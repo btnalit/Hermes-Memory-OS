@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -108,15 +109,27 @@ class ProposalQueueModule:
         legacy_record: dict[str, Any],
         source: str,
     ) -> dict[str, Any]:
+        legacy_import_key = _legacy_import_key(legacy_record, source)
+        legacy_id = str(legacy_record.get("id", "")).strip()
+        queue = self.read_queue()
+        for item in queue["items"]:
+            same_key = item.get("legacy_import_key") == legacy_import_key
+            same_id = bool(legacy_id) and item.get("candidate_id") == legacy_id
+            if same_key or same_id:
+                existing = dict(item)
+                self._audit(store, "proposal_queue_legacy_candidate_import_skipped", "ok", existing)
+                return existing
+
         legacy_state = str(legacy_record.get("status", legacy_record.get("state", "")) or "candidate")
         candidate = {
             "schema_version": "hermes.proposal_candidate.v0",
-            "candidate_id": str(legacy_record.get("id", _new_candidate_id())),
+            "candidate_id": legacy_id or f"legacy_{_stable_digest(legacy_import_key)}",
             "profile": self.profile,
             "kind": "legacy_owner_review",
             "title": str(legacy_record.get("title", legacy_record.get("text", ""))),
             "body": str(legacy_record.get("body", legacy_record.get("text", ""))),
             "source_refs": [str(source)],
+            "legacy_import_key": legacy_import_key,
             "state": _map_legacy_state(legacy_state),
             "legacy_state": legacy_state,
             "approval_purpose": "legacy_owner_review_visibility",
@@ -125,7 +138,6 @@ class ProposalQueueModule:
             "updated_at": _timestamp(),
             "reviews": [],
         }
-        queue = self.read_queue()
         queue["items"].append(candidate)
         self._write_queue(queue)
         self._audit(store, "proposal_queue_legacy_candidate_imported", "ok", candidate)
@@ -243,6 +255,21 @@ def _map_legacy_state(state: str) -> str:
 def _new_candidate_id() -> str:
     now = datetime.now(timezone.utc)
     return f"prop_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}"
+
+
+def _legacy_import_key(legacy_record: dict[str, Any], source: str) -> str:
+    identity_parts = {
+        "source": str(source),
+        "id": str(legacy_record.get("id", "")),
+        "status": str(legacy_record.get("status", legacy_record.get("state", ""))),
+        "title": str(legacy_record.get("title", "")),
+        "text": str(legacy_record.get("text", "")),
+    }
+    return _stable_digest(json.dumps(identity_parts, ensure_ascii=False, sort_keys=True))
+
+
+def _stable_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _timestamp() -> str:

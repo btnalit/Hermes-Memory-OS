@@ -90,6 +90,26 @@ def test_proposal_queue_maps_cw019_states_without_crystallized_approval(tmp_path
     assert imported["crystallized_approved"] is False
 
 
+def test_proposal_queue_legacy_import_is_idempotent(tmp_path):
+    store = _store(tmp_path)
+    module = ProposalQueueModule(tmp_path, profile="main")
+    legacy_record = {
+        "id": "cw019-1",
+        "status": "owner_eligible",
+        "text": "Synthetic owner review candidate",
+    }
+
+    first = module.import_legacy_candidate(store=store, legacy_record=legacy_record, source="cw-019-shadow")
+    second = module.import_legacy_candidate(store=store, legacy_record=legacy_record, source="cw-019-shadow")
+
+    queue = module.read_queue()
+    assert first == second
+    assert len(queue["items"]) == 1
+    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
+    assert sum("proposal_queue_legacy_candidate_imported" in line for line in audit_lines) == 1
+    assert sum("proposal_queue_legacy_candidate_import_skipped" in line for line in audit_lines) == 1
+
+
 def test_proposal_queue_status_and_doctor_report_queue_health(tmp_path):
     store = _store(tmp_path)
     module = ProposalQueueModule(tmp_path, profile="main")
