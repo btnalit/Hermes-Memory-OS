@@ -11,6 +11,18 @@ from .store import MemoryOSStore
 
 
 HEADER = "## Memory-OS Context"
+DIAGNOSTIC_SUPPRESSION_NOTICE = (
+    "Historical recall suppressed for diagnostic query. Use Current Memory-OS Runtime Facts only."
+)
+
+_DIAGNOSTIC_QUERY_PATTERNS = (
+    re.compile(r"记忆\s*(架构|系统|后端|provider|提供商|状态)"),
+    re.compile(r"当前.*(memory_os|memory-os|记忆|memory).*(状态|架构|系统|provider|backend)", re.I),
+    re.compile(r"(memory[-_ ]?os|hindsight).*(canonical|store|provider|backend|正常|还在用)", re.I),
+    re.compile(r"(memory architecture|memory backend|memory provider|current memory state)", re.I),
+    re.compile(r"(which|what).*(memory|storage).*(provider|backend|system)", re.I),
+    re.compile(r"用的什么.*记忆"),
+)
 
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)\S+"),
@@ -25,7 +37,14 @@ def build_prefetch(
     budget_chars: int,
     store: MemoryOSStore,
     index: object | None = None,
+    diagnostic_grounding_enabled: bool = True,
+    runtime_facts: dict[str, Any] | None = None,
 ) -> str:
+    if _should_ground_diagnostic_query(
+        query,
+        diagnostic_grounding_enabled=diagnostic_grounding_enabled,
+    ):
+        return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
     sections: list[tuple[str, list[str]]] = []
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store))
@@ -112,6 +131,56 @@ def _indexed_lines(query: str, index: object | None) -> list[str]:
         if snippet:
             lines.append(f"- {hit.get('record_type', 'record')}/{hit.get('record_id', '')}: {snippet}")
     return lines
+
+
+def _should_ground_diagnostic_query(
+    query: str,
+    *,
+    diagnostic_grounding_enabled: bool,
+) -> bool:
+    if not diagnostic_grounding_enabled:
+        return False
+    text = " ".join(str(query or "").split())
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _DIAGNOSTIC_QUERY_PATTERNS)
+
+
+def _format_diagnostic(runtime_facts: dict[str, Any]) -> str:
+    context_facts = {
+        key: value
+        for key, value in runtime_facts.items()
+        if key not in {"forbidden_claims"}
+    }
+    output = [
+        HEADER,
+        "",
+        "### Diagnostic Grounding",
+        f"- {DIAGNOSTIC_SUPPRESSION_NOTICE}",
+        "",
+        "### Current Memory-OS Runtime Facts",
+    ]
+    for key in (
+        "provider",
+        "canonical_store",
+        "storage_model",
+        "uses_hindsight_http_api",
+        "hindsight_role",
+        "index_health",
+        "prefetch_mode",
+    ):
+        if key in context_facts:
+            output.append(f"- {key}: {_fact_value(context_facts[key])}")
+    output.append("```json")
+    output.append(json.dumps(context_facts, ensure_ascii=False, indent=2, sort_keys=True))
+    output.append("```")
+    return "\n".join(output)
+
+
+def _fact_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
 
 
 def _file_snippet(path: Path) -> str:

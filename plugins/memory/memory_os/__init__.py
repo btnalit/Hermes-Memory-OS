@@ -69,6 +69,11 @@ class MemoryOSProvider(MemoryProvider):
             budget_chars=int(self._config.get("prefetch_char_budget", 2200)),
             store=self._store,
             index=self._index,
+            diagnostic_grounding_enabled=memory_os_config.effective_diagnostic_grounding_enabled(
+                self._config,
+                self.profile,
+            ),
+            runtime_facts=self._tool_status_report(),
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
@@ -97,7 +102,8 @@ class MemoryOSProvider(MemoryProvider):
                     "Inspect the active Memory-OS provider status. Use this when asked "
                     "which memory provider is active, whether Memory-OS is working, or "
                     "whether the current memory backend is Hindsight. Returns counts and "
-                    "storage facts without raw private bodies."
+                    "storage facts without raw private bodies. Treat this tool as "
+                    "authoritative for current provider diagnostics, not historical recall."
                 ),
                 "parameters": {
                     "type": "object",
@@ -258,6 +264,10 @@ class MemoryOSProvider(MemoryProvider):
         event_kinds = Counter(event.kind for event in events)
         latest_event_ts = max((event.ts for event in events), default=None)
         index_counts = self._index.counts() if self._index else {}
+        adapter_enabled = bool(self._config.get("hindsight_adapter_enabled"))
+        uses_hindsight_http_api = False
+        working_count = _working_item_count(self._roots)
+        candidate_count = len(read_candidate_queue(self._roots))
         return {
             "schema_version": "memory-os.tool_status.v0",
             "provider": "memory_os",
@@ -271,14 +281,30 @@ class MemoryOSProvider(MemoryProvider):
             "event_sources": dict(event_sources),
             "event_kinds": dict(event_kinds),
             "latest_event_ts": latest_event_ts,
-            "working_item_count": _working_item_count(self._roots),
-            "crystallized_candidate_count": len(read_candidate_queue(self._roots)),
+            "working_item_count": working_count,
+            "working_items": working_count,
+            "crystallized_candidate_count": candidate_count,
+            "crystallized_candidates": candidate_count,
+            "crystallized_records": int(index_counts.get("crystallized_records", 0)),
             "audit_entries": len(read_audit_entries(self._roots.audit_path)),
             "index_counts": index_counts,
-            "hindsight_adapter_enabled": bool(self._config.get("hindsight_adapter_enabled")),
+            "index_health": _tool_index_health(self._roots, len(events), index_counts),
+            "prefetch_mode": "indexed" if self._roots.index_path.exists() else "degraded_filesystem",
+            "hindsight_adapter_enabled": adapter_enabled,
             "hindsight_role": "optional_adapter_only_not_canonical",
-            "uses_hindsight_http_api": False,
+            "uses_hindsight_http_api": uses_hindsight_http_api,
             "body_policy": "summary_only",
+            "authoritative_for": [
+                "active memory provider",
+                "canonical Memory-OS store",
+                "whether Hindsight is canonical",
+                "runtime counts and index health",
+            ],
+            "forbidden_claims": _forbidden_claims(
+                adapter_enabled=adapter_enabled,
+                uses_hindsight_http_api=uses_hindsight_http_api,
+            ),
+            "stale_memory_warning": "Do not answer provider diagnostics from historical recalled events.",
         }
 
 
@@ -310,3 +336,23 @@ def _working_item_count(roots: Any) -> int:
             continue
         count += len(document.get("items", []))
     return count
+
+
+def _tool_index_health(roots: Any, event_count: int, index_counts: dict[str, int]) -> str:
+    if not roots.index_path.exists():
+        return "missing"
+    indexed_events = int(index_counts.get("events", 0))
+    if indexed_events < event_count:
+        return "stale"
+    if indexed_events > event_count:
+        return "mismatch"
+    return "healthy"
+
+
+def _forbidden_claims(*, adapter_enabled: bool, uses_hindsight_http_api: bool) -> list[str]:
+    claims = ["Memory-OS canonical store is /root/.hermes/hindsight/config.json"]
+    if not uses_hindsight_http_api:
+        claims.append("Memory-OS uses Hindsight HTTP API as its canonical store")
+    if not adapter_enabled:
+        claims.append("Hindsight is the active canonical provider when provider=memory_os")
+    return claims

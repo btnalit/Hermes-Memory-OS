@@ -27,7 +27,9 @@ docs/memory-os/
 ├── memory-provider-selection.md        # L1 子文档：provider 对比、v0 schema、10.20.3.200 验证
 ├── integration-with-current-hermes.md  # 生产接入边界：三奶/CW-019/Hindsight/跨 profile/回滚
 ├── implementation-plan.md              # 代码切片、验收标准、migrator、P1/P2 落地计划
-└── slice-20-runtime-indexer-design.md  # Runtime SQLite/FTS indexer 的设计契约
+├── slice-20-runtime-indexer-design.md  # Runtime SQLite/FTS indexer 的设计契约
+├── slice-21-diagnostic-grounding-design.md # provider 诊断回答的当前事实 grounding
+└── v0-closeout.md                      # v0 收口和观察期边界
 ```
 
 后续进入代码前，再补：

@@ -1081,6 +1081,89 @@ python -m pytest -q
 - No production host, production gateway, production Hindsight bank, or identity
   source file is modified.
 
+### Slice 21: Diagnostic Grounding
+
+**Purpose:** Prevent stale recalled memory from overriding current provider
+facts when a user asks a diagnostic question about the active memory backend.
+Slice 18 exposed `memory_os_status`; Slice 21 makes diagnostic prefetch
+grounding authoritative inside the plugin boundary.
+
+**Design Doc:**
+
+- `docs/memory-os/slice-21-diagnostic-grounding-design.md`
+
+**Files:**
+
+- Modify: `plugins/memory/memory_os/config.py`
+- Modify: `plugins/memory/memory_os/prefetch.py`
+- Modify: `plugins/memory/memory_os/__init__.py`
+- Test: `tests/plugins/memory/test_memory_os_diagnostic_grounding.py`
+- Extend: `docs/memory-os/test-plan-10.20.3.200.md`
+
+**Diagnostic flow:**
+
+```text
+user-facing query
+  -> conservative diagnostic keyword/regex detection
+  -> profile policy check
+  -> suppress Indexed Recall and Recent Event Summaries
+  -> inject Current Memory-OS Runtime Facts from memory_os_status path
+  -> answer from runtime facts, not stale historical recall
+```
+
+**Review items resolved by the design doc:**
+
+- P0 diagnostic query recognition: deterministic keyword/regex, conservative,
+  false negatives preferred over false positives.
+- P0 recall suppression: hard skip of indexed recall and recent summaries for
+  diagnostic turns, plus explicit suppression notice.
+- P0 profile policy: main/default enabled, Sannai disabled by default unless
+  explicit system-diagnostic wording is used.
+- P1 dynamic `forbidden_claims`: generated from current provider status and
+  adapter config, not maintained as a static long list.
+- P1 future write-side adjudication: documented as Slice 22+ only.
+- P1 CW-019 boundary: diagnostic grounding is user-facing only and not used by
+  inner-drive, Wandering Mind, candidate scoring, migrator replay, or benchmark
+  paths.
+- P1 fixture: 100 stale Hindsight-as-canonical events plus current Memory-OS
+  status facts.
+
+**Steps:**
+
+- [x] Add diagnostic grounding config with profile-aware defaults.
+- [x] Add conservative diagnostic query detector and tests for positive and
+      negative examples.
+- [x] Add diagnostic prefetch path that suppresses indexed recall and injects
+      current runtime facts.
+- [x] Extend `memory_os_status` with `authoritative_for`,
+      `forbidden_claims`, and `stale_memory_warning`.
+- [x] Add regression fixture containing stale Hindsight provider claims.
+- [x] Add Sannai default-off tests and explicit-diagnostic override tests.
+- [x] Add tests proving inner-drive/CW-019 code paths do not receive diagnostic
+      grounding.
+- [x] Run:
+
+```powershell
+python -m pytest tests/plugins/memory/test_memory_os_diagnostic_grounding.py -q
+python -m pytest -q
+```
+
+**Acceptance:**
+
+- Diagnostic context includes `provider=memory_os`,
+  `canonical_store=$HERMES_HOME/memory-os`, and
+  `uses_hindsight_http_api=false`.
+- Diagnostic context does not include stale indexed recall,
+  `/root/.hermes/hindsight/config.json`, or Hindsight-as-canonical claims.
+- Non-diagnostic queries still use normal indexed recall.
+- Sannai profile does not enter diagnostic grounding for ordinary memory/self
+  prompts.
+- `memory_os_status` remains read-only and excludes private bodies.
+- The implementation stays inside the memory provider plugin interface; it
+  does not patch system prompts or Hermes core `tool_choice`.
+- No production host, production gateway, production Hindsight bank, identity
+  source, or raw private body is modified.
+
 ## Validation Sequence
 
 Run after slices complete:
@@ -1126,6 +1209,13 @@ Remote validation on `10.20.3.200` is a later execution step and must be recorde
 | Slice 20 P2 schema migration | Slice 20 design + implementation |
 | Slice 20 P2 test matrix | Slice 20 design + implementation |
 | Slice 20 P2 degraded prefetch | Slice 20 design + implementation |
+| Slice 21 P0 diagnostic query detection | Slice 21 design |
+| Slice 21 P0 diagnostic recall suppression | Slice 21 design |
+| Slice 21 P0 Sannai profile protection | Slice 21 design |
+| Slice 21 P1 dynamic forbidden claims | Slice 21 design |
+| Slice 21 P1 write-side adjudication future | Slice 21 design |
+| Slice 21 P1 CW-019 boundary | Slice 21 design |
+| Slice 21 P1 stale provider fixture | Slice 21 design |
 
 ## Execution Gate
 

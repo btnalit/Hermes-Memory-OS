@@ -252,13 +252,145 @@ conversation -> event -> heartbeat -> working memory -> crystallized candidate
 
 Owner approval remains the boundary for writing `crystallized/*.md`.
 
+## Slice 21 Diagnostic Grounding Evidence
+
+Slice 21 was validated locally and on `10.20.3.200` after the live issue where
+a provider diagnostic answer mixed current Memory-OS facts with stale
+Hindsight-era recall.
+
+Local validation:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_diagnostic_grounding.py -q
+9 passed
+
+python -m pytest -q
+107 passed
+
+python -m compileall -q agent plugins scripts
+passed
+
+git diff --check
+passed
+```
+
+Remote validation directory:
+
+```text
+/tmp/hermes-memory-os-validation/slice21-diagnostic-grounding-20260520191245
+```
+
+Remote validation:
+
+```text
+python3 -m pytest tests/plugins/memory/test_memory_os_diagnostic_grounding.py -q
+9 passed
+
+python3 -m pytest -q
+107 passed
+
+python3 -m compileall -q agent plugins scripts
+passed
+```
+
+The refreshed plugin was installed to the main validation profile:
+
+```text
+target=/root/.hermes/plugins/memory_os
+copied_file_count=22
+runtime_artifacts_installed=true
+enable_requested=false
+runtime_enable_requested=false
+```
+
+Provider-level diagnostic prefetch check:
+
+```text
+HAS_CURRENT_FACTS=True
+HAS_INDEXED_RECALL=False
+HAS_RECENT=False
+HAS_OLD_HINDSIGHT_PATH=False
+HAS_PROVIDER_BULLET=True
+HAS_USES_HINDSIGHT_FALSE=True
+HAS_CANONICAL=True
+```
+
+This proves diagnostic grounding now happens before indexed recall runs, keeps
+critical runtime facts inside tight prefetch budgets, and excludes the old
+`/root/.hermes/hindsight/config.json` claim from diagnostic context.
+
+Live Telegram confirmation on the main validation gateway:
+
+```text
+time=2026-05-20 19:20-19:21 Asia/Shanghai
+prompt:
+  当前记忆架构是什么？
+  你现在用的是什么 memory provider？
+  Hindsight 现在是不是 Memory-OS 的 canonical store？
+```
+
+Observed answer facts:
+
+```text
+active provider=memory-os
+canonical store=/root/.hermes/memory-os
+storage model=local filesystem, JSONL + Markdown
+Hindsight role=optional adapter, not canonical
+hindsight_adapter_enabled=false
+uses_hindsight_http_api=false
+index health=healthy
+events=10
+working_items=10
+crystallized_candidates=10
+crystallized_records=0
+```
+
+Observed stale-claim result:
+
+```text
+The answer did not claim /root/.hermes/hindsight/config.json as the
+Memory-OS canonical path.
+```
+
+Gateway load step on `10.20.3.200`:
+
+```text
+before main MainPID=425553
+after  main MainPID=427105
+sannai ActiveState=inactive, MainPID=0 before and after
+```
+
+Post-restart status:
+
+```text
+hermes memory: provider memory_os active
+doctor status: ok
+only warning: hindsight_adapter_disabled
+events=10
+working_items=10
+crystallized_candidates=10
+crystallized_records=0
+index_health=healthy
+prefetch_mode=indexed
+```
+
+Production boundary:
+
+```text
+10.20.2.88 was not contacted.
+No production gateway was restarted.
+No production Hindsight bank was modified.
+No identity source was modified.
+```
+
 ## Result
 
 The `10.20.3.200` blank-host baseline validation passed for local unit tests,
 E2E smoke, synthetic migrator flow, compile checks, grouped diagnostics, and
 Hermes-native plugin install/discovery. The main profile pilot additionally
 validated provider self-diagnostics, post-turn event capture, runtime heartbeat,
-working memory evolution, and candidate generation.
+working memory evolution, candidate generation, runtime indexing, and
+diagnostic grounding against stale Hindsight recall.
 
 Next gate: continue the `10.20.3.200` main provider pilot using Hermes-native
 plugin status and doctor commands. Sannai shadow data remains an archived

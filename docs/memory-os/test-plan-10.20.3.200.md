@@ -182,6 +182,60 @@ HERMES_HOME=/root/.hermes hermes memory_os benchmark --records 100000 --large-op
 Record indexed prefetch, degraded prefetch, and full rebuild timing separately
 in the validation report.
 
+## Phase B.7: Diagnostic Grounding
+
+This phase validates Slice 21 after implementation. It targets the observed
+live issue where a diagnostic answer can mix current Memory-OS facts with stale
+Hindsight recall.
+
+Local test subset before remote deployment:
+
+```bash
+python3 -m pytest tests/plugins/memory/test_memory_os_diagnostic_grounding.py -q
+```
+
+Runtime validation on the `10.20.3.200` main profile:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory_os status
+HERMES_HOME=/root/.hermes hermes memory_os doctor
+```
+
+Then ask the main Telegram gateway diagnostic prompts such as:
+
+```text
+当前记忆架构是什么？
+你现在用的是什么 memory provider？
+Hindsight 现在是不是 Memory-OS 的 canonical store？
+```
+
+Expected:
+
+- Answer names `memory_os` as the active provider.
+- Answer identifies `$HERMES_HOME/memory-os` or `/root/.hermes/memory-os` as
+  the canonical Memory-OS store.
+- Answer says Hindsight is optional adapter only when disabled, not canonical.
+- Answer does not cite `/root/.hermes/hindsight/config.json` as the Memory-OS
+  canonical path.
+- Answer does not describe Hindsight HTTP API as the active Memory-OS storage
+  path when `uses_hindsight_http_api=false`.
+- Diagnostic grounding remains user-facing only; background heartbeat,
+  inner-drive, crystallized candidate generation, migrator replay, and
+  benchmarks are unaffected.
+
+Sannai policy check, if the profile exists on the validation host:
+
+```text
+ordinary self-memory prompt:
+  should not trigger diagnostic grounding
+
+explicit system-diagnostic prompt:
+  may trigger diagnostic grounding only if profile policy allows it
+```
+
+Do not connect Sannai shadow data, production Hindsight, or production
+gateways for this phase.
+
 ## Phase C: Owner Approval And Adapter Smoke
 
 ```bash

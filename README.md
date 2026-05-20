@@ -19,9 +19,13 @@ The current prototype covers:
 - working memory state evolution
 - crystallized memory approval boundary
 - runtime heartbeat from events to working memory and crystallized candidates
+- diagnostic grounding for current memory-provider questions
 - read-only Sannai shadow bundle export/import
 - CLI diagnostic helpers, meta-audit, benchmark, and dry-run-first cleanup
 - Provider self-diagnostic tool: `memory_os_status`
+
+The v0 implementation is closed. See `docs/memory-os/v0-closeout.md` for the
+final validation boundary and the observation-first next phase.
 
 Production Hermes and Sannai migration remains a separate controlled step. The
 code here is designed so validation can happen on an empty machine or shadow
@@ -74,7 +78,9 @@ patch is required for Hermes to discover the provider.
 
 When active, the provider exposes a read-only `memory_os_status` tool so the
 agent can inspect the real Memory-OS backend instead of inferring from old
-memory text.
+memory text. Diagnostic prefetch also suppresses historical recall for current
+provider questions so stale Hindsight-era memories do not override runtime
+facts.
 
 For a full test deployment, enable the heartbeat timer on a validation host:
 

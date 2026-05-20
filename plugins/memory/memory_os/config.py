@@ -13,6 +13,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "prefetch_char_budget": 2200,
     "hindsight_adapter_enabled": False,
     "allow_full_local_capture": False,
+    "diagnostic_grounding_enabled": None,
 }
 
 
@@ -38,6 +39,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "key": "allow_full_local_capture",
             "description": "Allow full local transcript capture",
             "default": DEFAULT_CONFIG["allow_full_local_capture"],
+        },
+        {
+            "key": "diagnostic_grounding_enabled",
+            "description": "Enable current-runtime grounding for memory provider diagnostics",
+            "default": DEFAULT_CONFIG["diagnostic_grounding_enabled"],
         },
     ]
 
@@ -81,3 +87,10 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
 
 def _known_values(values: dict[str, Any]) -> dict[str, Any]:
     return {key: values[key] for key in DEFAULT_CONFIG if key in values}
+
+
+def effective_diagnostic_grounding_enabled(config: dict[str, Any], profile: str) -> bool:
+    configured = config.get("diagnostic_grounding_enabled")
+    if isinstance(configured, bool):
+        return configured
+    return str(profile or "").strip().lower() != "sannai"
