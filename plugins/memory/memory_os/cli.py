@@ -1,0 +1,364 @@
+"""Local diagnostic helpers for Memory-OS operator commands."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .audit import last_audit_age_seconds, read_audit_entries
+from .benchmark import BenchmarkConfig, run_benchmark
+from .cleanup import CleanupPolicy, cleanup_plan
+from .config import load_config
+from .index import MemoryOSIndex
+from .migrator import export_shadow_bundle
+from .roots import MemoryOSRoots
+from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
+from .store import MemoryOSStore
+from .working import WorkingMemoryService
+
+
+_PRIVATE_SAFE_REF_KEYS = {"raw_body", "body", "content", "transcript", "private_body", "raw_transcript"}
+
+
+def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
+    events = store.read_events()
+    return {
+        "schema_version": "memory-os.status.v0",
+        "root": str(store.roots.memory_os_root),
+        "profile": store.roots.profile,
+        "counts": _store_counts(store),
+        "index_counts": MemoryOSIndex(store.roots).counts(),
+        "queue_backlog": 0,
+        "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),
+        "recent_event_summaries": [
+            {"id": event.id, "ts": event.ts, "kind": event.kind, "summary": event.summary}
+            for event in sorted(events, key=lambda item: item.ts)[-5:]
+        ],
+        "hindsight_adapter_enabled": bool(load_config(store.roots.hermes_home).get("hindsight_adapter_enabled")),
+    }
+
+
+def build_doctor_result(store: MemoryOSStore) -> dict[str, Any]:
+    audit = meta_audit(store)
+    has_error = any(finding["severity"] == "error" for finding in audit["findings"])
+    return {
+        "schema_version": "memory-os.doctor.v0",
+        "exit_code": 1 if has_error else 0,
+        "status": "fail" if has_error else "ok",
+        "findings": audit["findings"],
+        "meta_audit": audit,
+    }
+
+
+def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    status = build_status_report(store)
+    store_counts = status["counts"]
+    index_counts = status["index_counts"]
+    if not store.roots.index_path.exists():
+        findings.append(_finding("index_missing", "warning", "SQLite index is missing; rebuild is available."))
+    elif _indexed_counts_subset(index_counts) != _indexed_counts_subset(store_counts):
+        findings.append(
+            _finding(
+                "index_count_mismatch",
+                "error",
+                "SQLite index counts do not match filesystem store counts.",
+                {"store_counts": store_counts, "index_counts": index_counts},
+            )
+        )
+
+    findings.extend(_identity_source_findings(store))
+    if store_counts["events"] == 0:
+        findings.append(_finding("store_empty", "warning", "No event records found."))
+    if not bool(load_config(store.roots.hermes_home).get("hindsight_adapter_enabled")):
+        findings.append(_finding("hindsight_adapter_disabled", "warning", "Hindsight adapter is disabled."))
+    return {
+        "schema_version": "memory-os.meta_audit.v0",
+        "root": str(store.roots.memory_os_root),
+        "counts": store_counts,
+        "index_counts": index_counts,
+        "skipped_private_body_count": _skipped_private_body_count(store),
+        "queue_backlog": 0,
+        "last_write_age_seconds": status["last_write_age_seconds"],
+        "findings": findings,
+    }
+
+
+def inspect_event(store: MemoryOSStore, event_id: str, *, include_private: bool = False) -> dict[str, Any]:
+    for event in store.read_events():
+        if event.id != event_id:
+            continue
+        result = event.to_dict()
+        if not include_private:
+            result["safe_ref"] = {
+                key: "[redacted]" if key in _PRIVATE_SAFE_REF_KEYS else value
+                for key, value in result.get("safe_ref", {}).items()
+            }
+        return result
+    return {"found": False, "id": event_id}
+
+
+def trace_record(store: MemoryOSStore, record_id: str, *, include_private: bool = False) -> dict[str, Any]:
+    trace = WorkingMemoryService(store).trace_working_item(record_id)
+    if trace.get("found") and not include_private and isinstance(trace.get("item"), dict):
+        trace = dict(trace)
+        trace["item"] = dict(trace["item"])
+        trace["item"]["text"] = "[redacted]"
+    return trace
+
+
+def diff_report(store: MemoryOSStore, *, since: str, until: str) -> dict[str, Any]:
+    since_dt = datetime.fromisoformat(since)
+    until_dt = datetime.fromisoformat(until)
+    events = [
+        event for event in store.read_events()
+        if since_dt <= datetime.fromisoformat(event.ts) <= until_dt
+    ]
+    audit_entries = [
+        entry for entry in read_audit_entries(store.roots.audit_path)
+        if entry.get("ts") and since_dt <= datetime.fromisoformat(str(entry["ts"])) <= until_dt
+    ]
+    return {
+        "schema_version": "memory-os.diff.v0",
+        "since": since,
+        "until": until,
+        "event_count": len(events),
+        "audit_count": len(audit_entries),
+        "event_kinds": _count_by(events, "kind"),
+        "audit_actions": _count_dict(str(entry.get("action", "")) for entry in audit_entries),
+    }
+
+
+def approval_report(store: MemoryOSStore) -> dict[str, Any]:
+    approval_counts: dict[str, int] = {}
+    candidate_counts: dict[str, int] = {}
+    for report_path in sorted(store.roots.imports_root.glob("*/import_report.json")):
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        _merge_counts(approval_counts, report.get("approval_state_counts", {}))
+        _merge_counts(candidate_counts, report.get("candidate_status_counts", {}))
+    return {
+        "schema_version": "memory-os.approval_report.v0",
+        "approval_state_counts": approval_counts,
+        "candidate_status_counts": candidate_counts,
+    }
+
+
+def benchmark_report(
+    store: MemoryOSStore,
+    *,
+    record_count: int = 1000,
+    seed: int = 1,
+    large_opt_in: bool = False,
+) -> dict[str, Any]:
+    return run_benchmark(
+        store,
+        BenchmarkConfig(
+            record_count=record_count,
+            seed=seed,
+            profile=store.roots.profile or "memoryos-test",
+            large_opt_in=large_opt_in,
+        ),
+    )
+
+
+def cleanup_report(
+    store: MemoryOSStore,
+    *,
+    now: datetime | None = None,
+    policy: CleanupPolicy | None = None,
+) -> dict[str, Any]:
+    return cleanup_plan(store, now=now, policy=policy)
+
+
+def register_cli(subparser: argparse.ArgumentParser) -> None:
+    subs = subparser.add_subparsers(dest="memory_os_command")
+    subs.add_parser("status")
+    subs.add_parser("doctor")
+    inspect_parser = subs.add_parser("inspect")
+    inspect_parser.add_argument("event_id")
+    inspect_parser.add_argument("--include-private", action="store_true")
+    trace_parser = subs.add_parser("trace")
+    trace_parser.add_argument("record_id")
+    trace_parser.add_argument("--include-private", action="store_true")
+    diff_parser = subs.add_parser("diff")
+    diff_parser.add_argument("--since", required=True)
+    diff_parser.add_argument("--until", required=True)
+    subs.add_parser("approval-report")
+    benchmark_parser = subs.add_parser("benchmark")
+    benchmark_parser.add_argument("--records", type=int, default=1000)
+    benchmark_parser.add_argument("--seed", type=int, default=1)
+    benchmark_parser.add_argument("--large-opt-in", action="store_true")
+    cleanup_parser = subs.add_parser("cleanup")
+    cleanup_parser.add_argument("--quarantine-days", type=int, default=30)
+    cleanup_parser.add_argument("--import-days", type=int, default=30)
+    cleanup_parser.add_argument("--benchmark-days", type=int, default=14)
+    cleanup_parser.add_argument("--temp-days", type=int, default=1)
+    export_parser = subs.add_parser("export-shadow")
+    export_parser.add_argument("--profile", default="sannai")
+    export_parser.add_argument("--hermes-home", required=True)
+    export_parser.add_argument("--state-root", action="append", default=[])
+    export_parser.add_argument("--out", required=True)
+    export_parser.add_argument("--include-private-bodies", action="store_true")
+    export_parser.add_argument("--dry-run", action="store_true")
+
+
+def memory_os_command(args: argparse.Namespace) -> int:
+    if args.memory_os_command == "export-shadow":
+        roots = MemoryOSRoots.from_hermes_home(
+            args.hermes_home,
+            profile=args.profile,
+            external_state_roots=args.state_root,
+        )
+        print(
+            json.dumps(
+                export_shadow_bundle(
+                    roots,
+                    out_path=args.out,
+                    include_private_bodies=args.include_private_bodies,
+                    dry_run=args.dry_run,
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(args.hermes_home, profile=getattr(args, "profile", "")))
+    command = args.memory_os_command
+    if command == "status":
+        print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "doctor":
+        result = build_doctor_result(store)
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return int(result["exit_code"])
+    if command == "inspect":
+        print(json.dumps(inspect_event(store, args.event_id, include_private=args.include_private), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "trace":
+        print(json.dumps(trace_record(store, args.record_id, include_private=args.include_private), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "diff":
+        print(json.dumps(diff_report(store, since=args.since, until=args.until), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "approval-report":
+        print(json.dumps(approval_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "benchmark":
+        print(
+            json.dumps(
+                benchmark_report(
+                    store,
+                    record_count=args.records,
+                    seed=args.seed,
+                    large_opt_in=args.large_opt_in,
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "cleanup":
+        print(
+            json.dumps(
+                cleanup_report(
+                    store,
+                    policy=CleanupPolicy(
+                        quarantine_retention_days=args.quarantine_days,
+                        import_retention_days=args.import_days,
+                        benchmark_retention_days=args.benchmark_days,
+                        temp_retention_days=args.temp_days,
+                    ),
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    return 2
+
+
+def _store_counts(store: MemoryOSStore) -> dict[str, int]:
+    events = store.read_events()
+    working_items = 0
+    for path in sorted(store.roots.working_root.glob("*.json")):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        working_items += len(document.get("items", []))
+    crystallized_records = 0
+    for path in sorted(store.roots.crystallized_root.glob("*.md")):
+        crystallized_records += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip() == "---") // 2
+    return {
+        "events": len(events),
+        "working_items": working_items,
+        "crystallized_records": crystallized_records,
+        "audit_entries": len(read_audit_entries(store.roots.audit_path)),
+    }
+
+
+def _indexed_counts_subset(counts: dict[str, int]) -> dict[str, int]:
+    return {key: counts.get(key, 0) for key in ("events", "working_items", "crystallized_records")}
+
+
+def _identity_source_findings(store: MemoryOSStore) -> list[dict[str, Any]]:
+    path = store.roots.identity_manifest_path
+    if not path.exists():
+        return []
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [_finding("identity_manifest_unreadable", "error", "Identity manifest cannot be read.", {"error": str(exc)})]
+    findings: list[dict[str, Any]] = []
+    for source in manifest.get("identity_sources", []):
+        source_path = Path(str(source.get("path", "")))
+        if not source_path.exists():
+            findings.append(
+                _finding(
+                    "identity_source_missing",
+                    "error",
+                    "Identity source path is missing.",
+                    {"kind": source.get("kind", ""), "path": str(source_path)},
+                )
+            )
+    return findings
+
+
+def _skipped_private_body_count(store: MemoryOSStore) -> int:
+    count = 0
+    for report_path in sorted(store.roots.imports_root.glob("*/import_report.json")):
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        count += len(report.get("skipped_private_bodies", []))
+    return count
+
+
+def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"id": id_, "severity": severity, "message": message, "details": details or {}}
+
+
+def _count_by(items: list[Any], attr: str) -> dict[str, int]:
+    return _count_dict(str(getattr(item, attr)) for item in items)
+
+
+def _count_dict(values: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _merge_counts(target: dict[str, int], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        target[str(key)] = target.get(str(key), 0) + int(value)

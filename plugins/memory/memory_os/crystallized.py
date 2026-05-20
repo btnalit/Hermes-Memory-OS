@@ -1,0 +1,176 @@
+"""Owner-approved crystallized-memory service."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .approval import ApprovalDecision, ApprovalPurpose
+from .audit import append_audit
+from .ids import new_crystallized_id
+from .schema import CRYSTALLIZED_SCHEMA_VERSION
+from .store import MemoryOSStore
+
+
+class CrystallizedApprovalError(ValueError):
+    """Raised when a candidate lacks crystallized-memory approval."""
+
+
+@dataclass(frozen=True)
+class CrystallizedCandidate:
+    candidate_id: str
+    kind: str
+    body: str
+    source_event_ids: list[str]
+    sensitivity: str = "private"
+    tags: list[str] | None = None
+    bridge_state: str = ""
+
+
+@dataclass(frozen=True)
+class CrystallizedRecord:
+    file_name: str
+    frontmatter: dict[str, Any]
+    body: str
+
+
+class CrystallizedMemoryService:
+    """Write and read owner-approved long-term memory records."""
+
+    def __init__(self, store: MemoryOSStore) -> None:
+        self.store = store
+
+    def write_approved_record(
+        self,
+        candidate: CrystallizedCandidate,
+        decision: ApprovalDecision,
+        *,
+        file_name: str,
+        now: datetime | None = None,
+    ) -> Path:
+        self._ensure_crystallized_approval(candidate, decision)
+        created_at = _timestamp(now)
+        frontmatter = {
+            "schema_version": CRYSTALLIZED_SCHEMA_VERSION,
+            "id": new_crystallized_id(_datetime(now)),
+            "candidate_id": candidate.candidate_id,
+            "kind": candidate.kind,
+            "created_at": created_at,
+            "approved_by": decision.reviewer,
+            "approved_at": decision.reviewed_at,
+            "approval_purpose": decision.purpose.value,
+            "approval_note": decision.note,
+            "source_event_ids": list(candidate.source_event_ids),
+            "tags": list(candidate.tags or []),
+            "sensitivity": candidate.sensitivity,
+            "hindsight_indexed": False,
+            "bridge_state": candidate.bridge_state or decision.source_state,
+        }
+        path = self.store.append_crystallized_record(file_name, frontmatter, candidate.body)
+        append_audit(
+            self.store.roots.audit_path,
+            action="crystallized_record_written",
+            status="ok",
+            target=str(path),
+            details={
+                "record_id": frontmatter["id"],
+                "candidate_id": candidate.candidate_id,
+                "approval_purpose": decision.purpose.value,
+                "source_event_ids": list(candidate.source_event_ids),
+            },
+        )
+        return path
+
+    def read_records(self, file_name: str) -> list[CrystallizedRecord]:
+        path = self.store.roots.crystallized_root / file_name
+        if not path.exists():
+            return []
+        return [
+            CrystallizedRecord(file_name=file_name, frontmatter=frontmatter, body=body)
+            for frontmatter, body in _parse_markdown_records(path.read_text(encoding="utf-8"))
+        ]
+
+    def _ensure_crystallized_approval(
+        self,
+        candidate: CrystallizedCandidate,
+        decision: ApprovalDecision,
+    ) -> None:
+        if decision.candidate_id != candidate.candidate_id:
+            raise CrystallizedApprovalError("approval candidate_id does not match candidate")
+        if decision.purpose is not ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED:
+            bridge = candidate.bridge_state or decision.source_state
+            suffix = f"; bridge_state={bridge}" if bridge else ""
+            raise CrystallizedApprovalError(
+                f"Crystallized writes require approve_for_crystallized, got {decision.purpose.value}{suffix}"
+            )
+        if not candidate.source_event_ids:
+            raise CrystallizedApprovalError("crystallized records require source_event_ids")
+
+
+def _parse_markdown_records(content: str) -> list[tuple[dict[str, Any], str]]:
+    lines = content.splitlines()
+    records: list[tuple[dict[str, Any], str]] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != "---":
+            index += 1
+            continue
+        index += 1
+        frontmatter_lines: list[str] = []
+        while index < len(lines) and lines[index].strip() != "---":
+            frontmatter_lines.append(lines[index])
+            index += 1
+        if index >= len(lines):
+            break
+        index += 1
+        body_lines: list[str] = []
+        while index < len(lines) and lines[index].strip() != "---":
+            body_lines.append(lines[index])
+            index += 1
+        body = "\n".join(body_lines).strip()
+        records.append((_parse_frontmatter(frontmatter_lines), body))
+    return records
+
+
+def _parse_frontmatter(lines: list[str]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    current_list_key = ""
+    for line in lines:
+        if line.startswith("  - ") and current_list_key:
+            parsed[current_list_key].append(line[4:])
+            continue
+        current_list_key = ""
+        if line.endswith(":"):
+            key = line[:-1]
+            parsed[key] = []
+            current_list_key = key
+            continue
+        key, _, raw_value = line.partition(": ")
+        if not key:
+            continue
+        parsed[key] = _parse_scalar(raw_value)
+    return parsed
+
+
+def _parse_scalar(value: str) -> Any:
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    if value.startswith("[") or value.startswith("{"):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    return value
+
+
+def _datetime(value: datetime | None) -> datetime:
+    return (value or datetime.now(timezone.utc)).astimezone(timezone.utc)
+
+
+def _timestamp(value: datetime | None) -> str:
+    return _datetime(value).isoformat()

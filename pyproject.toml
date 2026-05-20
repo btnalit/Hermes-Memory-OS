@@ -1,0 +1,16 @@
+[project]
+name = "hermes-memory-os"
+version = "0.1.0"
+description = "A file-first memory operating system prototype for long-running Hermes-style agents."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
