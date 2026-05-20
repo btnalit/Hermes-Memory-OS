@@ -95,7 +95,15 @@ Recommended next phase:
 ```text
 run Memory-OS on 10.20.3.200 main profile for 1-2 weeks
 collect real diagnostic, recall, heartbeat, index, and doctor evidence
-only open v0.1 work from observed issues
+allow system integration work on the test host and local fixtures
+modularize the existing L2-L4 Hermes subsystems before any production migration
+only open production-facing work from observed issues and a separate gate
+```
+
+The system-modularization plan is documented under:
+
+```text
+docs/system-modularization/
 ```
 
 ## Explicitly Not Included In v0

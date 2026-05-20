@@ -24,8 +24,15 @@ The current prototype covers:
 - CLI diagnostic helpers, meta-audit, benchmark, and dry-run-first cleanup
 - Provider self-diagnostic tool: `memory_os_status`
 
-The v0 implementation is closed. See `docs/memory-os/v0-closeout.md` for the
-final validation boundary and the observation-first next phase.
+The v0 implementation is closed. See `docs/memory-os/v0-closeout.md` and
+`docs/memory-os/v0.1-observation-and-integration-plan.md` for the final
+validation boundary and the observation-first v0.1 integration phase.
+
+v0.1 also starts Hermes system modularization beyond L1 memory. That work is
+documented under `docs/system-modularization/` and covers how production-grown
+systems such as Wandering Mind, Self-Evolution Governor, Ops-Gate, mailbox,
+household digest, evidence/scoring, and Speak Gate should become portable
+modules.
 
 Production Hermes and Sannai migration remains a separate controlled step. The
 code here is designed so validation can happen on an empty machine or shadow
@@ -35,10 +42,13 @@ bundle before touching a live server.
 
 ```text
 plugins/memory/memory_os/   # Memory-OS provider and core services
+plugins/system/             # Portable Hermes module contracts and coordination primitives
+plugins/modules/            # Portable L2-L4 module scaffolds such as mailbox, household digest, wandering mind, and inner drive
 agent/                      # Minimal compatibility interface used by provider tests
 scripts/                    # Operator scripts
 tests/                      # Focused Memory-OS tests
 docs/memory-os/             # Architecture, integration, and implementation plans
+docs/system-modularization/ # v0.1 plan for portable L2-L4 Hermes modules
 ```
 
 ## Run Tests

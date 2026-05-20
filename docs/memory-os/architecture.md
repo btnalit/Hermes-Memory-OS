@@ -29,7 +29,17 @@ docs/memory-os/
 ├── implementation-plan.md              # 代码切片、验收标准、migrator、P1/P2 落地计划
 ├── slice-20-runtime-indexer-design.md  # Runtime SQLite/FTS indexer 的设计契约
 ├── slice-21-diagnostic-grounding-design.md # provider 诊断回答的当前事实 grounding
-└── v0-closeout.md                      # v0 收口和观察期边界
+├── v0-closeout.md                      # v0 收口和观察期边界
+├── v0.1-observation-and-integration-plan.md # v0.1 观察和系统集成计划
+└── v0.1-module-map.md                  # 现有 Hermes 子系统模块化映射
+
+docs/system-modularization/
+├── 00-overview.md                      # v0.1 系统模块化总览
+├── 01-plugin-architecture.md           # 可移植模块 lifecycle / manifest / doctor 契约
+├── 02-existing-system-audit.md         # 10.20.2.88 只读盘点
+├── 03-module-extraction-plan.md        # Wandering/Governor/mailbox 等提取顺序
+├── 04-migration-path.md                # 从生产脚本形态到模块形态的非生产迁移路径
+└── 05-validation-on-3.200.md           # 10.20.3.200 空白机模块验证路线
 ```
 
 后续进入代码前，再补：
@@ -459,11 +469,14 @@ Phase 1：Memory-OS Provider
 - 支持 event append、audit、SQLite index、bounded prefetch。
 - 在 `10.20.3.200` 空白 profile 验证。
 
-Phase 2：Inner Drive Engine
+Phase 2：System Modularization And Inner Drive Engine
 
+- 将 Wandering Mind、Self-Evolution Governor、Evidence/Scoring、mailbox、
+  household digest、Speak Gate 等生产脚本形态先抽象成模块契约。
 - 实现 Lingering / Emotional / Curiosity / Attention。
 - heartbeat 先在测试 profile 跑。
-- 所有输出先写 working / events，不直接表达。
+- 所有输出先写 working / events / candidates，不直接表达。
+- `10.20.2.88` 只作为只读 evidence；模块化版本先在 `10.20.3.200` 验证。
 
 Phase 3：Wandering Mind 对齐
 
