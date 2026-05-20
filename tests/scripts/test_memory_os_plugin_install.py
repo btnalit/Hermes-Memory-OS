@@ -91,6 +91,19 @@ def test_installer_can_write_runtime_heartbeat_artifacts(tmp_path):
     assert "OnUnitActiveSec=5min" in timer.read_text(encoding="utf-8")
 
 
+def test_installer_can_install_system_module_runtime_package(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home", install_system_modules=True)
+
+    runtime_root = tmp_path / "home" / "memory-os" / "runtime" / "python" / "plugins"
+    assert report["system_modules_installed"] is True
+    assert report["system_module_file_count"] > 0
+    assert runtime_root.joinpath("system", "lifecycle.py").is_file()
+    assert runtime_root.joinpath("modules", "cognition", "inner_drive.py").is_file()
+    assert runtime_root.joinpath("modules", "expression", "speak_gate.py").is_file()
+    assert runtime_root.joinpath("memory", "memory_os", "store.py").is_file()
+    assert not any("__pycache__" in path for path in report["system_module_files"])
+
+
 def test_memory_os_status_command_uses_current_hermes_home(tmp_path, monkeypatch, capsys):
     from plugins.memory.memory_os.cli import memory_os_command
     from plugins.memory.memory_os.roots import MemoryOSRoots

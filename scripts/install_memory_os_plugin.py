@@ -14,6 +14,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "memory_os"
+SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
 
 
 def install_plugin(
@@ -22,6 +23,7 @@ def install_plugin(
     source: Path = SOURCE_PLUGIN_DIR,
     enable: bool = False,
     install_runtime: bool = False,
+    install_system_modules: bool = False,
     enable_runtime: bool = False,
     runtime_interval: str = "5min",
     systemd_dir: Path | None = None,
@@ -33,6 +35,11 @@ def install_plugin(
     _validate_source(source)
 
     copied_files = _copy_tree(source, target, dry_run=dry_run)
+    system_module_files: list[Path] = []
+    system_module_target = hermes_home / "memory-os" / "runtime" / "python" / "plugins"
+    if install_system_modules:
+        _validate_system_module_source(SOURCE_PACKAGE_DIR)
+        system_module_files = _copy_tree(SOURCE_PACKAGE_DIR, system_module_target, dry_run=dry_run)
     runtime_artifacts: list[Path] = []
     if install_runtime or enable_runtime:
         runtime_artifacts = _write_runtime_artifacts(
@@ -86,6 +93,11 @@ def install_plugin(
         "target": str(target),
         "copied_file_count": len(copied_files),
         "copied_files": [str(path.relative_to(target)) for path in copied_files],
+        "system_modules_install_requested": install_system_modules,
+        "system_modules_installed": bool(system_module_files) and not dry_run,
+        "system_module_target": str(system_module_target),
+        "system_module_file_count": len(system_module_files),
+        "system_module_files": [str(path.relative_to(system_module_target)) for path in system_module_files],
         "enable_requested": enable,
         "enabled": enabled,
         "enable_command": enable_command,
@@ -104,6 +116,19 @@ def _validate_source(source: Path) -> None:
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
         raise SystemExit(f"Memory-OS plugin source is missing: {', '.join(missing)}")
+
+
+def _validate_system_module_source(source: Path) -> None:
+    required = (
+        "system/lifecycle.py",
+        "system/scheduler.py",
+        "modules/cognition/inner_drive.py",
+        "modules/expression/speak_gate.py",
+        "memory/memory_os/store.py",
+    )
+    missing = [name for name in required if not (source / name).is_file()]
+    if missing:
+        raise SystemExit(f"Memory-OS system module source is missing: {', '.join(missing)}")
 
 
 def _copy_tree(source: Path, target: Path, *, dry_run: bool) -> list[Path]:
@@ -177,6 +202,7 @@ def main() -> int:
     parser.add_argument("--source", default=str(SOURCE_PLUGIN_DIR), help="Plugin source directory")
     parser.add_argument("--enable", action="store_true", help="Set memory.provider=memory_os after install")
     parser.add_argument("--install-runtime", action="store_true", help="Write heartbeat wrapper and systemd timer artifacts")
+    parser.add_argument("--install-system-modules", action="store_true", help="Install portable L2-L4 module runtime package")
     parser.add_argument("--enable-runtime", action="store_true", help="Install and enable the user systemd heartbeat timer")
     parser.add_argument("--runtime-interval", default="5min", help="Heartbeat timer interval, default: 5min")
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
@@ -187,6 +213,7 @@ def main() -> int:
         source=Path(args.source),
         enable=args.enable,
         install_runtime=args.install_runtime,
+        install_system_modules=args.install_system_modules,
         enable_runtime=args.enable_runtime,
         runtime_interval=args.runtime_interval,
         dry_run=args.dry_run,

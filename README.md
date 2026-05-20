@@ -86,6 +86,19 @@ The expected discovery contract is `$HERMES_HOME/plugins/memory_os/` with
 `plugin.yaml`, `__init__.py`, and `register_memory_provider()`. No system prompt
 patch is required for Hermes to discover the provider.
 
+To install the portable v0.1 L2-L4 module runtime package as well:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home "$HERMES_HOME" \
+  --install-runtime \
+  --install-system-modules
+```
+
+This copies module code to
+`$HERMES_HOME/memory-os/runtime/python/plugins/`. It does not enable modules,
+start schedules, send messages, or restart a gateway.
+
 When active, the provider exposes a read-only `memory_os_status` tool so the
 agent can inspect the real Memory-OS backend instead of inferring from old
 memory text. Diagnostic prefetch also suppresses historical recall for current
