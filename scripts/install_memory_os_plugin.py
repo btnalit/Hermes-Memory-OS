@@ -15,6 +15,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "memory_os"
 SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
+SOURCE_AGENT_DIR = REPO_ROOT / "agent"
 
 
 def install_plugin(
@@ -36,10 +37,15 @@ def install_plugin(
 
     copied_files = _copy_tree(source, target, dry_run=dry_run)
     system_module_files: list[Path] = []
-    system_module_target = hermes_home / "memory-os" / "runtime" / "python" / "plugins"
+    system_module_root = hermes_home / "memory-os" / "runtime" / "python"
+    system_module_target = system_module_root / "plugins"
+    agent_runtime_target = system_module_root / "agent"
+    agent_runtime_files: list[Path] = []
     if install_system_modules:
         _validate_system_module_source(SOURCE_PACKAGE_DIR)
         system_module_files = _copy_tree(SOURCE_PACKAGE_DIR, system_module_target, dry_run=dry_run)
+        _validate_agent_source(SOURCE_AGENT_DIR)
+        agent_runtime_files = _copy_tree(SOURCE_AGENT_DIR, agent_runtime_target, dry_run=dry_run)
     runtime_artifacts: list[Path] = []
     if install_runtime or enable_runtime:
         runtime_artifacts = _write_runtime_artifacts(
@@ -98,6 +104,9 @@ def install_plugin(
         "system_module_target": str(system_module_target),
         "system_module_file_count": len(system_module_files),
         "system_module_files": [str(path.relative_to(system_module_target)) for path in system_module_files],
+        "agent_runtime_target": str(agent_runtime_target),
+        "agent_runtime_file_count": len(agent_runtime_files),
+        "agent_runtime_files": [str(path.relative_to(agent_runtime_target)) for path in agent_runtime_files],
         "enable_requested": enable,
         "enabled": enabled,
         "enable_command": enable_command,
@@ -129,6 +138,13 @@ def _validate_system_module_source(source: Path) -> None:
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
         raise SystemExit(f"Memory-OS system module source is missing: {', '.join(missing)}")
+
+
+def _validate_agent_source(source: Path) -> None:
+    required = ("__init__.py", "memory_provider.py")
+    missing = [name for name in required if not (source / name).is_file()]
+    if missing:
+        raise SystemExit(f"Memory-OS agent compatibility source is missing: {', '.join(missing)}")
 
 
 def _copy_tree(source: Path, target: Path, *, dry_run: bool) -> list[Path]:
