@@ -29,6 +29,8 @@ cd Hermes-Memory-OS
 python3 --version
 python3 -m pip install -e ".[dev]"
 python3 -m pytest -q
+python3 scripts/memory_os_blank_host_smoke.py \
+  --base-dir /tmp/hermes-memory-os-validation/smoke
 ```
 
 Evidence:
@@ -38,6 +40,7 @@ host:
 commit:
 python_version:
 pytest_result:
+blank_host_smoke_result:
 ```
 
 ## Phase B: Empty `memoryos-test` Profile
@@ -52,6 +55,8 @@ python3 -m pytest tests/plugins/memory/test_memory_os_lifecycle.py -q
 python3 -m pytest tests/plugins/memory/test_memory_os_store.py -q
 python3 -m pytest tests/plugins/memory/test_memory_os_prefetch.py -q
 python3 -m pytest tests/plugins/memory/test_memory_os_working.py -q
+python3 scripts/memory_os_blank_host_smoke.py \
+  --base-dir /tmp/hermes-memory-os-validation/smoke
 ```
 
 Success criteria:
@@ -61,6 +66,8 @@ Success criteria:
 - SQLite can be deleted and rebuilt from filesystem truth
 - prefetch respects budget and redaction
 - working memory evolves without writing crystallized memory
+- blank-host smoke completes without network, gateway, Telegram, mailbox, or
+  production dependencies
 
 ## Phase C: Owner Approval And Adapter Smoke
 
@@ -93,6 +100,8 @@ Validation commands after a bundle is available:
 
 ```bash
 python3 -m pytest tests/plugins/memory/test_memory_os_migrator.py -q
+python3 scripts/memory_os_blank_host_smoke.py \
+  --base-dir /tmp/hermes-memory-os-validation/smoke
 python3 scripts/memory_os_export_shadow.py \
   --profile sannai \
   --hermes-home /path/to/sannai/profile-copy \
@@ -107,6 +116,8 @@ Success criteria:
 - source hashes are unchanged before and after dry-run
 - CW-019 `owner_eligible` maps to S5 visibility only, not crystallized approval
 - shadow import never writes identity or production roots
+- synthetic shadow flow in `memory_os_blank_host_smoke.py` reaches diff report
+  without production data
 
 ## Phase E: Diagnostics, Benchmark, Cleanup
 
@@ -176,6 +187,7 @@ Attach these to the validation report:
 commit
 pytest output
 compileall output
+blank-host smoke JSON output
 doctor/meta-audit output
 benchmark report
 shadow import report, if run
