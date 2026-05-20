@@ -15,8 +15,8 @@
 - Do not modify `10.20.2.88` production during this plan.
 - Do not restart production gateways during this plan.
 - Do not enable Sannai S5, write active `lingering_thoughts.json`, or write long-term memory from CW-019 data.
-- Work against local source: `D:\Hermes agent manager\hermes-agent-2026.5.16\`.
-- Keep docs under `D:\Hermes agent manager\docs\memory-os\`.
+- Work against the standalone Memory-OS repo: `D:\Hermes agent manager\Hermes-Memory-OS\`.
+- Keep docs under `D:\Hermes agent manager\Hermes-Memory-OS\docs\memory-os\`.
 - If implementation happens in a git worktree later, run `git status --short --branch` before edits.
 
 ## Source Files To Create
@@ -24,7 +24,7 @@
 Target source root:
 
 ```text
-D:\Hermes agent manager\hermes-agent-2026.5.16\
+D:\Hermes agent manager\Hermes-Memory-OS\
 ```
 
 Provider files:
@@ -101,7 +101,7 @@ docs/memory-os/gateway-restart-runbook.md
 - [x] Run:
 
 ```powershell
-cd "D:\Hermes agent manager\hermes-agent-2026.5.16"
+cd "D:\Hermes agent manager\Hermes-Memory-OS"
 python -m pytest tests/plugins/memory/test_memory_os_lifecycle.py -q
 ```
 
@@ -678,12 +678,12 @@ python -m pytest tests/plugins/memory/test_memory_os_audit_benchmark_cleanup.py 
 
 **Steps:**
 
-- [ ] Test adapter disabled by default.
-- [ ] Test unapproved event and working draft are refused.
-- [ ] Test approved crystallized record can produce an export payload.
-- [ ] Mock Hindsight client; do not call network.
-- [ ] Mark exported record with `hindsight_indexed=true` only after success.
-- [ ] Run:
+- [x] Test adapter disabled by default.
+- [x] Test unapproved event and working draft are refused.
+- [x] Test approved crystallized record can produce an export payload.
+- [x] Mock Hindsight client; do not call network.
+- [x] Mark exported record with `hindsight_indexed=true` only after success.
+- [x] Run:
 
 ```powershell
 python -m pytest tests/plugins/memory/test_memory_os_hindsight_adapter.py -q
@@ -706,20 +706,20 @@ python -m pytest tests/plugins/memory/test_memory_os_hindsight_adapter.py -q
 
 **Steps:**
 
-- [ ] Document `10.20.3.200` restart commands separately from `10.20.2.88`.
-- [ ] Document production restart prechecks, but mark them blocked until explicit owner approval.
-- [ ] Include before/after checks:
+- [x] Document `10.20.3.200` restart commands separately from `10.20.2.88`.
+- [x] Document production restart prechecks, but mark them blocked until explicit owner approval.
+- [x] Include before/after checks:
 
 ```bash
 systemctl --user show hermes-gateway.service -p ActiveState -p MainPID --no-pager
 systemctl --user show hermes-gateway-sannai.service -p ActiveState -p MainPID --no-pager
 ```
 
-- [ ] Include rollback provider values:
+- [x] Include rollback provider values:
   - main: `memory.provider=hindsight`
   - Sannai: built-in only unless changed later
-- [ ] Include "never restart both gateways unless explicitly approved."
-- [ ] State explicitly that v0 writes a runbook only. Automated restart wrappers, restart hooks, or deployment orchestration are post-v0 work and must not be introduced in this slice.
+- [x] Include "never restart both gateways unless explicitly approved."
+- [x] State explicitly that v0 writes a runbook only. Automated restart wrappers, restart hooks, or deployment orchestration are post-v0 work and must not be introduced in this slice.
 
 **Acceptance:**
 
@@ -765,13 +765,13 @@ hermes memory-os migrate diff --source-report <path> --target-root <path>
 
 **Steps:**
 
-- [ ] Implement scan-only metadata report.
-- [ ] Implement redacted bundle export.
-- [ ] Implement shadow import into test profile.
-- [ ] Implement replay with adapter disabled.
-- [ ] Implement diff report covering source count, imported count, skipped private bodies, schema errors, approval state mapping, and would-write paths.
-- [ ] Add tests that use fixture data and prove no source mutation.
-- [ ] Run:
+- [x] Implement scan-only metadata report.
+- [x] Implement redacted bundle export.
+- [x] Implement shadow import into test profile.
+- [x] Implement replay with adapter disabled.
+- [x] Implement diff report covering source count, imported count, skipped private bodies, schema errors, approval state mapping, and would-write paths.
+- [x] Add tests that use fixture data and prove no source mutation.
+- [x] Run:
 
 ```powershell
 python -m pytest tests/plugins/memory/test_memory_os_migrator.py -q
@@ -808,16 +808,16 @@ sync_turn
 
 **Steps:**
 
-- [ ] Build an E2E fixture using `fixtures.py` and a temporary `$HERMES_HOME`.
-- [ ] Initialize `MemoryOSProvider` with adapter disabled.
-- [ ] Call `sync_turn()` and flush the worker.
-- [ ] Assert the event exists in filesystem store and index.
-- [ ] Run a minimal `InnerDriveEngine.process_event(event)` that creates a working item and a crystallized candidate. This engine surface is for Memory-OS validation only; autonomous scheduler behavior remains outside v0.
-- [ ] Apply `approve_for_crystallized` through the approval service.
-- [ ] Assert crystallized markdown is written with source event IDs and approval metadata.
-- [ ] Enable a mocked Hindsight adapter and export only the approved crystallized record.
-- [ ] Assert raw events, working items, and unapproved candidates are refused by the adapter.
-- [ ] Run:
+- [x] Build an E2E fixture using `fixtures.py` and a temporary `$HERMES_HOME`.
+- [x] Initialize `MemoryOSProvider` with adapter disabled.
+- [x] Call `sync_turn()` and flush the worker.
+- [x] Assert the event exists in filesystem store and index.
+- [x] Run a minimal `InnerDriveEngine.process_event(event)` that creates a working item and a crystallized candidate. This engine surface is for Memory-OS validation only; autonomous scheduler behavior remains outside v0.
+- [x] Apply `approve_for_crystallized` through the approval service.
+- [x] Assert crystallized markdown is written with source event IDs and approval metadata.
+- [x] Enable a mocked Hindsight adapter and export only the approved crystallized record.
+- [x] Assert raw events, working items, and unapproved candidates are refused by the adapter.
+- [x] Run:
 
 ```powershell
 python -m pytest tests/plugins/memory/test_memory_os_e2e.py -q
@@ -835,20 +835,10 @@ python -m pytest tests/plugins/memory/test_memory_os_e2e.py -q
 Run after slices complete:
 
 ```powershell
-cd "D:\Hermes agent manager\hermes-agent-2026.5.16"
-python -m pytest tests/plugins/memory/test_memory_os_schema.py -q
-python -m pytest tests/plugins/memory/test_memory_os_fixtures.py -q
-python -m pytest tests/plugins/memory/test_memory_os_roots.py -q
-python -m pytest tests/plugins/memory/test_memory_os_store.py -q
-python -m pytest tests/plugins/memory/test_memory_os_lifecycle.py -q
-python -m pytest tests/plugins/memory/test_memory_os_prefetch.py -q
-python -m pytest tests/plugins/memory/test_memory_os_working.py -q
-python -m pytest tests/plugins/memory/test_memory_os_crystallized.py -q
-python -m pytest tests/plugins/memory/test_memory_os_migrator.py -q
-python -m pytest tests/plugins/memory/test_memory_os_audit_benchmark_cleanup.py -q
-python -m pytest tests/plugins/memory/test_memory_os_hindsight_adapter.py -q
-python -m pytest tests/plugins/memory/test_memory_os_e2e.py tests/scripts/test_memory_os_export_shadow.py -q
-python -m pytest tests/run_agent/test_memory_provider_init.py tests/agent/test_memory_provider.py -q
+cd "D:\Hermes agent manager\Hermes-Memory-OS"
+python -m pytest -q
+python -m compileall -q agent plugins scripts
+git diff --check
 ```
 
 Remote validation on `10.20.3.200` is a later execution step and must be recorded in `docs/memory-os/test-plan-10.20.3.200.md`.

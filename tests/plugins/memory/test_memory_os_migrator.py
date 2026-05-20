@@ -1,9 +1,14 @@
 import json
+import argparse
 
 from plugins.memory.memory_os.fixtures import build_sannai_multi_root_fixture
+from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.migrator import (
     export_shadow_bundle,
     import_shadow_bundle,
+    migration_diff_report,
+    migration_scan_report,
+    replay_shadow_import,
     scan_legacy_sources,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -35,6 +40,22 @@ def test_scan_legacy_sources_covers_sannai_multi_root_shape(tmp_path):
         "owner_eligible": 1,
         "owner_defer": 1,
     }
+
+
+def test_migration_scan_report_is_dry_run_and_read_only(tmp_path):
+    layout = build_sannai_multi_root_fixture(tmp_path)
+    before_hashes = {source["path"]: source["sha256"] for source in scan_legacy_sources(layout.roots)}
+
+    report = migration_scan_report(layout.roots, dry_run=True)
+
+    assert report["schema_version"] == "memory-os.migration_scan.v0"
+    assert report["state"] == "scan_only"
+    assert report["dry_run"] is True
+    assert report["source_count"] >= 9
+    assert report["candidate_status_counts"]["owner_eligible"] == 1
+    assert not layout.roots.memory_os_root.exists()
+    after_hashes = {source["path"]: source["sha256"] for source in scan_legacy_sources(layout.roots)}
+    assert after_hashes == before_hashes
 
 
 def test_export_shadow_bundle_dry_run_reports_without_writing(tmp_path):
@@ -111,3 +132,67 @@ def test_import_shadow_bundle_writes_only_imports_and_canonical_store(tmp_path):
     assert imported_report["source_count"] == report["source_count"]
     source_after = {source["path"]: source["sha256"] for source in scan_legacy_sources(layout.roots)}
     assert source_after == source_before
+
+
+def test_replay_shadow_import_never_sends_or_exports_and_never_crystallizes(tmp_path):
+    layout = build_sannai_multi_root_fixture(tmp_path / "source")
+    bundle = tmp_path / "bundle"
+    export_shadow_bundle(layout.roots, out_path=bundle, include_private_bodies=True)
+    roots = _target_roots(tmp_path)
+    import_shadow_bundle(bundle, roots, dry_run=False)
+
+    report = replay_shadow_import(roots, dry_run=False, no_adapter_export=True)
+
+    assert report["schema_version"] == "memory-os.migration_replay.v0"
+    assert report["state"] == "shadow_replay"
+    assert report["message_delivery"] == "disabled"
+    assert report["adapter_export"] == "disabled"
+    assert report["events_replayed"] > 0
+    assert report["crystallized_created"] == 0
+    assert not list(roots.crystallized_root.glob("*.md"))
+
+
+def test_migration_diff_report_covers_owner_review_fields(tmp_path):
+    layout = build_sannai_multi_root_fixture(tmp_path / "source")
+    bundle = tmp_path / "redacted-bundle"
+    export_shadow_bundle(layout.roots, out_path=bundle, include_private_bodies=False)
+    roots = _target_roots(tmp_path)
+    import_shadow_bundle(bundle, roots, dry_run=False)
+
+    report = migration_diff_report(bundle / "manifest.json", roots)
+
+    assert report["schema_version"] == "memory-os.migration_diff.v0"
+    assert report["state"] == "diff_report"
+    assert report["source_count"] >= 9
+    assert report["imported_count"] == report["source_count"]
+    assert report["skipped_private_body_count"] == report["source_count"]
+    assert report["schema_errors"] == []
+    assert report["approval_state_mapping"]["owner_eligible"] == "approved_for_s5_visibility"
+    assert str(roots.events_root) in report["would_write_paths"]
+    assert report["ready_for_owner_review"] is True
+
+
+def test_migrate_cli_scan_emits_stage_report(tmp_path, capsys):
+    layout = build_sannai_multi_root_fixture(tmp_path)
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(
+        [
+            "migrate",
+            "scan",
+            "--profile",
+            "sannai",
+            "--hermes-home",
+            str(layout.hermes_home),
+            "--state-root",
+            str(layout.state_root),
+            "--dry-run",
+        ]
+    )
+
+    exit_code = memory_os_command(args)
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "scan_only"
+    assert report["source_count"] >= 9

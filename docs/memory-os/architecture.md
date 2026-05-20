@@ -42,8 +42,8 @@ docs/memory-os/
 
 本工程线的当前边界：
 
-- 本地源码：`D:\Hermes agent manager\hermes-agent-2026.5.16\`
-- 新文档线：`D:\Hermes agent manager\docs\memory-os\`
+- 本地源码：`D:\Hermes agent manager\Hermes-Memory-OS\`
+- 新文档线：`D:\Hermes agent manager\Hermes-Memory-OS\docs\memory-os\`
 - 生产环境：`10.20.2.88 / YC-NAS`，只读观察，不修改。
 - 实验环境：`10.20.3.200`，空白 Hermes 服务器，用于原型验证。
 - 旧 cowork 看板：不纳入，不开旧 CW，不把新系统塞回旧 proposal/agenda 文档。

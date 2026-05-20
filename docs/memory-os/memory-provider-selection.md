@@ -48,10 +48,11 @@ Hermes provider interface
 
 ## 依据
 
-本地源码文档：
+当前实现仓库：
 
-- `D:\Hermes agent manager\hermes-agent-2026.5.16\website\docs\developer-guide\memory-provider-plugin.md`
-- `D:\Hermes agent manager\hermes-agent-2026.5.16\website\docs\user-guide\features\memory-providers.md`
+- `D:\Hermes agent manager\Hermes-Memory-OS\`
+
+Hermes provider 接口依据以下官方文档复核；旧 Hermes 源码树不再作为本项目实现路径。
 
 联网复核资料：
 

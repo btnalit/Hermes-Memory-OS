@@ -13,7 +13,13 @@ from .benchmark import BenchmarkConfig, run_benchmark
 from .cleanup import CleanupPolicy, cleanup_plan
 from .config import load_config
 from .index import MemoryOSIndex
-from .migrator import export_shadow_bundle
+from .migrator import (
+    export_shadow_bundle,
+    import_shadow_bundle,
+    migration_diff_report,
+    migration_scan_report,
+    replay_shadow_import,
+)
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
 from .store import MemoryOSStore
@@ -206,9 +212,40 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     export_parser.add_argument("--out", required=True)
     export_parser.add_argument("--include-private-bodies", action="store_true")
     export_parser.add_argument("--dry-run", action="store_true")
+    migrate_parser = subs.add_parser("migrate")
+    migrate_subs = migrate_parser.add_subparsers(dest="migrate_command", required=True)
+    migrate_scan = migrate_subs.add_parser("scan")
+    migrate_scan.add_argument("--profile", default="sannai")
+    migrate_scan.add_argument("--hermes-home", required=True)
+    migrate_scan.add_argument("--state-root", action="append", default=[])
+    migrate_scan.add_argument("--dry-run", action="store_true", default=True)
+    migrate_export = migrate_subs.add_parser("export-shadow")
+    migrate_export.add_argument("--profile", default="sannai")
+    migrate_export.add_argument("--hermes-home", required=True)
+    migrate_export.add_argument("--state-root", action="append", default=[])
+    migrate_export.add_argument("--out", required=True)
+    migrate_export.add_argument("--redacted", action="store_true")
+    migrate_export.add_argument("--include-private-bodies", action="store_true")
+    migrate_export.add_argument("--dry-run", action="store_true")
+    migrate_import = migrate_subs.add_parser("import-shadow")
+    migrate_import.add_argument("--bundle", required=True)
+    migrate_import.add_argument("--profile", default="sannai-shadow")
+    migrate_import.add_argument("--hermes-home", required=True)
+    migrate_import.add_argument("--apply", action="store_true")
+    migrate_replay = migrate_subs.add_parser("replay")
+    migrate_replay.add_argument("--profile", default="sannai-shadow")
+    migrate_replay.add_argument("--hermes-home", required=True)
+    migrate_replay.add_argument("--no-adapter-export", action="store_true", default=True)
+    migrate_replay.add_argument("--apply", action="store_true")
+    migrate_diff = migrate_subs.add_parser("diff")
+    migrate_diff.add_argument("--source-report", required=True)
+    migrate_diff.add_argument("--target-root", required=True)
+    migrate_diff.add_argument("--profile", default="sannai-shadow")
 
 
 def memory_os_command(args: argparse.Namespace) -> int:
+    if args.memory_os_command == "migrate":
+        return _migrate_command(args)
     if args.memory_os_command == "export-shadow":
         roots = MemoryOSRoots.from_hermes_home(
             args.hermes_home,
@@ -284,6 +321,71 @@ def memory_os_command(args: argparse.Namespace) -> int:
         )
         return 0
     return 2
+
+
+def _migrate_command(args: argparse.Namespace) -> int:
+    command = args.migrate_command
+    if command == "scan":
+        roots = _source_roots_from_args(args)
+        print(json.dumps(migration_scan_report(roots, dry_run=args.dry_run), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "export-shadow":
+        roots = _source_roots_from_args(args)
+        print(
+            json.dumps(
+                export_shadow_bundle(
+                    roots,
+                    out_path=args.out,
+                    include_private_bodies=args.include_private_bodies and not args.redacted,
+                    dry_run=args.dry_run,
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "import-shadow":
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        print(
+            json.dumps(
+                import_shadow_bundle(args.bundle, roots, dry_run=not args.apply),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "replay":
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        print(
+            json.dumps(
+                replay_shadow_import(roots, dry_run=not args.apply, no_adapter_export=args.no_adapter_export),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "diff":
+        roots = _target_roots_from_arg(args.target_root, profile=args.profile)
+        print(json.dumps(migration_diff_report(args.source_report, roots), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    return 2
+
+
+def _source_roots_from_args(args: argparse.Namespace) -> MemoryOSRoots:
+    return MemoryOSRoots.from_hermes_home(
+        args.hermes_home,
+        profile=args.profile,
+        external_state_roots=args.state_root,
+    )
+
+
+def _target_roots_from_arg(target_root: str, *, profile: str) -> MemoryOSRoots:
+    path = Path(target_root).expanduser().resolve()
+    hermes_home = path.parent if path.name == "memory-os" else path
+    return MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
 
 
 def _store_counts(store: MemoryOSStore) -> dict[str, int]:
