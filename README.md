@@ -52,4 +52,4 @@ python -m pytest -q
 
 ## License
 
-No license has been selected yet.
+MIT License. See [LICENSE](LICENSE).
