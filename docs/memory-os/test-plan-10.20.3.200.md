@@ -33,6 +33,17 @@ python3 scripts/memory_os_blank_host_smoke.py \
   --base-dir /tmp/hermes-memory-os-validation/smoke
 ```
 
+If the blank host has Python but no `pip`, install the minimal Debian test
+runner instead and run from the repo root:
+
+```bash
+apt-get update
+apt-get install -y python3-pytest
+python3 -m pytest -q
+python3 scripts/memory_os_blank_host_smoke.py \
+  --base-dir /tmp/hermes-memory-os-validation/smoke
+```
+
 Evidence:
 
 ```text
@@ -68,6 +79,108 @@ Success criteria:
 - working memory evolves without writing crystallized memory
 - blank-host smoke completes without network, gateway, Telegram, mailbox, or
   production dependencies
+
+## Phase B.5: Hermes Plugin Install And Discovery
+
+This phase validates the plugin installation/discovery path on `10.20.3.200`.
+It is separate from Sannai shadow data compatibility.
+
+Use a fresh temporary Hermes home:
+
+```bash
+cd /tmp/hermes-memory-os-validation/repo
+rm -rf /tmp/memory-os-blank-home
+python3 scripts/install_memory_os_plugin.py --hermes-home /tmp/memory-os-blank-home
+HERMES_HOME=/tmp/memory-os-blank-home hermes memory
+```
+
+Expected:
+
+- `memory_os` appears under installed memory plugins.
+- Status is `available`.
+- No gateway restart occurs.
+- No production host is contacted.
+
+To enable for the real `10.20.3.200` main profile pilot:
+
+```bash
+HERMES_HOME=/root/.hermes python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-runtime \
+  --enable-runtime \
+  --runtime-interval 5min
+HERMES_HOME=/root/.hermes hermes config set memory.provider memory_os
+HERMES_HOME=/root/.hermes hermes memory
+systemctl --user restart hermes-gateway.service
+```
+
+Rollback preserves evidence:
+
+```bash
+cp /root/.hermes/config.yaml.memory-os-pilot-*.bak /root/.hermes/config.yaml
+systemctl --user restart hermes-gateway.service
+```
+
+Runtime heartbeat validation:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory_os heartbeat --max-events 100
+HERMES_HOME=/root/.hermes hermes memory_os status
+systemctl --user status hermes-memory-os-heartbeat.timer --no-pager
+```
+
+Expected:
+
+- `working_items` increases after new events are processed.
+- `crystallized_candidates` increases after new events are processed.
+- `crystallized_records` remains `0` until owner approval.
+- `hermes-memory-os-heartbeat.timer` is enabled and active on `10.20.3.200`.
+
+## Phase B.6: Runtime SQLite/FTS Indexer
+
+This phase validates Slice 20 after implementation. It follows the design in
+`docs/memory-os/slice-20-runtime-indexer-design.md`.
+
+Local test subset before remote deployment:
+
+```bash
+python3 -m pytest \
+  tests/plugins/memory/test_memory_os_store.py \
+  tests/plugins/memory/test_memory_os_runtime.py \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/plugins/memory/test_memory_os_audit_benchmark_cleanup.py \
+  -q
+```
+
+Runtime validation on the `10.20.3.200` main profile:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory_os heartbeat --max-events 100
+HERMES_HOME=/root/.hermes hermes memory_os status
+HERMES_HOME=/root/.hermes hermes memory_os doctor
+```
+
+Expected:
+
+- `index_counts.events` catches up after heartbeat.
+- A second heartbeat does not duplicate indexed rows.
+- Doctor distinguishes `index_missing`, `index_stale`, and mismatch findings.
+- Prefetch uses indexed mode when the index is healthy.
+- If the DB is missing or rebuilding, prefetch reports degraded filesystem mode
+  instead of silently pretending to meet the indexed SLO.
+- FTS tokenizer status reports `trigram` when available, otherwise
+  `fts_tokenizer_degraded`.
+- No production host, production gateway, production Hindsight bank, or identity
+  source file is modified.
+
+Optional Slice 20 benchmark:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory_os benchmark --records 100000 --large-opt-in
+```
+
+Record indexed prefetch, degraded prefetch, and full rebuild timing separately
+in the validation report.
 
 ## Phase C: Owner Approval And Adapter Smoke
 

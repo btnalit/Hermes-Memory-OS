@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import queue
 import threading
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
 from agent.memory_provider import MemoryProvider
 
 from . import config as memory_os_config
-from .audit import append_audit
+from .audit import append_audit, read_audit_entries
+from .crystallized import read_candidate_queue
 from .ids import new_event_id
 from .index import MemoryOSIndex
 from .prefetch import build_prefetch
@@ -87,7 +90,27 @@ class MemoryOSProvider(MemoryProvider):
         return "# Memory-OS\nActive. Conversation capture is summary-only by default."
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        return []
+        return [
+            {
+                "name": "memory_os_status",
+                "description": (
+                    "Inspect the active Memory-OS provider status. Use this when asked "
+                    "which memory provider is active, whether Memory-OS is working, or "
+                    "whether the current memory backend is Hindsight. Returns counts and "
+                    "storage facts without raw private bodies."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
+        if tool_name != "memory_os_status":
+            return super().handle_tool_call(tool_name, args, **kwargs)
+        return json.dumps(self._tool_status_report(), ensure_ascii=False, sort_keys=True)
 
     def get_config_schema(self) -> list[dict[str, Any]]:
         return memory_os_config.get_config_schema()
@@ -223,6 +246,41 @@ class MemoryOSProvider(MemoryProvider):
             details=details,
         )
 
+    def _tool_status_report(self) -> dict[str, Any]:
+        if self._roots is None or self._store is None:
+            return {
+                "schema_version": "memory-os.tool_status.v0",
+                "provider": "memory_os",
+                "status": "not_initialized",
+            }
+        events = self._store.read_events()
+        event_sources = Counter(event.source for event in events)
+        event_kinds = Counter(event.kind for event in events)
+        latest_event_ts = max((event.ts for event in events), default=None)
+        index_counts = self._index.counts() if self._index else {}
+        return {
+            "schema_version": "memory-os.tool_status.v0",
+            "provider": "memory_os",
+            "provider_name": self.name,
+            "status": "active",
+            "profile": self.profile,
+            "platform": self.platform,
+            "canonical_store": str(self._roots.memory_os_root),
+            "storage_model": "local_filesystem_jsonl_markdown",
+            "event_count": len(events),
+            "event_sources": dict(event_sources),
+            "event_kinds": dict(event_kinds),
+            "latest_event_ts": latest_event_ts,
+            "working_item_count": _working_item_count(self._roots),
+            "crystallized_candidate_count": len(read_candidate_queue(self._roots)),
+            "audit_entries": len(read_audit_entries(self._roots.audit_path)),
+            "index_counts": index_counts,
+            "hindsight_adapter_enabled": bool(self._config.get("hindsight_adapter_enabled")),
+            "hindsight_role": "optional_adapter_only_not_canonical",
+            "uses_hindsight_http_api": False,
+            "body_policy": "summary_only",
+        }
+
 
 def register_memory_provider() -> MemoryProvider:
     return MemoryOSProvider()
@@ -241,3 +299,14 @@ def _clip(value: str, limit: int) -> str:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _working_item_count(roots: Any) -> int:
+    count = 0
+    for path in sorted(roots.working_root.glob("*.json")):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        count += len(document.get("items", []))
+    return count

@@ -108,6 +108,8 @@ copy 规则：
 - 默认不复制 raw session body、private prompt、secret、API key。
 - 如果只需要结构验证，可以生成 redacted bundle：保留 path、mtime、size、hash、schema shape，不保留正文。
 - shadow bundle 中的 `SOUL.md` 只是测试输入，不是 Memory-OS 新的 canonical identity。
+- 导出脚本只能做 `stat` + sequential file read + checksum，不允许持有生产写锁、`flock`、rename、truncate、chmod/chattr 或任何 source mutation。
+- shadow validation 接受 bundle 是 T0 时间点快照；如果生产在导出后继续写入，source hash drift 只说明快照不代表当前生产状态，不影响 import/replay 验证结论。
 
 ### 映射规则
 
@@ -132,6 +134,22 @@ Phase 1b 通过条件：
 - prefetch 能在 budget 内返回三奶相关 bounded context。
 - owner review backlog 数量与源候选数量可对账。
 - inner-drive replay 只更新 working/candidate，不发消息、不写 identity、不导出 Hindsight。
+
+shadow suitability 验证不等于 production migration approval。它只能证明 Memory-OS 能处理三奶式数据形态、schema 兼容、inner-drive 在 shadow 数据上的行为可观察、owner review backlog 可对账；不能证明 production provider 切换、前台人格、mailbox/gateway 集成或 restart 风险已经安全。
+
+下一阶段的 shadow observation 允许：
+
+- 在 `10.20.3.200` shadow profile 上运行 inner-drive 观察。
+- 观察 working memory 演化、prefetch 输出、owner review backlog、doctor/inspect/trace/diff、benchmark、cleanup/retention。
+
+下一阶段禁止：
+
+- shadow profile 发送任何消息。
+- shadow 数据回流 production。
+- shadow approval 影响 production CW-019。
+- shadow profile 启用 S5。
+- shadow 验证通过后直接切 production provider。
+- shadow profile 连接生产 Hindsight bank 或真实 production Hindsight client。
 
 ## Identity 物理位置决策
 
@@ -179,6 +197,7 @@ $HERMES_HOME/memory-os/identity/manifest.json  # pointer + checksum + protection
 - Memory-OS 可以检测 checksum drift，但不能自动修正 identity。
 - identity drift 只能生成 event 和 owner review item。
 - shadow replay 中复制的 SOUL 是 fixture，不改变生产 source-of-truth 决策。
+- inner-drive 如果产生 identity 相关建议，只能写 audit event 或 owner review candidate；不能写 production identity source，也不能写 shadow copy 当作 canonical identity。
 - 如果未来 owner 决定给 SOUL 加 `chattr +i`，Memory-OS 不需要改设计，只更新 manifest 的 protection metadata。
 
 ## CW-019 与 Memory-OS Approval 的关系
@@ -239,6 +258,9 @@ Phase 4：
 Production migration：
 
 - 只有当统一审批模型通过 shadow replay 和 owner review 对账后，才考虑替代 CW-019 v1。
+- shadow profile 中的任何 approval 都是 shadow-local evidence，不会自动继承到 production migration。
+- production migration 前必须重新确认 approval purpose；`approve_for_visibility`、`approve_for_working`、`approve_for_crystallized` 仍然是不同审批目的。
+- shadow inner-drive 可以读取 CW-019 mirror 产生 shadow-local working/candidate 状态，但这些状态不能反向写入 production CW-019，也不能影响下一轮 production owner review。
 
 ## 跨 Profile 数据流
 
@@ -317,6 +339,33 @@ memoryos-test on 10.20.3.200
 - main 和 Sannai 同时切。
 - 一步把 Hindsight 从 active provider 改成 Memory-OS。
 - 为了测试 adapter 恢复 Hindsight auto-retain。
+- shadow Hindsight adapter smoke 只能使用 disabled-by-default 配置或 mock/isolated client；不得连接生产 Hindsight bank、生产 API key、生产 bank id 或 main Hermes Hindsight 配置。
+
+### Quiet Window Export Rule
+
+当前 shadow validation 不要求 quiet window。真实 production migration 时，最终 shadow bundle 必须在 quiet window 内导出，避免 T0 快照和切换时 production 当前状态之间出现不可自动恢复的数据丢失窗口。
+
+quiet window 定义：
+
+- Sannai 后台心跳暂停。
+- 三奶前台对话 paused，gateway 不路由新消息。
+- CW-019 candidate generation paused。
+- 持续时间至少 10 分钟，覆盖一个完整 cron tick。
+
+quiet window 操作顺序：
+
+1. owner 明确批准 quiet window。
+2. 暂停 Sannai cron jobs、前台路由和 CW-019 generation。
+3. 记录 `pause_window_id`、开始时间、目标 profile、目标服务、当前 PID、当前 provider。
+4. 执行 final export。
+5. 导出后重新计算所有 source hash，确认 manifest hash 与生产源一致。
+6. resume cron jobs、前台路由和 CW-019 generation。
+7. 写 production audit event：`quiet_window_used`、`exported_at`、`bundle_id`、hash check result、resume result。
+
+如果导出后 source hash drift：
+
+- shadow validation：可接受，bundle 是 T0 快照。
+- production migration：不允许继续切换；必须重新进入 quiet window 并重新导出 final bundle。
 
 ### 切换前备份
 

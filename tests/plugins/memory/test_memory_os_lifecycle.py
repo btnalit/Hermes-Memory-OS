@@ -17,7 +17,7 @@ def test_memory_os_provider_is_discoverable_without_initializing_storage():
     assert provider is not None
     assert provider.name == "memory-os"
     assert provider.is_available() is True
-    assert provider.get_tool_schemas() == []
+    assert [schema["name"] for schema in provider.get_tool_schemas()] == ["memory_os_status"]
     assert provider.prefetch("hello") == ""
 
 
@@ -153,3 +153,24 @@ def test_on_memory_write_mirrors_allowed_write_as_event_only(tmp_path):
     assert events[0].kind == "memory_write"
     assert "Remember owner preference." in events[0].summary
     assert not (tmp_path / "memories" / "MEMORY.md").exists()
+
+
+def test_memory_os_status_tool_reports_local_store_not_hindsight(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="main")
+
+    provider.sync_turn("check provider", "Memory-OS is active", session_id="session-1")
+    provider.shutdown()
+
+    report = json.loads(provider.handle_tool_call("memory_os_status", {}))
+    rendered = json.dumps(report, ensure_ascii=False)
+    assert report["schema_version"] == "memory-os.tool_status.v0"
+    assert report["provider"] == "memory_os"
+    assert report["status"] == "active"
+    assert report["storage_model"] == "local_filesystem_jsonl_markdown"
+    assert report["canonical_store"] == str(tmp_path / "memory-os")
+    assert report["event_count"] == 1
+    assert report["hindsight_adapter_enabled"] is False
+    assert report["uses_hindsight_http_api"] is False
+    assert "172.18.0.99" not in rendered
+    assert "api_url" not in rendered

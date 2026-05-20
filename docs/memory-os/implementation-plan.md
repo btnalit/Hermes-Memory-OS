@@ -79,6 +79,7 @@ Docs/runbooks:
 docs/memory-os/test-plan-10.20.3.200.md
 docs/memory-os/migration-notes.md
 docs/memory-os/gateway-restart-runbook.md
+docs/memory-os/slice-20-runtime-indexer-design.md
 ```
 
 ## Implementation Slices
@@ -830,6 +831,256 @@ python -m pytest tests/plugins/memory/test_memory_os_e2e.py -q
 - The E2E test does not send messages, restart services, touch `10.20.2.88`, or read production Sannai data.
 - The test proves component integration, not final Sannai personality quality; Sannai suitability still requires shadow replay.
 
+### Slice 17: Plugin Install And Hermes Discovery
+
+**Purpose:** Make Memory-OS installable as a Hermes user memory provider on a blank `$HERMES_HOME` without patching Hermes prompts or copying files by hand.
+
+**Files:**
+
+- Create: `scripts/install_memory_os_plugin.py`
+- Modify: `plugins/memory/memory_os/plugin.yaml`
+- Modify: `plugins/memory/memory_os/cli.py`
+- Test: `tests/scripts/test_memory_os_plugin_install.py`
+- Update: `README.md`
+
+**Hermes discovery contract:**
+
+```text
+$HERMES_HOME/plugins/memory_os/
+├── plugin.yaml
+├── __init__.py              # exposes register_memory_provider()
+├── cli.py                   # importable before provider package is preloaded
+└── *.py                     # provider implementation
+```
+
+Hermes detects user-installed memory providers by scanning
+`$HERMES_HOME/plugins/<name>/__init__.py` for `register_memory_provider` or
+`MemoryProvider`. Activation remains Hermes-native:
+
+```bash
+HERMES_HOME=/path/to/home hermes config set memory.provider memory_os
+HERMES_HOME=/path/to/home hermes memory
+```
+
+**Steps:**
+
+- [x] Add an installer script that copies `plugins/memory/memory_os` into `$HERMES_HOME/plugins/memory_os`.
+- [x] Exclude `__pycache__`, `.pyc`, and `.pyo` artifacts from installed plugin files.
+- [x] Keep provider enablement explicit via `--enable`; no gateway restart is performed by the installer.
+- [x] Align `plugin.yaml` name with the Hermes provider config key: `memory_os`.
+- [x] Make `cli.py` importable as `_hermes_user_memory.memory_os.cli` before the provider package has been loaded.
+- [x] Add tests for install shape, dry-run behavior, plugin name, and fresh-process CLI import.
+- [x] Run:
+
+```powershell
+python -m pytest tests/scripts/test_memory_os_plugin_install.py -q
+python -m pytest tests/plugins/memory/test_memory_os_lifecycle.py tests/scripts/test_memory_os_plugin_install.py -q
+```
+
+**Acceptance:**
+
+- A blank Hermes profile discovers Memory-OS through `hermes memory` after installation.
+- Discovery uses Hermes' native memory plugin mechanism, not a system prompt patch.
+- The installer does not touch production, restart gateways, or create Memory-OS runtime data until the provider is enabled and used.
+- Plugin CLI import does not depend on a prior `discover_memory_providers()` call in the same Python process.
+
+### Slice 18: Provider Self-Diagnostic Tool
+
+**Purpose:** Let a Hermes agent inspect the active Memory-OS provider through the memory plugin interface instead of guessing from stale built-in memory or Hindsight records.
+
+**Files:**
+
+- Modify: `plugins/memory/memory_os/__init__.py`
+- Test: `tests/plugins/memory/test_memory_os_lifecycle.py`
+- Update: `README.md`
+
+**Tool:**
+
+```text
+memory_os_status
+```
+
+The tool is read-only and returns:
+
+```json
+{
+  "provider": "memory_os",
+  "provider_name": "memory-os",
+  "status": "active",
+  "canonical_store": "$HERMES_HOME/memory-os",
+  "storage_model": "local_filesystem_jsonl_markdown",
+  "event_count": 0,
+  "hindsight_adapter_enabled": false,
+  "hindsight_role": "optional_adapter_only_not_canonical",
+  "uses_hindsight_http_api": false,
+  "body_policy": "summary_only"
+}
+```
+
+**Steps:**
+
+- [x] Add `memory_os_status` to `get_tool_schemas()`.
+- [x] Implement `handle_tool_call("memory_os_status", ...)`.
+- [x] Return storage facts, counts, source/kind counters, index counts, and adapter state without raw private bodies.
+- [x] Add a regression test proving the status tool reports local filesystem storage and does not mention Hindsight API URLs.
+- [x] Run:
+
+```powershell
+python -m pytest tests/plugins/memory/test_memory_os_lifecycle.py -q
+python -m pytest -q
+```
+
+**Acceptance:**
+
+- A Hermes agent can call `memory_os_status` when asked what memory backend is active.
+- The tool reports `provider=memory_os`, `storage_model=local_filesystem_jsonl_markdown`, and `uses_hindsight_http_api=false`.
+- The tool does not expose raw private bodies.
+- The solution stays inside the memory provider plugin interface; it does not patch system prompts.
+
+### Slice 19: Runtime Heartbeat Deployment
+
+**Purpose:** Make a deployed Memory-OS profile complete enough for validation: provider writes events, heartbeat advances unprocessed events into working memory and crystallized candidate queue, and a user systemd timer can keep it running.
+
+**Files:**
+
+- Create: `plugins/memory/memory_os/runtime.py`
+- Modify: `plugins/memory/memory_os/crystallized.py`
+- Modify: `plugins/memory/memory_os/cli.py`
+- Modify: `scripts/install_memory_os_plugin.py`
+- Test: `tests/plugins/memory/test_memory_os_runtime.py`
+- Extend: `tests/scripts/test_memory_os_plugin_install.py`
+
+**Runtime flow:**
+
+```text
+event JSONL
+  -> hermes memory_os heartbeat
+  -> InnerDriveEngine.process_event(event)
+  -> working/lingering.json
+  -> crystallized/candidates.jsonl
+  -> runtime/heartbeat_state.json
+```
+
+**Important boundary:** heartbeat creates candidates only. It does not write
+approved crystallized records. `crystallized/*.md` still requires explicit
+`approve_for_crystallized`.
+
+**Steps:**
+
+- [x] Add `MemoryOSRuntime.heartbeat(max_events=100)`.
+- [x] Persist processed event IDs in `memory-os/runtime/heartbeat_state.json`.
+- [x] Add `crystallized/candidates.jsonl` queue helpers.
+- [x] Add `hermes memory_os heartbeat --max-events N`.
+- [x] Extend `memory_os status` counts with `crystallized_candidates`.
+- [x] Extend installer with `--install-runtime`, `--enable-runtime`, and `--runtime-interval`.
+- [x] Generate heartbeat wrapper plus systemd user service/timer artifacts.
+- [x] Add tests proving heartbeat is idempotent and moves new events to working + candidates.
+- [x] Run:
+
+```powershell
+python -m pytest tests/plugins/memory/test_memory_os_runtime.py tests/scripts/test_memory_os_plugin_install.py -q
+python -m pytest -q
+```
+
+**Acceptance:**
+
+- After provider writes events, heartbeat increases `working_items` and `crystallized_candidates`.
+- Running heartbeat twice does not duplicate already processed events.
+- The deployed validation host can enable an active `hermes-memory-os-heartbeat.timer`.
+- `crystallized_records` stays `0` until owner approval is explicitly applied.
+
+### Slice 20: Runtime SQLite/FTS Indexer
+
+**Purpose:** Make the SQLite index a runtime-maintained derived index instead of
+only a manual full-rebuild artifact. The filesystem remains canonical; SQLite
+accelerates prefetch, status, doctor, and benchmark.
+
+**Design Doc:**
+
+- `docs/memory-os/slice-20-runtime-indexer-design.md`
+
+**Files:**
+
+- Modify: `plugins/memory/memory_os/index.py`
+- Modify: `plugins/memory/memory_os/runtime.py`
+- Modify: `plugins/memory/memory_os/prefetch.py`
+- Modify: `plugins/memory/memory_os/cli.py`
+- Modify: `plugins/memory/memory_os/benchmark.py`
+- Test: `tests/plugins/memory/test_memory_os_store.py`
+- Test: `tests/plugins/memory/test_memory_os_runtime.py`
+- Test: `tests/plugins/memory/test_memory_os_prefetch.py`
+- Test: `tests/plugins/memory/test_memory_os_audit_benchmark_cleanup.py`
+
+**Runtime flow:**
+
+```text
+provider sync_turn
+  -> canonical event JSONL
+  -> hermes memory_os heartbeat
+  -> working memory and candidate queue
+  -> incremental SQLite/FTS index
+  -> indexed prefetch and doctor health
+```
+
+**Review items resolved by the design doc:**
+
+- P0 heartbeat interruption idempotency: transaction plus unique record ids and
+  record hashes.
+- P0 mismatch detection: explicit healthy/stale/mismatch algorithm.
+- P0 crystallized Markdown indexing: frontmatter/body parser, FTS content, and
+  mtime/size invalidation.
+- P1 rebuild concurrency: staging DB plus atomic replace while readers use the
+  old DB.
+- P1 Chinese tokenizer: FTS5 trigram preferred, unicode61 fallback reported as
+  degraded.
+- P1 audit strategy: metadata-first, non-FTS audit indexing with capped
+  heartbeat work.
+- P1 WAL policy: PASSIVE checkpoint with FULL/TRUNCATE escalation.
+- P1 vector/graph extension: reserved derived tables only, no v0 writes.
+- P2 multi-profile isolation, schema migration, tests, and degraded prefetch
+  behavior.
+
+**Steps:**
+
+- [ ] Add failing tests for incremental event indexing and idempotent replay.
+- [ ] Add `index_source_state`, row hashes, and transactional incremental
+      indexing.
+- [ ] Add index health classification and doctor findings for missing, stale,
+      and mismatch.
+- [ ] Add crystallized Markdown body parser and candidate queue indexing.
+- [ ] Add FTS tables with tokenizer probe and active-tokenizer reporting.
+- [ ] Wire heartbeat to run incremental index after working/candidate updates.
+- [ ] Add full rebuild staging and atomic replace.
+- [ ] Add prefetch indexed path with degraded filesystem fallback.
+- [ ] Add WAL checkpoint escalation policy.
+- [ ] Add per-profile, migration, and benchmark coverage.
+- [ ] Run:
+
+```powershell
+python -m pytest tests/plugins/memory/test_memory_os_store.py tests/plugins/memory/test_memory_os_runtime.py tests/plugins/memory/test_memory_os_prefetch.py tests/plugins/memory/test_memory_os_audit_benchmark_cleanup.py -q
+python -m pytest -q
+```
+
+**Acceptance:**
+
+- `hermes memory_os heartbeat` indexes newly written events into SQLite.
+- Running heartbeat twice is idempotent.
+- Deleting `memory-os/index/memory_os.db` does not lose memory and can be
+  recovered by rebuild.
+- Doctor distinguishes `index_missing`, `index_stale`, and mismatch findings.
+- Prefetch uses SQLite/FTS when healthy and reports degraded filesystem mode
+  when not.
+- Chinese search is trigram-backed when supported and explicitly degraded when
+  not.
+- Crystallized approved Markdown records are parsed into rows and FTS; candidate
+  queue remains separate.
+- Rebuild does not block live reads when an old DB exists.
+- WAL is bounded by checkpoint policy.
+- 100k opt-in benchmark records rebuild, indexed prefetch, and degraded
+  prefetch timings.
+- No production host, production gateway, production Hindsight bank, or identity
+  source file is modified.
+
 ## Validation Sequence
 
 Run after slices complete:
@@ -859,6 +1110,22 @@ Remote validation on `10.20.3.200` is a later execution step and must be recorde
 | Read-only Sannai shadow export | Slice 9 |
 | Gateway restart automation deferred | Slice 14 |
 | Full vertical E2E flow | Slice 16 |
+| Blank Hermes plugin install/discovery | Slice 17 |
+| Provider self-diagnostic tool | Slice 18 |
+| Runtime heartbeat deployment | Slice 19 |
+| Runtime SQLite/FTS indexer | Slice 20 |
+| Slice 20 P0 interruption idempotency | Slice 20 design + implementation |
+| Slice 20 P0 mismatch detection | Slice 20 design + implementation |
+| Slice 20 P0 crystallized Markdown indexing | Slice 20 design + implementation |
+| Slice 20 P1 rebuild concurrency | Slice 20 design + implementation |
+| Slice 20 P1 Chinese tokenizer | Slice 20 design + implementation |
+| Slice 20 P1 audit index strategy | Slice 20 design + implementation |
+| Slice 20 P1 WAL checkpoint fallback | Slice 20 design + implementation |
+| Slice 20 P1 vector/graph extension space | Slice 20 design |
+| Slice 20 P2 multi-profile isolation | Slice 20 design + implementation |
+| Slice 20 P2 schema migration | Slice 20 design + implementation |
+| Slice 20 P2 test matrix | Slice 20 design + implementation |
+| Slice 20 P2 degraded prefetch | Slice 20 design + implementation |
 
 ## Execution Gate
 

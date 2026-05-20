@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -108,6 +108,49 @@ class CrystallizedMemoryService:
             )
         if not candidate.source_event_ids:
             raise CrystallizedApprovalError("crystallized records require source_event_ids")
+
+
+def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidate) -> Path:
+    path = store.roots.crystallized_root / "candidates.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(asdict(candidate), ensure_ascii=False, sort_keys=True))
+        handle.write("\n")
+    append_audit(
+        store.roots.audit_path,
+        action="crystallized_candidate_queued",
+        status="ok",
+        target=str(path),
+        details={
+            "candidate_id": candidate.candidate_id,
+            "source_event_ids": list(candidate.source_event_ids),
+        },
+    )
+    return path
+
+
+def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
+    roots = getattr(roots_or_store, "roots", roots_or_store)
+    path = roots.crystallized_root / "candidates.jsonl"
+    if not path.exists():
+        return []
+    candidates: list[CrystallizedCandidate] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        candidates.append(
+            CrystallizedCandidate(
+                candidate_id=str(raw["candidate_id"]),
+                kind=str(raw["kind"]),
+                body=str(raw["body"]),
+                source_event_ids=[str(item) for item in raw.get("source_event_ids", [])],
+                sensitivity=str(raw.get("sensitivity", "private")),
+                tags=[str(item) for item in raw.get("tags", [])],
+                bridge_state=str(raw.get("bridge_state", "")),
+            )
+        )
+    return candidates
 
 
 def _parse_markdown_records(content: str) -> list[tuple[dict[str, Any], str]]:

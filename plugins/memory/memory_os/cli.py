@@ -4,14 +4,45 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
+import types
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+
+def _ensure_user_plugin_package() -> None:
+    """Make Hermes' direct user-plugin CLI import support relative imports.
+
+    Hermes imports active user memory plugin CLIs as
+    ``_hermes_user_memory.<provider>.cli`` before the provider package has
+    necessarily been loaded. Creating the missing parent package modules keeps
+    this file importable in a fresh Hermes process.
+    """
+    package = __package__ or ""
+    if not package.startswith("_hermes_user_memory."):
+        return
+    current_dir = Path(__file__).resolve().parent
+    root_name = package.split(".", 1)[0]
+    provider_package = package
+    if root_name not in sys.modules:
+        root = types.ModuleType(root_name)
+        root.__path__ = [str(current_dir.parent)]  # type: ignore[attr-defined]
+        sys.modules[root_name] = root
+    if provider_package not in sys.modules:
+        provider = types.ModuleType(provider_package)
+        provider.__path__ = [str(current_dir)]  # type: ignore[attr-defined]
+        sys.modules[provider_package] = provider
+
+
+_ensure_user_plugin_package()
 
 from .audit import last_audit_age_seconds, read_audit_entries
 from .benchmark import BenchmarkConfig, run_benchmark
 from .cleanup import CleanupPolicy, cleanup_plan
 from .config import load_config
+from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
 from .migrator import (
     export_shadow_bundle,
@@ -21,6 +52,7 @@ from .migrator import (
     replay_shadow_import,
 )
 from .roots import MemoryOSRoots
+from .runtime import MemoryOSRuntime
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
 from .store import MemoryOSStore
 from .working import WorkingMemoryService
@@ -186,6 +218,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="memory_os_command")
     subs.add_parser("status")
     subs.add_parser("doctor")
+    heartbeat_parser = subs.add_parser("heartbeat")
+    heartbeat_parser.add_argument("--max-events", type=int, default=100)
     inspect_parser = subs.add_parser("inspect")
     inspect_parser.add_argument("event_id")
     inspect_parser.add_argument("--include-private", action="store_true")
@@ -266,7 +300,7 @@ def memory_os_command(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(args.hermes_home, profile=getattr(args, "profile", "")))
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(_active_hermes_home(args), profile=getattr(args, "profile", "")))
     command = args.memory_os_command
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
@@ -275,6 +309,10 @@ def memory_os_command(args: argparse.Namespace) -> int:
         result = build_doctor_result(store)
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return int(result["exit_code"])
+    if command == "heartbeat":
+        result = MemoryOSRuntime(store).heartbeat(max_events=args.max_events)
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if command == "inspect":
         print(json.dumps(inspect_event(store, args.event_id, include_private=args.include_private), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -382,6 +420,21 @@ def _source_roots_from_args(args: argparse.Namespace) -> MemoryOSRoots:
     )
 
 
+def _active_hermes_home(args: argparse.Namespace) -> str:
+    value = getattr(args, "hermes_home", "")
+    if value:
+        return str(value)
+    env_home = os.environ.get("HERMES_HOME")
+    if env_home:
+        return env_home
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home())
+    except Exception:
+        return str(Path.home() / ".hermes")
+
+
 def _target_roots_from_arg(target_root: str, *, profile: str) -> MemoryOSRoots:
     path = Path(target_root).expanduser().resolve()
     hermes_home = path.parent if path.name == "memory-os" else path
@@ -403,6 +456,7 @@ def _store_counts(store: MemoryOSStore) -> dict[str, int]:
     return {
         "events": len(events),
         "working_items": working_items,
+        "crystallized_candidates": len(read_candidate_queue(store.roots)),
         "crystallized_records": crystallized_records,
         "audit_entries": len(read_audit_entries(store.roots.audit_path)),
     }

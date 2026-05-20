@@ -26,7 +26,8 @@ docs/memory-os/
 ├── architecture.md                    # 本文：整体 L0-L4 架构
 ├── memory-provider-selection.md        # L1 子文档：provider 对比、v0 schema、10.20.3.200 验证
 ├── integration-with-current-hermes.md  # 生产接入边界：三奶/CW-019/Hindsight/跨 profile/回滚
-└── implementation-plan.md              # 代码切片、验收标准、migrator、P1/P2 落地计划
+├── implementation-plan.md              # 代码切片、验收标准、migrator、P1/P2 落地计划
+└── slice-20-runtime-indexer-design.md  # Runtime SQLite/FTS indexer 的设计契约
 ```
 
 后续进入代码前，再补：
