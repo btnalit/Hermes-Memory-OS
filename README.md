@@ -43,7 +43,7 @@ bundle before touching a live server.
 ```text
 plugins/memory/memory_os/   # Memory-OS provider and core services
 plugins/system/             # Portable Hermes module contracts and coordination primitives
-plugins/modules/            # Portable L2-L4 modules such as mailbox, household digest, wandering mind, inner drive, ops gate, proposal queue, and evidence scoring
+plugins/modules/            # Portable L2-L4 modules such as mailbox, household digest, wandering mind, inner drive, ops gate, proposal queue, evidence scoring, and self-evolution
 agent/                      # Minimal compatibility interface used by provider tests
 scripts/                    # Operator scripts
 tests/                      # Focused Memory-OS tests
