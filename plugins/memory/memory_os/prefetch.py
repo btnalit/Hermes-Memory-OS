@@ -31,6 +31,7 @@ def build_prefetch(
     _append_section(sections, "Working Memory", _working_lines(store))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
+    _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
     if not sections:
         return ""
@@ -94,6 +95,23 @@ def _crystallized_lines(store: MemoryOSStore) -> list[str]:
 def _event_lines(store: MemoryOSStore) -> list[str]:
     events = sorted(store.read_events(), key=lambda event: event.ts)[-5:]
     return [f"- {event.kind}: {_redact(_clip(event.summary, 220))}" for event in events]
+
+
+def _indexed_lines(query: str, index: object | None) -> list[str]:
+    if index is None or not query.strip() or not hasattr(index, "search"):
+        return []
+    try:
+        result = index.search(query, limit=5)
+    except Exception:
+        return []
+    lines: list[str] = []
+    for hit in result.get("hits", []):
+        if not isinstance(hit, dict):
+            continue
+        snippet = _redact(_clip(str(hit.get("snippet", "")), 220))
+        if snippet:
+            lines.append(f"- {hit.get('record_type', 'record')}/{hit.get('record_id', '')}: {snippet}")
+    return lines
 
 
 def _file_snippet(path: Path) -> str:

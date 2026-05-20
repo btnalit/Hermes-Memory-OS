@@ -9,6 +9,7 @@ from typing import Any
 
 from .audit import append_audit
 from .crystallized import append_candidate_queue, read_candidate_queue
+from .index import MemoryOSIndex
 from .inner_drive import InnerDriveEngine
 from .store import MemoryOSStore
 from .working import ALLOWED_WORKING_KINDS, WorkingMemoryService
@@ -52,6 +53,7 @@ class MemoryOSRuntime:
                 "processed_event_ids": sorted(processed_ids),
             }
         )
+        index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
         report = {
             "schema_version": "memory-os.heartbeat.v0",
             "processed_event_count": len(processed_now),
@@ -61,6 +63,7 @@ class MemoryOSRuntime:
             "working_item_count": _working_item_count(self.store),
             "candidate_count": len(read_candidate_queue(self.store.roots)),
             "crystallized_record_count": _crystallized_record_count(self.store),
+            "index_counts": index_counts,
             "decayed_documents": decayed_documents,
             "runtime_state_path": str(self._state_path),
         }

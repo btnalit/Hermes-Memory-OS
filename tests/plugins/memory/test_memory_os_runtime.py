@@ -2,6 +2,7 @@ import json
 
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.crystallized import read_candidate_queue
+from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
@@ -52,3 +53,33 @@ def test_runtime_heartbeat_is_idempotent_for_processed_events(tmp_path):
     assert second["processed_event_count"] == 0
     assert second["already_processed_event_count"] == 1
     assert len(read_candidate_queue(store.roots)) == 1
+
+
+def test_runtime_heartbeat_indexes_new_events_without_duplicates(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="main")
+    provider.sync_turn("runtime index marker alpha", "stored alpha", session_id="session-1")
+    provider.sync_turn("runtime index marker beta", "stored beta", session_id="session-1")
+    provider.shutdown()
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+
+    first = MemoryOSRuntime(store).heartbeat()
+    second = MemoryOSRuntime(store).heartbeat()
+
+    assert first["index_counts"]["events"] == 2
+    assert second["index_counts"]["events"] == 2
+    assert MemoryOSIndex(store.roots).counts()["events"] == 2
+
+
+def test_runtime_heartbeat_indexes_candidates_separately_from_crystallized_records(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="main")
+    provider.sync_turn("runtime candidate index marker", "stored", session_id="session-1")
+    provider.shutdown()
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+
+    report = MemoryOSRuntime(store).heartbeat()
+
+    assert report["index_counts"]["crystallized_candidates"] == 1
+    assert report["index_counts"]["crystallized_records"] == 0
+    assert MemoryOSIndex(store.roots).counts()["crystallized_candidates"] == 1

@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 
 from plugins.memory.memory_os.fixtures import (
@@ -173,3 +174,173 @@ def test_index_unavailable_keeps_store_readable_and_emits_audit(tmp_path, monkey
     assert [stored.id for stored in store.read_events()] == [event.id]
     audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
     assert any("index_rebuild_failed" in line and "database is locked" in line for line in audit_lines)
+
+
+def test_index_search_matches_chinese_event_summary_and_reports_tokenizer(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=42, profile="memoryos-test"),
+            "summary": "今天主人推荐了 Dolores 的歌。",
+        }
+    )
+    store.append_event(event)
+    index = MemoryOSIndex(store.roots)
+    index.sync_from_store(store)
+
+    result = index.search("推荐")
+
+    assert result["mode"] == "indexed"
+    assert result["tokenizer"] in {"trigram", "unicode61"}
+    assert any(hit["record_id"] == event.id for hit in result["hits"])
+
+
+def test_index_search_matches_approved_crystallized_markdown_body(tmp_path):
+    store = _store(tmp_path)
+    frontmatter = build_crystallized_frontmatter(seed=43, source_event_ids=["evt_43"])
+    store.append_crystallized_record("moments.md", frontmatter.__dict__, "这是一段沉淀记忆 ZETA_CRYSTAL。")
+    index = MemoryOSIndex(store.roots)
+    index.sync_from_store(store)
+
+    result = index.search("沉淀记忆")
+
+    assert any(
+        hit["record_type"] == "crystallized_record" and hit["record_id"] == frontmatter.id
+        for hit in result["hits"]
+    )
+
+
+def test_index_sync_records_passive_wal_checkpoint_metadata(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=44, profile="memoryos-test")))
+
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    with sqlite3.connect(store.roots.index_path) as conn:
+        row = conn.execute(
+            "select value from index_metadata where key = ?",
+            ("last_checkpoint_mode",),
+        ).fetchone()
+    assert row[0] == "PASSIVE"
+
+
+def test_index_checkpoint_escalates_to_full_after_repeated_busy_passive(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=50, profile="memoryos-test")))
+    modes = []
+
+    def fake_checkpoint(conn, mode):
+        modes.append(mode)
+        return mode == "PASSIVE"
+
+    monkeypatch.setattr("plugins.memory.memory_os.index._run_checkpoint", fake_checkpoint)
+
+    for _ in range(3):
+        MemoryOSIndex(store.roots).sync_from_store(store)
+
+    with sqlite3.connect(store.roots.index_path) as conn:
+        row = conn.execute(
+            "select value from index_metadata where key = ?",
+            ("last_checkpoint_mode",),
+        ).fetchone()
+    assert row[0] == "FULL"
+    assert modes.count("FULL") == 1
+
+
+def test_index_checkpoint_escalates_to_truncate_when_wal_is_large(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=51, profile="memoryos-test")))
+    modes = []
+
+    def fake_checkpoint(conn, mode):
+        modes.append(mode)
+        return False
+
+    monkeypatch.setattr("plugins.memory.memory_os.index._run_checkpoint", fake_checkpoint)
+    monkeypatch.setattr("plugins.memory.memory_os.index._wal_file_size_bytes", lambda path: 101 * 1024 * 1024)
+
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    with sqlite3.connect(store.roots.index_path) as conn:
+        row = conn.execute(
+            "select value from index_metadata where key = ?",
+            ("last_checkpoint_mode",),
+        ).fetchone()
+    assert row[0] == "TRUNCATE"
+    assert modes[-1] == "TRUNCATE"
+
+
+def test_index_schema_reserves_vector_and_graph_extension_tables(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=45, profile="memoryos-test")))
+
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    with sqlite3.connect(store.roots.index_path) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute("select name from sqlite_master where type = 'table'").fetchall()
+        }
+    assert "memory_embeddings" in tables
+    assert "memory_edges" in tables
+
+
+def test_index_sync_records_event_source_state(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=46, profile="memoryos-test"))
+    store.append_event(event)
+
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    with sqlite3.connect(store.roots.index_path) as conn:
+        row = conn.execute(
+            """
+            select source_kind, indexed_line_count, last_record_id
+            from index_source_state
+            where source_kind = ?
+            """,
+            ("events_jsonl",),
+        ).fetchone()
+    assert row == ("events_jsonl", 1, event.id)
+
+
+def test_index_rebuild_uses_staging_db_and_atomic_replace(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=47, profile="memoryos-test"))
+    store.append_event(event)
+    replace_calls = []
+    original_replace = os.replace
+
+    def record_replace(src, dst):
+        replace_calls.append((str(src), str(dst)))
+        original_replace(src, dst)
+
+    monkeypatch.setattr("plugins.memory.memory_os.index.os.replace", record_replace)
+
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+
+    assert replace_calls
+    assert replace_calls[-1][0].endswith(".rebuild.db")
+    assert replace_calls[-1][1] == str(store.roots.index_path)
+    assert MemoryOSIndex(store.roots).counts()["events"] == 1
+
+
+def test_failed_staging_rebuild_preserves_existing_live_index(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    first = EventEnvelope.from_dict(build_event(seed=48, profile="memoryos-test"))
+    second = EventEnvelope.from_dict(build_event(seed=49, profile="memoryos-test"))
+    store.append_event(first)
+    index = MemoryOSIndex(store.roots)
+    index.rebuild_from_store(store)
+    store.append_event(second)
+
+    def raise_during_staging(*args, **kwargs):
+        raise sqlite3.OperationalError("staging failed")
+
+    monkeypatch.setattr("plugins.memory.memory_os.index._index_working_items", raise_during_staging)
+
+    rebuilt = index.try_rebuild_from_store(store)
+
+    assert rebuilt is False
+    assert MemoryOSIndex(store.roots).counts()["events"] == 1
+    assert not store.roots.index_path.with_name(f"{store.roots.index_path.name}.rebuild.db").exists()

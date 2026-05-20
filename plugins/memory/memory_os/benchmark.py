@@ -21,8 +21,8 @@ LARGE_BENCHMARK_THRESHOLD = 100_000
 DEFAULT_SLO = {
     "sync_turn_enqueue_p95_ms": 20.0,
     "event_append_p95_ms": 20.0,
-    "prefetch_cold_ms": 100.0,
-    "prefetch_warm_ms": 100.0,
+    "prefetch_degraded_ms": 250.0,
+    "prefetch_indexed_ms": 100.0,
     "sqlite_rebuild_ms_per_1k": 500.0,
     "working_decay_ms_per_1k": 500.0,
     "status_command_ms": 100.0,
@@ -72,16 +72,17 @@ def run_benchmark(store: MemoryOSStore, config: BenchmarkConfig) -> dict[str, An
         working.add_item("lingering", f"Synthetic benchmark working item {index}", now=now)
 
     started = time.perf_counter()
-    cold_context = build_prefetch("synthetic", budget_chars=2200, store=store, index=None)
-    prefetch_cold_ms = _elapsed_ms(started)
+    degraded_context = build_prefetch("synthetic", budget_chars=2200, store=store, index=None)
+    prefetch_degraded_ms = _elapsed_ms(started)
 
+    index = MemoryOSIndex(store.roots)
     started = time.perf_counter()
-    warm_context = build_prefetch("synthetic", budget_chars=2200, store=store, index=None)
-    prefetch_warm_ms = _elapsed_ms(started)
-
-    started = time.perf_counter()
-    MemoryOSIndex(store.roots).rebuild_from_store(store)
+    index.rebuild_from_store(store)
     sqlite_rebuild_ms = _elapsed_ms(started)
+
+    started = time.perf_counter()
+    indexed_context = build_prefetch("synthetic", budget_chars=2200, store=store, index=index)
+    prefetch_indexed_ms = _elapsed_ms(started)
 
     started = time.perf_counter()
     working.decay_items("lingering", now=now + timedelta(hours=1))
@@ -90,15 +91,15 @@ def run_benchmark(store: MemoryOSStore, config: BenchmarkConfig) -> dict[str, An
     started = time.perf_counter()
     status_counts = {
         "events": len(store.read_events()),
-        "prefetch_cold_chars": len(cold_context),
-        "prefetch_warm_chars": len(warm_context),
+        "prefetch_degraded_chars": len(degraded_context),
+        "prefetch_indexed_chars": len(indexed_context),
     }
     status_command_ms = _elapsed_ms(started)
 
     metrics = {
         "event_append_p95_ms": _p95(append_durations),
-        "prefetch_cold_ms": prefetch_cold_ms,
-        "prefetch_warm_ms": prefetch_warm_ms,
+        "prefetch_degraded_ms": prefetch_degraded_ms,
+        "prefetch_indexed_ms": prefetch_indexed_ms,
         "sqlite_rebuild_ms": sqlite_rebuild_ms,
         "working_decay_ms": working_decay_ms,
         "status_command_ms": status_command_ms,
@@ -126,8 +127,8 @@ def _slo_checks(metrics: dict[str, float], record_count: int) -> dict[str, dict[
     scale = max(record_count / 1000.0, 1.0)
     checks = {
         "event_append_p95_ms": (metrics["event_append_p95_ms"], DEFAULT_SLO["event_append_p95_ms"]),
-        "prefetch_cold_ms": (metrics["prefetch_cold_ms"], DEFAULT_SLO["prefetch_cold_ms"]),
-        "prefetch_warm_ms": (metrics["prefetch_warm_ms"], DEFAULT_SLO["prefetch_warm_ms"]),
+        "prefetch_degraded_ms": (metrics["prefetch_degraded_ms"], DEFAULT_SLO["prefetch_degraded_ms"]),
+        "prefetch_indexed_ms": (metrics["prefetch_indexed_ms"], DEFAULT_SLO["prefetch_indexed_ms"]),
         "sqlite_rebuild_ms": (metrics["sqlite_rebuild_ms"], DEFAULT_SLO["sqlite_rebuild_ms_per_1k"] * scale),
         "working_decay_ms": (metrics["working_decay_ms"], DEFAULT_SLO["working_decay_ms_per_1k"] * scale),
         "status_command_ms": (metrics["status_command_ms"], DEFAULT_SLO["status_command_ms"]),

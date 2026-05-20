@@ -1042,19 +1042,19 @@ provider sync_turn
 
 **Steps:**
 
-- [ ] Add failing tests for incremental event indexing and idempotent replay.
-- [ ] Add `index_source_state`, row hashes, and transactional incremental
+- [x] Add failing tests for incremental event indexing and idempotent replay.
+- [x] Add `index_source_state`, row hashes, and transactional incremental
       indexing.
-- [ ] Add index health classification and doctor findings for missing, stale,
+- [x] Add index health classification and doctor findings for missing, stale,
       and mismatch.
-- [ ] Add crystallized Markdown body parser and candidate queue indexing.
-- [ ] Add FTS tables with tokenizer probe and active-tokenizer reporting.
-- [ ] Wire heartbeat to run incremental index after working/candidate updates.
-- [ ] Add full rebuild staging and atomic replace.
-- [ ] Add prefetch indexed path with degraded filesystem fallback.
-- [ ] Add WAL checkpoint escalation policy.
-- [ ] Add per-profile, migration, and benchmark coverage.
-- [ ] Run:
+- [x] Add crystallized Markdown body parser and candidate queue indexing.
+- [x] Add FTS tables with tokenizer probe and active-tokenizer reporting.
+- [x] Wire heartbeat to run incremental index after working/candidate updates.
+- [x] Add full rebuild staging and atomic replace.
+- [x] Add prefetch indexed path with degraded filesystem fallback.
+- [x] Add WAL checkpoint escalation policy.
+- [x] Add per-profile, migration, and benchmark coverage.
+- [x] Run:
 
 ```powershell
 python -m pytest tests/plugins/memory/test_memory_os_store.py tests/plugins/memory/test_memory_os_runtime.py tests/plugins/memory/test_memory_os_prefetch.py tests/plugins/memory/test_memory_os_audit_benchmark_cleanup.py -q

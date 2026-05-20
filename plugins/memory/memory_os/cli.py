@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import types
 from datetime import datetime
@@ -63,12 +64,17 @@ _PRIVATE_SAFE_REF_KEYS = {"raw_body", "body", "content", "transcript", "private_
 
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
     events = store.read_events()
+    store_counts = _store_counts(store)
+    index_counts = MemoryOSIndex(store.roots).counts()
+    prefetch_mode = _prefetch_mode(store)
     return {
         "schema_version": "memory-os.status.v0",
         "root": str(store.roots.memory_os_root),
         "profile": store.roots.profile,
-        "counts": _store_counts(store),
-        "index_counts": MemoryOSIndex(store.roots).counts(),
+        "counts": store_counts,
+        "index_counts": index_counts,
+        "index_health": _index_health_summary(store, store_counts, index_counts),
+        "prefetch_mode": prefetch_mode,
         "queue_backlog": 0,
         "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),
         "recent_event_summaries": [
@@ -98,19 +104,20 @@ def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
     index_counts = status["index_counts"]
     if not store.roots.index_path.exists():
         findings.append(_finding("index_missing", "warning", "SQLite index is missing; rebuild is available."))
-    elif _indexed_counts_subset(index_counts) != _indexed_counts_subset(store_counts):
-        findings.append(
-            _finding(
-                "index_count_mismatch",
-                "error",
-                "SQLite index counts do not match filesystem store counts.",
-                {"store_counts": store_counts, "index_counts": index_counts},
-            )
-        )
+    else:
+        findings.extend(_index_health_findings(store, store_counts, index_counts))
 
     findings.extend(_identity_source_findings(store))
     if store_counts["events"] == 0:
         findings.append(_finding("store_empty", "warning", "No event records found."))
+    if status["prefetch_mode"] == "degraded_filesystem":
+        findings.append(
+            _finding(
+                "prefetch_degraded",
+                "warning",
+                "Prefetch is using bounded filesystem fallback because the SQLite index is unavailable.",
+            )
+        )
     if not bool(load_config(store.roots.hermes_home).get("hindsight_adapter_enabled")):
         findings.append(_finding("hindsight_adapter_disabled", "warning", "Hindsight adapter is disabled."))
     return {
@@ -466,6 +473,141 @@ def _indexed_counts_subset(counts: dict[str, int]) -> dict[str, int]:
     return {key: counts.get(key, 0) for key in ("events", "working_items", "crystallized_records")}
 
 
+def _prefetch_mode(store: MemoryOSStore) -> str:
+    if not store.roots.index_path.exists():
+        return "degraded_filesystem"
+    try:
+        with sqlite3.connect(store.roots.index_path) as conn:
+            conn.execute("select count(*) from events").fetchone()
+    except sqlite3.Error:
+        return "degraded_filesystem"
+    return "indexed"
+
+
+def _index_health_summary(
+    store: MemoryOSStore,
+    store_counts: dict[str, int],
+    index_counts: dict[str, int],
+) -> dict[str, Any]:
+    if not store.roots.index_path.exists():
+        return {"state": "missing", "fts_tokenizer": ""}
+    findings = _index_health_findings(store, store_counts, index_counts)
+    if any(finding["severity"] == "error" for finding in findings):
+        state = "mismatch"
+    elif any(finding["id"] == "index_stale" for finding in findings):
+        state = "stale"
+    else:
+        state = "healthy"
+    return {"state": state, "fts_tokenizer": _index_fts_tokenizer(store)}
+
+
+def _index_fts_tokenizer(store: MemoryOSStore) -> str:
+    try:
+        with sqlite3.connect(store.roots.index_path) as conn:
+            row = conn.execute("select value from index_metadata where key = ?", ("fts_tokenizer",)).fetchone()
+    except sqlite3.Error:
+        return ""
+    return "" if row is None else str(row[0])
+
+
+def _index_health_findings(
+    store: MemoryOSStore,
+    store_counts: dict[str, int],
+    index_counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    events = sorted(store.read_events(), key=lambda item: (item.ts, item.id))
+    try:
+        with sqlite3.connect(store.roots.index_path) as conn:
+            conn.row_factory = sqlite3.Row
+            indexed_events = conn.execute(
+                """
+                select id, ts, profile, source, kind, summary, promotion_state, sensitivity, record_hash
+                from events
+                order by ts, id
+                """
+            ).fetchall()
+    except sqlite3.Error as exc:
+        return [_finding("index_unreadable", "error", "SQLite index cannot be read.", {"error": str(exc)})]
+
+    event_by_id = {event.id: event for event in events}
+    for row in indexed_events:
+        event = event_by_id.get(str(row["id"]))
+        if event is None:
+            findings.append(
+                _finding(
+                    "index_orphan_source",
+                    "error",
+                    "SQLite index references an event missing from the filesystem store.",
+                    {"event_id": str(row["id"])},
+                )
+            )
+            continue
+        for field_name in ("ts", "profile", "source", "kind", "summary", "promotion_state", "sensitivity"):
+            if str(row[field_name]) != str(getattr(event, field_name)):
+                findings.append(
+                    _finding(
+                        "index_content_mismatch",
+                        "error",
+                        "SQLite index event row conflicts with the filesystem store.",
+                        {"event_id": event.id, "field": field_name},
+                    )
+                )
+                break
+        indexed_hash = str(row["record_hash"])
+        if indexed_hash and indexed_hash != _event_record_hash(event):
+            findings.append(
+                _finding(
+                    "index_content_mismatch",
+                    "error",
+                    "SQLite index event hash conflicts with the filesystem store.",
+                    {"event_id": event.id, "field": "record_hash"},
+                )
+            )
+
+    if index_counts.get("events", 0) > store_counts.get("events", 0):
+        findings.append(
+            _finding(
+                "index_count_mismatch",
+                "error",
+                "SQLite index has more events than the filesystem store.",
+                {"store_counts": store_counts, "index_counts": index_counts},
+            )
+        )
+    elif index_counts.get("events", 0) < store_counts.get("events", 0) and not _has_index_error(findings):
+        findings.append(
+            _finding(
+                "index_stale",
+                "warning",
+                "SQLite index is behind append-only filesystem events and should catch up on heartbeat.",
+                {"store_counts": store_counts, "index_counts": index_counts},
+            )
+        )
+
+    for key in ("working_items", "crystallized_records"):
+        if index_counts.get(key, 0) != store_counts.get(key, 0):
+            findings.append(
+                _finding(
+                    "index_count_mismatch",
+                    "error",
+                    "SQLite index counts do not match filesystem store counts.",
+                    {"store_counts": store_counts, "index_counts": index_counts, "count_key": key},
+                )
+            )
+    return findings
+
+
+def _has_index_error(findings: list[dict[str, Any]]) -> bool:
+    return any(finding["severity"] == "error" and str(finding["id"]).startswith("index_") for finding in findings)
+
+
+def _event_record_hash(event: Any) -> str:
+    import hashlib
+
+    payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _identity_source_findings(store: MemoryOSStore) -> list[dict[str, Any]]:
     path = store.roots.identity_manifest_path
     if not path.exists():
@@ -501,7 +643,7 @@ def _skipped_private_body_count(store: MemoryOSStore) -> int:
 
 
 def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {"id": id_, "severity": severity, "message": message, "details": details or {}}
+    return {"id": id_, "code": id_, "severity": severity, "message": message, "details": details or {}}
 
 
 def _count_by(items: list[Any], attr: str) -> dict[str, int]:

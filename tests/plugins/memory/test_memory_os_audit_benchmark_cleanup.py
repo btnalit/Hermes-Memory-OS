@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.cli import (
@@ -88,12 +89,12 @@ def test_inspect_and_trace_require_include_private_for_body_output(tmp_path):
     assert private_trace["item"]["text"] == "PRIVATE WORKING BODY"
 
 
-def test_meta_audit_detects_index_count_mismatch_and_missing_identity_source(tmp_path):
+def test_meta_audit_reports_index_stale_and_missing_identity_source(tmp_path):
     store = _store(tmp_path)
     first = EventEnvelope.from_dict(build_event(seed=33, profile="memoryos-test"))
     second = EventEnvelope.from_dict(build_event(seed=34, profile="memoryos-test"))
     store.append_event(first)
-    MemoryOSIndex(store.roots).rebuild_from_store(store)
+    MemoryOSIndex(store.roots).sync_from_store(store)
     store.append_event(second)
     store.roots.identity_manifest_path.parent.mkdir(parents=True, exist_ok=True)
     store.roots.identity_manifest_path.write_text(
@@ -112,7 +113,7 @@ def test_meta_audit_detects_index_count_mismatch_and_missing_identity_source(tmp
     audit = meta_audit(store)
 
     finding_ids = {finding["id"] for finding in audit["findings"]}
-    assert "index_count_mismatch" in finding_ids
+    assert "index_stale" in finding_ids
     assert "identity_source_missing" in finding_ids
     assert build_doctor_result(store)["exit_code"] == 1
 
@@ -124,6 +125,63 @@ def test_doctor_exit_zero_for_warnings_only(tmp_path):
 
     assert result["exit_code"] == 0
     assert any(finding["severity"] == "warning" for finding in result["findings"])
+
+
+def test_doctor_reports_appended_events_as_index_stale_not_mismatch(tmp_path):
+    store = _store(tmp_path)
+    first = EventEnvelope.from_dict(build_event(seed=1, profile="memoryos-test"))
+    second = EventEnvelope.from_dict(build_event(seed=2, profile="memoryos-test"))
+    store.append_event(first)
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    store.append_event(second)
+
+    result = build_doctor_result(store)
+
+    assert result["exit_code"] == 0
+    assert any(finding["code"] == "index_stale" for finding in result["findings"])
+    assert not any(finding["code"] == "index_count_mismatch" for finding in result["findings"])
+
+
+def test_doctor_reports_sqlite_row_corruption_as_content_mismatch(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=3, profile="memoryos-test"))
+    store.append_event(event)
+    MemoryOSIndex(store.roots).sync_from_store(store)
+    with sqlite3.connect(store.roots.index_path) as conn:
+        conn.execute("update events set summary = ? where id = ?", ("corrupted summary", event.id))
+
+    result = build_doctor_result(store)
+
+    assert result["exit_code"] == 1
+    assert any(finding["code"] == "index_content_mismatch" for finding in result["findings"])
+
+
+def test_status_and_doctor_report_degraded_prefetch_when_index_missing(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=4, profile="memoryos-test")))
+
+    missing_status = build_status_report(store)
+    missing_doctor = build_doctor_result(store)
+
+    assert missing_status["prefetch_mode"] == "degraded_filesystem"
+    assert any(finding["code"] == "prefetch_degraded" for finding in missing_doctor["findings"])
+
+    MemoryOSIndex(store.roots).sync_from_store(store)
+    indexed_status = build_status_report(store)
+
+    assert indexed_status["prefetch_mode"] == "indexed"
+
+
+def test_status_reports_index_health_and_fts_tokenizer(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=5, profile="memoryos-test")))
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    status = build_status_report(store)
+
+    assert status["index_health"]["state"] == "healthy"
+    assert status["index_health"]["fts_tokenizer"] in {"trigram", "unicode61"}
 
 
 def test_diff_and_approval_report_use_metadata_not_private_bodies(tmp_path):
@@ -173,12 +231,14 @@ def test_tiny_benchmark_uses_synthetic_corpus_and_reports_slo(tmp_path):
     assert report["large_opt_in_required"] is False
     assert set(report["metrics"]) == {
         "event_append_p95_ms",
-        "prefetch_cold_ms",
-        "prefetch_warm_ms",
+        "prefetch_degraded_ms",
+        "prefetch_indexed_ms",
         "sqlite_rebuild_ms",
         "working_decay_ms",
         "status_command_ms",
     }
+    assert report["status_counts"]["prefetch_degraded_chars"] >= 0
+    assert report["status_counts"]["prefetch_indexed_chars"] >= 0
     assert report["slo"]["sync_turn_enqueue_p95_ms"] == 20.0
     assert report["pass"] is True
 
