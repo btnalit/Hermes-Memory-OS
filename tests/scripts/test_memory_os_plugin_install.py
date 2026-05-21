@@ -101,6 +101,7 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert report["agent_runtime_file_count"] > 0
     assert runtime_root.joinpath("system", "lifecycle.py").is_file()
     assert runtime_root.joinpath("modules", "context", "digest_consolidation.py").is_file()
+    assert runtime_root.joinpath("modules", "cognition", "deep_reflection.py").is_file()
     assert runtime_root.joinpath("modules", "cognition", "inner_drive.py").is_file()
     assert runtime_root.joinpath("modules", "expression", "speak_gate.py").is_file()
     assert runtime_root.joinpath("modules", "governance", "feedback_bridge.py").is_file()

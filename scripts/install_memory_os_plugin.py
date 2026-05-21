@@ -132,6 +132,7 @@ def _validate_system_module_source(source: Path) -> None:
         "system/lifecycle.py",
         "system/scheduler.py",
         "modules/context/digest_consolidation.py",
+        "modules/cognition/deep_reflection.py",
         "modules/cognition/inner_drive.py",
         "modules/expression/speak_gate.py",
         "modules/governance/feedback_bridge.py",

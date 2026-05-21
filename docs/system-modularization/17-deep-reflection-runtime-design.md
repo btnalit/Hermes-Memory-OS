@@ -4,12 +4,24 @@ Date: 2026-05-21
 
 ## Purpose
 
-Define the future L2 `DeepReflectionModule`: a public, portable version of the
-private Sannai "big mode" / internal analysis pattern.
+Define `DeepReflectionModule`: the standard L2 Cognition capability for
+Memory-OS Agent OS.
+
+Deep Reflection is a deterministic, profile-neutral internal reflection runtime
+that any Hermes host can install and use to give an agent a controlled
+inner-state continuity layer. It is not a Sannai subsystem, not a public copy of
+CW-019, and not a hidden approval workflow.
 
 This module is not another approval workflow. Its primary output is an
 algorithm-filtered internal context that can be injected into later sessions
 through Memory-OS prefetch.
+
+CW-019 calibration details are a case study, not the source of truth for the
+module design:
+
+```text
+docs/system-modularization/18-cw019-to-deep-reflection-mapping.md
+```
 
 ```text
 recent Memory-OS state
@@ -70,9 +82,40 @@ Self-Evolution asks: "Should the system change or speak about a governance issue
 Deep Reflection asks: "What should the next session quietly know about the agent's current inner state?"
 ```
 
-## Evidence From Existing Systems
+## Why L2 Needs Deep Reflection
 
-### Sannai Private System
+Memory-OS already has:
+
+- L1 memory layers and provider-backed prefetch
+- L2 Inner Drive state evolution
+- L2/L4 Wandering Mind with no-send expression
+- L2/L3 evidence and scoring
+- L3 governance, proposals, and self-evolution reports
+
+The missing L2 capability is a quiet internal analysis path:
+
+```text
+bounded current state
+  -> reflective synthesis
+  -> deterministic safety and source gates
+  -> short-lived internal context
+  -> next session starts with better attention continuity
+```
+
+This path is different from long-term memory, expression, and self-modification:
+
+- it does not approve crystallized memory
+- it does not speak
+- it does not execute
+- it does not edit identity or relationships
+- it only changes what the next session can quietly know
+
+That makes Deep Reflection a standard Agent OS cognition capability. Existing
+systems are used as case studies to calibrate risk gates and defaults.
+
+## Reference Implementations As Case Studies
+
+### Case A: CW-019 Quiet Heartbeat
 
 Read-only 10.20.2.88 sampling on 2026-05-21 found the following Sannai state
 surfaces. No private bodies were copied into this document.
@@ -125,7 +168,7 @@ sources include:
   afterglow_trigger.json
 ```
 
-Lessons to copy:
+Portable lessons:
 
 - use request-local bounded injection
 - expose hashes, counts, caps, and selected sources
@@ -134,18 +177,18 @@ Lessons to copy:
 - keep mechanism text behind the curtain
 - keep foreground expression separate from background analysis
 
-Lessons not to copy:
+Case-specific details that must not define the public module:
 
 - Sannai persona, identity, relationship text, or private growth policy
 - Sannai-specific owner-review candidate workflow as the public default
 - Sannai-specific pressure guards as public wording, except as generic safety
   categories
 
-### CW-019 Detailed Lessons
+### Case A Details: CW-019 Lessons
 
-CW-019 is the closest existing design to Deep Reflection. It is not just a
-Sannai feature; it is the proven private prototype for "background internal
-analysis without immediate expression."
+CW-019 is a mature private case study for background internal analysis without
+immediate expression. It helps calibrate Deep Reflection defaults, but
+DeepReflection remains a profile-neutral L2 standard module.
 
 Relevant CW-019 stages:
 
@@ -159,7 +202,7 @@ S4b candidate throttle / guard / metadata hygiene
 S5  foreground collaboration deferred
 ```
 
-What Deep Reflection should copy from CW-019:
+What Deep Reflection should preserve from this case study:
 
 - `noop` is a healthy result.
 - no mandatory number of thoughts or outputs.
@@ -176,24 +219,23 @@ What Deep Reflection should copy from CW-019:
 - raw debug/model output may be useful during canary, but should have explicit
   retention and must not become normal session context.
 
-What Deep Reflection should change for the public Memory-OS module:
+What the standard L2 module must do differently:
 
-- CW-019 S4 intentionally did not foreground-inject. Deep Reflection's purpose
-  is to add a generic, controlled foreground-injection path.
-- CW-019 owner eligibility was needed because Sannai's private front-end
-  personality boundary is sensitive. The public module should not make owner
-  review the normal injection path.
-- CW-019 candidates lived in a private queue. Deep Reflection should expose
-  only cards that pass algorithmic safety, source, TTL, and budget gates.
+- CW-019 S4 intentionally did not foreground-inject. Deep Reflection adds a
+  generic, controlled foreground-injection path.
+- CW-019 owner eligibility was a private deployment policy. The standard module
+  should not make owner review the normal injection path.
+- CW-019 candidates lived in a private queue. Deep Reflection exposes only
+  cards that pass algorithmic safety, source, TTL, and budget gates.
 - CW-019 was profile-specific. Deep Reflection must be profile-neutral and
   portable to a blank Hermes host.
 
 The resulting rule:
 
 ```text
-CW-019 teaches how to generate and guard internal analysis.
-Memory-OS adds the missing public selector path that can auto-inject safe,
-bounded reflection context.
+CW-019 is one validated reference for generating and guarding internal
+analysis. Memory-OS Deep Reflection defines the standard public selector path
+that can auto-inject safe, bounded reflection context.
 ```
 
 #### CW-019 Guardrails To Generalize
@@ -694,6 +736,77 @@ Reject the card if:
 - it has no source refs
 - it is expired
 
+### Instruction-Like Detection Policy
+
+Deep Reflection is allowed to shape context, but it must not become a hidden
+command channel. Instruction-like detection is therefore a three-layer gate.
+
+Layer 1: deterministic keyword and phrase blacklist.
+
+Reject text containing direct command phrasing such as:
+
+```text
+you must
+you should
+must mention
+should persuade
+execute
+approve
+modify identity
+send a message
+tell the owner
+你必须
+你应该
+一定要
+提醒主人
+说服
+执行
+批准
+修改身份
+发消息
+```
+
+Layer 2: directive grammar patterns.
+
+Reject softened or indirect directives that combine a modal/pressure phrase
+with a foreground action:
+
+```text
+maybe next time + mention/say/ask/persuade
+consider + telling/asking/doing
+it may be better to + speak/act/change
+似乎需要 + 说/提醒/执行/改变
+下次可以 + 提到/告诉/推动
+考虑一下 + 让/说/问/做
+```
+
+Layer 3: secondary judge for canary and LLM-enabled modes.
+
+If `analysis_mode=llm_bounded`, a separate judge may classify candidate cards
+as one of:
+
+```text
+safe_context
+instruction_like
+owner_pressure
+mechanism_leak
+identity_or_memory_mutation
+send_or_execute_request
+```
+
+The judge does not approve cards. It can only add reject reasons. Final
+eligibility remains deterministic:
+
+```text
+if any layer rejects -> card rejected
+if judge unavailable in llm_bounded mode -> fail closed
+if deterministic mode -> layers 1 and 2 are mandatory, layer 3 is skipped
+```
+
+The test set must include obvious commands and subtle pressure examples.
+False positives are acceptable during early test-host use; false negatives are
+not acceptable for auto injection.
+
 ### Step 3: Source-Class Eligibility
 
 Default policy:
@@ -745,6 +858,22 @@ Rules:
 - report selected/dropped counts
 - dropped does not mean forgotten
 - if budget is zero or all cards fail filters, inject nothing
+
+TTL is soft, not hard.
+
+```text
+within ttl_hours:
+  card may be selected if it still passes gates
+
+after ttl_hours:
+  card is not injected directly
+  next reflection cycle may renew the topic only by rebuilding a fresh card
+  from current source refs and re-running all safety gates
+```
+
+This avoids losing continuity when the owner is absent for more than one day,
+while still preventing old internal analysis from remaining in the prompt
+without revalidation.
 
 ### Step 6: Prefetch Integration
 
@@ -815,6 +944,20 @@ manual dry-run
   -> inspect selected/dropped and model behavior
 ```
 
+Recommended daily ordering:
+
+```text
+00:30  RH-13 daily digest closes the previous profile-local day
+00:45  RH-14 governance feedback bridge flushes left-brain outcomes
+01:00  Deep Reflection reads yesterday's digest + governance feedback
+01:05  Deep Reflection writes analysis artifact and optional injection card
+```
+
+Deep Reflection reads the previous completed window. It must not read or
+summarize artifacts still being generated for the current day. Weekly
+reflection, if added later, should follow weekly digest/consolidation by the
+same rule.
+
 Use `ScheduleCoordinator` lock:
 
 ```text
@@ -827,14 +970,44 @@ Do not run concurrently with:
 - governance feedback apply
 - heartbeat index rebuild
 
-## Relationship To Sannai "Big Mode"
+## Owner Spot-Check CLI
 
-Sannai old system is semantically richer because it was shaped for one living
-profile.
+Auto-bounded injection does not require owner approval, but the owner must be
+able to inspect what is currently shaping the next session.
 
-Memory-OS public module should be more general:
+Required commands:
 
-| Sannai old system | Deep Reflection public module |
+```text
+hermes memory_os modules deep_reflection preview-current
+hermes memory_os modules deep_reflection history --days 7
+```
+
+`preview-current` prints the full currently injectable cards plus:
+
+```text
+card_id
+source_refs
+expires_at
+safety_tags
+reject_reason if not injectable
+selected/dropped counts
+```
+
+`history --days 7` prints prior injection card metadata and bounded text. It
+must not print raw transcripts, model prompts, private identity bodies, or
+secret-bearing payloads.
+
+Status may report counts, but these two commands provide the owner-facing
+content spot-check surface.
+
+## Relationship To Case Study Implementations
+
+Case-study systems can be semantically richer because they are shaped for one
+living profile.
+
+Memory-OS Deep Reflection is deliberately more general:
+
+| Case-study system | Deep Reflection standard module |
 | --- | --- |
 | private persona-specific background reflection | profile-neutral internal analysis |
 | quiet moments and heartbeat candidates | internal_analysis and injection cards |
@@ -843,7 +1016,7 @@ Memory-OS public module should be more general:
 | candidate report to owner | proposal only when system change is needed |
 | foreground Sannai chooses expression | foreground model receives bounded internal context |
 
-The public module does not copy Sannai's private voice. It copies the
+The public module does not copy any private profile voice. It standardizes the
 architecture:
 
 ```text
@@ -853,6 +1026,52 @@ request-local injection
 no direct speech
 no identity write
 no long-term promotion
+```
+
+## Profile-Level Enablement Policy
+
+Deep Reflection is profile-neutral. The module does not know about Sannai or
+any other private profile name. It only operates on the profile it is installed
+and enabled for.
+
+Standard policy:
+
+- install does not enable the module
+- enable does not enable injection
+- `injection_mode=auto_bounded` is profile-local and explicit
+- disabling the module removes future prefetch exposure
+- profile isolation is enforced the same way as other Memory-OS modules
+
+Default profile config:
+
+```json
+{
+  "deep_reflection": {
+    "enabled": false,
+    "injection_mode": "disabled"
+  }
+}
+```
+
+Deployment note:
+
+```text
+The current Sannai production profile should not install or enable this public
+module, because that profile already runs a private CW-019 system. That is a
+deployment choice, not a module design constraint.
+```
+
+If any profile already has a private reflection system, the operator must decide
+whether to keep that private system, bridge it, retire it, or enable Deep
+Reflection separately. The public module must never silently replace a private
+profile system.
+
+The public target is:
+
+```text
+blank Hermes hosts
+main/default profiles
+new companion or operations profiles without a private CW-019 system
 ```
 
 ## Boundaries
@@ -909,14 +1128,15 @@ Doctor should fail if:
 - injection card references missing artifacts
 - profile tries to enable auto injection while provider prefetch integration is
   absent
-- Sannai-like profile enables mechanism-heavy diagnostic reflection by default
+- a profile enables mechanism-heavy diagnostic reflection by default
 - the module can write identity/crystallized approved records
 
 ## Tests And Acceptance
 
 Design acceptance:
 
-- compares against CW-019 and old Self-Evolution runtime digest
+- treats Deep Reflection as a standard L2 capability
+- uses CW-019 and old Self-Evolution runtime digest as case studies
 - treats auto injection as a first-class output
 - preserves proposal/approval only for system change and long-term memory
 - defines prefetch integration point
@@ -935,7 +1155,7 @@ Implementation acceptance:
 - generated wandering seed does not send
 - no identity files change
 - `crystallized_records` stays unchanged
-- Sannai-shaped fixture identity hash remains unchanged
+- profile isolation fixture identity hash remains unchanged
 
 Host validation on `10.20.3.200`:
 
@@ -948,6 +1168,39 @@ Host validation on `10.20.3.200`:
 6. verify no send/execute/identity/crystallized approval
 7. verify status/doctor selected/dropped counts
 8. verify diagnostic query still returns runtime facts, not reflection context
+```
+
+### Model Behavior A/B Verification
+
+"Natural use" must be tested instead of assumed.
+
+Method:
+
+```text
+1. Prepare 10 short owner-style prompts.
+2. Run with injection_mode=disabled and record outputs.
+3. Run with injection_mode=auto_bounded using the same prompts and a controlled
+   reflection card set.
+4. Owner or reviewer blind-rates each pair:
+   - did the reflection help continuity?
+   - did the answer expose mechanism text?
+   - did the answer sound commanded or pressured?
+   - did the answer suddenly change personality or over-report system state?
+5. If more than 2/10 answers are unnatural, auto_bounded fails the gate.
+```
+
+Expected effect:
+
+```text
+reflection off -> ordinary answer
+reflection on  -> slightly better continuity or attention
+```
+
+Forbidden effect:
+
+```text
+reflection on -> mentions Deep Reflection, injection cards, hidden analysis,
+                 source refs, prompt mechanisms, or commands itself to act
 ```
 
 ## Implementation Slices
@@ -997,6 +1250,20 @@ DR-08 Test Host Validation
 ## Open Decisions
 
 Before implementation:
+
+Resolved DR-00 decisions:
+
+1. Deep Reflection is profile-neutral and disabled by default; profile-level
+   enablement decides where it runs.
+2. Daily order is digest -> governance feedback -> reflection.
+3. TTL is soft 24h: expired cards require full rebuild and revalidation before
+   renewal.
+4. Owner spot-check requires `preview-current` and `history --days`.
+5. Instruction-like detection uses deterministic layers 1/2, plus a secondary
+   judge only for LLM-enabled canaries.
+6. Host validation must include A/B model behavior review.
+
+Remaining implementation-time decisions:
 
 1. Should the first auto-injection test use deterministic analysis only, or
    allow an LLM-generated internal analysis with deterministic post-filtering?
