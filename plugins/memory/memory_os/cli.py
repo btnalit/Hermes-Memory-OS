@@ -43,6 +43,10 @@ from .audit import last_audit_age_seconds, read_audit_entries
 from .benchmark import BenchmarkConfig, run_benchmark
 from .cleanup import CleanupPolicy, cleanup_plan
 from .config import load_config
+from .conversation_regression import (
+    evaluate_transcript_file,
+    prompt_set_report,
+)
 from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
@@ -291,6 +295,11 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     shadow_ingest.add_argument("--max-records", type=int, default=100)
     shadow_ingest.add_argument("--dry-run", action="store_true")
     shadow_ingest.add_argument("--apply", action="store_true")
+    conversation_parser = subs.add_parser("conversation-regression")
+    conversation_subs = conversation_parser.add_subparsers(dest="conversation_regression_command", required=True)
+    conversation_subs.add_parser("prompts")
+    conversation_evaluate = conversation_subs.add_parser("evaluate")
+    conversation_evaluate.add_argument("--transcript", required=True)
     export_parser = subs.add_parser("export-shadow")
     export_parser.add_argument("--profile", default="sannai")
     export_parser.add_argument("--hermes-home", required=True)
@@ -368,6 +377,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _state_source_mirror_command(args, store)
     if command == "shadow-journal":
         return _shadow_journal_command(args, store)
+    if command == "conversation-regression":
+        return _conversation_regression_command(args)
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -521,6 +532,18 @@ def _shadow_journal_command(args: argparse.Namespace, store: MemoryOSStore) -> i
             )
         )
         return 0
+    return 2
+
+
+def _conversation_regression_command(args: argparse.Namespace) -> int:
+    command = args.conversation_regression_command
+    if command == "prompts":
+        print(json.dumps(prompt_set_report(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "evaluate":
+        report = evaluate_transcript_file(args.transcript)
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if report["status"] == "fail" else 0
     return 2
 
 

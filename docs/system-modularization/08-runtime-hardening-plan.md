@@ -652,6 +652,34 @@ Acceptance:
 - failures become RH-21-style projection/tool-description fixtures before the
   slice is considered closed
 
+v0.1 implementation:
+
+- CLI:
+  - `hermes memory_os conversation-regression prompts`
+  - `hermes memory_os conversation-regression evaluate --transcript <path>`
+- transcript shape:
+  - JSON object with `turns`
+  - each turn should include `prompt_id`, `user`, `assistant`, and optional
+    `tools` / `tool_calls`
+  - public reports should keep prompt ids, failure codes, counts, and short
+    evidence only; raw private message bodies stay local
+- deterministic checks:
+  - ordinary prompts must not call `memory_os_status`
+  - ordinary prompts must not expose mechanism/status labels such as
+    `Internal Reflection Context`, `Status Snapshot`, `audit_entries`,
+    `index_health`, `crystallized_candidates`, Hindsight URLs, or similar
+    implementation labels
+  - casual/style-correction prompts fail if the assistant shifts back into
+    list-heavy report tone
+  - candidate/crystallized prompts fail if review candidates are described as
+    already approved crystallized memory
+- host-level use:
+  - run the real conversation smoke test manually through Telegram or CLI
+  - save a local transcript JSON from the observed turns
+  - evaluate it with the CLI
+  - run heartbeat/index catch-up and `hermes memory_os doctor`
+  - append only concise pass/fail evidence to the validation report
+
 ### RH-23 Deep Reflection Source-Class Monitoring
 
 Track which source classes actually feed Deep Reflection injection cards over
@@ -676,6 +704,24 @@ Acceptance:
   TTL, and budget filters
 - monitoring is observational and must not create candidates, sends, or
   crystallized records by itself
+
+v0.1 implementation:
+
+- `deep_reflection.run_once()` includes:
+  - `selected_injection_by_source_class`
+  - `dropped_injection_by_source_class`
+- `deep_reflection.status()` includes:
+  - `latest_injection_source_classes`
+  - `rolling_injection_source_classes`
+- `deep_reflection.preview_injection()` includes:
+  - `source_class_distribution`
+- source classes are counted from already-built injection card `source_classes`
+  only; RH-23 does not change card eligibility, TTL, safety filtering, caps, or
+  ranking
+- dropped-card source classes are counted as well, because over-filtering a
+  source class is as important as over-selecting one
+- v0.1 reporting is informational only; skew does not create a warning unless a
+  future operator policy explicitly adds one
 
 ### RH-24 Memory-OS Status Tool Contract Maintenance
 

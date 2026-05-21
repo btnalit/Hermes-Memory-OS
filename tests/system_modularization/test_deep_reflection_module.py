@@ -215,6 +215,7 @@ def test_deep_reflection_builds_injection_cards_with_ttl_budget_and_report(tmp_p
     event = EventEnvelope.from_dict(
         {
             **build_event(seed=40, profile="main"),
+            "kind": "conversation_turn",
             "summary": "Owner is checking continuity after a Telegram reset.",
         }
     )
@@ -236,6 +237,8 @@ def test_deep_reflection_builds_injection_cards_with_ttl_budget_and_report(tmp_p
     current = json.loads(module.current_injection_path.read_text(encoding="utf-8"))
     assert result["selected_injection_count"] == 1
     assert result["dropped_injection_count"] == 1
+    assert result["selected_injection_by_source_class"]["foreground"] >= 1
+    assert result["dropped_injection_by_source_class"]
     assert current["schema_version"] == "hermes.deep_reflection.injection.v0"
     assert current["selected_count"] == 1
     assert current["dropped_count"] == 1
@@ -249,6 +252,57 @@ def test_deep_reflection_builds_injection_cards_with_ttl_budget_and_report(tmp_p
     assert card["instruction_like_hit"] is False
     assert card["mechanism_terms_hit"] is False
     assert module.preview_injection()["selected_injection_count"] == 1
+
+
+def test_deep_reflection_injection_reports_source_class_distribution(tmp_path):
+    module = DeepReflectionModule(tmp_path, profile="main")
+    analysis = {
+        "themes": [
+            {
+                "label": "foreground",
+                "text": "Recent conversation carries a useful continuity thread.",
+                "source_refs": ["event:foreground"],
+            },
+            {
+                "label": "digest",
+                "text": "A daily digest points to a useful carryover.",
+                "source_refs": ["digest:daily:2026-05-21"],
+            },
+            {
+                "label": "cron",
+                "text": "Cron metadata should stay out of injection.",
+                "source_refs": ["event:cron"],
+            },
+        ],
+        "suggested_attention": [],
+    }
+    input_snapshot = {
+        "schema_version": "hermes.deep_reflection.input_snapshot.v0",
+        "profile": "main",
+        "recent_events": [
+            {"ref": "event:foreground", "source_class": "foreground", "summary": "foreground"},
+            {"ref": "event:cron", "source_class": "cron", "summary": "cron"},
+        ],
+        "working_items": [],
+        "digest_artifacts": [{"ref": "digest:daily:2026-05-21"}],
+        "evidence_scores": [],
+        "proposal_backlog": [],
+        "governance_feedback": [],
+        "input_refs": ["event:foreground", "digest:daily:2026-05-21", "event:cron"],
+    }
+
+    report = module.build_injection_cards(analysis=analysis, input_snapshot=input_snapshot, apply=True)
+    status = module.status()
+    preview = module.preview_injection()
+
+    assert report["selected_by_source_class"] == {"digest": 1, "foreground": 1}
+    assert report["dropped_by_source_class"] == {"cron": 1}
+    assert status["latest_injection_source_classes"]["selected_by_source_class"] == {"digest": 1, "foreground": 1}
+    assert status["latest_injection_source_classes"]["dropped_by_source_class"] == {"cron": 1}
+    assert status["rolling_injection_source_classes"]["selected_by_source_class"] == {"digest": 1, "foreground": 1}
+    assert status["rolling_injection_source_classes"]["dropped_by_source_class"] == {"cron": 1}
+    assert preview["source_class_distribution"]["selected_by_source_class"] == {"digest": 1, "foreground": 1}
+    assert preview["source_class_distribution"]["dropped_by_source_class"] == {"cron": 1}
 
 
 def test_deep_reflection_injection_builder_rejects_unsafe_or_ineligible_cards(tmp_path):

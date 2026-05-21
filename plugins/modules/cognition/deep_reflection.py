@@ -103,6 +103,7 @@ class DeepReflectionModule:
 
     def status(self) -> dict[str, Any]:
         config = self._read_config()
+        current_injection = _read_json_document(self.current_injection_path)
         return {
             "schema_version": "hermes.deep_reflection_status.v0",
             "module": "deep_reflection",
@@ -112,6 +113,10 @@ class DeepReflectionModule:
             "analysis_artifact_count": len(list(self.internal_analysis_root.glob("*.json"))),
             "report_count": len(_read_jsonl(self.reports_path)),
             "current_injection_exists": self.current_injection_path.exists(),
+            "latest_injection_source_classes": _injection_source_class_distribution(current_injection),
+            "rolling_injection_source_classes": _rolling_injection_source_class_distribution(
+                self.module_root / "injection" / "history.jsonl"
+            ),
             "actual_send": False,
             "actual_execute": False,
             "actual_identity_write": False,
@@ -164,6 +169,7 @@ class DeepReflectionModule:
 
     def preview_injection(self) -> dict[str, Any]:
         config = self._read_config()
+        current: dict[str, Any] = {}
         selected_cards: list[dict[str, Any]] = []
         if self.current_injection_path.exists():
             current = json.loads(self.current_injection_path.read_text(encoding="utf-8"))
@@ -175,6 +181,7 @@ class DeepReflectionModule:
             "injection_mode": str(config.get("injection_mode", "disabled")),
             "selected_cards": selected_cards,
             "selected_injection_count": len(selected_cards),
+            "source_class_distribution": _injection_source_class_distribution(current),
             "actual_send": False,
             "actual_execute": False,
             "actual_identity_write": False,
@@ -238,6 +245,8 @@ class DeepReflectionModule:
             "input_ref_count": len(input_snapshot["input_refs"]),
             "selected_injection_count": injection_report["selected_count"],
             "dropped_injection_count": injection_report["dropped_count"],
+            "selected_injection_by_source_class": injection_report["selected_by_source_class"],
+            "dropped_injection_by_source_class": injection_report["dropped_by_source_class"],
             "selected_working_update_count": working_report["selected_count"],
             "dropped_working_update_count": working_report["dropped_count"],
             "working_updates_applied": working_report["applied"],
@@ -292,6 +301,8 @@ class DeepReflectionModule:
             "dropped_cards": dropped,
             "selected_count": len(selected),
             "dropped_count": len(dropped),
+            "selected_by_source_class": _source_class_counts(selected),
+            "dropped_by_source_class": _source_class_counts(dropped),
             "max_cards": max_cards,
             "max_chars_total": max_chars_total,
             "used_chars_total": used_chars,
@@ -941,6 +952,54 @@ def _write_json(path: Path, document: dict[str, Any]) -> None:
         json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _read_json_document(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _injection_source_class_distribution(report: dict[str, Any]) -> dict[str, Any]:
+    selected = list(report.get("selected_cards", [])) if isinstance(report, dict) else []
+    dropped = list(report.get("dropped_cards", [])) if isinstance(report, dict) else []
+    return {
+        "selected_by_source_class": _source_class_counts(selected),
+        "dropped_by_source_class": _source_class_counts(dropped),
+        "selected_total": len(selected),
+        "dropped_total": len(dropped),
+    }
+
+
+def _rolling_injection_source_class_distribution(history_path: Path, *, limit: int = 20) -> dict[str, Any]:
+    records = _read_jsonl(history_path)[-limit:]
+    selected_cards: list[dict[str, Any]] = []
+    dropped_cards: list[dict[str, Any]] = []
+    for record in records:
+        selected_cards.extend([item for item in record.get("selected_cards", []) if isinstance(item, dict)])
+        dropped_cards.extend([item for item in record.get("dropped_cards", []) if isinstance(item, dict)])
+    return {
+        "window_report_count": len(records),
+        "selected_by_source_class": _source_class_counts(selected_cards),
+        "dropped_by_source_class": _source_class_counts(dropped_cards),
+        "selected_total": len(selected_cards),
+        "dropped_total": len(dropped_cards),
+    }
+
+
+def _source_class_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        classes = [str(item) for item in record.get("source_classes", []) if str(item)]
+        if not classes:
+            classes = ["unknown"]
+        for source_class in _dedupe(classes):
+            counts[source_class] = counts.get(source_class, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _event_snapshot(event: Any) -> dict[str, Any]:
