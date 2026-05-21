@@ -1,10 +1,11 @@
 import importlib.util
 import json
 import argparse
+import subprocess
 import sys
 from pathlib import Path
 
-from scripts.install_memory_os_plugin import SOURCE_PLUGIN_DIR, install_plugin
+from scripts.install_memory_os_plugin import SOURCE_AGENT_OS_SHELL_DIR, SOURCE_PLUGIN_DIR, install_plugin
 
 
 def test_installer_copies_memory_provider_shape_without_cache_files(tmp_path):
@@ -21,6 +22,24 @@ def test_installer_copies_memory_provider_shape_without_cache_files(tmp_path):
     assert target.joinpath("__init__.py").is_file()
     assert target.joinpath("plugin.yaml").is_file()
     assert target.joinpath("cli.py").is_file()
+    assert not target.joinpath("__pycache__", "ignored.pyc").exists()
+
+
+def test_installer_copies_agent_os_shell_by_default_without_cache_files(tmp_path):
+    shell_source = tmp_path / "shell-source"
+    target_home = tmp_path / "home"
+    shutil_copy_source(SOURCE_AGENT_OS_SHELL_DIR, shell_source)
+    (shell_source / "__pycache__").mkdir(exist_ok=True)
+    (shell_source / "__pycache__" / "ignored.pyc").write_bytes(b"cache")
+
+    report = install_plugin(hermes_home=target_home, shell_source=shell_source)
+
+    target = target_home / "plugins" / "memory-os-agent-os"
+    assert report["agent_os_shell_install_requested"] is True
+    assert report["agent_os_shell_installed"] is True
+    assert report["agent_os_shell_target"] == str(target)
+    assert target.joinpath("__init__.py").is_file()
+    assert target.joinpath("plugin.yaml").is_file()
     assert not target.joinpath("__pycache__", "ignored.pyc").exists()
 
 
@@ -54,7 +73,9 @@ def test_installer_dry_run_does_not_create_target(tmp_path):
 
     assert report["dry_run"] is True
     assert report["copied_file_count"] > 0
+    assert report["agent_os_shell_file_count"] > 0
     assert not (tmp_path / "home" / "plugins" / "memory_os").exists()
+    assert not (tmp_path / "home" / "plugins" / "memory-os-agent-os").exists()
 
 
 def test_installer_cli_prints_json(tmp_path, capsys):
@@ -140,6 +161,93 @@ def test_installer_can_write_deep_reflection_test_host_preset(tmp_path):
     assert config["llm_enabled"] is False
 
 
+def test_installer_can_enable_shell_without_enabling_memory_os_as_general_plugin(tmp_path):
+    config_path = tmp_path / "home" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "plugins:\n"
+        "  enabled:\n"
+        "    - existing-plugin\n",
+        encoding="utf-8",
+    )
+
+    report = install_plugin(hermes_home=tmp_path / "home", enable_shell=True)
+
+    assert report["agent_os_shell_enable_requested"] is True
+    assert report["agent_os_shell_enabled"] is True
+    assert report["agent_os_shell_enable_action"] == "config_yaml"
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "memory-os-agent-os" in config_text
+    assert "existing-plugin" in config_text
+    assert "memory_os" not in _enabled_plugins_from_config_text(config_text)
+
+
+def test_installer_shell_enable_is_idempotent(tmp_path):
+    config_path = tmp_path / "home" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "plugins:\n"
+        "  enabled:\n"
+        "    - memory-os-agent-os\n",
+        encoding="utf-8",
+    )
+
+    install_plugin(hermes_home=tmp_path / "home", enable_shell=True)
+
+    enabled = _enabled_plugins_from_config_text(config_path.read_text(encoding="utf-8"))
+    assert enabled.count("memory-os-agent-os") == 1
+    assert "memory_os" not in enabled
+
+
+def test_installer_does_not_enable_shell_when_provider_enable_fails(tmp_path, monkeypatch):
+    def fail_provider_enable(*args, **kwargs):
+        raise RuntimeError("provider enable failed")
+
+    monkeypatch.setattr("scripts.install_memory_os_plugin._enable_memory_provider", fail_provider_enable)
+
+    try:
+        install_plugin(hermes_home=tmp_path / "home", enable=True, enable_shell=True)
+    except RuntimeError as exc:
+        assert "provider enable failed" in str(exc)
+    else:
+        raise AssertionError("expected provider enable failure")
+
+    config_path = tmp_path / "home" / "config.yaml"
+    if config_path.exists():
+        assert "memory-os-agent-os" not in config_path.read_text(encoding="utf-8")
+
+
+def test_provider_enable_subprocess_stdout_is_suppressed(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args[0], 0)
+
+    monkeypatch.setattr("scripts.install_memory_os_plugin.subprocess.run", fake_run)
+
+    report = install_plugin(hermes_home=tmp_path / "home", enable=True)
+
+    assert report["enabled"] is True
+    assert calls
+    assert calls[0][1]["stdout"] is subprocess.DEVNULL
+
+
+def test_installer_rejects_shell_backups_inside_plugin_scan_tree(tmp_path):
+    source = tmp_path / "source"
+    shutil_copy_source(SOURCE_PLUGIN_DIR, source)
+    bad_backup = tmp_path / "home" / "plugins" / "memory-os-agent-os.backup" / "nested"
+    bad_backup.mkdir(parents=True)
+    (bad_backup / "plugin.yaml").write_text("name: memory-os-agent-os\n", encoding="utf-8")
+
+    try:
+        install_plugin(hermes_home=tmp_path / "home", source=source)
+    except SystemExit as exc:
+        assert "plugin backup manifest inside plugin scan tree" in str(exc)
+    else:
+        raise AssertionError("expected backup manifest guard to fail")
+
+
 def test_installer_deep_reflection_production_safe_preset_is_explicitly_off(tmp_path):
     report = install_plugin(
         hermes_home=tmp_path / "home",
@@ -178,3 +286,10 @@ def shutil_copy_source(source: Path, target: Path) -> None:
     import shutil
 
     shutil.copytree(source, target)
+
+
+def _enabled_plugins_from_config_text(config_text: str) -> list[str]:
+    import yaml
+
+    config = yaml.safe_load(config_text) or {}
+    return list((config.get("plugins") or {}).get("enabled") or [])

@@ -3160,3 +3160,210 @@ Boundaries:
 - no carryover injection from plugin hooks
 - no `pre_llm_call` registration
 - no slash command registration
+
+## PS-04 / PS-05 Installer-Level Shell Validation (2026-05-21)
+
+Scope:
+
+- deploy through `scripts/install_memory_os_plugin.py`, not manual plugin copy
+- install Memory-OS provider, Agent OS shell plugin, portable module runtime,
+  agent runtime, DeepReflection test-host config, and heartbeat runtime/timer
+- enable provider and shell as two separate states
+- verify backup protection keeps Memory-OS backup manifests outside
+  `$HERMES_HOME/plugins/`
+- re-run RH-22/RH-23/RH-24 after installer deployment
+
+Installer command:
+
+```bash
+python3 /tmp/memory-os-ps04-source/scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --enable \
+  --enable-shell \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --runtime-interval 5min \
+  --deep-reflection-preset test-host
+```
+
+Installer output was redirected to `/tmp/ps04-install-apply.json` and verified
+as pure JSON after suppressing the noisy `hermes config set` stdout from the
+provider-enable subprocess. `stderr` was empty.
+
+Installer result summary:
+
+```json
+{
+  "provider": "memory_os",
+  "enabled": true,
+  "agent_os_shell": "memory-os-agent-os",
+  "agent_os_shell_installed": true,
+  "agent_os_shell_enabled": true,
+  "agent_os_shell_enable_action": "config_yaml",
+  "system_modules_installed": true,
+  "runtime_artifacts_installed": true,
+  "runtime_enabled": true,
+  "deep_reflection_preset": "test-host"
+}
+```
+
+Deployment state:
+
+```text
+hermes memory:
+  Provider: memory_os
+  memory_os (local) ← active
+
+hermes plugins list:
+  memory-os-agent-os  enabled      user
+  memory_os           not enabled  user
+
+systemd:
+  hermes-memory-os-heartbeat.timer active/enabled
+  hermes-gateway.service active
+```
+
+Alias and doctor checks:
+
+```json
+{
+  "memory_os_status": {
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0,
+    "prefetch_mode": "indexed"
+  },
+  "shell_status": "same output as memory_os status",
+  "shell_doctor": {
+    "status": "ok",
+    "exit_code": 0,
+    "findings": ["hindsight_adapter_disabled"]
+  }
+}
+```
+
+Hook smoke:
+
+The installed shell hook functions were invoked with a Telegram-shaped session
+marker. This is a hook smoke, not a natural Telegram `/new` event.
+
+```json
+{
+  "before_counts": {
+    "audit_entries": 375,
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0
+  },
+  "after_counts": {
+    "audit_entries": 378,
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0
+  },
+  "delta_counts": {
+    "audit_entries": 3,
+    "events": 0,
+    "working_items": 0,
+    "crystallized_candidates": 0,
+    "crystallized_records": 0
+  },
+  "markers": [
+    "agent_os_shell_session_started",
+    "agent_os_shell_session_reset",
+    "agent_os_shell_session_finalized"
+  ]
+}
+```
+
+Unified regression after installer deployment:
+
+```json
+{
+  "rh22_full_prompt_count": 7,
+  "rh22_status": "ok",
+  "rh22_failure_count": 0,
+  "rh22_warning_count": 0,
+  "rh24_status_tool_contract": "ok",
+  "rh24_findings": []
+}
+```
+
+RH-23 source-class monitoring remained observational:
+
+```json
+{
+  "injection_mode": "auto_bounded",
+  "current_injection_exists": true,
+  "latest_injection_source_classes": {
+    "selected_by_source_class": {"working": 2},
+    "dropped_by_source_class": {"working": 1},
+    "selected_total": 2,
+    "dropped_total": 1
+  },
+  "rolling_injection_source_classes": {
+    "selected_by_source_class": {"working": 14},
+    "dropped_by_source_class": {"working": 7},
+    "selected_total": 14,
+    "dropped_total": 7,
+    "window_report_count": 7
+  },
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_crystallized_approval": false
+}
+```
+
+Heartbeat catch-up and final doctor:
+
+```json
+{
+  "heartbeat": {
+    "total_event_count": 24,
+    "already_processed_event_count": 24,
+    "processed_event_count": 0,
+    "working_created_count": 0,
+    "candidate_created_count": 0,
+    "crystallized_record_count": 0,
+    "index_counts": {
+      "audit_entries": 379,
+      "events": 24,
+      "working_items": 17,
+      "crystallized_candidates": 17,
+      "crystallized_records": 0
+    }
+  },
+  "doctor": {
+    "status": "ok",
+    "exit_code": 0,
+    "findings": ["hindsight_adapter_disabled"]
+  }
+}
+```
+
+Implementation findings resolved in PS-04:
+
+- provider enablement previously printed `hermes config set` status text into
+  installer stdout; PS-04 suppresses that subprocess stdout so installer output
+  remains machine-readable JSON
+- Memory-OS backup manifests under `$HERMES_HOME/plugins/` can be scanned as
+  live plugins; PS-04 rejects backup-looking Memory-OS provider/shell manifests
+  under the plugin scan tree and directs backups to
+  `$HERMES_HOME/plugin-backups/`
+- the guard no longer rejects unrelated legitimate user plugins such as
+  `hermes-self-evolution`
+
+Boundaries:
+
+- provider remains selected by `memory.provider=memory_os`
+- `memory-os-agent-os` is enabled as the official-style user plugin shell
+- `memory_os` is not enabled as a general plugin
+- shell hooks write audit markers only
+- no events, working items, candidates, crystallized records, sends, executes,
+  identity writes, Hindsight exports, `pre_llm_call` injection, or slash
+  commands were introduced by the shell

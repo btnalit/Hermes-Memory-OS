@@ -21,10 +21,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def register(ctx: Any) -> None:
-    """Register the official shell CLI alias.
+    """Register the official shell CLI alias and minimal session markers.
 
-    v0.1 deliberately registers no hooks and no slash commands. Conversation
-    carryover remains owned by the MemoryProvider.prefetch path.
+    v0.1 deliberately registers no slash commands and no LLM-call hooks.
+    Conversation carryover remains owned by the MemoryProvider.prefetch path.
     """
 
     ctx.register_cli_command(

@@ -10,12 +10,18 @@ import stat
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "memory_os"
+SOURCE_AGENT_OS_SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
 SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
 SOURCE_AGENT_DIR = REPO_ROOT / "agent"
+AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
+MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
 
 DEEP_REFLECTION_PRESETS: dict[str, dict[str, object]] = {
@@ -72,7 +78,10 @@ def install_plugin(
     *,
     hermes_home: Path,
     source: Path = SOURCE_PLUGIN_DIR,
+    shell_source: Path = SOURCE_AGENT_OS_SHELL_DIR,
+    install_shell: bool = True,
     enable: bool = False,
+    enable_shell: bool = False,
     install_runtime: bool = False,
     install_system_modules: bool = False,
     enable_runtime: bool = False,
@@ -82,11 +91,19 @@ def install_plugin(
     dry_run: bool = False,
 ) -> dict[str, object]:
     source = source.expanduser().resolve()
+    shell_source = shell_source.expanduser().resolve()
     hermes_home = hermes_home.expanduser().resolve()
     target = hermes_home / "plugins" / "memory_os"
+    shell_target = hermes_home / "plugins" / AGENT_OS_SHELL_PLUGIN_NAME
+    _guard_plugin_scan_tree_backups(hermes_home)
     _validate_source(source)
+    if install_shell or enable_shell:
+        _validate_agent_os_shell_source(shell_source)
 
     copied_files = _copy_tree(source, target, dry_run=dry_run)
+    shell_files: list[Path] = []
+    if install_shell:
+        shell_files = _copy_tree(shell_source, shell_target, dry_run=dry_run)
     system_module_files: list[Path] = []
     system_module_root = hermes_home / "memory-os" / "runtime" / "python"
     system_module_target = system_module_root / "plugins"
@@ -117,12 +134,16 @@ def install_plugin(
     if enable:
         enable_command = ["hermes", "config", "set", "memory.provider", "memory_os"]
         if not dry_run:
-            subprocess.run(
-                enable_command,
-                check=True,
-                env={**dict(os.environ), "HERMES_HOME": str(hermes_home)},
-            )
+            _enable_memory_provider(hermes_home, enable_command)
             enabled = True
+
+    shell_enabled = False
+    shell_enable_action = ""
+    if enable_shell:
+        shell_enable_action = "config_yaml"
+        if not dry_run:
+            _enable_agent_os_shell(hermes_home)
+            shell_enabled = True
 
     runtime_enabled = False
     runtime_enable_command: list[str] = []
@@ -158,6 +179,16 @@ def install_plugin(
         "target": str(target),
         "copied_file_count": len(copied_files),
         "copied_files": [str(path.relative_to(target)) for path in copied_files],
+        "agent_os_shell": AGENT_OS_SHELL_PLUGIN_NAME,
+        "agent_os_shell_install_requested": install_shell,
+        "agent_os_shell_installed": bool(shell_files) and not dry_run,
+        "agent_os_shell_source": str(shell_source),
+        "agent_os_shell_target": str(shell_target),
+        "agent_os_shell_file_count": len(shell_files),
+        "agent_os_shell_files": [str(path.relative_to(shell_target)) for path in shell_files],
+        "agent_os_shell_enable_requested": enable_shell,
+        "agent_os_shell_enabled": shell_enabled,
+        "agent_os_shell_enable_action": shell_enable_action,
         "system_modules_install_requested": install_system_modules,
         "system_modules_installed": bool(system_module_files) and not dry_run,
         "system_module_target": str(system_module_target),
@@ -188,6 +219,16 @@ def _validate_source(source: Path) -> None:
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
         raise SystemExit(f"Memory-OS plugin source is missing: {', '.join(missing)}")
+
+
+def _validate_agent_os_shell_source(source: Path) -> None:
+    required = ("__init__.py", "plugin.yaml")
+    missing = [name for name in required if not (source / name).is_file()]
+    if missing:
+        raise SystemExit(f"Memory-OS Agent OS shell source is missing: {', '.join(missing)}")
+    text = (source / "plugin.yaml").read_text(encoding="utf-8")
+    if f"name: {AGENT_OS_SHELL_PLUGIN_NAME}" not in text:
+        raise SystemExit("Memory-OS Agent OS shell plugin.yaml has the wrong plugin name")
 
 
 def _validate_system_module_source(source: Path) -> None:
@@ -232,6 +273,75 @@ def _copy_tree(source: Path, target: Path, *, dry_run: bool) -> list[Path]:
 
 def _is_excluded(path: Path) -> bool:
     return "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}
+
+
+def _guard_plugin_scan_tree_backups(hermes_home: Path) -> None:
+    plugins_root = hermes_home / "plugins"
+    if not plugins_root.exists():
+        return
+    for manifest in sorted(plugins_root.rglob("plugin.yaml")):
+        rel = manifest.relative_to(plugins_root)
+        top_level = rel.parts[0] if rel.parts else ""
+        if top_level in {MEMORY_PROVIDER_PLUGIN_NAME, AGENT_OS_SHELL_PLUGIN_NAME}:
+            continue
+        if not _looks_like_memory_os_backup_path(rel):
+            continue
+        raise SystemExit(
+            "plugin backup manifest inside plugin scan tree: "
+            f"{rel}. Move backups to {hermes_home / 'plugin-backups'}."
+        )
+
+
+def _looks_like_memory_os_backup_path(rel: Path) -> bool:
+    text = str(rel).lower()
+    backup_markers = (".bak", ".backup", ".bad", "backup", "old")
+    memory_os_names = (MEMORY_PROVIDER_PLUGIN_NAME.lower(), AGENT_OS_SHELL_PLUGIN_NAME.lower())
+    return any(name in text for name in memory_os_names) and any(marker in text for marker in backup_markers)
+
+
+def _enable_memory_provider(hermes_home: Path, enable_command: list[str]) -> None:
+    subprocess.run(
+        enable_command,
+        check=True,
+        env={**dict(os.environ), "HERMES_HOME": str(hermes_home)},
+        stdout=subprocess.DEVNULL,
+    )
+
+
+def _enable_agent_os_shell(hermes_home: Path) -> None:
+    config_path = hermes_home / "config.yaml"
+    config = _read_yaml_config(config_path)
+    plugins_config = config.get("plugins")
+    if not isinstance(plugins_config, dict):
+        plugins_config = {}
+    enabled = plugins_config.get("enabled")
+    if not isinstance(enabled, list):
+        enabled = []
+    normalized: list[str] = []
+    for item in enabled:
+        value = str(item)
+        if value == MEMORY_PROVIDER_PLUGIN_NAME:
+            continue
+        if value not in normalized:
+            normalized.append(value)
+    if AGENT_OS_SHELL_PLUGIN_NAME not in normalized:
+        normalized.append(AGENT_OS_SHELL_PLUGIN_NAME)
+    plugins_config["enabled"] = normalized
+    config["plugins"] = plugins_config
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _read_yaml_config(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        return {}
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        return {}
+    return dict(loaded)
 
 
 def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool) -> list[Path]:
@@ -306,7 +416,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--hermes-home", required=True, help="Target HERMES_HOME")
     parser.add_argument("--source", default=str(SOURCE_PLUGIN_DIR), help="Plugin source directory")
+    parser.add_argument("--shell-source", default=str(SOURCE_AGENT_OS_SHELL_DIR), help="Agent OS shell plugin source directory")
+    parser.add_argument("--no-install-shell", action="store_true", help="Do not copy the memory-os-agent-os shell plugin")
     parser.add_argument("--enable", action="store_true", help="Set memory.provider=memory_os after install")
+    parser.add_argument("--enable-shell", action="store_true", help="Add memory-os-agent-os to plugins.enabled")
     parser.add_argument("--install-runtime", action="store_true", help="Write heartbeat wrapper and systemd timer artifacts")
     parser.add_argument("--install-system-modules", action="store_true", help="Install portable L2-L4 module runtime package")
     parser.add_argument("--enable-runtime", action="store_true", help="Install and enable the user systemd heartbeat timer")
@@ -326,7 +439,10 @@ def main() -> int:
     report = install_plugin(
         hermes_home=Path(args.hermes_home),
         source=Path(args.source),
+        shell_source=Path(args.shell_source),
+        install_shell=not args.no_install_shell,
         enable=args.enable,
+        enable_shell=args.enable_shell,
         install_runtime=args.install_runtime,
         install_system_modules=args.install_system_modules,
         enable_runtime=args.enable_runtime,

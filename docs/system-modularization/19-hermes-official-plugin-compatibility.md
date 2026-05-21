@@ -463,15 +463,27 @@ PS-03 CLI aliases (implemented for status/doctor)
   - hermes memory-os-agent-os doctor
   - wrappers only; hermes memory_os remains authoritative
 
-PS-04 Installer integration
+PS-04 Installer integration (implemented)
   - provider enablement and shell enablement reported separately
   - Step 2 failure cannot corrupt Step 1 provider
   - Step 1 failure prevents shell activation
+  - installer copies `memory-os-agent-os` by default
+  - `--enable-shell` adds `memory-os-agent-os` to `plugins.enabled`
+  - installer output remains pure JSON even when provider enablement calls
+    `hermes config set`
+  - backup-looking Memory-OS provider/shell manifests are rejected under
+    `$HERMES_HOME/plugins/`; backups belong under
+    `$HERMES_HOME/plugin-backups/`
 
-PS-05 10.20.3.200 validation
+PS-05 10.20.3.200 validation (completed)
   - verify against the installed Hermes source, not only the website docs
   - run RH-22/RH-23/RH-24 checks
   - verify no duplicate carryover injection
+  - verify `memory.provider=memory_os`
+  - verify `memory-os-agent-os` is enabled as a user plugin shell
+  - verify `memory_os` is not enabled as a general plugin
+  - verify heartbeat timer and gateway remain active
+  - verify shell hook smoke writes audit markers only
 ```
 
 The installed Hermes source was inspected before PS-02. The live hook call
@@ -486,6 +498,24 @@ shell under `/root/.hermes/plugins/`. Hermes' plugin scanner found the nested
 manifest and loaded a duplicate command. The backup was moved outside the
 plugin scan tree. Future installer work should keep backups under
 `$HERMES_HOME/plugin-backups/`, not under `$HERMES_HOME/plugins/`.
+
+PS-04 installer work now enforces that rule for backup-looking Memory-OS
+provider/shell manifests while allowing unrelated legitimate user plugins under
+`$HERMES_HOME/plugins/`.
+
+PS-05 validation on `10.20.3.200` was run through the installer path, not by
+manual shell plugin copy. The validation confirmed:
+
+- `hermes memory` shows `memory_os` as the active provider
+- `hermes plugins list` shows `memory-os-agent-os` enabled and `memory_os` not
+  enabled as a general plugin
+- `hermes memory-os-agent-os status` and `doctor` delegate cleanly to the
+  provider CLI
+- RH-22 full seven-prompt regression passes
+- RH-23 source-class monitoring remains observational
+- RH-24 status-tool contract validation passes
+- heartbeat catch-up and doctor end at `status=ok` with only the expected
+  `hindsight_adapter_disabled` warning
 
 ## Validation Plan For A Future Shell
 
