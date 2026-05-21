@@ -494,6 +494,82 @@ records. The dry-run found 13 sessions that would be mirrored by an apply run,
 but apply remains blocked until the mirror family and RH-12 Inner Drive
 eligibility policy are in place.
 
+## Runtime Hardening RH-10 Dry-Run
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-10 StateSourceMirror only
+- no plugin refresh on `/root/.hermes`
+- no gateway restart
+- no `--apply`
+- no state-source file mutation
+- no Memory-OS event write
+
+Method:
+
+The current local working tree was copied to `/tmp/memory-os-rh10` on
+`hermes-media` and executed with `PYTHONPATH=/tmp/memory-os-rh10`. This avoided
+installing the uncommitted StateSourceMirror code into the live Hermes plugin
+tree.
+
+Pre-check:
+
+```text
+installed state_source_mirror.py: missing
+/root/.hermes/memory-os/runtime/state_source_mirror_state.json: absent
+```
+
+Actual host dry-run with no configured state roots:
+
+```json
+{
+  "status": "ok",
+  "state_root_count": 0,
+  "source_count": 0,
+  "new_event_count": 0,
+  "dry_run": true,
+  "state_rebuilt": false,
+  "written_event_ids": [],
+  "findings": []
+}
+```
+
+Synthetic allowlisted `/tmp` state-root dry-run:
+
+```json
+{
+  "status": "ok",
+  "state_root_count": 1,
+  "source_count": 2,
+  "new_event_count": 2,
+  "dry_run": true,
+  "state_rebuilt": false,
+  "written_event_ids": [],
+  "findings": []
+}
+```
+
+Side-effect check:
+
+```text
+/root/.hermes/memory-os/runtime/state_source_mirror_state.json: absent
+memory-os audit grep state_source_mirror: no entries
+synthetic body grep under /root/.hermes/memory-os: no entries
+Memory-OS events: 11
+working_items: 12
+index_health: healthy
+queue_backlog: 0
+```
+
+Interpretation:
+
+RH-10 StateSourceMirror supports a blank/no-allowlist host as healthy and can
+identify allowlisted state-source changes without writing events, state, audit,
+or source bodies during dry-run. Apply remains blocked until RH-12 Inner Drive
+eligibility policy is in place.
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.

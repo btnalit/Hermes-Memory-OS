@@ -57,6 +57,7 @@ from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
 from .session_mirror import SessionMirror
+from .state_source_mirror import StateSourceMirror
 from .store import MemoryOSStore
 from .working import WorkingMemoryService
 
@@ -262,6 +263,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     session_scan = session_subs.add_parser("scan")
     session_scan.add_argument("--dry-run", action="store_true")
     session_scan.add_argument("--apply", action="store_true")
+    state_source_parser = subs.add_parser("state-source-mirror")
+    state_source_parser.add_argument("--state-root", action="append", default=[])
+    state_source_subs = state_source_parser.add_subparsers(dest="state_source_mirror_command", required=True)
+    state_source_subs.add_parser("status")
+    state_source_subs.add_parser("doctor")
+    state_source_scan = state_source_subs.add_parser("scan")
+    state_source_scan.add_argument("--dry-run", action="store_true")
+    state_source_scan.add_argument("--apply", action="store_true")
     export_parser = subs.add_parser("export-shadow")
     export_parser.add_argument("--profile", default="sannai")
     export_parser.add_argument("--hermes-home", required=True)
@@ -323,12 +332,20 @@ def memory_os_command(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(_active_hermes_home(args), profile=getattr(args, "profile", "")))
+    store = MemoryOSStore(
+        MemoryOSRoots.from_hermes_home(
+            _active_hermes_home(args),
+            profile=getattr(args, "profile", ""),
+            external_state_roots=getattr(args, "state_root", []),
+        )
+    )
     command = args.memory_os_command
     if command == "cron-mirror":
         return _cron_mirror_command(args, store)
     if command == "session-mirror":
         return _session_mirror_command(args, store)
+    if command == "state-source-mirror":
+        return _state_source_mirror_command(args, store)
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -408,6 +425,23 @@ def _cron_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
 def _session_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
     mirror = SessionMirror(store)
     command = args.session_mirror_command
+    if command == "status":
+        print(json.dumps(mirror.status(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "doctor":
+        result = mirror.doctor()
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if result["status"] == "error" else 0
+    if command == "scan":
+        dry_run = not bool(getattr(args, "apply", False))
+        print(json.dumps(mirror.scan(dry_run=dry_run), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    return 2
+
+
+def _state_source_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    mirror = StateSourceMirror(store)
+    command = args.state_source_mirror_command
     if command == "status":
         print(json.dumps(mirror.status(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
