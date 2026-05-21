@@ -1,55 +1,224 @@
 # Hermes Memory-OS
 
-Hermes Memory-OS is a file-first memory architecture for long-running agents.
-It separates raw event capture, working memory, crystallized memory, identity
-sources, relationships, audit logs, diagnostics, and migration tooling.
+Hermes Memory-OS is a file-first memory and agent-OS runtime for long-running
+Hermes agents.
+
+The core idea is deliberately conservative:
+
+- canonical memory lives in profile-local files;
+- SQLite is a rebuildable index, not the source of truth;
+- runtime cognition and governance modules write bounded artifacts;
+- owner approval remains required for crystallized memory;
+- send, execute, identity writes, Hindsight export, cleanup apply, and shadow
+  journal apply are off by default.
 
 This repository is intentionally extracted as a clean project. It does not
 vendor the full Hermes agent manager source tree.
 
-## Current Scope
+## Current State
 
-The current prototype covers:
+The v0 Memory-OS provider is closed and validated. The v0.1 Agent OS work adds
+portable higher-layer modules and an official-style Hermes plugin shell while
+keeping the provider path authoritative.
 
-- Memory provider discovery scaffold
-- v0 schema and deterministic fixtures
-- profile-local root resolution
-- canonical filesystem store with SQLite as rebuildable index
-- prefetch context assembly
-- working memory state evolution
-- crystallized memory approval boundary
-- runtime heartbeat from events to working memory and crystallized candidates
-- diagnostic grounding for current memory-provider questions
-- read-only Sannai shadow bundle export/import
-- CLI diagnostic helpers, meta-audit, benchmark, and dry-run-first cleanup
-- Provider self-diagnostic tool: `memory_os_status`
+Implemented and tested:
 
-The v0 implementation is closed. See `docs/memory-os/v0-closeout.md` and
-`docs/memory-os/v0.1-observation-and-integration-plan.md` for the final
-validation boundary and the observation-first v0.1 integration phase.
+- `memory_os` Hermes memory provider
+- local filesystem store with event, working, crystallized candidate, identity,
+  relationship, audit, import, and quarantine roots
+- SQLite runtime index with heartbeat catch-up
+- indexed prefetch and diagnostic grounding
+- `memory_os_status` tool contract for current provider/backend facts
+- runtime heartbeat from events to working memory and review candidates
+- dry-run-first cleanup and shadow journal ingestion
+- portable L2-L4 module runtime:
+  - mailbox no-send
+  - household digest
+  - wandering mind
+  - inner drive
+  - ops gate
+  - proposal queue
+  - evidence/scoring
+  - self-evolution governor
+  - speak gate
+  - governance feedback bridge
+  - DeepReflection baseline
+- official-style `memory-os-agent-os` shell plugin:
+  - `hermes memory-os-agent-os status`
+  - `hermes memory-os-agent-os doctor`
+  - minimal session marker hooks
 
-v0.1 also starts Hermes system modularization beyond L1 memory. That work is
-documented under `docs/system-modularization/` and covers how production-grown
-systems such as Wandering Mind, Self-Evolution Governor, Ops-Gate, mailbox,
-household digest, evidence/scoring, and Speak Gate should become portable
-modules.
+See:
 
-Production Hermes and Sannai migration remains a separate controlled step. The
-code here is designed so validation can happen on an empty machine or shadow
-bundle before touching a live server.
+- `docs/memory-os/v0-closeout.md`
+- `docs/system-modularization/07-validation-report-10.20.3.200.md`
+- `docs/system-modularization/17-deep-reflection-runtime-design.md`
+- `docs/system-modularization/19-hermes-official-plugin-compatibility.md`
+- `docs/system-modularization/19-memory-os-3-200-monitor.md`
+
+## Architecture
+
+Memory-OS is provider-first.
+
+```text
+Hermes memory.provider=memory_os
+  -> plugins/memory/memory_os/
+     -> canonical profile-local Memory-OS files
+     -> rebuildable SQLite index
+     -> prefetch / sync_turn / memory_os_status / heartbeat
+
+Hermes general plugin shell
+  -> plugins/memory-os-agent-os/
+     -> operator-facing status/doctor aliases
+     -> bounded session marker hooks
+     -> no carryover injection
+     -> no send / execute / identity / crystallized approval
+
+Portable module runtime
+  -> plugins/system/
+  -> plugins/modules/
+  -> installed under $HERMES_HOME/memory-os/runtime/python/plugins/
+```
+
+`memory_os` is not meant to be enabled as a general Hermes plugin. It is enabled
+through:
+
+```yaml
+memory:
+  provider: memory_os
+```
+
+`memory-os-agent-os` is the optional official-style shell plugin. It is enabled
+through `plugins.enabled` for operator discoverability and shell aliases.
 
 ## Repository Layout
 
 ```text
-plugins/memory/memory_os/   # Memory-OS provider and core services
-plugins/system/             # Portable Hermes module contracts and coordination primitives
-plugins/modules/            # Portable L2-L4 modules such as mailbox, household digest, wandering mind, inner drive, ops gate, proposal queue, evidence scoring, self-evolution, and speak gate
-agent/                      # Minimal compatibility interface used by provider tests
-scripts/                    # Operator scripts
-tests/                      # Focused Memory-OS tests
-docs/memory-os/             # Architecture, integration, and implementation plans
-docs/system-modularization/ # v0.1 plan for portable L2-L4 Hermes modules
+agent/                         # Minimal Hermes compatibility surface
+plugins/memory/memory_os/      # Memory-OS provider and core services
+plugins/memory-os-agent-os/    # Official-style Hermes shell plugin
+plugins/system/                # Module contracts and coordination primitives
+plugins/modules/               # Portable L2-L4 modules
+scripts/                       # Installer and operator scripts
+tests/                         # Provider, runtime, module, and installer tests
+docs/memory-os/                # v0 architecture and implementation records
+docs/system-modularization/    # v0.1 Agent OS, RH, DR, and validation docs
 ```
+
+## Install
+
+Use a target Hermes profile home:
+
+```bash
+export HERMES_HOME=/root/.hermes
+```
+
+Minimal provider install:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home "$HERMES_HOME" \
+  --enable \
+  --install-runtime \
+  --enable-runtime
+```
+
+Full Agent OS test-host install:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home "$HERMES_HOME" \
+  --enable \
+  --enable-shell \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --runtime-interval 5min \
+  --deep-reflection-preset test-host
+```
+
+Production-safe DeepReflection preset:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home "$HERMES_HOME" \
+  --enable \
+  --enable-shell \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --deep-reflection-preset production-safe
+```
+
+Installer behavior:
+
+- copies the `memory_os` provider to `$HERMES_HOME/plugins/memory_os/`;
+- copies the `memory-os-agent-os` shell to
+  `$HERMES_HOME/plugins/memory-os-agent-os/` unless `--no-install-shell` is
+  passed;
+- enables the provider only when `--enable` is passed;
+- enables the shell only when `--enable-shell` is passed;
+- writes heartbeat runtime artifacts when `--install-runtime` is passed;
+- enables the user systemd heartbeat timer when `--enable-runtime` is passed;
+- installs portable modules when `--install-system-modules` is passed;
+- keeps Memory-OS backup manifests out of `$HERMES_HOME/plugins/`; backups
+  belong under `$HERMES_HOME/plugin-backups/`.
+
+## Verify
+
+Provider checks:
+
+```bash
+HERMES_HOME="$HERMES_HOME" hermes memory
+HERMES_HOME="$HERMES_HOME" hermes memory_os status
+HERMES_HOME="$HERMES_HOME" hermes memory_os doctor
+HERMES_HOME="$HERMES_HOME" hermes memory_os heartbeat --max-events 100
+```
+
+Shell plugin checks:
+
+```bash
+HERMES_HOME="$HERMES_HOME" hermes plugins list
+HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os status
+HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os doctor
+```
+
+Expected plugin relationship:
+
+```text
+memory.provider = memory_os
+plugins.enabled includes memory-os-agent-os
+plugins.enabled does not include memory_os
+```
+
+Regression checks:
+
+```bash
+HERMES_HOME="$HERMES_HOME" hermes memory_os conversation-regression prompts
+HERMES_HOME="$HERMES_HOME" hermes memory_os conversation-regression \
+  status-tool-contract
+```
+
+## DeepReflection Presets
+
+`scripts/install_memory_os_plugin.py` supports these presets:
+
+| Preset | Purpose |
+| --- | --- |
+| `production-safe` | Explicitly disabled; safe default for formal profiles. |
+| `observe` | Dry-run only; creates observation artifacts without injection. |
+| `auto-bounded` | Bounded deterministic carryover injection only. |
+| `test-host` | Enables no-send test observation outputs such as self-evolution proposals and wandering seeds. |
+
+The following remain disabled unless a future gate explicitly changes them:
+
+- `working_updates_enabled`
+- `llm_enabled`
+- real sends
+- real executes
+- identity writes
+- crystallized approval
+- Hindsight export
 
 ## Run Tests
 
@@ -58,66 +227,36 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
+Current local baseline after the Agent OS shell installer integration:
+
+```text
+295 passed
+```
+
 ## Safety Defaults
 
-- SQLite is an index, not the source of truth.
-- Shadow export is read-only against legacy Hermes/Sannai state.
-- Crystallized memory requires explicit owner approval.
-- Cleanup is dry-run-first and never targets identity sources or crystallized records.
-- Hindsight is treated as an optional adapter, not canonical storage.
+- Files are canonical; SQLite is a rebuildable index.
+- Runtime heartbeat creates working items and review candidates only.
+- Crystallized records require explicit owner approval.
+- Diagnostic grounding is restricted to explicit current
+  architecture/provider/status questions.
+- DeepReflection carryover is injected only through the provider prefetch path;
+  the shell plugin does not register `pre_llm_call`.
+- Shell hooks write bounded audit markers only.
+- Cleanup and shadow journal ingestion are dry-run-first.
+- No module sends messages, executes actions, writes identity, approves
+  crystallized memory, or exports to Hindsight by default.
 
-## Install As A Hermes Memory Plugin
+## Monitoring
 
-Install into a target Hermes profile home:
+The test-host monitor is documented in
+`docs/system-modularization/19-memory-os-3-200-monitor.md`.
 
-```bash
-python3 scripts/install_memory_os_plugin.py --hermes-home "$HERMES_HOME" --install-runtime
-```
-
-Then enable it through Hermes' native config path:
-
-```bash
-HERMES_HOME="$HERMES_HOME" hermes config set memory.provider memory_os
-HERMES_HOME="$HERMES_HOME" hermes memory
-HERMES_HOME="$HERMES_HOME" hermes memory_os heartbeat
-```
-
-The expected discovery contract is `$HERMES_HOME/plugins/memory_os/` with
-`plugin.yaml`, `__init__.py`, and `register_memory_provider()`. No system prompt
-patch is required for Hermes to discover the provider.
-
-To install the portable v0.1 L2-L4 module runtime package as well:
-
-```bash
-python3 scripts/install_memory_os_plugin.py \
-  --hermes-home "$HERMES_HOME" \
-  --install-runtime \
-  --install-system-modules
-```
-
-This copies module code to
-`$HERMES_HOME/memory-os/runtime/python/plugins/`. It does not enable modules,
-start schedules, send messages, or restart a gateway.
-
-When active, the provider exposes a read-only `memory_os_status` tool so the
-agent can inspect the real Memory-OS backend instead of inferring from old
-memory text. Diagnostic prefetch also suppresses historical recall for current
-provider questions so stale Hindsight-era memories do not override runtime
-facts.
-
-For a full test deployment, enable the heartbeat timer on a validation host:
-
-```bash
-python3 scripts/install_memory_os_plugin.py \
-  --hermes-home "$HERMES_HOME" \
-  --install-runtime \
-  --enable-runtime \
-  --runtime-interval 5min
-```
-
-The heartbeat advances new events into `working/*.json` and
-`crystallized/candidates.jsonl`. It does not write approved crystallized records;
-owner approval remains a separate boundary.
+It is read-only. It checks service health, provider status, shell plugin state,
+doctor output, status-tool contract, DeepReflection source-class distribution,
+backup-manifest pollution, and session hook audit markers. It must not restart
+services, run heartbeat catch-up, invoke hooks, force `/new`, apply cleanup,
+apply shadow journals, or read private transcripts.
 
 ## License
 
