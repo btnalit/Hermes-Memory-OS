@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import sqlite3
@@ -12,6 +13,8 @@ from plugins.memory.memory_os.cli import (
     diff_report,
     inspect_event,
     meta_audit,
+    memory_os_command,
+    register_cli,
     trace_record,
 )
 from plugins.memory.memory_os.audit import read_audit_entries
@@ -407,3 +410,210 @@ def test_cleanup_cli_wrapper_is_dry_run_by_default(tmp_path):
     assert report["dry_run"] is True
     assert len(report["actions"]) == 1
     assert stale_quarantine.exists()
+
+
+def test_cleanup_cli_accepts_event_source_class_retention_policy(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    now = datetime.now(timezone.utc)
+    old_telemetry = EventEnvelope.from_dict(
+        {
+            **build_event(seed=86, profile="memoryos-test"),
+            "id": "evt_cli_old_telemetry",
+            "ts": (now - timedelta(days=45)).isoformat(),
+            "source": "telemetry_probe",
+            "kind": "telemetry_status",
+            "summary": "Telemetry event should be planned through CLI.",
+            "safe_ref": {"source_class": "telemetry", "retention_class": "low_value"},
+            "tags": ["telemetry"],
+        }
+    )
+    store.append_event(old_telemetry)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(["cleanup", "--event-source-class-retention", "telemetry=30"])
+
+    result = memory_os_command(args)
+
+    output = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert output["dry_run"] is True
+    assert output["policy"]["event_retention_days_by_source_class"] == {"telemetry": 30}
+    assert [action["event_id"] for action in output["actions"] if action["kind"] == "prune_event_line"] == [
+        "evt_cli_old_telemetry"
+    ]
+
+
+def test_retention_prunes_explicit_low_value_source_class_with_archive(tmp_path):
+    store = _store(tmp_path)
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    old_telemetry = EventEnvelope.from_dict(
+        {
+            **build_event(seed=81, profile="memoryos-test"),
+            "id": "evt_old_telemetry",
+            "ts": (now - timedelta(days=45)).isoformat(),
+            "source": "telemetry_probe",
+            "kind": "telemetry_status",
+            "summary": "PCDN telemetry status repeated normal report.",
+            "safe_ref": {"source_class": "telemetry", "retention_class": "low_value"},
+            "tags": ["telemetry"],
+        }
+    )
+    fresh_telemetry = EventEnvelope.from_dict(
+        {
+            **build_event(seed=82, profile="memoryos-test"),
+            "id": "evt_fresh_telemetry",
+            "ts": (now - timedelta(days=2)).isoformat(),
+            "source": "telemetry_probe",
+            "kind": "telemetry_status",
+            "summary": "Recent telemetry status should remain hot.",
+            "safe_ref": {"source_class": "telemetry", "retention_class": "low_value"},
+            "tags": ["telemetry"],
+        }
+    )
+    old_foreground = EventEnvelope.from_dict(
+        {
+            **build_event(seed=83, profile="memoryos-test"),
+            "id": "evt_old_foreground",
+            "ts": (now - timedelta(days=45)).isoformat(),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Old foreground conversation is high-value and should remain.",
+            "safe_ref": {"source_class": "foreground"},
+            "tags": ["foreground"],
+        }
+    )
+    store.append_event(old_telemetry)
+    store.append_event(fresh_telemetry)
+    store.append_event(old_foreground)
+
+    plan = cleanup_plan(
+        store,
+        now=now,
+        policy=CleanupPolicy(event_retention_days_by_source_class={"telemetry": 30}),
+    )
+
+    actions = plan["actions"]
+    prune_actions = [action for action in actions if action["kind"] == "prune_event_line"]
+    assert len(prune_actions) == 1
+    assert prune_actions[0]["event_id"] == "evt_old_telemetry"
+    assert prune_actions[0]["source_class"] == "telemetry"
+    assert prune_actions[0]["archive_before_delete"] is True
+    assert plan["event_retention"]["scanned_event_count"] == 3
+
+    result = apply_cleanup(store, plan, confirmed_plan_id=plan["plan_id"])
+
+    remaining_ids = {event.id for event in store.read_events()}
+    archive_lines = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((store.roots.memory_os_root / "archive" / "retention").glob("*.jsonl"))
+    )
+    assert result["applied"] is True
+    assert "evt_old_telemetry" not in remaining_ids
+    assert "evt_fresh_telemetry" in remaining_ids
+    assert "evt_old_foreground" in remaining_ids
+    assert "evt_old_telemetry" in archive_lines
+    assert "PCDN telemetry status repeated normal report." in archive_lines
+
+
+def test_retention_preserves_high_value_and_active_candidate_events_even_if_policy_matches(tmp_path):
+    store = _store(tmp_path)
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    old_foreground = EventEnvelope.from_dict(
+        {
+            **build_event(seed=84, profile="memoryos-test"),
+            "id": "evt_high_value_foreground",
+            "ts": (now - timedelta(days=90)).isoformat(),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Old foreground conversation must not be automatically pruned.",
+            "safe_ref": {"source_class": "foreground"},
+            "tags": ["foreground"],
+        }
+    )
+    active_candidate = EventEnvelope.from_dict(
+        {
+            **build_event(seed=85, profile="memoryos-test"),
+            "id": "evt_active_candidate",
+            "ts": (now - timedelta(days=90)).isoformat(),
+            "source": "governance_feedback",
+            "kind": "governance_proposal",
+            "summary": "Active proposal queue candidate must remain canonical.",
+            "safe_ref": {
+                "source_class": "governance",
+                "approval_state": "candidate",
+                "candidate_allowed": False,
+            },
+            "tags": ["governance"],
+        }
+    )
+    store.append_event(old_foreground)
+    store.append_event(active_candidate)
+
+    plan = cleanup_plan(
+        store,
+        now=now,
+        policy=CleanupPolicy(
+            event_retention_days_by_source_class={"foreground": 30, "governance": 30}
+        ),
+    )
+
+    assert not [action for action in plan["actions"] if action["kind"] == "prune_event_line"]
+    archive_actions = [action for action in plan["actions"] if action["kind"] == "archive_high_value_event_summary"]
+    assert {action["event_id"] for action in archive_actions} == {
+        "evt_high_value_foreground",
+        "evt_active_candidate",
+    }
+    assert all(action["delete_after_archive"] is False for action in archive_actions)
+
+    result = apply_cleanup(store, plan, confirmed_plan_id=plan["plan_id"])
+
+    remaining_ids = {event.id for event in store.read_events()}
+    archive_lines = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((store.roots.memory_os_root / "archive" / "retention").glob("*.jsonl"))
+    )
+    assert result["applied"] is True
+    assert "evt_high_value_foreground" in remaining_ids
+    assert "evt_active_candidate" in remaining_ids
+    assert "evt_high_value_foreground" in archive_lines
+    assert "evt_active_candidate" in archive_lines
+
+
+def test_retention_apply_revalidates_prune_event_line_actions(tmp_path):
+    store = _store(tmp_path)
+    now = datetime(2026, 5, 21, tzinfo=timezone.utc)
+    old_foreground = EventEnvelope.from_dict(
+        {
+            **build_event(seed=87, profile="memoryos-test"),
+            "id": "evt_forged_foreground",
+            "ts": (now - timedelta(days=90)).isoformat(),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Forged prune action must not delete foreground conversation.",
+            "safe_ref": {"source_class": "foreground"},
+            "tags": ["foreground"],
+        }
+    )
+    event_path = store.append_event(old_foreground)
+    plan = {
+        "schema_version": "memory-os.cleanup_plan.v0",
+        "plan_id": "cleanup_plan_forged",
+        "actions": [
+            {
+                "id": "cleanup_action_forged",
+                "kind": "prune_event_line",
+                "target": str(event_path),
+                "event_id": "evt_forged_foreground",
+                "source_class": "foreground",
+                "archive_before_delete": True,
+            }
+        ],
+    }
+
+    result = apply_cleanup(store, plan, confirmed_plan_id=plan["plan_id"])
+
+    remaining_ids = {event.id for event in store.read_events()}
+    assert result["applied"] is False
+    assert result["skipped_count"] == 1
+    assert "evt_forged_foreground" in remaining_ids

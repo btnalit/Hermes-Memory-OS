@@ -308,6 +308,17 @@ Rejected.
 
 Retention is dry-run first. Protected records are never automatically deleted.
 
+RH-17 v0.1 narrows this further:
+
+```text
+default cleanup                  -> no event-stream pruning
+explicit telemetry/status policy -> archive full event line, then prune hot line
+high-value or active state       -> archive-only, delete_after_archive=false
+```
+
+This preserves the Memory-OS rule that compaction is policy-driven and
+auditable, not an automatic forgetting mechanism.
+
 ## Relationship To Runtime Hardening
 
 These are later Runtime Hardening items:

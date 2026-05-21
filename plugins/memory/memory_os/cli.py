@@ -253,6 +253,13 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     cleanup_parser.add_argument("--import-days", type=int, default=30)
     cleanup_parser.add_argument("--benchmark-days", type=int, default=14)
     cleanup_parser.add_argument("--temp-days", type=int, default=1)
+    cleanup_parser.add_argument(
+        "--event-source-class-retention",
+        action="append",
+        default=[],
+        metavar="SOURCE_CLASS=DAYS",
+        help="Add explicit event retention policy for one source_class, e.g. telemetry=30",
+    )
     cron_parser = subs.add_parser("cron-mirror")
     cron_subs = cron_parser.add_subparsers(dest="cron_mirror_command", required=True)
     cron_subs.add_parser("status")
@@ -398,6 +405,9 @@ def memory_os_command(args: argparse.Namespace) -> int:
                         import_retention_days=args.import_days,
                         benchmark_retention_days=args.benchmark_days,
                         temp_retention_days=args.temp_days,
+                        event_retention_days_by_source_class=_parse_event_source_class_retention(
+                            args.event_source_class_retention
+                        ),
                     ),
                 ),
                 ensure_ascii=False,
@@ -407,6 +417,25 @@ def memory_os_command(args: argparse.Namespace) -> int:
         )
         return 0
     return 2
+
+
+def _parse_event_source_class_retention(values: list[str]) -> dict[str, int]:
+    policy: dict[str, int] = {}
+    for value in values:
+        if "=" not in value:
+            raise SystemExit(f"Invalid event retention policy: {value}. Expected SOURCE_CLASS=DAYS")
+        source_class, days_text = value.split("=", 1)
+        source_class = source_class.strip().lower()
+        if not source_class:
+            raise SystemExit(f"Invalid event retention policy: {value}. Empty source class")
+        try:
+            days = int(days_text)
+        except ValueError as exc:
+            raise SystemExit(f"Invalid event retention days: {days_text}") from exc
+        if days < 0:
+            raise SystemExit(f"Invalid event retention days: {days_text}")
+        policy[source_class] = days
+    return policy
 
 
 def _cron_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> int:

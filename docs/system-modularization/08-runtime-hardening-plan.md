@@ -407,6 +407,37 @@ Acceptance:
 - every prune/compact action writes audit and is reversible where practical
 - tests cover low-value telemetry, high-value events, and protected records
 
+Implemented v0.1 behavior:
+
+- the default `hermes memory_os cleanup` command does not prune event stream
+  records
+- event retention requires explicit operator policy, for example:
+
+```bash
+hermes memory_os cleanup --event-source-class-retention telemetry=30
+```
+
+- matching low-value events create `prune_event_line` actions only when:
+  - the event source class matches the explicit policy
+  - the event age is beyond the configured day threshold
+  - the event is low-value by `retention_class=low_value` or a low-value source
+    class such as `telemetry`, `status`, `metrics`, or `runtime`
+- apply requires the generated `plan_id` and writes the full event line to
+  `memory-os/archive/retention/<plan_id>.jsonl` before rewriting the hot JSONL
+  event file
+- apply revalidates each `prune_event_line` action against the current event
+  body; a forged or stale plan cannot delete high-value foreground/governance
+  records by changing only the action kind
+- high-value source classes such as `foreground`, `memory_write`,
+  `mirrored_conversation`, `tool_failure`, `milestone`, `governance`, `owner`,
+  and `relationship` are never automatically pruned; if they match a retention
+  policy, the plan creates `archive_high_value_event_summary` actions with
+  `delete_after_archive=false`
+- active proposal/candidate states are treated as protected even if the source
+  class is explicitly configured
+- SQLite is not canonical; index rebuild/catch-up remains separate from
+  physical event retention
+
 ### RH-18 Shadow Journal Ingestion
 
 Provide a safe high-frequency ingestion path for non-agent producers.
