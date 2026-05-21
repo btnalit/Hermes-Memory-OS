@@ -2921,6 +2921,62 @@ Interpretation:
 - Chinese / mixed Chinese-English diagnostic and non-diagnostic fixture
   boundaries are available through the contract report
 
+### RH-22 Full Seven-Prompt Baseline
+
+Claude gate review noted that the deployed RH-22 prompt inventory contained
+seven prompts, while the first transcript evaluator evidence only covered
+three observed turns. The full public prompt set was therefore evaluated once
+on `10.20.3.200` as a deterministic baseline.
+
+Transcript path:
+
+```bash
+/tmp/rh22_transcript_full7.json
+```
+
+Command:
+
+```bash
+HERMES_HOME=/root/.hermes \
+  hermes memory_os conversation-regression evaluate \
+  --transcript /tmp/rh22_transcript_full7.json
+```
+
+Result:
+
+```json
+{
+  "schema_version": "memory-os.conversation_regression.v0",
+  "status": "ok",
+  "prompt_count": 7,
+  "failure_count": 0,
+  "warning_count": 0,
+  "failures": [],
+  "warnings": []
+}
+```
+
+Prompt coverage:
+
+```text
+casual_memory_system_change      memory_os_status_called=false
+memory_design_opinion            memory_os_status_called=false
+casual_style_correction          memory_os_status_called=false
+diagnostic_current_architecture  memory_os_status_called=true
+diagnostic_provider              memory_os_status_called=true
+diagnostic_hindsight_canonical   memory_os_status_called=true
+candidate_vs_crystallized        memory_os_status_called=true
+```
+
+Interpretation:
+
+- all seven public RH-22 regression prompts now have a passing deterministic
+  baseline on the test host
+- ordinary/casual prompts do not call `memory_os_status`
+- explicit architecture/provider/Hindsight/candidate-boundary prompts may call
+  `memory_os_status`
+- candidate wording remains separated from approved crystallized memory
+
 ### Heartbeat, Doctor, And Gateway Reload
 
 Heartbeat command:

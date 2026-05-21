@@ -765,6 +765,55 @@ v0.1 implementation:
 - future model-specific descriptions should be added as explicit contract
   variants with their own fixtures, not as ad hoc provider strings
 
+### RH-25 Deep Reflection Source-Class Diversity Follow-Up
+
+Track whether DeepReflection injection cards continue to come only from one
+source class after the test host has more runtime data.
+
+Reason:
+
+- RH-23 intentionally made source-class monitoring observational only
+- the first test-host rolling baseline showed all selected and dropped
+  injection cards coming from `working`
+- this may be normal for a low-data staging host, or it may indicate that the
+  selector over-favors working memory and under-selects foreground, digest, or
+  governance sources
+
+Initial observation:
+
+```json
+{
+  "rolling_injection_source_classes": {
+    "selected_by_source_class": {
+      "working": 14
+    },
+    "dropped_by_source_class": {
+      "working": 7
+    },
+    "selected_total": 14,
+    "dropped_total": 7,
+    "window_report_count": 7
+  }
+}
+```
+
+Boundary:
+
+- RH-25 is a tracking item, not an automatic tuning item
+- do not change eligibility, ranking, safety filters, TTL, caps, sends,
+  executes, identity writes, or crystallized approval based on skew alone
+- collect at least 1-2 weeks of test-host data before proposing selector
+  changes
+
+Open questions:
+
+- Is the skew caused by limited test-host data?
+- Do `foreground`, `digest`, and `governance` cards appear naturally after
+  longer runtime?
+- Does the selector need an operator-visible diversity diagnostic?
+- Should a later tuning slice add diversity caps or per-source minimums, or
+  would that distort the reflection signal?
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:
