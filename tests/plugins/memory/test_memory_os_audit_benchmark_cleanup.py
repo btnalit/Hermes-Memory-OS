@@ -184,6 +184,20 @@ def test_status_reports_index_health_and_fts_tokenizer(tmp_path):
     assert status["index_health"]["fts_tokenizer"] in {"trigram", "unicode61"}
 
 
+def test_status_and_doctor_report_continuity_selector_counts(tmp_path):
+    store = _store(tmp_path)
+    for seed in range(60, 70):
+        store.append_event(EventEnvelope.from_dict(build_event(seed=seed, profile="memoryos-test")))
+
+    status = build_status_report(store)
+    doctor = build_doctor_result(store)
+
+    assert status["continuity_selector"]["schema_version"] == "memory-os.continuity_selector.v0"
+    assert status["continuity_selector"]["selected_total"] > 0
+    assert status["continuity_selector"]["dropped_total"] > 0
+    assert doctor["meta_audit"]["continuity_selector"]["selected_total"] == status["continuity_selector"]["selected_total"]
+
+
 def test_diff_and_approval_report_use_metadata_not_private_bodies(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

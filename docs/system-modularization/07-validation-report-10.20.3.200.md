@@ -570,6 +570,110 @@ identify allowlisted state-source changes without writing events, state, audit,
 or source bodies during dry-run. Apply remains blocked until RH-12 Inner Drive
 eligibility policy is in place.
 
+## Runtime Hardening RH-11 Dry-Run
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-11 Continuity Context Selector only
+- no plugin refresh on `/root/.hermes`
+- no gateway restart
+- no mirror `--apply`
+- no Memory-OS event write
+- no heartbeat / Inner Drive processing of mirror events
+
+Method:
+
+The current local working tree was copied to `/tmp/memory-os-rh11` on
+`hermes-media` and executed with `PYTHONPATH=/tmp/memory-os-rh11`. This avoided
+installing uncommitted selector code into the live Hermes plugin tree.
+
+Actual host selector status:
+
+```json
+{
+  "schema_version": "memory-os.continuity_selector.v0",
+  "selected_total": 8,
+  "dropped_total": 3,
+  "selected_by_source_class": {
+    "foreground": 8
+  },
+  "dropped_by_source_class": {
+    "foreground": 3
+  },
+  "seed_slots": {
+    "foreground": 2,
+    "cron": 1,
+    "mailbox": 1,
+    "room_family": 1,
+    "state_source": 1,
+    "governance": 1
+  },
+  "max_records": 8
+}
+```
+
+Actual host doctor selector parity:
+
+```text
+doctor.meta_audit.continuity_selector matched status.continuity_selector
+```
+
+Actual host prefetch check:
+
+```json
+{
+  "chars": 3836,
+  "has_recent": true,
+  "has_bridge": false,
+  "has_diagnostic": false
+}
+```
+
+The actual host currently has only foreground Memory-OS events, so no
+`Continuity Bridge` section is expected on the real host yet.
+
+Synthetic `/tmp` bridge scenario:
+
+```json
+{
+  "has_bridge": true,
+  "has_cron": true,
+  "has_state": true,
+  "cron_before_working": true,
+  "selector": {
+    "selected_total": 8,
+    "dropped_total": 4,
+    "selected_by_source_class": {
+      "cron": 1,
+      "foreground": 6,
+      "state_source": 1
+    },
+    "dropped_by_source_class": {
+      "foreground": 4
+    }
+  }
+}
+```
+
+Side-effect check:
+
+```text
+synthetic bridge/working markers grep under /root/.hermes/memory-os: no entries
+Memory-OS events: 11
+working_items: 12
+index_health: healthy
+queue_backlog: 0
+```
+
+Interpretation:
+
+RH-11 exposes selected/dropped selector counts through status and doctor without
+private bodies, keeps diagnostic grounding separate, and preserves bridge seed
+facts ahead of noisy working memory in bounded prefetch contexts. No mirror
+events were applied and no heartbeat/Inner Drive mirror processing was enabled.
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.

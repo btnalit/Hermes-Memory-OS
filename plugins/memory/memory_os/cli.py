@@ -53,6 +53,7 @@ from .migrator import (
     migration_scan_report,
     replay_shadow_import,
 )
+from .prefetch import continuity_selector_report
 from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
@@ -78,6 +79,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "index_counts": index_counts,
         "index_health": _index_health_summary(store, store_counts, index_counts),
         "prefetch_mode": prefetch_mode,
+        "continuity_selector": continuity_selector_report(store),
         "queue_backlog": 0,
         "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),
         "recent_event_summaries": [
@@ -105,6 +107,7 @@ def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
     status = build_status_report(store)
     store_counts = status["counts"]
     index_counts = status["index_counts"]
+    continuity_selector = status["continuity_selector"]
     if not store.roots.index_path.exists():
         findings.append(_finding("index_missing", "warning", "SQLite index is missing; rebuild is available."))
     else:
@@ -130,6 +133,7 @@ def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
         "index_counts": index_counts,
         "skipped_private_body_count": _skipped_private_body_count(store),
         "queue_backlog": 0,
+        "continuity_selector": continuity_selector,
         "last_write_age_seconds": status["last_write_age_seconds"],
         "findings": findings,
     }

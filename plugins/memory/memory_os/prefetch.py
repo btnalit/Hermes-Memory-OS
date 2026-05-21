@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,18 @@ HEADER = "## Memory-OS Context"
 DIAGNOSTIC_SUPPRESSION_NOTICE = (
     "Historical recall suppressed for diagnostic query. Use Current Memory-OS Runtime Facts only."
 )
+CONTINUITY_SELECTOR_SCHEMA_VERSION = "memory-os.continuity_selector.v0"
+
+_BRIDGE_SEED_SLOTS = {
+    "foreground": 2,
+    "cron": 1,
+    "mailbox": 1,
+    "room_family": 1,
+    "state_source": 1,
+    "governance": 1,
+}
+
+_MAX_CONTINUITY_RECORDS = 8
 
 _DIAGNOSTIC_QUERY_PATTERNS = (
     re.compile(r"记忆\s*(架构|系统|后端|provider|提供商|状态)"),
@@ -47,11 +60,12 @@ def build_prefetch(
         return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
     sections: list[tuple[str, list[str]]] = []
     _append_section(sections, "Identity Memory", _identity_lines(store))
+    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
-    _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
+    _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     if not sections:
         return ""
     return _fit_budget(_format(sections), budget_chars)
@@ -112,8 +126,107 @@ def _crystallized_lines(store: MemoryOSStore) -> list[str]:
 
 
 def _event_lines(store: MemoryOSStore) -> list[str]:
-    events = sorted(store.read_events(), key=lambda event: event.ts)[-5:]
-    return [f"- {event.kind}: {_redact(_clip(event.summary, 220))}" for event in events]
+    selected, _dropped = _select_continuity_events(store)
+    return [
+        f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
+        for event in selected
+    ]
+
+
+def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:
+    selected, _dropped = _select_continuity_events(store)
+    return [
+        f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
+        for event in selected
+        if _event_source_class(event) in {"cron", "mailbox", "room_family", "state_source", "governance"}
+    ]
+
+
+def continuity_selector_report(store: MemoryOSStore) -> dict[str, Any]:
+    selected, dropped = _select_continuity_events(store)
+    return {
+        "schema_version": CONTINUITY_SELECTOR_SCHEMA_VERSION,
+        "selected_total": len(selected),
+        "dropped_total": len(dropped),
+        "selected_by_source_class": dict(Counter(_event_source_class(event) for event in selected)),
+        "dropped_by_source_class": dict(Counter(_event_source_class(event) for event in dropped)),
+        "seed_slots": dict(_BRIDGE_SEED_SLOTS),
+        "max_records": _MAX_CONTINUITY_RECORDS,
+    }
+
+
+def _select_continuity_events(store: MemoryOSStore) -> tuple[list[Any], list[Any]]:
+    events = sorted(store.read_events(), key=lambda event: (event.ts, event.id), reverse=True)
+    selected: list[Any] = []
+    selected_ids: set[str] = set()
+    buckets: dict[str, list[Any]] = {source_class: [] for source_class in _BRIDGE_SEED_SLOTS}
+    for event in events:
+        source_class = _event_source_class(event)
+        if source_class in buckets:
+            buckets[source_class].append(event)
+
+    for source_class, limit in _BRIDGE_SEED_SLOTS.items():
+        for event in sorted(buckets[source_class], key=_seed_sort_key, reverse=True)[:limit]:
+            if len(selected) >= _MAX_CONTINUITY_RECORDS:
+                break
+            if event.id in selected_ids:
+                continue
+            selected.append(event)
+            selected_ids.add(event.id)
+
+    remaining = [event for event in events if event.id not in selected_ids]
+    for event in sorted(remaining, key=_global_sort_key, reverse=True):
+        if len(selected) >= _MAX_CONTINUITY_RECORDS:
+            break
+        selected.append(event)
+        selected_ids.add(event.id)
+
+    dropped = [event for event in events if event.id not in selected_ids]
+    selected = sorted(selected, key=lambda event: (event.ts, event.id))
+    return selected, dropped
+
+
+def _seed_sort_key(event: Any) -> tuple[str, float, str]:
+    return (str(getattr(event, "ts", "")), _event_importance(event), str(getattr(event, "id", "")))
+
+
+def _global_sort_key(event: Any) -> tuple[float, str, str]:
+    return (_event_importance(event), str(getattr(event, "ts", "")), str(getattr(event, "id", "")))
+
+
+def _event_importance(event: Any) -> float:
+    safe_ref = getattr(event, "safe_ref", {}) or {}
+    for key in ("importance", "score", "drive_weight"):
+        try:
+            return float(safe_ref.get(key, 0.0))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _event_source_class(event: Any) -> str:
+    safe_ref = getattr(event, "safe_ref", {}) or {}
+    source = str(getattr(event, "source", "")).lower()
+    kind = str(getattr(event, "kind", "")).lower()
+    tags = {str(tag).lower() for tag in getattr(event, "tags", [])}
+    source_module = str(safe_ref.get("source_module", "")).lower()
+    source_class = str(safe_ref.get("source_class", "")).lower()
+    platform = str(safe_ref.get("platform", "")).lower()
+    if source_module == "cron_mirror" or source == "cron" or "cron" in tags or platform == "cron":
+        return "cron"
+    if source_module == "state_source_mirror" or source_class.startswith("state:") or source == "state_source_mirror":
+        return "state_source"
+    if platform == "mailbox" or source == "mailbox" or "mailbox" in tags:
+        return "mailbox"
+    if platform in {"room", "family", "household"} or source in {"room", "family", "household"}:
+        return "room_family"
+    if source_module in {"ops_gate", "proposal_queue", "evidence_scoring", "self_evolution"}:
+        return "governance"
+    if any(marker in kind for marker in ("proposal", "governance", "evidence", "ops_gate", "self_evolution")):
+        return "governance"
+    if kind in {"conversation_turn", "memory_write", "conversation_turn_mirrored"}:
+        return "foreground"
+    return "other"
 
 
 def _indexed_lines(query: str, index: object | None) -> list[str]:

@@ -5,7 +5,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import build_prefetch
+from plugins.memory.memory_os.prefetch import build_prefetch, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -109,3 +109,89 @@ def test_prefetch_uses_index_search_for_relevant_older_event(tmp_path):
 
     assert "### Indexed Recall" in context
     assert "MOS_INDEX_RARE_MARKER" in context
+
+
+def test_prefetch_continuity_selector_preserves_bridge_seed_events(tmp_path):
+    store = _store(tmp_path)
+    cron_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=30, profile="memoryos-test"),
+            "ts": "2026-05-21T08:00:00+00:00",
+            "source": "cron",
+            "kind": "cron_job_run",
+            "summary": "BRIDGE_CRON_MARKER scheduled work happened.",
+            "safe_ref": {"source_module": "cron_mirror", "drive_policy": "index_only"},
+            "tags": ["cron", "mirror"],
+        }
+    )
+    state_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=31, profile="memoryos-test"),
+            "ts": "2026-05-21T08:01:00+00:00",
+            "source": "state_source_mirror",
+            "kind": "state_source_changed",
+            "summary": "BRIDGE_STATE_MARKER daily digest changed.",
+            "safe_ref": {"source_module": "state_source_mirror", "source_class": "state:digest_daily"},
+            "tags": ["state", "mirror"],
+        }
+    )
+    store.append_event(cron_event)
+    store.append_event(state_event)
+    for seed in range(32, 42):
+        store.append_event(
+            EventEnvelope.from_dict(
+                {
+                    **build_event(seed=seed, profile="memoryos-test"),
+                    "ts": f"2026-05-21T08:{seed:02d}:00+00:00",
+                    "source": "telegram",
+                    "kind": "conversation_turn",
+                    "summary": f"Recent foreground event {seed}.",
+                }
+            )
+        )
+    noisy_working = build_working_item(seed=99, source_event_id=cron_event.id)
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": noisy_working.updated_at,
+            "items": [
+                {
+                    **noisy_working.__dict__,
+                    "text": "NOISY_WORKING_MEMORY " * 200,
+                }
+            ],
+        },
+    )
+
+    context = build_prefetch("ordinary continuity question", budget_chars=900, store=store, index=None)
+
+    assert "### Continuity Bridge" in context
+    assert "BRIDGE_CRON_MARKER" in context
+    assert "BRIDGE_STATE_MARKER" in context
+    assert context.index("BRIDGE_CRON_MARKER") < context.find("NOISY_WORKING_MEMORY")
+
+
+def test_continuity_selector_report_counts_selected_and_dropped_without_private_bodies(tmp_path):
+    store = _store(tmp_path)
+    for seed in range(50, 60):
+        store.append_event(
+            EventEnvelope.from_dict(
+                {
+                    **build_event(seed=seed, profile="memoryos-test"),
+                    "source": "telegram",
+                    "kind": "conversation_turn",
+                    "summary": f"Selector public summary {seed}.",
+                    "safe_ref": {"raw_transcript": "PRIVATE_SELECTOR_BODY_SHOULD_NOT_APPEAR"},
+                }
+            )
+        )
+
+    report = continuity_selector_report(store)
+    rendered = str(report)
+
+    assert report["schema_version"] == "memory-os.continuity_selector.v0"
+    assert report["selected_total"] > 0
+    assert report["dropped_total"] > 0
+    assert "foreground" in report["selected_by_source_class"]
+    assert "PRIVATE_SELECTOR_BODY_SHOULD_NOT_APPEAR" not in rendered
