@@ -224,6 +224,52 @@ def test_prefetch_labels_candidates_as_review_only_not_approved_crystallized(tmp
     assert "### Crystallized Memory" not in context
 
 
+def test_prefetch_filters_diagnostic_working_memory_from_casual_memory_chat(tmp_path):
+    store = _store(tmp_path)
+    diagnostic_item = build_working_item(seed=80, source_event_id="evt-diagnostic")
+    ordinary_item = build_working_item(seed=81, source_event_id="evt-ordinary")
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": ordinary_item.updated_at,
+            "items": [
+                {
+                    **diagnostic_item.__dict__,
+                    "text": (
+                        "User: 你了解我们记忆系统吗？ | Assistant: 根据系统提供的实时诊断数据，"
+                        "当前提供商 provider=memory_os，index_health: stale，"
+                        "Hindsight API http://172.18.0.99:8888。"
+                    ),
+                },
+                {
+                    **ordinary_item.__dict__,
+                    "text": "User enjoyed a natural conversation about whether Memory-OS helps continuity.",
+                },
+                {
+                    **build_working_item(seed=82, source_event_id="evt-report").__dict__,
+                    "text": (
+                        "User: 你觉得我们在这个设计怎么样？ | Assistant: 从你提供的 "
+                        "<memory-context> 片段来看，核心架构包含 Ops-Gate 和 Proposal Queue，"
+                        "权威路径位于 /root/.hermes/memory-os。"
+                    ),
+                },
+            ],
+        },
+    )
+
+    context = build_prefetch("你觉得这套记忆系统怎么样？", budget_chars=2200, store=store, index=None)
+
+    assert "### Working Memory" in context
+    assert "natural conversation about whether Memory-OS helps continuity" in context
+    assert "index_health: stale" not in context
+    assert "172.18.0.99" not in context
+    assert "实时诊断数据" not in context
+    assert "<memory-context>" not in context
+    assert "/root/.hermes/memory-os" not in context
+    assert "Ops-Gate" not in context
+
+
 def test_provider_status_distinguishes_candidates_from_approved_crystallized_records(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")

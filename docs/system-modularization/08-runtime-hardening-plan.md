@@ -483,6 +483,34 @@ Acceptance:
   diagnostics
 - no existing candidate is auto-promoted or rewritten
 
+### RH-21c Working Memory Diagnostic Tone Guard
+
+Prevent old diagnostic-style working memory from becoming a style seed during
+ordinary conversation.
+
+Reason:
+
+- real Telegram testing on 2026-05-21 showed RH-21a correctly avoided
+  diagnostic grounding for casual prompts such as "你了解我们记忆系统吗"
+- the provider context still contained older working-memory summaries written
+  in a runtime-report style
+- those summaries could make the assistant repeat stale runtime claims such as
+  `index_health: stale` or old Hindsight API details even when current
+  `memory_os_status` was healthy
+- this is a context projection problem, not a canonical event or index problem
+
+Acceptance:
+
+- diagnostic/report-style working memory remains stored in Memory-OS but is
+  filtered from ordinary prefetch `Working Memory` sections
+- ordinary working-memory items remain visible in casual conversation
+- explicit provider/backend/status questions still use diagnostic grounding and
+  current runtime facts
+- filtering does not delete events, working items, candidates, audit entries,
+  or crystallized records
+- tests cover stale `index_health` and Hindsight URL leakage from working
+  memory
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:

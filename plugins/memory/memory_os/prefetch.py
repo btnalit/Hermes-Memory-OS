@@ -77,6 +77,28 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(secret\s*[:=]\s*)\S+"),
 )
 
+_DIAGNOSTIC_STYLE_SEED_PATTERNS = (
+    re.compile(r"memory[-_ ]?os\.tool_status", re.I),
+    re.compile(r"memory_os_status", re.I),
+    re.compile(r"index_health", re.I),
+    re.compile(r"prefetch_mode", re.I),
+    re.compile(r"canonical_store|canonical store", re.I),
+    re.compile(r"storage_model", re.I),
+    re.compile(r"172\.18\.0\.99"),
+    re.compile(r"/root/\.hermes/memory-os"),
+    re.compile(r"<memory-context>", re.I),
+    re.compile(r"hindsight api", re.I),
+    re.compile(r"\bops-gate\b", re.I),
+    re.compile(r"\bproposal queue\b", re.I),
+    re.compile(r"runtime facts", re.I),
+    re.compile(r"实时诊断数据"),
+    re.compile(r"当前提供商"),
+    re.compile(r"权威存储路径"),
+    re.compile(r"权威路径"),
+    re.compile(r"核心架构"),
+    re.compile(r"索引健康"),
+)
+
 
 def build_prefetch(
     query: str,
@@ -173,6 +195,8 @@ def _working_lines(store: MemoryOSStore) -> list[str]:
             if not isinstance(item, dict):
                 continue
             text = _redact(_clip(str(item.get("text", "")), 220))
+            if _is_diagnostic_style_seed(text):
+                continue
             if text:
                 lines.append(f"- {path.stem}/{item.get('kind', 'item')}: {text}")
     return lines
@@ -345,6 +369,13 @@ def _should_ground_diagnostic_query(
     if not text:
         return False
     return any(pattern.search(text) for pattern in _DIAGNOSTIC_QUERY_PATTERNS)
+
+
+def _is_diagnostic_style_seed(text: str) -> bool:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return False
+    return any(pattern.search(normalized) for pattern in _DIAGNOSTIC_STYLE_SEED_PATTERNS)
 
 
 def _format_diagnostic(runtime_facts: dict[str, Any]) -> str:

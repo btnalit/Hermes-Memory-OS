@@ -1972,3 +1972,99 @@ PASS for `10.20.3.200` full plugin deployment and no-send module validation.
 
 The next step is the 2026-05-22 Stability Gate. If it passes, enter Runtime
 Hardening on the test host. Production migration remains out of scope.
+
+## 2026-05-21 Telegram Follow-Up: RH-21c Finding
+
+After RH-21a/RH-21b, the owner ran a fresh Telegram conversation:
+
+```text
+你了解我们记忆系统吗？
+你觉得这套记忆系统怎么样？
+当前记忆架构是什么？
+你现在用的是什么 memory provider？
+那些 crystallized candidates 是已经沉淀的长期记忆吗？
+```
+
+Observed host state:
+
+```json
+{
+  "events": 17,
+  "working_items": 10,
+  "crystallized_candidates": 10,
+  "crystallized_records": 0,
+  "index_health": {
+    "state": "healthy"
+  },
+  "doctor": "ok",
+  "queue_backlog": 0
+}
+```
+
+Interpretation:
+
+- the five Telegram turns were captured as events, working items, and review
+  candidates
+- no crystallized records were created
+- doctor remained `ok`; the real index state was `healthy`
+- explicit diagnostic questions still received current runtime facts
+- casual memory-system questions no longer triggered diagnostic grounding
+
+New finding:
+
+- casual prompts could still receive old `Working Memory` summaries written in
+  a diagnostic/report style
+- those historical summaries could seed stale wording such as
+  `index_health: stale` or old Hindsight API details even though the current
+  runtime facts were healthy
+
+Action:
+
+- added RH-21c Working Memory Diagnostic Tone Guard to the hardening plan
+- RH-21c filters diagnostic/report-style working items from ordinary prefetch
+  context without deleting canonical Memory-OS data
+
+Implementation validation:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/plugins/memory/test_memory_os_diagnostic_grounding.py \
+  tests/plugins/memory/test_memory_os_query_router.py -q
+
+27 passed
+
+python -m pytest -q
+
+229 passed
+```
+
+Host validation after reinstalling the provider/runtime on `10.20.3.200`:
+
+```json
+{
+  "casual_prompt": {
+    "diagnostic": false,
+    "stale_claim": false,
+    "hindsight_url": false,
+    "canonical_path": false,
+    "memory_context_tag": false,
+    "ops_gate_report_seed": false
+  },
+  "explicit_diagnostic_prompt": {
+    "diagnostic": true,
+    "runtime_healthy": true,
+    "hindsight_url": false
+  },
+  "doctor": "ok",
+  "heartbeat_timer": "active/enabled"
+}
+```
+
+Boundary:
+
+- canonical events, working items, candidates, and audit entries were not
+  deleted or rewritten
+- filtering happens only during ordinary prefetch context projection
+- explicit provider/backend/status questions still receive current diagnostic
+  runtime facts
