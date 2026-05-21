@@ -409,6 +409,91 @@ cron output files to mirror, so this validates empty-environment behavior and
 the no-write dry-run boundary. It does not yet validate `--apply` or non-empty
 cron output handling on the host.
 
+## Runtime Hardening RH-09 Dry-Run
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-09 SessionMirror only
+- no plugin refresh on `/root/.hermes`
+- no gateway restart
+- no `--apply`
+- no `state.db` write
+- no Memory-OS event write
+
+Method:
+
+The current local working tree was copied to `/tmp/memory-os-rh09` on
+`hermes-media` and executed with `PYTHONPATH=/tmp/memory-os-rh09`. This avoided
+installing the uncommitted SessionMirror code into the live Hermes plugin tree.
+
+Pre-check:
+
+```text
+state.db: present
+/root/.hermes/sessions: 45 files
+installed session_mirror.py: missing
+```
+
+SessionMirror status:
+
+```json
+{
+  "status": "ok",
+  "session_count": 22,
+  "covered_session_count": 9,
+  "pending_session_count": 13,
+  "state_db_present": true,
+  "sessions_root_present": true,
+  "state_rebuilt": false,
+  "findings": []
+}
+```
+
+SessionMirror doctor:
+
+```json
+{
+  "status": "ok",
+  "findings": []
+}
+```
+
+SessionMirror dry-run result:
+
+```json
+{
+  "status": "ok",
+  "session_count": 22,
+  "covered_session_count": 9,
+  "new_event_count": 13,
+  "dry_run": true,
+  "state_rebuilt": false,
+  "written_event_ids": [],
+  "findings": []
+}
+```
+
+Side-effect check:
+
+```text
+/root/.hermes/memory-os/runtime/session_mirror_state.json: absent
+memory-os audit grep session_mirror: no entries
+Memory-OS events: 11
+working_items: 12
+index_health: healthy
+queue_backlog: 0
+```
+
+Interpretation:
+
+RH-09 SessionMirror can read the test host's session surfaces in read-only mode
+and can identify uncovered sessions without writing events, state, or audit
+records. The dry-run found 13 sessions that would be mirrored by an apply run,
+but apply remains blocked until the mirror family and RH-12 Inner Drive
+eligibility policy are in place.
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.
