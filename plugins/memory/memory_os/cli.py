@@ -58,6 +58,7 @@ from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
 from .session_mirror import SessionMirror
+from .shadow_journal import ShadowJournalIngestion
 from .state_source_mirror import StateSourceMirror
 from .store import MemoryOSStore
 from .working import WorkingMemoryService
@@ -282,6 +283,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     state_source_scan = state_source_subs.add_parser("scan")
     state_source_scan.add_argument("--dry-run", action="store_true")
     state_source_scan.add_argument("--apply", action="store_true")
+    shadow_parser = subs.add_parser("shadow-journal")
+    shadow_subs = shadow_parser.add_subparsers(dest="shadow_journal_command", required=True)
+    shadow_subs.add_parser("status")
+    shadow_subs.add_parser("doctor")
+    shadow_ingest = shadow_subs.add_parser("ingest")
+    shadow_ingest.add_argument("--max-records", type=int, default=100)
+    shadow_ingest.add_argument("--dry-run", action="store_true")
+    shadow_ingest.add_argument("--apply", action="store_true")
     export_parser = subs.add_parser("export-shadow")
     export_parser.add_argument("--profile", default="sannai")
     export_parser.add_argument("--hermes-home", required=True)
@@ -357,6 +366,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _session_mirror_command(args, store)
     if command == "state-source-mirror":
         return _state_source_mirror_command(args, store)
+    if command == "shadow-journal":
+        return _shadow_journal_command(args, store)
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -485,6 +496,30 @@ def _state_source_mirror_command(args: argparse.Namespace, store: MemoryOSStore)
     if command == "scan":
         dry_run = not bool(getattr(args, "apply", False))
         print(json.dumps(mirror.scan(dry_run=dry_run), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    return 2
+
+
+def _shadow_journal_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    ingestion = ShadowJournalIngestion(store)
+    command = args.shadow_journal_command
+    if command == "status":
+        print(json.dumps(ingestion.status(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "doctor":
+        result = ingestion.doctor()
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if result["status"] == "error" else 0
+    if command == "ingest":
+        dry_run = not bool(getattr(args, "apply", False))
+        print(
+            json.dumps(
+                ingestion.ingest(dry_run=dry_run, max_records=args.max_records),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     return 2
 

@@ -464,6 +464,58 @@ Acceptance:
 - recurring ingestion is disabled until retention, source caps, and Inner Drive
   event policy are in place
 
+Implemented v0.1 behavior:
+
+- producer spool path:
+
+```text
+$HERMES_HOME/memory-os/shadow-journal/<producer>/spool.jsonl
+```
+
+- spool record schema:
+
+```json
+{
+  "schema_version": "memory-os.shadow_journal_record.v0",
+  "record_id": "producer-local-id",
+  "ts": "2026-05-21T10:00:00+00:00",
+  "producer": "pcdn",
+  "kind": "telemetry_status",
+  "source_class": "telemetry",
+  "summary": "Bounded safe summary.",
+  "payload": {"status": "ok"}
+}
+```
+
+- CLI:
+
+```bash
+hermes memory_os shadow-journal status
+hermes memory_os shadow-journal doctor
+hermes memory_os shadow-journal ingest          # dry-run by default
+hermes memory_os shadow-journal ingest --apply  # bounded canonical write
+```
+
+- `ingest` is dry-run by default and reports `would_write_event_count` without
+  mutating Memory-OS events
+- `--apply` takes a bounded batch, uses a `hermes.schedule_lock.v0` compatible
+  lock at `memory-os/runtime/locks/shadow_journal_ingest.lock.json`, and
+  defers when another worker holds the lock
+- accepted records become `summary_only` canonical Memory-OS events with:
+  - `source=shadow_journal:<producer>`
+  - `source_module=shadow_journal`
+  - `drive_policy=index_only`
+  - `candidate_allowed=false`
+  - `retention_class=low_value` for low-value telemetry/status/metrics/runtime
+    source classes
+- dedup uses `producer + record_id` when present, otherwise a deterministic
+  record hash; accepted dedup keys are stored in
+  `memory-os/runtime/shadow_journal_state.json`
+- malformed records are not events; apply writes them to
+  `memory-os/quarantine/shadow_journal_malformed.jsonl` and records audit
+- action/tool failure records may enter as events, but they do not retry, heal,
+  send, execute, approve, or bypass Ops-Gate/Proposal Queue
+
 ### RH-21a Chinese Diagnostic Trigger Tuning
 
 Tune Slice 21 diagnostic grounding for Chinese conversational prompts.

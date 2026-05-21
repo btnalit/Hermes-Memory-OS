@@ -205,6 +205,23 @@ Spool records are not memory until the arbiter accepts them.
 
 Malformed records go to quarantine and audit.
 
+RH-18 v0.1 implements this as:
+
+```text
+memory-os/shadow-journal/<producer>/spool.jsonl
+  -> hermes memory_os shadow-journal ingest --apply
+  -> summary_only Memory-OS event
+```
+
+Default command behavior remains dry-run:
+
+```bash
+hermes memory_os shadow-journal ingest
+```
+
+Canonical writes require `--apply`, a bounded batch, a lock-compatible runtime
+lock, source policy, dedup state, and malformed-record quarantine.
+
 ## 5. Failure Back-Propagation
 
 External idea:

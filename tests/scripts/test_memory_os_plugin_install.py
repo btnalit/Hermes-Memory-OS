@@ -106,6 +106,7 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert runtime_root.joinpath("modules", "expression", "speak_gate.py").is_file()
     assert runtime_root.joinpath("modules", "governance", "feedback_bridge.py").is_file()
     assert runtime_root.joinpath("memory", "memory_os", "store.py").is_file()
+    assert runtime_root.joinpath("memory", "memory_os", "shadow_journal.py").is_file()
     assert runtime_python.joinpath("agent", "memory_provider.py").is_file()
     assert not any("__pycache__" in path for path in report["system_module_files"])
     assert not any("__pycache__" in path for path in report["agent_runtime_files"])
