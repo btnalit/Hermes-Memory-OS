@@ -734,9 +734,230 @@ Covered invariants:
 
 Interpretation:
 
-RH-12 is ready for code review. It is intentionally not committed in this gate
-and should be reviewed before RH-13 starts because it changes Inner Drive
-semantics.
+RH-12 was reviewed and committed locally before RH-13 design work started:
+
+```text
+fd6ebe8 Add inner drive mirror eligibility policy
+```
+
+This keeps RH-13 dependent on a committed Inner Drive eligibility policy instead
+of an implicit or unreviewed working-tree change.
+
+## Pre-RH-13 Clarifications
+
+Claude's RH-12 review raised two questions before RH-13.
+
+### Why `proposal_after_approval.actual_send` Stays `false`
+
+`proposal_after_approval.decision=would_send` means Speak Gate would allow the
+approved proposal to be expressed. It does not mean a transport send happened.
+
+The v0.1 Speak Gate code has no real DeliverySink call path. It always returns
+`actual_send=false` in delivery decisions, and `delivery_mode=send` is explicitly
+reported as `send_blocked` / doctor error:
+
+```text
+delivery_mode=no-send    -> decision=no_send, actual_send=false
+delivery_mode=would-send -> decision=would_send, actual_send=false
+delivery_mode=send       -> decision=send_blocked, actual_send=false
+```
+
+So the boundary is code-level, not just configuration-level. Owner approval in
+Proposal Queue can change a Speak Gate decision from `no_send` to `would_send`,
+but v0.1 still has no path that performs real Telegram, mailbox, or other
+delivery.
+
+### Why `evidence_scoring.score_count=36`
+
+Evidence/Scoring v0.1 uses a one-subject / one-evidence / one-score snapshot
+model. `score_count` is the number of collected subjects, not a multi-dimension
+score matrix.
+
+For the host validation run:
+
+```text
+11 Memory-OS events
+12 working-memory items
+1 proposal_queue item
+12 crystallized candidates
+= 36 scored subjects
+```
+
+Each subject gets exactly one evidence record and one score record. This is
+simple and explainable, but RH-13 must avoid treating raw score volume as a
+digest priority signal by itself. Digest/consolidation should group and cap
+subjects by source class, freshness, proposal state, and evidence refs before
+creating any candidate or proposal.
+
+### Normal Post-Module Validation Step
+
+Module writes can temporarily outrun the SQLite index. Runtime validation should
+treat heartbeat catch-up plus doctor as the default post-module check:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory_os heartbeat --max-events 100
+HERMES_HOME=/root/.hermes hermes memory_os doctor
+```
+
+This turns index catch-up from an ad-hoc repair into the standard verification
+path after module runs that write working, candidates, audit, or governance
+artifacts.
+
+## Runtime Hardening RH-13 Local Implementation Gate
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-13 Digest / Consolidation Mapping
+- local code and tests
+- no 10.20.3.200 plugin install in this local gate
+- no recurring schedule enablement
+- no real send / execute / identity write / crystallized approval
+
+Implemented local module:
+
+```text
+plugins/modules/context/digest_consolidation.py
+```
+
+Implemented behavior:
+
+- module manifest and lifecycle install/enable support
+- profile-local config at `system-modules/digest_consolidation/config.json`
+- default `time_zone=UTC`, profile override supported
+- daily digest window assignment by event timestamp converted to profile time
+- late-arrival group using event timestamp plus safe `arrived_at` metadata
+- daily digest artifact write through tmp-file + fsync + atomic rename
+- weekly consolidation over ISO week windows
+- weekly expanded read scope includes Memory-OS events for the target week, so
+  daily dropped events remain visible
+- operational metadata source classes (`cron`, `state`, `session`) are digest
+  visible but do not create owner-review candidates by default
+- candidate dedup key uses `semantic_subject + candidate_kind + canonical
+  source ref set`
+- overlapping weekly candidates update existing proposal queue items through
+  `candidate_updated_via_overlap` provenance instead of creating duplicates
+- weekly candidate creation is capped by `max_candidates_per_week` (default 5)
+- dry-run and apply artifacts are byte-identical for deterministic payloads
+- status/doctor report artifact accumulation, but RH-13 does not prune artifacts
+- installer self-check now treats `modules/context/digest_consolidation.py` as
+  part of the required system module runtime package
+
+Local tests added:
+
+```text
+tests/system_modularization/test_digest_consolidation_module.py
+```
+
+Covered invariants:
+
+- manifest installs through `ModuleLifecycle`
+- profile timezone daily window works
+- late arrivals do not rewrite past digests
+- daily apply artifact matches dry-run would-write payload
+- candidate dedup key is order-independent and scoped by semantic subject
+- weekly consolidation reselects events that daily digest dropped
+- weekly consolidation creates at most 5 candidates by default
+- overlapping semantic subjects update the existing candidate
+- cron/state/session metadata do not become owner facts
+- weekly dry-run and apply artifacts match
+- artifact accumulation reports warning only; no pruning occurs in RH-13
+- Sannai-shaped identity fixture is not touched
+
+Self-review result:
+
+```text
+No actual_send=True path found.
+No actual_approve=True path found.
+No crystallized approved record write path found.
+No identity/SOUL write path found.
+No subprocess/systemctl/network transport path added.
+```
+
+Local verification:
+
+```text
+python -m pytest -q
+210 passed
+
+python -m compileall -q agent plugins scripts
+passed
+
+git diff --check
+passed
+```
+
+## Runtime Hardening RH-13 10.20.3.200 Dry-Run
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-13 Digest / Consolidation dry-run only
+- temporary code copy at `/tmp/memory-os-rh13`
+- `PYTHONPATH=/tmp/memory-os-rh13`
+- no install into `/root/.hermes/plugins`
+- no gateway restart
+- no recurring schedule enablement
+- no apply
+
+Method:
+
+```text
+copy /tmp/hermes-memory-os-validation/repo -> /tmp/memory-os-rh13
+overlay RH-13 context module files into the temp copy
+run DigestConsolidationModule directly against HERMES_HOME=/root/.hermes
+```
+
+Dry-run result:
+
+```json
+{
+  "profile": "default",
+  "event_count_before": 11,
+  "event_count_after": 11,
+  "module_root_exists_before": false,
+  "module_root_exists_after": false,
+  "daily": {
+    "dry_run": true,
+    "would_write_group_count": 0,
+    "selected_count": 0,
+    "dropped_count": 0,
+    "late_arrival_count": 0,
+    "actual_send": false,
+    "actual_approve": false
+  },
+  "weekly": {
+    "dry_run": true,
+    "expanded_event_count": 11,
+    "candidate_suggestion_count": 0,
+    "deferred_candidate_count": 0,
+    "forbidden_sources": ["raw_full_session_transcripts"],
+    "actual_send": false,
+    "actual_approve": false
+  }
+}
+```
+
+Interpretation:
+
+- daily target date `2026-05-21` had no matching profile-local events, so the
+  daily dry-run produced an empty digest card
+- weekly target `2026-W21` re-read the Memory-OS event stream and saw all 11
+  current events
+- dry-run did not create `/root/.hermes/system-modules/digest_consolidation`
+- Memory-OS event count stayed `11 -> 11`
+- no working item, candidate, proposal, send, execute, identity, or
+  crystallized approval path was triggered
+
+Post-dry-run doctor:
+
+```text
+status: ok
+only finding: hindsight_adapter_disabled warning
+queue_backlog: 0
+```
 
 ## Residual Items For Runtime Hardening
 

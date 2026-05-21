@@ -131,6 +131,7 @@ def _validate_system_module_source(source: Path) -> None:
     required = (
         "system/lifecycle.py",
         "system/scheduler.py",
+        "modules/context/digest_consolidation.py",
         "modules/cognition/inner_drive.py",
         "modules/expression/speak_gate.py",
         "memory/memory_os/store.py",

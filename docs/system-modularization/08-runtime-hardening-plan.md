@@ -287,6 +287,10 @@ Acceptance:
 Define the generic equivalent of Sannai daily digest and weekly consolidation
 without copying Sannai private policy.
 
+Detailed design:
+
+- `16-digest-consolidation-design.md`
+
 Acceptance:
 
 - digest reads Memory-OS events/candidates, not raw full sessions
