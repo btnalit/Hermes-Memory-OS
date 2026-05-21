@@ -2690,3 +2690,310 @@ Boundaries held:
 - no identity write
 - no send
 - no execute
+
+## RH-22 / RH-23 / RH-24 Unified Test Host Validation
+
+Date: 2026-05-21
+
+Scope:
+
+- deploy current committed repo at commit `60a615e`
+- verify RH-22 conversation-regression CLI and transcript evaluator
+- verify RH-23 Deep Reflection injection source-class monitoring
+- verify RH-24 `memory_os_status` tool contract reporting
+- verify heartbeat/index catch-up and doctor after deployment
+- restart only the test-host main gateway so the running process reloads the
+  freshly deployed provider/tool contract
+
+Deployment:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable \
+  --deep-reflection-preset test-host
+```
+
+Installer evidence:
+
+```json
+{
+  "provider": "memory_os",
+  "enabled": true,
+  "runtime_enabled": true,
+  "system_modules_installed": true,
+  "copied_file_count": 28,
+  "system_module_file_count": 54,
+  "copied_files_include": [
+    "conversation_regression.py",
+    "status_tool_contract.py"
+  ],
+  "system_module_files_include": [
+    "memory/memory_os/conversation_regression.py",
+    "memory/memory_os/status_tool_contract.py"
+  ],
+  "deep_reflection_preset": "test-host",
+  "deep_reflection_config": {
+    "enabled": true,
+    "injection_mode": "auto_bounded",
+    "working_updates_enabled": false,
+    "self_evolution_proposals_enabled": true,
+    "wandering_seed_enabled": true,
+    "llm_enabled": false
+  }
+}
+```
+
+Provider and runtime checks:
+
+```text
+hermes memory:
+  Provider: memory_os
+  Plugin: installed
+  Status: available
+  memory_os: active
+
+hermes-memory-os-heartbeat.timer: active/enabled
+
+Installed files:
+  /root/.hermes/plugins/memory_os/conversation_regression.py
+  /root/.hermes/plugins/memory_os/status_tool_contract.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/conversation_regression.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/status_tool_contract.py
+```
+
+### RH-22 Conversation Regression
+
+Prompt set command:
+
+```bash
+hermes memory_os conversation-regression prompts
+```
+
+Result:
+
+```json
+{
+  "schema_version": "memory-os.conversation_regression_prompts.v0",
+  "prompt_count": 7
+}
+```
+
+Transcript evaluator command:
+
+```bash
+hermes memory_os conversation-regression evaluate \
+  --transcript /tmp/rh22_transcript_pass.json
+```
+
+Result:
+
+```json
+{
+  "schema_version": "memory-os.conversation_regression.v0",
+  "status": "ok",
+  "prompt_count": 3,
+  "failure_count": 0,
+  "warning_count": 0,
+  "checks": [
+    {
+      "prompt_id": "casual_memory_system_change",
+      "category": "casual",
+      "memory_os_status_called": false
+    },
+    {
+      "prompt_id": "diagnostic_current_architecture",
+      "category": "diagnostic",
+      "memory_os_status_called": true
+    },
+    {
+      "prompt_id": "candidate_vs_crystallized",
+      "category": "candidate_boundary",
+      "memory_os_status_called": true
+    }
+  ]
+}
+```
+
+Interpretation:
+
+- ordinary memory-system conversation remains no-status-tool
+- explicit architecture diagnostics allow `memory_os_status`
+- candidate-vs-crystallized boundary fixture passes
+- no private transcript bodies are recorded in this public report
+
+### RH-23 Deep Reflection Source-Class Monitoring
+
+Command:
+
+```bash
+PYTHONPATH=/root/.hermes/memory-os/runtime/python python3 - <<'PY'
+from plugins.modules.cognition.deep_reflection import DeepReflectionModule
+module = DeepReflectionModule('/root/.hermes', profile='default')
+print(module.status())
+print(module.preview_injection())
+PY
+```
+
+Observed source-class distribution:
+
+```json
+{
+  "status_schema": "hermes.deep_reflection_status.v0",
+  "injection_mode": "auto_bounded",
+  "current_injection_exists": true,
+  "latest_injection_source_classes": {
+    "selected_by_source_class": {
+      "working": 2
+    },
+    "dropped_by_source_class": {
+      "working": 1
+    },
+    "selected_total": 2,
+    "dropped_total": 1
+  },
+  "rolling_injection_source_classes": {
+    "selected_by_source_class": {
+      "working": 14
+    },
+    "dropped_by_source_class": {
+      "working": 7
+    },
+    "selected_total": 14,
+    "dropped_total": 7,
+    "window_report_count": 7
+  },
+  "preview_selected": 2,
+  "preview_distribution": {
+    "selected_by_source_class": {
+      "working": 2
+    },
+    "dropped_by_source_class": {
+      "working": 1
+    },
+    "selected_total": 2,
+    "dropped_total": 1
+  },
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_crystallized_approval": false
+}
+```
+
+Interpretation:
+
+- RH-23 status and preview expose latest and rolling source-class distribution
+- current test-host cards still come from `working`, matching prior DR-08
+  observations
+- the monitoring is informational only and did not change card eligibility,
+  ranking, safety filters, sends, executes, identity, or crystallized approval
+
+### RH-24 Status Tool Contract
+
+Command:
+
+```bash
+hermes memory_os conversation-regression status-tool-contract
+```
+
+Result:
+
+```json
+{
+  "schema_version": "memory-os.status_tool_contract.v0",
+  "tool_name": "memory_os_status",
+  "validation": {
+    "schema_version": "memory-os.status_tool_contract_validation.v0",
+    "status": "ok",
+    "findings": []
+  }
+}
+```
+
+Interpretation:
+
+- the deployed provider exposes the maintained `memory_os_status` tool contract
+- contract validation passed on the test host
+- Chinese / mixed Chinese-English diagnostic and non-diagnostic fixture
+  boundaries are available through the contract report
+
+### Heartbeat, Doctor, And Gateway Reload
+
+Heartbeat command:
+
+```bash
+hermes memory_os heartbeat --max-events 100
+```
+
+Heartbeat result:
+
+```json
+{
+  "schema_version": "memory-os.heartbeat.v0",
+  "total_event_count": 24,
+  "already_processed_event_count": 24,
+  "processed_event_count": 0,
+  "candidate_count": 17,
+  "candidate_created_count": 0,
+  "working_item_count": 17,
+  "crystallized_record_count": 0,
+  "index_counts": {
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0,
+    "audit_entries": 319
+  }
+}
+```
+
+Doctor command:
+
+```bash
+hermes memory_os doctor
+```
+
+Doctor result:
+
+```json
+{
+  "schema_version": "memory-os.doctor.v0",
+  "status": "ok",
+  "exit_code": 0,
+  "findings": [
+    {
+      "code": "hindsight_adapter_disabled",
+      "severity": "warning"
+    }
+  ]
+}
+```
+
+Gateway reload:
+
+```text
+hermes-gateway.service:
+  before_pid: 435355
+  after_pid: 436233
+  active: active
+```
+
+Verdict:
+
+PASS for RH-22/RH-23/RH-24 unified validation on `10.20.3.200`.
+
+Boundaries held:
+
+- no send
+- no execute
+- no identity write
+- no crystallized approval
+- no Hindsight export
+- no destructive cleanup apply
+- no shadow journal apply
+- Deep Reflection source-class monitoring remained observational
+- `memory_os_status` contract is available and validated
