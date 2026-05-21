@@ -814,6 +814,101 @@ Open questions:
 - Should a later tuning slice add diversity caps or per-source minimums, or
   would that distort the reflection signal?
 
+## Future Work Tracking
+
+These items came out of the post-PS-05 stage gate review. They are P1 follow-up
+work, not blockers for the current v0.1 Runtime Hardening / DeepReflection /
+plugin-shell baseline. Each item should remain owner-reviewed before it changes
+runtime behavior on 10.20.3.200.
+
+### FW-01 PS-06 Shell Failure Isolation Test
+
+Add a fault-injection test for the two-step installer path:
+
+- Step 1 enables the `memory_os` provider.
+- Step 2 enables the `memory-os-agent-os` shell plugin.
+- If Step 2 fails, the already-working provider must remain active and
+  uncorrupted.
+- If Step 1 fails, shell activation must fail closed and must not write a
+  half-enabled plugin state.
+
+Tracking signal:
+
+- a local installer test that deliberately simulates shell enablement failure
+- a host validation note proving provider status remains `memory_os` after the
+  simulated failure
+
+### FW-02 RH-17 Audit Retention Policy
+
+Clarify how audit entries participate in retention and compaction.
+
+Open questions:
+
+- Are Memory-OS audit entries retained forever, archived, or compacted after a
+  time window?
+- Are shell hook markers such as `agent_os_shell_session_started`,
+  `agent_os_shell_session_reset`, and `agent_os_shell_session_finalized`
+  treated differently from provider/runtime audit entries?
+- Should audit retention be dry-run only in v0.1, with physical removal
+  deferred?
+
+Boundary:
+
+- do not delete audit entries by default
+- any audit compaction must be dry-run first, policy-driven, and reversible via
+  archive artifacts
+
+### FW-03 Monitor v0.2 Hook Coverage Detection
+
+Improve the 10.20.3.200 read-only monitor so hook-marker coverage can be
+checked against observed session activity.
+
+Current limitation:
+
+- the monitor can count shell hook markers, but it does not know whether real
+  session starts, resets, or finalizes happened during the same window
+- therefore "marker counts did not change despite real session resets" is not a
+  reliable automated warning yet
+
+Future monitor signal:
+
+- read only from session metadata or another safe session-count source
+- compare expected marker activity against observed marker activity over the
+  same window
+- emit `WARN` when session activity is present but shell markers are missing or
+  far below expected volume
+
+Boundary:
+
+- monitor remains read-only
+- no hook replay, session reset, gateway restart, heartbeat catch-up, or repair
+  action is triggered automatically
+
+### FW-04 Deep Reflection Source-Class Skew Explanation
+
+RH-25 tracks the current DeepReflection source-class skew observation. Keep it
+as an evidence-gathering item until the test host has enough runtime data.
+
+Current baseline:
+
+- seven rolling reports showed selected and dropped injection cards coming only
+  from `working`
+- this is not a failure by itself because RH-23 is observational only
+
+Next evidence to collect:
+
+- 1-2 weeks of rolling source-class distribution from 10.20.3.200
+- whether `foreground`, `digest`, or `governance` cards appear naturally after
+  more real runtime
+- whether the skew is caused by low data volume, source availability, selector
+  scoring, or an ingestion path gap
+
+Boundary:
+
+- do not tune card eligibility, ranking, safety filters, TTL, caps, or
+  auto-injection behavior based on the current skew alone
+- any selector tuning should be proposed as a separate reviewed RH item
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:
