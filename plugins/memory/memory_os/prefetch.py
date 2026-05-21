@@ -37,6 +37,36 @@ _DIAGNOSTIC_QUERY_PATTERNS = (
     re.compile(r"用的什么.*记忆"),
 )
 
+_ASCII_ENTITY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
+_FAST_PATH_CHINESE_KEYWORDS = (
+    "报错",
+    "错误",
+    "失败",
+    "丢包",
+    "队列",
+    "网关",
+    "重启",
+    "提案",
+    "治理",
+    "证据",
+    "结晶",
+    "候选",
+    "会话",
+    "定时",
+    "状态",
+    "索引",
+    "延迟",
+    "记忆",
+)
+_ROUTE_STOP_ENTITIES = {
+    "api_key",
+    "key",
+    "token",
+    "secret",
+    "password",
+    "redacted",
+}
+
 _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)\S+"),
     re.compile(r"(?i)(token\s*[:=]\s*)\S+"),
@@ -64,11 +94,47 @@ def build_prefetch(
     _append_section(sections, "Working Memory", _working_lines(store))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
-    _append_section(sections, "Recent Event Summaries", _event_lines(store))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
+    _append_section(sections, "Recent Event Summaries", _event_lines(store))
     if not sections:
         return ""
     return _fit_budget(_format(sections), budget_chars)
+
+
+def plan_query_route(
+    query: str,
+    *,
+    diagnostic_grounding_enabled: bool = True,
+) -> dict[str, Any]:
+    text = " ".join(str(query or "").split())
+    if not text:
+        return {"route": "slow_path", "search_query": "", "display_query": "", "keywords": []}
+    if _should_ground_diagnostic_query(text, diagnostic_grounding_enabled=diagnostic_grounding_enabled):
+        return {"route": "diagnostic", "search_query": "", "display_query": "", "keywords": []}
+
+    redacted = _redact(text)
+    entities = [
+        entity
+        for entity in _ASCII_ENTITY_PATTERN.findall(redacted)
+        if entity.lower() not in _ROUTE_STOP_ENTITIES
+    ]
+    chinese_keywords = [keyword for keyword in _FAST_PATH_CHINESE_KEYWORDS if keyword in redacted]
+    keywords = _dedupe(entities or chinese_keywords)
+    if keywords:
+        search_query = " ".join(keywords[:6])
+        return {
+            "route": "fast_path",
+            "search_query": search_query,
+            "display_query": search_query,
+            "keywords": keywords[:6],
+        }
+    slow_query = _clip(redacted, 120)
+    return {
+        "route": "slow_path",
+        "search_query": slow_query,
+        "display_query": slow_query,
+        "keywords": [],
+    }
 
 
 def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: list[str]) -> None:
@@ -230,10 +296,12 @@ def _event_source_class(event: Any) -> str:
 
 
 def _indexed_lines(query: str, index: object | None) -> list[str]:
-    if index is None or not query.strip() or not hasattr(index, "search"):
+    route = plan_query_route(query, diagnostic_grounding_enabled=False)
+    search_query = str(route.get("search_query", ""))
+    if index is None or not search_query.strip() or not hasattr(index, "search"):
         return []
     try:
-        result = index.search(query, limit=5)
+        result = index.search(search_query, limit=5)
     except Exception:
         return []
     lines: list[str] = []
@@ -243,6 +311,9 @@ def _indexed_lines(query: str, index: object | None) -> list[str]:
         snippet = _redact(_clip(str(hit.get("snippet", "")), 220))
         if snippet:
             lines.append(f"- {hit.get('record_type', 'record')}/{hit.get('record_id', '')}: {snippet}")
+    if lines:
+        display_query = str(route.get("display_query", ""))
+        lines.insert(0, f"- query route: {route.get('route', 'slow_path')}; search: {display_query}")
     return lines
 
 
@@ -294,6 +365,18 @@ def _fact_value(value: Any) -> str:
     if isinstance(value, bool):
         return str(value).lower()
     return str(value)
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = item.strip()
+        key = normalized.lower()
+        if normalized and key not in seen:
+            result.append(normalized)
+            seen.add(key)
+    return result
 
 
 def _file_snippet(path: Path) -> str:

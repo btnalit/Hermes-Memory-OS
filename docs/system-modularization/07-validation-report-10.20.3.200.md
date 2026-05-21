@@ -1687,6 +1687,153 @@ Interpretation:
 - no actual send, execute, identity write, relationship write, Hindsight export,
   or crystallized approval occurred
 
+## Runtime Hardening RH-16 Query Fast-Path Router
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-16 Query Fast-Path Router
+- deterministic query routing before indexed recall
+- Chinese and mixed Chinese/English operational query fixtures
+- preserve Slice 21 diagnostic grounding authority
+- deploy to `10.20.3.200` test host and verify provider prefetch
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_query_router.py \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/plugins/memory/test_memory_os_diagnostic_grounding.py -q
+
+22 passed
+
+python -m pytest -q
+
+224 passed
+```
+
+New local coverage:
+
+```text
+test_query_router_fast_path_extracts_mixed_operational_keywords
+test_query_router_slow_path_for_abstract_query_without_entities
+test_query_router_diagnostic_route_preserves_diagnostic_authority
+test_query_router_redacts_secret_like_user_input
+test_prefetch_uses_routed_query_and_reports_route
+test_prefetch_keeps_targeted_indexed_recall_inside_tight_budget
+```
+
+Implementation note:
+
+The first 10.20.3.200 validation exposed an over-narrow route:
+
+```text
+PCDN loss_rate 报错
+```
+
+This missed the RH-15 event because `报错` was a generic Chinese symptom word
+while the indexed event used `status=error`. The route planner now prefers
+strong ASCII/module/parameter entities when present and uses Chinese operational
+keywords only when no stronger entities are available.
+
+Host deployment:
+
+```text
+target: 10.20.3.200 only
+code copy: /tmp/memory-os-rh16
+installed: provider, system modules, agent runtime, heartbeat runtime
+heartbeat timer: active/enabled
+gateway restart: not required for this provider-prefetch validation
+```
+
+Provider prefetch validation:
+
+```json
+{
+  "diagnostic_has_indexed_recall": false,
+  "diagnostic_has_runtime_facts": true,
+  "diagnostic_route": {
+    "display_query": "",
+    "keywords": [],
+    "route": "diagnostic",
+    "search_query": ""
+  },
+  "fast_context_has_loss_rate": true,
+  "fast_context_has_rh15_event": true,
+  "fast_context_has_route": true,
+  "fast_context_indexed_before_recent": true,
+  "fast_route": {
+    "display_query": "PCDN loss_rate",
+    "keywords": [
+      "PCDN",
+      "loss_rate"
+    ],
+    "route": "fast_path",
+    "search_query": "PCDN loss_rate"
+  },
+  "secret_route": {
+    "display_query": "gateway_restart",
+    "keywords": [
+      "gateway_restart"
+    ],
+    "route": "fast_path",
+    "search_query": "gateway_restart"
+  },
+  "slow_route": {
+    "display_query": "上次那个老问题又出现了",
+    "keywords": [],
+    "route": "slow_path",
+    "search_query": "上次那个老问题又出现了"
+  }
+}
+```
+
+Post-validation status:
+
+```json
+{
+  "crystallized_candidates": 5,
+  "crystallized_records": 0,
+  "events": 12,
+  "index_health": {
+    "fts_tokenizer": "trigram",
+    "state": "healthy"
+  },
+  "prefetch_mode": "indexed",
+  "queue_backlog": 0,
+  "working_items": 5
+}
+```
+
+Doctor:
+
+```json
+{
+  "status": "ok",
+  "exit_code": 0,
+  "findings": [
+    {
+      "code": "hindsight_adapter_disabled",
+      "severity": "warning"
+    }
+  ]
+}
+```
+
+Interpretation:
+
+- explicit diagnostic queries still return runtime facts and suppress historical
+  indexed recall
+- mixed Chinese/English operational queries now route to compact fast-path
+  search terms
+- secret-like user input is redacted before route display or indexed search
+- targeted Indexed Recall is ordered before generic Recent Event Summaries so a
+  tight context budget does not hide the query-specific hit
+- no actual send, execute, identity write, relationship write, Hindsight export,
+  or crystallized approval occurred
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.
