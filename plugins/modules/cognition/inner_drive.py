@@ -9,7 +9,7 @@ from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import append_candidate_queue, read_candidate_queue
-from plugins.memory.memory_os.inner_drive import InnerDriveEngine
+from plugins.memory.memory_os.inner_drive import InnerDriveEngine, select_events_for_inner_drive
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.working import ALLOWED_WORKING_KINDS
 from plugins.system.scheduler import ScheduleCoordinator
@@ -135,6 +135,7 @@ class InnerDriveRuntimeModule:
         store: MemoryOSStore,
         coordinator: ScheduleCoordinator | None = None,
         max_events: int = 100,
+        max_events_per_source_class: int | dict[str, int] = 20,
         min_events: int = 1,
         lock_ttl_seconds: int = 300,
         now: datetime | None = None,
@@ -162,7 +163,13 @@ class InnerDriveRuntimeModule:
             }
 
         try:
-            return self._run_locked(store=store, max_events=max_events, min_events=min_events, now=now)
+            return self._run_locked(
+                store=store,
+                max_events=max_events,
+                max_events_per_source_class=max_events_per_source_class,
+                min_events=min_events,
+                now=now,
+            )
         finally:
             schedule.release_lock(self.lock_resource_id, owner=owner)
 
@@ -171,20 +178,39 @@ class InnerDriveRuntimeModule:
         *,
         store: MemoryOSStore,
         max_events: int,
+        max_events_per_source_class: int | dict[str, int],
         min_events: int,
         now: datetime | None,
     ) -> dict[str, Any]:
         store.initialize()
         state = self._read_state()
-        processed_ids = set(str(event_id) for event_id in state.get("processed_event_ids", []))
+        already_processed_ids = {str(event_id) for event_id in state.get("processed_event_ids", [])}
+        processed_ids = set(already_processed_ids)
         events = sorted(_profile_events(store, self.profile), key=lambda event: event.ts)
-        pending = [event for event in events if event.id not in processed_ids][:max_events]
+        pending, cap_deferred = select_events_for_inner_drive(
+            events,
+            processed_ids,
+            max_events=max_events,
+            max_events_per_source_class=max_events_per_source_class,
+        )
 
         engine = InnerDriveEngine(store)
         processed_now: list[str] = []
+        policy_skipped_now: list[str] = []
+        source_class_counts: dict[str, int] = {}
+        candidate_created_count = 0
+        working_created_count = 0
         for event in pending:
             result = engine.process_event(event)
-            append_candidate_queue(store, result.candidate)
+            source_class = result.decision.source_class
+            source_class_counts[source_class] = source_class_counts.get(source_class, 0) + 1
+            if result.working_item is not None:
+                working_created_count += 1
+            if result.candidate is not None:
+                append_candidate_queue(store, result.candidate)
+                candidate_created_count += 1
+            if result.working_item is None and result.candidate is None:
+                policy_skipped_now.append(event.id)
             processed_ids.add(event.id)
             processed_now.append(event.id)
 
@@ -206,7 +232,14 @@ class InnerDriveRuntimeModule:
             "status": status,
             "processed_event_count": len(processed_now),
             "processed_event_ids": processed_now,
-            "already_processed_event_count": len(events) - len(pending),
+            "policy_skipped_event_count": len(policy_skipped_now),
+            "policy_skipped_event_ids": policy_skipped_now,
+            "cap_deferred_event_count": len(cap_deferred),
+            "cap_deferred_event_ids": [event.id for event in cap_deferred],
+            "source_class_counts": source_class_counts,
+            "working_created_count": working_created_count,
+            "candidate_created_count": candidate_created_count,
+            "already_processed_event_count": len([event for event in events if event.id in already_processed_ids]),
             "total_event_count": len(events),
             "working_item_count": _working_item_count(store),
             "candidate_count": len(read_candidate_queue(store)),

@@ -674,6 +674,70 @@ private bodies, keeps diagnostic grounding separate, and preserves bridge seed
 facts ahead of noisy working memory in bounded prefetch contexts. No mirror
 events were applied and no heartbeat/Inner Drive mirror processing was enabled.
 
+## Runtime Hardening RH-12 Local Review Gate
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-12 Inner Drive Mirror Compatibility only
+- local tests only
+- no 10.20.3.200 host execution
+- no mirror `--apply`
+- no recurring Mirror -> Heartbeat -> InnerDrive enablement
+
+Implemented local policy:
+
+```text
+conversation_turn                   -> lingering + candidate
+memory_write                         -> lingering + candidate
+conversation_turn_mirrored bounded   -> low-weight lingering only by default
+session_observed                     -> index_only
+cron_job_run                         -> index_only
+candidate_surface_changed            -> no recursive candidate
+unknown event kind                   -> index_only
+```
+
+The runtime and the module now report:
+
+```text
+policy_skipped_event_count
+policy_skipped_event_ids
+cap_deferred_event_count
+cap_deferred_event_ids
+source_class_counts
+working_created_count
+candidate_created_count
+```
+
+Local verification:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_runtime.py \
+  tests/system_modularization/test_inner_drive_runtime_module.py \
+  tests/plugins/memory/test_memory_os_e2e.py -q
+
+16 passed
+```
+
+Covered invariants:
+
+- `cron_job_run` does not create working memory or crystallized candidates.
+- metadata-only `session_observed` does not create lingering.
+- bounded `conversation_turn_mirrored` can create controlled low-weight working
+  memory without creating a candidate by default.
+- `candidate_surface_changed` does not recursively create candidates.
+- unknown event kinds default to `index_only`.
+- source caps can defer excess cron/state-class events while still allowing a
+  foreground event through the same run.
+- existing E2E owner approval and Hindsight boundaries still pass locally.
+
+Interpretation:
+
+RH-12 is ready for code review. It is intentionally not committed in this gate
+and should be reviewed before RH-13 starts because it changes Inner Drive
+semantics.
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.

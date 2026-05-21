@@ -37,7 +37,12 @@ def test_inner_drive_manifest_installs_through_lifecycle(tmp_path):
 def test_inner_drive_processes_events_into_working_memory_and_candidates(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(
-        {**build_event(seed=1, profile="main"), "summary": "Owner asked about runtime cognition."}
+        {
+            **build_event(seed=1, profile="main"),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Owner asked about runtime cognition.",
+        }
     )
     store.append_event(event)
     module = InnerDriveRuntimeModule(tmp_path, profile="main")
@@ -58,7 +63,15 @@ def test_inner_drive_processes_events_into_working_memory_and_candidates(tmp_pat
 
 def test_inner_drive_is_idempotent_for_already_processed_events(tmp_path):
     store = _store(tmp_path)
-    store.append_event(EventEnvelope.from_dict(build_event(seed=2, profile="main")))
+    store.append_event(
+        EventEnvelope.from_dict(
+            {
+                **build_event(seed=2, profile="main"),
+                "source": "telegram",
+                "kind": "conversation_turn",
+            }
+        )
+    )
     module = InnerDriveRuntimeModule(tmp_path, profile="main")
 
     first = module.run_once(store=store)
@@ -131,3 +144,45 @@ def test_inner_drive_does_not_touch_sannai_shape_fixture(tmp_path):
 
     assert soul.stat().st_mtime_ns == before
     assert not (fixture.hermes_home / "system-modules").exists()
+
+
+def test_inner_drive_module_respects_mirror_event_policy(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(
+        EventEnvelope.from_dict(
+            {
+                **build_event(seed=20, profile="main"),
+                "source": "cron",
+                "kind": "cron_job_run",
+                "summary": "Cron metadata should not become a candidate.",
+                "safe_ref": {"source_module": "cron_mirror", "drive_policy": "index_only", "candidate_allowed": False},
+            }
+        )
+    )
+    store.append_event(
+        EventEnvelope.from_dict(
+            {
+                **build_event(seed=21, profile="main"),
+                "source": "session_mirror",
+                "kind": "conversation_turn_mirrored",
+                "summary": "Mirrored conversation can become bounded working memory.",
+                "safe_ref": {
+                    "source_module": "session_mirror",
+                    "drive_policy": "eligible",
+                    "body_policy": "bounded_summary",
+                    "candidate_allowed": False,
+                },
+            }
+        )
+    )
+    module = InnerDriveRuntimeModule(tmp_path, profile="main")
+
+    result = module.run_once(store=store)
+
+    assert result["processed_event_count"] == 2
+    assert result["policy_skipped_event_count"] == 1
+    assert result["candidate_count"] == 0
+    assert len(read_candidate_queue(store)) == 0
+    lingering = json.loads((store.roots.working_root / "lingering.json").read_text(encoding="utf-8"))
+    assert len(lingering["items"]) == 1
+    assert lingering["items"][0]["text"] == "Mirrored conversation can become bounded working memory."
