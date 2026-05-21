@@ -195,6 +195,105 @@ def test_index_search_matches_chinese_event_summary_and_reports_tokenizer(tmp_pa
     assert any(hit["record_id"] == event.id for hit in result["hits"])
 
 
+def test_index_projects_structured_event_payload_into_fts_without_private_body(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=52, profile="memoryos-test"),
+            "source": "cron",
+            "kind": "cron_job_run",
+            "summary": "PCDN monitor reported an operational anomaly.",
+            "safe_ref": {
+                "producer": "pcdn_cron",
+                "status": "error",
+                "metrics": {"loss_rate": 0.08, "queue_depth": 12},
+                "raw_transcript": "PRIVATE_BODY_SHOULD_NOT_BE_INDEXED",
+            },
+            "tags": ["telemetry", "pcdn"],
+        }
+    )
+    store.append_event(event)
+    index = MemoryOSIndex(store.roots)
+    index.sync_from_store(store)
+
+    assert any(hit["record_id"] == event.id for hit in index.search("loss_rate")["hits"])
+    assert any(hit["record_id"] == event.id for hit in index.search("0.08")["hits"])
+    assert any(hit["record_id"] == event.id for hit in index.search("queue_depth")["hits"])
+    assert not index.search("PRIVATE_BODY_SHOULD_NOT_BE_INDEXED")["hits"]
+    raw_event = json.loads(next(store.roots.events_root.glob("*/*.jsonl")).read_text(encoding="utf-8").splitlines()[0])
+    assert raw_event["safe_ref"]["raw_transcript"] == "PRIVATE_BODY_SHOULD_NOT_BE_INDEXED"
+
+
+def test_index_projection_covers_session_governance_and_failure_payloads(tmp_path):
+    store = _store(tmp_path)
+    session_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=54, profile="memoryos-test"),
+            "source": "session_mirror",
+            "kind": "session_observed",
+            "summary": "Session mirror observed bounded session metadata.",
+            "safe_ref": {
+                "session_count": 22,
+                "covered_session_count": 9,
+                "private_body": "SESSION_BODY_SHOULD_NOT_BE_INDEXED",
+            },
+        }
+    )
+    governance_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=55, profile="memoryos-test"),
+            "source": "governance_feedback",
+            "kind": "governance_feedback",
+            "summary": "Governance feedback summarized proposal state.",
+            "safe_ref": {
+                "proposal_state": "approved_for_proposal",
+                "decision": "would_send",
+                "private_report_body": "GOVERNANCE_BODY_SHOULD_NOT_BE_INDEXED",
+            },
+        }
+    )
+    failure_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=56, profile="memoryos-test"),
+            "source": "ops_gate",
+            "kind": "action_failure",
+            "summary": "Action failure was converted into evidence.",
+            "safe_ref": {
+                "status": "failed",
+                "failure_code": "gateway_restart_blocked",
+                "error_body": "FAILURE_BODY_SHOULD_NOT_BE_INDEXED",
+            },
+        }
+    )
+    for event in (session_event, governance_event, failure_event):
+        store.append_event(event)
+    index = MemoryOSIndex(store.roots)
+    index.sync_from_store(store)
+
+    assert any(hit["record_id"] == session_event.id for hit in index.search("session_count")["hits"])
+    assert any(hit["record_id"] == governance_event.id for hit in index.search("proposal_state")["hits"])
+    assert any(hit["record_id"] == governance_event.id for hit in index.search("decision")["hits"])
+    assert any(hit["record_id"] == failure_event.id for hit in index.search("failure_code")["hits"])
+    assert not index.search("SESSION_BODY_SHOULD_NOT_BE_INDEXED")["hits"]
+    assert not index.search("GOVERNANCE_BODY_SHOULD_NOT_BE_INDEXED")["hits"]
+    assert not index.search("FAILURE_BODY_SHOULD_NOT_BE_INDEXED")["hits"]
+
+
+def test_index_records_fts_projection_version_for_rebuildability(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=53, profile="memoryos-test")))
+
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    with sqlite3.connect(store.roots.index_path) as conn:
+        row = conn.execute(
+            "select value from index_metadata where key = ?",
+            ("fts_text_projection_version",),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "memory-os.fts_projection.v1"
+
+
 def test_index_search_matches_approved_crystallized_markdown_body(tmp_path):
     store = _store(tmp_path)
     frontmatter = build_crystallized_frontmatter(seed=43, source_event_ids=["evt_43"])

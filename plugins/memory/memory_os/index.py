@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 import sqlite3
 from collections.abc import Iterable
 from datetime import datetime, timezone
@@ -19,6 +20,21 @@ from .store import MemoryOSStore
 
 _CHECKPOINT_BUSY_FULL_THRESHOLD = 3
 _WAL_TRUNCATE_THRESHOLD_BYTES = 100 * 1024 * 1024
+_FTS_TEXT_PROJECTION_VERSION = "memory-os.fts_projection.v1"
+_PRIVATE_PROJECTION_KEY_PARTS = {
+    "api_key",
+    "body",
+    "content",
+    "cookie",
+    "key",
+    "password",
+    "private",
+    "prompt",
+    "raw",
+    "secret",
+    "token",
+    "transcript",
+}
 
 
 class MemoryOSIndex:
@@ -232,6 +248,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     )
     _ensure_column(conn, "events", "record_hash", "text not null default ''")
     _ensure_fts(conn)
+    _set_metadata(conn, "fts_text_projection_version", _FTS_TEXT_PROJECTION_VERSION)
 
 
 def _ensure_fts(conn: sqlite3.Connection) -> None:
@@ -385,7 +402,7 @@ def _index_events(conn: sqlite3.Connection, store: MemoryOSStore) -> None:
             record_type="event",
             record_id=event.id,
             title=f"{event.kind} {event.source}",
-            text=event.summary,
+            text=_event_fts_text(event),
         )
 
 
@@ -549,6 +566,53 @@ def _replace_fts_record(
         "insert into memory_fts (record_type, record_id, title, text) values (?, ?, ?, ?)",
         (record_type, record_id, title, text),
     )
+
+
+def _event_fts_text(event: Any) -> str:
+    parts = [
+        event.summary,
+        event.source,
+        event.kind,
+        " ".join(str(tag) for tag in event.tags),
+        _project_structured_text(event.safe_ref),
+    ]
+    return _normalize_projection_text(" ".join(part for part in parts if part))
+
+
+def _project_structured_text(value: Any, *, path: tuple[str, ...] = ()) -> str:
+    if isinstance(value, dict):
+        fragments: list[str] = []
+        for key, child in sorted(value.items(), key=lambda item: str(item[0])):
+            clean_key = _clean_projection_token(str(key))
+            if not clean_key or _is_private_projection_path(path + (clean_key,)):
+                continue
+            child_text = _project_structured_text(child, path=path + (clean_key,))
+            if child_text:
+                fragments.append(child_text)
+        return " ".join(fragments)
+    if isinstance(value, list):
+        return " ".join(_project_structured_text(item, path=path) for item in value)
+    if value is None or isinstance(value, bool):
+        return ""
+    rendered = _clean_projection_token(str(value))
+    if not rendered:
+        return ""
+    return " ".join((*path[-2:], rendered))
+
+
+def _is_private_projection_path(path: tuple[str, ...]) -> bool:
+    joined = "_".join(path).lower()
+    return any(part in joined for part in _PRIVATE_PROJECTION_KEY_PARTS)
+
+
+def _clean_projection_token(value: str) -> str:
+    cleaned = re.sub(r"[\{\}\[\]\"'`<>]", " ", value)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:160]
+
+
+def _normalize_projection_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _fts_hits(conn: sqlite3.Connection, query: str, *, limit: int) -> list[dict[str, str]]:

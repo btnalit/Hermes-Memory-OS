@@ -1558,6 +1558,135 @@ Follow-up findings:
    candidates sound like approved crystallized memory. Future context text
    should label them as review candidates.
 
+## Runtime Hardening RH-15 FTS Text Projection
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-15 FTS Text Projection
+- local tests first
+- then install current provider/runtime onto `10.20.3.200`
+- append one controlled `index_only` telemetry event
+- verify indexed recall can find structured fields without indexing private
+  bodies
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_store.py \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/plugins/memory/test_memory_os_runtime.py -q
+
+33 passed
+
+python -m pytest -q
+
+218 passed
+```
+
+New local coverage:
+
+```text
+test_index_projects_structured_event_payload_into_fts_without_private_body
+test_index_projection_covers_session_governance_and_failure_payloads
+test_index_records_fts_projection_version_for_rebuildability
+```
+
+Host deployment:
+
+```text
+target: 10.20.3.200 only
+code copy: /tmp/memory-os-rh15
+installed: provider, system modules, agent runtime, heartbeat runtime
+heartbeat timer: active/enabled
+gateway restart: not required for this index validation
+```
+
+Controlled validation event:
+
+```text
+event_id: evt_rh15_projection_20260521T010000Z
+source: cron
+kind: cron_job_run
+drive_policy: index_only
+candidate_allowed: false
+payload fields:
+  status=error
+  metrics.loss_rate=0.08
+  metrics.queue_depth=12
+  raw_transcript=<private marker>
+```
+
+Indexed recall result:
+
+```json
+{
+  "event_id": "evt_rh15_projection_20260521T010000Z",
+  "fts_text_projection_version": "memory-os.fts_projection.v1",
+  "heartbeat_processed_event_count": 1,
+  "heartbeat_policy_skipped_event_count": 1,
+  "index_counts": {
+    "audit_entries": 90,
+    "crystallized_candidates": 5,
+    "crystallized_records": 0,
+    "events": 12,
+    "working_items": 5
+  },
+  "loss_rate_hits": [
+    "evt_rh15_projection_20260521T010000Z"
+  ],
+  "queue_depth_hits": [
+    "evt_rh15_projection_20260521T010000Z"
+  ],
+  "private_body_hits": []
+}
+```
+
+Post-catch-up status:
+
+```json
+{
+  "crystallized_candidates": 5,
+  "crystallized_records": 0,
+  "events": 12,
+  "index_health": {
+    "fts_tokenizer": "trigram",
+    "state": "healthy"
+  },
+  "prefetch_mode": "indexed",
+  "queue_backlog": 0,
+  "working_items": 5
+}
+```
+
+Doctor:
+
+```json
+{
+  "status": "ok",
+  "exit_code": 0,
+  "findings": [
+    {
+      "code": "hindsight_adapter_disabled",
+      "severity": "warning"
+    }
+  ]
+}
+```
+
+Interpretation:
+
+- structured payload fields now project into FTS search text
+- canonical event payload remains unchanged in JSONL
+- private body fields are not indexed
+- projection version is recorded for rebuildability
+- mirror telemetry remains `index_only` and did not create working memory or
+  crystallized candidates
+- no actual send, execute, identity write, relationship write, Hindsight export,
+  or crystallized approval occurred
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.
