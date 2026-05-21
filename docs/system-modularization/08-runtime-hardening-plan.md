@@ -527,6 +527,18 @@ Scale-patch exit criteria for RH-15 through RH-18:
 
 After Runtime Hardening, start L2 Cognition Runtime:
 
+- Deep Reflection / Internal Analysis Runtime:
+  - reads recent events, working memory, digest/consolidation, evidence scores,
+    proposal backlog, and governance feedback
+  - writes internal analysis artifacts, bounded injection cards, attention /
+    curiosity / lingering updates, optional self-evolution proposals, and
+    optional wandering seeds
+  - uses deterministic filters, source-class policy, TTL, and budget caps to
+    auto-inject safe reflection context into provider prefetch
+  - does not use owner approval as the normal injection path; approval remains
+    only for identity, crystallized memory, real send/execute, and
+    self-modification
+  - design: `17-deep-reflection-runtime-design.md`
 - explainable lingering/emotional/curiosity/attention evolution
 - Wandering Mind right-brain output through Speak Gate passthrough
 - Evidence/Scoring reports that are readable by owner
