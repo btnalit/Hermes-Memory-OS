@@ -1834,6 +1834,128 @@ Interpretation:
 - no actual send, execute, identity write, relationship write, Hindsight export,
   or crystallized approval occurred
 
+## Runtime Hardening RH-21a/RH-21b Wording Guards
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-21a Chinese Diagnostic Trigger Tuning
+- RH-21b Candidate Versus Crystallized Wording Guard
+- local fixture tests first
+- deploy to `10.20.3.200`
+- validate provider prefetch and status wording
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_diagnostic_grounding.py \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/plugins/memory/test_memory_os_query_router.py -q
+
+26 passed
+
+python -m pytest -q
+
+228 passed
+```
+
+New local coverage:
+
+```text
+test_chinese_memory_conversation_does_not_trigger_diagnostic_grounding
+test_chinese_explicit_provider_questions_still_trigger_diagnostic_grounding
+test_prefetch_labels_candidates_as_review_only_not_approved_crystallized
+test_provider_status_distinguishes_candidates_from_approved_crystallized_records
+```
+
+Host deployment:
+
+```text
+target: 10.20.3.200 only
+code copy: /tmp/memory-os-rh21
+installed: provider, system modules, agent runtime, heartbeat runtime
+heartbeat timer: active/enabled
+gateway restart: not required for this provider-prefetch validation
+```
+
+Provider prefetch validation:
+
+```json
+{
+  "candidate_context_has_candidate_only": true,
+  "candidate_context_has_not_approved": true,
+  "candidate_context_has_review_label": true,
+  "casual_has_recent_or_candidates": true,
+  "casual_has_runtime_facts": false,
+  "casual_route": {
+    "display_query": "记忆",
+    "keywords": [
+      "记忆"
+    ],
+    "route": "fast_path",
+    "search_query": "记忆"
+  },
+  "crystallized_candidates": 5,
+  "crystallized_records": 0,
+  "explicit_has_indexed_recall": false,
+  "explicit_has_runtime_facts": true,
+  "explicit_route": {
+    "display_query": "",
+    "keywords": [],
+    "route": "diagnostic",
+    "search_query": ""
+  },
+  "status_candidate_label": "review candidates only; not approved crystallized memory",
+  "status_records_label": "approved crystallized memory records"
+}
+```
+
+Post-validation status:
+
+```json
+{
+  "crystallized_candidates": 5,
+  "crystallized_records": 0,
+  "events": 12,
+  "index_health": {
+    "fts_tokenizer": "trigram",
+    "state": "healthy"
+  },
+  "prefetch_mode": "indexed",
+  "queue_backlog": 0,
+  "working_items": 5
+}
+```
+
+Doctor:
+
+```json
+{
+  "status": "ok",
+  "exit_code": 0,
+  "findings": [
+    {
+      "code": "hindsight_adapter_disabled",
+      "severity": "warning"
+    }
+  ]
+}
+```
+
+Interpretation:
+
+- casual Chinese questions about the memory system no longer force diagnostic
+  runtime facts into the foreground answer
+- explicit provider/backend/status questions still trigger diagnostic grounding
+- candidate context is labeled as `candidate only / review candidate`
+- status output now labels candidates as review-only and records as approved
+  crystallized memory
+- `crystallized_candidates=5` and `crystallized_records=0` remain distinct
+- no actual send, execute, identity write, relationship write, Hindsight export,
+  or crystallized approval occurred
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.

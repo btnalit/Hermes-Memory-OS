@@ -99,6 +99,43 @@ def test_diagnostic_prefetch_suppresses_historical_recall_before_index_search(tm
     assert "Hindsight is canonical" not in context
 
 
+def test_chinese_memory_conversation_does_not_trigger_diagnostic_grounding(tmp_path):
+    store = _store(tmp_path, profile="main")
+    _append_stale_hindsight_events(store, count=1)
+
+    context = build_prefetch(
+        "你了解我们记忆系统吗？",
+        budget_chars=2200,
+        store=store,
+        index=ExplodingIndex(),
+        diagnostic_grounding_enabled=True,
+        runtime_facts=_runtime_facts(tmp_path),
+    )
+
+    assert "### Current Memory-OS Runtime Facts" not in context
+    assert "### Recent Event Summaries" in context
+
+
+def test_chinese_explicit_provider_questions_still_trigger_diagnostic_grounding(tmp_path):
+    store = _store(tmp_path, profile="main")
+
+    for prompt in (
+        "当前记忆架构是什么？",
+        "你现在用的是什么 memory provider？",
+        "Hindsight 现在是不是 Memory-OS 的 canonical store？",
+        "memory_os 状态正常吗？",
+    ):
+        context = build_prefetch(
+            prompt,
+            budget_chars=2200,
+            store=store,
+            index=ExplodingIndex(),
+            diagnostic_grounding_enabled=True,
+            runtime_facts=_runtime_facts(tmp_path),
+        )
+        assert "### Current Memory-OS Runtime Facts" in context, prompt
+
+
 def test_diagnostic_prefetch_keeps_critical_facts_under_tight_budget(tmp_path):
     store = _store(tmp_path, profile="main")
     facts = {

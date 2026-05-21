@@ -1,4 +1,5 @@
 from plugins.memory import load_memory_provider
+from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.fixtures import (
     build_crystallized_frontmatter,
     build_event,
@@ -195,3 +196,56 @@ def test_continuity_selector_report_counts_selected_and_dropped_without_private_
     assert report["dropped_total"] > 0
     assert "foreground" in report["selected_by_source_class"]
     assert "PRIVATE_SELECTOR_BODY_SHOULD_NOT_APPEAR" not in rendered
+
+
+def test_prefetch_labels_candidates_as_review_only_not_approved_crystallized(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(build_event(seed=70, profile="memoryos-test"))
+    store.append_event(event)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-review-only",
+            kind="insight",
+            body="Candidate-only insight about memory continuity.",
+            source_event_ids=[event.id],
+            sensitivity="private",
+            tags=["memory-os"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    context = build_prefetch("记忆连续性", budget_chars=2200, store=store, index=None)
+
+    assert "### Crystallized Review Candidates" in context
+    assert "candidate only" in context
+    assert "not approved crystallized memory" in context
+    assert "Candidate-only insight about memory continuity." in context
+    assert "### Crystallized Memory" not in context
+
+
+def test_provider_status_distinguishes_candidates_from_approved_crystallized_records(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    event = EventEnvelope.from_dict(build_event(seed=71, profile="memoryos-test"))
+    provider._store.append_event(event)
+    append_candidate_queue(
+        provider._store,
+        CrystallizedCandidate(
+            candidate_id="cand-status-review-only",
+            kind="insight",
+            body="Status candidate body.",
+            source_event_ids=[event.id],
+            sensitivity="private",
+            tags=["memory-os"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    report = provider._tool_status_report()
+    provider.shutdown()
+
+    assert report["crystallized_candidates_label"] == "review candidates only; not approved crystallized memory"
+    assert report["crystallized_records_label"] == "approved crystallized memory records"
+    assert report["crystallized_candidate_count"] == 1
+    assert report["crystallized_records"] == 0

@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .crystallized import read_candidate_queue
 from .store import MemoryOSStore
 
 
@@ -29,12 +30,15 @@ _BRIDGE_SEED_SLOTS = {
 _MAX_CONTINUITY_RECORDS = 8
 
 _DIAGNOSTIC_QUERY_PATTERNS = (
-    re.compile(r"记忆\s*(架构|系统|后端|provider|提供商|状态)"),
+    re.compile(r"(当前|现在|目前|当前的).{0,12}记忆.{0,8}(架构|系统|后端|provider|提供商|状态)"),
     re.compile(r"当前.*(memory_os|memory-os|记忆|memory).*(状态|架构|系统|provider|backend)", re.I),
     re.compile(r"(memory[-_ ]?os|hindsight).*(canonical|store|provider|backend|正常|还在用)", re.I),
+    re.compile(r"(memory_os|memory-os).*(状态|正常|provider|backend)", re.I),
     re.compile(r"(memory architecture|memory backend|memory provider|current memory state)", re.I),
     re.compile(r"(which|what).*(memory|storage).*(provider|backend|system)", re.I),
     re.compile(r"用的什么.*记忆"),
+    re.compile(r"记忆.*provider", re.I),
+    re.compile(r"记忆系统.*(怎么|如何).*(工作|运行)"),
 )
 
 _ASCII_ENTITY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
@@ -93,6 +97,7 @@ def build_prefetch(
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
+    _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
@@ -188,6 +193,18 @@ def _crystallized_lines(store: MemoryOSStore) -> list[str]:
         text = _crystallized_snippet(path)
         if text:
             lines.append(f"- {path.name}: {text}")
+    return lines
+
+
+def _candidate_lines(store: MemoryOSStore) -> list[str]:
+    lines: list[str] = []
+    for candidate in read_candidate_queue(store.roots)[:5]:
+        text = _redact(_clip(candidate.body, 180))
+        if text:
+            lines.append(
+                "- candidate only / review candidate; not approved crystallized memory: "
+                f"{candidate.candidate_id} {candidate.kind}: {text}"
+            )
     return lines
 
 
