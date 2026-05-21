@@ -2505,3 +2505,188 @@ python3 scripts/install_memory_os_plugin.py \
 This keeps the integration deploy path compatible with the new L2 module while
 preserving the expected default: install availability first, enable behavior
 only by explicit profile config.
+
+## RH-17 / RH-18 Test Host Dry-Run Validation
+
+Date: 2026-05-21
+
+Scope:
+
+- deploy the current `main` branch at commit `6eb03e1`
+- verify RH-17 retention/compaction CLI dry-run behavior
+- verify RH-18 shadow journal status and ingest dry-run behavior
+- do not run destructive cleanup apply
+- do not run shadow journal apply
+
+Deployment:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable \
+  --deep-reflection-preset test-host
+```
+
+Installer evidence:
+
+```json
+{
+  "provider": "memory_os",
+  "enabled": true,
+  "runtime_enabled": true,
+  "system_modules_installed": true,
+  "system_module_file_count": 52,
+  "copied_files_include": ["shadow_journal.py"],
+  "system_module_files_include": ["memory/memory_os/shadow_journal.py"]
+}
+```
+
+Runtime timer:
+
+```text
+hermes-memory-os-heartbeat.timer: active/enabled
+```
+
+### RH-17 Cleanup Dry-Run
+
+Command:
+
+```bash
+hermes memory_os cleanup --event-source-class-retention telemetry=30
+```
+
+Result:
+
+```json
+{
+  "schema_version": "memory-os.cleanup_plan.v0",
+  "dry_run": true,
+  "policy": {
+    "event_retention_days_by_source_class": {
+      "telemetry": 30
+    }
+  },
+  "action_count": 0
+}
+```
+
+Interpretation:
+
+- CLI accepted the explicit source-class retention policy
+- cleanup remained dry-run
+- no matching old telemetry event existed on the test host, so no actions were
+  generated
+- no canonical event, working item, candidate, crystallized record, identity
+  file, or relationship file changed
+
+### RH-18 Shadow Journal Dry-Run
+
+Setup:
+
+- wrote one temporary test spool frame to:
+
+```text
+/root/.hermes/memory-os/shadow-journal/rh18-smoke/spool.jsonl
+```
+
+- record schema:
+
+```json
+{
+  "schema_version": "memory-os.shadow_journal_record.v0",
+  "record_id": "rh18-smoke-dryrun-20260521",
+  "producer": "rh18-smoke",
+  "kind": "telemetry_status",
+  "source_class": "telemetry",
+  "summary": "RH-18 dry-run smoke telemetry frame."
+}
+```
+
+Commands:
+
+```bash
+hermes memory_os shadow-journal status
+hermes memory_os shadow-journal ingest
+```
+
+Result:
+
+```json
+{
+  "status_schema": "memory-os.shadow_journal_status.v0",
+  "ingest_schema": "memory-os.shadow_journal_ingest.v0",
+  "pending_record_count": 1,
+  "dry_run": true,
+  "would_write_event_count": 1,
+  "written_event_count": 0
+}
+```
+
+Canonical counts before and after RH-17/RH-18 dry-run:
+
+```json
+{
+  "before_counts": {
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0,
+    "audit_entries": 300
+  },
+  "after_counts": {
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0,
+    "audit_entries": 300
+  },
+  "counts_unchanged": true
+}
+```
+
+Cleanup after dry-run:
+
+```bash
+rm -f /root/.hermes/memory-os/shadow-journal/rh18-smoke/spool.jsonl
+rmdir /root/.hermes/memory-os/shadow-journal/rh18-smoke
+```
+
+Final shadow journal status:
+
+```json
+{
+  "schema_version": "memory-os.shadow_journal_status.v0",
+  "status": "ok",
+  "pending_record_count": 0,
+  "spool_file_count": 0,
+  "malformed_record_count": 0
+}
+```
+
+Doctor:
+
+```json
+{
+  "status": "ok",
+  "exit_code": 0,
+  "findings": ["hindsight_adapter_disabled"]
+}
+```
+
+Verdict:
+
+PASS for RH-17/RH-18 dry-run validation on `10.20.3.200`.
+
+Boundaries held:
+
+- no cleanup apply
+- no shadow journal apply
+- no canonical event count change
+- no working memory count change
+- no crystallized candidate or record count change
+- no identity write
+- no send
+- no execute
