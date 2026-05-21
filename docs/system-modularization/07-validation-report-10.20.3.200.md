@@ -310,18 +310,118 @@ Confirmed:
 - no production gateway was restarted
 - only `10.20.3.200` staging `hermes-gateway.service` was restarted
 
-## Residual Observation Items
+## Stability Gate
+
+`10.20.3.200` is a test host, not a production staging environment. There is no
+business workload to observe for one or two weeks. The stability gate is a
+single next-day check.
+
+Run on 2026-05-22:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory
+HERMES_HOME=/root/.hermes hermes memory_os status
+HERMES_HOME=/root/.hermes hermes memory_os doctor
+systemctl --user is-active hermes-memory-os-heartbeat.timer
+systemctl --user is-enabled hermes-memory-os-heartbeat.timer
+systemctl --user show hermes-gateway.service -p ActiveState -p SubState -p MainPID
+```
+
+Pass criteria:
+
+- `hermes memory` still reports provider `memory_os` active.
+- `memory_os doctor` returns `status=ok`.
+- `memory_os status` reports no index mismatch and no queue backlog.
+- heartbeat timer is active and enabled.
+- gateway service is active/running.
+- no actual-send, actual-execute, identity-write, Hindsight export, or
+  crystallized approval boundary is violated.
+
+If this gate passes, move directly into Runtime Hardening. Do not wait for a
+long observation period.
+
+## Runtime Hardening RH-05 Dry-Run
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-05 CronMirror only
+- no plugin refresh on `/root/.hermes`
+- no gateway restart
+- no `--apply`
+- no cron job mutation
+- no Memory-OS event write
+
+Method:
+
+The current local working tree was copied to `/tmp/memory-os-rh05` on
+`hermes-media` and executed with `PYTHONPATH=/tmp/memory-os-rh05`. This avoided
+installing the uncommitted CronMirror code into the live Hermes plugin tree.
+
+Pre-check:
+
+```text
+host: debian
+memory_os_root: present
+installed cron_mirror.py: missing
+Hermes CLI cron-mirror command: not installed yet
+```
+
+CronMirror dry-run result:
+
+```json
+{
+  "status": "ok",
+  "job_count": 0,
+  "output_file_count": 0,
+  "new_event_count": 0,
+  "dry_run": true,
+  "written_event_ids": []
+}
+```
+
+Status and doctor:
+
+```text
+cron_mirror status: ok
+cron_mirror doctor: ok
+pending_output_count: 0
+state_rebuilt: false
+findings: []
+```
+
+Side-effect check:
+
+```text
+/root/.hermes/memory-os/runtime/cron_mirror_state.json: absent
+memory-os audit grep cron_mirror: no entries
+Memory-OS events: 11
+working_items: 12
+index_health: healthy
+queue_backlog: 0
+```
+
+Interpretation:
+
+RH-05 CronMirror is safe to dry-run on `10.20.3.200`. The host currently has no
+cron output files to mirror, so this validates empty-environment behavior and
+the no-write dry-run boundary. It does not yet validate `--apply` or non-empty
+cron output handling on the host.
+
+## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.
 2. Runtime supervisor for automatic schema re-check and owner alert is still out
    of scope.
 3. The staging host now has module state under `/root/.hermes/system-modules`;
    future deployments should treat that as profile-local evidence, not code.
-4. Longer 24-48h observation is still needed for lock contention, audit growth,
-   and timer stability.
+4. Module writes can temporarily outrun the SQLite index. Runtime hardening
+   should make heartbeat/index catch-up part of the normal validation path.
 
 ## Verdict
 
 PASS for `10.20.3.200` full plugin deployment and no-send module validation.
 
-The next step is observation on the staging host, not production migration.
+The next step is the 2026-05-22 Stability Gate. If it passes, enter Runtime
+Hardening on the test host. Production migration remains out of scope.

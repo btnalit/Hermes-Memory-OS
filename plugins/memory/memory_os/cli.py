@@ -43,6 +43,7 @@ from .audit import last_audit_age_seconds, read_audit_entries
 from .benchmark import BenchmarkConfig, run_benchmark
 from .cleanup import CleanupPolicy, cleanup_plan
 from .config import load_config
+from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
 from .migrator import (
@@ -246,6 +247,13 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     cleanup_parser.add_argument("--import-days", type=int, default=30)
     cleanup_parser.add_argument("--benchmark-days", type=int, default=14)
     cleanup_parser.add_argument("--temp-days", type=int, default=1)
+    cron_parser = subs.add_parser("cron-mirror")
+    cron_subs = cron_parser.add_subparsers(dest="cron_mirror_command", required=True)
+    cron_subs.add_parser("status")
+    cron_subs.add_parser("doctor")
+    cron_scan = cron_subs.add_parser("scan")
+    cron_scan.add_argument("--dry-run", action="store_true")
+    cron_scan.add_argument("--apply", action="store_true")
     export_parser = subs.add_parser("export-shadow")
     export_parser.add_argument("--profile", default="sannai")
     export_parser.add_argument("--hermes-home", required=True)
@@ -309,6 +317,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return 0
     store = MemoryOSStore(MemoryOSRoots.from_hermes_home(_active_hermes_home(args), profile=getattr(args, "profile", "")))
     command = args.memory_os_command
+    if command == "cron-mirror":
+        return _cron_mirror_command(args, store)
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -364,6 +374,23 @@ def memory_os_command(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    return 2
+
+
+def _cron_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    mirror = CronMirror(store)
+    command = args.cron_mirror_command
+    if command == "status":
+        print(json.dumps(mirror.status(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "doctor":
+        result = mirror.doctor()
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if result["status"] == "error" else 0
+    if command == "scan":
+        dry_run = not bool(getattr(args, "apply", False))
+        print(json.dumps(mirror.scan(dry_run=dry_run), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     return 2
 

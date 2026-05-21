@@ -141,9 +141,13 @@ Example: a user sends a normal foreground message.
 9. inner_drive may create crystallized candidates
 10. evidence/scoring may attach explainable evidence refs
 11. proposal_queue may pick up eligible governance candidates
-12. speak_gate evaluates whether anything would be said
-13. DeliverySink records would_send only in v0.1
-14. audit records module decisions and lock outcomes
+12. governance feedback writes summary-only Memory-OS events for proposal,
+    ops-gate, scoring, and self-evolution outcomes
+13. continuity context selector may expose bounded governance context on later
+    foreground turns
+14. speak_gate evaluates whether anything would be said
+15. DeliverySink records would_send only in v0.1
+16. audit records module decisions and lock outcomes
 ```
 
 Example: weekly Wandering Mind run.
@@ -161,6 +165,38 @@ Example: weekly Wandering Mind run.
 
 Memory-OS carries data. ModuleBus and ScheduleCoordinator carry runtime control
 signals. Do not overload Memory-OS into a control plane.
+
+## Governance Feedback Loop
+
+The left-brain governance stack must be visible to future memory and
+conversation turns without becoming self-modifying or noisy.
+
+Required loop:
+
+```text
+Memory-OS events
+  -> evidence/scoring
+  -> ops_gate / proposal_queue / self_evolution
+  -> summary-only governance feedback events
+  -> continuity context selector / owner review
+  -> approved crystallized memory only after explicit approval
+```
+
+Governance reports, evidence scores, ops-gate decisions, and proposal
+transitions are not just local artifacts. They are also memory-relevant facts
+about what the system considered, deferred, blocked, or proposed.
+
+Boundary:
+
+- governance feedback may append summary-only Memory-OS events
+- governance feedback may add bounded context for later sessions
+- governance feedback may create proposal/candidate surfaces
+- governance feedback must not directly write identity, relationship memory, or
+  approved crystallized records
+- governance feedback must not become hidden instructions to the foreground
+  model
+- governance feedback must not pull private Sannai state into the main
+  evolution loop
 
 ## Sannai Boundary
 
