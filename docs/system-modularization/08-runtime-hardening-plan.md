@@ -521,6 +521,102 @@ Acceptance:
 - tests cover stale `index_health`, Hindsight URL leakage, status-snapshot
   leakage, mechanism section labels, and candidate/event diagnostic leakage
 
+Classifier notes:
+
+- v0 uses deterministic projection filtering, not an LLM judge
+- report-style candidates include explicit status labels such as
+  `index_health`, `audit_entries`, `governance_ops_gate_decision`,
+  `crystallized_candidates`, raw backend URLs, `Status Snapshot`, `Indexed
+  Recall`, or section names that describe the mechanism instead of the
+  conversation
+- Chinese report-style phrases include wording such as `审计记录`, `索引健康`,
+  `候选条目`, `治理提案`, `当前状态`, or list-heavy architecture/status phrasing
+  when the user prompt is ordinary chat rather than an explicit diagnostic
+  question
+- false positives are acceptable only at projection time because canonical
+  Memory-OS data is not deleted
+- every new real-conversation leak should add one deterministic fixture before
+  changing the prompt or tool description again
+
+### RH-22 Real Conversation Regression Test
+
+Turn real Telegram and CLI behavior into a repeatable smoke test after major
+RH/DR changes.
+
+Reason:
+
+- DR-08 found issues that local unit tests did not catch:
+  - mechanism-heavy card wording
+  - stale diagnostic working summaries in ordinary prefetch
+  - broad `memory_os_status` tool wording
+  - mechanism-heavy section title leakage
+- real model behavior can over-amplify labels that look harmless in static
+  context snapshots
+
+Acceptance:
+
+- maintain a standard prompt set with casual, diagnostic, memory-opinion,
+  candidate/crystallized, and style-correction prompts
+- run the set after any RH/DR slice that changes prefetch, tool descriptions,
+  injection cards, or working/candidate projection
+- record whether the assistant called `memory_os_status`, exposed mechanism
+  labels, confused candidates with crystallized records, or shifted into
+  report style
+- require `memory_os doctor` and heartbeat/index catch-up after the conversation
+  smoke test
+- append concise evidence to the validation report, without storing private
+  message bodies in public docs
+- failures become RH-21-style projection/tool-description fixtures before the
+  slice is considered closed
+
+### RH-23 Deep Reflection Source-Class Monitoring
+
+Track which source classes actually feed Deep Reflection injection cards over
+time.
+
+Reason:
+
+- DR-08 test-host cards came from `working`
+- that is acceptable for a small test host, but a mature L2 layer should not
+  silently collapse to a single source forever
+- source-class skew can reveal selector bugs, missing digest/governance input,
+  or over-filtered bridge events
+
+Acceptance:
+
+- Deep Reflection status reports selected and dropped source-class counts for
+  the latest run
+- reports include a rolling distribution for recent runs where practical
+- warning threshold is configurable, but v0.1 can start with informational
+  reporting only
+- no source class gets special promotion without going through existing safety,
+  TTL, and budget filters
+- monitoring is observational and must not create candidates, sends, or
+  crystallized records by itself
+
+### RH-24 Memory-OS Status Tool Contract Maintenance
+
+Treat `memory_os_status` wording as a maintained model-facing contract.
+
+Reason:
+
+- DR-08 showed broad tool descriptions can make ordinary conversation become a
+  system report
+- different models may interpret the same tool description differently
+- tool wording is part of the runtime behavior, not passive documentation
+
+Acceptance:
+
+- keep the tool description restricted to explicit current
+  architecture/provider/backend/status/health/count questions
+- ordinary chat, opinion, feeling, and design discussion prompts should not
+  recommend status tool use
+- every wording change must include Chinese and mixed Chinese/English fixtures
+- real-conversation regression should include at least one prompt that mentions
+  "记忆系统" casually and one that asks explicit provider/status facts
+- future model-specific overrides may be added, but must not weaken diagnostic
+  grounding when the user explicitly asks current runtime facts
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:

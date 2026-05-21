@@ -1350,13 +1350,43 @@ Remaining implementation-time decisions:
 
 1. Should the first auto-injection test use deterministic analysis only, or
    allow an LLM-generated internal analysis with deterministic post-filtering?
+   Resolved for DR-08: deterministic analysis only. LLM-generated internal
+   analysis remains a future canary and must fail closed if the secondary judge
+   is unavailable.
 2. What default `max_chars_total` is acceptable for the provider context budget:
    600, 900, or 1200?
+   Resolved for DR-08 test-host preset: 600. Larger budgets require a separate
+   model-behavior review.
 3. Resolved during DR-08: public prefetch wording uses `Conversation
    Carryover`; the section sits before `Working Memory` and after `Continuity
    Bridge`.
 4. Should Deep Reflection have a profile-specific "companion mode" that uses
    softer wording while still keeping module outputs profile-neutral?
+   Deferred. DR-08 fixed the immediate mechanism leakage through card wording
+   and RH-21c projection filtering; a separate companion-mode policy should be
+   based on repeated real-conversation evidence, not introduced preemptively.
 
-None of these block documenting the architecture. They should be decided at
-DR-01/DR-03 implementation time.
+## Post-DR-08 Follow-Ups
+
+Claude stage review on 2026-05-21 passed DR-01 through DR-08 and identified
+four non-blocking follow-ups. They should be tracked before starting broad
+production enablement, but they do not block RH-17/RH-18 implementation.
+
+1. Real conversation regression:
+   - add a repeatable Telegram/CLI prompt set for casual, diagnostic,
+     candidate/crystallized, and style-correction prompts
+   - ensure future DR/RH changes do not reintroduce mechanism leakage
+2. Source-class distribution:
+   - status should show whether injection cards come only from `working` or
+     also from digest, governance, foreground, and bridge inputs
+   - skew is a signal for selector tuning, not an automatic failure
+3. RH-21c classifier specification:
+   - keep diagnostic/report-style filtering deterministic at projection time
+   - add real leak examples as fixtures instead of silently broadening prompts
+4. `memory_os_status` tool contract maintenance:
+   - treat tool descriptions as model-facing runtime code
+   - re-test Chinese and mixed Chinese/English prompts whenever wording changes
+
+The next implementation decision is not whether Deep Reflection is viable; the
+test host gate already passed. The next decision is how much observation and
+cleanup machinery is needed before enabling broader profiles.
