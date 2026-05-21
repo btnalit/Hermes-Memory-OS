@@ -258,6 +258,50 @@ a scheduled no-send validation reads it"; it does not mean "speak now".
 Any real send still requires an explicit owner-approved runtime mode change and
 the Speak Gate / DeliverySink path.
 
+## Implementation Status
+
+Implemented in RH-14:
+
+```text
+plugins/modules/governance/feedback_bridge.py
+tests/system_modularization/test_governance_feedback_bridge_module.py
+```
+
+The implementation writes summary-only Memory-OS events for:
+
+- Evidence/Scoring snapshots
+- Ops-Gate decisions
+- Proposal Queue candidate creation and transitions
+- Self-Evolution dry-run reports
+
+Each feedback event is emitted through the canonical Memory-OS event stream
+with:
+
+```json
+{
+  "source": "governance_feedback",
+  "safe_ref": {
+    "source_class": "governance",
+    "drive_policy": "evidence_only",
+    "candidate_allowed": false,
+    "body_policy": "summary_only"
+  }
+}
+```
+
+Host validation on `10.20.3.200` found one important deployment lesson:
+
+- the bridge itself emitted correct `evidence_only` governance events
+- stale installed heartbeat runtime code still processed those events as normal
+  candidates
+- refreshing the installed Memory-OS runtime to the RH-12 policy fixed the
+  issue
+- a post-refresh governance event was processed with
+  `candidate_created_count=0` and `working_created_count=0`
+
+This means RH-14 depends not only on the bridge module, but also on keeping the
+installed heartbeat runtime in sync with RH-12 Inner Drive eligibility policy.
+
 ## Sannai Boundary
 
 Sannai compatibility is a constraint, not a public extraction target.

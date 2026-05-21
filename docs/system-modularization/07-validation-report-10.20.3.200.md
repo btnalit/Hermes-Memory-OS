@@ -959,6 +959,605 @@ only finding: hindsight_adapter_disabled warning
 queue_backlog: 0
 ```
 
+## Runtime Hardening RH-14 Local Implementation Gate
+
+Date: 2026-05-21
+
+Scope:
+
+- RH-14 Governance Feedback Bridge
+- local code and tests
+- controlled apply validated later on 10.20.3.200
+- no real send / execute / identity write / relationship write /
+  crystallized approval
+
+Implemented local module:
+
+```text
+plugins/modules/governance/feedback_bridge.py
+```
+
+Implemented behavior:
+
+- module manifest and lifecycle install/enable support
+- summary-only governance feedback events for:
+  - `governance_evidence_scored`
+  - `governance_ops_gate_decision`
+  - `governance_proposal_created`
+  - `governance_proposal_transitioned`
+  - `governance_self_evolution_reported`
+- event `safe_ref` always carries:
+  - `source_class=governance`
+  - `source_module=<source governance module>`
+  - `artifact_ref`
+  - `governance_feedback_key`
+  - `drive_policy=evidence_only`
+  - `candidate_allowed=false`
+  - `body_policy=summary_only`
+- idempotency uses source module, source key, state hash, and event kind
+- repeated apply skips already-emitted governance feedback keys
+- dry-run reports pending events without appending Memory-OS events
+- apply appends Memory-OS events and records local bridge state
+- raw proposal body is not mirrored into Memory-OS feedback events
+- governance feedback appears in the Continuity Context Selector
+- Inner Drive classification remains `evidence_only` with no working item and
+  no candidate by design
+- installer self-check now requires
+  `modules/governance/feedback_bridge.py` in the runtime package
+
+Local tests added:
+
+```text
+tests/system_modularization/test_governance_feedback_bridge_module.py
+```
+
+Covered invariants:
+
+- manifest installs through `ModuleLifecycle`
+- dry-run does not write events
+- apply writes summary-only governance events
+- second apply writes zero duplicate events
+- proposal private body does not leak into governance feedback events
+- continuity selector selects governance context
+- Inner Drive policy classifies governance feedback as `evidence_only`
+- Sannai-shaped identity fixture is not touched
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_governance_feedback_bridge_module.py tests\scripts\test_memory_os_plugin_install.py -q
+13 passed
+
+python -m pytest -q
+215 passed
+
+python -m compileall -q agent plugins scripts
+passed
+
+git diff --check
+passed
+```
+
+## Runtime Hardening RH-14 10.20.3.200 Controlled Apply
+
+Date: 2026-05-21
+
+Scope:
+
+- temporary code copy at `/tmp/memory-os-rh14`
+- `PYTHONPATH=/tmp/memory-os-rh14`
+- test host only: `10.20.3.200`
+- controlled governance artifact generation plus RH-14 apply
+- no 10.20.2.88 production access
+- no gateway restart
+- no real send / execute / identity write / relationship write /
+  crystallized approval
+
+Initial controlled apply method:
+
+1. generated safe test-host governance artifacts:
+   - evidence score snapshot
+   - Ops-Gate blocked report
+   - proposal queue candidate plus proposal-queue-only approval transition
+   - Self-Evolution dry-run report
+2. ran Governance Feedback Bridge dry-run
+3. ran Governance Feedback Bridge apply
+4. ran a second apply to verify idempotency
+5. checked Continuity Selector and Inner Drive classification
+
+Initial controlled apply result:
+
+```json
+{
+  "event_count_before": 11,
+  "event_count_after": 22,
+  "governance_event_count_before": 0,
+  "governance_event_count_after": 11,
+  "new_governance_event_count": 11,
+  "bridge_dry_run": {
+    "would_write_event_count": 11,
+    "written_event_count": 0
+  },
+  "bridge_apply": {
+    "would_write_event_count": 11,
+    "written_event_count": 11
+  },
+  "bridge_second_apply": {
+    "already_emitted_count": 11,
+    "would_write_event_count": 0,
+    "written_event_count": 0
+  },
+  "new_governance_event_kinds": [
+    "governance_evidence_scored",
+    "governance_ops_gate_decision",
+    "governance_proposal_created",
+    "governance_proposal_transitioned",
+    "governance_self_evolution_reported"
+  ],
+  "private_body_leaked": false,
+  "context_contains_governance": true,
+  "context_contains_private_body": false,
+  "actual_send": false,
+  "actual_execute": false
+}
+```
+
+Important finding:
+
+The first post-apply host heartbeat used stale installed runtime code. It
+processed the 11 new `evt_gov_*` events and incorrectly created derived
+working/candidate records. This was not a bridge defect; it exposed that the
+test host's installed heartbeat runtime had not yet been refreshed to the
+current RH-12 Inner Drive mirror-compatibility policy.
+
+Corrective action:
+
+```text
+HERMES_HOME=/root/.hermes python3 /tmp/memory-os-rh14/scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules
+```
+
+The installer copied:
+
+```text
+provider files: 25
+system module runtime files: 50
+agent compatibility files: 2
+```
+
+Confirmed installed runtime paths contain the RH-12 markers:
+
+```text
+/root/.hermes/plugins/memory_os/inner_drive.py
+/root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/inner_drive.py
+```
+
+Targeted cleanup:
+
+- backed up and removed only `evt_gov_*`-derived candidate rows
+- backed up and removed only `evt_gov_*`-derived lingering rows
+- did not remove foreground events, non-governance candidates, identity,
+  relationship, or crystallized approved records
+
+Cleanup evidence:
+
+```json
+{
+  "candidate_removed_count": 11,
+  "candidate_kept_count": 12,
+  "working_removed_count": 11,
+  "working_kept_count": 12,
+  "candidates_backup": "/root/.hermes/memory-os/crystallized/candidates.jsonl.bak.rh14-20260521T030935Z",
+  "working_backup": "/root/.hermes/memory-os/working/lingering.json.bak.rh14-20260521T030935Z"
+}
+```
+
+A pre-existing duplicate candidate id was also found and removed after backup:
+
+```json
+{
+  "removed_duplicate_count": 1,
+  "removed_ids": ["cand_evt_20260520T091910094050Z_92f8da6e23"],
+  "backup": "/root/.hermes/memory-os/crystallized/candidates.jsonl.bak.dedup-20260521T031147Z"
+}
+```
+
+Post-refresh validation:
+
+- generated one additional Ops-Gate report
+- Governance Feedback Bridge wrote one new governance event
+- refreshed heartbeat processed that event with the RH-12 policy
+- no working item and no candidate were created
+
+```json
+{
+  "before_event_count": 22,
+  "after_event_count": 23,
+  "before_candidate_count": 12,
+  "after_candidate_count": 12,
+  "before_working_count": 12,
+  "after_working_count": 12,
+  "bridge_apply": {
+    "written_event_count": 1,
+    "already_emitted_count": 4,
+    "actual_send": false,
+    "actual_execute": false
+  },
+  "heartbeat": {
+    "processed_event_count": 1,
+    "policy_skipped_event_count": 1,
+    "candidate_created_count": 0,
+    "working_created_count": 0,
+    "source_class_counts": {
+      "governance": 1
+    }
+  },
+  "candidate_matches_for_new_events": [],
+  "working_matches_for_new_events": []
+}
+```
+
+Final post-RH-14 host verification:
+
+```text
+HERMES_HOME=/root/.hermes hermes memory_os heartbeat --max-events 100
+candidate_count: 11
+candidate_created_count: 0
+working_item_count: 12
+events: 23
+index_counts.events: 23
+index_counts.working_items: 12
+index_counts.crystallized_candidates: 11
+
+HERMES_HOME=/root/.hermes hermes memory_os doctor
+status: ok
+only finding: hindsight_adapter_disabled warning
+queue_backlog: 0
+skipped_private_body_count: 0
+```
+
+RH-14 result:
+
+- Governance Feedback Bridge works on the test host
+- governance summaries are now queryable Memory-OS events
+- Continuity Selector can surface governance context
+- stale runtime deployment risk was found and corrected
+- RH-12 protection is now installed and verified on the test host
+- no-send / no-execute / no-crystallized-approval boundaries held after the
+  corrected runtime validation
+
+## Runtime Hardening RH-14.5 Fresh Deployment Rehearsal
+
+Date: 2026-05-21
+
+Scope:
+
+- test host only: `10.20.3.200`
+- current local repo state, including RH-14 uncommitted changes
+- clean Memory-OS-related deployment rehearsal
+- clear previous Memory-OS test artifacts, provider, runtime, module state, and
+  heartbeat timer before install
+- do not clear Hermes core, profile sessions, gateway service, or unrelated
+  `/root/.hermes` data
+- no 10.20.2.88 production access
+- no real send / execute / identity write / relationship write /
+  crystallized approval
+
+Pre-clean backup:
+
+```text
+/root/.hermes/backups/memory-os-fresh-deploy-20260521T032138Z
+```
+
+Cleared paths:
+
+```text
+/root/.hermes/plugins/memory_os
+/root/.hermes/memory-os
+/root/.hermes/system-modules
+/root/.config/systemd/user/hermes-memory-os-heartbeat.service
+/root/.config/systemd/user/hermes-memory-os-heartbeat.timer
+/root/.config/systemd/user/timers.target.wants/hermes-memory-os-heartbeat.timer
+```
+
+Post-clean check:
+
+```text
+all target paths: cleared
+heartbeat timer: inactive / not-found
+```
+
+Fresh install command:
+
+```bash
+HERMES_HOME=/root/.hermes python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable
+```
+
+Install result:
+
+```text
+provider enabled: true
+provider files copied: 25
+system module runtime files copied: 50
+agent compatibility files copied: 2
+runtime artifacts installed: true
+heartbeat timer enabled: true
+runtime interval: 5min
+```
+
+Provider discovery:
+
+```text
+HERMES_HOME=/root/.hermes hermes memory
+Provider: memory_os
+Plugin: installed
+Status: available
+memory_os (local) <- active
+```
+
+Initial post-install status:
+
+```text
+events: 0
+working_items: 0
+crystallized_candidates: 0
+crystallized_records: 0
+prefetch_mode: indexed
+index_health: healthy
+queue_backlog: 0
+doctor: ok
+doctor warnings: store_empty, hindsight_adapter_disabled
+```
+
+Heartbeat timer and gateway:
+
+```text
+TIMER_ACTIVE=active
+TIMER_ENABLED=enabled
+
+gateway restart:
+before_pid=428485
+after_pid=431776
+active=active
+sub=running
+```
+
+Full no-send integration chain from clean Memory-OS state:
+
+```text
+conversation/event
+  -> MemoryOSRuntime heartbeat / inner-drive processing
+  -> evidence_scoring
+  -> ops_gate
+  -> proposal_queue
+  -> self_evolution
+  -> governance_feedback dry-run
+  -> governance_feedback apply
+  -> governance_feedback second apply
+  -> MemoryOSRuntime heartbeat/index catch-up
+```
+
+Integration result:
+
+```json
+{
+  "initial_counts": {
+    "events": 0,
+    "working_items": 0,
+    "crystallized_candidates": 0,
+    "crystallized_records": 0
+  },
+  "first_heartbeat": {
+    "processed_event_count": 1,
+    "working_created_count": 1,
+    "candidate_created_count": 1,
+    "policy_skipped_event_count": 0,
+    "source_class_counts": {
+      "foreground": 1
+    }
+  },
+  "score_result": {
+    "score_count": 3,
+    "actual_approve": false,
+    "self_evolution_triggered": false
+  },
+  "ops_result": {
+    "decision_count": 1,
+    "actual_execute": false
+  },
+  "proposal_queue": {
+    "state_after_transition": "approved_for_proposal",
+    "crystallized_approved": false
+  },
+  "self_evolution": {
+    "proposal_created": true,
+    "direct_self_modify": false,
+    "actual_execute": false
+  },
+  "bridge_dry_run": {
+    "would_write_event_count": 6,
+    "written_event_count": 0
+  },
+  "bridge_apply": {
+    "would_write_event_count": 6,
+    "written_event_count": 6
+  },
+  "bridge_second_apply": {
+    "already_emitted_count": 6,
+    "would_write_event_count": 0,
+    "written_event_count": 0
+  },
+  "second_heartbeat": {
+    "processed_event_count": 6,
+    "policy_skipped_event_count": 6,
+    "working_created_count": 0,
+    "candidate_created_count": 0,
+    "source_class_counts": {
+      "governance": 6
+    }
+  },
+  "post_governance_heartbeat_counts": {
+    "events": 7,
+    "working_items": 1,
+    "crystallized_candidates": 1,
+    "crystallized_records": 0
+  },
+  "boundary": {
+    "actual_send": false,
+    "actual_execute": false,
+    "crystallized_records": 0,
+    "governance_created_working_or_candidate": false
+  }
+}
+```
+
+Final post-rehearsal status:
+
+```text
+events: 7
+working_items: 1
+crystallized_candidates: 1
+crystallized_records: 0
+continuity_selector.selected_by_source_class:
+  foreground: 1
+  governance: 6
+prefetch_mode: indexed
+index_health: healthy
+queue_backlog: 0
+skipped_private_body_count: 0
+
+doctor: ok
+only finding: hindsight_adapter_disabled warning
+
+heartbeat timer: active/enabled
+gateway: active/running pid=431776
+```
+
+RH-14.5 result:
+
+- fresh deployment script path is valid on `10.20.3.200`
+- Memory-OS provider is discoverable and active after install
+- system module runtime includes RH-14 Governance Feedback Bridge
+- heartbeat timer is installed and enabled by the script
+- main gateway survives restart and runs with the fresh provider
+- complete no-send integration chain works from an empty Memory-OS store
+- governance feedback events enter continuity context
+- governance feedback remains `evidence_only` under heartbeat
+- no real send, execute, identity write, relationship write, or crystallized
+  approval occurred
+
+## Telegram Conversation Memory Observation
+
+Date: 2026-05-21
+
+Scope:
+
+- real Telegram conversation after RH-14.5 fresh deployment rehearsal
+- user started with `/new`
+- no manual test marker was required
+- observation reports bounded summaries and structural counts only
+
+Pre-chat baseline:
+
+```text
+events: 7
+working_items: 1
+crystallized_candidates: 1
+crystallized_records: 0
+index_health: healthy
+prefetch_mode: indexed
+heartbeat timer: active/enabled
+gateway: active/running pid=431776
+```
+
+Post-chat status:
+
+```text
+events: 11
+working_items: 5
+crystallized_candidates: 5
+crystallized_records: 0
+doctor: ok
+index_health: healthy
+queue_backlog: 0
+only finding: hindsight_adapter_disabled warning
+```
+
+Observed increments:
+
+```text
+conversation_turn events: +4
+working_items: +4
+crystallized_candidates: +4
+crystallized_records: +0
+```
+
+Audit signals:
+
+```text
+append_event: 4
+working_item_added: 4
+crystallized_candidate_generated: 4
+crystallized_candidate_queued: 4
+```
+
+Heartbeat catch-up check:
+
+```text
+processed_event_count: 0
+already_processed_event_count: 11
+working_created_count: 0
+candidate_created_count: 0
+```
+
+This means the deployed timer/runtime had already processed the Telegram turns
+before manual observation.
+
+Continuity Selector:
+
+```text
+selected_total: 8
+selected_by_source_class:
+  foreground: 4
+  governance: 4
+dropped_by_source_class:
+  foreground: 1
+  governance: 2
+```
+
+Interpretation:
+
+- Telegram foreground turns entered canonical Memory-OS events correctly
+- Inner Drive turned each foreground turn into working memory and a review
+  candidate
+- no approved crystallized record was created automatically
+- governance feedback and foreground conversation both appeared in continuity
+  selection
+- normal non-diagnostic prefetch could see recent conversation and governance
+  context
+- explicit memory-system questions correctly triggered diagnostic grounding
+
+Follow-up findings:
+
+1. `RH-21a Chinese Diagnostic Trigger Tuning`
+
+   Explicit memory architecture questions should keep using diagnostic
+   grounding, but broad Chinese wording around "记忆" can make the assistant
+   answer in a system-report style during otherwise natural conversation.
+
+2. `RH-21b Candidate Versus Crystallized Wording Guard`
+
+   The system boundary held (`crystallized_candidates=5`,
+   `crystallized_records=0`), but model-facing wording can still make
+   candidates sound like approved crystallized memory. Future context text
+   should label them as review candidates.
+
 ## Residual Items For Runtime Hardening
 
 1. ModuleBus v0.1 remains append/read JSONL; no blocking subscribe API yet.

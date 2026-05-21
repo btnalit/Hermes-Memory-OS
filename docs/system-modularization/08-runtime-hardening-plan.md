@@ -329,6 +329,16 @@ Acceptance:
 - does not read Sannai private state in the main profile
 - keeps future Sannai use profile-local and owner-approved
 
+Status:
+
+- implemented locally in `plugins/modules/governance/feedback_bridge.py`
+- controlled apply validated on `10.20.3.200`
+- host validation proved that RH-14 must be deployed together with the RH-12
+  heartbeat runtime policy; stale heartbeat code can otherwise promote
+  governance events incorrectly
+- post-refresh validation processed governance events with
+  `candidate_created_count=0` and `working_created_count=0`
+
 ### RH-15 FTS Text Projection
 
 Project structured event payloads into clean search text for FTS/indexed
@@ -422,6 +432,56 @@ Acceptance:
 - fails closed on malformed spool records and quarantines them with audit
 - recurring ingestion is disabled until retention, source caps, and Inner Drive
   event policy are in place
+
+### RH-21a Chinese Diagnostic Trigger Tuning
+
+Tune Slice 21 diagnostic grounding for Chinese conversational prompts.
+
+Reason:
+
+- real Telegram testing on 2026-05-21 showed that questions about the memory
+  system correctly trigger diagnostic grounding
+- this is useful for explicit runtime/provider questions
+- but broad Chinese wording around "memory" can make the assistant answer in a
+  system-report style during otherwise natural conversation
+- false positives should stay lower than false negatives, especially for
+  companion-style profiles
+
+Acceptance:
+
+- explicit questions such as "当前记忆架构是什么" and "你现在用的是什么
+  memory provider" still trigger diagnostic grounding
+- ordinary relationship, mood, self-memory, or casual memory mentions do not
+  trigger diagnostic grounding by default
+- Chinese and mixed Chinese/English examples are covered by deterministic
+  tests
+- diagnostic grounding remains profile-configurable
+- Sannai-like profiles remain protected from accidental system-report style
+  responses
+
+### RH-21b Candidate Versus Crystallized Wording Guard
+
+Make model-facing memory context distinguish review candidates from approved
+crystallized records.
+
+Reason:
+
+- real Telegram testing on 2026-05-21 showed the assistant can describe
+  `crystallized_candidates` as if they are already "结晶" or long-term facts
+- the actual boundary held: candidates increased, but
+  `crystallized_records=0`
+- the context text should make this distinction hard to miss
+
+Acceptance:
+
+- Memory-OS context labels candidate records as `review candidate` or
+  `candidate only`, not approved long-term memory
+- approved crystallized records remain the only records described as
+  crystallized/approved memory
+- tests cover Chinese wording around "候选", "结晶", and "长期记忆"
+- owner approval and crystallized approval remain separate in context and
+  diagnostics
+- no existing candidate is auto-promoted or rewritten
 
 ## Exit Criteria
 
