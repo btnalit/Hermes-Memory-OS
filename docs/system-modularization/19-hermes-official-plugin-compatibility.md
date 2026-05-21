@@ -438,25 +438,27 @@ Its semantics should be defined in a future revision of
 
 ## Implementation Phase
 
-This document closes the compatibility decision. It does not implement the
-shell.
+This document closes the compatibility decision. The initial shell
+implementation was added after this decision record under
+`plugins/memory-os-agent-os/`.
 
 Proposed future slices:
 
 ```text
-PS-01 Shell skeleton
+PS-01 Shell skeleton (implemented)
   - plugin.yaml
   - __init__.py with register(ctx)
   - status/doctor only
-  - no hooks yet
+  - Memory-OS provider/runtime remains authoritative
 
-PS-02 Minimal session hooks
+PS-02 Minimal session hooks (implemented)
   - on_session_start marker
   - on_session_reset marker
   - on_session_finalize marker
-  - optional bounded finalize catch-up only if live-host limits pass
+  - no heartbeat catch-up in the initial implementation
+  - markers write bounded Memory-OS audit entries only
 
-PS-03 CLI aliases
+PS-03 CLI aliases (implemented for status/doctor)
   - hermes memory-os-agent-os status
   - hermes memory-os-agent-os doctor
   - wrappers only; hermes memory_os remains authoritative
@@ -472,12 +474,18 @@ PS-05 10.20.3.200 validation
   - verify no duplicate carryover injection
 ```
 
-Before PS-02, implementation must confirm the installed hook callback kwargs
-for `on_session_start`, `on_session_reset`, and `on_session_finalize`. The
-existing user plugin `hermes-self-evolution` receives `session_id`, `model`,
-and `platform`; if profile is not available in hook kwargs, the shell must use
-the configured Hermes profile context or fail closed. It must not guess a
-profile and write audit to the wrong profile.
+The installed Hermes source was inspected before PS-02. The live hook call
+sites pass `session_id`, `model`, and `platform` for `on_session_start`; gateway
+reset/finalize paths pass `session_id` and `platform`. Profile is not available
+in the installed hook kwargs, so the initial shell marker writes to the active
+`HERMES_HOME` Memory-OS audit only and does not attempt profile-specific state
+mutation.
+
+Implementation note: a test deployment initially left a backed-up copy of the
+shell under `/root/.hermes/plugins/`. Hermes' plugin scanner found the nested
+manifest and loaded a duplicate command. The backup was moved outside the
+plugin scan tree. Future installer work should keep backups under
+`$HERMES_HOME/plugin-backups/`, not under `$HERMES_HOME/plugins/`.
 
 ## Validation Plan For A Future Shell
 

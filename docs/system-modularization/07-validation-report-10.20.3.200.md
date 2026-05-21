@@ -3053,3 +3053,110 @@ Boundaries held:
 - no shadow journal apply
 - Deep Reflection source-class monitoring remained observational
 - `memory_os_status` contract is available and validated
+
+## Memory-OS Agent OS Shell Validation (2026-05-21)
+
+Scope:
+
+- install and enable the official-style `memory-os-agent-os` user plugin shell
+- keep `memory.provider=memory_os` as the authoritative provider path
+- expose `hermes memory-os-agent-os status`
+- expose `hermes memory-os-agent-os doctor`
+- register minimal session marker hooks only
+- verify the shell does not conflict with existing provider/runtime operation
+
+Live host findings:
+
+```text
+Hermes Agent version: v0.14.0 (2026.5.16)
+memory.provider: memory_os
+plugins.enabled: ["memory-os-agent-os"]
+memory-os-agent-os: enabled user plugin
+memory_os: installed memory provider, not enabled as a general plugin
+hermes-gateway.service: active
+hermes-memory-os-heartbeat.timer: active/enabled
+```
+
+Validation commands:
+
+```bash
+HERMES_HOME=/root/.hermes hermes plugins list
+HERMES_HOME=/root/.hermes hermes memory
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
+```
+
+Alias results:
+
+```json
+{
+  "status_alias": "ok",
+  "doctor_alias": "ok",
+  "doctor_exit_code": 0,
+  "doctor_findings": ["hindsight_adapter_disabled"],
+  "events": 24,
+  "working_items": 17,
+  "crystallized_candidates": 17,
+  "crystallized_records": 0,
+  "prefetch_mode": "indexed"
+}
+```
+
+Hook marker validation:
+
+The installed Hermes source was inspected before enabling hooks. The live
+`on_session_start` path passes `session_id`, `model`, and `platform`; reset and
+finalize paths pass `session_id` and `platform`.
+
+Synthetic hook invocation wrote bounded audit-only markers:
+
+```json
+[
+  {
+    "action": "agent_os_shell_session_started",
+    "target": "memory-os-agent-os",
+    "details": {
+      "hook": "on_session_start",
+      "session_id": "shell-hook-test-start",
+      "platform": "codex-test",
+      "model": "test-model"
+    }
+  },
+  {
+    "action": "agent_os_shell_session_reset",
+    "target": "memory-os-agent-os",
+    "details": {
+      "hook": "on_session_reset",
+      "session_id": "shell-hook-test-reset",
+      "platform": "codex-test"
+    }
+  },
+  {
+    "action": "agent_os_shell_session_finalized",
+    "target": "memory-os-agent-os",
+    "details": {
+      "hook": "on_session_finalize",
+      "session_id": "shell-hook-test-finalize",
+      "platform": "codex-test"
+    }
+  }
+]
+```
+
+Implementation finding:
+
+An early test copy left a backup tree under `/root/.hermes/plugins/`. Hermes'
+scanner found the nested `memory-os-agent-os` manifest and registered the CLI
+command twice, causing the stale backup to shadow the clean plugin. The backup
+was moved to `/root/.hermes/plugin-backups/`, outside the plugin scan tree.
+
+Boundaries:
+
+- no send
+- no execute
+- no identity write
+- no crystallized approval
+- no Hindsight export
+- no carryover injection from plugin hooks
+- no `pre_llm_call` registration
+- no slash command registration

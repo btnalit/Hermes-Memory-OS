@@ -1,0 +1,9 @@
+name: memory-os-agent-os
+version: 0.1.0
+kind: standalone
+description: "Official Hermes plugin shell for Memory-OS Agent OS operator commands."
+provides_hooks:
+  - on_session_start
+  - on_session_reset
+  - on_session_finalize
+provides_tools: []
