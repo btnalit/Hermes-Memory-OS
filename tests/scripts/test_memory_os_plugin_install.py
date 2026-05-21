@@ -111,6 +111,52 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert not any("__pycache__" in path for path in report["agent_runtime_files"])
 
 
+def test_installer_does_not_write_deep_reflection_config_by_default(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home", install_system_modules=True)
+
+    assert report["deep_reflection_preset"] is None
+    assert report["deep_reflection_config_written"] is False
+    assert not (tmp_path / "home" / "system-modules" / "deep_reflection" / "config.json").exists()
+
+
+def test_installer_can_write_deep_reflection_test_host_preset(tmp_path):
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        install_system_modules=True,
+        deep_reflection_preset="test-host",
+    )
+
+    config_path = tmp_path / "home" / "system-modules" / "deep_reflection" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert report["deep_reflection_preset"] == "test-host"
+    assert report["deep_reflection_config_written"] is True
+    assert config["preset"] == "test-host"
+    assert config["enabled"] is True
+    assert config["injection_mode"] == "auto_bounded"
+    assert config["self_evolution_proposals_enabled"] is True
+    assert config["wandering_seed_enabled"] is True
+    assert config["working_updates_enabled"] is False
+    assert config["llm_enabled"] is False
+
+
+def test_installer_deep_reflection_production_safe_preset_is_explicitly_off(tmp_path):
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        deep_reflection_preset="production-safe",
+    )
+
+    config = json.loads(
+        (tmp_path / "home" / "system-modules" / "deep_reflection" / "config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert report["deep_reflection_config_written"] is True
+    assert config["enabled"] is False
+    assert config["injection_mode"] == "disabled"
+    assert config["self_evolution_proposals_enabled"] is False
+    assert config["wandering_seed_enabled"] is False
+
+
 def test_memory_os_status_command_uses_current_hermes_home(tmp_path, monkeypatch, capsys):
     from plugins.memory.memory_os.cli import memory_os_command
     from plugins.memory.memory_os.roots import MemoryOSRoots

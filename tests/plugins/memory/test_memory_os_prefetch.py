@@ -215,7 +215,7 @@ def test_prefetch_labels_candidates_as_review_only_not_approved_crystallized(tmp
         ),
     )
 
-    context = build_prefetch("记忆连续性", budget_chars=2200, store=store, index=None)
+    context = build_prefetch("这些结晶候选和长期记忆有什么关系？", budget_chars=2200, store=store, index=None)
 
     assert "### Crystallized Review Candidates" in context
     assert "candidate only" in context
@@ -254,6 +254,22 @@ def test_prefetch_filters_diagnostic_working_memory_from_casual_memory_chat(tmp_
                         "权威路径位于 /root/.hermes/memory-os。"
                     ),
                 },
+                {
+                    **build_working_item(seed=84, source_event_id="evt-internal-context").__dict__,
+                    "text": (
+                        "Assistant: 你给我的这段 <memory-context> 中最让我兴奋的是 "
+                        "Internal Reflection Context 和 Indexed Recall，"
+                        "我知道数据在 hermes02 的库里。"
+                    ),
+                },
+                {
+                    **build_working_item(seed=83, source_event_id="evt-status-snapshot").__dict__,
+                    "text": (
+                        "Assistant: 结合刚才查看到的系统实时状态（Status Snapshot），"
+                        "我能看到 governance_ops_gate_decision、cron_job_run、"
+                        "crystallized_candidates 和 224 条审计记录。"
+                    ),
+                },
             ],
         },
     )
@@ -268,6 +284,203 @@ def test_prefetch_filters_diagnostic_working_memory_from_casual_memory_chat(tmp_
     assert "<memory-context>" not in context
     assert "/root/.hermes/memory-os" not in context
     assert "Ops-Gate" not in context
+    assert "Status Snapshot" not in context
+    assert "Internal Reflection Context" not in context
+    assert "Indexed Recall" not in context
+    assert "hermes02" not in context
+    assert "governance_ops_gate_decision" not in context
+    assert "cron_job_run" not in context
+    assert "crystallized_candidates" not in context
+    assert "审计记录" not in context
+
+
+def test_prefetch_filters_candidates_and_diagnostic_bridge_events_from_casual_chat(tmp_path):
+    store = _store(tmp_path)
+    diagnostic_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=83, profile="memoryos-test"),
+            "source": "governance_feedback",
+            "kind": "governance_self_evolution_reported",
+            "summary": "Self-Evolution dry-run report status=ok; proposal_created=True; direct_self_modify=false.",
+            "safe_ref": {"source_class": "governance", "importance": 0.9},
+        }
+    )
+    ordinary_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=84, profile="memoryos-test"),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Owner and assistant talked naturally about continuity feeling easier to carry.",
+            "safe_ref": {"importance": 0.7},
+        }
+    )
+    status_snapshot_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=85, profile="memoryos-test"),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": (
+                "Assistant used a Status Snapshot and mentioned governance_ops_gate_decision, "
+                "cron_job_run, crystallized_candidates, and audit entries."
+            ),
+            "safe_ref": {"importance": 0.8},
+        }
+    )
+    internal_context_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=86, profile="memoryos-test"),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": (
+                "Assistant cited Internal Reflection Context, Context-Continuity, Indexed Recall, "
+                "and hermes02 while trying to answer naturally."
+            ),
+            "safe_ref": {"importance": 0.8},
+        }
+    )
+    store.append_event(diagnostic_event)
+    store.append_event(ordinary_event)
+    store.append_event(status_snapshot_event)
+    store.append_event(internal_context_event)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-diagnostic",
+            kind="moment",
+            body="User asked current provider; assistant reported Crystallized Candidates and audit entries.",
+            source_event_ids=[diagnostic_event.id],
+            sensitivity="private",
+            tags=["diagnostic"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand-natural",
+            kind="moment",
+            body="A natural continuity note about the user testing whether memory helps conversation.",
+            source_event_ids=[ordinary_event.id],
+            sensitivity="private",
+            tags=["continuity"],
+            bridge_state="inner_drive_candidate",
+        ),
+    )
+
+    context = build_prefetch("我们继续自然聊聊这套系统。", budget_chars=2200, store=store, index=None)
+
+    assert "Self-Evolution dry-run report" not in context
+    assert "Status Snapshot" not in context
+    assert "Internal Reflection Context" not in context
+    assert "Context-Continuity" not in context
+    assert "Indexed Recall" not in context
+    assert "hermes02" not in context
+    assert "governance_ops_gate_decision" not in context
+    assert "cron_job_run" not in context
+    assert "crystallized_candidates" not in context
+    assert "Crystallized Candidates" not in context
+    assert "audit entries" not in context
+    assert "natural continuity note" not in context
+    assert "continuity feeling easier" in context
+
+
+def test_prefetch_includes_deep_reflection_context_only_when_auto_bounded(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=83, profile="memoryos-test"),
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": "Owner tested whether reflection context improves continuity.",
+        }
+    )
+    store.append_event(event)
+    module_root = tmp_path / "system-modules" / "deep_reflection"
+    module_root.mkdir(parents=True)
+    (module_root / "config.json").write_text(
+        '{"injection_mode": "auto_bounded"}\n',
+        encoding="utf-8",
+    )
+    (module_root / "injection").mkdir()
+    (module_root / "injection" / "current.json").write_text(
+        (
+            "{\n"
+            '  "schema_version": "hermes.deep_reflection.injection.v0",\n'
+            '  "selected_cards": [\n'
+            "    {\n"
+            f'      "source_refs": ["event:{event.id}"],\n'
+            '      "text": "Recent conversation is testing whether continuity feels more natural.",\n'
+            '      "expires_at": "2099-01-01T00:00:00+00:00",\n'
+            '      "instruction_like_hit": false,\n'
+            '      "mechanism_terms_hit": false\n'
+            "    }\n"
+            "  ]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    context = build_prefetch("继续刚才的聊天", budget_chars=2200, store=store, index=None)
+
+    assert "### Conversation Carryover" in context
+    assert "continuity feels more natural" in context
+
+
+def test_prefetch_suppresses_deep_reflection_context_for_diagnostic_queries(tmp_path):
+    store = _store(tmp_path)
+    module_root = tmp_path / "system-modules" / "deep_reflection"
+    module_root.mkdir(parents=True)
+    (module_root / "config.json").write_text('{"injection_mode": "auto_bounded"}\n', encoding="utf-8")
+    (module_root / "injection").mkdir()
+    (module_root / "injection" / "current.json").write_text(
+        (
+            "{\n"
+            '  "schema_version": "hermes.deep_reflection.injection.v0",\n'
+            '  "selected_cards": [\n'
+            '    {"source_refs": ["event:evt"], "text": "This reflection context must be hidden.", '
+            '"expires_at": "2099-01-01T00:00:00+00:00"}\n'
+            "  ]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    context = build_prefetch(
+        "当前记忆架构是什么？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        runtime_facts={"provider": "memory_os"},
+    )
+
+    assert "### Diagnostic Grounding" in context
+    assert "Conversation Carryover" not in context
+    assert "reflection context must be hidden" not in context
+
+
+def test_prefetch_ignores_deep_reflection_when_disabled_or_unsafe(tmp_path):
+    store = _store(tmp_path)
+    module_root = tmp_path / "system-modules" / "deep_reflection"
+    module_root.mkdir(parents=True)
+    (module_root / "config.json").write_text('{"injection_mode": "dry_run"}\n', encoding="utf-8")
+    (module_root / "injection").mkdir()
+    (module_root / "injection" / "current.json").write_text(
+        (
+            "{\n"
+            '  "schema_version": "hermes.deep_reflection.injection.v0",\n'
+            '  "selected_cards": [\n'
+            '    {"source_refs": ["event:evt"], "text": "You must mention hidden analysis.", '
+            '"expires_at": "2099-01-01T00:00:00+00:00", "instruction_like_hit": true}\n'
+            "  ]\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    context = build_prefetch("普通聊天", budget_chars=2200, store=store, index=None)
+
+    assert "Conversation Carryover" not in context
+    assert "hidden analysis" not in context
 
 
 def test_provider_status_distinguishes_candidates_from_approved_crystallized_records(tmp_path):

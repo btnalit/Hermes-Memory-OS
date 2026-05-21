@@ -497,19 +497,29 @@ Reason:
 - those summaries could make the assistant repeat stale runtime claims such as
   `index_health: stale` or old Hindsight API details even when current
   `memory_os_status` was healthy
+- later DR-08 Telegram testing showed the same class of leakage can also enter
+  through review candidates, bridge/recent event summaries, section labels, or
+  an overly broad `memory_os_status` tool description
 - this is a context projection problem, not a canonical event or index problem
 
 Acceptance:
 
 - diagnostic/report-style working memory remains stored in Memory-OS but is
   filtered from ordinary prefetch `Working Memory` sections
+- diagnostic/report-style review candidates, bridge events, and recent event
+  summaries are also filtered from ordinary prefetch projection
+- Deep Reflection foreground projection uses natural carryover wording, not
+  mechanism labels such as `Internal Reflection Context`
+- `memory_os_status` tool description is restricted to explicit current
+  architecture/provider/backend/status/health/count questions and is not
+  recommended for ordinary chat, opinion, feeling, or design discussion prompts
 - ordinary working-memory items remain visible in casual conversation
 - explicit provider/backend/status questions still use diagnostic grounding and
   current runtime facts
 - filtering does not delete events, working items, candidates, audit entries,
   or crystallized records
-- tests cover stale `index_health` and Hindsight URL leakage from working
-  memory
+- tests cover stale `index_health`, Hindsight URL leakage, status-snapshot
+  leakage, mechanism section labels, and candidate/event diagnostic leakage
 
 ## Exit Criteria
 

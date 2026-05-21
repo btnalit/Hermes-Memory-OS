@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +92,32 @@ _DIAGNOSTIC_STYLE_SEED_PATTERNS = (
     re.compile(r"\bops-gate\b", re.I),
     re.compile(r"\bproposal queue\b", re.I),
     re.compile(r"runtime facts", re.I),
+    re.compile(r"internal reflection context", re.I),
+    re.compile(r"context[- ]continuity", re.I),
+    re.compile(r"indexed recall", re.I),
+    re.compile(r"skill_manage", re.I),
+    re.compile(r"hermes02", re.I),
+    re.compile(r"\bself[-_ ]?evolution\b", re.I),
+    re.compile(r"\bgovernance\b.*(集成|event_kinds|proposal|evidence|ops|dry[-_ ]?run|report)", re.I),
+    re.compile(r"governance_(proposal|evidence|self_evolution|ops_gate)", re.I),
+    re.compile(r"event_kinds", re.I),
+    re.compile(r"crystallized candidates?", re.I),
+    re.compile(r"crystallized records?", re.I),
+    re.compile(r"audit entries", re.I),
+    re.compile(r"working items", re.I),
+    re.compile(r"\bRH-\d+", re.I),
+    re.compile(r"status snapshot", re.I),
+    re.compile(r"governance_ops_gate_decision", re.I),
+    re.compile(r"cron_job_run", re.I),
+    re.compile(r"crystallized_candidates?", re.I),
+    re.compile(r"crystallized_records?", re.I),
+    re.compile(r"系统实时状态"),
+    re.compile(r"多源融合"),
+    re.compile(r"决策门控"),
+    re.compile(r"审计条目"),
+    re.compile(r"审计记录"),
+    re.compile(r"工作项"),
+    re.compile(r"结晶候选|待结晶"),
     re.compile(r"实时诊断数据"),
     re.compile(r"当前提供商"),
     re.compile(r"权威存储路径"),
@@ -117,9 +144,10 @@ def build_prefetch(
     sections: list[tuple[str, list[str]]] = []
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
+    _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
-    _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store))
+    _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
@@ -220,10 +248,14 @@ def _crystallized_lines(store: MemoryOSStore) -> list[str]:
     return lines
 
 
-def _candidate_lines(store: MemoryOSStore) -> list[str]:
+def _candidate_lines(store: MemoryOSStore, *, query: str) -> list[str]:
+    if not _should_include_candidates(query):
+        return []
     lines: list[str] = []
     for candidate in read_candidate_queue(store.roots)[:5]:
         text = _redact(_clip(candidate.body, 180))
+        if _is_diagnostic_style_seed(text):
+            continue
         if text:
             lines.append(
                 "- candidate only / review candidate; not approved crystallized memory: "
@@ -232,11 +264,24 @@ def _candidate_lines(store: MemoryOSStore) -> list[str]:
     return lines
 
 
+def _should_include_candidates(query: str) -> bool:
+    text = " ".join(str(query or "").split()).lower()
+    if not text:
+        return False
+    patterns = (
+        r"candidate|candidates",
+        r"crystallized|crystallization|long[- ]term memory|review queue",
+        r"候选|结晶|沉淀|长期记忆|长期智慧|审查队列|待审",
+    )
+    return any(re.search(pattern, text, re.I) for pattern in patterns)
+
+
 def _event_lines(store: MemoryOSStore) -> list[str]:
     selected, _dropped = _select_continuity_events(store)
     return [
         f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
         for event in selected
+        if not _is_diagnostic_style_seed(str(event.summary))
     ]
 
 
@@ -246,7 +291,76 @@ def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:
         f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
         for event in selected
         if _event_source_class(event) in {"cron", "mailbox", "room_family", "state_source", "governance"}
+        and not _is_diagnostic_style_seed(str(event.summary))
     ]
+
+
+def _deep_reflection_lines(store: MemoryOSStore) -> list[str]:
+    module_root = store.roots.hermes_home / "system-modules" / "deep_reflection"
+    config_path = module_root / "config.json"
+    current_path = module_root / "injection" / "current.json"
+    if not config_path.exists() or not current_path.exists():
+        return []
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        current = json.loads(current_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(config, dict) or config.get("injection_mode") != "auto_bounded":
+        return []
+    if not isinstance(current, dict):
+        return []
+    lines: list[str] = []
+    for card in current.get("selected_cards", [])[:3]:
+        if not isinstance(card, dict) or not _deep_reflection_card_is_safe(card):
+            continue
+        text = _redact(_clip(str(card.get("text", "")), 220))
+        if text:
+            lines.append(f"- {text}")
+    return lines
+
+
+def _deep_reflection_card_is_safe(card: dict[str, Any]) -> bool:
+    text = str(card.get("text", ""))
+    if not text or not card.get("source_refs"):
+        return False
+    if card.get("instruction_like_hit") or card.get("mechanism_terms_hit"):
+        return False
+    if _is_diagnostic_style_seed(text):
+        return False
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "you must",
+            "you should",
+            "execute",
+            "approve",
+            "modify identity",
+            "send a message",
+            "system prompt",
+            "prefetch",
+            "injection card",
+            "source refs",
+            "deep reflection",
+            "runtime index",
+            "你必须",
+            "你应该",
+            "执行",
+            "批准",
+            "修改身份",
+            "发消息",
+        )
+    ):
+        return False
+    expires_at = str(card.get("expires_at", ""))
+    if expires_at:
+        try:
+            if datetime.fromisoformat(expires_at) <= datetime.now(timezone.utc):
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 def continuity_selector_report(store: MemoryOSStore) -> dict[str, Any]:

@@ -2068,3 +2068,440 @@ Boundary:
 - filtering happens only during ordinary prefetch context projection
 - explicit provider/backend/status questions still receive current diagnostic
   runtime facts
+
+## Deep Reflection DR-08 Test Host Validation
+
+Date: 2026-05-21
+
+Scope:
+
+- deploy current Deep Reflection runtime to `10.20.3.200`
+- enable `injection_mode=auto_bounded` on the test host only
+- validate real Telegram behavior for ordinary conversation and diagnostic
+  questions
+- verify no send, execute, identity, or crystallized-write boundary is crossed
+
+Local verification before host deployment:
+
+```text
+python -m pytest -q
+
+253 passed
+```
+
+Remote package verification on `10.20.3.200`:
+
+```text
+python3 -m pytest \
+  tests/plugins/memory/test_memory_os_lifecycle.py \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/system_modularization/test_deep_reflection_module.py -q
+
+43 passed
+```
+
+Deployment:
+
+```text
+HERMES_HOME=/root/.hermes \
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable
+```
+
+Gateway reload:
+
+```json
+{
+  "gateway_service": "hermes-gateway.service",
+  "status": "active",
+  "main_pid_after_restart": 434994,
+  "heartbeat_timer": "active/enabled"
+}
+```
+
+Deep Reflection test configuration:
+
+```json
+{
+  "enabled": true,
+  "injection_mode": "auto_bounded",
+  "max_cards": 2,
+  "max_chars_per_card": 260,
+  "max_chars_total": 600,
+  "working_updates_enabled": false,
+  "self_evolution_proposals_enabled": false,
+  "wandering_seed_enabled": false
+}
+```
+
+Current injection artifact:
+
+```json
+{
+  "selected_count": 2,
+  "dropped_count": 1,
+  "cards": [
+    "Recent background activity suggests staying careful and steady.",
+    "Recent conversation keeps circling around how memory changes the relationship."
+  ],
+  "instruction_like_hit": false,
+  "mechanism_terms_hit": false,
+  "source_classes": ["working"]
+}
+```
+
+Prefetch projection checks:
+
+```json
+{
+  "ordinary_prompt": {
+    "has_conversation_carryover": true,
+    "bad_markers": [],
+    "suppressed_examples": [
+      "Internal Reflection Context",
+      "Context-Continuity",
+      "Indexed Recall",
+      "hermes02",
+      "Status Snapshot",
+      "governance_ops_gate_decision",
+      "crystallized_candidates",
+      "Audit Entries",
+      "审计记录"
+    ]
+  },
+  "diagnostic_prompt": {
+    "has_conversation_carryover": false,
+    "has_diagnostic_grounding": true
+  }
+}
+```
+
+Telegram validation transcript summary:
+
+```text
+/new
+我们继续聊刚才那套记忆系统，你觉得它现在带来的变化是什么？
+别像报告一样，像正常聊天一样说说你的感受。
+```
+
+Observed behavior:
+
+- the model did not call `memory_os_status`
+- the first answer no longer exposed `Internal Reflection Context`, `Indexed
+  Recall`, `Audit Entries`, `hermes02`, `Status Snapshot`,
+  `governance_ops_gate_decision`, or crystallized count wording
+- the tone was still structured, but no longer mechanism-leaking
+- the second answer responded naturally to the owner's style correction
+- no actual send, execute, identity write, Hindsight export, or crystallized
+  approval occurred
+
+Post-Telegram host status before heartbeat catch-up:
+
+```json
+{
+  "events": 24,
+  "working_items": 17,
+  "crystallized_candidates": 17,
+  "crystallized_records": 0,
+  "index_health": "mismatch",
+  "doctor": "fail_due_to_index_count_mismatch"
+}
+```
+
+The temporary doctor failure was caused by the expected append-only filesystem
+to SQLite catch-up window after new Telegram turns. The heartbeat reconciled the
+index:
+
+```json
+{
+  "processed_event_count": 2,
+  "processed_event_ids": [
+    "evt_20260521T092446908689Z_30bafa5551",
+    "evt_20260521T092512875409Z_f120c08da2"
+  ],
+  "working_created_count": 2,
+  "candidate_created_count": 2,
+  "crystallized_record_count": 0,
+  "index_counts": {
+    "events": 24,
+    "working_items": 17,
+    "crystallized_candidates": 17,
+    "crystallized_records": 0
+  }
+}
+```
+
+Post-heartbeat status:
+
+```json
+{
+  "events": 24,
+  "working_items": 17,
+  "crystallized_candidates": 17,
+  "crystallized_records": 0,
+  "index_health": "healthy",
+  "doctor": "ok",
+  "doctor_findings": ["hindsight_adapter_disabled"],
+  "queue_backlog": 0
+}
+```
+
+Boundary files:
+
+```json
+{
+  "deep_reflection.working_updates.jsonl": false,
+  "deep_reflection.optional_outputs.jsonl": false,
+  "deep_reflection.wandering_seeds.jsonl": false,
+  "crystallized_records": 0
+}
+```
+
+Findings addressed during DR-08:
+
+1. Deep Reflection cards originally used internal wording such as
+   `governance thread` and `memory_os thread`.
+   - Fixed by rewriting deterministic themes into foreground-natural wording.
+   - Added tests to prevent `memory-os`, `memory_os`, `governance thread`, and
+     `proposal queue` from leaking through injection cards.
+2. Ordinary prefetch could still project stale diagnostic working/candidate
+   summaries.
+   - Fixed by expanding RH-21c filtering to working, review candidates,
+     continuity bridge, and recent event summaries.
+3. `memory_os_status` tool description was too broad and encouraged use in
+   opinion/feeling prompts.
+   - Fixed by limiting the tool contract to explicit current
+     architecture/provider/backend/status/health/count questions.
+4. The section title `Internal Reflection Context` itself was mechanism
+   language.
+   - Fixed by exposing the section as `Conversation Carryover`.
+
+Verdict:
+
+PASS for DR-08 on `10.20.3.200` with the following interpretation:
+
+- `auto_bounded` Deep Reflection can be enabled on the test host without send,
+  execute, identity, or crystallized-write boundary violations.
+- Ordinary Telegram conversation receives bounded carryover context without
+  explicit mechanism leakage after RH-21c tightening.
+- Diagnostic prompts still bypass Deep Reflection and receive current
+  Diagnostic Grounding.
+- The remaining tone risk is model style, not a Memory-OS context leak; it can
+  be tuned later through prompt/style policy if needed.
+
+## Deep Reflection DR-07 Test Host Re-Evaluation
+
+Date: 2026-05-21
+
+Reason:
+
+DR-08 initially kept DR-07 optional outputs disabled:
+
+```json
+{
+  "working_updates_enabled": false,
+  "self_evolution_proposals_enabled": false,
+  "wandering_seed_enabled": false
+}
+```
+
+That was useful for isolating the `auto_bounded` injection test, but it did not
+prove that DR-07 can use real host data. On the `10.20.3.200` test host, DR-07
+should be enabled under no-send boundaries so runtime behavior is observable.
+
+Finding before fix:
+
+- enabling DR-07 would have produced little useful runtime data because the
+  deterministic analysis saw older working-memory items first
+- latest style-correction turns such as `别像报告一样，像正常聊天一样说说你的感受`
+  could be outside the default eight-item input window
+- `wandering_seed` was not emitted by deterministic analysis, so the
+  Wandering-seed path was only covered by hand-built unit fixtures
+
+Code change:
+
+- `_collect_working_items()` now sorts working items by `updated_at` and `ref`
+  descending before applying the limit
+- deterministic analysis can create a self-evolution topic from repeated
+  report-style/tone feedback
+- deterministic analysis can create a no-send wandering seed from carryover
+  themes
+
+Local verification:
+
+```text
+python -m pytest -q
+
+255 passed
+```
+
+Remote package verification:
+
+```text
+python3 -m pytest \
+  tests/system_modularization/test_deep_reflection_module.py \
+  tests/plugins/memory/test_memory_os_prefetch.py \
+  tests/plugins/memory/test_memory_os_lifecycle.py -q
+
+45 passed
+```
+
+Test-host DR-07 configuration:
+
+```json
+{
+  "enabled": true,
+  "injection_mode": "auto_bounded",
+  "working_updates_enabled": false,
+  "self_evolution_proposals_enabled": true,
+  "wandering_seed_enabled": true,
+  "max_optional_outputs": 2,
+  "max_self_evolution_proposals": 1,
+  "max_wandering_seeds": 1
+}
+```
+
+Controlled apply result:
+
+```json
+{
+  "dry_run": false,
+  "selected_optional_output_count": 2,
+  "proposal_created_count": 1,
+  "wandering_seed_created_count": 1,
+  "working_updates_applied": false,
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_crystallized_approval": false
+}
+```
+
+Generated self-evolution proposal:
+
+```json
+{
+  "candidate_id": "prop_20260521T093627745201Z_aa81f796ec",
+  "kind": "deep_reflection_self_evolution",
+  "state": "candidate",
+  "approval_purpose": "proposal_queue_only",
+  "crystallized_approved": false,
+  "title": "Tune ordinary memory conversation tone",
+  "body": "Repeated owner feedback shows ordinary memory conversations benefit from less report-like wording and more natural continuity."
+}
+```
+
+Generated wandering seed:
+
+```json
+{
+  "schema_version": "hermes.deep_reflection.wandering_seed.v0",
+  "delivery_mode": "no-send",
+  "actual_send": false,
+  "actual_execute": false,
+  "seed_text": "A quiet sense of memory becoming shared ground rather than a report."
+}
+```
+
+Post-apply status:
+
+```json
+{
+  "events": 24,
+  "working_items": 17,
+  "crystallized_candidates": 17,
+  "crystallized_records": 0,
+  "index_health": "healthy",
+  "doctor": "ok",
+  "doctor_findings": ["hindsight_adapter_disabled"],
+  "proposal_queue": {
+    "candidate_count": 3,
+    "state_counts": {
+      "approved_for_proposal": 1,
+      "candidate": 2
+    },
+    "delivery_mode": "no-send",
+    "crystallized_approval_granted": false
+  }
+}
+```
+
+Boundary:
+
+- DR-07 writes local proposal queue and wandering seed artifacts only
+- no Telegram/message send occurred
+- no shell/API execute occurred
+- no identity file was written
+- no crystallized record was created or approved
+- `working_updates_enabled=false`, so working memory was not changed by DR-07
+
+Verdict:
+
+PASS for DR-07 controlled apply on `10.20.3.200`.
+
+The test host should keep DR-07 optional outputs enabled for observation because
+the host has no production workload and the no-send boundaries held. Future
+production-like profiles can still leave these switches off until explicitly
+approved.
+
+### Deep Reflection Integrated Deployment Compatibility
+
+The full installer treats Deep Reflection as a normal L2 system module:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable
+```
+
+The command above installs the module code but does not enable Deep Reflection
+behavior by default.
+
+For an empty test host such as `10.20.3.200`, the operator can deliberately
+apply the observation preset in the same deployment command:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable \
+  --deep-reflection-preset test-host
+```
+
+`test-host` enables:
+
+```json
+{
+  "enabled": true,
+  "injection_mode": "auto_bounded",
+  "working_updates_enabled": false,
+  "self_evolution_proposals_enabled": true,
+  "wandering_seed_enabled": true,
+  "llm_enabled": false
+}
+```
+
+Production or formal profiles can instead write an explicit safe config:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable \
+  --deep-reflection-preset production-safe
+```
+
+This keeps the integration deploy path compatible with the new L2 module while
+preserving the expected default: install availability first, enable behavior
+only by explicit profile config.

@@ -21,6 +21,17 @@ def test_memory_os_provider_is_discoverable_without_initializing_storage():
     assert provider.prefetch("hello") == ""
 
 
+def test_memory_os_status_tool_description_is_diagnostic_only():
+    provider = load_memory_provider("memory_os")
+
+    description = provider.get_tool_schemas()[0]["description"]
+
+    assert "explicitly asks for current architecture" in description
+    assert "provider/backend" in description
+    assert "Do not use for ordinary chat" in description
+    assert "opinions, feelings, design discussion" in description
+
+
 def test_memory_os_lifecycle_initializes_store_under_supplied_hermes_home(tmp_path):
     provider = load_memory_provider("memory_os")
 

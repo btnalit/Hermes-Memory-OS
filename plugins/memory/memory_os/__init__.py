@@ -99,11 +99,13 @@ class MemoryOSProvider(MemoryProvider):
             {
                 "name": "memory_os_status",
                 "description": (
-                    "Inspect the active Memory-OS provider status. Use this when asked "
-                    "which memory provider is active, whether Memory-OS is working, or "
-                    "whether the current memory backend is Hindsight. Returns counts and "
-                    "storage facts without raw private bodies. Treat this tool as "
-                    "authoritative for current provider diagnostics, not historical recall."
+                    "Inspect current Memory-OS runtime diagnostics only when the user "
+                    "explicitly asks for current architecture, provider/backend, status, "
+                    "health, Hindsight canonical-store role, or exact counts. Do not use "
+                    "for ordinary chat, opinions, feelings, design discussion, or broad "
+                    "questions such as whether the memory system feels useful. Returns "
+                    "counts and storage facts without raw private bodies. Treat this tool "
+                    "as authoritative for current provider diagnostics, not historical recall."
                 ),
                 "parameters": {
                     "type": "object",

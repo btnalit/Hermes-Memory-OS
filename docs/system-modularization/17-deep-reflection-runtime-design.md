@@ -481,6 +481,70 @@ Initial config:
 This keeps blank-host installation safe while allowing `10.20.3.200` to enable
 `dry_run` or `auto_bounded` deliberately for test conversations.
 
+### Enablement Presets
+
+Deep Reflection has two separate deployment decisions:
+
+```text
+install code        -> make the module available
+write config preset -> decide what the current profile may do
+```
+
+The full Memory-OS installer copies the L2 module when system modules are
+installed, but it does not enable Deep Reflection behavior unless an explicit
+preset is provided.
+
+Supported installer presets:
+
+| Preset | Intended host | Effect |
+| --- | --- | --- |
+| `production-safe` | production or formal profiles | writes an explicit disabled config |
+| `observe` | cautious staging | enables deterministic dry-run only; no prefetch injection |
+| `auto-bounded` | staging conversation tests | enables bounded Conversation Carryover; optional outputs stay off |
+| `test-host` | `10.20.3.200` and equivalent empty test hosts | enables `auto_bounded` plus no-send proposal and wandering-seed outputs |
+
+Example full test-host deployment:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable \
+  --deep-reflection-preset test-host
+```
+
+Example explicit formal-profile safe deployment:
+
+```bash
+python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-system-modules \
+  --install-runtime \
+  --enable-runtime \
+  --enable \
+  --deep-reflection-preset production-safe
+```
+
+`test-host` still keeps these hard boundaries:
+
+```json
+{
+  "working_updates_enabled": false,
+  "self_evolution_proposals_enabled": true,
+  "wandering_seed_enabled": true,
+  "llm_enabled": false,
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_crystallized_approval": false
+}
+```
+
+This means the test host can observe DR-07 behavior from live data without
+opening delivery, execution, identity, or crystallized-memory paths.
+
 ### Prefetch Integration Point
 
 Automatic injection must be implemented as a Memory-OS prefetch extension, not
@@ -492,7 +556,7 @@ Required provider behavior:
 MemoryOSProvider.prefetch()
   -> build_prefetch()
   -> selector reads deep_reflection injection/current.json when enabled
-  -> adds Internal Reflection Context section if cards pass gates
+  -> adds Conversation Carryover section if cards pass gates
 ```
 
 This means:
@@ -524,7 +588,7 @@ Host validation must prove:
 - enable/disable works
 - no schedule is active by default
 - prefetch changes only when `injection_mode=auto_bounded`
-- disabling the module removes the Internal Reflection Context section
+- disabling the module removes the Conversation Carryover section
 - actual_send=false
 - actual_execute=false
 - identity hash unchanged
@@ -583,8 +647,17 @@ Shape:
   "suggested_attention": [],
   "suggested_curiosity": [],
   "suggested_lingering": [],
-  "candidate_self_evolution_topics": [],
-  "wandering_seed": null,
+  "candidate_self_evolution_topics": [
+    {
+      "title": "Tune ordinary memory conversation tone",
+      "text": "Repeated owner feedback shows ordinary memory conversations benefit from less report-like wording and more natural continuity.",
+      "source_refs": ["working:..."]
+    }
+  ],
+  "wandering_seed": {
+    "seed_text": "A quiet sense of memory becoming shared ground rather than a report.",
+    "source_refs": ["working:..."]
+  },
   "actual_send": false,
   "actual_execute": false,
   "actual_identity_write": false,
@@ -628,10 +701,10 @@ Memory-OS event:
 The injectable card must be short, plain, and non-commanding:
 
 ```text
-Internal Reflection Context
-- There is an unresolved thread about Memory-OS continuity testing.
-- Recent governance context is relevant, but not an instruction.
-- Attention should stay on whether the next session asks about runtime behavior.
+Conversation Carryover
+- Recent conversation has something worth carrying forward.
+- Recent background activity suggests staying careful and steady.
+- Recent conversation keeps circling around how memory changes the relationship.
 ```
 
 It must not say:
@@ -664,6 +737,12 @@ Rules:
 Deep Reflection may create a proposal only when the analysis identifies a
 system improvement.
 
+The first deterministic trigger is repeated owner style feedback. For example,
+if recent working memory contains corrections like "别像报告一样，像正常聊天一样说说你的感受",
+Deep Reflection may create a proposal queue candidate to tune ordinary memory
+conversation tone. This proposal stays in `proposal_queue` and is never treated
+as crystallized approval.
+
 This path is not auto injection:
 
 ```text
@@ -691,6 +770,10 @@ Deep Reflection may write a seed for Wandering Mind:
 
 Wandering Mind still keeps `[SILENT]` as a true option and must route any
 would-send through Speak Gate passthrough.
+
+The deterministic default may emit a seed when recent context carries a stable
+relationship or continuity theme. The seed is a local no-send artifact; it does
+not wake a session and does not bypass Speak Gate.
 
 ## Automatic Injection Algorithm
 
@@ -880,7 +963,7 @@ without revalidation.
 Provider prefetch adds a separate section:
 
 ```text
-### Internal Reflection Context
+### Conversation Carryover
 - ...
 ```
 
@@ -889,7 +972,7 @@ Placement:
 ```text
 Identity Memory
 Continuity Bridge
-Internal Reflection Context
+Conversation Carryover
 Working Memory
 Relationship Memory
 Crystallized Memory
@@ -1146,7 +1229,7 @@ Implementation acceptance:
 - `run-once --dry-run` creates internal analysis without Memory-OS event count
   changes
 - `preview-injection` reports selected/dropped cards without raw bodies
-- `auto_bounded` exposes a small Internal Reflection Context section in
+- `auto_bounded` exposes a small Conversation Carryover section in
   prefetch
 - diagnostic prompts suppress reflection context
 - cards from cron/session/state metadata alone are filtered out
@@ -1234,7 +1317,7 @@ DR-04 Injection Card Builder
   safety filters, source eligibility, TTL, budget, selected/dropped report
 
 DR-05 Prefetch Integration
-  Memory-OS provider adds Internal Reflection Context section behind
+  Memory-OS provider adds Conversation Carryover section behind
   injection_mode=auto_bounded, with disable/removal tests
 
 DR-06 Working Updates
@@ -1269,8 +1352,9 @@ Remaining implementation-time decisions:
    allow an LLM-generated internal analysis with deterministic post-filtering?
 2. What default `max_chars_total` is acceptable for the provider context budget:
    600, 900, or 1200?
-3. Should `Internal Reflection Context` sit before or after `Working Memory` in
-   prefetch once real behavior is observed?
+3. Resolved during DR-08: public prefetch wording uses `Conversation
+   Carryover`; the section sits before `Working Memory` and after `Continuity
+   Bridge`.
 4. Should Deep Reflection have a profile-specific "companion mode" that uses
    softer wording while still keeping module outputs profile-neutral?
 

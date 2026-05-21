@@ -18,6 +18,56 @@ SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
 SOURCE_AGENT_DIR = REPO_ROOT / "agent"
 
 
+DEEP_REFLECTION_PRESETS: dict[str, dict[str, object]] = {
+    "production-safe": {
+        "enabled": False,
+        "injection_mode": "disabled",
+        "working_updates_enabled": False,
+        "self_evolution_proposals_enabled": False,
+        "wandering_seed_enabled": False,
+    },
+    "observe": {
+        "enabled": True,
+        "injection_mode": "dry_run",
+        "working_updates_enabled": False,
+        "self_evolution_proposals_enabled": False,
+        "wandering_seed_enabled": False,
+    },
+    "auto-bounded": {
+        "enabled": True,
+        "injection_mode": "auto_bounded",
+        "working_updates_enabled": False,
+        "self_evolution_proposals_enabled": False,
+        "wandering_seed_enabled": False,
+    },
+    "test-host": {
+        "enabled": True,
+        "injection_mode": "auto_bounded",
+        "working_updates_enabled": False,
+        "self_evolution_proposals_enabled": True,
+        "wandering_seed_enabled": True,
+        "max_optional_outputs": 2,
+        "max_self_evolution_proposals": 1,
+        "max_wandering_seeds": 1,
+    },
+}
+
+
+DEEP_REFLECTION_CONFIG_DEFAULTS: dict[str, object] = {
+    "enabled": False,
+    "injection_mode": "disabled",
+    "max_cards": 2,
+    "max_chars_total": 600,
+    "max_chars_per_card": 260,
+    "ttl_hours": 24,
+    "analysis_mode": "deterministic",
+    "llm_enabled": False,
+    "working_updates_enabled": False,
+    "self_evolution_proposals_enabled": False,
+    "wandering_seed_enabled": False,
+}
+
+
 def install_plugin(
     *,
     hermes_home: Path,
@@ -27,6 +77,7 @@ def install_plugin(
     install_system_modules: bool = False,
     enable_runtime: bool = False,
     runtime_interval: str = "5min",
+    deep_reflection_preset: str | None = None,
     systemd_dir: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, object]:
@@ -46,6 +97,14 @@ def install_plugin(
         system_module_files = _copy_tree(SOURCE_PACKAGE_DIR, system_module_target, dry_run=dry_run)
         _validate_agent_source(SOURCE_AGENT_DIR)
         agent_runtime_files = _copy_tree(SOURCE_AGENT_DIR, agent_runtime_target, dry_run=dry_run)
+    deep_reflection_config: dict[str, object] | None = None
+    deep_reflection_config_path: Path | None = None
+    if deep_reflection_preset is not None:
+        deep_reflection_config_path, deep_reflection_config = _write_deep_reflection_config(
+            hermes_home,
+            preset=deep_reflection_preset,
+            dry_run=dry_run,
+        )
     runtime_artifacts: list[Path] = []
     if install_runtime or enable_runtime:
         runtime_artifacts = _write_runtime_artifacts(
@@ -116,6 +175,10 @@ def install_plugin(
         "runtime_enable_requested": enable_runtime,
         "runtime_enabled": runtime_enabled,
         "runtime_enable_command": runtime_enable_command,
+        "deep_reflection_preset": deep_reflection_preset,
+        "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
+        "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
+        "deep_reflection_config": deep_reflection_config or {},
         "dry_run": dry_run,
     }
 
@@ -211,6 +274,30 @@ def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool)
     return artifacts
 
 
+def _write_deep_reflection_config(
+    hermes_home: Path,
+    *,
+    preset: str,
+    dry_run: bool,
+) -> tuple[Path, dict[str, object]]:
+    if preset not in DEEP_REFLECTION_PRESETS:
+        choices = ", ".join(sorted(DEEP_REFLECTION_PRESETS))
+        raise SystemExit(f"Unsupported DeepReflection preset: {preset}. Choices: {choices}")
+    config = {
+        **DEEP_REFLECTION_CONFIG_DEFAULTS,
+        **DEEP_REFLECTION_PRESETS[preset],
+        "preset": preset,
+    }
+    config_path = hermes_home / "system-modules" / "deep_reflection" / "config.json"
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return config_path, config
+
+
 def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -224,6 +311,15 @@ def main() -> int:
     parser.add_argument("--install-system-modules", action="store_true", help="Install portable L2-L4 module runtime package")
     parser.add_argument("--enable-runtime", action="store_true", help="Install and enable the user systemd heartbeat timer")
     parser.add_argument("--runtime-interval", default="5min", help="Heartbeat timer interval, default: 5min")
+    parser.add_argument(
+        "--deep-reflection-preset",
+        choices=sorted(DEEP_REFLECTION_PRESETS),
+        help=(
+            "Write a DeepReflection config preset. Default is no config write; "
+            "use production-safe for explicit off, observe for dry-run, "
+            "auto-bounded for injection only, or test-host for no-send test observation."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
     args = parser.parse_args()
 
@@ -235,6 +331,7 @@ def main() -> int:
         install_system_modules=args.install_system_modules,
         enable_runtime=args.enable_runtime,
         runtime_interval=args.runtime_interval,
+        deep_reflection_preset=args.deep_reflection_preset,
         dry_run=args.dry_run,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
