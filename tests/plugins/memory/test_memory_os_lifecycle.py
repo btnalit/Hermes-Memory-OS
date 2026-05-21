@@ -3,6 +3,10 @@ import time
 
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.status_tool_contract import (
+    memory_os_status_tool_contract,
+    validate_memory_os_status_tool_description,
+)
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -25,11 +29,39 @@ def test_memory_os_status_tool_description_is_diagnostic_only():
     provider = load_memory_provider("memory_os")
 
     description = provider.get_tool_schemas()[0]["description"]
+    contract = memory_os_status_tool_contract()
 
+    assert description == contract["description"]
     assert "explicitly asks for current architecture" in description
     assert "provider/backend" in description
     assert "Do not use for ordinary chat" in description
     assert "opinions, feelings, design discussion" in description
+    assert validate_memory_os_status_tool_description(description)["status"] == "ok"
+
+
+def test_memory_os_status_tool_contract_has_chinese_and_mixed_fixtures():
+    contract = memory_os_status_tool_contract()
+
+    allowed_text = "\n".join(contract["allowed_prompt_examples"])
+    disallowed_text = "\n".join(contract["disallowed_prompt_examples"])
+
+    assert contract["schema_version"] == "memory-os.status_tool_contract.v0"
+    assert "当前记忆架构是什么？" in allowed_text
+    assert "memory provider" in allowed_text
+    assert "你觉得这套记忆系统怎么样？" in disallowed_text
+    assert "别像报告一样" in disallowed_text
+
+
+def test_memory_os_status_tool_contract_rejects_broad_descriptions():
+    report = validate_memory_os_status_tool_description(
+        "Use memory_os_status whenever the user asks about the memory system, "
+        "opinions, feelings, usefulness, or design discussion."
+    )
+
+    assert report["status"] == "fail"
+    codes = {finding["code"] for finding in report["findings"]}
+    assert "missing_required_boundary" in codes
+    assert "forbidden_broad_trigger" in codes
 
 
 def test_memory_os_lifecycle_initializes_store_under_supplied_hermes_home(tmp_path):

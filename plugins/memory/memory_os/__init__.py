@@ -20,6 +20,7 @@ from .index import MemoryOSIndex
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .status_tool_contract import MEMORY_OS_STATUS_TOOL_DESCRIPTION
 from .store import MemoryOSStore
 
 
@@ -98,15 +99,7 @@ class MemoryOSProvider(MemoryProvider):
         return [
             {
                 "name": "memory_os_status",
-                "description": (
-                    "Inspect current Memory-OS runtime diagnostics only when the user "
-                    "explicitly asks for current architecture, provider/backend, status, "
-                    "health, Hindsight canonical-store role, or exact counts. Do not use "
-                    "for ordinary chat, opinions, feelings, design discussion, or broad "
-                    "questions such as whether the memory system feels useful. Returns "
-                    "counts and storage facts without raw private bodies. Treat this tool "
-                    "as authoritative for current provider diagnostics, not historical recall."
-                ),
+                "description": MEMORY_OS_STATUS_TOOL_DESCRIPTION,
                 "parameters": {
                     "type": "object",
                     "properties": {},

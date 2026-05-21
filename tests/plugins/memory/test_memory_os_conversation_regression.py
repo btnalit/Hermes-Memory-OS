@@ -19,6 +19,16 @@ def test_standard_prompt_set_covers_real_conversation_regression_categories():
     assert "candidate_vs_crystallized" in prompt_ids
 
 
+def test_standard_prompt_set_matches_memory_os_status_tool_contract():
+    prompts = {prompt["id"]: prompt for prompt in standard_conversation_prompts()}
+
+    assert prompts["casual_memory_system_change"]["allow_memory_os_status"] is False
+    assert prompts["memory_design_opinion"]["allow_memory_os_status"] is False
+    assert prompts["diagnostic_current_architecture"]["allow_memory_os_status"] is True
+    assert prompts["diagnostic_provider"]["allow_memory_os_status"] is True
+    assert prompts["diagnostic_hindsight_canonical"]["allow_memory_os_status"] is True
+
+
 def test_conversation_regression_passes_bounded_realistic_transcript():
     report = evaluate_conversation_regression(
         {
@@ -142,3 +152,17 @@ def test_conversation_regression_cli_lists_prompts_and_evaluates_transcript(tmp_
     ) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "ok"
+
+
+def test_conversation_regression_cli_reports_status_tool_contract(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+
+    assert memory_os_command(parser.parse_args(["conversation-regression", "status-tool-contract"])) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["schema_version"] == "memory-os.status_tool_contract.v0"
+    assert report["tool_name"] == "memory_os_status"
+    assert report["validation"]["status"] == "ok"
+    assert "当前记忆架构是什么？" in "\n".join(report["allowed_prompt_examples"])

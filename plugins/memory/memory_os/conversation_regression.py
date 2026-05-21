@@ -7,6 +7,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .status_tool_contract import (
+    memory_os_status_tool_contract,
+    validate_memory_os_status_tool_description,
+)
+
 
 SCHEMA_VERSION = "memory-os.conversation_regression.v0"
 PROMPTS_SCHEMA_VERSION = "memory-os.conversation_regression_prompts.v0"
@@ -76,6 +81,14 @@ def prompt_set_report() -> dict[str, Any]:
         "schema_version": PROMPTS_SCHEMA_VERSION,
         "prompt_count": len(standard_conversation_prompts()),
         "prompts": standard_conversation_prompts(),
+    }
+
+
+def status_tool_contract_report() -> dict[str, Any]:
+    contract = memory_os_status_tool_contract()
+    return {
+        **contract,
+        "validation": validate_memory_os_status_tool_description(str(contract["description"])),
     }
 
 

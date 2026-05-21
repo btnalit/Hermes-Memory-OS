@@ -46,6 +46,7 @@ from .config import load_config
 from .conversation_regression import (
     evaluate_transcript_file,
     prompt_set_report,
+    status_tool_contract_report,
 )
 from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
@@ -298,6 +299,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     conversation_parser = subs.add_parser("conversation-regression")
     conversation_subs = conversation_parser.add_subparsers(dest="conversation_regression_command", required=True)
     conversation_subs.add_parser("prompts")
+    conversation_subs.add_parser("status-tool-contract")
     conversation_evaluate = conversation_subs.add_parser("evaluate")
     conversation_evaluate.add_argument("--transcript", required=True)
     export_parser = subs.add_parser("export-shadow")
@@ -539,6 +541,9 @@ def _conversation_regression_command(args: argparse.Namespace) -> int:
     command = args.conversation_regression_command
     if command == "prompts":
         print(json.dumps(prompt_set_report(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "status-tool-contract":
+        print(json.dumps(status_tool_contract_report(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if command == "evaluate":
         report = evaluate_transcript_file(args.transcript)

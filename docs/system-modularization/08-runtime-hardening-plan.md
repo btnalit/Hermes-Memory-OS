@@ -746,6 +746,25 @@ Acceptance:
 - future model-specific overrides may be added, but must not weaken diagnostic
   grounding when the user explicitly asks current runtime facts
 
+v0.1 implementation:
+
+- the `memory_os_status` description lives in
+  `plugins/memory/memory_os/status_tool_contract.py`, not inline in the
+  provider
+- provider schemas import the contract description, so tests can detect drift
+  between the model-facing tool schema and the maintained contract
+- the contract includes Chinese, English, and mixed Chinese/English prompt
+  fixtures for:
+  - allowed explicit diagnostics
+  - disallowed ordinary chat / opinion / feeling / design discussion prompts
+- CLI:
+  - `hermes memory_os conversation-regression status-tool-contract`
+- RH-22 real-conversation regression consumes the same boundary:
+  - ordinary memory-system prompts must not call `memory_os_status`
+  - explicit current architecture/provider/status prompts may call it
+- future model-specific descriptions should be added as explicit contract
+  variants with their own fixtures, not as ad hoc provider strings
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:
