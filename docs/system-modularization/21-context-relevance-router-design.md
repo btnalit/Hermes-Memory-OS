@@ -561,6 +561,85 @@ When apply is enabled, it must be controlled by config:
 
 Default remains disabled or dry-run.
 
+Apply should be progressive, not all-at-once.
+
+Recommended first apply gate:
+
+```json
+{
+  "context_router": {
+    "enabled": true,
+    "mode": "apply",
+    "apply_routes": ["foreground_control"],
+    "dry_run_routes": [
+      "active_task",
+      "casual_continuity",
+      "diagnostic_current_status",
+      "candidate_review",
+      "memory_architecture_discussion"
+    ],
+    "llm_judge_mode": "disabled"
+  }
+}
+```
+
+Reason:
+
+- `foreground_control` is already aligned with RH-25b's cancellation and vague
+  continuation behavior
+- it is the route most directly tied to preventing small-context drift
+- it should not pull Working Memory, Conversation Carryover, or Indexed Recall
+  into cancellation turns
+- the remaining routes should stay in dry-run until their reports are reviewed
+  against live Telegram behavior
+
+Rollback must be config-only:
+
+```json
+{
+  "context_router": {
+    "mode": "dry_run",
+    "apply_routes": []
+  }
+}
+```
+
+The apply gate checklist:
+
+1. Dry-run report passes for the seven host validation prompts.
+2. Dropped sections include `reason_codes`, scores, and bounded previews in the
+   raw JSON report.
+3. Full RH-22 seven-prompt baseline passes before apply.
+4. Apply starts with `foreground_control` only.
+5. Full RH-22 seven-prompt baseline runs again after apply.
+6. `hermes memory_os doctor` is `ok`.
+7. Hard boundaries remain false: no send, no execute, no identity write, no
+   crystallized approval.
+8. Observe real Telegram behavior for 24 hours.
+9. If behavior regresses, rollback with config only.
+10. Only after stable observation should the next route be considered for apply.
+
+Owner override for the 10.20.3.200 test host:
+
+- Full-route apply is allowed on the test host to expose real behavior sooner.
+- This is not the production-safe default.
+- Production and shared profiles should still use progressive apply.
+- Test-host rollback remains config-only.
+
+Test-host full apply config:
+
+```json
+{
+  "context_router": {
+    "enabled": true,
+    "mode": "apply",
+    "apply_routes": ["all"],
+    "dry_run_routes": [],
+    "llm_judge_mode": "disabled"
+  }
+}
+```
+
 ## Test Matrix
 
 Required tests:

@@ -3921,3 +3921,305 @@ Interpretation: RH-25b is now active on the test host. Cancellation and vague
 continuation turns should no longer compete with background Working Memory or
 Conversation Carryover during prefetch. Hermes automatic compression still
 reports `focus=None`; that upstream behavior is unchanged.
+
+### RH-26 Context Router Dry-Run Validation
+
+RH-26 was implemented and deployed in dry-run/report-only mode. It does not
+change live prefetch behavior and does not write memory. The provider was
+installed through the normal installer and the gateway restarted cleanly:
+
+```text
+gateway ActiveState=active
+gateway SubState=running
+gateway MainPID=451521
+```
+
+Health checks after deployment:
+
+```text
+doctor_status=ok
+exit_code=0
+findings=[("hindsight_adapter_disabled", "warning")]
+
+status_tool_contract_validation=ok
+status_tool_contract_findings=[]
+```
+
+Seven host validation prompts were run through:
+
+```text
+hermes memory_os context-router dry-run --query ...
+```
+
+Summary:
+
+```text
+cancel_failed_video:
+  route=foreground_control
+  reason_codes=[cancellation]
+  selected=[Current Foreground Task]
+  dropped=[Conversation Carryover, Working Memory, Indexed Recall, Recent Event Summaries]
+
+continue_current_task:
+  route=foreground_control
+  reason_codes=[vague_continue_with_anchor]
+  selected=[Current Foreground Task]
+  dropped=[Conversation Carryover, Working Memory, Recent Event Summaries]
+
+casual_memory_system_change:
+  route=casual_continuity
+  reason_codes=[ordinary_opinion]
+  selected=[]
+  dropped=[Conversation Carryover, Working Memory, Indexed Recall, Recent Event Summaries]
+
+diagnostic_current_architecture:
+  route=diagnostic_current_status
+  reason_codes=[explicit_diagnostic]
+  selected=[Diagnostic Grounding]
+  dropped=[]
+
+candidate_vs_crystallized:
+  route=candidate_review
+  reason_codes=[candidate_review_terms]
+  selected=[Crystallized Review Candidates, Indexed Recall]
+  dropped=[Conversation Carryover, Working Memory, Recent Event Summaries]
+
+active_comfyui_install:
+  route=active_task
+  reason_codes=[active_task_terms]
+  selected=[Current Foreground Task, Indexed Recall]
+  dropped=[Conversation Carryover, Working Memory, Recent Event Summaries]
+
+deferred_cancellation:
+  route=foreground_control
+  reason_codes=[deferred_cancellation_open]
+  open_issue=deferred_cancellation_requires_anchor_lifecycle
+  selected=[Current Foreground Task]
+  dropped=[Conversation Carryover, Working Memory, Recent Event Summaries]
+```
+
+Interpretation:
+
+- foreground cancellation and vague continuation are routed to the hard
+  foreground-control path and are not mixed with background Working Memory or
+  Conversation Carryover
+- explicit current-status questions keep the diagnostic section
+- candidate/crystallized wording questions keep review-candidate context and do
+  not treat candidates as approved crystallized memory
+- active task prompts keep the foreground task anchor and only keep indexed
+  recall when it passes the dry-run relevance gate
+- deferred cancellation is intentionally reported as an open anchor-lifecycle
+  issue instead of being silently treated as solved
+
+The casual continuity prompt selected no sections on this host because the
+available current sections were judged diagnostic/mechanism-heavy or below the
+dry-run relevance threshold. This is a useful signal for review, not an apply
+failure: RH-26 has not changed live prefetch, and "empty or low-relevance
+sections should not consume budget just because a route allows them" remains
+the intended dry-run behavior.
+
+The CLI dry-run output includes `reason_codes` and scores for dropped sections.
+The validation summary above lists section names only, so the relevant detail is
+recorded here without raw private bodies:
+
+```text
+casual_memory_system_change dropped reasons:
+  Conversation Carryover:
+    score=0.00
+    reason_codes=[below_threshold]
+  Working Memory:
+    score=0.00
+    reason_codes=[keyword_match, high_relevance, mechanism_leak_detected, below_threshold]
+  Indexed Recall:
+    score=0.00
+    reason_codes=[keyword_match, high_relevance, diagnostic_style_in_non_diagnostic_route, below_threshold]
+  Recent Event Summaries:
+    score=0.15
+    reason_codes=[keyword_match, below_threshold]
+
+active_comfyui_install dropped reasons:
+  Conversation Carryover:
+    score=0.00
+    reason_codes=[route_excludes_broad_carryover]
+  Working Memory:
+    score=0.15
+    reason_codes=[entity_match, keyword_match, foreground_anchor, high_relevance, mechanism_leak_detected, below_threshold]
+  Recent Event Summaries:
+    score=0.00
+    reason_codes=[below_threshold]
+```
+
+This confirms the empty casual selection is caused by the current host's
+available context shape, not by missing dry-run metadata.
+
+### RH-26.5 Apply Gate Baseline
+
+Before any apply-mode review, the full RH-22 seven-prompt baseline was run on
+10.20.3.200 against a public synthetic transcript:
+
+```text
+schema_version=memory-os.conversation_regression.v0
+status=ok
+prompt_count=7
+failure_count=0
+warning_count=0
+```
+
+The first baseline attempt used the exact phrase `approved crystallized memory`
+inside a negated Chinese sentence and correctly exposed that this phrase is part
+of the evaluator's candidate-boundary guard. The transcript was rewritten to
+avoid that guarded phrase and the seven-prompt baseline passed. This is a
+fixture wording issue, not a router behavior issue.
+
+Recommended apply strategy for RH-26.5:
+
+```json
+{
+  "context_router": {
+    "enabled": true,
+    "mode": "apply",
+    "apply_routes": ["foreground_control"],
+    "dry_run_routes": [
+      "active_task",
+      "casual_continuity",
+      "diagnostic_current_status",
+      "candidate_review",
+      "memory_architecture_discussion"
+    ],
+    "llm_judge_mode": "disabled"
+  }
+}
+```
+
+Rationale:
+
+- `foreground_control` is the safest first apply route because it matches the
+  already-deployed RH-25b foreground-only behavior
+- all other routes should remain dry-run until their reports are reviewed after
+  at least one live Telegram observation window
+- rollback must be config-only: set `mode` back to `dry_run` or clear
+  `apply_routes`
+
+Boundary result:
+
+```text
+would_change_live_prefetch=true for most dry-run reports
+live_prefetch_changed=false
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+```
+
+RH-26 should stop here for review. RH-26.5 apply mode remains disabled and
+requires a separate review gate.
+
+### RH-26.5 Test-Host Full Apply
+
+After review, the owner chose to apply all RH-26 routes on the 10.20.3.200 test
+host to expose real behavior faster. This is a test-host override, not the
+production-safe default.
+
+Applied config:
+
+```json
+{
+  "context_router": {
+    "enabled": true,
+    "mode": "apply",
+    "apply_routes": ["all"],
+    "dry_run_routes": [],
+    "llm_judge_mode": "disabled"
+  }
+}
+```
+
+Deployment:
+
+```text
+provider install path: /root/.hermes/plugins/memory_os
+runtime install path: /root/.hermes/memory-os/runtime/python
+gateway ActiveState=active
+gateway SubState=running
+gateway MainPID=451894
+```
+
+Implementation note:
+
+- default config remains disabled/dry-run
+- apply mode is config-gated
+- rollback is config-only: set `mode=dry_run` or clear `apply_routes`
+- `foreground_control` uses the same Current Foreground Task section behavior as
+  RH-25b rather than a second competing foreground-only implementation
+
+Apply-only findings fixed before observation:
+
+- Real provider calls refresh `current_task_anchor` for each query. With
+  full-route apply, the first test pass incorrectly allowed a casual prompt's
+  current query anchor to become `Current Foreground Task`. The router now
+  excludes `Current Foreground Task` and `Indexed Recall` from
+  `casual_continuity`.
+- Diagnostic apply initially double-wrapped `## Memory-OS Context` because the
+  diagnostic candidate text already contained a complete context block. Apply
+  formatting now returns a single already-formatted diagnostic block when only
+  that block is selected.
+
+Post-apply direct prefetch probe:
+
+```text
+cancel_failed_video:
+  chars=134
+  headings=[Current Foreground Task]
+
+continue_current_task:
+  chars=108
+  headings=[Current Foreground Task]
+
+casual_memory_system_change:
+  chars=0
+  headings=[]
+
+diagnostic_current_architecture:
+  chars=297
+  headings=[Diagnostic Grounding, Current Memory-OS Runtime Facts]
+
+candidate_vs_crystallized:
+  chars=1306
+  headings=[Crystallized Review Candidates, Indexed Recall]
+
+active_comfyui_install:
+  chars=1516
+  headings=[Current Foreground Task, Indexed Recall]
+
+deferred_cancellation:
+  chars=110
+  headings=[Current Foreground Task]
+```
+
+Post-apply health checks:
+
+```text
+doctor_status=ok
+exit_code=0
+findings=[("hindsight_adapter_disabled", "warning")]
+
+RH-22 full seven-prompt baseline:
+  status=ok
+  prompt_count=7
+  failure_count=0
+  warning_count=0
+
+memory_os status:
+  index_health=healthy
+  prefetch_mode=indexed
+  hindsight_adapter_enabled=false
+  crystallized_records=0
+```
+
+Observation plan:
+
+- existing six-hour read-only monitor now records `context_router` config and
+  RH-26 apply probe headings only
+- no section bodies, private messages, raw event summaries, or prompt-expanded
+  context are printed by the monitor
+- regressions should be rolled back by config before any code change

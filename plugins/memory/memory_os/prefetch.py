@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .context_router import ContextSection, route_context_sections
 from .crystallized import read_candidate_queue
 from .store import MemoryOSStore
 
@@ -138,16 +139,142 @@ def build_prefetch(
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
     foreground_task_only: bool = False,
+    context_router_config: dict[str, Any] | None = None,
 ) -> str:
+    router_config = _normalize_context_router_config(context_router_config)
+    router_apply_enabled = _context_router_apply_enabled(router_config)
+    if _should_ground_diagnostic_query(
+        query,
+        diagnostic_grounding_enabled=diagnostic_grounding_enabled,
+    ) and not router_apply_enabled:
+        return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
+    current_task_section: list[tuple[str, list[str]]] = []
+    _append_section(current_task_section, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
+    if foreground_task_only and current_task_section:
+        return _fit_budget(_format(current_task_section), budget_chars)
+    if router_apply_enabled:
+        routed = _build_context_router_apply_prefetch(
+            query,
+            budget_chars=budget_chars,
+            store=store,
+            index=index,
+            diagnostic_grounding_enabled=diagnostic_grounding_enabled,
+            runtime_facts=runtime_facts,
+            current_task_anchor=current_task_anchor,
+            context_router_config=router_config,
+        )
+        if routed is not None:
+            return routed
+    sections = _build_prefetch_sections(query, store=store, index=index, current_task_anchor=current_task_anchor)
+    if not sections:
+        return ""
+    return _fit_budget(_format(sections), budget_chars)
+
+
+def build_prefetch_section_candidates(
+    query: str,
+    *,
+    store: MemoryOSStore,
+    index: object | None = None,
+    diagnostic_grounding_enabled: bool = True,
+    runtime_facts: dict[str, Any] | None = None,
+    current_task_anchor: str | None = None,
+) -> list[ContextSection]:
     if _should_ground_diagnostic_query(
         query,
         diagnostic_grounding_enabled=diagnostic_grounding_enabled,
     ):
-        return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
+        return [
+            ContextSection(
+                section="Diagnostic Grounding",
+                text=_format_diagnostic(runtime_facts or {}),
+                source_class="diagnostic",
+            )
+        ]
+    return [
+        ContextSection(section=title, text="\n".join(lines), source_class=_section_source_class(title))
+        for title, lines in _build_prefetch_sections(
+            query,
+            store=store,
+            index=index,
+            current_task_anchor=current_task_anchor,
+        )
+    ]
+
+
+def build_context_router_report(
+    query: str,
+    *,
+    budget_chars: int,
+    store: MemoryOSStore,
+    index: object | None = None,
+    diagnostic_grounding_enabled: bool = True,
+    runtime_facts: dict[str, Any] | None = None,
+    current_task_anchor: str | None = None,
+) -> dict[str, Any]:
+    return route_context_sections(
+        query,
+        sections=build_prefetch_section_candidates(
+            query,
+            store=store,
+            index=index,
+            diagnostic_grounding_enabled=diagnostic_grounding_enabled,
+            runtime_facts=runtime_facts,
+            current_task_anchor=current_task_anchor,
+        ),
+        current_task_anchor=current_task_anchor,
+        budget_chars=budget_chars,
+        mode="dry_run",
+    )
+
+
+def _build_context_router_apply_prefetch(
+    query: str,
+    *,
+    budget_chars: int,
+    store: MemoryOSStore,
+    index: object | None = None,
+    diagnostic_grounding_enabled: bool = True,
+    runtime_facts: dict[str, Any] | None = None,
+    current_task_anchor: str | None = None,
+    context_router_config: dict[str, Any],
+) -> str | None:
+    candidates = build_prefetch_section_candidates(
+        query,
+        store=store,
+        index=index,
+        diagnostic_grounding_enabled=diagnostic_grounding_enabled,
+        runtime_facts=runtime_facts,
+        current_task_anchor=current_task_anchor,
+    )
+    report = route_context_sections(
+        query,
+        sections=candidates,
+        current_task_anchor=current_task_anchor,
+        budget_chars=budget_chars,
+        mode="apply",
+    )
+    route = str(report.get("route") or "")
+    if not _context_router_route_applies(route, context_router_config):
+        return None
+    selected_names = [str(item.get("section") or "") for item in report.get("selected_sections", [])]
+    selected_sections = _sections_for_selected_names(candidates, selected_names)
+    if route == "foreground_control":
+        selected_sections = [section for section in selected_sections if section.section == "Current Foreground Task"]
+    if not selected_sections:
+        return ""
+    return _fit_budget(_format_selected_context_sections(selected_sections), budget_chars)
+
+
+def _build_prefetch_sections(
+    query: str,
+    *,
+    store: MemoryOSStore,
+    index: object | None = None,
+    current_task_anchor: str | None = None,
+) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
-    if foreground_task_only and sections:
-        return _fit_budget(_format(sections), budget_chars)
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
@@ -157,9 +284,71 @@ def build_prefetch(
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
-    if not sections:
-        return ""
-    return _fit_budget(_format(sections), budget_chars)
+    return sections
+
+
+def _section_source_class(title: str) -> str:
+    mapping = {
+        "Current Foreground Task": "foreground",
+        "Identity Memory": "identity",
+        "Continuity Bridge": "bridge",
+        "Conversation Carryover": "carryover",
+        "Working Memory": "working",
+        "Relationship Memory": "relationship",
+        "Crystallized Review Candidates": "candidate",
+        "Crystallized Memory": "crystallized",
+        "Indexed Recall": "indexed",
+        "Recent Event Summaries": "event",
+        "Diagnostic Grounding": "diagnostic",
+    }
+    return mapping.get(title, "other")
+
+
+def _normalize_context_router_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {
+            "enabled": False,
+            "mode": "dry_run",
+            "apply_routes": [],
+            "dry_run_routes": [],
+            "llm_judge_mode": "disabled",
+        }
+    return {
+        "enabled": bool(config.get("enabled")),
+        "mode": str(config.get("mode") or "dry_run"),
+        "apply_routes": list(config.get("apply_routes") or []),
+        "dry_run_routes": list(config.get("dry_run_routes") or []),
+        "llm_judge_mode": str(config.get("llm_judge_mode") or "disabled"),
+    }
+
+
+def _context_router_apply_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("enabled")) and str(config.get("mode") or "") == "apply"
+
+
+def _context_router_route_applies(route: str, config: dict[str, Any]) -> bool:
+    routes = {str(item) for item in config.get("apply_routes", [])}
+    return "all" in routes or route in routes
+
+
+def _sections_for_selected_names(candidates: list[ContextSection], selected_names: list[str]) -> list[ContextSection]:
+    remaining = list(candidates)
+    selected: list[ContextSection] = []
+    for name in selected_names:
+        for index, candidate in enumerate(remaining):
+            if candidate.section != name:
+                continue
+            selected.append(candidate)
+            remaining.pop(index)
+            break
+    return selected
+
+
+def _format_selected_context_sections(sections: list[ContextSection]) -> str:
+    nonempty = [section for section in sections if section.text.strip()]
+    if len(nonempty) == 1 and nonempty[0].text.startswith(HEADER):
+        return nonempty[0].text
+    return _format([(section.section, section.text.splitlines()) for section in nonempty])
 
 
 def plan_query_route(

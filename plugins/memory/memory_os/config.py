@@ -14,6 +14,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hindsight_adapter_enabled": False,
     "allow_full_local_capture": False,
     "diagnostic_grounding_enabled": None,
+    "context_router": {
+        "enabled": False,
+        "mode": "dry_run",
+        "apply_routes": [],
+        "dry_run_routes": [],
+        "llm_judge_mode": "disabled",
+    },
 }
 
 
@@ -44,6 +51,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "key": "diagnostic_grounding_enabled",
             "description": "Enable current-runtime grounding for memory provider diagnostics",
             "default": DEFAULT_CONFIG["diagnostic_grounding_enabled"],
+        },
+        {
+            "key": "context_router",
+            "description": "Context Relevance Router mode and route allowlist",
+            "default": DEFAULT_CONFIG["context_router"],
         },
     ]
 
@@ -82,11 +94,27 @@ def save_config(values: dict[str, Any], hermes_home: str | Path) -> None:
 def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG)
     merged.update(_known_values(values))
+    merged["context_router"] = _merge_context_router_config(merged.get("context_router"))
     return merged
 
 
 def _known_values(values: dict[str, Any]) -> dict[str, Any]:
     return {key: values[key] for key in DEFAULT_CONFIG if key in values}
+
+
+def _merge_context_router_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["context_router"])
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in default:
+        if key in value:
+            merged[key] = value[key]
+    if not isinstance(merged.get("apply_routes"), list):
+        merged["apply_routes"] = []
+    if not isinstance(merged.get("dry_run_routes"), list):
+        merged["dry_run_routes"] = []
+    return merged
 
 
 def effective_diagnostic_grounding_enabled(config: dict[str, Any], profile: str) -> bool:

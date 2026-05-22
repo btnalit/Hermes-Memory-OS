@@ -81,6 +81,7 @@ class MemoryOSProvider(MemoryProvider):
             runtime_facts=self._tool_status_report(),
             current_task_anchor=self._current_task_anchor,
             foreground_task_only=self._foreground_task_only_prefetch,
+            context_router_config=self._config.get("context_router"),
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:

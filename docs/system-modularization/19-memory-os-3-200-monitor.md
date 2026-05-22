@@ -53,6 +53,15 @@ HERMES_HOME=/root/.hermes hermes memory_os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
 HERMES_HOME=/root/.hermes hermes memory_os conversation-regression status-tool-contract
+python3 - <<'PY'
+# Read /root/.hermes/memory-os/config.json and report only
+# context_router.enabled/mode/apply_routes/dry_run_routes/llm_judge_mode.
+PY
+PYTHONPATH=/root/.hermes/memory-os/runtime/python python3 - <<'PY'
+# Run RH-26 apply probes for the seven public validation prompts and report
+# only prompt id, context character count, and selected section headings.
+# Do not print section bodies or previews.
+PY
 PYTHONPATH=/root/.hermes/memory-os/runtime/python \
   python3 -m plugins.modules.cognition.deep_reflection status \
   --hermes-home /root/.hermes \
@@ -79,6 +88,11 @@ for `agent_os_shell_session_started`, `agent_os_shell_session_reset`, and
 `agent_os_shell_session_finalized`, but it must not trigger `/new`, invoke
 hooks, or create new audit entries.
 
+The RH-26 apply probe is read-only. It may call `build_prefetch` locally and
+report which section headings would be present for the public validation
+prompts. It must not print selected section bodies, previews, raw event
+summaries, private transcript text, or prompt-expanded context.
+
 ## Expected Healthy Snapshot
 
 A normal monitor pass should be treated as PASS when:
@@ -96,6 +110,9 @@ A normal monitor pass should be treated as PASS when:
 - `memory_os doctor` has `status=ok`
 - the only expected doctor warning is `hindsight_adapter_disabled`
 - `status-tool-contract` validation is `ok`
+- `context_router` config matches the intended test-host mode
+- RH-26 apply probes show expected section headings for the seven public
+  validation prompts
 - no backup-looking Memory-OS provider/shell plugin manifests are present under
   `$HERMES_HOME/plugins/`
 - DeepReflection reports `mode=auto_bounded` on the test host
@@ -115,6 +132,8 @@ WARN conditions:
 - shell hook marker counts do not change for a long period despite real
   session resets; this can indicate that Hermes hook dispatch is not reaching
   the shell, but it is not an automatic recovery condition
+- RH-26 casual continuity probes return empty context on a host that lacks clean
+  casual carryover; this is a review signal, not a hard failure
 - disk usage grows unexpectedly but no hard limit is crossed
 - a simple `is-active` service probe reports inactive, but a follow-up
   `systemctl --user show` probe reports `LoadState=loaded`,
@@ -132,6 +151,8 @@ FAIL conditions:
 - `memory-os-agent-os` status or doctor alias fails
 - doctor returns an error
 - status tool contract validation fails
+- RH-26 apply probes select mechanism-heavy sections for casual prompts or
+  include background sections for cancellation/continue prompts
 - backup-looking Memory-OS provider/shell plugin manifests exist under
   `$HERMES_HOME/plugins/`
 - any boundary boolean becomes true

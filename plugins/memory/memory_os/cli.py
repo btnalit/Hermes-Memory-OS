@@ -59,6 +59,7 @@ from .migrator import (
     replay_shadow_import,
 )
 from .prefetch import continuity_selector_report
+from .prefetch import build_context_router_report
 from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
@@ -302,6 +303,12 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     conversation_subs.add_parser("status-tool-contract")
     conversation_evaluate = conversation_subs.add_parser("evaluate")
     conversation_evaluate.add_argument("--transcript", required=True)
+    context_router_parser = subs.add_parser("context-router")
+    context_router_subs = context_router_parser.add_subparsers(dest="context_router_command", required=True)
+    context_router_dry_run = context_router_subs.add_parser("dry-run")
+    context_router_dry_run.add_argument("--query", required=True)
+    context_router_dry_run.add_argument("--budget", type=int, default=2200)
+    context_router_dry_run.add_argument("--current-task-anchor", default="")
     export_parser = subs.add_parser("export-shadow")
     export_parser.add_argument("--profile", default="sannai")
     export_parser.add_argument("--hermes-home", required=True)
@@ -381,6 +388,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _shadow_journal_command(args, store)
     if command == "conversation-regression":
         return _conversation_regression_command(args)
+    if command == "context-router":
+        return _context_router_command(args, store)
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -549,6 +558,26 @@ def _conversation_regression_command(args: argparse.Namespace) -> int:
         report = evaluate_transcript_file(args.transcript)
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 1 if report["status"] == "fail" else 0
+    return 2
+
+
+def _context_router_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    if args.context_router_command == "dry-run":
+        print(
+            json.dumps(
+                build_context_router_report(
+                    args.query,
+                    budget_chars=args.budget,
+                    store=store,
+                    index=MemoryOSIndex(store.roots),
+                    current_task_anchor=args.current_task_anchor,
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     return 2
 
 
