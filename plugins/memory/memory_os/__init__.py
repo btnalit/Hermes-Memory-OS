@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import queue
+import re
 import threading
 from collections import Counter
 from datetime import datetime, timezone
@@ -39,6 +40,7 @@ class MemoryOSProvider(MemoryProvider):
         self._queue: queue.Queue[EventEnvelope] | None = None
         self._worker_thread: threading.Thread | None = None
         self._worker_stop = threading.Event()
+        self._current_task_anchor = ""
 
     @property
     def name(self) -> str:
@@ -65,6 +67,7 @@ class MemoryOSProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._store is None:
             return ""
+        self._refresh_current_task_anchor_from_query(query, session_id=session_id)
         return build_prefetch(
             query,
             budget_chars=int(self._config.get("prefetch_char_budget", 2200)),
@@ -75,6 +78,7 @@ class MemoryOSProvider(MemoryProvider):
                 self.profile,
             ),
             runtime_facts=self._tool_status_report(),
+            current_task_anchor=self._current_task_anchor,
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
@@ -93,7 +97,10 @@ class MemoryOSProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
-        return "# Memory-OS\nActive. Conversation capture is summary-only by default."
+        lines = ["# Memory-OS", "Active. Conversation capture is summary-only by default."]
+        if self._current_task_anchor:
+            lines.extend(["", self._current_task_anchor])
+        return "\n".join(lines)
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [
@@ -123,7 +130,8 @@ class MemoryOSProvider(MemoryProvider):
         return None
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
-        return ""
+        self._current_task_anchor = _build_current_task_anchor(messages, session_id=self.session_id)
+        return self._current_task_anchor
 
     def on_memory_write(
         self,
@@ -304,6 +312,18 @@ class MemoryOSProvider(MemoryProvider):
             "stale_memory_warning": "Do not answer provider diagnostics from historical recalled events.",
         }
 
+    def _refresh_current_task_anchor_from_query(self, query: str, *, session_id: str = "") -> None:
+        text = " ".join(str(query or "").split())
+        if not text:
+            return
+        if self._current_task_anchor and _is_continue_current_task_query(text):
+            return
+        self._current_task_anchor = _format_current_task_anchor(
+            task=text,
+            operations=[],
+            session_id=session_id or self.session_id,
+        )
+
 
 def register_memory_provider() -> MemoryProvider:
     return MemoryOSProvider()
@@ -322,6 +342,149 @@ def _clip(value: str, limit: int) -> str:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+_TASK_SECRET_PATTERNS = (
+    re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)\S+"),
+    re.compile(r"(?i)(token\s*[:=]\s*)\S+"),
+    re.compile(r"(?i)(secret\s*[:=]\s*)\S+"),
+    re.compile(r"(?i)(password\s*[:=]\s*)\S+"),
+)
+
+
+def _build_current_task_anchor(messages: list[dict[str, Any]], *, session_id: str = "") -> str:
+    latest_user_index: int | None = None
+    latest_user_text = ""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if str(message.get("role", "")) != "user":
+            continue
+        text = _content_text(message.get("content"))
+        if text.strip():
+            latest_user_index = index
+            latest_user_text = text
+            break
+    if latest_user_index is None or not latest_user_text.strip():
+        return ""
+
+    operations: list[str] = []
+    for message in messages[latest_user_index + 1 :]:
+        role = str(message.get("role", ""))
+        if role not in {"assistant", "tool"}:
+            continue
+        text = _content_text(message.get("content"))
+        if _looks_like_operation_context(text):
+            operations.append(f"{role}: {_clip(text, 180)}")
+    return _format_current_task_anchor(
+        task=latest_user_text,
+        operations=operations[-4:],
+        session_id=session_id,
+    )
+
+
+def _format_current_task_anchor(*, task: str, operations: list[str], session_id: str = "") -> str:
+    task = _redact_task_text(_clip(task, 240))
+    if not task:
+        return ""
+    output = [
+        "### Memory-OS Current Task Anchor",
+        f"- current task: {task}",
+    ]
+    if session_id:
+        output.append(f"- session: {session_id}")
+    if operations:
+        output.append("- active tool/process state:")
+        for operation in operations:
+            output.append(f"  - {_redact_task_text(_clip(operation, 220))}")
+    output.append(
+        "- compression rule: Continue this foreground task after compaction. "
+        "Do not switch back to unrelated historical memory topics."
+    )
+    return _clip_multiline("\n".join(output), 1200)
+
+
+def _content_text(content: Any) -> str:
+    if isinstance(content, str):
+        return " ".join(content.split())
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                value = item.get("text") or item.get("content") or ""
+                if value:
+                    parts.append(str(value))
+            elif isinstance(item, str):
+                parts.append(item)
+        return " ".join(" ".join(parts).split())
+    return " ".join(str(content or "").split())
+
+
+def _looks_like_operation_context(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    markers = (
+        "terminal:",
+        "process",
+        "proc_",
+        "running",
+        "wait ",
+        "poll ",
+        "install",
+        "download",
+        "clone",
+        "git ",
+        "fatal:",
+        "error",
+        "failed",
+        "comfyui",
+        "正在",
+        "安装",
+        "下载",
+        "失败",
+        "报错",
+        "后台",
+        "进程",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _is_continue_current_task_query(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return False
+    patterns = (
+        "继续当前任务",
+        "继续刚才的任务",
+        "继续这个任务",
+        "继续安装",
+        "继续执行",
+        "继续吧",
+        "继续",
+        "接着",
+        "接着做",
+        "keep going",
+        "continue",
+        "continue current task",
+        "continue the current task",
+        "resume",
+        "resume current task",
+    )
+    return normalized in patterns
+
+
+def _redact_task_text(value: str) -> str:
+    redacted = value
+    for pattern in _TASK_SECRET_PATTERNS:
+        redacted = pattern.sub(r"\1[redacted]", redacted)
+    return redacted
+
+
+def _clip_multiline(value: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
 
 
 def _working_item_count(roots: Any) -> int:

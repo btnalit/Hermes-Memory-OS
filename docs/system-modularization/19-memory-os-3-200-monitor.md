@@ -116,6 +116,10 @@ WARN conditions:
   session resets; this can indicate that Hermes hook dispatch is not reaching
   the shell, but it is not an automatic recovery condition
 - disk usage grows unexpectedly but no hard limit is crossed
+- a simple `is-active` service probe reports inactive, but a follow-up
+  `systemctl --user show` probe reports `LoadState=loaded`,
+  `ActiveState=active`, and `UnitFileState=enabled`; this should be recorded as
+  a monitor-probe discrepancy before treating it as a runtime failure
 
 FAIL conditions:
 
@@ -204,6 +208,264 @@ deployment:
   }
 }
 ```
+
+## Latest Automation Snapshot And Recheck
+
+Automation snapshot:
+
+```text
+automation: memory-os-3-200-monitor
+run_time_utc: 2026-05-21T23:37:47Z
+host: debian
+```
+
+Automation-reported PASS:
+
+```text
+provider=memory_os
+memory_os status index_health=healthy
+prefetch_mode=indexed
+hindsight_adapter_enabled=false
+doctor.status=ok
+status-tool-contract.validation.status=ok
+DeepReflection enabled=true
+DeepReflection injection_mode=auto_bounded
+disk /root/.hermes/memory-os use=25%
+```
+
+Automation-reported WARN:
+
+```text
+hermes-gateway.service inactive, PID=0
+hermes-memory-os-heartbeat.timer inactive, enabled state empty/unstable
+hindsight_adapter_disabled expected warning
+```
+
+Automation counts:
+
+```text
+audit_entries=742
+events=52
+working_items=45
+queue_backlog=0
+```
+
+Manual read-only recheck after the automation snapshot:
+
+```text
+recheck_time_remote: 2026-05-21T21:27:06-04:00
+gateway: LoadState=loaded, ActiveState=active, SubState=running,
+         UnitFileState=enabled, MainPID=440371
+heartbeat timer: LoadState=loaded, ActiveState=active, SubState=waiting,
+                 UnitFileState=enabled
+provider/plugin split: memory-os-agent-os enabled, memory_os not enabled as a
+                       general plugin
+doctor: status=ok, expected hindsight_adapter_disabled warning only
+status-tool-contract: validation.status=ok, findings=[]
+disk: 25%, 174G/754G
+```
+
+Manual recheck counts:
+
+```text
+audit_entries=792
+events=54
+working_items=47
+crystallized_candidates=47
+crystallized_records=0
+queue_backlog=0
+index_health=healthy
+index_counts.audit_entries=791
+```
+
+DeepReflection manual recheck:
+
+```json
+{
+  "enabled": true,
+  "injection_mode": "auto_bounded",
+  "latest_injection_source_classes": {
+    "selected_by_source_class": {"working": 2},
+    "dropped_by_source_class": {"working": 1},
+    "selected_total": 2,
+    "dropped_total": 1
+  },
+  "rolling_injection_source_classes": {
+    "window_report_count": 7,
+    "selected_by_source_class": {"working": 14},
+    "dropped_by_source_class": {"working": 7},
+    "selected_total": 14,
+    "dropped_total": 7
+  },
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_crystallized_approval": false
+}
+```
+
+Interpretation:
+
+- Memory-OS grew between snapshots without queue backlog:
+  `events +2`, `working_items +2`, and `audit_entries +50` from the automation
+  snapshot to the manual recheck.
+- `crystallized_records` remained `0`.
+- DeepReflection remained safe but still source-class skewed to `working`.
+- The gateway/timer WARN was not reproduced by the richer manual systemd
+  recheck. If this repeats, the monitor should collect `LoadState`,
+  `FragmentPath`, and `UnitFileState` before final FAIL classification.
+
+## Optimization Decision Signals
+
+These signals decide when to revisit currently deferred enhancement choices.
+They are tracking inputs, not automatic triggers.
+
+### DeepReflection Working Updates
+
+Current state:
+
+```text
+working_updates_enabled=false
+```
+
+Keep it disabled while:
+
+- DeepReflection cards come only from `working`
+- source-class skew remains unexplained
+- RH-22 real-conversation regression has not been rerun after a behavior change
+
+Consider an owner-reviewed canary only after:
+
+- `actual_send=false`, `actual_execute=false`, `actual_identity_write=false`,
+  and `actual_crystallized_approval=false` remain stable over multiple monitor
+  windows
+- queue backlog stays `0`
+- `doctor.status=ok`
+- source-class distribution includes more than only `working`, or the
+  working-only skew is explained by data rather than selector bias
+- the canary writes are capped and separately visible in status/doctor
+
+Track:
+
+- working item growth rate per day
+- how many working items are created by heartbeat versus DeepReflection
+- whether working items from mirrored/governance sources affect ordinary chat
+  tone
+
+### LLM Internal Analysis Canary
+
+Current state:
+
+```text
+llm_enabled=false
+```
+
+Do not enable until deterministic DeepReflection has enough baseline data.
+
+Track before deciding:
+
+- repeated rejected/dropped deterministic cards caused by weak synthesis
+- owner-visible cases where deterministic analysis misses obvious continuity
+- RH-22 and status-tool-contract stability
+- instruction-like filter rejection rate
+- whether LLM judge availability would fail closed cleanly
+
+Canary requirement:
+
+- local-only or test-host-only
+- no direct injection without the same deterministic post-filters
+- no working updates, sends, executes, identity writes, or crystallized approval
+  from LLM output
+
+### Carryover Budget / `max_chars_total`
+
+Current position:
+
+```text
+do not expand until real conversation regression stays clean
+```
+
+Track:
+
+- selected card count
+- dropped card count
+- drop reasons by budget versus safety filter
+- ordinary conversation tone regressions
+- mechanism label leakage
+- candidate/crystallized wording mistakes
+
+Consider a small budget increase only if:
+
+- useful cards are repeatedly dropped only because of budget
+- RH-22 full prompt set stays clean
+- Telegram smoke tests remain natural
+- no diagnostic/report style leaks into ordinary chat
+
+### Source-Class Diversity / RH-25
+
+Current baseline:
+
+```text
+selected=working:14
+dropped=working:7
+window_report_count=7
+```
+
+Track:
+
+- selected and dropped cards by `foreground`, `digest`, `governance`, `cron`,
+  `state_source`, and `working`
+- whether digest/governance data exists but is never selected
+- whether source-class filtering is too strict or source ingestion is missing
+
+Decision rule:
+
+- do not tune diversity from the first seven windows
+- collect at least 1-2 weeks of distribution data
+- propose a separate RH item before changing ranking, caps, or minimum slots
+
+### Audit Retention / RH-17 Follow-Up
+
+Current observation:
+
+```text
+audit_entries grew from 742 to 792 between automation snapshot and manual
+recheck while events grew from 52 to 54
+```
+
+Track:
+
+- audit entries per day
+- audit entries per event
+- shell hook marker count
+- monitor-generated audit count, if any
+- disk usage of `/root/.hermes/memory-os`
+
+Decision rule:
+
+- no audit deletion by default
+- if audit growth becomes noisy, design dry-run archive/compaction first
+- hook markers should remain audit-only and should not become events/working
+  items/candidates
+
+### Service And Monitor Reliability
+
+Track:
+
+- automation `is-active` result
+- direct `systemctl --user show` state
+- `FragmentPath`
+- `UnitFileState`
+- gateway `MainPID`
+- timer `list-timers` visibility
+
+Decision rule:
+
+- if automation repeatedly reports inactive/not-found while direct recheck
+  reports loaded/active/enabled, improve the monitor probe before treating it
+  as runtime instability
+- if both automation and direct recheck show inactive/disabled, treat it as a
+  real runtime WARN/FAIL and ask owner before recovery
 
 ## Boundaries
 

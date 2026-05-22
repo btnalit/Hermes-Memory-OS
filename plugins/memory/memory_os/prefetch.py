@@ -76,6 +76,7 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)(api[_-]?key\s*[:=]\s*)\S+"),
     re.compile(r"(?i)(token\s*[:=]\s*)\S+"),
     re.compile(r"(?i)(secret\s*[:=]\s*)\S+"),
+    re.compile(r"(?i)(password\s*[:=]\s*)\S+"),
 )
 
 _DIAGNOSTIC_STYLE_SEED_PATTERNS = (
@@ -135,6 +136,7 @@ def build_prefetch(
     index: object | None = None,
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
+    current_task_anchor: str | None = None,
 ) -> str:
     if _should_ground_diagnostic_query(
         query,
@@ -142,6 +144,7 @@ def build_prefetch(
     ):
         return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
     sections: list[tuple[str, list[str]]] = []
+    _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
@@ -195,6 +198,19 @@ def plan_query_route(
 def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: list[str]) -> None:
     if lines:
         sections.append((title, lines))
+
+
+def _current_task_anchor_lines(anchor: str | None) -> list[str]:
+    if not anchor:
+        return []
+    text = _redact(_clip_multiline(str(anchor), 700))
+    lines: list[str] = []
+    for line in text.splitlines():
+        clean = line.strip()
+        if not clean or clean.startswith("###"):
+            continue
+        lines.append(clean if clean.startswith("-") else f"- {clean}")
+    return lines[:6]
 
 
 def _identity_lines(store: MemoryOSStore) -> list[str]:
@@ -585,6 +601,13 @@ def _clip(value: str, limit: int) -> str:
     if len(clean) <= limit:
         return clean
     return clean[: limit - 1].rstrip() + "..."
+
+
+def _clip_multiline(value: str, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
 
 
 def _redact(value: str) -> str:

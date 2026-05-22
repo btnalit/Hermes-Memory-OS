@@ -909,6 +909,156 @@ Boundary:
   auto-injection behavior based on the current skew alone
 - any selector tuning should be proposed as a separate reviewed RH item
 
+### RH-25 Small-Context Session Task Anchor
+
+Mitigate foreground task drift after context compression in small-context Hermes
+modes.
+
+Status:
+
+- priority: P0 if small-context Hermes sessions are used for real work
+- investigation: initial read-only source and log inspection completed on
+  10.20.3.200
+- Memory-OS mitigation: implemented locally as a bounded current task anchor
+- 10.20.3.200: deployed and verified with synthetic ComfyUI task-anchor probe
+- Hermes upstream gap: documented separately in
+  `20-hermes-compression-hook-gap.md`
+
+Observed symptom:
+
+- A long ComfyUI installation task ran through multiple tool calls and
+  background processes.
+- The foreground session compacted context more than once.
+- After compaction, the assistant resumed with an unrelated Memory-OS/Hindsight
+  explanation instead of continuing the ComfyUI install status.
+- Background process outputs still arrived, but the current user task anchor
+  had been weakened or lost.
+
+Initial classification:
+
+```text
+not: canonical Memory-OS corruption
+not: DeepReflection safety failure
+not: approved long-term memory drift
+
+likely: foreground compression/resume task-focus drift
+```
+
+Read-only evidence from 10.20.3.200:
+
+- The user-facing compaction messages are emitted by Hermes itself:
+  `/usr/local/lib/hermes-agent/run_agent.py` logs and emits both
+  `Preflight compression` and
+  `Compacting context -- summarizing earlier conversation so I can continue`.
+- The reproduced session log showed:
+
+```text
+session=20260521_220646_3c3d23
+preflight_tokens=159123
+threshold_tokens=136000
+model=gpt-5.4-mini
+context_length=272000
+messages=148
+focus=None
+```
+
+- Hermes core has a `focus_topic` compression path, but automatic preflight
+  compression did not pass one. Focus is currently present for manual
+  `/compress <focus>` style flows, not for automatic long-running task
+  compaction.
+- Hermes calls `MemoryManager.on_pre_compress(messages)`, and the manager
+  combines provider-returned text for inclusion in the compression summary
+  prompt. However, the current `_compress_context()` call path invokes this
+  hook for side effects and discards the returned text.
+- The installed `memory_os` provider currently implements
+  `on_pre_compress()` as an empty return, so Memory-OS does not preserve a
+  task anchor before compaction.
+- Gateway long-running progress notifications are also Hermes-side
+  (`gateway/run.py` emits `Still working...`). This confirms the symptom is
+  not a local Codex CLI-only issue.
+
+Updated classification:
+
+```text
+not: Codex CLI-only drift
+not: canonical Memory-OS data corruption
+not: DeepReflection safety failure
+not: approved long-term memory drift
+
+primary: Hermes run_agent automatic compression lacks an active task focus
+secondary: Memory-OS has a provider hook seam but currently contributes no
+           foreground task anchor and the Hermes call path does not consume
+           provider hook return text
+```
+
+Why this matters:
+
+- Memory-OS can preserve long-term facts while the active session still loses
+  the current task after compaction.
+- Small-context modes are more likely to hit this because long tool runs,
+  process output, web search, and historical memory summaries compete for the
+  remaining foreground context.
+- If this is not handled, long installs, model downloads, and media jobs can
+  resume into the wrong topic even when Memory-OS itself is healthy.
+
+Data to collect before design:
+
+- exact session id and platform (first observed session:
+  `20260521_220646_3c3d23`)
+- model/context mode used by the gateway (first observed model:
+  `gpt-5.4-mini`, context length `272000`, threshold `136000`)
+- number and timing of compaction events (first observed preflight:
+  `2026-05-21 22:29:19` host log time)
+- current active user task before compaction (known from user transcript:
+  ComfyUI plugin/model installation)
+- first assistant message after compaction (known from user transcript:
+  unrelated Memory-OS/Hindsight explanation)
+- pending background process ids and labels (known from user transcript:
+  multiple ComfyUI install/download/search processes; exact process mapping
+  still needs gateway-side structured capture)
+- whether `on_pre_compress()` was called and what it returned (called; current
+  Memory-OS provider returns empty string)
+- whether Memory-OS prefetch or DeepReflection injected unrelated high-salience
+  context
+
+Potential design direction:
+
+- add a bounded `current_task_anchor` artifact for long-running foreground jobs
+  (implemented as provider runtime state)
+- attach background process output to a task id when available
+- make Memory-OS `on_pre_compress()` expose the current task, active
+  tool/process set, and "do not switch topic" constraint (implemented)
+- include the task anchor in provider prefetch as `Current Foreground Task`
+  (implemented for non-diagnostic prefetch)
+- include the task anchor in `system_prompt_block()` after pre-compression so
+  Hermes' rebuilt system prompt has a same-turn fallback (implemented)
+- patch or wrap the Hermes compression path so provider hook output is actually
+  fed into the summary prompt, or pass a generated `focus_topic` to automatic
+  preflight compression
+- prioritize the task anchor above historical recall after compaction
+- expire the anchor when the task is explicitly completed, cancelled, or
+  superseded
+
+Boundaries:
+
+- do not turn task anchors into approved long-term memory
+- do not use task anchors to hide user corrections or failures
+- do not let task anchors suppress explicit user topic changes
+- do not make background process output create working/candidates unless it
+  passes existing Inner Drive and source-class policies
+
+Open questions:
+
+- Should task anchors live under working memory, session metadata, or a separate
+  foreground-continuity artifact?
+- Does Hermes core already expose enough task/process metadata to implement
+  this without patching the gateway? Initial source read suggests task id exists,
+  but task description/process labels need a structured foreground anchor.
+- Should this be an RH item, a provider `on_pre_compress()` item, an Agent OS
+  shell hook item, or a small upstream Hermes compression patch?
+- How can regression tests simulate compaction/resume without depending on a
+  specific model?
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:

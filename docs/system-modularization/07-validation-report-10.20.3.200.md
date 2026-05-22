@@ -3367,3 +3367,463 @@ Boundaries:
 - no events, working items, candidates, crystallized records, sends, executes,
   identity writes, Hindsight exports, `pre_llm_call` injection, or slash
   commands were introduced by the shell
+
+## Read-Only Monitor Snapshot Review (2026-05-21)
+
+This section records the first external `memory-os-3-200-monitor` style
+snapshot after PS-04/PS-05, plus a direct read-only Codex recheck on
+`hermes-media`. No recovery action was taken.
+
+User-provided monitor snapshot:
+
+```text
+host: debian
+snapshot_time: 2026-05-21 13:35:59 EDT
+provider: memory_os
+status counts:
+  audit_entries=492
+  crystallized_candidates=22
+  crystallized_records=0
+  events=29
+  working_items=22
+index_health.state=healthy
+prefetch_mode=indexed
+queue_backlog=0
+doctor.status=ok
+doctor.exit_code=0
+status-tool-contract.validation.status=ok
+DeepReflection:
+  enabled=true
+  injection_mode=auto_bounded
+  latest selected=working:2, dropped=1
+  rolling selected=working:14, dropped=7
+disk /root/.hermes/memory-os mount:
+  total=754G, used=170G, available=547G, use=24%
+```
+
+The same snapshot reported these WARN conditions:
+
+```text
+hermes-gateway.service: inactive, MainPID=0
+hermes-memory-os-heartbeat.timer: inactive, not-found
+hindsight_adapter_enabled=false
+```
+
+`hindsight_adapter_enabled=false` remains expected for this deployment because
+Hindsight is an optional adapter, not the canonical Memory-OS store.
+
+Direct read-only recheck from Codex immediately afterwards:
+
+```bash
+ssh hermes-media \
+  "systemctl --user show hermes-gateway.service \
+     -p LoadState -p ActiveState -p SubState -p MainPID \
+     -p FragmentPath -p UnitFileState"
+```
+
+Result:
+
+```text
+LoadState=loaded
+ActiveState=active
+SubState=running
+FragmentPath=/root/.config/systemd/user/hermes-gateway.service
+UnitFileState=enabled
+MainPID=440371
+```
+
+Heartbeat timer recheck:
+
+```bash
+ssh hermes-media \
+  "systemctl --user show hermes-memory-os-heartbeat.timer \
+     -p LoadState -p ActiveState -p SubState -p UnitFileState \
+     -p FragmentPath"
+```
+
+Result:
+
+```text
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+FragmentPath=/root/.config/systemd/user/hermes-memory-os-heartbeat.timer
+UnitFileState=enabled
+```
+
+Timer list:
+
+```text
+NEXT                            LEFT      LAST                             PASSED
+Thu 2026-05-21 13:43:07 EDT     2min 59s  Thu 2026-05-21 13:38:07 EDT      2min 0s ago
+UNIT                             ACTIVATES
+hermes-memory-os-heartbeat.timer hermes-memory-os-heartbeat.service
+```
+
+Plugin state recheck:
+
+```text
+memory-os-agent-os  enabled      user
+memory_os           not enabled  user
+```
+
+Memory-OS status recheck:
+
+```json
+{
+  "counts": {
+    "audit_entries": 500,
+    "crystallized_candidates": 23,
+    "crystallized_records": 0,
+    "events": 31,
+    "working_items": 23
+  },
+  "index_counts": {
+    "audit_entries": 498,
+    "crystallized_candidates": 23,
+    "crystallized_records": 0,
+    "events": 30,
+    "working_items": 23
+  },
+  "index_health": {
+    "state": "stale",
+    "fts_tokenizer": "trigram"
+  },
+  "prefetch_mode": "indexed",
+  "queue_backlog": 0
+}
+```
+
+Doctor recheck:
+
+```json
+{
+  "status": "ok",
+  "exit_code": 0,
+  "findings": [
+    {
+      "code": "index_stale",
+      "severity": "warning"
+    },
+    {
+      "code": "hindsight_adapter_disabled",
+      "severity": "warning"
+    }
+  ]
+}
+```
+
+Status-tool contract recheck:
+
+```json
+{
+  "validation": {
+    "status": "ok",
+    "findings": []
+  }
+}
+```
+
+Interpretation:
+
+- The user-provided gateway/timer WARN was not reproduced by direct read-only
+  systemd recheck; both units were loaded, enabled, and active at recheck time.
+- The recheck found the expected provider/shell split:
+  `memory.provider=memory_os`, `memory-os-agent-os` enabled, and `memory_os`
+  not enabled as a general plugin.
+- Memory-OS remained operational: queue backlog was `0`, `prefetch_mode` stayed
+  `indexed`, status-tool contract validation stayed `ok`, and
+  `crystallized_records` stayed `0`.
+- The direct recheck did observe `index_stale`, with the filesystem ahead by
+  one event and two audit entries. This is a WARN-level heartbeat catch-up
+  condition, not a doctor failure.
+- No heartbeat catch-up, gateway restart, hook replay, cleanup apply, or other
+  recovery action was run during this review.
+
+Follow-up:
+
+- Keep watching whether the monitor ever repeats gateway inactive or timer
+  not-found. If it repeats while direct `systemctl --user show` says active,
+  improve the monitor to collect `LoadState`, `FragmentPath`, and
+  `UnitFileState` before classifying that condition.
+- Let the active heartbeat timer catch up the stale index naturally unless
+  owner explicitly asks for manual heartbeat catch-up.
+
+## Automation Snapshot Delta Review (2026-05-21 23:37Z)
+
+The `memory-os-3-200-monitor` automation later produced another read-only
+snapshot:
+
+```text
+automation_id: memory-os-3-200-monitor
+run_time_utc: 2026-05-21T23:37:47Z
+host: debian
+```
+
+Automation summary:
+
+```text
+PASS provider=memory_os
+PASS status index_health=healthy, prefetch_mode=indexed
+PASS doctor.status=ok, exit_code=0
+PASS status-tool-contract.validation.status=ok
+PASS DeepReflection enabled=true, injection_mode=auto_bounded
+PASS disk usage=25%, 174G/754G
+WARN gateway inactive, PID=0
+WARN heartbeat timer inactive, enabled state empty/unstable
+WARN hindsight_adapter_disabled, expected
+counts: audit_entries=742, events=52, working_items=45, queue_backlog=0
+```
+
+Manual read-only recheck after this automation snapshot:
+
+```text
+remote_time: 2026-05-21T21:27:06-04:00
+gateway: loaded, active/running, enabled, MainPID=440371
+heartbeat_timer: loaded, active/waiting, enabled
+provider/plugin split: memory-os-agent-os enabled; memory_os not enabled as
+                       general plugin
+doctor.status=ok
+doctor.findings=[hindsight_adapter_disabled]
+status-tool-contract.validation.status=ok
+disk usage=25%, 174G/754G
+```
+
+Manual recheck counts:
+
+```text
+audit_entries=792
+events=54
+working_items=47
+crystallized_candidates=47
+crystallized_records=0
+queue_backlog=0
+index_health=healthy
+index_counts.audit_entries=791
+```
+
+Delta from the automation snapshot to manual recheck:
+
+```text
+audit_entries: +50
+events: +2
+working_items: +2
+queue_backlog: 0 -> 0
+crystallized_records: stayed 0
+disk usage: stayed 25%
+```
+
+DeepReflection recheck:
+
+```json
+{
+  "enabled": true,
+  "injection_mode": "auto_bounded",
+  "latest_injection_source_classes": {
+    "selected_by_source_class": {"working": 2},
+    "dropped_by_source_class": {"working": 1},
+    "selected_total": 2,
+    "dropped_total": 1
+  },
+  "rolling_injection_source_classes": {
+    "window_report_count": 7,
+    "selected_by_source_class": {"working": 14},
+    "dropped_by_source_class": {"working": 7},
+    "selected_total": 14,
+    "dropped_total": 7
+  },
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_crystallized_approval": false
+}
+```
+
+Interpretation:
+
+- The automation again reported gateway/timer inactivity, but the richer manual
+  systemd recheck again found both units loaded, active, and enabled.
+- The repeated discrepancy suggests the monitor should record `LoadState`,
+  `FragmentPath`, and `UnitFileState` before treating service/timer checks as a
+  hard runtime FAIL.
+- Memory-OS data continued to grow with `queue_backlog=0`, healthy index, and
+  no crystallized records.
+- DeepReflection remained in safe `auto_bounded` mode. The source-class skew
+  remained unchanged: selected and dropped injection cards still came only from
+  `working`.
+- No recovery action was taken.
+
+## Small-Context Compression Drift Investigation (2026-05-22)
+
+Trigger:
+
+- A real Telegram/Hermes session running a long ComfyUI install/download task
+  hit repeated context compaction in a small-context workflow.
+- After compaction, the assistant resumed with an unrelated Memory-OS/Hindsight
+  explanation instead of continuing the active ComfyUI task.
+- The user reported this as a practical usability failure: Hermes could not be
+  used reliably for long jobs under that context mode.
+
+Read-only classification work:
+
+```text
+scope: 10.20.3.200 source/log inspection
+mutation: none
+private bodies printed: no
+```
+
+Evidence:
+
+- `Compacting context -- summarizing earlier conversation so I can continue`
+  is emitted by Hermes at
+  `/usr/local/lib/hermes-agent/run_agent.py`.
+- `Preflight compression` is also emitted by Hermes at
+  `/usr/local/lib/hermes-agent/run_agent.py`.
+- Gateway long-running updates such as `Still working...` are emitted by Hermes
+  gateway code at `/usr/local/lib/hermes-agent/gateway/run.py`.
+- The observed session log showed automatic preflight compression with
+  `focus=None`:
+
+```text
+session=20260521_220646_3c3d23
+preflight_tokens=159123
+threshold_tokens=136000
+model=gpt-5.4-mini
+context_length=272000
+messages=148
+focus=None
+```
+
+- Hermes has a compression `focus_topic` mechanism, but the automatic preflight
+  compression path did not pass one.
+- Hermes calls `MemoryManager.on_pre_compress(messages)` before compression,
+  but the `run_agent.py` call path does not consume the returned provider text.
+- The installed `memory_os` provider currently returns an empty string from
+  `on_pre_compress()`.
+
+Conclusion:
+
+```text
+not: Codex CLI-only issue
+not: canonical Memory-OS data corruption
+not: DeepReflection safety failure
+not: approved long-term memory drift
+
+classification: Hermes foreground compression/resume task-focus drift, with a
+                Memory-OS provider hook seam that is currently unused/empty
+```
+
+Operational impact:
+
+- Memory-OS can remain healthy while the foreground turn loses the current task
+  after automatic compression.
+- This is especially likely in long-running tool jobs where process output,
+  web search, installation logs, and historical high-salience memory compete for
+  the compressed context budget.
+
+Follow-up recorded:
+
+- `08-runtime-hardening-plan.md` now tracks `RH-25 Small-Context Session Task
+  Anchor`.
+- `20-hermes-compression-hook-gap.md` records the cross-boundary Hermes hook gap
+  and the Memory-OS mitigation.
+- Memory-OS now implements a bounded `current_task_anchor` through
+  `on_pre_compress()`, provider prefetch, and `system_prompt_block()`.
+- A full root-cause fix still needs Hermes to consume provider hook return text
+  or pass a generated `focus_topic` into automatic preflight compression.
+
+## RH-25 Deployment Verification (2026-05-22)
+
+Scope:
+
+```text
+host: 10.20.3.200 / hermes-media
+deployment: install_memory_os_plugin.py full install
+mutation: Memory-OS provider/runtime/shell reinstall on test host
+gateway: restarted after install to load provider code
+```
+
+Local verification before deployment:
+
+```text
+python -m pytest -q
+300 passed
+```
+
+Installer result:
+
+```text
+provider: memory_os
+agent_os_shell: memory-os-agent-os
+copied provider files: 28
+system module files: 56
+agent runtime files: 2
+runtime timer: enabled
+deep_reflection_preset: test-host
+```
+
+Gateway state after restart:
+
+```text
+ActiveState=active
+SubState=running
+MainPID=448893
+```
+
+Synthetic current-task anchor probe:
+
+```text
+prefetch_has_foreground=True
+prefetch_preserves_original_task=True
+prefetch_preserves_error=True
+prompt_has_anchor=True
+```
+
+This probe used a synthetic ComfyUI Impact Pack task and verified that a generic
+follow-up query (`continue current task`) does not overwrite the more specific
+pre-compression task anchor.
+
+Memory-OS health after deployment:
+
+```text
+doctor_status=ok
+exit_code=0
+findings=[
+  ("index_stale", "warning"),
+  ("hindsight_adapter_disabled", "warning")
+]
+```
+
+Status excerpt:
+
+```text
+counts:
+  audit_entries=889
+  crystallized_candidates=59
+  crystallized_records=0
+  events=67
+  working_items=59
+index_health=stale
+queue_backlog=0
+prefetch_mode=indexed
+```
+
+Heartbeat timer:
+
+```text
+LoadState=loaded
+ActiveState=active
+SubState=waiting
+UnitFileState=enabled
+```
+
+Interpretation:
+
+- RH-25 is installed and active on the test host.
+- The Memory-OS-side mitigation works for synthetic task-anchor extraction,
+  same-turn system prompt fallback, and next-turn prefetch carryover.
+- `index_stale` is a warning-level catch-up condition after deployment activity,
+  not a doctor failure. No manual heartbeat was run in this verification.
+- The Hermes upstream hook gap remains: provider-returned
+  `on_pre_compress()` text still requires Hermes runtime support to influence
+  the compression summary directly.
