@@ -1059,6 +1059,69 @@ Open questions:
 - How can regression tests simulate compaction/resume without depending on a
   specific model?
 
+### RH-26 Context Relevance Router
+
+Make Memory-OS prefetch context route-aware instead of statically loading the
+same Working Memory / Conversation Carryover stack for every ordinary turn.
+
+Status:
+
+- priority: P1 after RH-25b, because RH-25b has restored foreground task
+  usability and RH-26 is the maturity step
+- design document:
+  `21-context-relevance-router-design.md`
+- first implementation mode: dry-run/report-only
+- apply mode: explicitly deferred until dry-run reports are reviewed
+
+Reason:
+
+- Working Memory and Conversation Carryover remain valuable, but they should
+  not compete with foreground task-control turns such as cancellation or vague
+  continuation.
+- Static projection can still make the model over-amplify stale or
+  off-topic memory sections.
+- Mature memory systems route context by task, recency, risk, source, and
+  relevance instead of blindly loading every memory section.
+
+Target route classes:
+
+- `diagnostic_current_status`
+- `foreground_control`
+- `active_task`
+- `casual_continuity`
+- `candidate_review`
+- `memory_architecture_discussion`
+
+Acceptance for dry-run:
+
+- reports the selected route for a query
+- reports selected and dropped section candidates with reason codes
+- never prints private raw bodies
+- preserves RH-25b foreground-only handling for cancellation and vague
+  continuation turns
+- does not change live `build_prefetch()` output unless a future apply config
+  is explicitly enabled
+- includes fixtures for:
+  - cancellation after a failed video task
+  - `继续当前任务`
+  - casual memory-system conversation
+  - explicit current provider/status query
+  - candidate-vs-crystallized question
+  - active ComfyUI install/debug task
+  - deferred cancellation such as `这个先放一下，明天再说`
+
+Boundaries:
+
+- no send
+- no execute
+- no identity write
+- no relationship write
+- no crystallized approval
+- no candidate creation
+- no canonical event deletion or rewriting
+- no LLM-only final routing decision
+- no migration of carryover injection to Hermes `pre_llm_call`
+
 ## Exit Criteria
 
 Runtime Hardening is complete when:

@@ -105,6 +105,9 @@ continuity without turning the anchor into memory:
 - `prefetch(query)` may refresh the anchor from a new concrete user query.
 - Vague continuation queries do not overwrite the existing anchor. Examples:
   `continue`, `resume`, `继续`, `继续当前任务`, `继续刚才的任务`.
+- Cancellation/rejection queries switch to a cancellation anchor and suppress
+  background Memory-OS prefetch sections for that turn. Examples:
+  `算了`, `别做`, `不要做`, `停止`, `cancel`, `stop`, `abort`.
 - A different concrete user task can replace the current anchor.
 - The anchor is provider runtime state. It is not persisted across provider
   restart and is not written to events, working memory, candidates,
@@ -133,11 +136,13 @@ until real usage proves the need.
 Implementation status:
 
 ```text
-local tests: 300 passed
+local tests: 302 passed
 10.20.3.200 deployment: installed via install_memory_os_plugin.py
-gateway: restarted and active
+gateway: restarted and active, PID 451115
 synthetic task-anchor probe: passed
 doctor: ok, warning-only findings
+post-deploy compactions observed: 2
+cancellation/continuation foreground-only guard: implemented
 ```
 
 Synthetic probe assertions:
@@ -148,6 +153,40 @@ prefetch_preserves_original_task=True
 prefetch_preserves_error=True
 prompt_has_anchor=True
 ```
+
+RH-25b cancellation probe assertions:
+
+```text
+has_foreground=True
+has_cancel=True
+foreground_only=True
+no_hindsight_marker=True
+prompt_has_cancel=True
+```
+
+Real post-deploy compaction observation:
+
+```text
+session=20260521_230024_83b866
+23:49:15 compression started, messages=97, tokens=~102306, focus=None
+23:49:38 compression done, messages=97->7, tokens=~22419
+23:51:35 compression started, messages=97, tokens=~101129, focus=None
+23:52:06 compression done, messages=97->7, tokens=~19981
+```
+
+Follow-up finding:
+
+- RH-25 preserved the foreground task through compression well enough for the
+  assistant to continue the video task.
+- A later owner cancellation turn still allowed the model to pivot into
+  unrelated historical system-memory discussion.
+- The mitigation was tightened so cancellation and vague continuation turns use
+  foreground-only prefetch and do not compete with Working Memory or
+  Conversation Carryover sections.
+- RH-25b was then deployed to 10.20.3.200. The live provider now contains the
+  cancellation guard and `foreground_task_only` prefetch parameter, and the
+  synthetic cancellation probe confirms no Hindsight/hermes02 marker appears in
+  the injected context.
 
 ## Boundaries
 

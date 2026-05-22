@@ -89,6 +89,82 @@ def test_provider_prefetch_includes_current_task_anchor_after_pre_compress(tmp_p
     assert "fatal: unable to access github.com" in context
 
 
+def test_cancellation_query_does_not_pivot_to_background_memory(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_pre_compress(
+        [
+            {"role": "user", "content": "剪一个 ComfyUI 教程视频，修掉内容消失的问题"},
+            {"role": "assistant", "content": "terminal: ffmpeg render tutorial clip"},
+            {"role": "tool", "content": "render produced bad crop"},
+        ]
+    )
+    provider._store.write_working_document(
+        "lingering",
+        {
+            "schema_version": "memory-os.working.v0",
+            "updated_at": "2026-05-22T00:00:00+00:00",
+            "items": [
+                {
+                    "kind": "lingering",
+                    "text": "Hindsight / hermes02 legacy memory architecture discussion should not appear here.",
+                    "source_event_id": "evt-hindsight",
+                    "weight": 0.8,
+                    "updated_at": "2026-05-22T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    context = provider.prefetch("太垃圾了，算了，你还是别做视频了", session_id="session-1")
+    prompt_block = provider.system_prompt_block()
+    provider.shutdown()
+
+    assert "### Current Foreground Task" in context
+    assert "owner cancelled" in context
+    assert "Do not pivot to unrelated system-memory" in context
+    assert "Conversation Carryover" not in context
+    assert "Working Memory" not in context
+    assert "Hindsight" not in context
+    assert "hermes02" not in context
+    assert "owner cancelled" in prompt_block
+
+
+def test_continue_query_after_anchor_uses_foreground_only_prefetch(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_pre_compress(
+        [
+            {"role": "user", "content": "安装 ComfyUI Impact Pack"},
+            {"role": "tool", "content": "fatal: unable to access github.com"},
+        ]
+    )
+    provider._store.write_working_document(
+        "lingering",
+        {
+            "schema_version": "memory-os.working.v0",
+            "updated_at": "2026-05-22T00:00:00+00:00",
+            "items": [
+                {
+                    "kind": "lingering",
+                    "text": "Unrelated Hindsight background should not compete with current task.",
+                    "source_event_id": "evt-bg",
+                    "weight": 0.8,
+                    "updated_at": "2026-05-22T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    context = provider.prefetch("继续当前任务", session_id="session-1")
+    provider.shutdown()
+
+    assert "### Current Foreground Task" in context
+    assert "ComfyUI Impact Pack" in context
+    assert "Working Memory" not in context
+    assert "Hindsight" not in context
+
+
 def test_current_task_anchor_redacts_secrets(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")

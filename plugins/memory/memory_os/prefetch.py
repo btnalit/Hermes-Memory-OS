@@ -137,6 +137,7 @@ def build_prefetch(
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
+    foreground_task_only: bool = False,
 ) -> str:
     if _should_ground_diagnostic_query(
         query,
@@ -145,6 +146,8 @@ def build_prefetch(
         return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
     sections: list[tuple[str, list[str]]] = []
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
+    if foreground_task_only and sections:
+        return _fit_budget(_format(sections), budget_chars)
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))

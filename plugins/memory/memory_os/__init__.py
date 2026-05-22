@@ -41,6 +41,7 @@ class MemoryOSProvider(MemoryProvider):
         self._worker_thread: threading.Thread | None = None
         self._worker_stop = threading.Event()
         self._current_task_anchor = ""
+        self._foreground_task_only_prefetch = False
 
     @property
     def name(self) -> str:
@@ -79,6 +80,7 @@ class MemoryOSProvider(MemoryProvider):
             ),
             runtime_facts=self._tool_status_report(),
             current_task_anchor=self._current_task_anchor,
+            foreground_task_only=self._foreground_task_only_prefetch,
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
@@ -316,13 +318,23 @@ class MemoryOSProvider(MemoryProvider):
         text = " ".join(str(query or "").split())
         if not text:
             return
+        if _is_cancel_current_task_query(text):
+            self._current_task_anchor = _format_cancelled_task_anchor(
+                cancellation=text,
+                previous_anchor=self._current_task_anchor,
+                session_id=session_id or self.session_id,
+            )
+            self._foreground_task_only_prefetch = True
+            return
         if self._current_task_anchor and _is_continue_current_task_query(text):
+            self._foreground_task_only_prefetch = True
             return
         self._current_task_anchor = _format_current_task_anchor(
             task=text,
             operations=[],
             session_id=session_id or self.session_id,
         )
+        self._foreground_task_only_prefetch = False
 
 
 def register_memory_provider() -> MemoryProvider:
@@ -403,6 +415,32 @@ def _format_current_task_anchor(*, task: str, operations: list[str], session_id:
     return _clip_multiline("\n".join(output), 1200)
 
 
+def _format_cancelled_task_anchor(*, cancellation: str, previous_anchor: str, session_id: str = "") -> str:
+    output = [
+        "### Memory-OS Current Task Anchor",
+        f"- owner cancelled or rejected the foreground task: {_redact_task_text(_clip(cancellation, 240))}",
+    ]
+    previous_task = _extract_anchor_current_task(previous_anchor)
+    if previous_task:
+        output.append(f"- cancelled task: {_redact_task_text(_clip(previous_task, 220))}")
+    if session_id:
+        output.append(f"- session: {session_id}")
+    output.append(
+        "- response rule: Acknowledge the cancellation and stop the foreground task. "
+        "Do not pivot to unrelated system-memory, provider-status, or historical architecture topics "
+        "unless the owner explicitly asks."
+    )
+    return _clip_multiline("\n".join(output), 1200)
+
+
+def _extract_anchor_current_task(anchor: str) -> str:
+    for line in str(anchor or "").splitlines():
+        clean = line.strip()
+        if clean.startswith("- current task:"):
+            return clean.split(":", 1)[1].strip()
+    return ""
+
+
 def _content_text(content: Any) -> str:
     if isinstance(content, str):
         return " ".join(content.split())
@@ -471,6 +509,31 @@ def _is_continue_current_task_query(text: str) -> bool:
         "resume current task",
     )
     return normalized in patterns
+
+
+def _is_cancel_current_task_query(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return False
+    markers = (
+        "算了",
+        "别做",
+        "不要做",
+        "不做了",
+        "停下",
+        "停止",
+        "收手",
+        "放弃",
+        "取消",
+        "别弄",
+        "不用做",
+        "cancel",
+        "stop",
+        "abort",
+        "give up",
+        "never mind",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _redact_task_text(value: str) -> str:

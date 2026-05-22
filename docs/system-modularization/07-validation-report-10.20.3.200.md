@@ -3827,3 +3827,97 @@ Interpretation:
 - The Hermes upstream hook gap remains: provider-returned
   `on_pre_compress()` text still requires Hermes runtime support to influence
   the compression summary directly.
+
+### RH-25 Real Compaction Follow-Up
+
+After RH-25 deployment, the gateway hit automatic compression twice:
+
+```text
+session=20260521_230024_83b866
+23:49:15 context compression started: messages=97 tokens=~102306 focus=None
+23:49:38 context compression done: messages=97->7 tokens=~22419
+23:51:35 context compression started: messages=97 tokens=~101129 focus=None
+23:52:06 context compression done: messages=97->7 tokens=~19981
+```
+
+The `focus=None` value confirms the Hermes upstream compression-focus gap
+remained. Memory-OS RH-25 still helped enough that the assistant continued the
+foreground video task immediately after compaction.
+
+However, a later owner cancellation/rejection turn exposed a second issue: after
+acknowledging the failed video direction, the assistant pivoted into unrelated
+historical system-memory discussion.
+
+Follow-up fix:
+
+- cancellation and vague continuation turns now use foreground-only prefetch
+- those turns suppress Working Memory and Conversation Carryover sections
+- cancellation anchors tell the assistant to acknowledge cancellation and stop
+  the foreground task instead of pivoting to unrelated system-memory/provider
+  topics
+- tests increased to `302 passed`
+
+### RH-25b Deployment Verification
+
+The first real compaction follow-up above happened before the cancellation /
+foreground-only guard was deployed to the live provider path. The active
+provider at that point did not yet contain:
+
+```text
+_foreground_task_only_prefetch
+_is_cancel_current_task_query
+foreground_task_only
+```
+
+The updated RH-25b provider was then installed on 10.20.3.200 via the normal
+installer and the gateway was restarted:
+
+```text
+provider target: /root/.hermes/plugins/memory_os
+gateway ActiveState=active
+gateway SubState=running
+gateway MainPID=451115
+heartbeat timer ActiveState=active
+heartbeat timer UnitFileState=enabled
+```
+
+Live provider code confirmation:
+
+```text
+/root/.hermes/plugins/memory_os/__init__.py:
+  has_foreground_only_flag=True
+  has_cancel_guard=True
+  has_foreground_only_param=True
+  has_cancel_rule=True
+
+/root/.hermes/plugins/memory_os/prefetch.py:
+  has_foreground_only_param=True
+```
+
+Synthetic cancellation probe:
+
+```text
+input anchor: "剪一个 ComfyUI 教程视频，修掉内容消失的问题"
+input cancellation: "太垃圾了，算了，你还是别做视频了"
+
+has_foreground=True
+has_cancel=True
+foreground_only=True
+no_hindsight_marker=True
+prompt_has_cancel=True
+context_chars=390
+prompt_chars=444
+```
+
+Doctor after deployment:
+
+```text
+doctor_status=ok
+exit_code=0
+findings=[("hindsight_adapter_disabled", "warning")]
+```
+
+Interpretation: RH-25b is now active on the test host. Cancellation and vague
+continuation turns should no longer compete with background Working Memory or
+Conversation Carryover during prefetch. Hermes automatic compression still
+reports `focus=None`; that upstream behavior is unchanged.
