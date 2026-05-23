@@ -266,6 +266,41 @@ def test_installer_deep_reflection_production_safe_preset_is_explicitly_off(tmp_
     assert config["wandering_seed_enabled"] is False
 
 
+def test_test_host_install_shell_wraps_full_agent_os_install():
+    script = Path("scripts/install_memory_os_test_host.sh")
+    text = script.read_text(encoding="utf-8")
+
+    assert 'exec "${SCRIPT_DIR}/install_memory_os.sh" --yes --test-host "$@"' in text
+
+
+def test_interactive_install_shell_exposes_safe_operator_flow():
+    script = Path("scripts/install_memory_os.sh")
+    text = script.read_text(encoding="utf-8")
+
+    assert "select_hermes_home" in text
+    assert "inspect_current_state" in text
+    assert "ask_yes_no" in text
+    assert "--test-host" in text
+    assert "--production-safe" in text
+    assert "--yes" in text
+    assert "--dry-run" in text
+    assert "scripts/install_memory_os_plugin.py" in text
+    assert "install_runtime" in text
+    assert "enable_runtime" in text
+    assert "runtime artifacts are not being installed" in text
+    assert "The script does not restart hermes-gateway.service" in text
+    assert "hermes memory-os-agent-os status" in text
+    assert "hermes memory-os-agent-os doctor" in text
+
+
+def test_test_host_wrapper_delegates_to_interactive_installer_defaults():
+    text = Path("scripts/install_memory_os_test_host.sh").read_text(encoding="utf-8")
+
+    assert "install_memory_os.sh" in text
+    assert "--yes" in text
+    assert "--test-host" in text
+
+
 def test_memory_os_status_command_uses_current_hermes_home(tmp_path, monkeypatch, capsys):
     from plugins.memory.memory_os.cli import memory_os_command
     from plugins.memory.memory_os.roots import MemoryOSRoots

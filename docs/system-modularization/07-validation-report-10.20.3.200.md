@@ -4347,3 +4347,127 @@ Interpretation:
   growth indicates the monitor/tool path can add small audit noise. Future
   audit growth analysis should distinguish monitor/tool audit noise from real
   event-layer growth.
+
+### Agent OS Shell No-Env Regression Fix
+
+Manual operator testing on 10.20.3.200 exposed a real shell usability bug:
+
+```text
+root@debian:~# hermes memory-os-agent-os status
+{
+  "schema_version": "memory-os.agent_os_shell.v0",
+  "status": "error",
+  "code": "memory_os_provider_missing",
+  "message": "Memory-OS provider/runtime is not importable by the shell plugin.",
+  "error": "No module named 'memory_os'"
+}
+```
+
+Root cause:
+
+- the provider itself was installed and active
+- `HERMES_HOME=/root/.hermes hermes memory-os-agent-os status` worked
+- the shell plugin only added Memory-OS import paths when `HERMES_HOME` was set
+- a natural operator command without `HERMES_HOME` could not import the provider
+  or runtime
+
+Fix:
+
+- the shell plugin now resolves Hermes home in this order:
+  1. explicit `HERMES_HOME`
+  2. installed shell path under `$HERMES_HOME/plugins/memory-os-agent-os`
+  3. default `~/.hermes` if it exists
+- session marker hooks use the same resolver
+- the monitor now treats no-env shell alias failure as a FAIL condition
+- `scripts/install_memory_os_test_host.sh` provides a one-command test-host
+  installer wrapper around the interactive shell installer
+- `scripts/install_memory_os.sh` is now the primary operator entrypoint. It
+  discovers existing Hermes homes, prints the current provider/shell/runtime
+  state, asks which pieces to install or enable, and then delegates writes to
+  the Python installer.
+
+Deployment:
+
+```text
+target: 10.20.3.200
+method: copy current repo bundle to /tmp and run scripts/install_memory_os_test_host.sh
+gateway_restart: no
+cleanup_apply: no
+shadow_journal_apply: no
+```
+
+Post-fix verification without explicit `HERMES_HOME`:
+
+```text
+hermes memory-os-agent-os status:
+  schema_version=memory-os.status.v0
+  index_health=healthy
+  counts.events=93
+  counts.crystallized_records=0
+
+hermes memory-os-agent-os doctor:
+  schema_version=memory-os.doctor.v0
+  status=ok
+  exit_code=0
+  findings=[hindsight_adapter_disabled warning]
+```
+
+Monitor recheck after the fix:
+
+```text
+classification=WARN
+PASS includes shell_alias_no_env_ok
+FAIL=[]
+gateway=active
+heartbeat=active/enabled
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"]
+```
+
+Interpretation: this was not a Memory-OS canonical data problem. It was a shell
+plugin import-path usability gap that previous validation missed because the
+checks always supplied `HERMES_HOME`. The regression is now covered by tests
+and by the six-hour monitor.
+
+Interactive installer validation:
+
+```text
+command:
+  HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+
+preflight:
+  hermes_home=/root/.hermes
+  config_yaml=yes
+  provider_dir=present
+  shell_dir=present
+  runtime_dir=present
+  current provider=memory_os
+  memory-os-agent-os enabled
+  memory_os not enabled as a general plugin
+  heartbeat timer active/enabled
+  gateway restart not performed
+
+selected non-interactive choices:
+  install/update shell plugin=yes
+  set memory.provider=memory_os=yes
+  enable memory-os-agent-os=yes
+  install portable L2-L4 modules=yes
+  install heartbeat runtime artifacts=yes
+  enable heartbeat timer=yes
+  deep_reflection_preset=test-host
+```
+
+Post-installer monitor:
+
+```text
+classification=WARN
+PASS includes shell_alias_no_env_ok
+FAIL=[]
+gateway=active
+heartbeat=active/enabled
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"]
+crystallized_records=0
+```

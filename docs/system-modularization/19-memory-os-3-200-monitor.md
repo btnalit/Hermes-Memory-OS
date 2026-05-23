@@ -62,6 +62,8 @@ HERMES_HOME=/root/.hermes hermes memory_os status
 HERMES_HOME=/root/.hermes hermes memory_os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
+hermes memory-os-agent-os status
+hermes memory-os-agent-os doctor
 HERMES_HOME=/root/.hermes hermes memory_os conversation-regression status-tool-contract
 python3 - <<'PY'
 # Read /root/.hermes/memory-os/config.json and report only
@@ -93,6 +95,11 @@ crystallized records.
 The plugin-list and shell-alias checks are read-only PS-04 health probes. They
 verify that the provider remains provider-selected while the official-style
 Agent OS shell is discoverable through Hermes' plugin system.
+
+The shell-alias probe must include the natural operator path without
+`HERMES_HOME`. The shell plugin is expected to infer the default Hermes home
+from its installed plugin path. If this fails, the shell is not usable even if
+provider commands work with an explicit environment variable.
 
 The hook-marker query is read-only. It may count or show bounded audit metadata
 for `agent_os_shell_session_started`, `agent_os_shell_session_reset`, and
@@ -135,6 +142,9 @@ A normal monitor pass should be treated as PASS when:
   plugin
 - `hermes memory-os-agent-os status` delegates successfully
 - `hermes memory-os-agent-os doctor` has `status=ok`
+- `hermes memory-os-agent-os status` and `doctor` also work without an
+  explicit `HERMES_HOME` when the shell is installed under the default Hermes
+  home
 - `memory_os status` reports `prefetch_mode=indexed`
 - `memory_os doctor` has `status=ok`
 - the only expected doctor warning is `hindsight_adapter_disabled`
@@ -184,6 +194,8 @@ FAIL conditions:
 - `memory-os-agent-os` is missing or not enabled in `hermes plugins list`
 - `memory_os` appears enabled as a general plugin
 - `memory-os-agent-os` status or doctor alias fails
+- `memory-os-agent-os` status or doctor only works with explicit
+  `HERMES_HOME` but fails through the natural operator command
 - doctor returns an error
 - status tool contract validation fails
 - RH-26 apply probes select mechanism-heavy sections for casual prompts or

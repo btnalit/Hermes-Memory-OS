@@ -112,6 +112,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
         "deep_reflection": {
@@ -134,6 +135,41 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
     assert any(item["code"] == "rh26_casual_empty" for item in classification["warn"])
     assert any(item["code"] == "deep_reflection_source_skew" for item in classification["warn"])
     assert any(item["code"] == "compression_focus_none" for item in classification["warn"])
+    assert any(item["code"] == "shell_alias_no_env_ok" for item in classification["pass"])
+
+
+def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
+    snapshot = {
+        "gateway": {"ActiveState": "active"},
+        "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "heartbeat_listed": True,
+        "memory_status": {
+            "counts": {"crystallized_records": 0},
+            "index_health": {"state": "healthy"},
+            "prefetch_mode": "indexed",
+        },
+        "doctor": {"status": "ok", "findings": []},
+        "status_tool_contract": {"status": "ok", "findings": []},
+        "shell_alias_no_env": {
+            "status_ok": False,
+            "doctor_ok": False,
+            "status_error": "No module named 'memory_os'",
+        },
+        "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        "rh26_apply_probe": [],
+        "deep_reflection": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_crystallized_approval": False,
+        },
+        "compaction": {},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "shell_alias_no_env_failed" for item in classification["fail"])
 
 
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
@@ -148,6 +184,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
             "prefetch_mode": "indexed",
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
         "deltas": {"counts_delta": {"audit_entries": 10, "events": 2}, "audit_entries_per_new_event": 5.0},
@@ -158,6 +195,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
 
     assert "host=debian" in rendered
     assert "context_router=apply" in rendered
+    assert "shell_alias_no_env" in rendered
     assert "audit_entries=+10" in rendered
     assert "events=+2" in rendered
     assert "raw event" not in rendered.lower()
@@ -189,6 +227,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             },
             "doctor": {"status": "ok", "findings": []},
             "status_tool_contract": {"status": "ok", "findings": []},
+            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
             "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
             "rh26_apply_probe": [],
             "deep_reflection": {},

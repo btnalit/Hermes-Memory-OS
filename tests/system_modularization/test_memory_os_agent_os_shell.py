@@ -37,6 +37,14 @@ def load_shell_module() -> ModuleType:
     return module
 
 
+def load_shell_module_from(path: Path, name: str = "memory_os_agent_os_shell_installed") -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_shell_manifest_is_official_user_plugin_shape():
     manifest = (SHELL_DIR / "plugin.yaml").read_text(encoding="utf-8")
 
@@ -151,6 +159,73 @@ def test_shell_runtime_path_adds_flat_provider_parent(monkeypatch, tmp_path):
     assert str(hermes_home / "plugins") in sys.path
 
 
+def test_shell_runtime_path_infers_hermes_home_from_installed_plugin_without_env(monkeypatch, tmp_path):
+    original_sys_path = list(sys.path)
+    hermes_home = tmp_path / "home"
+    installed_shell = hermes_home / "plugins" / "memory-os-agent-os"
+    installed_shell.mkdir(parents=True)
+    shell_init = installed_shell / "__init__.py"
+    shell_init.write_text((SHELL_DIR / "__init__.py").read_text(encoding="utf-8"), encoding="utf-8")
+    runtime_root = hermes_home / "memory-os" / "runtime" / "python"
+    runtime_root.mkdir(parents=True)
+    flat_provider = hermes_home / "plugins" / "memory_os"
+    flat_provider.mkdir(parents=True)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+
+    try:
+        module = load_shell_module_from(shell_init)
+        module._ensure_memory_os_runtime_path()
+
+        assert str(runtime_root) in sys.path
+        assert str(hermes_home / "plugins") in sys.path
+    finally:
+        sys.path[:] = original_sys_path
+        _clear_imported_memory_os_modules()
+
+
+def test_shell_alias_imports_provider_from_inferred_runtime_without_env(monkeypatch, tmp_path, capsys):
+    original_sys_path = list(sys.path)
+    hermes_home = tmp_path / "home"
+    installed_shell = hermes_home / "plugins" / "memory-os-agent-os"
+    installed_shell.mkdir(parents=True)
+    shell_init = installed_shell / "__init__.py"
+    shell_init.write_text((SHELL_DIR / "__init__.py").read_text(encoding="utf-8"), encoding="utf-8")
+    runtime_pkg = hermes_home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
+    runtime_pkg.mkdir(parents=True)
+    for package in [
+        runtime_pkg.parents[2],
+        runtime_pkg.parents[1],
+        runtime_pkg.parent,
+        runtime_pkg,
+    ]:
+        package.joinpath("__init__.py").write_text("", encoding="utf-8")
+    runtime_pkg.joinpath("cli.py").write_text(
+        "def memory_os_command(args):\n"
+        "    print('{\"status\":\"ok\",\"delegated\":\"%s\"}' % args.memory_os_command)\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    for name in [
+        "plugins",
+        "plugins.memory",
+        "plugins.memory.memory_os",
+        "plugins.memory.memory_os.cli",
+    ]:
+        sys.modules.pop(name, None)
+
+    try:
+        module = load_shell_module_from(shell_init, name="memory_os_agent_os_shell_installed_runtime")
+
+        result = module.memory_os_agent_os_command(argparse.Namespace(agent_os_command="status"))
+
+        assert result == 0
+        assert json.loads(capsys.readouterr().out) == {"delegated": "status", "status": "ok"}
+    finally:
+        sys.path[:] = original_sys_path
+        _clear_imported_memory_os_modules()
+
+
 def test_shell_session_start_hook_writes_bounded_audit_marker(monkeypatch, tmp_path):
     module = load_shell_module()
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -197,3 +272,15 @@ def test_shell_session_hooks_skip_without_hermes_home(monkeypatch, tmp_path):
 def _audit_entries(hermes_home: Path) -> list[dict[str, Any]]:
     audit_path = hermes_home / "memory-os" / "audit" / "write_audit.jsonl"
     return [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+
+
+def _clear_imported_memory_os_modules() -> None:
+    for name in [
+        "plugins",
+        "plugins.memory",
+        "plugins.memory.memory_os",
+        "plugins.memory.memory_os.cli",
+        "memory_os",
+        "memory_os.cli",
+    ]:
+        sys.modules.pop(name, None)

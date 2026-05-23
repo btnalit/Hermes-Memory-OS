@@ -17,6 +17,7 @@ from typing import Any
 
 
 _ALLOWED_ALIASES = {"status", "doctor"}
+_PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -126,8 +127,8 @@ def _append_session_marker(
     platform: str = "",
     model: str = "",
 ) -> None:
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    if not hermes_home:
+    hermes_home = _resolve_hermes_home()
+    if hermes_home is None:
         return
     try:
         roots_class, append_audit = _load_memory_os_audit_api()
@@ -163,22 +164,40 @@ def _load_memory_os_audit_api() -> tuple[Any, Any]:
 
 
 def _ensure_memory_os_runtime_path() -> None:
-    hermes_home = os.environ.get("HERMES_HOME", "").strip()
-    if not hermes_home:
+    hermes_home = _resolve_hermes_home()
+    if hermes_home is None:
         return
-    runtime_root = Path(hermes_home) / "memory-os" / "runtime" / "python"
+    runtime_root = hermes_home / "memory-os" / "runtime" / "python"
     if runtime_root.exists():
         runtime_text = str(runtime_root)
         if runtime_text not in sys.path:
             sys.path.insert(0, runtime_text)
         _extend_existing_plugins_namespace(runtime_root / "plugins")
         _extend_existing_package_namespace("plugins.memory", runtime_root / "plugins" / "memory")
-    flat_plugins_root = Path(hermes_home) / "plugins"
+    flat_plugins_root = hermes_home / "plugins"
     flat_provider = flat_plugins_root / "memory_os"
     if flat_provider.exists():
         flat_plugins_root_text = str(flat_plugins_root)
         if flat_plugins_root_text not in sys.path:
             sys.path.insert(0, flat_plugins_root_text)
+
+
+def _resolve_hermes_home() -> Path | None:
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return Path(hermes_home).expanduser().resolve()
+
+    try:
+        plugin_dir = Path(__file__).resolve().parent
+    except NameError:
+        plugin_dir = Path()
+    if plugin_dir.name == _PLUGIN_NAME and plugin_dir.parent.name == "plugins":
+        return plugin_dir.parent.parent
+
+    default_home = Path.home() / ".hermes"
+    if default_home.exists():
+        return default_home
+    return None
 
 
 def _extend_existing_plugins_namespace(runtime_plugins: Path) -> None:

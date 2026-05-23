@@ -511,6 +511,9 @@ manual shell plugin copy. The validation confirmed:
   enabled as a general plugin
 - `hermes memory-os-agent-os status` and `doctor` delegate cleanly to the
   provider CLI
+- `hermes memory-os-agent-os status` and `doctor` also work without an explicit
+  `HERMES_HOME` when the shell is installed under the default Hermes home; the
+  shell infers the home from its installed plugin path
 - RH-22 full seven-prompt regression passes
 - RH-23 source-class monitoring remains observational
 - RH-24 status-tool contract validation passes

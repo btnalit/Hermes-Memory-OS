@@ -121,6 +121,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         fail.append({"code": "status_tool_contract_failed", "value": contract})
 
+    shell_alias = snapshot.get("shell_alias_no_env", {})
+    if shell_alias.get("status_ok") is True and shell_alias.get("doctor_ok") is True:
+        passed.append({"code": "shell_alias_no_env_ok"})
+    else:
+        fail.append({"code": "shell_alias_no_env_failed", "value": shell_alias})
+
     router = snapshot.get("context_router", {})
     if router.get("enabled") is True and router.get("mode") == "apply":
         passed.append({"code": "context_router_apply"})
@@ -189,6 +195,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
             f"prefetch_mode={memory_status.get('prefetch_mode')}"
         ),
         f"- doctor={snapshot.get('doctor', {}).get('status')} findings={snapshot.get('doctor', {}).get('findings')}",
+        f"- shell_alias_no_env={snapshot.get('shell_alias_no_env')}",
         (
             f"- context_router={router.get('mode')} apply_routes={router.get('apply_routes')} "
             f"llm_judge={router.get('llm_judge_mode')}"
@@ -393,6 +400,16 @@ print(json.dumps({k:status.get(k) for k in keys if k in status}, ensure_ascii=Fa
     r = run(["python3", "-c", code], env=env)
     return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
 
+def shell_alias_no_env():
+    status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
+    doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
+    return {
+      "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
+      "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
+      "status_error": status.get("_error") if isinstance(status, dict) else None,
+      "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
+    }
+
 status = load_json_cmd(["hermes", "memory_os", "status"])
 doctor = load_json_cmd(["hermes", "memory_os", "doctor"])
 contract = load_json_cmd(["hermes", "memory_os", "conversation-regression", "status-tool-contract"])
@@ -422,6 +439,7 @@ print(json.dumps({
     "findings": [(x.get("code"), x.get("severity")) for x in doctor.get("findings", [])] if isinstance(doctor, dict) else None,
   },
   "status_tool_contract": contract.get("validation") if isinstance(contract, dict) else contract,
+  "shell_alias_no_env": shell_alias_no_env(),
   "context_router": cfg.get("context_router", {}),
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),

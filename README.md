@@ -113,6 +113,43 @@ Use a target Hermes profile home:
 export HERMES_HOME=/root/.hermes
 ```
 
+Recommended interactive installer:
+
+```bash
+bash scripts/install_memory_os.sh
+```
+
+The interactive installer:
+
+- discovers existing Hermes home candidates from `HERMES_HOME`, `~/.hermes`,
+  and `/root/.hermes`;
+- prints current provider, shell plugin, runtime, and heartbeat timer state;
+- installs/updates the `memory_os` provider as the required base component;
+- asks which optional parts to install or enable:
+  - `memory-os-agent-os` shell plugin
+  - `memory.provider=memory_os`
+  - `plugins.enabled: memory-os-agent-os`
+  - portable L2-L4 system modules
+  - heartbeat runtime artifacts
+  - heartbeat timer
+  - DeepReflection preset
+- delegates writes to `scripts/install_memory_os_plugin.py`;
+- verifies provider and shell status after install;
+- does not restart `hermes-gateway.service`;
+- does not run cleanup apply or shadow-journal apply.
+
+Non-interactive test-host install:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+```
+
+Non-interactive production-safe install:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
+```
+
 Minimal provider install:
 
 ```bash
@@ -136,6 +173,14 @@ python3 scripts/install_memory_os_plugin.py \
   --runtime-interval 5min \
   --deep-reflection-preset test-host
 ```
+
+Test-host compatibility wrapper:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os_test_host.sh
+```
+
+The wrapper delegates to `scripts/install_memory_os.sh --yes --test-host`.
 
 Production-safe DeepReflection preset:
 
@@ -181,6 +226,14 @@ Shell plugin checks:
 HERMES_HOME="$HERMES_HOME" hermes plugins list
 HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os status
 HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os doctor
+```
+
+When the shell plugin is installed under the default Hermes home, the shell
+aliases also infer their home from their plugin path:
+
+```bash
+hermes memory-os-agent-os status
+hermes memory-os-agent-os doctor
 ```
 
 Expected plugin relationship:
