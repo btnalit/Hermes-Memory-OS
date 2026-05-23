@@ -189,6 +189,51 @@ def test_installer_can_write_deep_reflection_test_host_preset(tmp_path):
     assert config["llm_enabled"] is False
 
 
+def test_installer_does_not_write_memory_sources_config_by_default(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home")
+
+    assert report["memory_sources_preset"] is None
+    assert report["memory_sources_config_written"] is False
+    assert not (tmp_path / "home" / "memory-os" / "config.json").exists()
+
+
+def test_installer_can_write_memory_sources_test_host_preset(tmp_path):
+    config_path = tmp_path / "home" / "memory-os" / "config.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps({"context_router": {"enabled": True}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        memory_sources_preset="test-host",
+    )
+
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert report["memory_sources_preset"] == "test-host"
+    assert report["memory_sources_config_written"] is True
+    assert report["memory_sources_config_path"] == str(config_path)
+    assert config["context_router"]["enabled"] is True
+    assert config["memory_sources"]["enabled"] is True
+    assert config["memory_sources"]["mode"] == "metadata_only"
+    assert config["memory_sources"]["retention_days"] == 30
+    assert config["memory_sources"]["record_live_prefetch"] is True
+    assert config["memory_sources"]["record_dry_run"] is False
+
+
+def test_installer_memory_sources_production_safe_preset_is_explicitly_off(tmp_path):
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        memory_sources_preset="production-safe",
+    )
+
+    config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert report["memory_sources_config_written"] is True
+    assert config["memory_sources"]["enabled"] is False
+    assert config["memory_sources"]["record_live_prefetch"] is True
+
+
 def test_installer_can_enable_shell_without_enabling_memory_os_as_general_plugin(tmp_path):
     config_path = tmp_path / "home" / "config.yaml"
     config_path.parent.mkdir(parents=True)
@@ -367,6 +412,7 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "ask_yes_no" in text
     assert "--test-host" in text
     assert "--production-safe" in text
+    assert "--memory-sources-preset" in text
     assert "--yes" in text
     assert "--dry-run" in text
     assert "scripts/install_memory_os_plugin.py" in text

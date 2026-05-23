@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-_ALLOWED_ALIASES = {"status", "doctor"}
+_ALLOWED_ALIASES = {"status", "doctor", "memory-sources"}
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +75,13 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="agent_os_command")
     subs.add_parser("status")
     subs.add_parser("doctor")
+    memory_sources_parser = subs.add_parser("memory-sources")
+    memory_sources_subs = memory_sources_parser.add_subparsers(dest="memory_sources_command", required=True)
+    memory_sources_subs.add_parser("last")
+    memory_sources_history = memory_sources_subs.add_parser("history")
+    memory_sources_history.add_argument("--limit", type=int, default=20)
+    memory_sources_stats = memory_sources_subs.add_parser("stats")
+    memory_sources_stats.add_argument("--hours", type=int, default=24)
 
 
 def memory_os_agent_os_command(args: argparse.Namespace) -> int:

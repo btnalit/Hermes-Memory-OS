@@ -53,18 +53,27 @@ The script should collect only metadata and bounded status reports:
 ```bash
 systemctl --user is-active hermes-gateway.service
 systemctl --user show hermes-gateway.service -p MainPID --value
-systemctl --user is-active hermes-memory-os-heartbeat.timer
-systemctl --user is-enabled hermes-memory-os-heartbeat.timer
+systemctl --user show hermes-memory-os-heartbeat.timer \
+  -p LoadState -p ActiveState -p SubState -p UnitFileState \
+  -p Result -p ExecMainStatus --no-pager
+systemctl --user show hermes-memory-os-heartbeat.service \
+  -p LoadState -p ActiveState -p SubState -p UnitFileState \
+  -p Result -p ExecMainStatus --no-pager
 systemctl --user list-timers hermes-memory-os-heartbeat.timer --no-pager
 HERMES_HOME=/root/.hermes hermes memory
 HERMES_HOME=/root/.hermes hermes plugins list
-HERMES_HOME=/root/.hermes hermes memory_os status
-HERMES_HOME=/root/.hermes hermes memory_os doctor
+PYTHONPATH=/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins \
+  HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os status
+PYTHONPATH=/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins \
+  HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
 hermes memory-os-agent-os status
 hermes memory-os-agent-os doctor
-HERMES_HOME=/root/.hermes hermes memory_os conversation-regression status-tool-contract
+hermes memory-os-agent-os memory-sources stats --hours 24
+PYTHONPATH=/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins \
+  HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os \
+  conversation-regression status-tool-contract
 python3 - <<'PY'
 # Read /root/.hermes/memory-os/config.json and report only
 # context_router.enabled/mode/apply_routes/dry_run_routes/llm_judge_mode.
@@ -111,7 +120,7 @@ report which section headings would be present for the public validation
 prompts. It must not print selected section bodies, previews, raw event
 summaries, private transcript text, or prompt-expanded context.
 
-The v0.3 monitor tracks trend signals that can support future decisions:
+The v0.5 monitor tracks trend signals that can support future decisions:
 
 - count deltas since the previous snapshot:
   - `audit_entries`
@@ -124,7 +133,10 @@ The v0.3 monitor tracks trend signals that can support future decisions:
 - gateway compaction count in the last six hours
 - `focus=None` count in compression logs
 - RH-26 section-heading anomalies
+- Memory Sources record count, file size, route distribution, selected
+  source-class distribution, boundary true count, and forbidden field findings
 - DeepReflection source-class skew
+- heartbeat/cognitive-loop service last `Result` and `ExecMainStatus`
 
 The previous snapshot is local to the Codex automation directory. It is not
 written to the remote Hermes host and does not contain private bodies.
@@ -145,6 +157,8 @@ A normal monitor pass should be treated as PASS when:
 - `hermes memory-os-agent-os status` and `doctor` also work without an
   explicit `HERMES_HOME` when the shell is installed under the default Hermes
   home
+- `hermes memory-os-agent-os memory-sources stats --hours 24` also works
+  without an explicit `HERMES_HOME`
 - `memory_os status` reports `prefetch_mode=indexed`
 - `memory_os doctor` has `status=ok`
 - the only expected doctor warning is `hindsight_adapter_disabled`
@@ -162,6 +176,8 @@ A normal monitor pass should be treated as PASS when:
   - `actual_execute=false`
   - `actual_identity_write=false`
   - `actual_crystallized_approval=false`
+- Memory Sources reports schema `memory-os.memory_sources_stats.v0`,
+  `boundary_true_count=0`, and no forbidden field findings
 
 WARN conditions:
 
@@ -196,6 +212,8 @@ FAIL conditions:
 - `memory-os-agent-os` status or doctor alias fails
 - `memory-os-agent-os` status or doctor only works with explicit
   `HERMES_HOME` but fails through the natural operator command
+- `memory-os-agent-os memory-sources stats` fails through the natural operator
+  command
 - doctor returns an error
 - status tool contract validation fails
 - RH-26 apply probes select mechanism-heavy sections for casual prompts or
@@ -203,6 +221,8 @@ FAIL conditions:
 - backup-looking Memory-OS provider/shell plugin manifests exist under
   `$HERMES_HOME/plugins/`
 - any boundary boolean becomes true
+- Memory Sources attribution contains forbidden fields, private text, or any
+  true hard-boundary flag
 - crystallized records increase without an explicit owner approval gate
 - monitor output contains private bodies, raw transcripts, prompts, secrets, or
   tokens

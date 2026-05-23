@@ -74,6 +74,24 @@ DEEP_REFLECTION_CONFIG_DEFAULTS: dict[str, object] = {
 }
 
 
+MEMORY_SOURCES_PRESETS: dict[str, dict[str, object]] = {
+    "production-safe": {
+        "enabled": False,
+        "mode": "metadata_only",
+        "retention_days": 30,
+        "record_live_prefetch": True,
+        "record_dry_run": False,
+    },
+    "test-host": {
+        "enabled": True,
+        "mode": "metadata_only",
+        "retention_days": 30,
+        "record_live_prefetch": True,
+        "record_dry_run": False,
+    },
+}
+
+
 def install_plugin(
     *,
     hermes_home: Path,
@@ -90,6 +108,7 @@ def install_plugin(
     enable_cognitive_loop: bool = False,
     cognitive_loop_interval: str = "6h",
     deep_reflection_preset: str | None = None,
+    memory_sources_preset: str | None = None,
     systemd_dir: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, object]:
@@ -127,6 +146,14 @@ def install_plugin(
         deep_reflection_config_path, deep_reflection_config = _write_deep_reflection_config(
             hermes_home,
             preset=deep_reflection_preset,
+            dry_run=dry_run,
+        )
+    memory_sources_config: dict[str, object] | None = None
+    memory_sources_config_path: Path | None = None
+    if memory_sources_preset is not None:
+        memory_sources_config_path, memory_sources_config = _write_memory_sources_config(
+            hermes_home,
+            preset=memory_sources_preset,
             dry_run=dry_run,
         )
     runtime_artifacts: list[Path] = []
@@ -257,6 +284,10 @@ def install_plugin(
         "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
         "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
         "deep_reflection_config": deep_reflection_config or {},
+        "memory_sources_preset": memory_sources_preset,
+        "memory_sources_config_written": bool(memory_sources_config_path) and not dry_run,
+        "memory_sources_config_path": str(memory_sources_config_path) if memory_sources_config_path else "",
+        "memory_sources_config": memory_sources_config or {},
         "dry_run": dry_run,
     }
 
@@ -498,6 +529,40 @@ def _write_deep_reflection_config(
     return config_path, config
 
 
+def _write_memory_sources_config(
+    hermes_home: Path,
+    *,
+    preset: str,
+    dry_run: bool,
+) -> tuple[Path, dict[str, object]]:
+    if preset not in MEMORY_SOURCES_PRESETS:
+        choices = ", ".join(sorted(MEMORY_SOURCES_PRESETS))
+        raise SystemExit(f"Unsupported Memory Sources preset: {preset}. Choices: {choices}")
+    config_path = hermes_home / "memory-os" / "config.json"
+    config = _read_json_config(config_path)
+    memory_sources_config = {
+        **MEMORY_SOURCES_PRESETS[preset],
+        "preset": preset,
+    }
+    config["memory_sources"] = memory_sources_config
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return config_path, memory_sources_config
+
+
+def _read_json_config(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        return {}
+    loaded = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        return {}
+    return dict(loaded)
+
+
 def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -526,6 +591,14 @@ def main() -> int:
             "auto-bounded for injection only, or test-host for no-send test observation."
         ),
     )
+    parser.add_argument(
+        "--memory-sources-preset",
+        choices=sorted(MEMORY_SOURCES_PRESETS),
+        help=(
+            "Write Memory Sources Attribution config. Default is no config write; "
+            "use production-safe for explicit off or test-host for metadata-only observation."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
     args = parser.parse_args()
 
@@ -544,6 +617,7 @@ def main() -> int:
         enable_cognitive_loop=args.enable_cognitive_loop,
         cognitive_loop_interval=args.cognitive_loop_interval,
         deep_reflection_preset=args.deep_reflection_preset,
+        memory_sources_preset=args.memory_sources_preset,
         dry_run=args.dry_run,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

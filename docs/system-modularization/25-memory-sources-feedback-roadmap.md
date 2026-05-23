@@ -199,14 +199,16 @@ Implementation shape:
 
 - add a bounded `memory_sources` metadata record for each live prefetch build
 - store metadata only, not raw section bodies
+- reuse the RH-26 route as the initial query class; do not create a second
+  classifier unless evidence shows route-level classes are insufficient
 - include:
   - timestamp
   - profile
   - route
-  - query hash or bounded query class, not raw private prompt
+  - query class derived from route, not raw private prompt
   - selected section headings
   - source classes
-  - source ids where safe
+  - safe source ids only
   - character counts
   - scores
   - reason codes
@@ -215,6 +217,27 @@ Implementation shape:
 - write to:
   - `$HERMES_HOME/memory-os/system/memory_sources.jsonl`
   - or another system metadata file outside canonical events
+
+Relationship to audit:
+
+- audit remains the canonical system fact stream
+- `memory_sources.jsonl` is a prefetch-level attribution ledger
+- RH-29 must not duplicate attribution records as canonical events
+- monitor may read this ledger, but the ledger does not drive memory writes
+
+Retention:
+
+- default retention is rolling 30 days plus archive-before-prune
+- retention applies to attribution metadata only, never canonical events
+- the first 24-hour test-host gate should report records per day, bytes per
+  day, and selected route/source-class distribution
+
+Safe source ids:
+
+- allowed: event id, working item id, candidate id, crystallized id, digest id,
+  reflection card id, governance feedback id, proposal id
+- forbidden: raw file paths, raw message text, private body hashes, user private
+  text, transcript excerpts, screenshots, cookies, tokens, or credentials
 
 Non-goals:
 
@@ -259,6 +282,23 @@ hermes memory_os memory-sources feedback last --rating missing-context
   - optional owner note
   - timestamp
 
+`last` definition:
+
+- `last` means the newest memory source attribution record for the active
+  profile, not the newest canonical event or newest Telegram message
+- if no source record exists, the command must fail closed with a clear message
+- if multiple sessions are active, the first version should require an explicit
+  profile and may later add session-aware selection
+
+Expected v0 usage:
+
+- CLI feedback is intentionally low-friction for operators but still less
+  convenient than Telegram
+- feedback volume may be low in v0; this is acceptable because RH-30 is for
+  evidence capture, not automatic tuning
+- a future v0.2 may add Telegram `/feedback last useful` or an inline command,
+  but this is not part of RH-30
+
 Initial ratings:
 
 - `useful`
@@ -292,6 +332,7 @@ Why third:
 - RH-26/RH-28 are already effective
 - the correct next move is small real-finding-based guards, not a general LLM
   relevance judge
+- this is an ongoing process, not a one-time deliverable
 
 Implementation shape:
 
@@ -350,6 +391,13 @@ hermes memory_os consolidation suggest --days 7 --limit 20
   - repeated stable facts that may deserve owner review
   - candidate conflicts
   - expired or low-use DeepReflection cards
+- all suggestion detection is deterministic in v0
+- do not call an LLM to decide stable facts, conflicts, or owner-review
+  eligibility
+- stable facts are structural/statistical suggestions only, such as repeated
+  entity+predicate patterns above a threshold
+- candidate conflicts are structural suggestions only, such as matching subject
+  keys with incompatible values or duplicate semantic keys
 
 Write target:
 
@@ -386,14 +434,22 @@ Implementation shape:
 - add optional `top_of_mind_score` to router candidate metadata
 - compute score from existing metadata:
   - route match
-  - recent successful use
-  - owner `useful` feedback
-  - repeated retrieval success
+  - explicit owner `useful` feedback
+  - repeated retrieval across query classes
   - freshness
   - source class policy
   - negative feedback penalties
   - diagnostic-style penalty for casual routes
 - score is used only inside RH-26 ranking and reports
+
+Successful use rule:
+
+- a section being selected is not enough to count as successful use
+- `successful_use` requires explicit positive feedback or a conservative
+  derived signal backed by multiple observations
+- repeated selection alone must not increase top-of-mind score
+- negative feedback and decay must outweigh repeated selection to prevent
+  self-reinforcing drift
 
 Non-goals:
 
@@ -500,6 +556,8 @@ Monitor v0.5 should eventually include:
 - owner feedback counts by rating
 - top-of-mind score distribution, only after RH-33
 - consolidation suggestion counts, only after RH-32
+- attribution ledger size and retention/archive counts
+- feedback ledger size and retention/archive counts
 
 Expected WARN:
 
@@ -513,6 +571,23 @@ FAIL:
 - feedback mutates crystallized/identity/relationship memory
 - source attribution hides hard-boundary booleans
 - top-of-mind scoring creates a new implicit tier without review
+- metadata ledgers grow without retention or archive policy
+
+## Metadata Retention Rule
+
+RH-29 through RH-33 create audit-like metadata. These files are useful for
+debugging and public evidence, but they are not canonical memory.
+
+Default policy until RH-17 retention is fully generalized:
+
+- keep recent metadata hot for 30 days
+- archive-before-prune older metadata
+- never delete canonical events, crystallized records, identity, or
+  relationship memory as part of metadata retention
+- monitor ledger growth after 24 hours, then after each subsequent observation
+  window
+- if metadata growth is noisy, tune sampling or retention before adding new
+  metadata-producing features
 
 ## Boundaries
 

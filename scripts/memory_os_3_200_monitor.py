@@ -25,6 +25,9 @@ EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
     "active_comfyui_install": ["Current Foreground Task", "Indexed Recall"],
     "deferred_cancellation": ["Current Foreground Task"],
 }
+ALLOWED_RH26_EXTRA_HEADINGS: dict[str, set[str]] = {
+    "active_comfyui_install": {"Working Memory", "Recent Event Summaries"},
+}
 SAFE_CASUAL_HEADINGS = {"Conversation Carryover", "Recent Event Summaries"}
 FORBIDDEN_CASUAL_HEADINGS = {
     "Current Foreground Task",
@@ -56,7 +59,8 @@ def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, 
                 }
             )
             continue
-        if actual != expected:
+        allowed = set(expected) | ALLOWED_RH26_EXTRA_HEADINGS.get(prompt_id, set())
+        if not all(heading in actual for heading in expected) or any(heading not in allowed for heading in actual):
             anomalies.append(
                 {
                     "id": prompt_id,
@@ -101,6 +105,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         fail.append({"code": "heartbeat_timer_inactive", "value": heartbeat})
     if not snapshot.get("heartbeat_listed", False):
         fail.append({"code": "heartbeat_timer_not_listed"})
+    heartbeat_service = snapshot.get("heartbeat_service", {})
+    if _systemd_service_failed(heartbeat_service):
+        fail.append({"code": "heartbeat_service_failed", "value": heartbeat_service})
 
     cognitive_loop_timer = snapshot.get("cognitive_loop_timer", {})
     if (
@@ -112,6 +119,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         fail.append({"code": "cognitive_loop_timer_inactive", "value": cognitive_loop_timer})
     if not snapshot.get("cognitive_loop_listed", False):
         fail.append({"code": "cognitive_loop_timer_not_listed"})
+    cognitive_loop_service = snapshot.get("cognitive_loop_service", {})
+    if _systemd_service_failed(cognitive_loop_service):
+        fail.append({"code": "cognitive_loop_service_failed", "value": cognitive_loop_service})
 
     cognitive_loop = snapshot.get("cognitive_loop", {})
     if cognitive_loop.get("last_status") == "error":
@@ -154,7 +164,11 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         fail.append({"code": "status_tool_contract_failed", "value": contract})
 
     shell_alias = snapshot.get("shell_alias_no_env", {})
-    if shell_alias.get("status_ok") is True and shell_alias.get("doctor_ok") is True:
+    if (
+        shell_alias.get("status_ok") is True
+        and shell_alias.get("doctor_ok") is True
+        and shell_alias.get("memory_sources_ok") is True
+    ):
         passed.append({"code": "shell_alias_no_env_ok"})
     else:
         fail.append({"code": "shell_alias_no_env_failed", "value": shell_alias})
@@ -164,6 +178,24 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         passed.append({"code": "context_router_apply"})
     else:
         warn.append({"code": "context_router_not_apply", "value": router})
+
+    memory_sources = snapshot.get("memory_sources", {})
+    if memory_sources.get("schema_version") == "memory-os.memory_sources_stats.v0":
+        if memory_sources.get("forbidden_field_findings"):
+            fail.append(
+                {
+                    "code": "memory_sources_forbidden_fields",
+                    "findings": memory_sources.get("forbidden_field_findings"),
+                }
+            )
+        if int(memory_sources.get("boundary_true_count") or 0) > 0:
+            fail.append({"code": "memory_sources_boundary_true", "value": memory_sources.get("boundary_true_count")})
+        if bool(memory_sources.get("ledger_exists")) and not memory_sources.get("forbidden_field_findings"):
+            passed.append({"code": "memory_sources_stats_ok"})
+        else:
+            warn.append({"code": "memory_sources_no_records_yet", "value": memory_sources})
+    else:
+        warn.append({"code": "memory_sources_stats_unavailable", "value": memory_sources})
 
     rh26_anomalies = find_rh26_heading_anomalies(list(snapshot.get("rh26_apply_probe") or []))
     for anomaly in rh26_anomalies:
@@ -198,6 +230,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, "pass": passed, "warn": warn, "fail": fail}
 
 
+def _systemd_service_failed(service: dict[str, Any]) -> bool:
+    if not service:
+        return False
+    return service.get("ActiveState") == "failed" or service.get("Result") not in {"", "success"}
+
+
 def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     classification = snapshot.get("classification") or classify_snapshot(snapshot)
     memory_status = snapshot.get("memory_status", {})
@@ -212,12 +250,14 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- gateway={snapshot.get('gateway', {}).get('ActiveState')} pid={snapshot.get('gateway', {}).get('MainPID')}",
         (
             f"- heartbeat={snapshot.get('heartbeat_timer', {}).get('ActiveState')}/"
-            f"{snapshot.get('heartbeat_timer', {}).get('UnitFileState')}"
+            f"{snapshot.get('heartbeat_timer', {}).get('UnitFileState')} "
+            f"service_result={snapshot.get('heartbeat_service', {}).get('Result')}"
         ),
         (
             f"- cognitive_loop={snapshot.get('cognitive_loop', {}).get('last_status')} "
             f"timer={snapshot.get('cognitive_loop_timer', {}).get('ActiveState')}/"
-            f"{snapshot.get('cognitive_loop_timer', {}).get('UnitFileState')}"
+            f"{snapshot.get('cognitive_loop_timer', {}).get('UnitFileState')} "
+            f"service_result={snapshot.get('cognitive_loop_service', {}).get('Result')}"
         ),
         (
             f"- counts: audit_entries={counts.get('audit_entries')}, events={counts.get('events')}, "
@@ -242,6 +282,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
             f"llm_judge={router.get('llm_judge_mode')}"
         ),
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
+        f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
         f"- disk={snapshot.get('disk_du')}",
@@ -331,6 +372,17 @@ def _deep_reflection_summary(status: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "record_count": stats.get("record_count"),
+        "file_size_bytes": stats.get("file_size_bytes"),
+        "routes": stats.get("route_distribution"),
+        "selected_sources": stats.get("selected_source_class_distribution"),
+        "boundary_true_count": stats.get("boundary_true_count"),
+        "forbidden_field_count": len(stats.get("forbidden_field_findings") or []),
+    }
+
+
 def _ssh_json(host: str, script: str) -> dict[str, Any]:
     completed = subprocess.run(
         ["ssh", host, "python3 -"],
@@ -355,7 +407,7 @@ def run(cmd, env=None):
         return {"ok": False, "out": (exc.output or "").strip(), "code": exc.returncode}
 
 def system_show(unit):
-    r = run(["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "--no-pager"])
+    r = run(["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "--no-pager"])
     data = {"ok": r["ok"], "code": r["code"]}
     for line in r["out"].splitlines():
         if "=" in line:
@@ -450,16 +502,20 @@ print(json.dumps({k:status.get(k) for k in keys if k in status}, ensure_ascii=Fa
 def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
+    memory_sources = load_json_cmd(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
+      "memory_sources_ok": isinstance(memory_sources, dict) and memory_sources.get("schema_version") == "memory-os.memory_sources_stats.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
+      "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
     }
 
 status = memory_os_cli(["status"])
 doctor = memory_os_cli(["doctor"])
 contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
+memory_sources = memory_os_cli(["memory-sources", "stats", "--hours", "24"])
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
@@ -472,8 +528,10 @@ print(json.dumps({
   "date_local": run(["date", "+%Y-%m-%d %H:%M:%S %Z"])["out"],
   "gateway": system_show("hermes-gateway.service"),
   "heartbeat_timer": system_show("hermes-memory-os-heartbeat.timer"),
+  "heartbeat_service": system_show("hermes-memory-os-heartbeat.service"),
   "heartbeat_listed": "hermes-memory-os-heartbeat.timer" in heartbeat_list,
   "cognitive_loop_timer": system_show("hermes-memory-os-cognitive-loop.timer"),
+  "cognitive_loop_service": system_show("hermes-memory-os-cognitive-loop.service"),
   "cognitive_loop_listed": "hermes-memory-os-cognitive-loop.timer" in run(["systemctl", "--user", "list-timers", "hermes-memory-os-cognitive-loop.timer", "--no-pager"])["out"],
   "memory_status": {
     "counts": status.get("counts") if isinstance(status, dict) else None,
@@ -490,6 +548,7 @@ print(json.dumps({
   "status_tool_contract": contract.get("validation") if isinstance(contract, dict) else contract,
   "shell_alias_no_env": shell_alias_no_env(),
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
+  "memory_sources": memory_sources,
   "context_router": cfg.get("context_router", {}),
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),

@@ -1321,6 +1321,8 @@ After Runtime Hardening, start L2 Cognition Runtime:
 Design:
 
 - `25-memory-sources-feedback-roadmap.md`
+- RH-29 detailed design:
+  `26-memory-sources-attribution-design.md`
 
 Purpose:
 

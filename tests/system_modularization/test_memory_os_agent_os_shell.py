@@ -78,6 +78,15 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
 
     assert parser.parse_args(["status"]).agent_os_command == "status"
     assert parser.parse_args(["doctor"]).agent_os_command == "doctor"
+    last_args = parser.parse_args(["memory-sources", "last"])
+    assert last_args.agent_os_command == "memory-sources"
+    assert last_args.memory_sources_command == "last"
+    history_args = parser.parse_args(["memory-sources", "history", "--limit", "5"])
+    assert history_args.memory_sources_command == "history"
+    assert history_args.limit == 5
+    stats_args = parser.parse_args(["memory-sources", "stats", "--hours", "24"])
+    assert stats_args.memory_sources_command == "stats"
+    assert stats_args.hours == 24
 
 
 def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
@@ -97,6 +106,28 @@ def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, cap
     assert calls[0].memory_os_command == "status"
     assert calls[0].passthrough == "kept"
     assert json.loads(capsys.readouterr().out) == {"delegated": "status"}
+
+
+def test_shell_memory_sources_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
+    module = load_shell_module()
+    calls: list[argparse.Namespace] = []
+
+    def fake_delegate(args: argparse.Namespace) -> int:
+        calls.append(args)
+        print(json.dumps({"delegated": args.memory_os_command, "subcommand": args.memory_sources_command}))
+        return 0
+
+    monkeypatch.setattr(module, "_delegate_to_memory_os_cli", fake_delegate)
+    args = argparse.Namespace(agent_os_command="memory-sources", memory_sources_command="stats", hours=24)
+
+    assert module.memory_os_agent_os_command(args) == 0
+
+    assert calls[0].memory_os_command == "memory-sources"
+    assert calls[0].memory_sources_command == "stats"
+    assert json.loads(capsys.readouterr().out) == {
+        "delegated": "memory-sources",
+        "subcommand": "stats",
+    }
 
 
 def test_shell_unknown_alias_fails_closed():

@@ -26,7 +26,11 @@ def test_rh26_heading_anomalies_allow_known_casual_empty_and_safe_carryover_stat
             "chars": 1306,
             "headings": ["Crystallized Review Candidates", "Indexed Recall"],
         },
-        {"id": "active_comfyui_install", "chars": 1516, "headings": ["Current Foreground Task", "Indexed Recall"]},
+        {
+            "id": "active_comfyui_install",
+            "chars": 2051,
+            "headings": ["Current Foreground Task", "Indexed Recall", "Recent Event Summaries"],
+        },
         {"id": "deferred_cancellation", "chars": 110, "headings": ["Current Foreground Task"]},
     ]
 
@@ -138,7 +142,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
         "deep_reflection": {
@@ -201,6 +205,60 @@ def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
     assert any(item["code"] == "shell_alias_no_env_failed" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_cognitive_loop_service_last_result_failed():
+    snapshot = _healthy_snapshot()
+    snapshot["cognitive_loop_service"] = {
+        "ActiveState": "failed",
+        "SubState": "failed",
+        "Result": "exit-code",
+        "ExecMainStatus": "2",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "cognitive_loop_service_failed" for item in classification["fail"])
+
+
+def test_classify_snapshot_passes_memory_sources_stats_and_fails_for_forbidden_fields():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_sources_stats_ok" for item in classification["pass"])
+
+    snapshot["memory_sources"]["forbidden_field_findings"] = [{"path": "$.selected[0].preview"}]
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "memory_sources_forbidden_fields" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_memory_sources_boundary_is_true():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 1,
+        "forbidden_field_findings": [],
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "memory_sources_boundary_true" for item in classification["fail"])
+
+
 def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_boundary():
     snapshot = {
         "gateway": {"ActiveState": "active"},
@@ -224,7 +282,7 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
         },
         "doctor": {"status": "ok", "findings": []},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {
@@ -246,24 +304,17 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
 
 
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
-    snapshot = {
-        "hostname": "debian",
-        "date_utc": "2026-05-22T07:07:41Z",
-        "gateway": {"ActiveState": "active", "MainPID": "451894"},
-        "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
-        "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
-        "cognitive_loop": _healthy_cognitive_loop(),
-        "memory_status": {
-            "counts": {"audit_entries": 110, "events": 12, "working_items": 7, "crystallized_records": 0},
-            "index_health": {"state": "healthy"},
-            "prefetch_mode": "indexed",
-        },
-        "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
-        "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
-        "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
-        "deltas": {"counts_delta": {"audit_entries": 10, "events": 2}, "audit_entries_per_new_event": 5.0},
-        "classification": {"status": "WARN", "pass": [{"code": "doctor_ok"}], "warn": [], "fail": []},
+    snapshot = _healthy_snapshot()
+    snapshot["deltas"] = {"counts_delta": {"audit_entries": 10, "events": 2}, "audit_entries_per_new_event": 5.0}
+    snapshot["classification"] = {"status": "WARN", "pass": [{"code": "doctor_ok"}], "warn": [], "fail": []}
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "record_count": 3,
+        "file_size_bytes": 2048,
+        "route_distribution": {"ambiguous_recall": 1},
+        "selected_source_class_distribution": {"recall_guard": 1},
+        "forbidden_field_findings": [],
+        "boundary_true_count": 0,
     }
 
     rendered = render_chinese_summary(snapshot)
@@ -272,6 +323,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "context_router=apply" in rendered
     assert "cognitive_loop=ok" in rendered
     assert "shell_alias_no_env" in rendered
+    assert "MemorySources" in rendered
     assert "audit_entries=+10" in rendered
     assert "events=+2" in rendered
     assert "raw event" not in rendered.lower()
@@ -306,7 +358,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             },
             "doctor": {"status": "ok", "findings": []},
             "status_tool_contract": {"status": "ok", "findings": []},
-            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
+            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
             "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
             "rh26_apply_probe": [],
             "deep_reflection": {},
@@ -347,4 +399,34 @@ def _healthy_cognitive_loop() -> dict:
             "actual_identity_write": False,
             "actual_crystallized_approval": False,
         },
+    }
+
+
+def _healthy_snapshot() -> dict:
+    return {
+        "hostname": "debian",
+        "date_utc": "2026-05-22T07:07:41Z",
+        "gateway": {"ActiveState": "active", "MainPID": "451894"},
+        "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "heartbeat_listed": True,
+        "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "cognitive_loop_listed": True,
+        "cognitive_loop": _healthy_cognitive_loop(),
+        "memory_status": {
+            "counts": {"audit_entries": 110, "events": 12, "working_items": 7, "crystallized_records": 0},
+            "index_health": {"state": "healthy"},
+            "prefetch_mode": "indexed",
+        },
+        "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
+        "status_tool_contract": {"status": "ok", "findings": []},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
+        "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        "rh26_apply_probe": [],
+        "deep_reflection": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_crystallized_approval": False,
+        },
+        "compaction": {},
     }

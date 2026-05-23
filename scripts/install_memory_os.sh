@@ -21,6 +21,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUNTIME_INTERVAL="${RUNTIME_INTERVAL:-5min}"
 COGNITIVE_LOOP_INTERVAL="${COGNITIVE_LOOP_INTERVAL:-6h}"
 DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
+MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-}"
 
 INSTALL_SHELL=""
 ENABLE_PROVIDER=""
@@ -45,6 +46,7 @@ Options:
   --production-safe             Production-safe defaults with DeepReflection
                                 explicitly disabled.
   --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host.
+  --memory-sources-preset NAME none|production-safe|test-host.
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
   --cognitive-loop-interval VALUE
                                 Test-host cognitive loop timer interval. Default: 6h.
@@ -78,15 +80,21 @@ while [[ $# -gt 0 ]]; do
       MODE="test-host"
       YES=1
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-test-host}"
+      MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-test-host}"
       shift
       ;;
     --production-safe)
       MODE="production-safe"
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-production-safe}"
+      MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-production-safe}"
       shift
       ;;
     --deep-reflection-preset)
       DEEP_REFLECTION_PRESET="${2:?missing --deep-reflection-preset value}"
+      shift 2
+      ;;
+    --memory-sources-preset)
+      MEMORY_SOURCES_PRESET="${2:?missing --memory-sources-preset value}"
       shift 2
       ;;
     --runtime-interval)
@@ -298,6 +306,27 @@ choose_preset() {
   esac
 }
 
+choose_memory_sources_preset() {
+  local default="$1"
+  local answer
+  if [[ "${YES}" == "1" ]]; then
+    echo "Memory Sources preset [${default}] -> ${default}"
+    MEMORY_SOURCES_PRESET="${default}"
+    return
+  fi
+  read -r -p "Memory Sources preset [none/production-safe/test-host] [${default}] " answer
+  answer="${answer:-${default}}"
+  case "${answer}" in
+    none|production-safe|test-host)
+      MEMORY_SOURCES_PRESET="${answer}"
+      ;;
+    *)
+      echo "Invalid Memory Sources preset: ${answer}" >&2
+      choose_memory_sources_preset "${default}"
+      ;;
+  esac
+}
+
 normalize_shell_enablement() {
   [[ "${INSTALL_SHELL}" == "0" ]] || return 0
 
@@ -331,9 +360,11 @@ select_options() {
   local default_install_cognitive_loop="no"
   local default_enable_cognitive_loop="no"
   local default_preset="production-safe"
+  local default_memory_sources_preset="production-safe"
 
   if [[ "${MODE}" == "test-host" ]]; then
     default_preset="test-host"
+    default_memory_sources_preset="test-host"
     default_install_cognitive_loop="yes"
     default_enable_cognitive_loop="yes"
   fi
@@ -359,6 +390,9 @@ select_options() {
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
     choose_preset "${default_preset}"
+  fi
+  if [[ -z "${MEMORY_SOURCES_PRESET}" ]]; then
+    choose_memory_sources_preset "${default_memory_sources_preset}"
   fi
 }
 
@@ -387,6 +421,7 @@ run_installer() {
   [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]] && args+=("--enable-cognitive-loop")
   args+=("--cognitive-loop-interval" "${COGNITIVE_LOOP_INTERVAL}")
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
+  [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
   echo "Running installer:"

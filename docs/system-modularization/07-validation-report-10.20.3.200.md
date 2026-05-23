@@ -5233,3 +5233,212 @@ The remaining trend to watch is growth slope: `audit_entries` and
 working/candidate counts are rising now that the cognitive loop is active. This
 is expected for a test-host observation phase, but monitor v0.4 should continue
 tracking `audit_per_new_event` and disk growth.
+
+## 2026-05-23 RH-29 Memory Sources Attribution Deployment
+
+### Scope
+
+RH-29 was deployed to the `10.20.3.200` test host only.
+
+Installed through the project installer from a temporary transfer bundle:
+
+```text
+scripts/install_memory_os_test_host.sh --hermes-home /root/.hermes
+```
+
+Installer result:
+
+```text
+memory_sources_preset=test-host
+memory_sources_config_written=true
+memory_sources_config_path=/root/.hermes/memory-os/config.json
+memory_sources_config.enabled=true
+memory_sources_config.mode=metadata_only
+memory_sources_config.retention_days=30
+record_live_prefetch=true
+record_dry_run=false
+```
+
+The installer also refreshed the provider plugin, Agent OS shell plugin,
+portable L2-L4 runtime, heartbeat artifacts, cognitive-loop artifacts, and
+DeepReflection test-host config.
+
+Because provider prefetch code changed, the user gateway was restarted in the
+user service scope:
+
+```text
+systemctl --user restart hermes-gateway.service
+systemctl --user is-active hermes-gateway.service -> active
+MainPID=464934
+```
+
+### Synthetic Live-Prefetch Probe
+
+A bounded synthetic probe exercised the installed provider path without printing
+private bodies:
+
+```text
+MemoryOSProvider.initialize(session_id="rh29_smoke", hermes_home="/root/.hermes", profile="default")
+MemoryOSProvider.prefetch(low-clue recall query)
+context_chars=1816
+has_recall_guard=true
+```
+
+`memory-sources last` reported:
+
+```text
+status=ok
+route=ambiguous_recall
+query_class=ambiguous_recall
+selected_headings=[Recall Clarification Guard, Recent Event Summaries]
+selected_source_classes=[recall_guard, event]
+selected_chars_total=1734
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_relationship_write=false
+boundary.actual_crystallized_approval=false
+boundary.hindsight_exported=false
+```
+
+`memory-sources stats --hours 24` reported:
+
+```text
+schema_version=memory-os.memory_sources_stats.v0
+ledger_exists=true
+record_count=1
+route_distribution={"ambiguous_recall": 1}
+selected_source_class_distribution={"event": 1, "recall_guard": 1}
+boundary_true_count=0
+forbidden_field_findings=[]
+```
+
+### Monitor v0.5 Recheck
+
+The local deterministic monitor was run against `hermes-media` after deployment:
+
+```text
+status=PASS
+time=2026-05-23T08:51:31Z
+gateway=active pid=464934
+heartbeat=active/enabled
+cognitive_loop=ok timer=active/enabled
+counts:
+  audit_entries=1939
+  events=139
+  working_items=121
+  candidates=121
+  crystallized_records=0
+index_health=healthy
+doctor=ok
+doctor_findings=[hindsight_adapter_disabled warning]
+context_router=apply, apply_routes=["all"], llm_judge=disabled
+MemorySources:
+  record_count=1
+  file_size_bytes=1764
+  routes={"ambiguous_recall": 1}
+  selected_sources={"event": 1, "recall_guard": 1}
+  boundary_true_count=0
+  forbidden_field_count=0
+DeepReflection:
+  enabled=true
+  injection_mode=auto_bounded
+  latest selected_by_source_class={"governance": 2}
+  rolling selected_by_source_class={"governance": 4, "working": 14}
+  actual_send=false
+  actual_execute=false
+  actual_identity_write=false
+  actual_crystallized_approval=false
+disk_usage=/root/.hermes/memory-os 9.7M
+PASS=[
+  gateway_active,
+  heartbeat_timer_active,
+  cognitive_loop_timer_active,
+  cognitive_loop_last_cycle_present,
+  index_healthy,
+  doctor_ok,
+  status_tool_contract_ok,
+  shell_alias_no_env_ok,
+  context_router_apply,
+  memory_sources_stats_ok
+]
+WARN=[]
+FAIL=[]
+```
+
+### Findings
+
+- RH-29 metadata ledger is active on the test host.
+- The first attribution record is bounded metadata only.
+- No raw private text, section bodies, file paths, tokens, or credentials were
+  reported by stats validation.
+- All hard-boundary booleans remain false.
+- `crystallized_records` remains `0`.
+- The monitor can now report route/source-class attribution distribution.
+
+### Interface Note
+
+The remote Hermes command registry does not expose `hermes memory_os ...`
+because `memory_os` remains a memory provider, not an enabled general plugin.
+During the initial gate, the module entrypoint also worked:
+
+```text
+PYTHONPATH=/root/.hermes/plugins:/root/.hermes/memory-os/runtime/python \
+  python3 -m plugins.memory.memory_os memory-sources last
+```
+
+The Agent OS shell plugin exposes `hermes memory-os-agent-os status` and
+`hermes memory-os-agent-os doctor`. The RH-29 follow-up also added and deployed
+shell aliases for:
+
+```text
+hermes memory-os-agent-os memory-sources last
+hermes memory-os-agent-os memory-sources history --limit N
+hermes memory-os-agent-os memory-sources stats --hours N
+```
+
+Remote alias verification after redeploy and gateway restart:
+
+```text
+systemctl --user restart hermes-gateway.service
+systemctl --user is-active hermes-gateway.service -> active
+MainPID=465190
+
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os memory-sources stats --hours 24
+schema_version=memory-os.memory_sources_stats.v0
+ledger_exists=true
+record_count=1
+boundary_true_count=0
+forbidden_field_findings=[]
+route_distribution={"ambiguous_recall": 1}
+selected_source_class_distribution={"event": 1, "recall_guard": 1}
+```
+
+Final monitor v0.5 recheck after alias deployment and one controlled
+cognitive-loop service run:
+
+```text
+time=2026-05-23T09:01:48Z
+status=WARN
+gateway=active pid=465190
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+MemorySources.record_count=1
+MemorySources.file_size_bytes=1764
+MemorySources.routes={"ambiguous_recall": 1}
+MemorySources.selected_sources={"event": 1, "recall_guard": 1}
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+shell_alias_no_env.status_ok=true
+shell_alias_no_env.doctor_ok=true
+shell_alias_no_env.memory_sources_ok=true
+PASS includes memory_sources_stats_ok
+WARN=[rh26_casual_empty]
+FAIL=[]
+```
+
+`rh26_casual_empty` is an expected observation warning: the casual continuity
+probe had no clean, route-eligible context after the latest cognitive-loop run.
+The monitor no longer escalates this empty casual context to FAIL, and it now
+checks the last systemd service result for heartbeat/cognitive-loop services so
+stale `exit-code` failures are visible.

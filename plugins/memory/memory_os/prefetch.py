@@ -11,6 +11,13 @@ from typing import Any
 
 from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
 from .crystallized import read_candidate_queue
+from .memory_sources import (
+    GUARD_RECALL_CLARIFICATION,
+    append_memory_source_record,
+    build_memory_source_record,
+    memory_sources_enabled,
+    normalize_memory_sources_config,
+)
 from .store import MemoryOSStore
 
 
@@ -140,18 +147,71 @@ def build_prefetch(
     current_task_anchor: str | None = None,
     foreground_task_only: bool = False,
     context_router_config: dict[str, Any] | None = None,
+    memory_sources_config: dict[str, Any] | None = None,
 ) -> str:
     router_config = _normalize_context_router_config(context_router_config)
+    source_config = normalize_memory_sources_config(memory_sources_config)
     router_apply_enabled = _context_router_apply_enabled(router_config)
     if _should_ground_diagnostic_query(
         query,
         diagnostic_grounding_enabled=diagnostic_grounding_enabled,
     ) and not router_apply_enabled:
-        return _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
+        context = _fit_budget(_format_diagnostic(runtime_facts or {}), budget_chars)
+        candidates = build_prefetch_section_candidates(
+            query,
+            store=store,
+            index=index,
+            diagnostic_grounding_enabled=diagnostic_grounding_enabled,
+            runtime_facts=runtime_facts,
+            current_task_anchor=current_task_anchor,
+        )
+        report = route_context_sections(
+            query,
+            sections=candidates,
+            current_task_anchor=current_task_anchor,
+            budget_chars=budget_chars,
+            mode="disabled",
+        )
+        _record_memory_sources(
+            store=store,
+            config=source_config,
+            route_report=report,
+            selected_sections=candidates,
+            context_router_config=router_config,
+            router_applied=False,
+            prefetch_mode=_prefetch_mode(index),
+        )
+        return context
     current_task_section: list[tuple[str, list[str]]] = []
     _append_section(current_task_section, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     if foreground_task_only and current_task_section:
-        return _fit_budget(_format(current_task_section), budget_chars)
+        context = _fit_budget(_format(current_task_section), budget_chars)
+        selected_sections = [
+            ContextSection(
+                section=title,
+                text="\n".join(lines),
+                source_class=_section_source_class(title),
+                metadata=_section_metadata(title),
+            )
+            for title, lines in current_task_section
+        ]
+        report = route_context_sections(
+            query,
+            sections=selected_sections,
+            current_task_anchor=current_task_anchor,
+            budget_chars=budget_chars,
+            mode="foreground_only",
+        )
+        _record_memory_sources(
+            store=store,
+            config=source_config,
+            route_report=report,
+            selected_sections=selected_sections,
+            context_router_config=router_config,
+            router_applied=False,
+            prefetch_mode=_prefetch_mode(index),
+        )
+        return context
     if router_apply_enabled:
         routed = _build_context_router_apply_prefetch(
             query,
@@ -164,11 +224,62 @@ def build_prefetch(
             context_router_config=router_config,
         )
         if routed is not None:
-            return routed
+            _record_memory_sources(
+                store=store,
+                config=source_config,
+                route_report=routed["report"],
+                selected_sections=routed["selected_sections"],
+                context_router_config=router_config,
+                router_applied=True,
+                prefetch_mode=_prefetch_mode(index),
+            )
+            return str(routed["context"])
     sections = _build_prefetch_sections(query, store=store, index=index, current_task_anchor=current_task_anchor)
     if not sections:
+        report = route_context_sections(
+            query,
+            sections=[],
+            current_task_anchor=current_task_anchor,
+            budget_chars=budget_chars,
+            mode=str(router_config.get("mode") or "disabled"),
+        )
+        _record_memory_sources(
+            store=store,
+            config=source_config,
+            route_report=report,
+            selected_sections=[],
+            context_router_config=router_config,
+            router_applied=False,
+            prefetch_mode=_prefetch_mode(index),
+        )
         return ""
-    return _fit_budget(_format(sections), budget_chars)
+    context = _fit_budget(_format(sections), budget_chars)
+    candidates = [
+        ContextSection(
+            section=title,
+            text="\n".join(lines),
+            source_class=_section_source_class(title),
+            metadata=_section_metadata(title),
+        )
+        for title, lines in sections
+    ]
+    report = route_context_sections(
+        query,
+        sections=candidates,
+        current_task_anchor=current_task_anchor,
+        budget_chars=budget_chars,
+        mode=str(router_config.get("mode") or "disabled"),
+    )
+    _record_memory_sources(
+        store=store,
+        config=source_config,
+        route_report=report,
+        selected_sections=candidates,
+        context_router_config=router_config,
+        router_applied=False,
+        prefetch_mode=_prefetch_mode(index),
+    )
+    return context
 
 
 def build_prefetch_section_candidates(
@@ -192,7 +303,12 @@ def build_prefetch_section_candidates(
             )
         ]
     return [
-        ContextSection(section=title, text="\n".join(lines), source_class=_section_source_class(title))
+        ContextSection(
+            section=title,
+            text="\n".join(lines),
+            source_class=_section_source_class(title),
+            metadata=_section_metadata(title),
+        )
         for title, lines in _build_prefetch_sections(
             query,
             store=store,
@@ -238,7 +354,7 @@ def _build_context_router_apply_prefetch(
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
     context_router_config: dict[str, Any],
-) -> str | None:
+) -> dict[str, Any] | None:
     candidates = build_prefetch_section_candidates(
         query,
         store=store,
@@ -262,8 +378,10 @@ def _build_context_router_apply_prefetch(
     if route == "foreground_control":
         selected_sections = [section for section in selected_sections if section.section == "Current Foreground Task"]
     if not selected_sections:
-        return ""
-    return _fit_budget(_format_selected_context_sections(selected_sections), budget_chars)
+        context = ""
+    else:
+        context = _fit_budget(_format_selected_context_sections(selected_sections), budget_chars)
+    return {"context": context, "report": report, "selected_sections": selected_sections}
 
 
 def _build_prefetch_sections(
@@ -304,6 +422,39 @@ def _section_source_class(title: str) -> str:
         "Diagnostic Grounding": "diagnostic",
     }
     return mapping.get(title, "other")
+
+
+def _section_metadata(title: str) -> dict[str, Any]:
+    if title == "Recall Clarification Guard":
+        return {"source_ids": [GUARD_RECALL_CLARIFICATION]}
+    return {}
+
+
+def _record_memory_sources(
+    *,
+    store: MemoryOSStore,
+    config: dict[str, Any],
+    route_report: dict[str, Any],
+    selected_sections: list[ContextSection],
+    context_router_config: dict[str, Any],
+    router_applied: bool,
+    prefetch_mode: str,
+) -> None:
+    if not memory_sources_enabled(config) or not bool(config.get("record_live_prefetch", True)):
+        return
+    record = build_memory_source_record(
+        roots=store.roots,
+        route_report=route_report,
+        selected_sections=selected_sections,
+        context_router_config=context_router_config,
+        router_applied=router_applied,
+        prefetch_mode=prefetch_mode,
+    )
+    append_memory_source_record(store.roots, record)
+
+
+def _prefetch_mode(index: object | None) -> str:
+    return "indexed" if index is not None else "degraded_filesystem"
 
 
 def _normalize_context_router_config(config: dict[str, Any] | None) -> dict[str, Any]:

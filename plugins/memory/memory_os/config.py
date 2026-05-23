@@ -21,6 +21,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "dry_run_routes": [],
         "llm_judge_mode": "disabled",
     },
+    "memory_sources": {
+        "enabled": False,
+        "mode": "metadata_only",
+        "retention_days": 30,
+        "record_live_prefetch": True,
+        "record_dry_run": False,
+    },
 }
 
 
@@ -56,6 +63,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "key": "context_router",
             "description": "Context Relevance Router mode and route allowlist",
             "default": DEFAULT_CONFIG["context_router"],
+        },
+        {
+            "key": "memory_sources",
+            "description": "Memory Sources attribution metadata ledger",
+            "default": DEFAULT_CONFIG["memory_sources"],
         },
     ]
 
@@ -95,6 +107,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG)
     merged.update(_known_values(values))
     merged["context_router"] = _merge_context_router_config(merged.get("context_router"))
+    merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     return merged
 
 
@@ -114,6 +127,21 @@ def _merge_context_router_config(value: Any) -> dict[str, Any]:
         merged["apply_routes"] = []
     if not isinstance(merged.get("dry_run_routes"), list):
         merged["dry_run_routes"] = []
+    return merged
+
+
+def _merge_memory_sources_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["memory_sources"])
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in default:
+        if key in value:
+            merged[key] = value[key]
+    try:
+        merged["retention_days"] = int(merged.get("retention_days") or 30)
+    except (TypeError, ValueError):
+        merged["retention_days"] = 30
     return merged
 
 

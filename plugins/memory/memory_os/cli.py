@@ -53,6 +53,11 @@ from .cognitive_loop import CognitiveLoopRunner
 from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
+from .memory_sources import (
+    memory_sources_history_report,
+    memory_sources_last_report,
+    memory_sources_stats_report,
+)
 from .migrator import (
     export_shadow_bundle,
     import_shadow_bundle,
@@ -311,6 +316,13 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     context_router_dry_run.add_argument("--query", required=True)
     context_router_dry_run.add_argument("--budget", type=int, default=2200)
     context_router_dry_run.add_argument("--current-task-anchor", default="")
+    memory_sources_parser = subs.add_parser("memory-sources")
+    memory_sources_subs = memory_sources_parser.add_subparsers(dest="memory_sources_command", required=True)
+    memory_sources_subs.add_parser("last")
+    memory_sources_history = memory_sources_subs.add_parser("history")
+    memory_sources_history.add_argument("--limit", type=int, default=20)
+    memory_sources_stats = memory_sources_subs.add_parser("stats")
+    memory_sources_stats.add_argument("--hours", type=int, default=24)
     cognitive_loop_parser = subs.add_parser("cognitive-loop")
     cognitive_loop_subs = cognitive_loop_parser.add_subparsers(dest="cognitive_loop_command", required=True)
     cognitive_loop_subs.add_parser("status")
@@ -423,6 +435,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _conversation_regression_command(args)
     if command == "context-router":
         return _context_router_command(args, store)
+    if command == "memory-sources":
+        return _memory_sources_command(args, store)
     if command == "cognitive-loop":
         return _cognitive_loop_command(args, store)
     if command == "validate":
@@ -615,6 +629,34 @@ def _cognitive_loop_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if result.get("status") != "error" else 2
+    return 2
+
+
+def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    command = args.memory_sources_command
+    if command == "last":
+        print(json.dumps(memory_sources_last_report(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "history":
+        print(
+            json.dumps(
+                memory_sources_history_report(store.roots, limit=max(int(args.limit), 0)),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "stats":
+        print(
+            json.dumps(
+                memory_sources_stats_report(store.roots, hours=max(int(args.hours), 0)),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     return 2
 
 
