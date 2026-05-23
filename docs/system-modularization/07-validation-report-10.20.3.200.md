@@ -4471,3 +4471,271 @@ doctor=ok
 context_router=apply apply_routes=["all"]
 crystallized_records=0
 ```
+
+## P1 Gap Closure Remote Deployment Gate
+
+Date: 2026-05-23
+
+Scope:
+
+- target host: `10.20.3.200` via `ssh hermes-media`
+- target `HERMES_HOME`: `/root/.hermes`
+- deployment source: current local workspace snapshot
+- install command: `HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host`
+- gateway restart: not requested and not performed
+- heartbeat/manual cleanup/shadow journal apply: not run
+- production/Sannai host `10.20.2.88`: not touched
+
+This gate validates the P1 implementation closure described in
+`22-p1-gap-closure-plan.md`:
+
+- module CLI surfaces
+- DeepReflection owner preview/history CLI
+- no-send host validation command
+- controlled dry-run module runner
+- installer fail-closed behavior
+- Agent OS shell compatibility with the installed provider/runtime
+
+### Local Verification Before Remote Gate
+
+Local verification was rerun after the final runtime import fix:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_cli_modules.py tests\scripts\test_memory_os_plugin_install.py -q
+34 passed in 3.81s
+
+python -m pytest -q
+346 passed in 25.14s
+
+git diff --check
+passed
+```
+
+### Remote Finding During Gate
+
+The first remote validation attempt after deployment exposed a real installed
+Hermes import-path gap:
+
+```text
+hermes memory_os modules deep_reflection preview-current
+ModuleNotFoundError: No module named 'plugins.modules'
+```
+
+After adding the runtime python path, a second error showed the deeper package
+path conflict:
+
+```text
+ModuleNotFoundError: No module named 'plugins.memory.memory_os'
+```
+
+Root cause:
+
+- Hermes had already loaded the user-plugin `plugins` package from
+  `$HERMES_HOME/plugins`.
+- Inserting `$HERMES_HOME/memory-os/runtime/python` into `sys.path` was not
+  sufficient once `plugins` and `plugins.memory` were already loaded.
+- DeepReflection imports both `plugins.modules...` and
+  `plugins.memory.memory_os...`, so both loaded package paths had to be
+  extended.
+
+Fix:
+
+- `_ensure_system_module_runtime_path()` now extends:
+  - `plugins.__path__` with
+    `/root/.hermes/memory-os/runtime/python/plugins`
+  - `plugins.memory.__path__` with
+    `/root/.hermes/memory-os/runtime/python/plugins/memory`
+- regression coverage was added for already-loaded `plugins` and
+  `plugins.memory` package path extension.
+
+Why the fix did not require a gateway restart:
+
+- the failing surface was the operator CLI path, not the running gateway
+  request path
+- each `hermes memory_os ...` CLI command starts a fresh Python process and
+  loads the newly installed plugin files
+- the gateway was left running while the fixed CLI path was validated through
+  fresh invocations
+
+Known packaging risk:
+
+- the installed Hermes runtime can load `plugins` namespace packages from both
+  `$HERMES_HOME/plugins` and
+  `$HERMES_HOME/memory-os/runtime/python`
+- extending already-loaded namespace package paths fixes the observed import
+  contract, but future provider/runtime updates must keep the provider package
+  and portable L2-L4 runtime API-compatible
+- this remains an installer-level validation point for future releases
+
+Interpretation:
+
+- This was not a canonical Memory-OS data problem.
+- This was an installed-runtime compatibility gap that only appears in a real
+  Hermes process after user plugins have already populated the `plugins`
+  package namespace.
+- Local unit tests alone did not expose it; the remote deployment gate did.
+
+### Remote Validation After Fix
+
+Final remote validation after redeploying the fixed workspace snapshot:
+
+```text
+hermes memory_os status:
+  exit_code=0
+  index_health.state=healthy
+  prefetch_mode=indexed
+  hindsight_adapter_enabled=false
+  counts:
+    audit_entries=1573
+    events=93
+    working_items=86
+    crystallized_candidates=86
+    crystallized_records=0
+
+hermes memory_os doctor:
+  exit_code=0
+  status=ok
+  findings=[hindsight_adapter_disabled]
+
+hermes memory_os modules status:
+  exit_code=0
+  module_count=16
+  commandized=[
+    cron_mirror,
+    session_mirror,
+    state_source_mirror,
+    shadow_journal,
+    deep_reflection,
+    governance_feedback
+  ]
+  uncommandized_count=10
+
+hermes memory_os modules doctor:
+  exit_code=0
+  status=warning
+  warning_count=4
+  warning_findings:
+    mailbox/mailbox_root_missing:
+      mailbox root is not configured on the test host
+    wandering_mind/household_digest_missing:
+      household digest artifact is not present, so Wandering Mind may return
+      [SILENT]
+    proposal_queue/pending_candidates_present:
+      2 proposal candidates are pending review
+    self_evolution/missing_required_runtime_dependency:
+      ops_gate, proposal_queue, and evidence_scoring are not exposed through
+      the generic run-once path for this validation gate
+
+hermes memory_os modules run-once --module cron_mirror:
+  exit_code=0
+  dry_run=true
+  new_event_count=0
+
+hermes memory_os modules deep_reflection preview-current:
+  exit_code=0
+  schema_version=hermes.deep_reflection_preview.v0
+  status=ok
+  selected_injection_count=2
+  actual_send=false
+  actual_execute=false
+  actual_identity_write=false
+  actual_crystallized_approval=false
+
+hermes memory_os modules deep_reflection history --days 7:
+  exit_code=0
+  schema_version=hermes.deep_reflection_history.v0
+  record_count=7
+  actual_send=false
+  actual_execute=false
+  actual_identity_write=false
+  actual_crystallized_approval=false
+
+hermes memory_os validate --no-send --write-report:
+  exit_code=0
+  status=warning
+  report_written=true
+  warning_source:
+    modules_doctor emitted warning-class findings listed above; hard-boundary
+    checks stayed false and no doctor error caused a non-zero exit
+  hard boundaries:
+    actual_send=false
+    actual_execute=false
+    actual_identity_write=false
+    actual_relationship_write=false
+    actual_crystallized_approval=false
+    hindsight_exported=false
+
+hermes memory-os-agent-os status:
+  exit_code=0
+  schema_version=memory-os.status.v0
+
+hermes memory-os-agent-os doctor:
+  exit_code=0
+  schema_version=memory-os.doctor.v0
+  status=ok
+
+hermes memory_os conversation-regression status-tool-contract:
+  exit_code=0
+  validation.status=ok
+  finding_count=0
+```
+
+Service and plugin state after the gate:
+
+```text
+hermes-gateway.service:
+  ActiveState=active
+  SubState=running
+  MainPID=451894
+
+hermes-memory-os-heartbeat.timer:
+  LoadState=loaded
+  ActiveState=active
+  SubState=waiting
+  UnitFileState=enabled
+
+hermes plugins list:
+  memory-os-agent-os: enabled
+  memory_os: not enabled as a general plugin
+```
+
+### Boundary Review
+
+Hard-boundary evidence from the final remote gate:
+
+```json
+{
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_relationship_write": false,
+  "actual_crystallized_approval": false,
+  "hindsight_exported": false
+}
+```
+
+Additional boundary observations:
+
+- `crystallized_records` remained `0`.
+- `memory_os` remained the active memory provider but was not enabled as a
+  general Hermes plugin.
+- `memory-os-agent-os` remained enabled as the official shell plugin.
+- DeepReflection preview/history commands returned bounded JSON and did not
+  print source raw bodies.
+- The validation command wrote a bounded report under
+  `/root/.hermes/memory-os/system-modules/validation/`.
+- The gateway stayed active and was not restarted by this gate.
+
+### Gate Judgment
+
+P1-A through P1-D are now validated on the real test host:
+
+- module CLI exists and reports commandized/uncommandized modules
+- safe module dry-run works for a commandized module
+- DeepReflection owner preview/history CLI works in the installed Hermes
+  runtime, not just local tests
+- `memory_os validate --no-send --write-report` produces a bounded report
+- Agent OS shell aliases can call the installed provider/runtime
+- installer-based deployment preserves provider/shell/timer state
+- expected warnings remain warning-class only
+- no hard-boundary violation was observed

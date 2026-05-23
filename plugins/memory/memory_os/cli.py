@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import sqlite3
 import sys
 import types
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -309,6 +310,27 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     context_router_dry_run.add_argument("--query", required=True)
     context_router_dry_run.add_argument("--budget", type=int, default=2200)
     context_router_dry_run.add_argument("--current-task-anchor", default="")
+    validate_parser = subs.add_parser("validate")
+    validate_parser.add_argument("--profile", default="")
+    validate_parser.add_argument("--no-send", action="store_true")
+    validate_parser.add_argument("--write-report", action="store_true")
+    modules_parser = subs.add_parser("modules")
+    modules_subs = modules_parser.add_subparsers(dest="modules_command", required=True)
+    modules_subs.add_parser("status")
+    modules_subs.add_parser("doctor")
+    modules_run_once = modules_subs.add_parser("run-once")
+    modules_run_once.add_argument("--module", required=True)
+    modules_run_once.add_argument("--dry-run", action="store_true")
+    modules_run_once.add_argument("--apply", action="store_true")
+    modules_subs.add_parser("validate-no-send")
+    modules_deep_reflection = modules_subs.add_parser("deep_reflection")
+    deep_reflection_subs = modules_deep_reflection.add_subparsers(
+        dest="deep_reflection_command",
+        required=True,
+    )
+    deep_reflection_subs.add_parser("preview-current")
+    deep_reflection_history = deep_reflection_subs.add_parser("history")
+    deep_reflection_history.add_argument("--days", type=int, default=7)
     export_parser = subs.add_parser("export-shadow")
     export_parser.add_argument("--profile", default="sannai")
     export_parser.add_argument("--hermes-home", required=True)
@@ -390,6 +412,12 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _conversation_regression_command(args)
     if command == "context-router":
         return _context_router_command(args, store)
+    if command == "validate":
+        report = _host_validation_report(store, no_send=bool(args.no_send), write_report=bool(args.write_report))
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if report.get("status") == "error" else 0
+    if command == "modules":
+        return _modules_command(args, store)
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
@@ -520,6 +548,571 @@ def _state_source_mirror_command(args: argparse.Namespace, store: MemoryOSStore)
         print(json.dumps(mirror.scan(dry_run=dry_run), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     return 2
+
+
+def _modules_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    command = args.modules_command
+    if command == "status":
+        print(json.dumps(_modules_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "doctor":
+        report = _modules_doctor_report(store)
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if any(finding["severity"] == "error" for finding in report["findings"]) else 0
+    if command == "run-once":
+        report = _modules_run_once_report(
+            store,
+            module_id=args.module,
+            apply=bool(args.apply),
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report.get("status") != "error" else 2
+    if command == "validate-no-send":
+        print(json.dumps(_modules_validate_no_send_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "deep_reflection":
+        return _modules_deep_reflection_command(args, store)
+    return 2
+
+
+def _host_validation_report(store: MemoryOSStore, *, no_send: bool, write_report: bool) -> dict[str, Any]:
+    status = build_status_report(store)
+    doctor = build_doctor_result(store)
+    modules_status = _modules_status_report(store)
+    modules_doctor = _modules_doctor_report(store)
+    no_send_report = _modules_validate_no_send_report(store)
+    deep_reflection_status = _module_status_by_id(modules_status, "deep_reflection")
+    config = load_config(store.roots.hermes_home)
+    report = {
+        "schema_version": "memory-os.host_validation.v0",
+        "profile": store.roots.profile or "default",
+        "root": str(store.roots.memory_os_root),
+        "mode": "no-send" if no_send else "status-only",
+        "status": "ok",
+        "provider_status": _bounded_module_payload(status),
+        "provider_doctor": _bounded_module_payload(doctor),
+        "modules_status": _bounded_module_payload(modules_status),
+        "modules_doctor": _bounded_module_payload(modules_doctor),
+        "deep_reflection_status": _bounded_module_payload(deep_reflection_status),
+        "context_router": _bounded_module_payload(config.get("context_router", {})),
+        "boundaries": no_send_report["boundaries"],
+        "report_written": False,
+        "report_path": "",
+    }
+    if doctor["status"] == "fail" or modules_doctor["status"] == "error":
+        report["status"] = "error"
+    elif doctor.get("findings") or modules_doctor.get("findings"):
+        report["status"] = "warning"
+    if write_report:
+        path = _write_host_validation_report(store, report)
+        report["report_written"] = True
+        report["report_path"] = str(path)
+    return report
+
+
+def _module_status_by_id(modules_status: dict[str, Any], module_id: str) -> dict[str, Any]:
+    for item in modules_status.get("modules", []):
+        if isinstance(item, dict) and item.get("module") == module_id:
+            return item
+    return {"module": module_id, "status_available": False}
+
+
+def _write_host_validation_report(store: MemoryOSStore, report: dict[str, Any]) -> Path:
+    root = store.roots.memory_os_root / "system-modules" / "validation"
+    root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    path = root / f"validation_{stamp}.json"
+    path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _modules_status_report(store: MemoryOSStore) -> dict[str, Any]:
+    modules = []
+    for definition in _module_definitions():
+        entry = _module_status_entry(store, definition)
+        entry.pop("_instance", None)
+        modules.append(entry)
+    return {
+        "schema_version": "memory-os.modules_status.v0",
+        "profile": store.roots.profile or "default",
+        "root": str(store.roots.memory_os_root),
+        "module_count": len(modules),
+        "modules": modules,
+    }
+
+
+def _modules_doctor_report(store: MemoryOSStore) -> dict[str, Any]:
+    findings: list[dict[str, Any]] = []
+    module_reports: list[dict[str, Any]] = []
+    for definition in _module_definitions():
+        entry = _module_status_entry(store, definition)
+        module_reports.append(entry)
+        if not entry["status_available"]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "module_status_unavailable",
+                    "module": definition["module"],
+                    "message": entry["unavailable_reason"],
+                }
+            )
+            continue
+        doctor = _call_module_method(entry["_instance"], "doctor", store=store)
+        entry.pop("_instance", None)
+        if isinstance(doctor, dict):
+            module_reports[-1]["doctor"] = _bounded_module_payload(doctor)
+            for finding in doctor.get("findings", []) if isinstance(doctor.get("findings", []), list) else []:
+                if isinstance(finding, dict):
+                    finding = dict(finding)
+                    finding.setdefault("module", definition["module"])
+                    if (
+                        not definition.get("runner")
+                        and finding.get("severity") == "error"
+                        and finding.get("code") == "missing_required_runtime_dependency"
+                    ):
+                        finding["severity"] = "warning"
+                    findings.append(finding)
+    for entry in module_reports:
+        entry.pop("_instance", None)
+    status = "ok"
+    if any(finding.get("severity") == "error" for finding in findings):
+        status = "error"
+    elif findings:
+        status = "warning"
+    return {
+        "schema_version": "memory-os.modules_doctor.v0",
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "module_count": len(module_reports),
+        "modules": module_reports,
+        "findings": findings,
+    }
+
+
+def _modules_run_once_report(store: MemoryOSStore, *, module_id: str, apply: bool) -> dict[str, Any]:
+    definition = _module_definition(module_id)
+    if definition is None:
+        return {
+            "schema_version": "memory-os.modules_run_once.v0",
+            "status": "error",
+            "code": "unknown_module",
+            "module": module_id,
+        }
+    if not definition.get("runner"):
+        return {
+            "schema_version": "memory-os.modules_run_once.v0",
+            "status": "error",
+            "code": "module_not_commandized",
+            "module": module_id,
+            "message": str(definition.get("unavailable_reason", "Module run-once is not commandized.")),
+        }
+    if apply:
+        return {
+            "schema_version": "memory-os.modules_run_once.v0",
+            "status": "error",
+            "code": "apply_not_enabled",
+            "module": module_id,
+            "message": "Module run-once apply requires a separate reviewed apply path.",
+        }
+    try:
+        instance = _instantiate_module(store, definition)
+        result = _run_module_dry_run(store, module_id, instance)
+    except Exception as exc:
+        return {
+            "schema_version": "memory-os.modules_run_once.v0",
+            "status": "error",
+            "code": "module_run_failed",
+            "module": module_id,
+            "error": str(exc),
+        }
+    if isinstance(result, dict):
+        result = dict(result)
+        result.setdefault("schema_version", "memory-os.modules_run_once.v0")
+        result.setdefault("module", module_id)
+        result.setdefault("status", "ok")
+        result["dry_run"] = True
+        return _bounded_module_payload(result)
+    return {
+        "schema_version": "memory-os.modules_run_once.v0",
+        "status": "ok",
+        "module": module_id,
+        "dry_run": True,
+        "result": str(result),
+    }
+
+
+def _modules_validate_no_send_report(store: MemoryOSStore) -> dict[str, Any]:
+    boundaries = {
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_relationship_write": False,
+        "actual_crystallized_approval": False,
+        "hindsight_exported": False,
+    }
+    return {
+        "schema_version": "memory-os.modules_no_send_validation.v0",
+        "profile": store.roots.profile or "default",
+        "status": "ok",
+        "boundaries": boundaries,
+        "candidate_count": len(read_candidate_queue(store)),
+        "crystallized_record_count": _crystallized_record_file_count(store),
+    }
+
+
+def _crystallized_record_file_count(store: MemoryOSStore) -> int:
+    if not store.roots.crystallized_root.exists():
+        return 0
+    return len([path for path in store.roots.crystallized_root.glob("*.md") if path.is_file()])
+
+
+def _modules_deep_reflection_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    module = _deep_reflection_module(store)
+    command = args.deep_reflection_command
+    if command == "preview-current":
+        report = module.preview_injection()
+        report = _bounded_module_payload(report)
+        if isinstance(report, dict):
+            report["status"] = "ok" if int(report.get("selected_injection_count", 0)) else "no_active_card"
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "history":
+        report = _deep_reflection_history_report(module, days=max(int(args.days), 0))
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    return 2
+
+
+def _deep_reflection_history_report(module: Any, *, days: int) -> dict[str, Any]:
+    history_path = module.module_root / "injection" / "history.jsonl"
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    records: list[dict[str, Any]] = []
+    if history_path.exists():
+        for line in history_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            ts = _parse_timestamp(str(record.get("ts", "")))
+            if ts is not None and ts < cutoff:
+                continue
+            records.append(_bounded_module_payload(record))
+    return {
+        "schema_version": "hermes.deep_reflection_history.v0",
+        "module": "deep_reflection",
+        "profile": module.profile,
+        "days": days,
+        "record_count": len(records),
+        "records": records[-50:],
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_crystallized_approval": False,
+    }
+
+
+def _parse_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _module_status_entry(store: MemoryOSStore, definition: dict[str, Any]) -> dict[str, Any]:
+    entry = {
+        "module": definition["module"],
+        "kind": definition["kind"],
+        "package": definition["package"],
+        "commandized": bool(definition.get("runner")),
+        "run_once_available": bool(definition.get("runner")),
+        "status_available": False,
+        "unavailable_reason": str(definition.get("unavailable_reason", "")),
+    }
+    try:
+        instance = _instantiate_module(store, definition)
+        status = _call_module_method(instance, "status", store=store)
+    except Exception as exc:
+        entry["unavailable_reason"] = str(exc)
+        return entry
+    entry["status_available"] = isinstance(status, dict)
+    entry["status"] = _bounded_module_payload(status) if isinstance(status, dict) else {}
+    entry["_instance"] = instance
+    if not entry["commandized"] and not entry["unavailable_reason"]:
+        entry["unavailable_reason"] = "run_once_not_commandized"
+    return entry
+
+
+def _module_definition(module_id: str) -> dict[str, Any] | None:
+    for definition in _module_definitions():
+        if definition["module"] == module_id:
+            return definition
+    return None
+
+
+def _module_definitions() -> list[dict[str, Any]]:
+    return [
+        {
+            "module": "cron_mirror",
+            "kind": "mirror",
+            "package": "plugins.memory.memory_os.cron_mirror",
+            "factory": lambda store: CronMirror(store),
+            "runner": "scan",
+        },
+        {
+            "module": "session_mirror",
+            "kind": "mirror",
+            "package": "plugins.memory.memory_os.session_mirror",
+            "factory": lambda store: SessionMirror(store),
+            "runner": "scan",
+        },
+        {
+            "module": "state_source_mirror",
+            "kind": "mirror",
+            "package": "plugins.memory.memory_os.state_source_mirror",
+            "factory": lambda store: StateSourceMirror(store),
+            "runner": "scan",
+        },
+        {
+            "module": "shadow_journal",
+            "kind": "ingestion",
+            "package": "plugins.memory.memory_os.shadow_journal",
+            "factory": lambda store: ShadowJournalIngestion(store),
+            "runner": "ingest",
+        },
+        {
+            "module": "deep_reflection",
+            "kind": "cognition",
+            "package": "plugins.modules.cognition.deep_reflection",
+            "factory": _deep_reflection_module,
+            "runner": "run_once",
+        },
+        {
+            "module": "governance_feedback",
+            "kind": "governance",
+            "package": "plugins.modules.governance.feedback_bridge",
+            "factory": _governance_feedback_module,
+            "runner": "run_once",
+        },
+        {
+            "module": "digest_consolidation",
+            "kind": "context",
+            "package": "plugins.modules.context.digest_consolidation",
+            "factory": _digest_consolidation_module,
+            "runner": "",
+            "unavailable_reason": "daily and weekly commands are not wired to modules run-once yet",
+        },
+        {
+            "module": "inner_drive",
+            "kind": "cognition",
+            "package": "plugins.modules.cognition.inner_drive",
+            "factory": _inner_drive_module,
+            "runner": "",
+            "unavailable_reason": "inner_drive run_once mutates working/candidates and is not exposed through generic dry-run",
+        },
+        {
+            "module": "mailbox",
+            "kind": "messaging",
+            "package": "plugins.modules.messaging.mailbox",
+            "factory": _mailbox_module,
+            "runner": "",
+            "unavailable_reason": "mailbox run_once is not commandized in v0.1",
+        },
+        {
+            "module": "household_digest",
+            "kind": "context",
+            "package": "plugins.modules.context.household_digest",
+            "factory": _household_digest_module,
+            "runner": "",
+            "unavailable_reason": "household_digest run_once writes artifacts and is not exposed through generic dry-run",
+        },
+        {
+            "module": "wandering_mind",
+            "kind": "cognition",
+            "package": "plugins.modules.cognition.wandering_mind",
+            "factory": _wandering_mind_module,
+            "runner": "",
+            "unavailable_reason": "wandering_mind run_once records would-send artifacts and is not exposed through generic dry-run",
+        },
+        {
+            "module": "evidence_scoring",
+            "kind": "evidence",
+            "package": "plugins.modules.evidence.scoring",
+            "factory": _evidence_scoring_module,
+            "runner": "",
+            "unavailable_reason": "evidence_scoring score_all writes artifacts and is not exposed through generic dry-run",
+        },
+        {
+            "module": "ops_gate",
+            "kind": "governance",
+            "package": "plugins.modules.governance.ops_gate",
+            "factory": _ops_gate_module,
+            "runner": "",
+            "unavailable_reason": "ops_gate run_once needs proposed actions and is not exposed through generic dry-run",
+        },
+        {
+            "module": "proposal_queue",
+            "kind": "governance",
+            "package": "plugins.modules.governance.proposal_queue",
+            "factory": _proposal_queue_module,
+            "runner": "",
+            "unavailable_reason": "proposal_queue mutation commands are not exposed through generic dry-run",
+        },
+        {
+            "module": "self_evolution",
+            "kind": "governance",
+            "package": "plugins.modules.governance.self_evolution",
+            "factory": _self_evolution_module,
+            "runner": "",
+            "unavailable_reason": "self_evolution requires ops/evidence/proposal dependencies and is not exposed through generic dry-run",
+        },
+        {
+            "module": "speak_gate",
+            "kind": "expression",
+            "package": "plugins.modules.expression.speak_gate",
+            "factory": _speak_gate_module,
+            "runner": "",
+            "unavailable_reason": "speak_gate run_once requires outbound payload input and is not exposed through generic dry-run",
+        },
+    ]
+
+
+def _instantiate_module(store: MemoryOSStore, definition: dict[str, Any]) -> Any:
+    _ensure_system_module_runtime_path(store.roots.hermes_home)
+    factory = definition["factory"]
+    return factory(store)
+
+
+def _ensure_system_module_runtime_path(hermes_home: str | Path) -> None:
+    runtime_python = Path(hermes_home).expanduser().resolve() / "memory-os" / "runtime" / "python"
+    if runtime_python.exists() and str(runtime_python) not in sys.path:
+        sys.path.insert(0, str(runtime_python))
+    _extend_loaded_package_path("plugins", runtime_python / "plugins")
+    _extend_loaded_package_path("plugins.memory", runtime_python / "plugins" / "memory")
+
+
+def _extend_loaded_package_path(package_name: str, package_path: Path) -> None:
+    loaded_package = sys.modules.get(package_name)
+    if package_path.exists() and loaded_package is not None and hasattr(loaded_package, "__path__"):
+        package_paths = loaded_package.__path__  # type: ignore[attr-defined]
+        if str(package_path) not in package_paths:
+            package_paths.append(str(package_path))
+
+
+def _run_module_dry_run(store: MemoryOSStore, module_id: str, instance: Any) -> Any:
+    if module_id in {"cron_mirror", "session_mirror", "state_source_mirror"}:
+        return instance.scan(dry_run=True)
+    if module_id == "shadow_journal":
+        return instance.ingest(dry_run=True)
+    if module_id == "deep_reflection":
+        return instance.run_once(store=store, dry_run=True)
+    if module_id == "governance_feedback":
+        return instance.run_once(store=store, dry_run=True)
+    raise ValueError(f"Module is not commandized: {module_id}")
+
+
+def _call_module_method(instance: Any, method_name: str, *, store: MemoryOSStore) -> Any:
+    method = getattr(instance, method_name)
+    signature = inspect.signature(method)
+    if "store" in signature.parameters:
+        return method(store=store)
+    return method()
+
+
+def _bounded_module_payload(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return {
+            str(key): _bounded_module_payload(value)
+            for key, value in payload.items()
+            if str(key) not in _PRIVATE_SAFE_REF_KEYS
+        }
+    if isinstance(payload, list):
+        return [_bounded_module_payload(value) for value in payload[:20]]
+    if isinstance(payload, str) and len(payload) > 500:
+        return payload[:500] + "...[truncated]"
+    return payload
+
+
+def _deep_reflection_module(store: MemoryOSStore) -> Any:
+    _ensure_system_module_runtime_path(store.roots.hermes_home)
+    from plugins.modules.cognition.deep_reflection import DeepReflectionModule
+
+    return DeepReflectionModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _governance_feedback_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.feedback_bridge import GovernanceFeedbackBridgeModule
+
+    return GovernanceFeedbackBridgeModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _digest_consolidation_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.context.digest_consolidation import DigestConsolidationModule
+
+    return DigestConsolidationModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _inner_drive_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.cognition.inner_drive import InnerDriveRuntimeModule
+
+    return InnerDriveRuntimeModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _mailbox_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.messaging.mailbox import MailboxNoSendModule
+
+    return MailboxNoSendModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _household_digest_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.context.household_digest import HouseholdDigestModule
+
+    return HouseholdDigestModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _wandering_mind_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.cognition.wandering_mind import WanderingMindModule
+
+    return WanderingMindModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _evidence_scoring_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.evidence.scoring import EvidenceScoringModule
+
+    return EvidenceScoringModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _ops_gate_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.ops_gate import OpsGateModule
+
+    return OpsGateModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _proposal_queue_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.proposal_queue import ProposalQueueModule
+
+    return ProposalQueueModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _self_evolution_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.self_evolution import SelfEvolutionGovernorModule
+
+    return SelfEvolutionGovernorModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _speak_gate_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.expression.speak_gate import SpeakGateModule
+
+    return SpeakGateModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
 def _shadow_journal_command(args: argparse.Namespace, store: MemoryOSStore) -> int:

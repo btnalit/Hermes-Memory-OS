@@ -821,6 +821,20 @@ work, not blockers for the current v0.1 Runtime Hardening / DeepReflection /
 plugin-shell baseline. Each item should remain owner-reviewed before it changes
 runtime behavior on 10.20.3.200.
 
+Post-RH-26 audit note:
+
+- The project now has a dedicated P1 closure document:
+  `22-p1-gap-closure-plan.md`.
+- That document tracks the audit finding that several earlier hardening
+  commitments are still not implemented as command surfaces:
+  - RH-01 module CLI
+  - DeepReflection `preview-current` / `history`
+  - RH-02 host validation command
+  - RH-06 controlled module run-once surface
+  - installer dependency fail-closed behavior
+  - PS-06 shell failure isolation
+- New cognition features should not supersede this P1 closure work.
+
 ### FW-01 PS-06 Shell Failure Isolation Test
 
 Add a fault-injection test for the two-step installer path:

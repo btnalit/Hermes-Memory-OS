@@ -97,8 +97,12 @@ def install_plugin(
     shell_target = hermes_home / "plugins" / AGENT_OS_SHELL_PLUGIN_NAME
     _guard_plugin_scan_tree_backups(hermes_home)
     _validate_source(source)
-    if install_shell or enable_shell:
+    if install_shell:
         _validate_agent_os_shell_source(shell_source)
+    if enable_shell and not install_shell and not (shell_target / "plugin.yaml").is_file():
+        raise SystemExit(
+            f"Cannot enable {AGENT_OS_SHELL_PLUGIN_NAME}: shell plugin is not installed at {shell_target}"
+        )
 
     copied_files = _copy_tree(source, target, dry_run=dry_run)
     shell_files: list[Path] = []

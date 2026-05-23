@@ -199,6 +199,38 @@ def test_installer_shell_enable_is_idempotent(tmp_path):
     assert "memory_os" not in enabled
 
 
+def test_installer_rejects_shell_enable_when_shell_was_not_installed_or_present(tmp_path):
+    try:
+        install_plugin(hermes_home=tmp_path / "home", install_shell=False, enable_shell=True)
+    except SystemExit as exc:
+        assert "Cannot enable memory-os-agent-os" in str(exc)
+    else:
+        raise AssertionError("expected shell enable to fail when shell plugin is absent")
+
+    config_path = tmp_path / "home" / "config.yaml"
+    assert not (tmp_path / "home" / "plugins" / "memory-os-agent-os").exists()
+    if config_path.exists():
+        assert "memory-os-agent-os" not in config_path.read_text(encoding="utf-8")
+
+
+def test_installer_can_enable_existing_shell_without_reinstalling_it(tmp_path):
+    shell_target = tmp_path / "home" / "plugins" / "memory-os-agent-os"
+    shell_target.mkdir(parents=True)
+    (shell_target / "__init__.py").write_text("", encoding="utf-8")
+    (shell_target / "plugin.yaml").write_text("name: memory-os-agent-os\n", encoding="utf-8")
+
+    report = install_plugin(hermes_home=tmp_path / "home", install_shell=False, enable_shell=True)
+
+    assert report["agent_os_shell_install_requested"] is False
+    assert report["agent_os_shell_file_count"] == 0
+    assert report["agent_os_shell_enable_requested"] is True
+    assert report["agent_os_shell_enabled"] is True
+    enabled = _enabled_plugins_from_config_text(
+        (tmp_path / "home" / "config.yaml").read_text(encoding="utf-8")
+    )
+    assert enabled == ["memory-os-agent-os"]
+
+
 def test_installer_does_not_enable_shell_when_provider_enable_fails(tmp_path, monkeypatch):
     def fail_provider_enable(*args, **kwargs):
         raise RuntimeError("provider enable failed")
@@ -215,6 +247,31 @@ def test_installer_does_not_enable_shell_when_provider_enable_fails(tmp_path, mo
     config_path = tmp_path / "home" / "config.yaml"
     if config_path.exists():
         assert "memory-os-agent-os" not in config_path.read_text(encoding="utf-8")
+
+
+def test_installer_preserves_provider_when_shell_enable_fails(tmp_path, monkeypatch):
+    config_path = tmp_path / "home" / "config.yaml"
+
+    def fake_provider_enable(hermes_home, command):
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text("memory:\n  provider: memory_os\n", encoding="utf-8")
+
+    def fail_shell_enable(*args, **kwargs):
+        raise RuntimeError("shell enable failed")
+
+    monkeypatch.setattr("scripts.install_memory_os_plugin._enable_memory_provider", fake_provider_enable)
+    monkeypatch.setattr("scripts.install_memory_os_plugin._enable_agent_os_shell", fail_shell_enable)
+
+    try:
+        install_plugin(hermes_home=tmp_path / "home", enable=True, enable_shell=True)
+    except RuntimeError as exc:
+        assert "shell enable failed" in str(exc)
+    else:
+        raise AssertionError("expected shell enable failure")
+
+    config_text = config_path.read_text(encoding="utf-8")
+    assert "provider: memory_os" in config_text
+    assert "memory-os-agent-os" not in config_text
 
 
 def test_provider_enable_subprocess_stdout_is_suppressed(tmp_path, monkeypatch):
@@ -288,6 +345,8 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "install_runtime" in text
     assert "enable_runtime" in text
     assert "runtime artifacts are not being installed" in text
+    assert "normalize_shell_enablement" in text
+    assert "require_hermes_for_selected_actions" in text
     assert "The script does not restart hermes-gateway.service" in text
     assert "hermes memory-os-agent-os status" in text
     assert "hermes memory-os-agent-os doctor" in text

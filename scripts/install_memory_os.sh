@@ -273,6 +273,29 @@ choose_preset() {
   esac
 }
 
+normalize_shell_enablement() {
+  [[ "${INSTALL_SHELL}" == "0" ]] || return 0
+
+  local shell_dir="${HERMES_HOME}/plugins/memory-os-agent-os"
+  if [[ "${ENABLE_SHELL}" == "1" ]]; then
+    if [[ -d "${shell_dir}" ]]; then
+      echo "Enable existing memory-os-agent-os shell plugin -> yes"
+      return 0
+    fi
+    echo "Cannot enable memory-os-agent-os because --no-install-shell was selected and no existing shell plugin is present at ${shell_dir}" >&2
+    exit 1
+  fi
+
+  if [[ -z "${ENABLE_SHELL}" ]]; then
+    if [[ -d "${shell_dir}" && "${YES}" != "1" ]]; then
+      ask_yes_no "Enable existing memory-os-agent-os shell plugin?" "no" && ENABLE_SHELL=1 || ENABLE_SHELL=0
+    else
+      echo "Enable memory-os-agent-os in plugins.enabled? [no] -> no (--no-install-shell selected)"
+      ENABLE_SHELL=0
+    fi
+  fi
+}
+
 select_options() {
   local default_shell="yes"
   local default_enable_provider="yes"
@@ -287,6 +310,7 @@ select_options() {
   fi
 
   [[ -n "${INSTALL_SHELL}" ]] || { ask_yes_no "Install/update memory-os-agent-os shell plugin?" "${default_shell}" && INSTALL_SHELL=1 || INSTALL_SHELL=0; }
+  normalize_shell_enablement
   [[ -n "${ENABLE_PROVIDER}" ]] || { ask_yes_no "Set memory.provider=memory_os?" "${default_enable_provider}" && ENABLE_PROVIDER=1 || ENABLE_PROVIDER=0; }
   [[ -n "${ENABLE_SHELL}" ]] || { ask_yes_no "Enable memory-os-agent-os in plugins.enabled?" "${default_enable_shell}" && ENABLE_SHELL=1 || ENABLE_SHELL=0; }
   [[ -n "${INSTALL_SYSTEM_MODULES}" ]] || { ask_yes_no "Install portable L2-L4 system modules?" "${default_system_modules}" && INSTALL_SYSTEM_MODULES=1 || INSTALL_SYSTEM_MODULES=0; }
@@ -299,6 +323,17 @@ select_options() {
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
     choose_preset "${default_preset}"
+  fi
+}
+
+require_hermes_for_selected_actions() {
+  [[ "${DRY_RUN}" == "1" ]] && return 0
+  command_exists hermes && return 0
+
+  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
+    echo "ERROR: hermes command not found in PATH." >&2
+    echo "Install Hermes or rerun with --skip-verify and without provider/shell enablement for file-copy-only installs." >&2
+    exit 1
   fi
 }
 
@@ -349,6 +384,7 @@ verify_install() {
 select_hermes_home
 inspect_current_state
 select_options
+require_hermes_for_selected_actions
 run_installer
 verify_install
 
