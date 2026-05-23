@@ -19,6 +19,7 @@ MODE="interactive"
 HERMES_HOME_INPUT="${HERMES_HOME:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUNTIME_INTERVAL="${RUNTIME_INTERVAL:-5min}"
+COGNITIVE_LOOP_INTERVAL="${COGNITIVE_LOOP_INTERVAL:-6h}"
 DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
 
 INSTALL_SHELL=""
@@ -27,6 +28,8 @@ ENABLE_SHELL=""
 INSTALL_SYSTEM_MODULES=""
 INSTALL_RUNTIME=""
 ENABLE_RUNTIME=""
+INSTALL_COGNITIVE_LOOP=""
+ENABLE_COGNITIVE_LOOP=""
 
 usage() {
   cat <<'USAGE'
@@ -43,11 +46,15 @@ Options:
                                 explicitly disabled.
   --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host.
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
+  --cognitive-loop-interval VALUE
+                                Test-host cognitive loop timer interval. Default: 6h.
   --no-install-shell            Do not install memory-os-agent-os shell plugin.
   --no-enable-shell             Do not add memory-os-agent-os to plugins.enabled.
   --no-install-system-modules   Do not install portable L2-L4 runtime modules.
   --no-install-runtime          Do not write heartbeat wrapper/systemd artifacts.
   --no-enable-runtime           Do not enable heartbeat timer.
+  --no-install-cognitive-loop   Do not write cognitive-loop wrapper/systemd artifacts.
+  --no-enable-cognitive-loop    Do not enable cognitive-loop timer.
   --dry-run                     Print installer report without writing.
   --skip-verify                 Skip post-install verification commands.
   --allow-create                Allow creating HERMES_HOME if it does not exist.
@@ -86,6 +93,10 @@ while [[ $# -gt 0 ]]; do
       RUNTIME_INTERVAL="${2:?missing --runtime-interval value}"
       shift 2
       ;;
+    --cognitive-loop-interval)
+      COGNITIVE_LOOP_INTERVAL="${2:?missing --cognitive-loop-interval value}"
+      shift 2
+      ;;
     --no-install-shell)
       INSTALL_SHELL=0
       shift
@@ -105,6 +116,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-enable-runtime)
       ENABLE_RUNTIME=0
+      shift
+      ;;
+    --no-install-cognitive-loop)
+      INSTALL_COGNITIVE_LOOP=0
+      ENABLE_COGNITIVE_LOOP=0
+      shift
+      ;;
+    --no-enable-cognitive-loop)
+      ENABLE_COGNITIVE_LOOP=0
       shift
       ;;
     --dry-run)
@@ -211,6 +231,7 @@ inspect_current_state() {
   echo "provider_dir=$([[ -d "${HERMES_HOME}/plugins/memory_os" ]] && echo present || echo missing)"
   echo "shell_dir=$([[ -d "${HERMES_HOME}/plugins/memory-os-agent-os" ]] && echo present || echo missing)"
   echo "runtime_dir=$([[ -d "${HERMES_HOME}/memory-os/runtime/python" ]] && echo present || echo missing)"
+  echo "cognitive_loop_unit=$([[ -f "${HERMES_HOME}/memory-os/systemd/hermes-memory-os-cognitive-loop.timer" ]] && echo present || echo missing)"
 
   if command_exists hermes; then
     echo
@@ -227,6 +248,10 @@ inspect_current_state() {
     echo
     echo "Heartbeat timer state:"
     systemctl --user show hermes-memory-os-heartbeat.timer \
+      -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager 2>/dev/null || true
+    echo
+    echo "Cognitive loop timer state:"
+    systemctl --user show hermes-memory-os-cognitive-loop.timer \
       -p LoadState -p ActiveState -p SubState -p UnitFileState --no-pager 2>/dev/null || true
   fi
   echo
@@ -303,10 +328,14 @@ select_options() {
   local default_system_modules="yes"
   local default_install_runtime="yes"
   local default_enable_runtime="yes"
+  local default_install_cognitive_loop="no"
+  local default_enable_cognitive_loop="no"
   local default_preset="production-safe"
 
   if [[ "${MODE}" == "test-host" ]]; then
     default_preset="test-host"
+    default_install_cognitive_loop="yes"
+    default_enable_cognitive_loop="yes"
   fi
 
   [[ -n "${INSTALL_SHELL}" ]] || { ask_yes_no "Install/update memory-os-agent-os shell plugin?" "${default_shell}" && INSTALL_SHELL=1 || INSTALL_SHELL=0; }
@@ -320,6 +349,13 @@ select_options() {
     ENABLE_RUNTIME=0
   fi
   [[ -n "${ENABLE_RUNTIME}" ]] || { ask_yes_no "Enable heartbeat timer?" "${default_enable_runtime}" && ENABLE_RUNTIME=1 || ENABLE_RUNTIME=0; }
+
+  [[ -n "${INSTALL_COGNITIVE_LOOP}" ]] || { ask_yes_no "Install test-host cognitive-loop runtime artifacts?" "${default_install_cognitive_loop}" && INSTALL_COGNITIVE_LOOP=1 || INSTALL_COGNITIVE_LOOP=0; }
+  if [[ "${INSTALL_COGNITIVE_LOOP}" == "0" && -z "${ENABLE_COGNITIVE_LOOP}" ]]; then
+    echo "Enable cognitive-loop timer? [no] -> no (cognitive-loop artifacts are not being installed)"
+    ENABLE_COGNITIVE_LOOP=0
+  fi
+  [[ -n "${ENABLE_COGNITIVE_LOOP}" ]] || { ask_yes_no "Enable test-host cognitive-loop timer?" "${default_enable_cognitive_loop}" && ENABLE_COGNITIVE_LOOP=1 || ENABLE_COGNITIVE_LOOP=0; }
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
     choose_preset "${default_preset}"
@@ -347,6 +383,9 @@ run_installer() {
   [[ "${INSTALL_RUNTIME}" == "1" ]] && args+=("--install-runtime")
   [[ "${ENABLE_RUNTIME}" == "1" ]] && args+=("--enable-runtime")
   args+=("--runtime-interval" "${RUNTIME_INTERVAL}")
+  [[ "${INSTALL_COGNITIVE_LOOP}" == "1" ]] && args+=("--install-cognitive-loop")
+  [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]] && args+=("--enable-cognitive-loop")
+  args+=("--cognitive-loop-interval" "${COGNITIVE_LOOP_INTERVAL}")
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
@@ -362,7 +401,9 @@ verify_install() {
   echo "Memory-OS install verification"
   echo "------------------------------"
   HERMES_HOME="${HERMES_HOME}" hermes memory
-  HERMES_HOME="${HERMES_HOME}" hermes memory_os doctor
+  HERMES_HOME="${HERMES_HOME}" \
+    PYTHONPATH="${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}" \
+    "${PYTHON_BIN}" -m plugins.memory.memory_os doctor
   if [[ "${INSTALL_SHELL}" == "1" ]]; then
     HERMES_HOME="${HERMES_HOME}" hermes memory-os-agent-os status >/dev/null
     HERMES_HOME="${HERMES_HOME}" hermes memory-os-agent-os doctor >/dev/null
@@ -378,6 +419,15 @@ verify_install() {
   if [[ "${ENABLE_RUNTIME}" == "1" ]] && command_exists systemctl; then
     systemctl --user is-active hermes-memory-os-heartbeat.timer
     systemctl --user is-enabled hermes-memory-os-heartbeat.timer
+  fi
+  if [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]] && command_exists systemctl; then
+    systemctl --user is-active hermes-memory-os-cognitive-loop.timer
+    systemctl --user is-enabled hermes-memory-os-cognitive-loop.timer
+  fi
+  if [[ "${INSTALL_COGNITIVE_LOOP}" == "1" ]]; then
+    HERMES_HOME="${HERMES_HOME}" \
+      PYTHONPATH="${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}" \
+      "${PYTHON_BIN}" -m plugins.memory.memory_os cognitive-loop status >/dev/null
   fi
 }
 

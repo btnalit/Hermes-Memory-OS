@@ -10,11 +10,12 @@ from scripts.memory_os_3_200_monitor import (
 )
 
 
-def test_rh26_heading_anomalies_allow_known_casual_empty_state():
+def test_rh26_heading_anomalies_allow_known_casual_empty_and_safe_carryover_state():
     probes = [
         {"id": "cancel_failed_video", "chars": 134, "headings": ["Current Foreground Task"]},
         {"id": "continue_current_task", "chars": 108, "headings": ["Current Foreground Task"]},
         {"id": "casual_memory_system_change", "chars": 0, "headings": []},
+        {"id": "casual_memory_system_change", "chars": 1535, "headings": ["Recent Event Summaries"]},
         {
             "id": "diagnostic_current_architecture",
             "chars": 297,
@@ -58,10 +59,32 @@ def test_rh26_heading_anomalies_flag_background_context_on_cancel_and_casual():
     assert {
         "id": "casual_memory_system_change",
         "severity": "fail",
-        "code": "casual_context_not_empty",
+        "code": "casual_context_forbidden_heading",
         "expected": [],
         "actual": ["Current Foreground Task", "Indexed Recall"],
     } in anomalies
+
+
+def test_rh26_heading_anomalies_warn_on_unclassified_casual_context():
+    probes = [
+        {
+            "id": "casual_memory_system_change",
+            "chars": 900,
+            "headings": ["Working Memory"],
+        }
+    ]
+
+    anomalies = find_rh26_heading_anomalies(probes)
+
+    assert anomalies == [
+        {
+            "id": "casual_memory_system_change",
+            "severity": "warning",
+            "code": "casual_context_needs_review",
+            "expected": [],
+            "actual": ["Working Memory"],
+        }
+    ]
 
 
 def test_compute_deltas_tracks_count_growth_and_audit_ratios():
@@ -105,6 +128,9 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
         "gateway": {"ActiveState": "active"},
         "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
         "heartbeat_listed": True,
+        "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "cognitive_loop_listed": True,
+        "cognitive_loop": _healthy_cognitive_loop(),
         "memory_status": {
             "counts": {"crystallized_records": 0},
             "index_health": {"state": "healthy"},
@@ -143,6 +169,9 @@ def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
         "gateway": {"ActiveState": "active"},
         "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
         "heartbeat_listed": True,
+        "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "cognitive_loop_listed": True,
+        "cognitive_loop": _healthy_cognitive_loop(),
         "memory_status": {
             "counts": {"crystallized_records": 0},
             "index_health": {"state": "healthy"},
@@ -172,12 +201,58 @@ def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
     assert any(item["code"] == "shell_alias_no_env_failed" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_boundary():
+    snapshot = {
+        "gateway": {"ActiveState": "active"},
+        "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "heartbeat_listed": True,
+        "cognitive_loop_timer": {"ActiveState": "inactive", "UnitFileState": "disabled"},
+        "cognitive_loop_listed": False,
+        "cognitive_loop": {
+            "last_status": "error",
+            "boundaries": {
+                "actual_send": True,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_crystallized_approval": False,
+            },
+        },
+        "memory_status": {
+            "counts": {"crystallized_records": 0},
+            "index_health": {"state": "healthy"},
+            "prefetch_mode": "indexed",
+        },
+        "doctor": {"status": "ok", "findings": []},
+        "status_tool_contract": {"status": "ok", "findings": []},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True},
+        "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        "rh26_apply_probe": [],
+        "deep_reflection": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_crystallized_approval": False,
+        },
+        "compaction": {},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "cognitive_loop_timer_inactive" for item in classification["fail"])
+    assert any(item["code"] == "cognitive_loop_timer_not_listed" for item in classification["fail"])
+    assert any(item["code"] == "cognitive_loop_last_cycle_error" for item in classification["fail"])
+    assert any(item["code"] == "cognitive_loop_actual_send_true" for item in classification["fail"])
+
+
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     snapshot = {
         "hostname": "debian",
         "date_utc": "2026-05-22T07:07:41Z",
         "gateway": {"ActiveState": "active", "MainPID": "451894"},
         "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+        "cognitive_loop": _healthy_cognitive_loop(),
         "memory_status": {
             "counts": {"audit_entries": 110, "events": 12, "working_items": 7, "crystallized_records": 0},
             "index_health": {"state": "healthy"},
@@ -195,6 +270,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
 
     assert "host=debian" in rendered
     assert "context_router=apply" in rendered
+    assert "cognitive_loop=ok" in rendered
     assert "shell_alias_no_env" in rendered
     assert "audit_entries=+10" in rendered
     assert "events=+2" in rendered
@@ -220,6 +296,9 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             "gateway": {"ActiveState": "active", "MainPID": "1"},
             "heartbeat_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
             "heartbeat_listed": True,
+            "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
+            "cognitive_loop_listed": True,
+            "cognitive_loop": _healthy_cognitive_loop(),
             "memory_status": {
                 "counts": {"audit_entries": 9, "events": 2, "crystallized_records": 0},
                 "index_health": {"state": "healthy"},
@@ -256,3 +335,16 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
     assert saved["memory_status"]["counts"]["audit_entries"] == 9
     assert saved["deltas"]["counts_delta"]["audit_entries"] == 4
     assert "audit_entries=+4" in capsys.readouterr().out
+
+
+def _healthy_cognitive_loop() -> dict:
+    return {
+        "last_status": "ok",
+        "last_cycle_id": "cloop_test",
+        "boundaries": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_crystallized_approval": False,
+        },
+    }

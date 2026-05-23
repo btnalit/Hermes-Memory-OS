@@ -4739,3 +4739,429 @@ P1-A through P1-D are now validated on the real test host:
 - installer-based deployment preserves provider/shell/timer state
 - expected warnings remain warning-class only
 - no hard-boundary violation was observed
+
+## RH-27 Test-Host Cognitive Loop Validation
+
+Date: 2026-05-23
+
+### Why This Gate Was Needed
+
+Earlier monitoring proved the Memory-OS plumbing was healthy:
+
+- provider active
+- heartbeat timer active
+- context router applied
+- shell plugin enabled
+- read-only monitor running
+
+That did not prove the left/right cognition modules were actually running. The
+test host was observing the water pipes, not the water flow. RH-27 adds a
+test-host-only no-send cognitive loop so the developed modules run together and
+produce observable interaction data.
+
+### Deployment Finding
+
+The first remote deployment attempt exposed an installed-Hermes command-surface
+gap:
+
+```text
+hermes memory_os ...
+```
+
+was not available on the installed host because `memory_os` is active as a
+memory provider and is not enabled as a general plugin. The fix was to use the
+standalone Memory-OS module entrypoint from systemd wrappers and monitor probes:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins:$PYTHONPATH
+python3 -m plugins.memory.memory_os ...
+```
+
+This also keeps `memory_os` out of `plugins.enabled` while preserving the
+provider-first architecture.
+
+### Remote Install State
+
+After the wrapper fix, the test-host installer deployed:
+
+- provider runtime
+- `memory-os-agent-os` shell plugin
+- heartbeat service/timer
+- cognitive-loop service/timer
+
+Systemd state after install:
+
+```text
+hermes-gateway.service:
+  ActiveState=active
+  MainPID=451894
+
+hermes-memory-os-heartbeat.timer:
+  ActiveState=active
+  UnitFileState=enabled
+
+hermes-memory-os-cognitive-loop.timer:
+  LoadState=loaded
+  ActiveState=active
+  SubState=waiting
+  UnitFileState=enabled
+```
+
+### Manual Cognitive Loop Run
+
+Command:
+
+```bash
+/root/.hermes/memory-os/bin/memory_os_cognitive_loop.sh
+```
+
+Result:
+
+```json
+{
+  "cycle_id": "cloop_20260523T050110276460Z_0f0c02cb09",
+  "status": "ok",
+  "duration_ms": 527,
+  "step_count": 11,
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_relationship_write": false,
+  "actual_crystallized_approval": false,
+  "hindsight_exported": false
+}
+```
+
+All 11 steps returned `ok`:
+
+```text
+heartbeat_pre
+household_digest
+digest_consolidation
+wandering_mind
+ops_gate
+evidence_scoring
+self_evolution
+governance_feedback
+deep_reflection
+heartbeat_post
+doctor_boundary_report
+```
+
+Step evidence:
+
+```text
+household_digest:
+  event_count=50
+  artifact_written=true
+
+digest_consolidation:
+  daily_artifact_date=2026-05-23
+  weekly_artifact_week=2026-W21
+
+wandering_mind:
+  would_send=true
+  actual_send=false
+
+ops_gate:
+  mode=report_only
+  actual_execute=false
+
+evidence_scoring:
+  score_count=269
+
+self_evolution:
+  proposal_created=true
+  proposal_id=prop_20260523T050110584207Z_3073ae8ff0
+  direct_self_modify=false
+  actual_execute=false
+
+governance_feedback:
+  written_event_count=6
+  event_kinds=[
+    governance_evidence_scored,
+    governance_ops_gate_decision,
+    governance_proposal_created,
+    governance_proposal_transitioned,
+    governance_self_evolution_reported
+  ]
+
+deep_reflection:
+  selected_injection_by_source_class={"governance": 2}
+  dropped_injection_by_source_class={"governance": 2}
+
+heartbeat_post:
+  processed_event_count=6
+  policy_skipped_event_count=6
+  source_class_counts={"governance": 6}
+```
+
+The heartbeat post-step intentionally skipped governance events from working
+promotion, preserving the RH-12 source-class boundary.
+
+### Post-Run Monitor Snapshot
+
+The deterministic read-only monitor reported `WARN` with no `FAIL`.
+
+```text
+gateway=active pid=451894
+heartbeat=active/enabled
+cognitive_loop=ok timer=active/enabled
+audit_entries=1633
+events=99
+working_items=86
+crystallized_candidates=86
+crystallized_records=0
+index_health=healthy
+prefetch_mode=indexed
+doctor=ok
+status_tool_contract=ok
+context_router=apply, llm_judge=disabled
+disk_usage=/root/.hermes/memory-os 8.3M
+```
+
+DeepReflection source-class distribution after RH-27:
+
+```json
+{
+  "latest": {
+    "selected_by_source_class": {"governance": 2},
+    "dropped_by_source_class": {"governance": 2}
+  },
+  "rolling": {
+    "selected_by_source_class": {"governance": 2, "working": 14},
+    "dropped_by_source_class": {"governance": 2, "working": 7},
+    "window_report_count": 8
+  }
+}
+```
+
+This is the first validation signal that the source-class skew was at least
+partly caused by not running the cognition loop. Once governance feedback ran,
+DeepReflection selected governance-sourced injection cards.
+
+Follow-up read-only monitor after documentation updates:
+
+```text
+time=2026-05-23T05:04:55Z
+gateway=active pid=451894
+heartbeat=active/enabled
+cognitive_loop=ok timer=active/enabled
+audit_entries=1635
+events=99
+working_items=86
+crystallized_candidates=86
+crystallized_records=0
+index_health=healthy
+doctor=ok
+status_tool_contract=ok
+context_router=apply, apply_routes=["all"], llm_judge=disabled
+DeepReflection latest selected_by_source_class={"governance": 2}
+DeepReflection rolling selected_by_source_class={"governance": 2, "working": 14}
+PASS=[
+  gateway_active,
+  heartbeat_timer_active,
+  cognitive_loop_timer_active,
+  cognitive_loop_last_cycle_present,
+  index_healthy,
+  doctor_ok,
+  status_tool_contract_ok,
+  shell_alias_no_env_ok,
+  context_router_apply
+]
+WARN=[rh26_casual_empty]
+FAIL=[]
+```
+
+Follow-up validation after hard-boundary aggregation was added to the cognitive
+loop runner:
+
+```text
+local_tests=356 passed
+cycle_id=cloop_20260523T050811038295Z_4d300f67cf
+cycle_status=ok
+cycle_duration_ms=487
+events=104
+audit_entries=1658
+working_items=86
+crystallized_candidates=86
+crystallized_records=0
+heartbeat_post.processed_event_count=5
+heartbeat_post.policy_skipped_event_count=5
+DeepReflection latest selected_by_source_class={"governance": 2}
+DeepReflection rolling selected_by_source_class={"governance": 4, "working": 14}
+PASS=[
+  gateway_active,
+  heartbeat_timer_active,
+  cognitive_loop_timer_active,
+  cognitive_loop_last_cycle_present,
+  index_healthy,
+  doctor_ok,
+  status_tool_contract_ok,
+  shell_alias_no_env_ok,
+  context_router_apply
+]
+WARN=[rh26_casual_empty]
+FAIL=[]
+```
+
+The second manual cycle verifies that the new hard-boundary aggregation did not
+break the live no-send cognition loop. It also confirms that governance remains
+visible to DeepReflection while RH-12 still prevents governance events from
+becoming working-memory items.
+
+### Boundary Review
+
+Hard-boundary state after the RH-27 gate:
+
+```json
+{
+  "actual_send": false,
+  "actual_execute": false,
+  "actual_identity_write": false,
+  "actual_relationship_write": false,
+  "actual_crystallized_approval": false,
+  "hindsight_exported": false,
+  "crystallized_records": 0
+}
+```
+
+Expected warnings:
+
+- `hindsight_adapter_disabled`
+- RH-26 casual empty context
+
+Resolved or changed warnings:
+
+- DeepReflection no longer shows a strictly working-only source-class
+  distribution after the cognitive loop run; governance appeared in both latest
+  selected and dropped cards.
+
+### Gate Judgment
+
+RH-27 is validated on the test host:
+
+- the left/right cognition loop now runs, not just the provider plumbing
+- one manual cycle completed with all steps `ok`
+- cognitive-loop timer is installed and enabled for ongoing test-host cycles
+- the read-only monitor now observes cognitive-loop status and boundaries
+- all hard boundaries remained false
+- no raw private bodies were printed
+- no production host or Sannai host was touched
+
+## Monitor v0.4 And RH-28 Validation
+
+Date: 2026-05-23
+
+### Trigger
+
+Telegram tests showed two follow-up needs:
+
+- monitor v0.3 treated `casual_memory_system_change` as a failure whenever
+  casual context was non-empty
+- low-clue recall questions such as
+  `你还记得我之前跟你说过的一个设计吗？` caused the agent to guess one likely
+  answer too early
+
+### Implementation
+
+Monitor v0.4 changed the casual heading rule:
+
+- empty casual context remains a warning
+- safe `Recent Event Summaries` / `Conversation Carryover` in casual context is
+  allowed
+- diagnostic/runtime/candidate/foreground headings in casual context remain
+  failures
+- other casual headings are warnings for manual review
+
+RH-28 added a deterministic `ambiguous_recall` route and a bounded
+`Recall Clarification Guard` prefetch section.
+
+### Local Verification
+
+```text
+python -m pytest -q
+359 passed
+
+git diff --check
+ok
+```
+
+### Remote Validation
+
+After redeploying the test-host package, the read-only monitor returned `PASS`:
+
+```text
+time=2026-05-23T06:10:38Z
+gateway=active pid=451894
+heartbeat=active/enabled
+cognitive_loop=ok timer=active/enabled
+audit_entries=1859
+events=138
+working_items=120
+crystallized_candidates=120
+crystallized_records=0
+index_health=healthy
+doctor=ok
+context_router=apply, apply_routes=["all"], llm_judge=disabled
+RH-26 casual_memory_system_change=1535 chars, headings=[Recent Event Summaries]
+DeepReflection latest selected_by_source_class={"governance": 2}
+DeepReflection rolling selected_by_source_class={"governance": 4, "working": 14}
+PASS=[
+  gateway_active,
+  heartbeat_timer_active,
+  cognitive_loop_timer_active,
+  cognitive_loop_last_cycle_present,
+  index_healthy,
+  doctor_ok,
+  status_tool_contract_ok,
+  shell_alias_no_env_ok,
+  context_router_apply
+]
+WARN=[]
+FAIL=[]
+```
+
+RH-28 remote prefetch probe:
+
+```text
+query=你还记得我之前跟你说过的一个设计吗？
+route=ambiguous_recall
+reason_codes=[low_clue_recall]
+has_guard=true
+headings=[Recall Clarification Guard]
+```
+
+### Gate Judgment
+
+- monitor v0.4 no longer misclassifies safe casual carryover as a failure
+- RH-28 deterministic guard is present in live prefetch
+- all hard-boundary booleans remain false
+- no raw private bodies were printed
+- no production/Sannai host was touched
+
+### Telegram Smoke Follow-Up
+
+After restarting `hermes-gateway.service` to load the updated provider code, the
+owner opened a fresh Telegram session:
+
+```text
+/new
+你还记得我之前跟你说过的一个设计吗？
+```
+
+The agent no longer guessed a single design. It answered that the prompt was not
+enough to locate a unique item, offered three candidate directions, and asked
+for a keyword:
+
+```text
+1. 互联网数据采集系统的分层设计
+2. ComfyUI / AI 生成工作流的分层设计
+3. Memory-OS / 记忆系统的分层架构
+```
+
+This validates the RH-28 low-clue recall behavior in the real Telegram frontend:
+
+- low-clue recall is treated as ambiguous
+- candidate directions are offered instead of a single overconfident answer
+- the agent asks for an anchor to continue

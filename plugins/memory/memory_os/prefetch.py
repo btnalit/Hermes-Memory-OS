@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .context_router import ContextSection, route_context_sections
+from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
 from .crystallized import read_candidate_queue
 from .store import MemoryOSStore
 
@@ -274,6 +274,7 @@ def _build_prefetch_sections(
     current_task_anchor: str | None = None,
 ) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
+    _append_section(sections, "Recall Clarification Guard", _recall_clarification_guard_lines(query))
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
@@ -290,6 +291,7 @@ def _build_prefetch_sections(
 def _section_source_class(title: str) -> str:
     mapping = {
         "Current Foreground Task": "foreground",
+        "Recall Clarification Guard": "recall_guard",
         "Identity Memory": "identity",
         "Continuity Bridge": "bridge",
         "Conversation Carryover": "carryover",
@@ -349,6 +351,17 @@ def _format_selected_context_sections(sections: list[ContextSection]) -> str:
     if len(nonempty) == 1 and nonempty[0].text.startswith(HEADER):
         return nonempty[0].text
     return _format([(section.section, section.text.splitlines()) for section in nonempty])
+
+
+def _recall_clarification_guard_lines(query: str) -> list[str]:
+    if not is_low_clue_recall_query(query):
+        return []
+    return [
+        "The user's recall request is underspecified.",
+        "Do not answer as if one remembered item is certain.",
+        "Offer 2-3 plausible directions or ask for a keyword, time, project, or source.",
+        "If the user rejects two guesses, stop guessing and ask for an anchor.",
+    ]
 
 
 def plan_query_route(

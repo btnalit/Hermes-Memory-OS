@@ -86,6 +86,9 @@ def install_plugin(
     install_system_modules: bool = False,
     enable_runtime: bool = False,
     runtime_interval: str = "5min",
+    install_cognitive_loop: bool = False,
+    enable_cognitive_loop: bool = False,
+    cognitive_loop_interval: str = "6h",
     deep_reflection_preset: str | None = None,
     systemd_dir: Path | None = None,
     dry_run: bool = False,
@@ -133,6 +136,13 @@ def install_plugin(
             interval=runtime_interval,
             dry_run=dry_run,
         )
+    cognitive_loop_artifacts: list[Path] = []
+    if install_cognitive_loop or enable_cognitive_loop:
+        cognitive_loop_artifacts = _write_cognitive_loop_artifacts(
+            hermes_home,
+            interval=cognitive_loop_interval,
+            dry_run=dry_run,
+        )
     enabled = False
     enable_command: list[str] = []
     if enable:
@@ -176,6 +186,33 @@ def install_plugin(
             subprocess.run(runtime_enable_command, check=True)
             runtime_enabled = True
 
+    cognitive_loop_enabled = False
+    cognitive_loop_enable_command: list[str] = []
+    if enable_cognitive_loop:
+        if not install_cognitive_loop:
+            cognitive_loop_artifacts = _write_cognitive_loop_artifacts(
+                hermes_home,
+                interval=cognitive_loop_interval,
+                dry_run=dry_run,
+            )
+        unit_dir = (systemd_dir or (Path.home() / ".config" / "systemd" / "user")).expanduser().resolve()
+        service_src = hermes_home / "memory-os" / "systemd" / "hermes-memory-os-cognitive-loop.service"
+        timer_src = hermes_home / "memory-os" / "systemd" / "hermes-memory-os-cognitive-loop.timer"
+        cognitive_loop_enable_command = [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            "hermes-memory-os-cognitive-loop.timer",
+        ]
+        if not dry_run:
+            unit_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(service_src, unit_dir / service_src.name)
+            shutil.copy2(timer_src, unit_dir / timer_src.name)
+            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+            subprocess.run(cognitive_loop_enable_command, check=True)
+            cognitive_loop_enabled = True
+
     return {
         "schema_version": "memory-os.install.v0",
         "provider": "memory_os",
@@ -210,6 +247,12 @@ def install_plugin(
         "runtime_enable_requested": enable_runtime,
         "runtime_enabled": runtime_enabled,
         "runtime_enable_command": runtime_enable_command,
+        "cognitive_loop_artifacts_installed": bool(cognitive_loop_artifacts) and not dry_run,
+        "cognitive_loop_artifacts": [str(path) for path in cognitive_loop_artifacts],
+        "cognitive_loop_interval": cognitive_loop_interval,
+        "cognitive_loop_enable_requested": enable_cognitive_loop,
+        "cognitive_loop_enabled": cognitive_loop_enabled,
+        "cognitive_loop_enable_command": cognitive_loop_enable_command,
         "deep_reflection_preset": deep_reflection_preset,
         "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
         "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
@@ -362,7 +405,8 @@ def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool)
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         f"export HERMES_HOME={_shell_quote(str(hermes_home))}\n"
-        "exec hermes memory_os heartbeat --max-events 100\n",
+        "export PYTHONPATH=\"${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}\"\n"
+        "exec python3 -m plugins.memory.memory_os heartbeat --max-events 100\n",
         encoding="utf-8",
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
@@ -381,6 +425,48 @@ def _write_runtime_artifacts(hermes_home: Path, *, interval: str, dry_run: bool)
         f"OnBootSec={interval}\n"
         f"OnUnitActiveSec={interval}\n"
         "AccuracySec=30s\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n",
+        encoding="utf-8",
+    )
+    return artifacts
+
+
+def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run: bool) -> list[Path]:
+    runtime_root = hermes_home / "memory-os"
+    wrapper = runtime_root / "bin" / "memory_os_cognitive_loop.sh"
+    service = runtime_root / "systemd" / "hermes-memory-os-cognitive-loop.service"
+    timer = runtime_root / "systemd" / "hermes-memory-os-cognitive-loop.timer"
+    artifacts = [wrapper, service, timer]
+    if dry_run:
+        return artifacts
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    service.parent.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f"export HERMES_HOME={_shell_quote(str(hermes_home))}\n"
+        "export PYTHONPATH=\"${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}\"\n"
+        "exec python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    service.write_text(
+        "[Unit]\n"
+        "Description=Hermes Memory-OS test-host cognitive loop\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={wrapper}\n",
+        encoding="utf-8",
+    )
+    timer.write_text(
+        "[Unit]\n"
+        "Description=Run Hermes Memory-OS test-host cognitive loop periodically\n\n"
+        "[Timer]\n"
+        f"OnBootSec={interval}\n"
+        f"OnUnitActiveSec={interval}\n"
+        "AccuracySec=30s\n"
+        "Persistent=true\n\n"
         "[Install]\n"
         "WantedBy=timers.target\n",
         encoding="utf-8",
@@ -428,6 +514,9 @@ def main() -> int:
     parser.add_argument("--install-system-modules", action="store_true", help="Install portable L2-L4 module runtime package")
     parser.add_argument("--enable-runtime", action="store_true", help="Install and enable the user systemd heartbeat timer")
     parser.add_argument("--runtime-interval", default="5min", help="Heartbeat timer interval, default: 5min")
+    parser.add_argument("--install-cognitive-loop", action="store_true", help="Write test-host cognitive loop wrapper and systemd timer artifacts")
+    parser.add_argument("--enable-cognitive-loop", action="store_true", help="Install and enable the user systemd cognitive-loop timer")
+    parser.add_argument("--cognitive-loop-interval", default="6h", help="Cognitive-loop timer interval, default: 6h")
     parser.add_argument(
         "--deep-reflection-preset",
         choices=sorted(DEEP_REFLECTION_PRESETS),
@@ -451,6 +540,9 @@ def main() -> int:
         install_system_modules=args.install_system_modules,
         enable_runtime=args.enable_runtime,
         runtime_interval=args.runtime_interval,
+        install_cognitive_loop=args.install_cognitive_loop,
+        enable_cognitive_loop=args.enable_cognitive_loop,
+        cognitive_loop_interval=args.cognitive_loop_interval,
         deep_reflection_preset=args.deep_reflection_preset,
         dry_run=args.dry_run,
     )

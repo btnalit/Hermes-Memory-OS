@@ -938,6 +938,110 @@ v0.3 progress:
 - working-only skew remains a WARN/observation item, not an automatic tuning
   trigger
 
+RH-27 progress:
+
+- The earlier observation period was only proving provider/shell/router/timer
+  plumbing. It did not prove the left/right cognition modules were running as
+  a loop.
+- RH-27 adds a test-host-only no-send cognitive-loop scheduler. It runs
+  heartbeat, digest, wandering, ops gate, evidence scoring, self-evolution,
+  governance feedback, DeepReflection, and a final doctor/boundary report.
+- The first manual cycle on `10.20.3.200` completed with all 11 steps `ok`.
+- DeepReflection selected governance-sourced cards after governance feedback
+  ran, changing the previous working-only source-class observation to a mixed
+  `working + governance` rolling distribution.
+- A second manual cycle after hard-boundary aggregation also completed with
+  `status=ok`; rolling DeepReflection distribution reached
+  `selected_by_source_class={"governance": 4, "working": 14}`.
+- Continue observing whether digest, foreground, and other source classes appear
+  naturally after 7-14 days of scheduled cognitive-loop runtime.
+
+### FW-05 Cognitive Loop Runtime Observation
+
+Track the no-send cognitive loop on `10.20.3.200` as a runtime observation item.
+
+Current baseline after the first RH-27 manual run:
+
+- cognitive-loop timer active/enabled
+- latest cycle status `ok`
+- all 11 cycle steps returned `ok`
+- all hard-boundary booleans remained false
+- `crystallized_records=0`
+- DeepReflection latest selected source class included `governance`
+
+Signals to collect for at least 7 days:
+
+- cycle success/error/warning rate
+- per-step duration and failure count
+- audit growth per cycle
+- event growth per cycle
+- working item growth and cap behavior
+- candidate/proposal growth
+- evidence score growth
+- digest artifact creation
+- wandering artifact creation
+- governance feedback event count
+- DeepReflection source-class distribution
+- RH-26 context-router heading anomalies
+- doctor warnings and index health
+
+Stop conditions:
+
+- `actual_send=true`
+- `actual_execute=true`
+- `actual_identity_write=true`
+- `actual_relationship_write=true`
+- `actual_crystallized_approval=true`
+- `hindsight_exported=true`
+- `crystallized_records` increases without explicit owner approval
+- doctor returns an error
+- gateway becomes unstable after loop runs
+- audit growth becomes unbounded relative to event growth
+
+Boundary:
+
+- observation remains test-host-only
+- no automatic recovery
+- no cleanup apply
+- no shadow journal apply
+- no production/Sannai mutation
+
+### RH-28 Low-Clue Recall Clarification Guard
+
+Design and deterministic v0 guard:
+
+- `24-low-clue-recall-clarification-guard.md`
+
+Reason:
+
+- Telegram testing showed that low-clue recall can use history search and still
+  over-commit to the first plausible answer.
+- This is not a long-term memory corruption issue; it is a foreground response
+  discipline issue.
+
+Current behavior:
+
+- low-clue recall queries route to `ambiguous_recall`
+- prefetch includes `Recall Clarification Guard`
+- the guard tells the foreground model to list possible directions or ask for
+  a keyword/time/project/source instead of claiming one answer is certain
+
+Boundary:
+
+- no memory writes
+- no candidate creation
+- no identity/crystallized changes
+- no LLM judge in v0
+- no changes to automation wording policy
+
+Validation:
+
+- local tests cover route planning and prefetch injection
+- next Telegram smoke test should send:
+  `你还记得我之前跟你说过的一个设计吗？`
+- expected response: candidate directions or anchor request, not a single
+  overconfident answer
+
 ### RH-25 Small-Context Session Task Anchor
 
 Mitigate foreground task drift after context compression in small-context Hermes

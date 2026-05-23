@@ -108,8 +108,36 @@ def test_installer_can_write_runtime_heartbeat_artifacts(tmp_path):
     assert wrapper.is_file()
     assert service.is_file()
     assert timer.is_file()
-    assert "hermes memory_os heartbeat" in wrapper.read_text(encoding="utf-8")
+    assert "python3 -m plugins.memory.memory_os heartbeat" in wrapper.read_text(encoding="utf-8")
     assert "OnUnitActiveSec=5min" in timer.read_text(encoding="utf-8")
+
+
+def test_installer_can_write_cognitive_loop_artifacts(tmp_path):
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        install_cognitive_loop=True,
+        cognitive_loop_interval="6h",
+    )
+
+    home = tmp_path / "home"
+    assert report["cognitive_loop_artifacts_installed"] is True
+    wrapper = home / "memory-os" / "bin" / "memory_os_cognitive_loop.sh"
+    service = home / "memory-os" / "systemd" / "hermes-memory-os-cognitive-loop.service"
+    timer = home / "memory-os" / "systemd" / "hermes-memory-os-cognitive-loop.timer"
+    assert wrapper.is_file()
+    assert service.is_file()
+    assert timer.is_file()
+    assert "python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply" in wrapper.read_text(
+        encoding="utf-8"
+    )
+    assert "OnUnitActiveSec=6h" in timer.read_text(encoding="utf-8")
+
+
+def test_installer_does_not_write_cognitive_loop_artifacts_by_default(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home")
+
+    assert report["cognitive_loop_artifacts_installed"] is False
+    assert not (tmp_path / "home" / "memory-os" / "bin" / "memory_os_cognitive_loop.sh").exists()
 
 
 def test_installer_can_install_system_module_runtime_package(tmp_path):
@@ -344,12 +372,15 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "scripts/install_memory_os_plugin.py" in text
     assert "install_runtime" in text
     assert "enable_runtime" in text
+    assert "install_cognitive_loop" in text
+    assert "enable_cognitive_loop" in text
     assert "runtime artifacts are not being installed" in text
     assert "normalize_shell_enablement" in text
     assert "require_hermes_for_selected_actions" in text
     assert "The script does not restart hermes-gateway.service" in text
     assert "hermes memory-os-agent-os status" in text
     assert "hermes memory-os-agent-os doctor" in text
+    assert "plugins.memory.memory_os cognitive-loop status" in text
 
 
 def test_test_host_wrapper_delegates_to_interactive_installer_defaults():

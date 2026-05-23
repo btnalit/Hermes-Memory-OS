@@ -123,6 +123,12 @@ _ORDINARY_OPINION_TERMS = (
     "what do you think",
 )
 
+_LOW_CLUE_RECALL_PATTERNS = (
+    re.compile(r"(还记得|记不记得|记得吗).{0,20}(之前|以前|上次|跟你说过|聊过).{0,20}(设计|方案|事情|想法|那个|那套)?"),
+    re.compile(r"(之前|以前|上次).{0,20}(跟你说过|聊过).{0,20}(设计|方案|事情|想法|那个|那套)?"),
+    re.compile(r"(do you remember|remember).{0,40}(design|idea|thing|plan|that)", re.I),
+)
+
 _CHINESE_KEYWORDS = (
     "记忆",
     "架构",
@@ -200,6 +206,9 @@ def plan_context_route(query: str, *, current_task_anchor: str | None = None) ->
 
     if _matches_any(text, _DIAGNOSTIC_PATTERNS):
         return _route("diagnostic_current_status", hard_route=True, reason_codes=["explicit_diagnostic"])
+
+    if is_low_clue_recall_query(text):
+        return _route("ambiguous_recall", hard_route=False, reason_codes=["low_clue_recall"])
 
     if _matches_any(text, _CANDIDATE_PATTERNS):
         return _route("candidate_review", hard_route=False, reason_codes=["candidate_review_terms"])
@@ -315,6 +324,8 @@ def _is_required_by_route(section: ContextSection, route: str) -> bool:
         return name == "current foreground task"
     if route == "candidate_review":
         return "candidate" in name or "crystallized" in name
+    if route == "ambiguous_recall":
+        return name == "recall clarification guard"
     return False
 
 
@@ -333,6 +344,13 @@ def _route_exclusion_reason(section: ContextSection, route: str) -> str:
         or "candidate" in name
         or name == "crystallized memory"
     ):
+        return "route_excludes_section"
+    if route == "ambiguous_recall" and name in {
+        "current foreground task",
+        "diagnostic grounding",
+        "current memory-os runtime facts",
+        "crystallized review candidates",
+    }:
         return "route_excludes_section"
     return ""
 
@@ -411,6 +429,15 @@ def _risk_flags(entries: list[dict[str, Any]]) -> list[str]:
 def _has_cancellation(text: str) -> bool:
     normalized = _normalize(text).lower()
     return any(marker in normalized for marker in _CANCELLATION_MARKERS)
+
+
+def is_low_clue_recall_query(text: str) -> bool:
+    normalized = _normalize(text)
+    if not normalized:
+        return False
+    if _matches_any(normalized, _DIAGNOSTIC_PATTERNS):
+        return False
+    return _matches_any(normalized, _LOW_CLUE_RECALL_PATTERNS)
 
 
 def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:

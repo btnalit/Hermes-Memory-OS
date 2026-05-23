@@ -91,6 +91,14 @@ def test_router_routes_casual_memory_opinion_to_casual_continuity():
     assert "ordinary_opinion" in report["reason_codes"]
 
 
+def test_router_routes_low_clue_recall_to_ambiguous_recall():
+    report = plan_context_route("你还记得我之前跟你说过的一个设计吗？")
+
+    assert report["route"] == "ambiguous_recall"
+    assert report["hard_route"] is False
+    assert "low_clue_recall" in report["reason_codes"]
+
+
 def test_router_routes_candidate_question_to_candidate_review():
     report = plan_context_route("那些 crystallized candidates 是已经沉淀的长期记忆吗？")
 
@@ -360,6 +368,23 @@ def test_prefetch_context_router_apply_casual_does_not_treat_query_anchor_as_tas
 
     assert "Current Foreground Task" not in context
     assert "Hindsight" not in context
+
+
+def test_prefetch_low_clue_recall_injects_clarification_guard(tmp_path):
+    store = _store(tmp_path)
+
+    context = build_prefetch(
+        "你还记得我之前跟你说过的一个设计吗？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+    )
+
+    assert "### Recall Clarification Guard" in context
+    assert "underspecified" in context
+    assert "Do not answer as if one remembered item is certain." in context
+    assert "ask for a keyword" in context
 
 
 def test_prefetch_context_router_apply_diagnostic_does_not_double_wrap_context(tmp_path):

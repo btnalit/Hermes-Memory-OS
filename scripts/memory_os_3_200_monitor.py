@@ -25,6 +25,13 @@ EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
     "active_comfyui_install": ["Current Foreground Task", "Indexed Recall"],
     "deferred_cancellation": ["Current Foreground Task"],
 }
+SAFE_CASUAL_HEADINGS = {"Conversation Carryover", "Recent Event Summaries"}
+FORBIDDEN_CASUAL_HEADINGS = {
+    "Current Foreground Task",
+    "Diagnostic Grounding",
+    "Current Memory-OS Runtime Facts",
+    "Crystallized Review Candidates",
+}
 
 
 def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -35,12 +42,15 @@ def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, 
         expected = EXPECTED_RH26_HEADINGS.get(prompt_id)
         if expected is None:
             continue
-        if prompt_id == "casual_memory_system_change" and actual:
+        if prompt_id == "casual_memory_system_change":
+            if not actual or all(heading in SAFE_CASUAL_HEADINGS for heading in actual):
+                continue
+            forbidden = [heading for heading in actual if heading in FORBIDDEN_CASUAL_HEADINGS]
             anomalies.append(
                 {
                     "id": prompt_id,
-                    "severity": "fail",
-                    "code": "casual_context_not_empty",
+                    "severity": "fail" if forbidden else "warning",
+                    "code": "casual_context_forbidden_heading" if forbidden else "casual_context_needs_review",
                     "expected": expected,
                     "actual": actual,
                 }
@@ -92,6 +102,28 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if not snapshot.get("heartbeat_listed", False):
         fail.append({"code": "heartbeat_timer_not_listed"})
 
+    cognitive_loop_timer = snapshot.get("cognitive_loop_timer", {})
+    if (
+        cognitive_loop_timer.get("ActiveState") == "active"
+        and cognitive_loop_timer.get("UnitFileState") == "enabled"
+    ):
+        passed.append({"code": "cognitive_loop_timer_active"})
+    else:
+        fail.append({"code": "cognitive_loop_timer_inactive", "value": cognitive_loop_timer})
+    if not snapshot.get("cognitive_loop_listed", False):
+        fail.append({"code": "cognitive_loop_timer_not_listed"})
+
+    cognitive_loop = snapshot.get("cognitive_loop", {})
+    if cognitive_loop.get("last_status") == "error":
+        fail.append({"code": "cognitive_loop_last_cycle_error", "value": cognitive_loop})
+    elif cognitive_loop.get("last_status") in {"ok", "warning"}:
+        passed.append({"code": "cognitive_loop_last_cycle_present"})
+    else:
+        warn.append({"code": "cognitive_loop_no_cycle_yet", "value": cognitive_loop})
+    for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_crystallized_approval"):
+        if (cognitive_loop.get("boundaries") or {}).get(key) is True:
+            fail.append({"code": f"cognitive_loop_{key}_true"})
+
     memory_status = snapshot.get("memory_status", {})
     if memory_status.get("index_health", {}).get("state") == "healthy":
         passed.append({"code": "index_healthy"})
@@ -134,7 +166,11 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         warn.append({"code": "context_router_not_apply", "value": router})
 
     rh26_anomalies = find_rh26_heading_anomalies(list(snapshot.get("rh26_apply_probe") or []))
-    fail.extend(rh26_anomalies)
+    for anomaly in rh26_anomalies:
+        if anomaly.get("severity") == "fail":
+            fail.append(anomaly)
+        else:
+            warn.append(anomaly)
     for probe in snapshot.get("rh26_apply_probe") or []:
         if probe.get("id") == "casual_memory_system_change" and int(probe.get("chars", 0)) == 0:
             warn.append({"code": "rh26_casual_empty"})
@@ -177,6 +213,11 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         (
             f"- heartbeat={snapshot.get('heartbeat_timer', {}).get('ActiveState')}/"
             f"{snapshot.get('heartbeat_timer', {}).get('UnitFileState')}"
+        ),
+        (
+            f"- cognitive_loop={snapshot.get('cognitive_loop', {}).get('last_status')} "
+            f"timer={snapshot.get('cognitive_loop_timer', {}).get('ActiveState')}/"
+            f"{snapshot.get('cognitive_loop_timer', {}).get('UnitFileState')}"
         ),
         (
             f"- counts: audit_entries={counts.get('audit_entries')}, events={counts.get('events')}, "
@@ -322,14 +363,20 @@ def system_show(unit):
             data[key] = value
     return data
 
-def load_json_cmd(cmd):
-    r = run(cmd)
+def load_json_cmd(cmd, env=None):
+    r = run(cmd, env=env)
     if not r["ok"]:
         return {"_error": r["out"], "_code": r["code"]}
     try:
         return json.loads(r["out"])
     except Exception as exc:
         return {"_parse_error": str(exc)}
+
+def memory_os_cli(args):
+    env = dict(os.environ)
+    env["HERMES_HOME"] = "/root/.hermes"
+    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins:" + env.get("PYTHONPATH", "")
+    return load_json_cmd(["python3", "-m", "plugins.memory.memory_os"] + list(args), env=env)
 
 def compaction_stats():
     r = run(["journalctl", "--user", "-u", "hermes-gateway.service", "--since", "6 hours ago", "--no-pager", "-o", "cat"])
@@ -410,9 +457,9 @@ def shell_alias_no_env():
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
     }
 
-status = load_json_cmd(["hermes", "memory_os", "status"])
-doctor = load_json_cmd(["hermes", "memory_os", "doctor"])
-contract = load_json_cmd(["hermes", "memory_os", "conversation-regression", "status-tool-contract"])
+status = memory_os_cli(["status"])
+doctor = memory_os_cli(["doctor"])
+contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
@@ -426,6 +473,8 @@ print(json.dumps({
   "gateway": system_show("hermes-gateway.service"),
   "heartbeat_timer": system_show("hermes-memory-os-heartbeat.timer"),
   "heartbeat_listed": "hermes-memory-os-heartbeat.timer" in heartbeat_list,
+  "cognitive_loop_timer": system_show("hermes-memory-os-cognitive-loop.timer"),
+  "cognitive_loop_listed": "hermes-memory-os-cognitive-loop.timer" in run(["systemctl", "--user", "list-timers", "hermes-memory-os-cognitive-loop.timer", "--no-pager"])["out"],
   "memory_status": {
     "counts": status.get("counts") if isinstance(status, dict) else None,
     "index_health": status.get("index_health") if isinstance(status, dict) else None,
@@ -440,6 +489,7 @@ print(json.dumps({
   },
   "status_tool_contract": contract.get("validation") if isinstance(contract, dict) else contract,
   "shell_alias_no_env": shell_alias_no_env(),
+  "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "context_router": cfg.get("context_router", {}),
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),

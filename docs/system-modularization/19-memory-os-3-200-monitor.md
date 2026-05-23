@@ -684,6 +684,36 @@ Decision rule:
 - if both automation and direct recheck show inactive/disabled, treat it as a
   real runtime WARN/FAIL and ask owner before recovery
 
+### RH-26 Casual Context Classification / Monitor v0.4
+
+Initial RH-26 monitor rules treated `casual_memory_system_change` as expected
+empty context. After RH-27 enabled the cognitive loop, safe recent summaries can
+appear for casual conversation. That is useful carryover, not a failure by
+itself.
+
+v0.4 classification:
+
+- `casual_memory_system_change` with no headings: `WARN` as
+  `rh26_casual_empty`
+- `casual_memory_system_change` with `Recent Event Summaries` or
+  `Conversation Carryover`: acceptable
+- `casual_memory_system_change` with `Diagnostic Grounding`,
+  `Current Memory-OS Runtime Facts`, `Current Foreground Task`, or
+  `Crystallized Review Candidates`: `FAIL`
+- other casual headings such as `Working Memory`: `WARN` for manual review
+
+The monitor still does not print section bodies or private summaries.
+
+Remote validation:
+
+```text
+time=2026-05-23T06:10:38Z
+RH-26 casual_memory_system_change=1535 chars, headings=[Recent Event Summaries]
+status=PASS
+FAIL=[]
+WARN=[]
+```
+
 ## Boundaries
 
 The monitor is not allowed to:

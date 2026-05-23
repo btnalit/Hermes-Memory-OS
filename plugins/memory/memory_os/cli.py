@@ -49,6 +49,7 @@ from .conversation_regression import (
     prompt_set_report,
     status_tool_contract_report,
 )
+from .cognitive_loop import CognitiveLoopRunner
 from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
@@ -310,6 +311,16 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     context_router_dry_run.add_argument("--query", required=True)
     context_router_dry_run.add_argument("--budget", type=int, default=2200)
     context_router_dry_run.add_argument("--current-task-anchor", default="")
+    cognitive_loop_parser = subs.add_parser("cognitive-loop")
+    cognitive_loop_subs = cognitive_loop_parser.add_subparsers(dest="cognitive_loop_command", required=True)
+    cognitive_loop_subs.add_parser("status")
+    cognitive_loop_subs.add_parser("doctor")
+    cognitive_loop_history = cognitive_loop_subs.add_parser("history")
+    cognitive_loop_history.add_argument("--limit", type=int, default=20)
+    cognitive_loop_run_once = cognitive_loop_subs.add_parser("run-once")
+    cognitive_loop_run_once.add_argument("--test-host", action="store_true")
+    cognitive_loop_run_once.add_argument("--apply", action="store_true")
+    cognitive_loop_run_once.add_argument("--max-events", type=int, default=100)
     validate_parser = subs.add_parser("validate")
     validate_parser.add_argument("--profile", default="")
     validate_parser.add_argument("--no-send", action="store_true")
@@ -412,6 +423,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _conversation_regression_command(args)
     if command == "context-router":
         return _context_router_command(args, store)
+    if command == "cognitive-loop":
+        return _cognitive_loop_command(args, store)
     if command == "validate":
         report = _host_validation_report(store, no_send=bool(args.no_send), write_report=bool(args.write_report))
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
@@ -572,6 +585,36 @@ def _modules_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
         return 0
     if command == "deep_reflection":
         return _modules_deep_reflection_command(args, store)
+    return 2
+
+
+def _cognitive_loop_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    runner = CognitiveLoopRunner(store)
+    command = args.cognitive_loop_command
+    if command == "status":
+        print(json.dumps(runner.status(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "doctor":
+        result = runner.doctor()
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if result.get("status") == "error" else 0
+    if command == "history":
+        result = {
+            "schema_version": "memory-os.cognitive_loop_history.v0",
+            "profile": store.roots.profile or "default",
+            "limit": max(int(args.limit), 0),
+            "records": runner.read_reports(limit=max(int(args.limit), 0)),
+        }
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "run-once":
+        result = runner.run_once(
+            apply=bool(args.apply),
+            test_host=bool(args.test_host),
+            max_events=int(args.max_events),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if result.get("status") != "error" else 2
     return 2
 
 

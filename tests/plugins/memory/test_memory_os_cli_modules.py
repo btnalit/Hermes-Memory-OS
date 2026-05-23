@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.cli import _ensure_system_module_runtime_path
+from plugins.memory.memory_os.__main__ import main as memory_os_module_main
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -25,6 +26,17 @@ def test_modules_status_reports_commandized_and_uncommandized_modules(tmp_path, 
     assert modules["inner_drive"]["commandized"] is False
     assert modules["inner_drive"]["unavailable_reason"]
     assert "raw_body" not in json.dumps(output)
+
+
+def test_memory_os_module_main_exposes_provider_cli_without_hermes_command(tmp_path, monkeypatch, capsys):
+    _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = memory_os_module_main(["status"])
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema_version"] == "memory-os.status.v0"
 
 
 def test_modules_doctor_returns_ok_for_warning_only_uncommandized_modules(tmp_path, monkeypatch, capsys):
