@@ -714,6 +714,41 @@ FAIL=[]
 WARN=[]
 ```
 
+Post-smoke recheck:
+
+```text
+time=2026-05-23T06:20:41Z
+status=PASS
+index_health=healthy
+RH-26 casual_memory_system_change=1538 chars, headings=[Recent Event Summaries]
+compaction.focus_none_count=0
+DeepReflection latest selected_by_source_class={"governance": 2}
+DeepReflection rolling selected_by_source_class={"governance": 4, "working": 14}
+audit_entries=1871
+events=139
+working_items=121
+crystallized_candidates=121
+crystallized_records=0
+delta_from_previous_snapshot:
+  audit_entries=+112
+  events=+12
+  working_items=+21
+  candidates=+21
+  audit_per_new_event=9.333
+FAIL=[]
+WARN=[]
+```
+
+Interpretation:
+
+- safe casual carryover should now be treated as a positive signal that the
+  cognitive loop has produced usable recent summaries
+- `index_health=healthy` means the earlier stale warning was transient
+- DeepReflection source-class skew is no longer strictly working-only after
+  RH-27; governance appears in latest and rolling distributions
+- audit and candidate growth should remain a trend metric, not an immediate
+  failure, unless growth becomes unbounded or disk usage becomes material
+
 ## Boundaries
 
 The monitor is not allowed to:

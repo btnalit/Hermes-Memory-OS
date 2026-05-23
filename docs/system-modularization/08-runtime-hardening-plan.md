@@ -1315,3 +1315,30 @@ After Runtime Hardening, start L2 Cognition Runtime:
 - Wandering Mind right-brain output through Speak Gate passthrough
 - Evidence/Scoring reports that are readable by owner
 - Self-Evolution proposals that remain review-only
+
+## Post-RH-28 Low-Cost Memory Relevance Roadmap
+
+Design:
+
+- `25-memory-sources-feedback-roadmap.md`
+
+Purpose:
+
+- adopt the low-cost lessons from ChatGPT Memory Sources, MemGPT/Letta memory
+  hierarchy, RAG provenance, Zep temporal lineage, Mem0 selective memory, and
+  LangGraph background consolidation without adding a new top-of-mind tier
+
+Recommended order:
+
+1. RH-29 Memory Sources Attribution
+2. RH-30 Relevance Feedback Audit
+3. RH-31 deterministic relevance guards from real findings
+4. RH-32 consolidation suggestions, no approval
+5. RH-33 top-of-mind scoring only
+
+Explicitly deferred:
+
+- standalone Top-of-Mind tier
+- LLM-only relevance decisions
+- automatic crystallized approval
+- automatic canonical deletion or rewriting

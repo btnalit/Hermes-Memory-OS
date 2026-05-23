@@ -5165,3 +5165,71 @@ This validates the RH-28 low-clue recall behavior in the real Telegram frontend:
 - low-clue recall is treated as ambiguous
 - candidate directions are offered instead of a single overconfident answer
 - the agent asks for an anchor to continue
+
+### Post-Smoke Monitor Recheck
+
+After the Telegram smoke test, a read-only monitor recheck was run without
+overwriting the automation's `last-snapshot.json`.
+
+Result:
+
+```text
+time=2026-05-23T06:20:41Z
+status=PASS
+gateway=active pid=464064
+heartbeat=active/enabled
+cognitive_loop=ok timer=active/enabled
+audit_entries=1871
+events=139
+working_items=121
+crystallized_candidates=121
+crystallized_records=0
+delta_from_previous_snapshot:
+  audit_entries=+112
+  events=+12
+  working_items=+21
+  candidates=+21
+  audit_per_new_event=9.333
+index_health=healthy
+doctor=ok
+context_router=apply, apply_routes=["all"], llm_judge=disabled
+RH-26 casual_memory_system_change=1538 chars, headings=[Recent Event Summaries]
+compaction.focus_none_count=0
+DeepReflection latest selected_by_source_class={"governance": 2}
+DeepReflection rolling selected_by_source_class={"governance": 4, "working": 14}
+DeepReflection actual_send=false
+DeepReflection actual_execute=false
+DeepReflection actual_identity_write=false
+DeepReflection actual_crystallized_approval=false
+disk_usage=/root/.hermes/memory-os 9.3M
+PASS=[
+  gateway_active,
+  heartbeat_timer_active,
+  cognitive_loop_timer_active,
+  cognitive_loop_last_cycle_present,
+  index_healthy,
+  doctor_ok,
+  status_tool_contract_ok,
+  shell_alias_no_env_ok,
+  context_router_apply
+]
+WARN=[]
+FAIL=[]
+```
+
+Comparison against the pre-smoke automation snapshot:
+
+- `index_health` recovered from `stale` to `healthy`.
+- `rh26_casual_empty` disappeared because the casual probe now selects safe
+  `Recent Event Summaries` instead of empty context.
+- DeepReflection no longer shows a working-only source skew; governance remains
+  present in both latest and rolling source-class distribution.
+- `compaction.focus_none_count` remained `0`, so no new compression-focus
+  anomaly was observed.
+- all hard-boundary booleans remained false and `crystallized_records` remained
+  `0`.
+
+The remaining trend to watch is growth slope: `audit_entries` and
+working/candidate counts are rising now that the cognitive loop is active. This
+is expected for a test-host observation phase, but monitor v0.4 should continue
+tracking `audit_per_new_event` and disk growth.

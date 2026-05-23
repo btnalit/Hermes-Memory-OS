@@ -375,3 +375,28 @@ Follow-up validation after adding hard-boundary aggregation:
 - rolling DeepReflection source distribution became
   `selected_by_source_class={"governance": 4, "working": 14}` and
   `dropped_by_source_class={"governance": 4, "working": 7}`
+
+Follow-up validation after RH-28 Telegram smoke:
+
+- local full test suite later passed with `359 passed`
+- the test host was rechecked through the read-only monitor at
+  `2026-05-23T06:20:41Z`
+- monitor status became `PASS` with `WARN=[]` and `FAIL=[]`
+- `index_health` recovered to `healthy`
+- RH-26 casual probe selected safe `Recent Event Summaries` instead of empty
+  context
+- `compaction.focus_none_count=0`
+- DeepReflection latest source distribution remained
+  `selected_by_source_class={"governance": 2}`
+- rolling DeepReflection source distribution remained
+  `selected_by_source_class={"governance": 4, "working": 14}`
+- hard-boundary booleans stayed false and `crystallized_records=0`
+- counts increased as expected for an active cognitive-loop test host:
+  `audit_entries=1871`, `events=139`, `working_items=121`,
+  `crystallized_candidates=121`
+
+This converts the earlier post-run warning profile into a cleaner observation
+baseline: the cognitive loop is producing usable recent summaries, the index
+can recover naturally, and DeepReflection has a non-working source class in its
+selection distribution. The main remaining observation metric is growth slope,
+especially `audit_per_new_event`.
