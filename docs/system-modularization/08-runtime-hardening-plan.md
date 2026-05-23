@@ -884,6 +884,14 @@ Boundary:
 - no hook replay, session reset, gateway restart, heartbeat catch-up, or repair
   action is triggered automatically
 
+v0.3 progress:
+
+- `scripts/memory_os_3_200_monitor.py` now collects shell hook marker totals as
+  bounded metadata
+- the monitor still does not infer expected marker counts from session activity
+- full hook coverage detection remains open until a safe session-count source is
+  selected
+
 ### FW-04 Deep Reflection Source-Class Skew Explanation
 
 RH-25 tracks the current DeepReflection source-class skew observation. Keep it
@@ -908,6 +916,13 @@ Boundary:
 - do not tune card eligibility, ranking, safety filters, TTL, caps, or
   auto-injection behavior based on the current skew alone
 - any selector tuning should be proposed as a separate reviewed RH item
+
+v0.3 progress:
+
+- the six-hour monitor now reports latest and rolling DeepReflection
+  source-class distribution through the deterministic monitor script
+- working-only skew remains a WARN/observation item, not an automatic tuning
+  trigger
 
 ### RH-25 Small-Context Session Task Anchor
 

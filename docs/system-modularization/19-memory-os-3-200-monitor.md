@@ -38,7 +38,17 @@ ssh hermes-media
 
 ## Read-Only Checks
 
-The monitor should collect only metadata and bounded status reports:
+The automation should call the deterministic read-only monitor script:
+
+```powershell
+python scripts/memory_os_3_200_monitor.py `
+  --host hermes-media `
+  --previous-json C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json `
+  --snapshot-out C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json `
+  --output summary
+```
+
+The script should collect only metadata and bounded status reports:
 
 ```bash
 systemctl --user is-active hermes-gateway.service
@@ -71,6 +81,7 @@ find /root/.hermes/plugins -mindepth 2 -name plugin.yaml \
   | grep -E 'bak|backup|old|bad' || true
 grep -R '"action": "agent_os_shell_session_' /root/.hermes/memory-os/audit \
   | tail -20
+journalctl --user -u hermes-gateway.service --since "6 hours ago" --no-pager -o cat
 du -sh /root/.hermes/memory-os /root/.hermes/system-modules
 ```
 
@@ -93,6 +104,24 @@ report which section headings would be present for the public validation
 prompts. It must not print selected section bodies, previews, raw event
 summaries, private transcript text, or prompt-expanded context.
 
+The v0.3 monitor tracks trend signals that can support future decisions:
+
+- count deltas since the previous snapshot:
+  - `audit_entries`
+  - `events`
+  - `working_items`
+  - `crystallized_candidates`
+  - `crystallized_records`
+- `audit_entries_per_new_event`
+- shell hook marker totals for started/reset/finalized markers
+- gateway compaction count in the last six hours
+- `focus=None` count in compression logs
+- RH-26 section-heading anomalies
+- DeepReflection source-class skew
+
+The previous snapshot is local to the Codex automation directory. It is not
+written to the remote Hermes host and does not contain private bodies.
+
 ## Expected Healthy Snapshot
 
 A normal monitor pass should be treated as PASS when:
@@ -113,6 +142,8 @@ A normal monitor pass should be treated as PASS when:
 - `context_router` config matches the intended test-host mode
 - RH-26 apply probes show expected section headings for the seven public
   validation prompts
+- count deltas are present after the first script-backed run
+- gateway compaction and `focus=None` counts are reported as bounded integers
 - no backup-looking Memory-OS provider/shell plugin manifests are present under
   `$HERMES_HOME/plugins/`
 - DeepReflection reports `mode=auto_bounded` on the test host
@@ -134,6 +165,10 @@ WARN conditions:
   the shell, but it is not an automatic recovery condition
 - RH-26 casual continuity probes return empty context on a host that lacks clean
   casual carryover; this is a review signal, not a hard failure
+- `focus=None` appears in compression logs; this confirms the known Hermes
+  automatic compression focus gap remains
+- audit growth per new event is high enough to warrant review, but no boundary
+  violation appears
 - disk usage grows unexpectedly but no hard limit is crossed
 - a simple `is-active` service probe reports inactive, but a follow-up
   `systemctl --user show` probe reports `LoadState=loaded`,
@@ -335,6 +370,155 @@ Interpretation:
 - The gateway/timer WARN was not reproduced by the richer manual systemd
   recheck. If this repeats, the monitor should collect `LoadState`,
   `FragmentPath`, and `UnitFileState` before final FAIL classification.
+
+## v0.3 Script-Backed Trend Snapshot
+
+The deterministic monitor script produced the following saved automation
+snapshot:
+
+```text
+snapshot_time_utc=2026-05-22T11:49:52Z
+host=debian
+classification=WARN
+```
+
+PASS:
+
+```text
+gateway_active
+heartbeat_timer_active
+index_healthy
+doctor_ok
+status_tool_contract_ok
+context_router_apply
+```
+
+WARN:
+
+```text
+rh26_casual_empty
+deep_reflection_source_skew
+```
+
+FAIL:
+
+```text
+none
+```
+
+Status counts:
+
+```text
+audit_entries=1211
+events=92
+working_items=85
+crystallized_candidates=85
+crystallized_records=0
+queue_backlog=0
+index_health=healthy
+prefetch_mode=indexed
+```
+
+Trend deltas from the previous saved snapshot:
+
+```text
+audit_entries +110
+events +2
+working_items +2
+crystallized_candidates +2
+crystallized_records +0
+audit_entries_per_new_event=55.0
+```
+
+Interpretation:
+
+- The host remained healthy and the only WARN items were expected observation
+  signals.
+- The `audit_entries_per_new_event=55.0` ratio is high enough to keep tracking,
+  but it did not correspond to boundary violations, queue backlog, or
+  crystallized writes.
+- Events, working items, and candidates moved together by `+2`, which is
+  consistent with real foreground/runtime activity rather than uncontrolled
+  recursive growth.
+- `crystallized_records` stayed `0`.
+
+Shell hook marker totals:
+
+```text
+agent_os_shell_session_started=5
+agent_os_shell_session_reset=4
+agent_os_shell_session_finalized=4
+```
+
+These are totals, not expected-coverage assertions. The monitor still does not
+infer whether a real session reset occurred without a corresponding marker.
+
+Compression signal:
+
+```text
+gateway_compaction_recent_count=0
+gateway_compaction_focus_none_count=0
+```
+
+No new automatic compression focus-gap signal appeared in this monitor window.
+
+RH-26 live apply probe headings:
+
+```text
+cancel_failed_video -> Current Foreground Task
+continue_current_task -> Current Foreground Task
+casual_memory_system_change -> <empty>
+diagnostic_current_architecture -> Diagnostic Grounding / Current Memory-OS Runtime Facts
+candidate_vs_crystallized -> Crystallized Review Candidates / Indexed Recall
+active_comfyui_install -> Current Foreground Task / Indexed Recall
+deferred_cancellation -> Current Foreground Task
+```
+
+This matches the intended full-route test-host apply shape:
+
+- cancellation and vague continuation stay foreground-only
+- diagnostic questions expose diagnostic context
+- candidate/crystallized questions get candidate-review and indexed recall
+- active task prompts keep the foreground task plus task-relevant indexed
+  recall
+- casual continuity remains empty on this host because the available context is
+  still mechanism-heavy
+
+DeepReflection remained safe:
+
+```text
+enabled=true
+injection_mode=auto_bounded
+latest_selected_by_source_class=working:2
+latest_dropped_by_source_class=working:1
+rolling_selected_by_source_class=working:14
+rolling_dropped_by_source_class=working:7
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+```
+
+A read-only manual recheck shortly after the saved snapshot reported:
+
+```text
+recheck_time_utc=2026-05-22T11:56:26Z
+audit_entries=1215
+events=92
+working_items=85
+crystallized_candidates=85
+crystallized_records=0
+delta_vs_saved_snapshot:
+  audit_entries +4
+  events +0
+  working_items +0
+  crystallized_candidates +0
+```
+
+This recheck is useful because it shows the monitor probe itself can add small
+audit noise without advancing events, working memory, candidates, or
+crystallized records. Future audit-growth review should separate monitor/tool
+audit noise from real event-layer growth.
 
 ## Optimization Decision Signals
 

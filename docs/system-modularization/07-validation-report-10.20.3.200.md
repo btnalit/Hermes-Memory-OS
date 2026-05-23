@@ -4223,3 +4223,127 @@ Observation plan:
 - no section bodies, private messages, raw event summaries, or prompt-expanded
   context are printed by the monitor
 - regressions should be rolled back by config before any code change
+
+### Script-Backed Monitor v0.3 Snapshot
+
+The `memory-os-3-200-monitor` automation was moved to the deterministic
+read-only script:
+
+```text
+python scripts/memory_os_3_200_monitor.py --host hermes-media \
+  --previous-json C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json \
+  --snapshot-out C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json \
+  --output summary
+```
+
+Saved automation snapshot:
+
+```text
+snapshot_time_utc=2026-05-22T11:49:52Z
+classification=WARN
+PASS=[gateway_active, heartbeat_timer_active, index_healthy, doctor_ok,
+      status_tool_contract_ok, context_router_apply]
+WARN=[rh26_casual_empty, deep_reflection_source_skew]
+FAIL=[]
+```
+
+Counts and deltas:
+
+```text
+audit_entries=1211
+events=92
+working_items=85
+crystallized_candidates=85
+crystallized_records=0
+queue_backlog=0
+
+delta_from_previous_snapshot:
+  audit_entries +110
+  events +2
+  working_items +2
+  crystallized_candidates +2
+  crystallized_records +0
+  audit_entries_per_new_event=55.0
+```
+
+Context router state:
+
+```json
+{
+  "enabled": true,
+  "mode": "apply",
+  "apply_routes": ["all"],
+  "dry_run_routes": [],
+  "llm_judge_mode": "disabled"
+}
+```
+
+RH-26 live apply headings:
+
+```text
+cancel_failed_video -> Current Foreground Task
+continue_current_task -> Current Foreground Task
+casual_memory_system_change -> <empty>
+diagnostic_current_architecture -> Diagnostic Grounding / Current Memory-OS Runtime Facts
+candidate_vs_crystallized -> Crystallized Review Candidates / Indexed Recall
+active_comfyui_install -> Current Foreground Task / Indexed Recall
+deferred_cancellation -> Current Foreground Task
+```
+
+DeepReflection status:
+
+```text
+enabled=true
+injection_mode=auto_bounded
+latest_selected_by_source_class=working:2
+latest_dropped_by_source_class=working:1
+rolling_selected_by_source_class=working:14
+rolling_dropped_by_source_class=working:7
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+```
+
+Other bounded signals:
+
+```text
+agent_os_shell_session_started=5
+agent_os_shell_session_reset=4
+agent_os_shell_session_finalized=4
+gateway_compaction_recent_count=0
+gateway_compaction_focus_none_count=0
+disk_du=7.0M /root/.hermes/memory-os
+```
+
+Read-only recheck shortly after the saved snapshot:
+
+```text
+recheck_time_utc=2026-05-22T11:56:26Z
+audit_entries=1215
+events=92
+working_items=85
+crystallized_candidates=85
+crystallized_records=0
+delta_vs_saved_snapshot:
+  audit_entries +4
+  events +0
+  working_items +0
+  crystallized_candidates +0
+```
+
+Interpretation:
+
+- The monitor is now collecting the signals needed to support deferred
+  decisions: audit/event ratio, hook marker totals, compaction focus-gap
+  counts, RH-26 heading shape, and DeepReflection source-class distribution.
+- The only WARN items are expected: RH-26 casual continuity remains empty on
+  this mechanism-heavy test host, and DeepReflection remains working-source
+  skewed.
+- The `audit_entries_per_new_event=55.0` ratio deserves continued observation,
+  but it did not coincide with queue backlog, crystallized writes, or boundary
+  violations.
+- The manual recheck's `audit_entries +4` with no event/working/candidate
+  growth indicates the monitor/tool path can add small audit noise. Future
+  audit growth analysis should distinguish monitor/tool audit noise from real
+  event-layer growth.
