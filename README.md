@@ -62,6 +62,7 @@ HERMES_HOME=/root/.hermes hermes memory
 HERMES_HOME=/root/.hermes hermes memory_os status
 HERMES_HOME=/root/.hermes hermes memory_os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules status
 ```
 
 Expected relationship:
@@ -109,6 +110,11 @@ Implemented and tested:
 - official-style `memory-os-agent-os` shell plugin:
   - `hermes memory-os-agent-os status`
   - `hermes memory-os-agent-os doctor`
+  - `hermes memory-os-agent-os low-clue-recall dry-run`
+  - `hermes memory-os-agent-os memory-sources last/history/stats/feedback`
+  - `hermes memory-os-agent-os modules status/doctor/run-once`
+  - `hermes memory-os-agent-os modules validate-no-send`
+  - `hermes memory-os-agent-os modules deep_reflection preview-current/history`
   - minimal session marker hooks
 
 See:
@@ -290,6 +296,11 @@ Shell plugin checks:
 HERMES_HOME="$HERMES_HOME" hermes plugins list
 HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os status
 HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os doctor
+HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules status
+HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules doctor
+HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules run-once \
+  --module cron_mirror --dry-run
+HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules validate-no-send
 ```
 
 When the shell plugin is installed under the default Hermes home, the shell
@@ -298,6 +309,16 @@ aliases also infer their home from their plugin path:
 ```bash
 hermes memory-os-agent-os status
 hermes memory-os-agent-os doctor
+hermes memory-os-agent-os modules status
+```
+
+Useful operator aliases:
+
+```bash
+hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个"
+hermes memory-os-agent-os memory-sources last
+hermes memory-os-agent-os memory-sources stats --hours 24
+hermes memory-os-agent-os modules deep_reflection preview-current
 ```
 
 Expected plugin relationship:
@@ -347,7 +368,7 @@ python -m pytest -q
 Current local baseline after the Agent OS shell installer integration:
 
 ```text
-399 passed
+427 passed
 ```
 
 ## Safety Defaults
@@ -370,7 +391,9 @@ The test-host monitor is documented in
 `docs/system-modularization/19-memory-os-3-200-monitor.md`.
 
 It is read-only. It checks service health, provider status, shell plugin state,
-doctor output, status-tool contract, DeepReflection source-class distribution,
+shell aliases without explicit `HERMES_HOME`, modules alias parity, doctor
+output, status-tool contract, context-router mode, low-clue recall probes,
+Memory Sources attribution health, DeepReflection source-class distribution,
 backup-manifest pollution, and session hook audit markers. It must not restart
 services, run heartbeat catch-up, invoke hooks, force `/new`, apply cleanup,
 apply shadow journals, or read private transcripts.

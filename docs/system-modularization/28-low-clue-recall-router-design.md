@@ -1627,6 +1627,182 @@ DeepReflection.actual_identity_write=false
 DeepReflection.actual_crystallized_approval=false
 ```
 
+### RH-28h Tool-Aware Recall Clarification Contract
+
+A live Telegram retest after RH-28f/RH-28g exposed a gap outside the internal
+candidate router:
+
+```text
+user: /new
+user: 继续昨天那个
+assistant tool path: session_search
+assistant reply:
+  1. n8n 与智能体协作方案
+  2. 继续 n8n 与智能体方案
+  3. 继续 n8n 与 AI 智能体方案
+```
+
+Memory-OS internals were not producing this duplicate shortlist. A bounded
+provider probe showed `route=ambiguous_recall`, `router_applied=true`, and
+`selected_headings=[Recall Clarification Guard]`. The dry-run candidate router
+also showed duplicate merging and source diversity.
+
+The remaining gap was at the live agent/tool boundary: after receiving the
+Memory-OS guard, the agent still called `session_search` and generated a new
+shortlist from raw tool results. That bypassed the clustered guard candidates.
+
+For `ambiguous_recall` turns:
+
+- the `Recall Clarification Guard` candidate list is the authoritative
+  shortlist for the turn
+- downstream `session_search` or other tool results may support the answer but
+  must not create a competing unclustered shortlist
+- similar tool results must be merged into the existing candidate topics
+- if the guard candidates are insufficient, the assistant should ask for a
+  keyword, time, project, or source instead of guessing
+
+This does not disable `session_search`. It constrains how tool results may be
+used after ContextProjection has already classified the turn as ambiguous
+recall.
+
+Monitor v0.8 extends the low-clue ingress probe beyond route/headings. For each
+`ambiguous_recall` probe it verifies that live prefetch includes this
+tool-aware guard contract. Missing contract text is a FAIL:
+
+```text
+low_clue_guard_contract_missing
+```
+
+Remote validation on 10.20.3.200 after deploying RH-28h:
+
+```text
+build_prefetch("继续昨天那个")
+headings=[Recall Clarification Guard]
+guard_contract_ok=true
+context_chars=895
+```
+
+Monitor result:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+gateway=active pid=478558
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=[all]
+low_clue_recall.enabled=true
+low_clue_recall.judge_mode=report_only
+low_clue_recall.llm_available=true
+low_clue_ingress:
+  deictic_yesterday -> Recall Clarification Guard
+  deictic_just_now_no_punctuation -> Recall Clarification Guard
+  deictic_just_now_punctuation -> Recall Clarification Guard
+  continue_current_task -> Current Foreground Task
+  explicit_deferred_en -> Current Foreground Task
+  explicit_deferred_zh -> Current Foreground Task
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+### RH-28i MemorySources Internal Label Filter
+
+A follow-up live Telegram retest showed a second candidate-quality defect:
+
+```text
+3. ambiguous_recall: Current Foreground Task（memory_sources）
+```
+
+This was not a user topic. It was an attribution artifact produced by
+`memory_sources`: the candidate builder used `route + selected section headings`
+as a fallback title. When the selected headings were internal projection
+sections such as `Recall Clarification Guard` or `Current Foreground Task`, the
+router exposed Memory-OS internals as a recall option.
+
+RH-28i changes the rule:
+
+- `memory_sources` may contribute a recall candidate only when it contains a
+  non-internal topic heading
+- internal projection headings are ignored for candidate labels
+- if a memory_sources record contains only internal headings, it is skipped
+- monitor fails if any low-clue candidate label contains internal route or
+  projection names
+
+Remote validation on 10.20.3.200:
+
+```text
+low-clue-recall dry-run --query "继续昨天那个"
+candidate_count=4
+source_distribution={"working": 109}
+internal memory_sources label removed
+no candidate label contains:
+  ambiguous_recall
+  Current Foreground Task
+  Recall Clarification Guard
+
+monitor:
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+low_clue_recall.internal_label_count=0
+gateway=active pid=478852
+index_health=healthy
+doctor=ok
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+```
+
+### RH-28j Distinctive Entity Preservation
+
+A retest after RH-28i showed the opposite title-quality failure:
+
+```text
+3. make / 自动化 / Claude / AI / app
+```
+
+The `n8n` topic was present inside `cluster_terms`, but title normalization
+selected the first broad terms and dropped the most distinctive product token.
+This was not a source-diversity problem; it was an entity-preservation problem
+inside candidate title normalization.
+
+RH-28j changes the title rule:
+
+- distinctive product/project tokens are prioritized when building normalized
+  topic titles
+- the rule is generic: alphanumeric entity-like terms receive higher title
+  priority than broad context words
+- no `n8n`-specific rule is added
+- candidate clustering remains unchanged
+
+Regression fixture:
+
+```text
+X9Flow 与智能体协作方案
+make / 自动化 / Claude / AI / app 背景...
+
+=> normalized title must preserve X9Flow
+=> broad generic prefix must not hide the distinctive entity
+```
+
+Remote validation on 10.20.3.200:
+
+```text
+low-clue-recall dry-run --query "继续昨天那个"
+candidate 3 before: make / 自动化 / Claude / AI / app
+candidate 3 after:  n8n / Claude / discovery / make / 自动化
+internal_label_count=0
+monitor status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+gateway=active pid=479171
+```
+
 ### RH-28e Priority Correction
 
 A second Telegram retest showed the first RH-28e patch was incomplete:

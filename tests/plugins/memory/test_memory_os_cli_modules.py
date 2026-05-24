@@ -1,5 +1,6 @@
 import argparse
 import json
+import importlib
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -144,8 +145,9 @@ def test_modules_deep_reflection_preview_ensures_installed_runtime_path(tmp_path
     def fake_ensure_runtime_path(hermes_home):
         calls.append(str(hermes_home))
 
-    monkeypatch.setattr(
-        "plugins.memory.memory_os.cli._ensure_system_module_runtime_path",
+    monkeypatch.setitem(
+        memory_os_command.__globals__,
+        "_ensure_system_module_runtime_path",
         fake_ensure_runtime_path,
     )
 
@@ -222,8 +224,8 @@ def test_installed_cli_extends_loaded_plugins_package_path(tmp_path, monkeypatch
     runtime_memory_plugins = runtime_plugins / "memory"
     runtime_plugins.mkdir(parents=True)
     runtime_memory_plugins.mkdir()
-    plugins_package = sys.modules["plugins"]
-    memory_package = sys.modules["plugins.memory"]
+    plugins_package = importlib.import_module("plugins")
+    memory_package = importlib.import_module("plugins.memory")
     original_path = list(plugins_package.__path__)
     original_memory_path = list(memory_package.__path__)
     monkeypatch.setattr(plugins_package, "__path__", original_path.copy())

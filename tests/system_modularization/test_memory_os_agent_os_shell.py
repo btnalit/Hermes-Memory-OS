@@ -98,6 +98,21 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     feedback_history_args = parser.parse_args(["memory-sources", "feedback", "history", "--limit", "3"])
     assert feedback_history_args.memory_sources_feedback_command == "history"
     assert feedback_history_args.limit == 3
+    modules_status_args = parser.parse_args(["modules", "status"])
+    assert modules_status_args.agent_os_command == "modules"
+    assert modules_status_args.modules_command == "status"
+    modules_doctor_args = parser.parse_args(["modules", "doctor"])
+    assert modules_doctor_args.modules_command == "doctor"
+    modules_run_once_args = parser.parse_args(["modules", "run-once", "--module", "cron_mirror", "--dry-run"])
+    assert modules_run_once_args.modules_command == "run-once"
+    assert modules_run_once_args.module == "cron_mirror"
+    assert modules_run_once_args.dry_run is True
+    modules_validate_args = parser.parse_args(["modules", "validate-no-send"])
+    assert modules_validate_args.modules_command == "validate-no-send"
+    dr_history_args = parser.parse_args(["modules", "deep_reflection", "history", "--days", "3"])
+    assert dr_history_args.modules_command == "deep_reflection"
+    assert dr_history_args.deep_reflection_command == "history"
+    assert dr_history_args.days == 3
 
 
 def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
@@ -164,6 +179,35 @@ def test_shell_low_clue_recall_alias_delegates_to_existing_memory_os_cli(monkeyp
     assert json.loads(capsys.readouterr().out) == {
         "delegated": "low-clue-recall",
         "subcommand": "dry-run",
+    }
+
+
+def test_shell_modules_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
+    module = load_shell_module()
+    calls: list[argparse.Namespace] = []
+
+    def fake_delegate(args: argparse.Namespace) -> int:
+        calls.append(args)
+        print(json.dumps({"delegated": args.memory_os_command, "subcommand": args.modules_command}))
+        return 0
+
+    monkeypatch.setattr(module, "_delegate_to_memory_os_cli", fake_delegate)
+    args = argparse.Namespace(
+        agent_os_command="modules",
+        modules_command="run-once",
+        module="cron_mirror",
+        dry_run=True,
+        apply=False,
+    )
+
+    assert module.memory_os_agent_os_command(args) == 0
+
+    assert calls[0].memory_os_command == "modules"
+    assert calls[0].modules_command == "run-once"
+    assert calls[0].module == "cron_mirror"
+    assert json.loads(capsys.readouterr().out) == {
+        "delegated": "modules",
+        "subcommand": "run-once",
     }
 
 

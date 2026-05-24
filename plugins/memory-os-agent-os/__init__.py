@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-_ALLOWED_ALIASES = {"status", "doctor", "low-clue-recall", "memory-sources"}
+_ALLOWED_ALIASES = {"status", "doctor", "low-clue-recall", "memory-sources", "modules"}
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +98,23 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    modules_parser = subs.add_parser("modules")
+    modules_subs = modules_parser.add_subparsers(dest="modules_command", required=True)
+    modules_subs.add_parser("status")
+    modules_subs.add_parser("doctor")
+    modules_run_once = modules_subs.add_parser("run-once")
+    modules_run_once.add_argument("--module", required=True)
+    modules_run_once.add_argument("--dry-run", action="store_true")
+    modules_run_once.add_argument("--apply", action="store_true")
+    modules_subs.add_parser("validate-no-send")
+    modules_deep_reflection = modules_subs.add_parser("deep_reflection")
+    deep_reflection_subs = modules_deep_reflection.add_subparsers(
+        dest="deep_reflection_command",
+        required=True,
+    )
+    deep_reflection_subs.add_parser("preview-current")
+    deep_reflection_history = deep_reflection_subs.add_parser("history")
+    deep_reflection_history.add_argument("--days", type=int, default=7)
 
 
 def memory_os_agent_os_command(args: argparse.Namespace) -> int:

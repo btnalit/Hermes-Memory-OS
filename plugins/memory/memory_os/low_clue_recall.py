@@ -93,6 +93,17 @@ _GENERIC_TOPIC_TERMS = _GENERIC_RECALL_TERMS | {
     "user",
     "assistant",
 }
+_INTERNAL_PROJECTION_HEADINGS = {
+    "Conversation Carryover",
+    "Crystallized Review Candidates",
+    "Current Foreground Task",
+    "Current Memory-OS Runtime Facts",
+    "Diagnostic Grounding",
+    "Indexed Recall",
+    "Recall Clarification Guard",
+    "Recent Event Summaries",
+    "Working Memory",
+}
 _ENGLISH_TOPIC_STOPWORDS = {
     "about",
     "above",
@@ -295,6 +306,14 @@ def build_low_clue_guard_lines(
             )
         else:
             lines.append("Plausible recall candidates are available; ask the owner to choose one.")
+            lines.append(
+                "Use the candidates below as the authoritative shortlist for this ambiguous recall turn."
+            )
+            lines.append("Do not create a competing shortlist from raw session_search/tool results.")
+            lines.append(
+                "If tool/search results appear similar, merge duplicate variants into the existing candidate topics."
+            )
+            lines.append("If these candidates are insufficient, ask for a keyword instead of guessing.")
         lines.append("Likely recall candidate:" if report.get("decision") == "direct_resume" else "Plausible recall candidates:")
         for index, candidate in enumerate(candidates[:limit], start=1):
             label = _clip(str(candidate.get("label") or ""), 140)
@@ -460,11 +479,16 @@ def _event_candidates(store: MemoryOSStore) -> list[dict[str, Any]]:
 def _memory_source_candidates(store: MemoryOSStore) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for record in read_memory_source_records(store.roots, limit=50):
-        route = str(record.get("route") or "unknown")
         selected = record.get("selected") if isinstance(record.get("selected"), list) else []
-        headings = [str(item.get("heading") or "") for item in selected if isinstance(item, dict)]
-        label = _label_from_text(f"{route}: {', '.join(headings[:3])}")
-        if not label:
+        headings = [
+            str(item.get("heading") or "")
+            for item in selected
+            if isinstance(item, dict)
+            and str(item.get("heading") or "")
+            and str(item.get("heading") or "") not in _INTERNAL_PROJECTION_HEADINGS
+        ]
+        label = _label_from_text(", ".join(headings[:3]))
+        if not label or _looks_too_mechanistic(label):
             continue
         result.append(
             _candidate(
@@ -824,6 +848,7 @@ def _topic_title_from_terms(labels: list[str], topic_terms: set[str]) -> str:
     ordered = sorted(
         topic_terms,
         key=lambda term: (
+            -_term_title_priority(term),
             text_lower.find(term.lower()) if text_lower.find(term.lower()) >= 0 else 999999,
             term,
         ),
@@ -837,6 +862,22 @@ def _topic_title_from_terms(labels: list[str], topic_terms: set[str]) -> str:
         and not re.search(r"(?i)\.(png|jpg|jpeg|json|py|safetensors|txt|md)$", term)
     ]
     return " / ".join(filtered[:5])
+
+
+def _term_title_priority(term: str) -> int:
+    value = str(term or "").strip().lower()
+    if not value:
+        return 0
+    score = 0
+    if re.search(r"[a-z]", value) and re.search(r"\d", value):
+        score += 20
+    if re.search(r"\d", value):
+        score += 5
+    if len(value) >= 5:
+        score += 2
+    if value in _GENERIC_TOPIC_TERMS or value in _ENGLISH_TOPIC_STOPWORDS:
+        score -= 10
+    return score
 
 
 def _display_topic_term(term: str, text: str) -> str:

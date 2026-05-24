@@ -130,6 +130,38 @@ def test_low_clue_recall_keeps_memory_sources_candidate_when_working_would_monop
     assert report["candidate_quality"]["diversity_applied"] is True
 
 
+def test_low_clue_recall_skips_memory_sources_with_only_internal_projection_headings(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。",
+            "n8n 与 AI 智能体分工：n8n 做流程外壳，智能体做判断。",
+        ],
+    )
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_internal_only",
+            "created_at": "2026-05-24T00:00:00Z",
+            "route": "ambiguous_recall",
+            "query_class": "ambiguous_recall",
+            "selected": [
+                {"heading": "Recall Clarification Guard", "source_class": "recall_guard", "chars": 100},
+                {"heading": "Current Foreground Task", "source_class": "foreground", "chars": 100},
+            ],
+        },
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+    labels = [str(candidate["label"]) for candidate in report["candidates"]]
+
+    assert all("ambiguous_recall" not in label for label in labels)
+    assert all("Current Foreground Task" not in label for label in labels)
+    assert "memory_sources" not in {candidate["source_class"] for candidate in report["candidates"]}
+
+
 def test_low_clue_recall_applies_recent_correction_penalty_without_long_term_write(tmp_path):
     store = _store(tmp_path)
     _write_working(
@@ -173,6 +205,24 @@ def test_low_clue_recall_normalizes_transcript_fragments_into_topic_titles(tmp_p
     assert any("Project Atlas" in label for label in labels)
     assert all("User:" not in label and "Assistant:" not in label and "|" not in label for label in labels)
     assert all(len(label) <= 96 for label in labels)
+
+
+def test_low_clue_recall_preserves_distinctive_entity_in_normalized_title(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "make / 自动化 / Claude / AI / app 背景：X9Flow 与智能体协作方案，流程外壳负责触发、重试、回滚。",
+            "make / 自动化 / Claude / AI / app 继续：X9Flow 与 AI 智能体分工，编排层做确定性执行。",
+            "make / 自动化 / Claude / AI / app 评估：X9Flow 适合 webhook、审批、通知、日志审计。",
+        ],
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+    labels = [candidate["label"] for candidate in report["candidates"]]
+
+    assert any("X9Flow" in label for label in labels)
+    assert all("make / 自动化 / Claude / AI / app" not in label for label in labels)
 
 
 def test_low_clue_recall_llm_judge_receives_normalized_titles(tmp_path):
@@ -383,6 +433,33 @@ def test_prefetch_low_clue_guard_includes_bounded_choices_when_enabled(tmp_path)
     assert "n8n 与 AI 智能体分工" in context
     assert "互联网数据采集系统分层" in context
     assert "Working Memory" not in context
+
+
+def test_prefetch_low_clue_guard_blocks_unclustered_tool_shortlists(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "n8n 与 AI 智能体分工：n8n 做流程外壳，智能体做判断。",
+            "继续 n8n 与智能体方案：n8n 负责流程，智能体负责判断。",
+            "继续 n8n 与 AI 智能体方案：自动化编排不等于智能体替代。",
+        ],
+    )
+
+    context = build_prefetch(
+        "继续昨天那个",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        low_clue_recall_config={"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
+    )
+
+    assert "### Recall Clarification Guard" in context
+    assert "authoritative shortlist" in context
+    assert "Do not create a competing shortlist from raw session_search/tool results." in context
+    assert "merge duplicate variants into the existing candidate topics" in context
+    assert "ask for a keyword instead of guessing" in context
 
 
 def test_prefetch_high_confidence_low_clue_guard_allows_likely_resume(tmp_path):

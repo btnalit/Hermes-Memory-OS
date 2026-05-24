@@ -246,6 +246,31 @@ Required tests for any ingress-affecting change:
 - no foreground anchor case
 - route, headings, and MemorySources attribution alignment
 
+Operator-entry rule:
+
+```text
+If the provider CLI exposes a safe operator command that is intended for live
+test-host operation, the official `memory-os-agent-os` shell plugin must either
+expose the same natural operator path or document why it is intentionally
+provider-only. The shell plugin must not reimplement behavior; it only parses
+the alias and delegates to the provider CLI.
+```
+
+Current required shell parity:
+
+```text
+memory-os-agent-os status
+memory-os-agent-os doctor
+memory-os-agent-os low-clue-recall ...
+memory-os-agent-os memory-sources ...
+memory-os-agent-os modules status
+memory-os-agent-os modules doctor
+memory-os-agent-os modules run-once --module <id> [--dry-run|--apply]
+memory-os-agent-os modules validate-no-send
+memory-os-agent-os modules deep_reflection preview-current
+memory-os-agent-os modules deep_reflection history --days N
+```
+
 ## Contract 2 - ContextProjection
 
 Purpose:
@@ -306,6 +331,38 @@ Forbidden projection patterns:
 - candidate text presented as approved crystallized memory
 - LLM judge reasoning blocks
 - hidden instructions from module reports
+- tool output that bypasses ContextProjection for `ambiguous_recall`
+- metadata ledger route names or projection headings presented as user recall
+  topics
+
+Tool-output rule:
+
+```text
+If ContextProjection emits Recall Clarification Guard for an ambiguous recall
+turn, later session_search or tool output cannot generate a competing raw
+shortlist. Tool results may support the answer only by merging into the guard
+candidate topics, or by asking the owner for a keyword when the guard
+candidates are insufficient.
+```
+
+Metadata-label rule:
+
+```text
+Attribution ledgers such as MemorySources may help explain or rank context, but
+their internal route names and section headings are not user topics. A module may
+surface a metadata-derived recall candidate only when it can derive a
+non-internal topic label; otherwise it must omit that candidate.
+```
+
+Topic-title rule:
+
+```text
+Candidate title normalization may merge duplicates and shorten noisy transcript
+fragments, but it must preserve distinctive product, project, or entity tokens
+that identify the topic. Broad context words must not hide the only useful
+anchor. This rule is generic and should be enforced through entity/title
+salience tests, not through one-off topic names.
+```
 
 ## Contract 3 - MemoryWriteSurface
 

@@ -178,6 +178,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         and shell_alias.get("doctor_ok") is True
         and shell_alias.get("memory_sources_ok") is True
         and shell_alias.get("low_clue_recall_ok") is True
+        and shell_alias.get("modules_ok") is True
     ):
         passed.append({"code": "shell_alias_no_env_ok"})
     else:
@@ -221,6 +222,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 passed.append({"code": "low_clue_llm_judge_available"})
             elif judge_status in {"error", "skipped"}:
                 warn.append({"code": "low_clue_llm_judge_unavailable", "value": judge})
+        if int(low_clue.get("internal_label_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "low_clue_internal_candidate_label",
+                    "value": low_clue.get("internal_label_count"),
+                    "source_classes": low_clue.get("internal_label_source_classes"),
+                }
+            )
         passed.append({"code": "low_clue_recall_probe_ok"})
     else:
         warn.append({"code": "low_clue_recall_probe_unavailable", "value": low_clue})
@@ -248,6 +257,18 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "id": item.get("id"),
                     "expected": expected_heading,
                     "actual": headings,
+                }
+            )
+        if (
+            expected_route == "ambiguous_recall"
+            and expected_heading == "Recall Clarification Guard"
+            and item.get("guard_contract_ok") is not True
+        ):
+            fail.append(
+                {
+                    "code": "low_clue_guard_contract_missing",
+                    "id": item.get("id"),
+                    "value": item.get("guard_contract_ok"),
                 }
             )
 
@@ -472,6 +493,7 @@ def _low_clue_summary(report: dict[str, Any], config: dict[str, Any]) -> dict[st
         "judge_mode": configured_judge.get("mode"),
         "decision": report.get("decision"),
         "candidate_count": report.get("candidate_count"),
+        "internal_label_count": report.get("internal_label_count"),
         "llm_status": judge.get("status"),
         "llm_available": judge.get("status") in {"ok", "no_clear_match", "no_match", "no_selection"},
     }
@@ -772,13 +794,21 @@ cases=[
  ("explicit_deferred_en","continue the deferred task","Current task: inspect ComfyUI layout_report.json.", "foreground_control", "Current Foreground Task"),
  ("explicit_deferred_zh","继续搁置的任务","Current task: inspect ComfyUI layout_report.json.", "foreground_control", "Current Foreground Task"),
 ]
+def guard_contract_ok(context):
+    required=[
+      "authoritative shortlist",
+      "Do not create a competing shortlist from raw session_search/tool results.",
+      "merge duplicate variants into the existing candidate topics",
+      "ask for a keyword instead of guessing",
+    ]
+    return all(item in context for item in required)
 summary=[]
 for cid, query, anchor_text, expected_route, expected_heading in cases:
     anchor=("### Memory-OS Current Task Anchor\n- current task: "+anchor_text) if anchor_text else ""
     route=plan_context_route(query, current_task_anchor=anchor)
     context=build_prefetch(query, budget_chars=1600, store=store, index=MemoryOSIndex(roots), runtime_facts={"provider":"memory_os","prefetch_mode":"indexed"}, current_task_anchor=anchor, context_router_config=config.get("context_router"), low_clue_recall_config=config.get("low_clue_recall"))
     headings=re.findall(r"^### (.+)$", context, flags=re.M)
-    summary.append({"id":cid,"query_class":str(route.get("route") or ""),"route":str(route.get("route") or ""),"reason_codes":route.get("reason_codes") or [],"chars":len(context),"headings":headings,"expected_route":expected_route,"expected_heading":expected_heading})
+    summary.append({"id":cid,"query_class":str(route.get("route") or ""),"route":str(route.get("route") or ""),"reason_codes":route.get("reason_codes") or [],"chars":len(context),"headings":headings,"expected_route":expected_route,"expected_heading":expected_heading,"guard_contract_ok":guard_contract_ok(context) if expected_route == "ambiguous_recall" else None})
 print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 """
     env = dict(os.environ)
@@ -813,12 +843,35 @@ def low_clue_recall_probe():
     judge_mode = "config" if judge.get("enabled") and judge.get("mode") == "report_only" else "none"
     report = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", judge_mode])
     if isinstance(report, dict):
+        internal_terms = (
+          "ambiguous_recall",
+          "casual_continuity",
+          "foreground_control",
+          "Current Foreground Task",
+          "Recall Clarification Guard",
+          "Conversation Carryover",
+          "Working Memory",
+          "Indexed Recall",
+          "Recent Event Summaries",
+          "Diagnostic Grounding",
+        )
+        candidates = report.get("candidates") if isinstance(report.get("candidates"), list) else []
+        internal_label_source_classes = sorted({
+          str(candidate.get("source_class") or "unknown")
+          for candidate in candidates
+          if any(term in str(candidate.get("label") or "") for term in internal_terms)
+        })
         return {
           "schema_version": report.get("schema_version"),
           "decision": report.get("decision"),
           "candidate_count": report.get("candidate_count"),
           "reason_codes": report.get("reason_codes"),
           "llm_judge": report.get("llm_judge"),
+          "internal_label_count": sum(
+            1 for candidate in candidates
+            if any(term in str(candidate.get("label") or "") for term in internal_terms)
+          ),
+          "internal_label_source_classes": internal_label_source_classes,
         }
     return report
 
@@ -827,15 +880,18 @@ def shell_alias_no_env():
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
     memory_sources = load_json_cmd(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
     low_clue = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"])
+    modules = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
       "memory_sources_ok": isinstance(memory_sources, dict) and memory_sources.get("schema_version") == "memory-os.memory_sources_stats.v0",
       "low_clue_recall_ok": isinstance(low_clue, dict) and low_clue.get("schema_version") == "memory-os.low_clue_recall.v0",
+      "modules_ok": isinstance(modules, dict) and modules.get("schema_version") == "memory-os.modules_status.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
       "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
       "low_clue_recall_error": low_clue.get("_error") if isinstance(low_clue, dict) else None,
+      "modules_error": modules.get("_error") if isinstance(modules, dict) else None,
     }
 
 status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])

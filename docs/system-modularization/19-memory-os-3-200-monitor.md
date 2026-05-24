@@ -232,6 +232,9 @@ A normal monitor pass should be treated as PASS when:
   home
 - `hermes memory-os-agent-os memory-sources stats --hours 24` also works
   without an explicit `HERMES_HOME`
+- `hermes memory-os-agent-os modules status` also works without an explicit
+  `HERMES_HOME`, proving the shell plugin exposes the provider module operator
+  entrypoint
 - `memory_os status` reports `prefetch_mode=indexed`
 - `memory_os doctor` has `status=ok`
 - the only expected doctor warning is `hindsight_adapter_disabled`
@@ -243,6 +246,14 @@ A normal monitor pass should be treated as PASS when:
   `ambiguous_recall` with `Recall Clarification Guard`, while explicit current
   or deferred task phrases remain `foreground_control` with
   `Current Foreground Task`
+- RH-28h ingress probes confirm `Recall Clarification Guard` includes the
+  tool-aware contract that prevents raw `session_search` or other tool results
+  from creating a competing unclustered shortlist
+- RH-28i low-clue recall probes report `internal_label_count=0`, proving that
+  internal route or projection names are not exposed as candidate titles
+- RH-28j title normalization preserves distinctive entity terms in low-clue
+  candidate labels; this is covered by regression tests rather than raw monitor
+  title output
 - RH-26 apply probes show expected section headings for the seven public
   validation prompts
 - count deltas are present after the first script-backed run
@@ -299,10 +310,17 @@ FAIL conditions:
   `HERMES_HOME` but fails through the natural operator command
 - `memory-os-agent-os memory-sources stats` fails through the natural operator
   command
+- `memory-os-agent-os modules status` fails through the natural operator
+  command
 - doctor returns an error
 - status tool contract validation fails
 - RH-26 apply probes select mechanism-heavy sections for casual prompts or
   include background sections for cancellation/continue prompts
+- RH-28 ambiguous recall probes select `Recall Clarification Guard` but the
+  guard is missing the tool-aware contract, reported as
+  `low_clue_guard_contract_missing`
+- RH-28 low-clue candidates contain internal route or projection names, reported
+  as `low_clue_internal_candidate_label`
 - backup-looking Memory-OS provider/shell plugin manifests exist under
   `$HERMES_HOME/plugins/`
 - any boundary boolean becomes true

@@ -179,6 +179,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             "doctor_ok": True,
             "memory_sources_ok": True,
             "low_clue_recall_ok": True,
+            "modules_ok": True,
         },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
@@ -206,6 +207,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
                 "headings": ["Recall Clarification Guard"],
                 "expected_route": "ambiguous_recall",
                 "expected_heading": "Recall Clarification Guard",
+                "guard_contract_ok": True,
             }
         ],
     }
@@ -237,6 +239,41 @@ def test_classify_snapshot_fails_on_low_clue_ingress_route_mismatch():
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "low_clue_ingress_route_mismatch" for item in classification["fail"])
     assert any(item["code"] == "low_clue_ingress_heading_mismatch" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_low_clue_guard_contract_missing():
+    snapshot = _healthy_snapshot()
+    snapshot["low_clue_ingress_matrix"] = [
+        {
+            "id": "deictic_yesterday",
+            "route": "ambiguous_recall",
+            "headings": ["Recall Clarification Guard"],
+            "expected_route": "ambiguous_recall",
+            "expected_heading": "Recall Clarification Guard",
+            "guard_contract_ok": False,
+        }
+    ]
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "low_clue_guard_contract_missing" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_low_clue_candidate_uses_internal_label():
+    snapshot = _healthy_snapshot()
+    snapshot["low_clue_recall"] = {
+        "schema_version": "memory-os.low_clue_recall.v0",
+        "decision": "ask_choice",
+        "candidate_count": 4,
+        "internal_label_count": 1,
+        "llm_judge": {"status": "disabled", "mode": "none"},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "low_clue_internal_candidate_label" for item in classification["fail"])
 
 
 def test_classify_snapshot_treats_no_selection_judge_as_available():
@@ -290,6 +327,17 @@ def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
         },
         "compaction": {},
     }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "shell_alias_no_env_failed" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_shell_modules_alias_without_env_breaks():
+    snapshot = _healthy_snapshot()
+    snapshot["shell_alias_no_env"]["modules_ok"] = False
+    snapshot["shell_alias_no_env"]["modules_error"] = "invalid choice: 'modules'"
 
     classification = classify_snapshot(snapshot)
 
@@ -516,7 +564,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             },
             "doctor": {"status": "ok", "findings": []},
             "status_tool_contract": {"status": "ok", "findings": []},
-            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
+            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True},
             "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
             "rh26_apply_probe": [],
             "deep_reflection": {},
@@ -577,7 +625,7 @@ def _healthy_snapshot() -> dict:
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {
