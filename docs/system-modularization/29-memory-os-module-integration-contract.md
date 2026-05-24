@@ -545,6 +545,144 @@ provider.prefetch -> ingress -> build_prefetch -> context_router ->
 MemorySources -> monitor
 ```
 
+## Contract 7 - HermesUpgradeCompatibility
+
+Purpose:
+
+Keep Memory-OS compatible with Hermes upgrades without relying on memory of
+which operator commands happened to work on a previous host.
+
+This contract applies whenever Hermes itself changes:
+
+- Hermes package upgrade or downgrade
+- plugin loader or manifest behavior changes
+- memory provider API changes
+- CLI command registry changes
+- config schema changes
+- gateway service environment changes
+- Python import/bootstrap path changes
+
+Owning script:
+
+```text
+scripts/memory_os_upgrade_compat_check.py
+```
+
+The script is read-only. It must not install, enable, restart, run heartbeat,
+run cognitive loop, run cleanup, apply shadow journals, export to Hindsight, or
+read private transcripts.
+
+### External Interface Surfaces
+
+Hermes upgrades are treated as external interface changes, not normal module
+changes.
+
+| Surface | Why it matters | Required compatibility probe |
+| --- | --- | --- |
+| Provider selection | Memory-OS only works when Hermes selects `memory_os` as provider. | `hermes memory` must report active provider `memory_os`. |
+| Provider runtime import | Shell aliases and hooks must be able to import Memory-OS runtime. | `hermes memory-os-agent-os status` and `doctor` must return Memory-OS JSON. |
+| Shell plugin loader | Operator paths must remain usable after Hermes plugin scanning changes. | `memory-os-agent-os status/doctor/modules status` must work without explicit `HERMES_HOME` when installed in the default home. |
+| Module CLI parity | Safe operator commands must remain available through the shell path. | `modules status`, `modules doctor`, `modules run-once --dry-run`, and `modules validate-no-send`. |
+| Context router / low-clue recall | Hermes changes must not bypass Memory-OS context projection. | `low-clue-recall dry-run --query "继续昨天那个"` must return bounded JSON with false boundaries. |
+| Attribution / feedback metadata | Upgrade must not break MemorySources observability. | `memory-sources stats --hours 24` must return forbidden-field count 0 and boundary count 0. |
+| Status-tool contract | Runtime status schema must remain machine-checkable. | status-tool contract probe must pass when available through the deployed entrypoint. |
+
+Current live reality:
+
+```text
+`memory_os` is the memory provider, not a general Hermes plugin command.
+Do not require `hermes memory_os ...` as the natural operator path on the live
+test host. Use `hermes memory` for provider selection and
+`hermes memory-os-agent-os ...` for operator commands.
+```
+
+Historical documents may mention `hermes memory_os ...` because earlier design
+iterations expected a general-plugin CLI. New operational docs and upgrade
+checks must use the current shell alias path unless a future Hermes version
+officially exposes provider commands again.
+
+### Upgrade Gate
+
+Before a Hermes upgrade:
+
+1. Run the upgrade compatibility check and save the JSON report.
+2. Run the normal read-only monitor and save the summary.
+3. Record Hermes version, active provider, shell alias health, modules alias
+   health, MemorySources health, and low-clue recall probe result.
+
+After a Hermes upgrade:
+
+1. Run the same upgrade compatibility check.
+2. Run the normal read-only monitor.
+3. Compare pre/post results.
+4. Do not enable new modules until all required checks pass or the failure is
+   explicitly classified and accepted.
+
+Required PASS:
+
+- `hermes --version` runs or is explicitly recorded as unavailable.
+- `hermes memory` reports `memory_os` as active provider.
+- `memory-os-agent-os status` returns `memory-os.status.v0`.
+- `memory-os-agent-os doctor` has no error findings.
+- `memory-os-agent-os modules status` returns
+  `memory-os.modules_status.v0`.
+- `memory-os-agent-os modules doctor` has no error findings.
+- `memory-os-agent-os modules run-once --module cron_mirror --dry-run` returns
+  a dry-run report.
+- `memory-os-agent-os modules validate-no-send` reports all hard boundaries
+  false.
+- `memory-os-agent-os memory-sources stats --hours 24` has
+  `boundary_true_count=0` and no forbidden-field findings.
+- `memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个"` returns a
+  bounded recall report with all hard boundaries false.
+
+Required FAIL:
+
+- provider is not `memory_os`
+- Memory-OS runtime import fails
+- shell alias command is missing
+- modules alias command is missing
+- any hard boundary is true
+- MemorySources reports forbidden fields
+- doctor reports an error finding
+- low-clue recall command exits non-zero or returns unbounded/non-JSON output
+
+Expected WARN:
+
+- Hermes version command unavailable
+- optional status-tool contract entrypoint unavailable, if the active Hermes
+  command registry does not expose provider subcommands
+- known `hindsight_adapter_disabled` warning without additional doctor errors
+
+### Upgrade Finding Severity
+
+| Severity | Example | Action |
+| --- | --- | --- |
+| P0 | Upgrade causes send/execute/identity/crystallized write or private leak. | Roll back or disable affected config before any further testing. |
+| P1 | Provider selected but shell/runtime import, modules alias, or prefetch probe breaks. | Stop new feature work; fix compatibility seam or document version as unsupported. |
+| P2 | Optional report-only LLM judge unavailable, version probe unavailable, or non-critical WARN changes. | Keep deterministic fallback; record and monitor. |
+| P3 | Output wording or formatting changed but schemas and boundaries remain valid. | Batch with docs cleanup. |
+
+### Installer Requirement
+
+Installer changes must not assume a single Hermes version. Any installer change
+that touches plugin paths, runtime paths, shell enablement, or config writes
+must either:
+
+- pass the upgrade compatibility check on the test host, or
+- document why the check is not applicable and what manual evidence replaces it.
+
+If Hermes changes break the adapter, Memory-OS must degrade rather than block
+core provider/runtime operation:
+
+```text
+provider data stays readable
+canonical files remain untouched
+shell/operator convenience may fail closed
+LLM judge falls back to deterministic mode
+advanced modules do not auto-enable to work around the break
+```
+
 ## Observation And Promotion Gates
 
 Purpose:

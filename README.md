@@ -59,9 +59,8 @@ After install:
 
 ```bash
 HERMES_HOME=/root/.hermes hermes memory
-HERMES_HOME=/root/.hermes hermes memory_os status
-HERMES_HOME=/root/.hermes hermes memory_os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules status
 ```
 
@@ -124,6 +123,7 @@ See:
 - `docs/system-modularization/17-deep-reflection-runtime-design.md`
 - `docs/system-modularization/19-hermes-official-plugin-compatibility.md`
 - `docs/system-modularization/19-memory-os-3-200-monitor.md`
+- `docs/system-modularization/30-hermes-upgrade-compatibility-gate.md`
 
 ## Architecture
 
@@ -285,10 +285,10 @@ Provider checks:
 
 ```bash
 HERMES_HOME="$HERMES_HOME" hermes memory
-HERMES_HOME="$HERMES_HOME" hermes memory_os status
-HERMES_HOME="$HERMES_HOME" hermes memory_os doctor
-HERMES_HOME="$HERMES_HOME" hermes memory_os heartbeat --max-events 100
 ```
+
+`memory_os` is selected through `memory.provider`; it is not expected to appear
+as a top-level `hermes memory_os ...` command on current Hermes builds.
 
 Shell plugin checks:
 
@@ -332,9 +332,8 @@ plugins.enabled does not include memory_os
 Regression checks:
 
 ```bash
-HERMES_HOME="$HERMES_HOME" hermes memory_os conversation-regression prompts
-HERMES_HOME="$HERMES_HOME" hermes memory_os conversation-regression \
-  status-tool-contract
+python scripts/memory_os_upgrade_compat_check.py --host hermes-media --output summary
+python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
 ```
 
 ## DeepReflection Presets
@@ -368,7 +367,7 @@ python -m pytest -q
 Current local baseline after the Agent OS shell installer integration:
 
 ```text
-427 passed
+433 passed
 ```
 
 ## Safety Defaults

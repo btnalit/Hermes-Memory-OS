@@ -40,11 +40,10 @@ The installer does not restart `hermes-gateway.service`.
 
 ```bash
 HERMES_HOME=/root/.hermes hermes memory
-HERMES_HOME=/root/.hermes hermes memory_os status
-HERMES_HOME=/root/.hermes hermes memory_os doctor
 HERMES_HOME=/root/.hermes hermes plugins list
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules status
 ```
 
 Expected state:
@@ -55,6 +54,9 @@ memory-os-agent-os = enabled general plugin
 memory_os = not enabled as a general plugin
 doctor.status = ok
 ```
+
+Current Hermes builds select Memory-OS through `memory.provider=memory_os`.
+They do not need to expose `hermes memory_os ...` as a top-level command.
 
 ## 4. What Gets Installed
 

@@ -30,6 +30,10 @@ Useful commands:
 ```bash
 hermes memory-os-agent-os status
 hermes memory-os-agent-os doctor
+hermes memory-os-agent-os modules status
+hermes memory-os-agent-os modules doctor
+hermes memory-os-agent-os memory-sources stats --hours 24
+hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个"
 ```
 
 ## Installer Presets
@@ -72,13 +76,13 @@ no-execute.
 ## Validation Commands
 
 ```bash
-hermes memory_os status
-hermes memory_os doctor
-hermes memory_os conversation-regression status-tool-contract
-hermes memory_os modules status
-hermes memory_os validate --no-send
-hermes memory_os memory-sources stats --hours 24
-hermes memory_os feedback stats --hours 24
+hermes memory
+hermes memory-os-agent-os status
+hermes memory-os-agent-os doctor
+hermes memory-os-agent-os modules status
+hermes memory-os-agent-os modules validate-no-send
+hermes memory-os-agent-os memory-sources stats --hours 24
+python scripts/memory_os_upgrade_compat_check.py --host hermes-media --output summary
 ```
 
 Expected hard boundaries:
