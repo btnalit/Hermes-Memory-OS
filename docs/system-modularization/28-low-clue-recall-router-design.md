@@ -922,6 +922,26 @@ Use these as RH-28 regression prompts:
    likely match briefly and ask for correction if wrong. Lower-confidence
    routes still ask the owner to choose from bounded options.
 
+9. Low-clue candidate quality matters before answer wording.
+
+   The 2026-05-24 Telegram retest showed that `继续昨天那个。` could still
+   produce a narrow shortlist because recent/session-search-like working
+   records contained repeated variants of the same automation topic. The
+   correct fix is not to hard-code `n8n`, `Make`, or any other content. RH-28c
+   instead improves the generic candidate set:
+
+   - merge duplicate topic candidates before display
+   - cap same-source domination for low-clue queries
+   - apply short-term correction feedback when the owner says "not that" or
+     "something is missing"
+   - expose bounded candidate quality metrics in dry-run reports
+   - keep LLM judge in report-only mode after deterministic candidate
+     generation, where it can identify duplicates or low confidence without
+     changing live behavior
+
+   This makes the LLM judge useful as a quality reviewer for the candidate
+   set, not as an unbounded retrieval mechanism.
+
 ## Final Decision
 
 Proceed with RH-28 as a low-clue recall router, not as a larger memory
@@ -938,4 +958,221 @@ RH-28.5: 10.20.3.200 deterministic and report-only validation completed.
 RH-28b: live prefetch disables report-only judge calls and direct-resume guard
         wording no longer over-asks for clarification; deployed on
         10.20.3.200 with post-deploy monitor WARN-only / FAIL=[].
+RH-28c: low-clue candidate quality pass implemented and deployed:
+        duplicate topic clustering, source-diversity selection, short-term
+        correction penalty, and candidate_quality dry-run metrics. Deterministic
+        and report-only LLM judge modes were compared on 10.20.3.200. Both keep
+        the live decision at ask_choice for "继续昨天那个。"; report-only judge
+        adds no_clear_match metadata with low confidence instead of selecting a
+        candidate.
+RH-28d: candidate title normalization implemented and deployed:
+        transcript speaker prefixes, system/self-review prompts, artifact paths,
+        URL/domain fragments, and long sentence-like titles are stripped or
+        converted into bounded topic titles before candidate display and before
+        report-only judge input. LLM judge remains report-only.
+```
+
+## RH-28c Validation Summary
+
+Host: `10.20.3.200`
+
+Live config:
+
+```text
+low_clue_recall.enabled=true
+low_clue_recall.llm_judge.mode=report_only
+low_clue_recall.llm_judge.provider=hermes_default
+low_clue_recall.judge_availability.available=true
+resolved_provider=openai-codex
+resolved_model=gpt-5.4-mini
+```
+
+Gateway reload:
+
+```text
+systemctl --user restart hermes-gateway.service
+gateway=active
+pid=474841
+```
+
+Bounded A/B probe:
+
+```text
+query="继续昨天那个。"
+
+Mode A: --llm-judge none
+decision=ask_choice
+candidate_count=6
+llm_judge.status=disabled
+raw_candidate_count=112
+cluster_count=45
+merged_duplicates=67
+feedback_penalty_applied=true
+source_distribution={"memory_sources": 3, "working": 109}
+
+Mode B: --llm-judge report-only
+decision=ask_choice
+candidate_count=6
+llm_judge.status=ok
+llm_judge.confidence=0.18
+llm_judge.selected_candidate_id=""
+llm_judge.reason_codes=[
+  "no_clear_match",
+  "ambiguous_query",
+  "all_candidates_low_specificity"
+]
+raw_candidate_count=112
+cluster_count=45
+merged_duplicates=67
+feedback_penalty_applied=true
+source_distribution={"memory_sources": 3, "working": 109}
+```
+
+Interpretation:
+
+- RH-28c no longer treats multiple near-duplicate records as separate
+  high-confidence topics.
+- The current test-host data is still working-heavy after unsafe/system
+  metadata candidates are filtered. That is a data-state limitation, not a
+  reason to lower thresholds.
+- LLM judge adds value by confirming low confidence in report-only mode. It
+  does not alter the deterministic `ask_choice` decision and does not run in
+  live prefetch.
+- The next improvement should continue to target candidate-set quality, not
+  response wording or content-specific rules.
+
+Post-deploy monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+low_clue_recall.enabled=true
+low_clue_recall.judge_mode=report_only
+low_clue_recall.llm_status=ok
+low_clue_recall.llm_available=true
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+## RH-28d Validation Summary
+
+Goal:
+
+- improve candidate title quality without hard-coding content topics
+- keep deterministic live behavior unchanged
+- keep LLM judge in report-only mode
+
+Implementation shape:
+
+- normalize cluster labels after duplicate merge
+- strip `User:` / `Assistant:` transcript scaffolding
+- filter system-note and self-review memory prompts
+- remove media/path artifacts such as `MEDIA:/...`, local paths, and file
+  extensions
+- convert long sentence-like labels into topic-term titles
+- preserve source ids and score/reason metadata
+
+Local tests:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_low_clue_recall.py -q
+20 passed
+
+python -m pytest \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_memory_sources.py -q
+51 passed
+```
+
+Remote deployment:
+
+```text
+host=10.20.3.200
+remote staging test=20 passed
+installer=--test-host --llm-judge-preset report-only
+gateway=active
+pid=476094
+```
+
+Bounded A/B probe:
+
+```text
+query="继续昨天那个。"
+
+Mode A: --llm-judge none
+decision=ask_choice
+candidate_count=6
+llm_judge.status=disabled
+raw_candidate_count=108
+cluster_count=46
+merged_duplicates=62
+max_title_chars=64
+title_normalization_applied=true
+
+Mode B: --llm-judge report-only
+decision=ask_choice
+candidate_count=6
+llm_judge.status=no_clear_match
+llm_judge.confidence=0.18
+llm_judge.selected_candidate_id=""
+llm_judge.reason_codes=[
+  "low_clue_no_specific_terms",
+  "ambiguous_recall",
+  "no_unique_semantic_overlap"
+]
+raw_candidate_count=108
+cluster_count=46
+merged_duplicates=62
+max_title_chars=64
+title_normalization_applied=true
+```
+
+Example normalized candidate titles from the host:
+
+```text
+Crystallized Candidates（结晶候选）还不是最终沉淀的长期记忆
+“准备把你的 MindVideo API 集成进素材收集 Worker，让它从‘搬运工’升级为‘视觉创作者’
+我们之前说的互联网数据采集系统，如果重新设计，你会怎么分层
+make / 自动化 / Claude / AI / app
+comfyui / V9 / checkpoints
+FFmpeg 命令的 zoompan 滤镜在处理单张循环图片时出了点逻辑冲突，导致视频编码器以为只有一帧，把后面的内容全“吞”了
+```
+
+Interpretation:
+
+- RH-28d is an improvement over RH-28c: candidate titles are bounded and no
+  longer expose transcript scaffolding, system notes, media paths, or URL
+  fragments.
+- The live decision remains `ask_choice`; report-only judge still reports
+  `no_clear_match`.
+- Conditions are not mature for `bounded_vote` live decision influence. The
+  judge has not shown enough stable positive selection data, and the candidate
+  pool remains working-heavy.
+- Next possible live-judge gate remains limited to `ask_choice -> confirm_one`
+  or reranking only after a future evidence window shows high agreement with
+  owner choices.
+
+Post-deploy monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+low_clue_recall.enabled=true
+low_clue_recall.judge_mode=report_only
+low_clue_recall.decision=ask_choice
+low_clue_recall.llm_status=no_clear_match
+low_clue_recall.llm_available=true
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
 ```
