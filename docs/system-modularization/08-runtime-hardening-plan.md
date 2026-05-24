@@ -1396,6 +1396,8 @@ Design:
   `26-memory-sources-attribution-design.md`
 - Module integration contract:
   `29-memory-os-module-integration-contract.md`
+- RH-31 recall eval and derived retrieval gate:
+  `31-recall-eval-and-derived-retrieval-plan.md`
 
 Purpose:
 
@@ -1408,9 +1410,10 @@ Recommended order:
 1. RH-29 Memory Sources Attribution
 2. RH-30 Relevance Feedback Audit
 3. Apply the module integration contract before adding more live behavior
-4. RH-31 deterministic relevance guards from real findings
-5. RH-32 consolidation suggestions, no approval
-6. RH-33 top-of-mind scoring only
+4. RH-31 recall eval harness and baseline scorecard
+5. RH-31 deterministic relevance guards only from scorecard-backed real findings
+6. RH-32 consolidation suggestions, no approval
+7. RH-33 top-of-mind scoring only
 
 Contract gate:
 
@@ -1424,6 +1427,13 @@ Contract gate:
   requirement, retention policy, and monitor evidence
 - scheduler changes must declare step mode, lock/failure behavior, audit action,
   boundary booleans, and rollback
+- RH-31 work must start with read-only eval, report artifacts, and the first six
+  deterministic adapters defined in `31-recall-eval-and-derived-retrieval-plan.md`
+- RH-31 reports must stay under gitignored `eval/reports/` unless explicitly
+  promoted to `docs/benchmarks/memory-os/`
+- RH-31 operator CLI, if exposed, must follow the provider/runtime source-of-truth
+  and `memory-os-agent-os` shell delegation rules in the module integration
+  contract
 
 Audit noise follow-up:
 

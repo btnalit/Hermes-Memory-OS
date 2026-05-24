@@ -7260,3 +7260,138 @@ MonitorEvidence
 This is now a required gate before any new module affects live ingress, prompt
 projection, memory writes, feedback scoring, scheduler behavior, or monitor
 semantics.
+
+## Post-Contract Monitor Trend Snapshot
+
+Date: 2026-05-24
+Host: 10.20.3.200 (`hermes-media`)
+Source: scheduled monitor summary plus direct read-only monitor rerun
+
+Scheduled monitor classification:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+audit_per_new_event=7.0
+working_items=138
+candidates=138
+working lingering statuses:
+  active=48
+  expired=90
+```
+
+Direct read-only monitor rerun:
+
+```text
+time=2026-05-24T13:45:44Z
+gateway=active pid=479718
+heartbeat=active/enabled service_result=success
+heartbeat_state=fresh age_seconds=156
+cognitive_loop=ok timer=active/enabled service_result=success
+
+counts:
+  audit_entries=2685
+  events=191
+  working_items=138
+  candidates=138
+  crystallized_records=0
+
+index_health=healthy
+prefetch_mode=indexed
+doctor=ok
+doctor_findings=[hindsight_adapter_disabled warning]
+status_tool_contract=ok
+shell_alias_no_env_ok=true
+context_router=apply apply_routes=["all"]
+```
+
+Low-clue recall and ingress evidence:
+
+```text
+low_clue_recall:
+  enabled=true
+  judge_mode=report_only
+  decision=ask_choice
+  candidate_count=4
+  internal_label_count=0
+  llm_status=no_match
+  llm_available=true
+
+low_clue_ingress_matrix:
+  deictic_yesterday -> Recall Clarification Guard
+  deictic_just_now_no_punctuation -> Recall Clarification Guard
+  deictic_just_now_punctuation -> Recall Clarification Guard
+  continue_current_task -> Current Foreground Task
+  explicit_deferred_en -> Current Foreground Task
+  explicit_deferred_zh -> Current Foreground Task
+```
+
+MemorySources:
+
+```text
+record_count=15
+file_size_bytes=29113
+feedback_count=1
+routes={"ambiguous_recall": 7, "casual_continuity": 8}
+selected_sources={"carryover": 1, "event": 5, "foreground": 4, "recall_guard": 6}
+boundary_true_count=0
+forbidden_field_count=0
+```
+
+DeepReflection:
+
+```text
+enabled=true
+injection_mode=auto_bounded
+latest.selected_by_source_class={"governance": 2}
+latest.dropped_by_source_class={"governance": 1}
+rolling.selected_by_source_class={"governance": 16, "working": 14}
+rolling.dropped_by_source_class={"governance": 7, "working": 7}
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+```
+
+Interpretation against `29-memory-os-module-integration-contract.md`:
+
+- Core provider/runtime remains healthy enough to continue observation:
+  gateway, heartbeat, cognitive loop, index, doctor, status-tool contract, and
+  shell aliases all pass.
+- `rh26_casual_empty` remains the only WARN and is still treated as expected
+  observation noise.
+- MemorySources satisfies the RH-29 safety gate: no boundary flags and no
+  forbidden fields.
+- Low-clue recall satisfies the RH-28f/RH-28g live route/heading gate and the
+  LLM judge remains report-only.
+- RH-27b audit density is improved but not mature: the scheduled monitor
+  reports `audit_per_new_event=7.0`, which is lower than the earlier
+  pre-RH-27b noise band but still above the target 3-5 range.
+- Working/candidate accumulation needs continued observation. The current
+  `lingering.json` state has more expired than active items (`90` expired vs
+  `48` active), which is not a boundary failure but is a signal to keep watching
+  retention and candidate lifecycle before declaring the loop mature.
+
+Task status from this snapshot:
+
+```text
+Continue:
+  - RH-27b audit density observation until audit_per_new_event repeatedly stays
+    within or near the 3-5 target range.
+  - working/candidate lifecycle observation, especially expired/active ratio.
+  - RH-28 Telegram live behavior observation for low-clue recall candidate
+    completeness and duplicate handling.
+
+Do not advance yet:
+  - RH-31/RH-32/RH-33, unless a real monitored finding requires one.
+  - any stronger LLM judge live influence.
+
+Safe to keep:
+  - current provider/runtime
+  - context_router apply
+  - MemorySources metadata-only attribution
+  - LLM judge report-only observation
+  - cognitive loop no-send test-host mode
+```

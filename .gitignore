@@ -10,4 +10,5 @@ build/
 *.egg-info/
 /memory-os/
 docs/public-materials-drafts/
+eval/reports/
 *.tmp

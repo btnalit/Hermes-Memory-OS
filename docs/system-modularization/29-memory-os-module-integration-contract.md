@@ -737,6 +737,7 @@ The 10.20.3.200 monitor currently covers:
 | MemorySources RH-29 | record count, file size, forbidden fields, boundary count | 24h of records with boundary_true_count=0 and forbidden_field_count=0 | any forbidden field, private text, or true boundary flag |
 | Feedback RH-30 | feedback count and rating distribution | feedback may be observed immediately; do not use as strong ranking signal until enough explicit owner feedback exists | feedback mutates router weights, memory, candidates, crystallized records, identity, or relationships |
 | DeepReflection | source-class distribution and boundaries | boundaries false; source skew may remain WARN while collecting data | actual_send/execute/identity/crystallized true, or unbounded private content appears |
+| RH-31 eval harness | eval report count, adapter scorecard, forbidden-field scan, report retention | first scorecard is generated from the approved deterministic adapters; reports remain gitignored or explicitly promoted; no live behavior changes | eval report reads private bodies, report path is not ignored, shell path is half-exposed, adapter changes live prefetch, or forbidden-field count is non-zero |
 | RH-31 guards | real finding plus route matrix | only add a guard when backed by live transcript/fixture and monitor can explain the route | broad wording guard without real finding, content-specific hardcode |
 | RH-32 consolidation suggestions | suggestion report counts, retention/read-only proof | only after deterministic suggestion contract and retention story are defined | any automatic approve/delete/prune of canonical memory |
 | RH-33 top-of-mind scoring | MemorySources + feedback + dry-run score reports | dry-run only until `successful_use` is defined without self-reinforcing selected-count logic | selected-by-router treated as success, hidden strong injection, new implicit tier |
@@ -845,6 +846,7 @@ contracts:
 | Heartbeat / Inner Drive | events | working, candidates, heartbeat state | no | no | no | none | heartbeat_state, working counts |
 | Cognitive Loop RH-27 | store, module reports | module reports, audit, bounded events | no | indirect through generated state | no send/execute | DR may use LLM per config | cycle status, boundary report |
 | DeepReflection | working, digest, governance | injection cards/reports | no | carryover section | bounded injection | auto_bounded | source-class distribution, boundaries |
+| Future RH-31 eval harness | synthetic/redacted fixtures, bounded monitor metadata, MemorySources fixtures, public projection seams | gitignored eval reports and promoted scorecards only | no | report-only adapter reads only | no | none/report-only only | eval report count, forbidden fields, retention, adapter scorecard |
 | Future RH-31 guards | real findings | tests/docs, maybe route rules | must use IngressDecision | maybe | maybe | none/report-only only | route matrix |
 | Future RH-32 consolidation suggestions | events/candidates/metadata | suggestion reports only | no | no | no | deterministic-only initially | suggestion count, no approval |
 | Future RH-33 scoring | MemorySources + feedback | scoring metadata only | no | yes | no until apply gate | none/report-only first | attribution and feedback trend |
@@ -1045,7 +1047,7 @@ These are not blockers for this contract, but future modules must account for
 them:
 
 - RH-17 retention still needs to cover MemorySources, feedback ledgers,
-  suggestion reports, and other metadata JSONL files.
+  RH-31 eval reports, suggestion reports, and other metadata JSONL files.
 - RH-30 feedback volume is still low. Do not use it as a strong ranking signal
   until more real owner corrections exist.
 - RH-32 consolidation suggestions must remain deterministic-only until a
