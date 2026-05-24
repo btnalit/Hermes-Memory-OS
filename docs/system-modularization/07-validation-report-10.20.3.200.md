@@ -5651,6 +5651,259 @@ DeepReflection.actual_identity_write=false
 DeepReflection.actual_crystallized_approval=false
 ```
 
+## RH-28e Global Low-Clue Ingress Routing Validation
+
+Date: 2026-05-24
+
+Trigger:
+
+```text
+Telegram live test:
+  /new
+  继续昨天那个。
+
+Observed before RH-28e:
+  live prefetch route=casual_continuity
+  selected_headings=[Recent Event Summaries]
+  Telegram clarify/session_search path produced a narrow shortlist and missed
+  one expected topic until the owner corrected it.
+```
+
+Root cause:
+
+```text
+The shared provider ingress classifier `plan_context_route()` did not classify
+deictic continuation requests such as "继续昨天那个。", "继续上次那个。", or
+"接着刚才那条。" as low-clue recall queries.
+
+Because `MemoryProvider.prefetch()` is the global provider entrance, the fix is
+global to all Hermes entrances that call prefetch. It is not a Telegram-specific
+handler patch and does not hard-code content topics.
+```
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/plugins/memory/test_memory_os_memory_sources.py -q
+
+54 passed
+
+python -m pytest -q
+413 passed
+```
+
+Remote staging verification:
+
+```text
+host=10.20.3.200
+staging=/root/Hermes-Memory-OS-rh28c-20260524154927
+
+python -m pytest \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/plugins/memory/test_memory_os_memory_sources.py -q
+
+54 passed
+```
+
+Deployment:
+
+```text
+installer=--test-host --llm-judge-preset report-only
+gateway_restart=success
+gateway=active
+pid=476553
+```
+
+Bounded provider-ingress probe:
+
+```text
+query="继续昨天那个。"
+context_chars=538
+has_recall_guard=true
+has_do_not_answer_certain=true
+route=ambiguous_recall
+query_class=ambiguous_recall
+selected_headings=[Recall Clarification Guard]
+dropped_headings=[Conversation Carryover, Working Memory, Recent Event Summaries]
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_relationship_write=false
+boundary.actual_crystallized_approval=false
+boundary.hindsight_exported=false
+```
+
+Low-clue dry-run comparison:
+
+```text
+query="继续昨天那个。"
+decision=ask_choice
+candidate_count=4
+candidate_quality.raw_candidate_count=111
+candidate_quality.cluster_count=46
+candidate_quality.merged_duplicates=65
+candidate_quality.title_normalization_applied=true
+llm_judge.status=ok
+llm_judge.mode=report_only
+llm_judge.confidence=0.12
+llm_judge.selected_candidate_id=""
+llm_judge.reason_codes=[ambiguous_query, low_clue_no_specific_terms, no_clear_match]
+```
+
+Post-deploy monitor:
+
+```text
+status=WARN
+PASS includes:
+  gateway_active
+  heartbeat_timer_active
+  heartbeat_state_fresh
+  cognitive_loop_timer_active
+  cognitive_loop_last_cycle_present
+  index_healthy
+  doctor_ok
+  status_tool_contract_ok
+  shell_alias_no_env_ok
+  context_router_apply
+  memory_sources_stats_ok
+  low_clue_llm_judge_available
+  low_clue_recall_probe_ok
+WARN=[rh26_casual_empty]
+FAIL=[]
+
+MemorySources.routes={"ambiguous_recall": 1, "casual_continuity": 13}
+MemorySources.selected_headings={"Conversation Carryover": 1,
+  "Current Foreground Task": 3,
+  "Recall Clarification Guard": 2,
+  "Recent Event Summaries": 11}
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Interpretation:
+
+```text
+RH-28e fixes the global ingress gap. The phrase "继续昨天那个。" now enters the
+same low-clue recall guard as the dry-run path before any Telegram-specific
+clarify/session_search behavior can narrow the candidate set.
+
+The live LLM judge remains report-only. It contributes confidence metadata but
+does not alter the deterministic ask_choice decision.
+```
+
+### RH-28e Priority Correction After Telegram Retest
+
+The first RH-28e deployment fixed route classification but not the full live
+output path. A follow-up Telegram retest exposed this record:
+
+```text
+created_at=2026-05-24T09:11:12Z
+query_class=ambiguous_recall
+route=ambiguous_recall
+route_reason_codes=[low_clue_deictic_continue]
+router_applied=false
+selected_headings=[Current Foreground Task]
+```
+
+Root cause:
+
+```text
+RH-25.1 deferred foreground resume still matched broad phrases like
+"继续昨天那个。" before context-router apply, set foreground_task_only=true, and
+forced the output to Current Foreground Task.
+```
+
+Corrected behavior:
+
+```text
+Broad deictic recall:
+  "继续昨天那个。", "继续上次那个。", "接着刚才那条。"
+  -> ambiguous_recall
+  -> Recall Clarification Guard
+
+Explicit foreground/deferred task:
+  "继续当前任务", "continue the deferred task", "继续搁置的任务"
+  -> foreground_control
+```
+
+Local verification after the priority correction:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_current_task_anchor.py \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/plugins/memory/test_memory_os_memory_sources.py -q
+
+64 passed
+
+python -m pytest -q
+414 passed
+```
+
+Remote verification:
+
+```text
+host=10.20.3.200
+staging=/root/Hermes-Memory-OS-rh28c-20260524154927
+related_tests=64 passed
+installer=--test-host --llm-judge-preset report-only
+gateway=active
+pid=476963
+```
+
+Provider-ingress probe after correction:
+
+```text
+query="继续昨天那个。"
+context_chars=538
+has_recall_guard=true
+has_current_foreground=false
+has_working_memory_section=false
+prompt_has_current_task_anchor=false
+route=ambiguous_recall
+query_class=ambiguous_recall
+router_applied=true
+selected_headings=[Recall Clarification Guard]
+dropped_headings=[Conversation Carryover, Working Memory, Indexed Recall, Recent Event Summaries]
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_relationship_write=false
+boundary.actual_crystallized_approval=false
+boundary.hindsight_exported=false
+```
+
+Post-correction monitor:
+
+```text
+status=WARN
+WARN=[rh26_casual_empty]
+FAIL=[]
+index_health=healthy
+doctor=ok
+context_router=apply
+low_clue_recall.judge_mode=report_only
+low_clue_recall.llm_status=no_clear_match
+MemorySources.routes={"ambiguous_recall": 3, "casual_continuity": 12}
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
 ## 2026-05-24 RH-28c Low-Clue Candidate Quality Validation
 
 Purpose:
@@ -6771,3 +7024,239 @@ DeepReflection.actual_execute=false
 DeepReflection.actual_identity_write=false
 DeepReflection.actual_crystallized_approval=false
 ```
+
+## RH-28f/RH-28g Global Ingress And Candidate Diversity Validation
+
+Date: 2026-05-24
+Host: 10.20.3.200 (`hermes-media`)
+Scope: RH-28f shared ingress decision; RH-28g deterministic source-diversity
+slot; monitor low-clue ingress matrix; test-host deployment only
+
+Problem confirmed before RH-28f:
+
+```text
+继续刚才那个       -> casual_continuity without punctuation
+继续刚才那个。     -> ambiguous_recall
+继续昨天那个。     -> route=ambiguous_recall but live prefetch could still be
+                       stolen by foreground_task_only
+```
+
+Root cause:
+
+```text
+RH-25 current-task anchor handling,
+RH-25.1 deferred resume,
+RH-28 low-clue routing,
+and MemorySources attribution
+were classifying ingress independently.
+```
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_current_task_anchor.py \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py -q
+
+57 passed
+
+python -m pytest tests/scripts/test_memory_os_3_200_monitor.py -q
+
+17 passed
+
+python -m pytest -q
+
+420 passed
+```
+
+Remote staging verification:
+
+```text
+python3 -m pytest \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_current_task_anchor.py \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+73 passed
+```
+
+Deployment:
+
+```text
+bundle=/root/Hermes-Memory-OS-rh28fg-20260524175745
+installer=HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --llm-judge-preset report-only
+runtime_copied=ingress.py, context_router.py, low_clue_recall.py
+gateway_restart=performed after install
+gateway=active pid=477649
+```
+
+Bounded ingress probe after gateway restart:
+
+```text
+继续昨天那个。:
+  route=ambiguous_recall
+  headings=[Recall Clarification Guard]
+
+继续刚才那个:
+  route=ambiguous_recall
+  headings=[Recall Clarification Guard]
+
+继续刚才那个。:
+  route=ambiguous_recall
+  headings=[Recall Clarification Guard]
+
+继续当前任务:
+  route=foreground_control
+  headings=[Current Foreground Task]
+
+继续搁置的任务:
+  route=foreground_control
+  headings=[Current Foreground Task]
+  reason_codes=[explicit_deferred_resume]
+```
+
+RH-28g candidate diversity evidence:
+
+```text
+decision=ask_choice
+candidate_count=4
+candidate_quality.diversity_applied=true
+candidate_quality.raw_candidate_count=113
+candidate_quality.cluster_count=46
+candidate_quality.source_distribution includes memory_sources and working
+selected reason_codes include source_diversity_slot
+llm_judge.mode=report_only
+llm_judge.status=ok/no_match
+```
+
+Post-deploy monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=477649
+heartbeat=active/enabled
+cognitive_loop=ok timer=active/enabled
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"]
+
+low_clue_recall:
+  enabled=true
+  judge_mode=report_only
+  decision=ask_choice
+  candidate_count=4
+  llm_available=true
+
+low_clue_ingress_matrix:
+  deictic_yesterday -> Recall Clarification Guard
+  deictic_just_now_no_punctuation -> Recall Clarification Guard
+  deictic_just_now_punctuation -> Recall Clarification Guard
+  continue_current_task -> Current Foreground Task
+  explicit_deferred_en -> Current Foreground Task
+  explicit_deferred_zh -> Current Foreground Task
+
+MemorySources:
+  record_count=13
+  routes={"ambiguous_recall": 3, "casual_continuity": 10}
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Interpretation:
+
+- RH-28f fixes the global entrance inconsistency. The same low-clue phrase now
+  reaches the same route and section headings regardless of punctuation and
+  active foreground anchor.
+- RH-28g prevents working-only candidate monopolies by reserving a bounded
+  diversity slot when another source class clears the fallback score.
+- Report-only LLM judge remains observational only. It does not change live
+  decisions.
+- Candidate topic labels are improved but not final. Attribution-derived labels
+  can still be generic and should stay under observation.
+
+## Module Integration Contract Baseline
+
+Date: 2026-05-24
+Host: 10.20.3.200 (`hermes-media`)
+Document: `29-memory-os-module-integration-contract.md`
+
+Reason:
+
+RH-25/RH-28/RH-29/RH-30 exposed a module-integration failure class:
+
+```text
+single-module tests can pass while live provider ingress, foreground anchors,
+context routing, low-clue recall, and MemorySources attribution still disagree.
+```
+
+Live evidence used for the contract:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=477649
+heartbeat_timer=active/enabled
+heartbeat_state=fresh
+cognitive_loop_timer=active/enabled
+cognitive_loop_last_cycle=ok
+index_health=healthy
+doctor=ok
+status_tool_contract=ok
+context_router=apply apply_routes=["all"]
+
+low_clue_ingress_matrix:
+  deictic_yesterday -> ambiguous_recall / Recall Clarification Guard
+  deictic_just_now_no_punctuation -> ambiguous_recall / Recall Clarification Guard
+  deictic_just_now_punctuation -> ambiguous_recall / Recall Clarification Guard
+  continue_current_task -> foreground_control / Current Foreground Task
+  explicit_deferred_en -> foreground_control / Current Foreground Task
+  explicit_deferred_zh -> foreground_control / Current Foreground Task
+
+MemorySources:
+  record_count=13
+  feedback_count=1
+  boundary_true_count=0
+  forbidden_field_count=0
+
+DeepReflection:
+  enabled=true
+  injection_mode=auto_bounded
+  actual_send=false
+  actual_execute=false
+  actual_identity_write=false
+  actual_crystallized_approval=false
+
+crystallized_records=0
+compaction.focus_none_count=0
+```
+
+Contract decision:
+
+Future RH-31/RH-32/RH-33 and any new cognition module must declare its
+integration contract before implementation:
+
+```text
+IngressDecision
+ContextProjection
+MemoryWriteSurface
+FeedbackSignal
+SchedulerStep
+MonitorEvidence
+```
+
+This is now a required gate before any new module affects live ingress, prompt
+projection, memory writes, feedback scoring, scheduler behavior, or monitor
+semantics.

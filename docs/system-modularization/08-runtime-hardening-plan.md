@@ -1026,6 +1026,9 @@ Current behavior:
   - `hermes memory_os low-clue-recall dry-run --query ...`
   - `hermes memory-os-agent-os low-clue-recall dry-run --query ...`
 - low-clue recall queries can route to `ambiguous_recall`
+- deictic continuation queries such as `继续昨天那个。`, `继续上次那个。`,
+  and `接着刚才那条。` route to `ambiguous_recall` at the shared provider
+  ingress instead of falling through to `casual_continuity`
 - when enabled in config, prefetch includes a bounded
   `Recall Clarification Guard` with candidate choices instead of raw memory
   bodies
@@ -1070,6 +1073,23 @@ Validation:
 - RH-28b updates `direct_resume` guard wording so high-confidence candidates can
   be stated as likely matches with a correction affordance instead of being
   treated like low-confidence choices
+- RH-28e deployed on 10.20.3.200 after a Telegram `/new` test showed
+  `继续昨天那个。` was being handled by `session_search`/`clarify` instead of
+  the global provider route; post-fix provider-ingress probe recorded
+  `route=ambiguous_recall`, selected `Recall Clarification Guard`, and kept all
+  hard boundaries false
+- RH-28e follow-up corrected a priority conflict with RH-25.1: broad deictic
+  recall phrases no longer force deferred foreground-task resume; deferred
+  tasks remain candidates inside the Recall Clarification Guard, while explicit
+  `continue the deferred task` / `继续搁置的任务` style requests still use
+  foreground-control
+- RH-28f introduces a shared ingress classifier consumed by the provider and
+  context router, so low-clue recall, current-task continuation, cancellation,
+  and explicit deferred-task resume are classified once before prefetch
+  selection; the monitor now checks a bounded low-clue ingress matrix
+- RH-28g adds a deterministic source-diversity slot for low-clue candidates so
+  working-heavy candidate pools cannot completely crowd out bounded
+  MemorySources attribution candidates when they clear the fallback score
 - all hard boundaries remained false
 
 ### RH-25 Small-Context Session Task Anchor
@@ -1374,6 +1394,8 @@ Design:
 - `25-memory-sources-feedback-roadmap.md`
 - RH-29 detailed design:
   `26-memory-sources-attribution-design.md`
+- Module integration contract:
+  `29-memory-os-module-integration-contract.md`
 
 Purpose:
 
@@ -1385,9 +1407,23 @@ Recommended order:
 
 1. RH-29 Memory Sources Attribution
 2. RH-30 Relevance Feedback Audit
-3. RH-31 deterministic relevance guards from real findings
-4. RH-32 consolidation suggestions, no approval
-5. RH-33 top-of-mind scoring only
+3. Apply the module integration contract before adding more live behavior
+4. RH-31 deterministic relevance guards from real findings
+5. RH-32 consolidation suggestions, no approval
+6. RH-33 top-of-mind scoring only
+
+Contract gate:
+
+- any new RH-31/RH-32/RH-33 work must fill the module integration declaration
+  from `29-memory-os-module-integration-contract.md`
+- ingress-affecting work must consume the shared `IngressDecision` contract
+  instead of adding a second classifier
+- prefetch-affecting work must pass through `ContextProjection` and
+  MemorySources attribution
+- write-surface changes must declare the exact memory layer, owner-approval
+  requirement, retention policy, and monitor evidence
+- scheduler changes must declare step mode, lock/failure behavior, audit action,
+  boundary booleans, and rollback
 
 Audit noise follow-up:
 

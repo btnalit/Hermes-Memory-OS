@@ -1,4 +1,5 @@
 from plugins.memory import load_memory_provider
+from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -165,7 +166,15 @@ def test_continue_query_after_anchor_uses_foreground_only_prefetch(tmp_path):
     assert "Hindsight" not in context
 
 
-def test_deferred_task_survives_session_reset_for_tomorrow_continue(tmp_path):
+def test_deictic_yesterday_continue_routes_deferred_task_as_low_clue_candidate(tmp_path):
+    save_config(
+        {
+            "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+            "low_clue_recall": {"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
+            "memory_sources": {"enabled": True},
+        },
+        tmp_path,
+    )
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
     provider.on_pre_compress(
@@ -202,14 +211,88 @@ def test_deferred_task_survives_session_reset_for_tomorrow_continue(tmp_path):
 
     assert "### Current Foreground Task" in deferred_context
     assert "deferred" in deferred_context.lower()
+    assert "### Recall Clarification Guard" in resume_context
+    assert "Plausible recall candidates" in resume_context
     assert "ComfyUI" in resume_context
-    assert "layout_report.json failed: No composition found" in resume_context
-    assert "Continue this deferred foreground task" in resume_context
+    assert "deferred" in resume_context.lower()
+    assert "Continue this deferred foreground task" not in resume_context
     assert "Working Memory" not in resume_context
-    assert "n8n" not in resume_context
+    assert "current task: 继续昨天那个" not in resumed.system_prompt_block()
+
+
+def test_explicit_deferred_task_resume_still_uses_foreground_only(tmp_path):
+    save_config(
+        {
+            "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+            "memory_sources": {"enabled": True},
+        },
+        tmp_path,
+    )
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_pre_compress(
+        [
+            {"role": "user", "content": "继续处理 ComfyUI 的视频问题"},
+            {"role": "tool", "content": "layout_report.json failed: No composition found"},
+        ]
+    )
+    provider.prefetch("这个先放一下，明天再说。", session_id="session-1")
+    provider.shutdown()
+
+    resumed = load_memory_provider("memory_os")
+    resumed.initialize("session-2", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    resume_context = resumed.prefetch("continue the deferred task", session_id="session-2")
+    resumed.shutdown()
+    source_records = (tmp_path / "memory-os" / "system" / "memory_sources.jsonl").read_text(encoding="utf-8")
+
+    assert "### Current Foreground Task" in resume_context
+    assert "ComfyUI" in resume_context
+    assert "Continue this deferred foreground task" in resume_context
+    assert "Recall Clarification Guard" not in resume_context
+    assert '"route": "foreground_control"' in source_records
+    assert "explicit_deferred_resume" in source_records
+
+
+def test_chinese_explicit_deferred_task_resume_uses_matching_foreground_attribution(tmp_path):
+    save_config(
+        {
+            "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+            "memory_sources": {"enabled": True},
+        },
+        tmp_path,
+    )
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_pre_compress(
+        [
+            {"role": "user", "content": "继续处理 ComfyUI 的视频问题"},
+            {"role": "tool", "content": "layout_report.json failed: No composition found"},
+        ]
+    )
+    provider.prefetch("这个先放一下，明天再说。", session_id="session-1")
+    provider.shutdown()
+
+    resumed = load_memory_provider("memory_os")
+    resumed.initialize("session-2", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    resume_context = resumed.prefetch("继续搁置的任务", session_id="session-2")
+    resumed.shutdown()
+    source_records = (tmp_path / "memory-os" / "system" / "memory_sources.jsonl").read_text(encoding="utf-8")
+
+    assert "### Current Foreground Task" in resume_context
+    assert "ComfyUI" in resume_context
+    assert "Recall Clarification Guard" not in resume_context
+    assert '"route": "foreground_control"' in source_records
+    assert "explicit_deferred_resume" in source_records
 
 
 def test_deferred_continue_without_record_asks_for_clarification(tmp_path):
+    save_config(
+        {
+            "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+            "low_clue_recall": {"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
+        },
+        tmp_path,
+    )
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
     provider._store.write_working_document(
@@ -232,11 +315,11 @@ def test_deferred_continue_without_record_asks_for_clarification(tmp_path):
     context = provider.prefetch("继续昨天那个。", session_id="session-1")
     provider.shutdown()
 
-    assert "### Current Foreground Task" in context
-    assert "deferred resume is ambiguous" in context
-    assert "Ask the owner to choose" in context
+    assert "### Recall Clarification Guard" in context
+    assert "Plausible recall candidates" in context
+    assert "n8n" in context
     assert "Working Memory" not in context
-    assert "n8n" not in context
+    assert "current task: 继续昨天那个" not in provider.system_prompt_block()
 
 
 def test_current_task_anchor_redacts_secrets(tmp_path):

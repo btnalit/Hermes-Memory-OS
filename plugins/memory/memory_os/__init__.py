@@ -18,6 +18,7 @@ from .audit import append_audit, read_audit_entries
 from .crystallized import read_candidate_queue
 from .ids import new_event_id
 from .index import MemoryOSIndex
+from .ingress import classify_ingress
 from .low_clue_recall import low_clue_judge_availability
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
@@ -328,7 +329,8 @@ class MemoryOSProvider(MemoryProvider):
         text = " ".join(str(query or "").split())
         if not text:
             return
-        if self._current_task_anchor and _is_defer_current_task_query(text):
+        decision = classify_ingress(text, current_task_anchor=self._current_task_anchor)
+        if decision.intent == "defer_current_task" and self._current_task_anchor:
             self._write_deferred_current_task_anchor(
                 anchor=self._current_task_anchor,
                 deferral=text,
@@ -341,7 +343,7 @@ class MemoryOSProvider(MemoryProvider):
             )
             self._foreground_task_only_prefetch = True
             return
-        if not self._current_task_anchor and _is_deferred_continue_query(text):
+        if decision.intent == "explicit_deferred_resume":
             deferred_anchor = self._read_latest_deferred_current_task_anchor()
             if deferred_anchor:
                 self._current_task_anchor = _format_resumed_deferred_task_anchor(
@@ -356,7 +358,7 @@ class MemoryOSProvider(MemoryProvider):
             )
             self._foreground_task_only_prefetch = True
             return
-        if _is_cancel_current_task_query(text):
+        if decision.intent == "cancellation":
             self._current_task_anchor = _format_cancelled_task_anchor(
                 cancellation=text,
                 previous_anchor=self._current_task_anchor,
@@ -364,8 +366,12 @@ class MemoryOSProvider(MemoryProvider):
             )
             self._foreground_task_only_prefetch = True
             return
-        if self._current_task_anchor and _is_continue_current_task_query(text):
+        if decision.intent == "continue_current_task":
             self._foreground_task_only_prefetch = True
+            return
+        if decision.intent == "ambiguous_recall":
+            self._current_task_anchor = ""
+            self._foreground_task_only_prefetch = False
             return
         self._current_task_anchor = _format_current_task_anchor(
             task=text,
@@ -708,18 +714,14 @@ def _is_deferred_continue_query(text: str) -> bool:
     if not normalized:
         return False
     markers = {
-        "继续昨天那个",
-        "继续昨天的",
-        "继续昨晚那个",
-        "继续昨晚的",
-        "接着昨天那个",
-        "接着昨晚那个",
-        "昨天那个继续",
-        "昨晚那个继续",
-        "继续上次那个",
-        "继续上次的",
-        "resume yesterday",
-        "continue yesterday",
+        "继续延期任务",
+        "继续延后的任务",
+        "继续搁置任务",
+        "继续搁置的任务",
+        "继续暂停的任务",
+        "继续之前暂停的任务",
+        "继续之前延期的任务",
+        "继续 deferred task",
         "continue the deferred task",
         "resume the deferred task",
     }

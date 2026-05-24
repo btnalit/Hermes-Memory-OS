@@ -6,6 +6,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .ingress import (
+    classify_ingress as _classify_ingress,
+    is_low_clue_deictic_continue_query as _ingress_is_low_clue_deictic_continue_query,
+    is_low_clue_recall_query as _ingress_is_low_clue_recall_query,
+)
+
 
 SCHEMA_VERSION = "memory-os.context_router.v0"
 INCLUDE_THRESHOLD = 0.30
@@ -129,6 +135,12 @@ _LOW_CLUE_RECALL_PATTERNS = (
     re.compile(r"(do you remember|remember).{0,40}(design|idea|thing|plan|that)", re.I),
 )
 
+_LOW_CLUE_DEICTIC_CONTINUE_PATTERNS = (
+    re.compile(r"^(继续|接着|接着说|说回|回到).{0,8}(昨天|上次|刚才|之前|前面).{0,8}(那个|那条|那套|那件事|那一条|那一个|那个设计)"),
+    re.compile(r"^(继续|接着|接着说|说回|回到).{0,8}(那个|那条|那套|那件事|那一条|那一个|那个设计)$"),
+    re.compile(r"^(continue|resume|back to).{0,20}(yesterday|last time|that one|that topic|that design)", re.I),
+)
+
 _CHINESE_KEYWORDS = (
     "记忆",
     "架构",
@@ -192,6 +204,12 @@ def plan_context_route(query: str, *, current_task_anchor: str | None = None) ->
     text = _normalize(query)
     lower = text.lower()
     reason_codes: list[str] = []
+    ingress = _classify_ingress(query, current_task_anchor=current_task_anchor)
+    if ingress.route:
+        result = _route(ingress.route, hard_route=ingress.hard_route, reason_codes=list(ingress.reason_codes))
+        if ingress.open_issue:
+            result["open_issue"] = ingress.open_issue
+        return result
 
     if text and _has_cancellation(text):
         return _route("foreground_control", hard_route=True, reason_codes=["cancellation"])
@@ -206,6 +224,9 @@ def plan_context_route(query: str, *, current_task_anchor: str | None = None) ->
 
     if _matches_any(text, _DIAGNOSTIC_PATTERNS):
         return _route("diagnostic_current_status", hard_route=True, reason_codes=["explicit_diagnostic"])
+
+    if _is_low_clue_deictic_continue_query(text):
+        return _route("ambiguous_recall", hard_route=False, reason_codes=["low_clue_deictic_continue"])
 
     if is_low_clue_recall_query(text):
         return _route("ambiguous_recall", hard_route=False, reason_codes=["low_clue_recall"])
@@ -345,12 +366,7 @@ def _route_exclusion_reason(section: ContextSection, route: str) -> str:
         or name == "crystallized memory"
     ):
         return "route_excludes_section"
-    if route == "ambiguous_recall" and name in {
-        "current foreground task",
-        "diagnostic grounding",
-        "current memory-os runtime facts",
-        "crystallized review candidates",
-    }:
+    if route == "ambiguous_recall" and name != "recall clarification guard":
         return "route_excludes_section"
     return ""
 
@@ -432,12 +448,11 @@ def _has_cancellation(text: str) -> bool:
 
 
 def is_low_clue_recall_query(text: str) -> bool:
-    normalized = _normalize(text)
-    if not normalized:
-        return False
-    if _matches_any(normalized, _DIAGNOSTIC_PATTERNS):
-        return False
-    return _matches_any(normalized, _LOW_CLUE_RECALL_PATTERNS)
+    return _ingress_is_low_clue_recall_query(text)
+
+
+def _is_low_clue_deictic_continue_query(text: str) -> bool:
+    return _ingress_is_low_clue_deictic_continue_query(text)
 
 
 def _matches_any(text: str, patterns: tuple[re.Pattern[str], ...]) -> bool:

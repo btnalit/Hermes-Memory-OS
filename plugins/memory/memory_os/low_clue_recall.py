@@ -185,6 +185,7 @@ _CORRECTION_TERMS = ("不对", "少了", "不是这个", "还有吗", "不准确
 _SOURCE_DIVERSITY_LIMIT = 2
 _SOURCE_DIVERSITY_LIMIT_AFTER_CORRECTION = 1
 _MIN_LOW_CLUE_SELECT_SCORE = 0.12
+_MIN_SOURCE_DIVERSITY_FALLBACK_SCORE = 0.03
 _TITLE_MAX_CHARS = 96
 _SPEAKER_PREFIX_RE = re.compile(r"(?i)\b(user|assistant|system)\s*[:：]\s*")
 _TITLE_LEAD_RE = re.compile(
@@ -638,6 +639,7 @@ def _select_diverse_clusters(
         source_counts[source_class] = source_counts.get(source_class, 0) + 1
         if len(selected) >= limit:
             break
+    selected, forced_diversity = _ensure_source_diversity_slot(selected, clusters, limit=limit)
     if len(selected) < limit:
         for cluster in deferred:
             selected.append(cluster)
@@ -646,7 +648,34 @@ def _select_diverse_clusters(
     selected = selected[:limit]
     baseline_ids = [str(item.get("candidate_id") or "") for item in clusters[:limit]]
     selected_ids = [str(item.get("candidate_id") or "") for item in selected]
-    return selected, selected_ids != baseline_ids
+    return selected, forced_diversity or selected_ids != baseline_ids
+
+
+def _ensure_source_diversity_slot(
+    selected: list[dict[str, Any]],
+    clusters: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    if limit <= 1 or not selected:
+        return selected, False
+    selected_sources = {str(item.get("source_class") or "unknown") for item in selected}
+    available_sources = {str(item.get("source_class") or "unknown") for item in clusters}
+    if len(selected_sources) > 1 or len(available_sources) <= 1:
+        return selected, False
+    dominant_source = next(iter(selected_sources))
+    for cluster in clusters:
+        source_class = str(cluster.get("source_class") or "unknown")
+        if source_class == dominant_source:
+            continue
+        if float(cluster.get("score") or 0.0) < _MIN_SOURCE_DIVERSITY_FALLBACK_SCORE:
+            continue
+        candidate = dict(cluster)
+        candidate["reason_codes"] = _dedupe([str(item) for item in candidate.get("reason_codes", [])] + ["source_diversity_slot"])
+        if len(selected) < limit:
+            return selected + [candidate], True
+        return selected[:-1] + [candidate], True
+    return selected, False
 
 
 def _topic_terms(text: str) -> set[str]:

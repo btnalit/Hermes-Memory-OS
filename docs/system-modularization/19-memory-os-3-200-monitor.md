@@ -168,9 +168,20 @@ The v0.6 monitor tracks trend signals that can support future decisions:
   - candidate count
   - configured judge mode
   - report-only judge status when enabled
+  - `ok`, `no_clear_match`, `no_match`, and `no_selection` all mean the judge
+    adapter was reachable; only unavailable/error states should become judge
+    availability warnings
   - report-only judge availability warning when the adapter degrades to
     deterministic fallback
   - no candidate labels or private bodies in monitor output
+- RH-28f low-clue ingress matrix:
+  - `继续昨天那个。`
+  - `继续刚才那个`
+  - `继续刚才那个。`
+  - `继续当前任务`
+  - `continue the deferred task`
+  - `继续搁置的任务`
+  - reports only route, expected route, section headings, and character count
 - DeepReflection source-class skew
 - heartbeat/cognitive-loop service last `Result` and `ExecMainStatus`
 
@@ -203,6 +214,10 @@ A normal monitor pass should be treated as PASS when:
 - `context_router` config matches the intended test-host mode
 - if RH-28 report-only judge is enabled, status/doctor expose judge
   availability and the monitor reports `low_clue_llm_judge_available`
+- RH-28f ingress probes route broad deictic recall phrases to
+  `ambiguous_recall` with `Recall Clarification Guard`, while explicit current
+  or deferred task phrases remain `foreground_control` with
+  `Current Foreground Task`
 - RH-26 apply probes show expected section headings for the seven public
   validation prompts
 - count deltas are present after the first script-backed run

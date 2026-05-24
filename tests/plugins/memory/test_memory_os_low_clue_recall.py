@@ -5,6 +5,7 @@ from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.fixtures import build_event, build_working_item
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.low_clue_recall import build_low_clue_recall_report, low_clue_judge_availability
+from plugins.memory.memory_os.memory_sources import append_memory_source_record
 import plugins.memory.memory_os.low_clue_recall as low_clue_recall_module
 from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -98,6 +99,35 @@ def test_low_clue_recall_uses_source_diversity_when_recent_working_would_monopol
     assert "working" in source_classes
     assert "event" in source_classes
     assert report["candidate_quality"]["source_distribution"]["event"] == 2
+
+
+def test_low_clue_recall_keeps_memory_sources_candidate_when_working_would_monopolize(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [f"项目 {index} 工作线索：这是第 {index} 个 working 主题。" for index in range(40)],
+    )
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_test_architecture",
+            "created_at": "2026-05-24T00:00:00Z",
+            "route": "ambiguous_recall",
+            "query_class": "ambiguous_recall",
+            "selected": [
+                {"heading": "Recall Clarification Guard", "source_class": "recall_guard", "chars": 100},
+                {"heading": "Internet collection architecture", "source_class": "event", "chars": 100},
+            ],
+        },
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    source_classes = {candidate["source_class"] for candidate in report["candidates"]}
+    assert "working" in source_classes
+    assert "memory_sources" in source_classes
+    assert report["candidate_quality"]["diversity_applied"] is True
 
 
 def test_low_clue_recall_applies_recent_correction_penalty_without_long_term_write(tmp_path):

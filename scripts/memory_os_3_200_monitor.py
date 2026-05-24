@@ -217,13 +217,39 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         )
         judge_status = judge.get("status")
         if configured_judge.get("enabled") and configured_judge.get("mode") == "report_only":
-            if judge_status in {"ok", "no_clear_match", "no_match"}:
+            if judge_status in {"ok", "no_clear_match", "no_match", "no_selection"}:
                 passed.append({"code": "low_clue_llm_judge_available"})
             elif judge_status in {"error", "skipped"}:
                 warn.append({"code": "low_clue_llm_judge_unavailable", "value": judge})
         passed.append({"code": "low_clue_recall_probe_ok"})
     else:
         warn.append({"code": "low_clue_recall_probe_unavailable", "value": low_clue})
+
+    for item in snapshot.get("low_clue_ingress_matrix") or []:
+        if not isinstance(item, dict):
+            continue
+        expected_route = str(item.get("expected_route") or "")
+        route = str(item.get("route") or "")
+        if expected_route and route != expected_route:
+            fail.append(
+                {
+                    "code": "low_clue_ingress_route_mismatch",
+                    "id": item.get("id"),
+                    "expected": expected_route,
+                    "actual": route,
+                }
+            )
+        expected_heading = str(item.get("expected_heading") or "")
+        headings = [str(heading) for heading in item.get("headings") or []]
+        if expected_heading and expected_heading not in headings:
+            fail.append(
+                {
+                    "code": "low_clue_ingress_heading_mismatch",
+                    "id": item.get("id"),
+                    "expected": expected_heading,
+                    "actual": headings,
+                }
+            )
 
     rh26_anomalies = find_rh26_heading_anomalies(list(snapshot.get("rh26_apply_probe") or []))
     for anomaly in rh26_anomalies:
@@ -330,6 +356,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
             f"llm_judge={router.get('llm_judge_mode')}"
         ),
         f"- low_clue_recall={_low_clue_summary(snapshot.get('low_clue_recall') or {}, snapshot.get('low_clue_recall_config') or {})}",
+        f"- low_clue_ingress={_probe_summary(snapshot.get('low_clue_ingress_matrix') or [])}",
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- compaction={snapshot.get('compaction')}",
@@ -446,7 +473,7 @@ def _low_clue_summary(report: dict[str, Any], config: dict[str, Any]) -> dict[st
         "decision": report.get("decision"),
         "candidate_count": report.get("candidate_count"),
         "llm_status": judge.get("status"),
-        "llm_available": judge.get("status") in {"ok", "no_clear_match", "no_match"},
+        "llm_available": judge.get("status") in {"ok", "no_clear_match", "no_match", "no_selection"},
     }
 
 
@@ -724,6 +751,41 @@ print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     r = run(["python3", "-c", code], env=env)
     return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
 
+def low_clue_ingress_matrix():
+    code = r"""
+import json, re
+from plugins.memory.memory_os.config import load_config
+from plugins.memory.memory_os.context_router import plan_context_route
+from plugins.memory.memory_os.index import MemoryOSIndex
+from plugins.memory.memory_os.prefetch import build_prefetch
+from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.store import MemoryOSStore
+home="/root/.hermes"
+roots=MemoryOSRoots.from_hermes_home(home, profile="default")
+store=MemoryOSStore(roots)
+config=load_config(home)
+cases=[
+ ("deictic_yesterday","继续昨天那个。","", "ambiguous_recall", "Recall Clarification Guard"),
+ ("deictic_just_now_no_punctuation","继续刚才那个","Current task: inspect ComfyUI layout_report.json.", "ambiguous_recall", "Recall Clarification Guard"),
+ ("deictic_just_now_punctuation","继续刚才那个。","Current task: inspect ComfyUI layout_report.json.", "ambiguous_recall", "Recall Clarification Guard"),
+ ("continue_current_task","继续当前任务","Current task: inspect ComfyUI layout_report.json.", "foreground_control", "Current Foreground Task"),
+ ("explicit_deferred_en","continue the deferred task","Current task: inspect ComfyUI layout_report.json.", "foreground_control", "Current Foreground Task"),
+ ("explicit_deferred_zh","继续搁置的任务","Current task: inspect ComfyUI layout_report.json.", "foreground_control", "Current Foreground Task"),
+]
+summary=[]
+for cid, query, anchor_text, expected_route, expected_heading in cases:
+    anchor=("### Memory-OS Current Task Anchor\n- current task: "+anchor_text) if anchor_text else ""
+    route=plan_context_route(query, current_task_anchor=anchor)
+    context=build_prefetch(query, budget_chars=1600, store=store, index=MemoryOSIndex(roots), runtime_facts={"provider":"memory_os","prefetch_mode":"indexed"}, current_task_anchor=anchor, context_router_config=config.get("context_router"), low_clue_recall_config=config.get("low_clue_recall"))
+    headings=re.findall(r"^### (.+)$", context, flags=re.M)
+    summary.append({"id":cid,"query_class":str(route.get("route") or ""),"route":str(route.get("route") or ""),"reason_codes":route.get("reason_codes") or [],"chars":len(context),"headings":headings,"expected_route":expected_route,"expected_heading":expected_heading})
+print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"
+    r = run(["python3", "-c", code], env=env)
+    return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
+
 def deep_reflection_status():
     code = r"""
 import json
@@ -820,6 +882,7 @@ print(json.dumps({
   "context_router": cfg.get("context_router", {}),
   "low_clue_recall_config": cfg.get("low_clue_recall", {}),
   "low_clue_recall": low_clue_recall_probe(),
+  "low_clue_ingress_matrix": low_clue_ingress_matrix(),
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),
   "hook_markers": hook_marker_counts(),

@@ -99,6 +99,37 @@ def test_router_routes_low_clue_recall_to_ambiguous_recall():
     assert "low_clue_recall" in report["reason_codes"]
 
 
+def test_router_routes_deictic_continue_recall_to_ambiguous_recall():
+    for query in ["继续昨天那个。", "继续上次那个。", "继续刚才那个", "继续刚才那个。", "接着刚才那条。"]:
+        report = plan_context_route(query)
+
+        assert report["route"] == "ambiguous_recall"
+        assert report["hard_route"] is False
+        assert "low_clue_deictic_continue" in report["reason_codes"]
+
+
+def test_router_routes_deictic_continue_to_recall_even_with_current_anchor():
+    report = plan_context_route(
+        "继续刚才那个",
+        current_task_anchor="Current task: inspect ComfyUI layout_report.json.",
+    )
+
+    assert report["route"] == "ambiguous_recall"
+    assert report["hard_route"] is False
+    assert "low_clue_deictic_continue" in report["reason_codes"]
+
+
+def test_router_keeps_current_task_continue_on_foreground_control():
+    report = plan_context_route(
+        "继续当前任务",
+        current_task_anchor="Current task: inspect ComfyUI layout_report.json.",
+    )
+
+    assert report["route"] == "foreground_control"
+    assert report["hard_route"] is True
+    assert "vague_continue_with_anchor" in report["reason_codes"]
+
+
 def test_router_routes_candidate_question_to_candidate_review():
     report = plan_context_route("那些 crystallized candidates 是已经沉淀的长期记忆吗？")
 
@@ -385,6 +416,47 @@ def test_prefetch_low_clue_recall_injects_clarification_guard(tmp_path):
     assert "underspecified" in context
     assert "Do not answer as if one remembered item is certain." in context
     assert "ask for a keyword" in context
+
+
+def test_prefetch_deictic_continue_uses_recall_guard_at_global_entry(tmp_path):
+    store = _store(tmp_path)
+
+    context = build_prefetch(
+        "继续昨天那个。",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        low_clue_recall_config={"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
+        memory_sources_config={"enabled": True},
+    )
+    source_record = (tmp_path / "memory-os" / "system" / "memory_sources.jsonl").read_text(encoding="utf-8")
+
+    assert "### Recall Clarification Guard" in context
+    assert "Do not answer as if one remembered item is certain." in context
+    assert '"route": "ambiguous_recall"' in source_record
+    assert '"query_class": "ambiguous_recall"' in source_record
+
+
+def test_prefetch_deictic_continue_without_punctuation_uses_recall_guard_even_with_anchor(tmp_path):
+    store = _store(tmp_path)
+
+    context = build_prefetch(
+        "继续刚才那个",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        current_task_anchor="Current task: inspect ComfyUI layout_report.json.",
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        low_clue_recall_config={"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
+        memory_sources_config={"enabled": True},
+    )
+    source_record = (tmp_path / "memory-os" / "system" / "memory_sources.jsonl").read_text(encoding="utf-8")
+
+    assert "### Recall Clarification Guard" in context
+    assert "### Current Foreground Task" not in context
+    assert '"route": "ambiguous_recall"' in source_record
+    assert '"router_applied": true' in source_record
 
 
 def test_prefetch_context_router_apply_diagnostic_does_not_double_wrap_context(tmp_path):

@@ -199,6 +199,15 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             "candidate_count": 2,
             "llm_judge": {"status": "disabled", "mode": "none"},
         },
+        "low_clue_ingress_matrix": [
+            {
+                "id": "deictic_yesterday",
+                "route": "ambiguous_recall",
+                "headings": ["Recall Clarification Guard"],
+                "expected_route": "ambiguous_recall",
+                "expected_heading": "Recall Clarification Guard",
+            }
+        ],
     }
 
     classification = classify_snapshot(snapshot)
@@ -209,6 +218,46 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
     assert any(item["code"] == "deep_reflection_source_skew" for item in classification["warn"])
     assert any(item["code"] == "compression_focus_none" for item in classification["warn"])
     assert any(item["code"] == "shell_alias_no_env_ok" for item in classification["pass"])
+
+
+def test_classify_snapshot_fails_on_low_clue_ingress_route_mismatch():
+    snapshot = _healthy_snapshot()
+    snapshot["low_clue_ingress_matrix"] = [
+        {
+            "id": "deictic_just_now_no_punctuation",
+            "route": "foreground_control",
+            "headings": ["Current Foreground Task"],
+            "expected_route": "ambiguous_recall",
+            "expected_heading": "Recall Clarification Guard",
+        }
+    ]
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "low_clue_ingress_route_mismatch" for item in classification["fail"])
+    assert any(item["code"] == "low_clue_ingress_heading_mismatch" for item in classification["fail"])
+
+
+def test_classify_snapshot_treats_no_selection_judge_as_available():
+    snapshot = _healthy_snapshot()
+    snapshot["low_clue_recall_config"] = {
+        "enabled": True,
+        "llm_judge": {"enabled": True, "mode": "report_only"},
+    }
+    snapshot["low_clue_recall"] = {
+        "schema_version": "memory-os.low_clue_recall.v0",
+        "decision": "ask_choice",
+        "candidate_count": 4,
+        "llm_judge": {"status": "no_selection", "mode": "report_only"},
+    }
+
+    classification = classify_snapshot(snapshot)
+    summary = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "low_clue_llm_judge_available" for item in classification["pass"])
+    assert not any(item["code"] == "low_clue_llm_judge_unavailable" for item in classification["warn"])
+    assert "'llm_available': True" in summary
 
 
 def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
@@ -354,7 +403,12 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
         },
         "doctor": {"status": "ok", "findings": []},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
+        "shell_alias_no_env": {
+            "status_ok": True,
+            "doctor_ok": True,
+            "memory_sources_ok": True,
+            "low_clue_recall_ok": True,
+        },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {
