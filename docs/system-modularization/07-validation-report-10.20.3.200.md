@@ -7447,3 +7447,69 @@ FAIL=[]
 This validates the P1C requirement: RH-31 can be probed from the monitor
 without touching live prefetch, live routing, scheduler behavior,
 crystallized approval, send/execute gates, identity, or canonical memory.
+
+## 2026-05-25 RH-17 Metadata Retention Dry-Run Smoke
+
+Source: read-only remote smoke against `10.20.3.200` after deploying the
+metadata retention helper.
+
+Command:
+
+```text
+hermes memory-os-agent-os metadata-retention
+```
+
+Result:
+
+```text
+schema_version=memory-os.metadata_retention_plan.v0
+dry_run=true
+canonical_paths_touched=[]
+actions=[]
+
+ledgers:
+  memory_sources:
+    exists=true
+    total_records=31
+    retained_records=31
+    archive_candidate_records=0
+  memory_sources_feedback:
+    exists=true
+    total_records=1
+    retained_records=1
+    archive_candidate_records=0
+  consolidation_suggestions:
+    exists=false
+    total_records=0
+    archive_candidate_records=0
+
+report_roots:
+  rh31_eval_reports:
+    exists=false
+    candidate_count=0
+    archive_candidate_count=0
+  rh32_suggestion_reports:
+    exists=false
+    candidate_count=0
+    archive_candidate_count=0
+```
+
+Interpretation:
+
+- The helper is dry-run only.
+- It plans archive-before-prune work for metadata ledgers and report dirs.
+- It does not touch canonical Memory-OS paths.
+- Current test-host metadata volume is still inside the 30-day retention
+  window, so no archive/prune candidates are expected.
+
+Monitor integration:
+
+```text
+shell_alias_no_env.metadata_retention_ok=true
+PASS includes shell_alias_no_env_ok
+FAIL=[]
+```
+
+This closes the immediate RH-17 metadata/report retention gap at the planning
+layer. Physical apply/prune remains intentionally open and should require a
+separate gate.

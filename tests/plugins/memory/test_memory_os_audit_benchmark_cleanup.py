@@ -22,6 +22,8 @@ from plugins.memory.memory_os.benchmark import BenchmarkConfig, run_benchmark
 from plugins.memory.memory_os.cleanup import CleanupPolicy, apply_cleanup, cleanup_plan
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.index import MemoryOSIndex
+from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path, memory_sources_path
+from plugins.memory.memory_os.metadata_retention import MetadataRetentionPolicy, metadata_retention_plan
 from plugins.memory.memory_os.migrator import export_shadow_bundle, import_shadow_bundle
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
@@ -41,6 +43,15 @@ def _touch(path, *, days_old):
     path.write_text("stale", encoding="utf-8")
     ts = (datetime.now(timezone.utc) - timedelta(days=days_old)).timestamp()
     os.utime(path, (ts, ts))
+
+
+def _touch_dir(path, *, days_old):
+    path.mkdir(parents=True, exist_ok=True)
+    marker = path / "summary.json"
+    marker.write_text("{}", encoding="utf-8")
+    ts = (datetime.now(timezone.utc) - timedelta(days=days_old)).timestamp()
+    os.utime(path, (ts, ts))
+    os.utime(marker, (ts, ts))
 
 
 def test_status_and_doctor_do_not_print_private_bodies(tmp_path):
@@ -410,6 +421,121 @@ def test_cleanup_cli_wrapper_is_dry_run_by_default(tmp_path):
     assert report["dry_run"] is True
     assert len(report["actions"]) == 1
     assert stale_quarantine.exists()
+
+
+def test_metadata_retention_plan_is_dry_run_and_keeps_canonical_paths(tmp_path):
+    store = _store(tmp_path)
+    now = datetime(2026, 5, 25, tzinfo=timezone.utc)
+    identity_source = tmp_path / "SOUL.md"
+    identity_source.write_text("protected identity", encoding="utf-8")
+    store.roots.identity_manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.identity_manifest.v0",
+                "profile": "memoryos-test",
+                "identity_sources": [{"kind": "soul", "path": str(identity_source)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    crystallized_path = store.append_crystallized_record(
+        "stable.md",
+        {"schema_version": "memory-os.crystallized.v0", "id": "crystal-retention"},
+        "protected crystallized record",
+    )
+    memory_sources_path(store.roots).parent.mkdir(parents=True, exist_ok=True)
+    old_ts = (now - timedelta(days=45)).isoformat().replace("+00:00", "Z")
+    fresh_ts = (now - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    memory_sources_path(store.roots).write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "record_id": "ms_old",
+                        "created_at": old_ts,
+                        "route": "ambiguous_recall",
+                        "raw_prompt": "private body must not appear in plan",
+                    },
+                    sort_keys=True,
+                ),
+                json.dumps({"record_id": "ms_fresh", "created_at": fresh_ts, "route": "active_task"}, sort_keys=True),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    memory_sources_feedback_path(store.roots).write_text(
+        json.dumps({"feedback_id": "fb_old", "created_at": old_ts, "rating": "useful"}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    suggestion_ledger = store.roots.memory_os_root / "system" / "consolidation_suggestions.jsonl"
+    suggestion_ledger.write_text(
+        json.dumps({"suggestion_id": "sg_old", "created_at": old_ts}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    eval_reports = tmp_path / "eval" / "reports" / "memory-os-rh31"
+    _touch_dir(eval_reports / "rh31_old", days_old=45)
+    _touch_dir(eval_reports / "rh31_fresh", days_old=1)
+
+    plan = metadata_retention_plan(
+        store.roots,
+        now=now,
+        policy=MetadataRetentionPolicy(
+            memory_sources_retention_days=30,
+            feedback_retention_days=30,
+            suggestion_retention_days=30,
+            eval_report_retention_days=30,
+            eval_report_keep_latest=1,
+        ),
+        eval_report_root=eval_reports,
+    )
+
+    assert plan["schema_version"] == "memory-os.metadata_retention_plan.v0"
+    assert plan["dry_run"] is True
+    assert plan["canonical_paths_touched"] == []
+    assert identity_source.exists()
+    assert crystallized_path.exists()
+    assert "private body must not appear in plan" not in json.dumps(plan, ensure_ascii=False)
+    actions = plan["actions"]
+    assert {
+        (action["kind"], action.get("ledger"), action.get("record_count"))
+        for action in actions
+        if action["kind"] == "archive_metadata_jsonl_records"
+    } == {
+        ("archive_metadata_jsonl_records", "memory_sources", 1),
+        ("archive_metadata_jsonl_records", "memory_sources_feedback", 1),
+        ("archive_metadata_jsonl_records", "consolidation_suggestions", 1),
+    }
+    assert [action for action in actions if action["kind"] == "archive_report_dir"][0]["target"].endswith("rh31_old")
+
+
+def test_metadata_retention_cli_is_dry_run(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    memory_sources_path(store.roots).parent.mkdir(parents=True, exist_ok=True)
+    memory_sources_path(store.roots).write_text(
+        json.dumps(
+            {
+                "record_id": "ms_cli_old",
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),
+                "route": "ambiguous_recall",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(["metadata-retention", "--memory-sources-days", "30"])
+
+    result = memory_os_command(args)
+
+    output = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert output["schema_version"] == "memory-os.metadata_retention_plan.v0"
+    assert output["dry_run"] is True
+    assert output["actions"][0]["ledger"] == "memory_sources"
+    assert memory_sources_path(store.roots).exists()
 
 
 def test_cleanup_cli_accepts_event_source_class_retention_policy(tmp_path, monkeypatch, capsys):

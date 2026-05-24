@@ -71,6 +71,7 @@ HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
 hermes memory-os-agent-os status
 hermes memory-os-agent-os doctor
 hermes memory-os-agent-os memory-sources stats --hours 24
+hermes memory-os-agent-os metadata-retention
 hermes memory-os-agent-os low-clue-recall dry-run \
   --query "继续昨天那个。" \
   --llm-judge none

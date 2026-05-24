@@ -178,6 +178,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             "status_ok": True,
             "doctor_ok": True,
             "memory_sources_ok": True,
+            "metadata_retention_ok": True,
             "low_clue_recall_ok": True,
             "modules_ok": True,
             "eval_ok": True,
@@ -369,6 +370,17 @@ def test_classify_snapshot_fails_when_shell_modules_alias_without_env_breaks():
     assert any(item["code"] == "shell_alias_no_env_failed" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_metadata_retention_alias_without_env_breaks():
+    snapshot = _healthy_snapshot()
+    snapshot["shell_alias_no_env"]["metadata_retention_ok"] = False
+    snapshot["shell_alias_no_env"]["metadata_retention_error"] = "invalid choice: 'metadata-retention'"
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "shell_alias_no_env_failed" for item in classification["fail"])
+
+
 def test_classify_snapshot_fails_when_cognitive_loop_service_last_result_failed():
     snapshot = _healthy_snapshot()
     snapshot["cognitive_loop_service"] = {
@@ -479,6 +491,7 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
             "status_ok": True,
             "doctor_ok": True,
             "memory_sources_ok": True,
+            "metadata_retention_ok": True,
             "low_clue_recall_ok": True,
             "modules_ok": True,
             "eval_ok": True,
@@ -590,7 +603,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             },
             "doctor": {"status": "ok", "findings": []},
             "status_tool_contract": {"status": "ok", "findings": []},
-                "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
+                "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "metadata_retention_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
             "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
             "rh26_apply_probe": [],
             "deep_reflection": {},
@@ -651,7 +664,7 @@ def _healthy_snapshot() -> dict:
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "metadata_retention_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {

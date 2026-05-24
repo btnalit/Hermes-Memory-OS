@@ -1046,10 +1046,10 @@ Architecture-level bug:
 These are not blockers for this contract, but future modules must account for
 them:
 
-- RH-17 retention still needs to cover MemorySources, feedback ledgers,
-  suggestion reports, and other metadata JSONL files. RH-31 now has a
-  report-retention dry-run helper for `eval/reports/memory-os-rh31/`, but that
-  does not replace broad metadata retention.
+- RH-17 metadata retention now has a dry-run helper for MemorySources, feedback
+  ledgers, future consolidation suggestion ledgers, RH-31 eval reports, and
+  future RH-32 suggestion reports. It plans archive-before-prune work and keeps
+  `canonical_paths_touched=[]`. Physical apply/prune remains intentionally open.
 - RH-30 feedback volume is still low. Do not use it as a strong ranking signal
   until more real owner corrections exist.
 - RH-32 consolidation suggestions must remain deterministic-only until a

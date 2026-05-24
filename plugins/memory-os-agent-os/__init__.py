@@ -16,7 +16,15 @@ from pathlib import Path
 from typing import Any
 
 
-_ALLOWED_ALIASES = {"status", "doctor", "low-clue-recall", "memory-sources", "modules", "eval"}
+_ALLOWED_ALIASES = {
+    "status",
+    "doctor",
+    "low-clue-recall",
+    "memory-sources",
+    "metadata-retention",
+    "modules",
+    "eval",
+}
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +106,16 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    metadata_retention_parser = subs.add_parser("metadata-retention")
+    metadata_retention_parser.add_argument("--memory-sources-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--feedback-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--suggestion-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--eval-report-root", default="")
+    metadata_retention_parser.add_argument("--eval-report-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--eval-report-keep-latest", type=int, default=20)
+    metadata_retention_parser.add_argument("--suggestion-report-root", default="")
+    metadata_retention_parser.add_argument("--suggestion-report-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--suggestion-report-keep-latest", type=int, default=20)
     modules_parser = subs.add_parser("modules")
     modules_subs = modules_parser.add_subparsers(dest="modules_command", required=True)
     modules_subs.add_parser("status")

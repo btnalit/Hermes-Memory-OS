@@ -61,6 +61,7 @@ from .memory_sources import (
     memory_sources_last_report,
     memory_sources_stats_report,
 )
+from .metadata_retention import MetadataRetentionPolicy, metadata_retention_plan
 from .migrator import (
     export_shadow_bundle,
     import_shadow_bundle,
@@ -303,6 +304,16 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         metavar="SOURCE_CLASS=DAYS",
         help="Add explicit event retention policy for one source_class, e.g. telemetry=30",
     )
+    metadata_retention_parser = subs.add_parser("metadata-retention")
+    metadata_retention_parser.add_argument("--memory-sources-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--feedback-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--suggestion-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--eval-report-root", default="")
+    metadata_retention_parser.add_argument("--eval-report-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--eval-report-keep-latest", type=int, default=20)
+    metadata_retention_parser.add_argument("--suggestion-report-root", default="")
+    metadata_retention_parser.add_argument("--suggestion-report-days", type=int, default=30)
+    metadata_retention_parser.add_argument("--suggestion-report-keep-latest", type=int, default=20)
     cron_parser = subs.add_parser("cron-mirror")
     cron_subs = cron_parser.add_subparsers(dest="cron_mirror_command", required=True)
     cron_subs.add_parser("status")
@@ -567,6 +578,29 @@ def memory_os_command(args: argparse.Namespace) -> int:
                             args.event_source_class_retention
                         ),
                     ),
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "metadata-retention":
+        print(
+            json.dumps(
+                metadata_retention_plan(
+                    store.roots,
+                    policy=MetadataRetentionPolicy(
+                        memory_sources_retention_days=max(int(args.memory_sources_days), 0),
+                        feedback_retention_days=max(int(args.feedback_days), 0),
+                        suggestion_retention_days=max(int(args.suggestion_days), 0),
+                        eval_report_retention_days=max(int(args.eval_report_days), 0),
+                        eval_report_keep_latest=max(int(args.eval_report_keep_latest), 0),
+                        suggestion_report_retention_days=max(int(args.suggestion_report_days), 0),
+                        suggestion_report_keep_latest=max(int(args.suggestion_report_keep_latest), 0),
+                    ),
+                    eval_report_root=args.eval_report_root or None,
+                    suggestion_report_root=args.suggestion_report_root or None,
                 ),
                 ensure_ascii=False,
                 indent=2,

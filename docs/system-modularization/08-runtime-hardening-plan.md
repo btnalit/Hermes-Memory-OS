@@ -1437,6 +1437,20 @@ Contract gate:
 - RH-31.0 through RH-31.3 are now implemented as a read-only eval harness:
   inventory, synthetic fixtures, first six deterministic adapters, provider CLI,
   shell alias delegation, report artifacts, and no-write monitor smoke
+- RH-17 metadata/report retention now has a dry-run helper for MemorySources,
+  feedback ledger, future consolidation suggestions, RH-31 eval reports, and
+  future RH-32 suggestion reports:
+  `hermes memory_os metadata-retention`
+- The RH-17 helper is still dry-run only. It plans archive-before-prune actions
+  and keeps `canonical_paths_touched=[]`; it does not apply physical pruning.
+- The first RH-31 scorecard has been generated from the approved deterministic
+  adapters. It produced warning-level recall findings
+  (`fts_miss`, `lexical_miss`, `projection_miss`) with
+  `boundary_true_count=0` and `forbidden_field_count=0`.
+- Do not add the first RH-31 guard from this scorecard alone. The current
+  failures are measurement signals and need either a live finding, a reviewed
+  fixture correction, or a repeated scorecard trend before changing live
+  behavior.
 
 Audit noise follow-up:
 

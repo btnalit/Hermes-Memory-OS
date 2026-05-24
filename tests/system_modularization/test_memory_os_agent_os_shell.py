@@ -98,6 +98,12 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     feedback_history_args = parser.parse_args(["memory-sources", "feedback", "history", "--limit", "3"])
     assert feedback_history_args.memory_sources_feedback_command == "history"
     assert feedback_history_args.limit == 3
+    metadata_retention_args = parser.parse_args(
+        ["metadata-retention", "--memory-sources-days", "30", "--eval-report-root", "eval/reports/memory-os-rh31"]
+    )
+    assert metadata_retention_args.agent_os_command == "metadata-retention"
+    assert metadata_retention_args.memory_sources_days == 30
+    assert metadata_retention_args.eval_report_root == "eval/reports/memory-os-rh31"
     modules_status_args = parser.parse_args(["modules", "status"])
     assert modules_status_args.agent_os_command == "modules"
     assert modules_status_args.modules_command == "status"

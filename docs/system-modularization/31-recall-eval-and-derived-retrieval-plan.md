@@ -1177,3 +1177,89 @@ RH31Eval={
   "report_written": false
 }
 ```
+
+## First Scorecard Decision
+
+Date: 2026-05-25
+
+Command:
+
+```text
+python -m plugins.memory.memory_os eval rh31 run --fixture synthetic --adapter all
+```
+
+Result:
+
+```text
+run_id=rh31_20260524T183908544131Z
+status=warning
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=4
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1, "projection_miss": 1}
+boundary_true_count=0
+forbidden_field_count=0
+report_dir=eval/reports/memory-os-rh31/rh31_20260524T183908544131Z
+```
+
+Failure records:
+
+```text
+grep/mechanism_noise_001 -> lexical_miss
+memory_os_fts/diagnostic_grounding_001 -> fts_miss
+memory_os_fts/mechanism_noise_001 -> fts_miss
+context_projection/candidate_boundary_001 -> projection_miss
+```
+
+Guard decision:
+
+- Do not add the first RH-31 live guard from this scorecard alone.
+- The failures are useful measurement signals, but they are not yet a reviewed
+  live finding.
+- The `candidate_boundary_001` projection miss may indicate either a fixture
+  expectation issue or an active-task route priority issue; it needs a reviewed
+  fixture/live reproduction before any routing guard is added.
+- The FTS/lexical misses support improving fixtures and measurement coverage,
+  not adding broad wording guards.
+
+RH-17 metadata retention support:
+
+- `plugins/memory/memory_os/metadata_retention.py` adds
+  `memory-os.metadata_retention_plan.v0`.
+- CLI:
+
+```text
+hermes memory_os metadata-retention
+hermes memory-os-agent-os metadata-retention
+```
+
+- The helper is dry-run only and covers:
+  - MemorySources JSONL
+  - MemorySources feedback JSONL
+  - future consolidation suggestion JSONL
+  - RH-31 eval report directories
+  - future RH-32 suggestion report directories
+- The helper reports archive-before-prune actions and keeps
+  `canonical_paths_touched=[]`.
+
+Remote RH-17 metadata-retention smoke on `10.20.3.200`:
+
+```text
+command=hermes memory-os-agent-os metadata-retention
+
+schema_version=memory-os.metadata_retention_plan.v0
+dry_run=true
+canonical_paths_touched=[]
+actions=[]
+memory_sources.total_records=31
+memory_sources.archive_candidate_records=0
+memory_sources_feedback.total_records=1
+memory_sources_feedback.archive_candidate_records=0
+consolidation_suggestions.exists=false
+rh31_eval_reports.exists=false
+rh32_suggestion_reports.exists=false
+```
+
+The no-env monitor alias check now includes `metadata-retention` and reports
+`metadata_retention_ok=true` on the test host.

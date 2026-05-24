@@ -177,6 +177,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         shell_alias.get("status_ok") is True
         and shell_alias.get("doctor_ok") is True
         and shell_alias.get("memory_sources_ok") is True
+        and shell_alias.get("metadata_retention_ok") is True
         and shell_alias.get("low_clue_recall_ok") is True
         and shell_alias.get("modules_ok") is True
         and shell_alias.get("eval_ok") is True
@@ -908,6 +909,7 @@ def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
     memory_sources = load_json_cmd(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
+    metadata_retention = load_json_cmd(["hermes", "memory-os-agent-os", "metadata-retention"])
     low_clue = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"])
     modules = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     eval_report = load_json_cmd(["hermes", "memory-os-agent-os", "eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
@@ -915,12 +917,14 @@ def shell_alias_no_env():
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
       "memory_sources_ok": isinstance(memory_sources, dict) and memory_sources.get("schema_version") == "memory-os.memory_sources_stats.v0",
+      "metadata_retention_ok": isinstance(metadata_retention, dict) and metadata_retention.get("schema_version") == "memory-os.metadata_retention_plan.v0",
       "low_clue_recall_ok": isinstance(low_clue, dict) and low_clue.get("schema_version") == "memory-os.low_clue_recall.v0",
       "modules_ok": isinstance(modules, dict) and modules.get("schema_version") == "memory-os.modules_status.v0",
       "eval_ok": isinstance(eval_report, dict) and eval_report.get("schema_version") == "memory-os.rh31_summary.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
       "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
+      "metadata_retention_error": metadata_retention.get("_error") if isinstance(metadata_retention, dict) else None,
       "low_clue_recall_error": low_clue.get("_error") if isinstance(low_clue, dict) else None,
       "modules_error": modules.get("_error") if isinstance(modules, dict) else None,
       "eval_error": eval_report.get("_error") if isinstance(eval_report, dict) else None,
