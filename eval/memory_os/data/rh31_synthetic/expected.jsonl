@@ -1,0 +1,6 @@
+{"case_id":"low_clue_zh_001","expected_class":"should_clarify","expected_terms":["互联网","采集"],"expected_heading":"Recall Clarification Guard","family":"low_clue","weight":1.2}
+{"case_id":"low_clue_keyword_001","expected_class":"direct_or_confirm","expected_terms":["互联网","采集","系统"],"expected_heading":"","family":"low_clue","weight":1.0}
+{"case_id":"candidate_boundary_001","expected_class":"candidate_boundary","expected_terms":["candidate","长期记忆"],"expected_heading":"Crystallized Review Candidates","family":"candidate_boundary","weight":1.1}
+{"case_id":"diagnostic_grounding_001","expected_class":"diagnostic_grounding","expected_terms":["记忆","架构"],"expected_heading":"Diagnostic Grounding","family":"diagnostic","weight":1.1}
+{"case_id":"active_task_001","expected_class":"active_task","expected_terms":["ComfyUI","插件"],"expected_heading":"Current Foreground Task","family":"active_task","weight":1.0}
+{"case_id":"mechanism_noise_001","expected_class":"casual_continuity","expected_terms":["项目","理解"],"expected_heading":"","family":"mechanism_noise","weight":1.0}

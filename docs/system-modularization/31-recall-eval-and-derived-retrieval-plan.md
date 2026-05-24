@@ -1052,3 +1052,128 @@ storage model, or default tool surface.
 
 Derived hybrid retrieval remains possible only as a later report-only branch
 after the eval proves a semantic retrieval gap.
+
+## Implementation Evidence - RH-31.0 through RH-31.3
+
+Date: 2026-05-25
+
+Implemented scope:
+
+- Slice 31.0 read-only inventory:
+  - `eval/memory_os/runner/inventory.py`
+  - emits `memory-os.rh31_inventory.v0`
+  - reports bounded route/source/feedback/audit/working/candidate metadata
+  - maps its fields back to existing monitor concepts instead of inventing a
+    second health schema
+- Slice 31.1 eval harness skeleton:
+  - `eval/memory_os/runner/run.py`
+  - `eval/memory_os/runner/score.py`
+  - writes `summary.json`, `scores.ndjson`, `failure_cases.ndjson`,
+    `source_distribution.json`, and `scorecard.md`
+  - supports `--no-write-report` for monitor smoke
+- Slice 31.2 synthetic fixture corpus:
+  - `eval/memory_os/data/rh31_synthetic/questions.jsonl`
+  - `eval/memory_os/data/rh31_synthetic/corpus.jsonl`
+  - `eval/memory_os/data/rh31_synthetic/expected.jsonl`
+  - synthetic/redacted only; no private body fixture
+- Slice 31.3 first deterministic adapters:
+  - `grep`
+  - `memory_os_fts`
+  - `context_projection`
+  - `low_clue_candidates`
+  - `memory_sources_replay`
+  - `diagnostic_grounding`
+
+Operator path:
+
+```text
+hermes memory_os eval rh31 run --fixture synthetic --adapter all
+hermes memory_os eval rh31 summary
+hermes memory_os eval rh31 failures --class projection_miss
+hermes memory-os-agent-os eval rh31 run --fixture synthetic --adapter all
+```
+
+Monitor path:
+
+```text
+hermes memory-os-agent-os eval rh31 run \
+  --fixture synthetic \
+  --adapter all \
+  --no-write-report
+```
+
+The shell plugin delegates to the provider/runtime implementation. It does not
+read reports directly and does not reimplement eval logic.
+
+Installation path:
+
+- `install_system_modules` now copies the top-level `eval/` package into
+  `$HERMES_HOME/memory-os/runtime/python/eval`.
+- This is required because installed provider CLI imports the eval harness from
+  the runtime Python path.
+
+Retention:
+
+- `eval/memory_os/runner/retention.py` provides a dry-run report retention
+  plan for `eval/reports/memory-os-rh31/`.
+- It reports which old eval runs would be archived/pruned while keeping
+  canonical Memory-OS paths untouched.
+- Broad RH-17 retention for MemorySources, feedback ledgers, and future
+  suggestion reports remains separate.
+
+Boundary status:
+
+- RH-31.0-31.3 are report-only.
+- They do not alter live prefetch, live routing, scheduler behavior,
+  crystallized approval, send/execute gates, identity, or canonical memory.
+
+Remote smoke on `10.20.3.200`:
+
+```text
+time=2026-05-24T17:58:24Z
+command=hermes memory-os-agent-os eval rh31 run --fixture synthetic --adapter all --no-write-report
+
+schema_version=memory-os.rh31_summary.v0
+status=warning
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=4
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1, "projection_miss": 1}
+boundary_true_count=0
+forbidden_field_count=0
+report_written=false
+retention.reports_root=/root/eval/reports/memory-os-rh31
+retention.would_archive_or_prune=[]
+```
+
+The warning status is expected for the first scorecard: RH-31 is measuring
+known recall misses, not declaring the runtime unhealthy. The safety gate is
+the boundary/forbidden-field count, both of which stayed at zero.
+
+Remote monitor integration smoke:
+
+```text
+command=python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
+
+monitor_status=WARN
+PASS includes:
+  rh31_eval_safety_ok
+  shell_alias_no_env_ok
+  context_router_apply
+  memory_sources_stats_ok
+  low_clue_recall_probe_ok
+
+WARN includes:
+  rh31_eval_has_failures
+
+FAIL=[]
+RH31Eval={
+  "status": "warning",
+  "adapter_count": 6,
+  "failure_count": 4,
+  "boundary_true_count": 0,
+  "forbidden_field_count": 0,
+  "report_written": false
+}
+```

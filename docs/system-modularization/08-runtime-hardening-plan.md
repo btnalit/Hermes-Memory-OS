@@ -1434,6 +1434,9 @@ Contract gate:
 - RH-31 operator CLI, if exposed, must follow the provider/runtime source-of-truth
   and `memory-os-agent-os` shell delegation rules in the module integration
   contract
+- RH-31.0 through RH-31.3 are now implemented as a read-only eval harness:
+  inventory, synthetic fixtures, first six deterministic adapters, provider CLI,
+  shell alias delegation, report artifacts, and no-write monitor smoke
 
 Audit noise follow-up:
 

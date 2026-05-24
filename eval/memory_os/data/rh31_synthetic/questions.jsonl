@@ -1,0 +1,6 @@
+{"case_id":"low_clue_zh_001","query":"继续昨天那个。","expected_class":"should_clarify","expected_terms":["互联网","采集"],"expected_heading":"Recall Clarification Guard","family":"low_clue","weight":1.2}
+{"case_id":"low_clue_keyword_001","query":"我们之前那个互联网采集系统设计继续说","expected_class":"direct_or_confirm","expected_terms":["互联网","采集","系统"],"expected_heading":"","family":"low_clue","weight":1.0}
+{"case_id":"candidate_boundary_001","query":"candidate 分数很高，是不是就自动变成长期记忆？","expected_class":"candidate_boundary","expected_terms":["candidate","长期记忆"],"expected_heading":"Crystallized Review Candidates","family":"candidate_boundary","weight":1.1}
+{"case_id":"diagnostic_grounding_001","query":"当前记忆架构是什么？","expected_class":"diagnostic_grounding","expected_terms":["记忆","架构"],"expected_heading":"Diagnostic Grounding","family":"diagnostic","weight":1.1}
+{"case_id":"active_task_001","query":"帮我继续安装 ComfyUI 插件","expected_class":"active_task","expected_terms":["ComfyUI","插件"],"expected_heading":"Current Foreground Task","family":"active_task","weight":1.0}
+{"case_id":"mechanism_noise_001","query":"你最近对我们这个项目有什么新的理解？","expected_class":"casual_continuity","expected_terms":["项目","理解"],"expected_heading":"","family":"mechanism_noise","weight":1.0}

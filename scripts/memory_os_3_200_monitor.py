@@ -179,10 +179,27 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         and shell_alias.get("memory_sources_ok") is True
         and shell_alias.get("low_clue_recall_ok") is True
         and shell_alias.get("modules_ok") is True
+        and shell_alias.get("eval_ok") is True
     ):
         passed.append({"code": "shell_alias_no_env_ok"})
     else:
         fail.append({"code": "shell_alias_no_env_failed", "value": shell_alias})
+
+    rh31 = snapshot.get("rh31_eval", {})
+    if rh31:
+        if rh31.get("schema_version") == "memory-os.rh31_summary.v0":
+            if int(rh31.get("boundary_true_count") or 0) > 0:
+                fail.append({"code": "rh31_eval_boundary_true", "value": rh31.get("boundary_true_count")})
+            if int(rh31.get("forbidden_field_count") or 0) > 0:
+                fail.append({"code": "rh31_eval_forbidden_fields", "value": rh31.get("forbidden_field_count")})
+            if int(rh31.get("boundary_true_count") or 0) == 0 and int(rh31.get("forbidden_field_count") or 0) == 0:
+                passed.append({"code": "rh31_eval_safety_ok"})
+            if rh31.get("status") == "warning":
+                warn.append({"code": "rh31_eval_has_failures", "failure_count": rh31.get("failure_count")})
+            elif rh31.get("status") == "fail":
+                fail.append({"code": "rh31_eval_failed", "failure_count": rh31.get("failure_count")})
+        else:
+            warn.append({"code": "rh31_eval_unavailable", "value": rh31})
 
     router = snapshot.get("context_router", {})
     if router.get("enabled") is True and router.get("mode") == "apply":
@@ -380,6 +397,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- low_clue_ingress={_probe_summary(snapshot.get('low_clue_ingress_matrix') or [])}",
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
+        f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
         f"- disk={snapshot.get('disk_du')}",
@@ -482,6 +500,17 @@ def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
         "dropped_headings": stats.get("dropped_heading_distribution"),
         "boundary_true_count": stats.get("boundary_true_count"),
         "forbidden_field_count": len(stats.get("forbidden_field_findings") or []),
+    }
+
+
+def _rh31_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "adapter_count": summary.get("adapter_count"),
+        "failure_count": summary.get("failure_count"),
+        "boundary_true_count": summary.get("boundary_true_count"),
+        "forbidden_field_count": summary.get("forbidden_field_count"),
+        "report_written": bool(summary.get("report_dir")),
     }
 
 
@@ -881,17 +910,20 @@ def shell_alias_no_env():
     memory_sources = load_json_cmd(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
     low_clue = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"])
     modules = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
+    eval_report = load_json_cmd(["hermes", "memory-os-agent-os", "eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
       "memory_sources_ok": isinstance(memory_sources, dict) and memory_sources.get("schema_version") == "memory-os.memory_sources_stats.v0",
       "low_clue_recall_ok": isinstance(low_clue, dict) and low_clue.get("schema_version") == "memory-os.low_clue_recall.v0",
       "modules_ok": isinstance(modules, dict) and modules.get("schema_version") == "memory-os.modules_status.v0",
+      "eval_ok": isinstance(eval_report, dict) and eval_report.get("schema_version") == "memory-os.rh31_summary.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
       "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
       "low_clue_recall_error": low_clue.get("_error") if isinstance(low_clue, dict) else None,
       "modules_error": modules.get("_error") if isinstance(modules, dict) else None,
+      "eval_error": eval_report.get("_error") if isinstance(eval_report, dict) else None,
     }
 
 status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
@@ -899,6 +931,7 @@ doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
 contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
 memory_sources = memory_os_cli(["memory-sources", "stats", "--hours", "24"])
 memory_sources = enrich_memory_sources_stats(memory_sources)
+rh31_eval = memory_os_cli(["eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
@@ -933,6 +966,7 @@ print(json.dumps({
   "shell_alias_no_env": shell_alias_no_env(),
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "memory_sources": memory_sources,
+  "rh31_eval": rh31_eval,
   "audit_actions": audit_action_stats(),
   "working_status": working_status(),
   "context_router": cfg.get("context_router", {}),

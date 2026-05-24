@@ -846,7 +846,7 @@ contracts:
 | Heartbeat / Inner Drive | events | working, candidates, heartbeat state | no | no | no | none | heartbeat_state, working counts |
 | Cognitive Loop RH-27 | store, module reports | module reports, audit, bounded events | no | indirect through generated state | no send/execute | DR may use LLM per config | cycle status, boundary report |
 | DeepReflection | working, digest, governance | injection cards/reports | no | carryover section | bounded injection | auto_bounded | source-class distribution, boundaries |
-| Future RH-31 eval harness | synthetic/redacted fixtures, bounded monitor metadata, MemorySources fixtures, public projection seams | gitignored eval reports and promoted scorecards only | no | report-only adapter reads only | no | none/report-only only | eval report count, forbidden fields, retention, adapter scorecard |
+| RH-31 eval harness (31.0-31.3) | synthetic/redacted fixtures, bounded monitor metadata, MemorySources fixtures, public projection seams | gitignored eval reports and promoted scorecards only | no | report-only adapter reads only | no | none/report-only only | eval report count, forbidden fields, retention, adapter scorecard |
 | Future RH-31 guards | real findings | tests/docs, maybe route rules | must use IngressDecision | maybe | maybe | none/report-only only | route matrix |
 | Future RH-32 consolidation suggestions | events/candidates/metadata | suggestion reports only | no | no | no | deterministic-only initially | suggestion count, no approval |
 | Future RH-33 scoring | MemorySources + feedback | scoring metadata only | no | yes | no until apply gate | none/report-only first | attribution and feedback trend |
@@ -1047,7 +1047,9 @@ These are not blockers for this contract, but future modules must account for
 them:
 
 - RH-17 retention still needs to cover MemorySources, feedback ledgers,
-  RH-31 eval reports, suggestion reports, and other metadata JSONL files.
+  suggestion reports, and other metadata JSONL files. RH-31 now has a
+  report-retention dry-run helper for `eval/reports/memory-os-rh31/`, but that
+  does not replace broad metadata retention.
 - RH-30 feedback volume is still low. Do not use it as a strong ranking signal
   until more real owner corrections exist.
 - RH-32 consolidation suggestions must remain deterministic-only until a

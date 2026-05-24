@@ -7395,3 +7395,55 @@ Safe to keep:
   - LLM judge report-only observation
   - cognitive loop no-send test-host mode
 ```
+
+## 2026-05-25 RH-31 Eval Harness Remote Smoke
+
+Source: read-only remote smoke against `10.20.3.200` after installing the
+current RH-31.0-31.3 implementation into `/root/.hermes`.
+
+Provider/shell entry:
+
+```text
+command:
+  hermes memory-os-agent-os eval rh31 run --fixture synthetic --adapter all --no-write-report
+
+schema_version=memory-os.rh31_summary.v0
+status=warning
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=4
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1, "projection_miss": 1}
+boundary_true_count=0
+forbidden_field_count=0
+report_written=false
+```
+
+Interpretation:
+
+- The shell alias resolves the provider/runtime eval implementation.
+- The status is `warning` because the first deterministic scorecard exposes
+  known recall misses; this is measurement output, not a runtime boundary
+  failure.
+- The safety gate passed: `boundary_true_count=0` and
+  `forbidden_field_count=0`.
+- The no-write smoke did not create an eval report.
+
+Monitor integration:
+
+```text
+command:
+  python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
+
+monitor_status=WARN
+RH31Eval={"status": "warning", "adapter_count": 6, "failure_count": 4,
+          "boundary_true_count": 0, "forbidden_field_count": 0,
+          "report_written": false}
+PASS includes rh31_eval_safety_ok
+WARN includes rh31_eval_has_failures
+FAIL=[]
+```
+
+This validates the P1C requirement: RH-31 can be probed from the monitor
+without touching live prefetch, live routing, scheduler behavior,
+crystallized approval, send/execute gates, identity, or canonical memory.

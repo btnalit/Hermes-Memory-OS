@@ -74,6 +74,10 @@ hermes memory-os-agent-os memory-sources stats --hours 24
 hermes memory-os-agent-os low-clue-recall dry-run \
   --query "继续昨天那个。" \
   --llm-judge none
+hermes memory-os-agent-os eval rh31 run \
+  --fixture synthetic \
+  --adapter all \
+  --no-write-report
 PYTHONPATH=/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins \
   HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os \
   conversation-regression status-tool-contract
@@ -163,6 +167,14 @@ The v0.6 monitor tracks trend signals that can support future decisions:
 - Memory Sources record count, file size, route distribution, selected
   source-class distribution, selected/dropped heading distribution, boundary
   true count, and forbidden field findings
+- RH-31 eval no-write probe:
+  - `schema_version`
+  - status (`pass` / `warning` / `fail`)
+  - adapter count
+  - failure count
+  - boundary true count
+  - forbidden field count
+  - no report directory written during monitor smoke
 - RH-28 low-clue recall config and a bounded probe summary:
   - deterministic decision
   - candidate count
@@ -208,6 +220,10 @@ Current monitor-supported gates:
   forbidden-field findings are empty, and ledger growth remains explainable
 - RH-30 feedback can be collected immediately, but it must not become a strong
   ranking signal until enough explicit owner feedback exists
+- RH-31 eval harness can advance only when the no-write monitor probe returns
+  `memory-os.rh31_summary.v0`, boundary true count is 0, forbidden field count
+  is 0, and any adapter failures are treated as scorecard findings rather than
+  runtime failures
 - LLM judge report-only mode can remain enabled while deterministic fallback is
   active; bounded-live use requires a separate future gate
 - RH-31/RH-32/RH-33 must first fill the module declaration in the 29号 contract

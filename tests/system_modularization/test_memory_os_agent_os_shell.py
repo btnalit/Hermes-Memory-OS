@@ -113,6 +113,12 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert dr_history_args.modules_command == "deep_reflection"
     assert dr_history_args.deep_reflection_command == "history"
     assert dr_history_args.days == 3
+    eval_run_args = parser.parse_args(["eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "grep"])
+    assert eval_run_args.agent_os_command == "eval"
+    assert eval_run_args.eval_command == "rh31"
+    assert eval_run_args.rh31_command == "run"
+    assert eval_run_args.fixture == "synthetic"
+    assert eval_run_args.adapter == ["grep"]
 
 
 def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
@@ -208,6 +214,35 @@ def test_shell_modules_alias_delegates_to_existing_memory_os_cli(monkeypatch, ca
     assert json.loads(capsys.readouterr().out) == {
         "delegated": "modules",
         "subcommand": "run-once",
+    }
+
+
+def test_shell_eval_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
+    module = load_shell_module()
+    calls: list[argparse.Namespace] = []
+
+    def fake_delegate(args: argparse.Namespace) -> int:
+        calls.append(args)
+        print(json.dumps({"delegated": args.memory_os_command, "subcommand": args.eval_command}))
+        return 0
+
+    monkeypatch.setattr(module, "_delegate_to_memory_os_cli", fake_delegate)
+    args = argparse.Namespace(
+        agent_os_command="eval",
+        eval_command="rh31",
+        rh31_command="run",
+        fixture="synthetic",
+        adapter=["grep"],
+    )
+
+    assert module.memory_os_agent_os_command(args) == 0
+
+    assert calls[0].memory_os_command == "eval"
+    assert calls[0].eval_command == "rh31"
+    assert calls[0].rh31_command == "run"
+    assert json.loads(capsys.readouterr().out) == {
+        "delegated": "eval",
+        "subcommand": "rh31",
     }
 
 

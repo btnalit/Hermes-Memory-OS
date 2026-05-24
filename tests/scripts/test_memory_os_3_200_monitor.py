@@ -180,6 +180,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             "memory_sources_ok": True,
             "low_clue_recall_ok": True,
             "modules_ok": True,
+            "eval_ok": True,
         },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
@@ -220,6 +221,29 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
     assert any(item["code"] == "deep_reflection_source_skew" for item in classification["warn"])
     assert any(item["code"] == "compression_focus_none" for item in classification["warn"])
     assert any(item["code"] == "shell_alias_no_env_ok" for item in classification["pass"])
+
+
+def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
+    snapshot = _healthy_snapshot()
+    snapshot["rh31_eval"] = {
+        "schema_version": "memory-os.rh31_summary.v0",
+        "status": "warning",
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+        "adapter_count": 6,
+        "failure_count": 2,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "rh31_eval_safety_ok" for item in classification["pass"])
+    assert any(item["code"] == "rh31_eval_has_failures" for item in classification["warn"])
+
+    snapshot["rh31_eval"]["forbidden_field_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "rh31_eval_forbidden_fields" for item in classification["fail"])
 
 
 def test_classify_snapshot_fails_on_low_clue_ingress_route_mismatch():
@@ -456,6 +480,8 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
             "doctor_ok": True,
             "memory_sources_ok": True,
             "low_clue_recall_ok": True,
+            "modules_ok": True,
+            "eval_ok": True,
         },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
@@ -564,7 +590,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             },
             "doctor": {"status": "ok", "findings": []},
             "status_tool_contract": {"status": "ok", "findings": []},
-            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True},
+                "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
             "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
             "rh26_apply_probe": [],
             "deep_reflection": {},
@@ -625,7 +651,7 @@ def _healthy_snapshot() -> dict:
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True},
+        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {

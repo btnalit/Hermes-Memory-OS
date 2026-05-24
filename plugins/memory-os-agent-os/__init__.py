@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-_ALLOWED_ALIASES = {"status", "doctor", "low-clue-recall", "memory-sources", "modules"}
+_ALLOWED_ALIASES = {"status", "doctor", "low-clue-recall", "memory-sources", "modules", "eval"}
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,6 +115,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     deep_reflection_subs.add_parser("preview-current")
     deep_reflection_history = deep_reflection_subs.add_parser("history")
     deep_reflection_history.add_argument("--days", type=int, default=7)
+    eval_parser = subs.add_parser("eval")
+    eval_subs = eval_parser.add_subparsers(dest="eval_command", required=True)
+    eval_rh31 = eval_subs.add_parser("rh31")
+    eval_rh31_subs = eval_rh31.add_subparsers(dest="rh31_command", required=True)
+    eval_rh31_run = eval_rh31_subs.add_parser("run")
+    eval_rh31_run.add_argument("--fixture", default="synthetic")
+    eval_rh31_run.add_argument("--adapter", action="append", default=[])
+    eval_rh31_run.add_argument("--report-root", default="")
+    eval_rh31_run.add_argument("--no-write-report", action="store_true")
+    eval_rh31_run.add_argument("--keep-latest", type=int, default=20)
+    eval_rh31_run.add_argument("--retention-days", type=int, default=30)
+    eval_rh31_summary = eval_rh31_subs.add_parser("summary")
+    eval_rh31_summary.add_argument("--report-root", default="")
+    eval_rh31_failures = eval_rh31_subs.add_parser("failures")
+    eval_rh31_failures.add_argument("--report-root", default="")
+    eval_rh31_failures.add_argument("--class", dest="failure_class", default="")
 
 
 def memory_os_agent_os_command(args: argparse.Namespace) -> int:

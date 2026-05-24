@@ -20,6 +20,7 @@ SOURCE_PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "memory_os"
 SOURCE_AGENT_OS_SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
 SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
 SOURCE_AGENT_DIR = REPO_ROOT / "agent"
+SOURCE_EVAL_DIR = REPO_ROOT / "eval"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -184,12 +185,16 @@ def install_plugin(
     system_module_root = hermes_home / "memory-os" / "runtime" / "python"
     system_module_target = system_module_root / "plugins"
     agent_runtime_target = system_module_root / "agent"
+    eval_runtime_target = system_module_root / "eval"
     agent_runtime_files: list[Path] = []
+    eval_runtime_files: list[Path] = []
     if install_system_modules:
         _validate_system_module_source(SOURCE_PACKAGE_DIR)
         system_module_files = _copy_tree(SOURCE_PACKAGE_DIR, system_module_target, dry_run=dry_run)
         _validate_agent_source(SOURCE_AGENT_DIR)
         agent_runtime_files = _copy_tree(SOURCE_AGENT_DIR, agent_runtime_target, dry_run=dry_run)
+        _validate_eval_source(SOURCE_EVAL_DIR)
+        eval_runtime_files = _copy_tree(SOURCE_EVAL_DIR, eval_runtime_target, dry_run=dry_run)
     deep_reflection_config: dict[str, object] | None = None
     deep_reflection_config_path: Path | None = None
     if deep_reflection_preset is not None:
@@ -323,6 +328,9 @@ def install_plugin(
         "agent_runtime_target": str(agent_runtime_target),
         "agent_runtime_file_count": len(agent_runtime_files),
         "agent_runtime_files": [str(path.relative_to(agent_runtime_target)) for path in agent_runtime_files],
+        "eval_runtime_target": str(eval_runtime_target),
+        "eval_runtime_file_count": len(eval_runtime_files),
+        "eval_runtime_files": [str(path.relative_to(eval_runtime_target)) for path in eval_runtime_files],
         "enable_requested": enable,
         "enabled": enabled,
         "enable_command": enable_command,
@@ -394,6 +402,19 @@ def _validate_agent_source(source: Path) -> None:
         raise SystemExit(f"Memory-OS agent compatibility source is missing: {', '.join(missing)}")
 
 
+def _validate_eval_source(source: Path) -> None:
+    required = (
+        "__init__.py",
+        "memory_os/__init__.py",
+        "memory_os/runner/run.py",
+        "memory_os/runner/inventory.py",
+        "memory_os/adapters/grep.py",
+    )
+    missing = [name for name in required if not (source / name).is_file()]
+    if missing:
+        raise SystemExit(f"Memory-OS eval source is missing: {', '.join(missing)}")
+
+
 def _copy_tree(source: Path, target: Path, *, dry_run: bool) -> list[Path]:
     files = [
         path for path in sorted(source.rglob("*"))
@@ -412,7 +433,11 @@ def _copy_tree(source: Path, target: Path, *, dry_run: bool) -> list[Path]:
 
 
 def _is_excluded(path: Path) -> bool:
-    return "__pycache__" in path.parts or path.suffix in {".pyc", ".pyo"}
+    return (
+        "__pycache__" in path.parts
+        or (("eval" in path.parts) and ("reports" in path.parts))
+        or path.suffix in {".pyc", ".pyo"}
+    )
 
 
 def _guard_plugin_scan_tree_backups(hermes_home: Path) -> None:

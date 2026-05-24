@@ -373,6 +373,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    eval_parser = subs.add_parser("eval")
+    eval_subs = eval_parser.add_subparsers(dest="eval_command", required=True)
+    eval_rh31 = eval_subs.add_parser("rh31")
+    eval_rh31_subs = eval_rh31.add_subparsers(dest="rh31_command", required=True)
+    eval_rh31_run = eval_rh31_subs.add_parser("run")
+    eval_rh31_run.add_argument("--fixture", default="synthetic")
+    eval_rh31_run.add_argument("--adapter", action="append", default=[])
+    eval_rh31_run.add_argument("--report-root", default="")
+    eval_rh31_run.add_argument("--no-write-report", action="store_true")
+    eval_rh31_run.add_argument("--keep-latest", type=int, default=20)
+    eval_rh31_run.add_argument("--retention-days", type=int, default=30)
+    eval_rh31_summary = eval_rh31_subs.add_parser("summary")
+    eval_rh31_summary.add_argument("--report-root", default="")
+    eval_rh31_failures = eval_rh31_subs.add_parser("failures")
+    eval_rh31_failures.add_argument("--report-root", default="")
+    eval_rh31_failures.add_argument("--class", dest="failure_class", default="")
     cognitive_loop_parser = subs.add_parser("cognitive-loop")
     cognitive_loop_subs = cognitive_loop_parser.add_subparsers(dest="cognitive_loop_command", required=True)
     cognitive_loop_subs.add_parser("status")
@@ -489,6 +505,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _low_clue_recall_command(args, store)
     if command == "memory-sources":
         return _memory_sources_command(args, store)
+    if command == "eval":
+        return _eval_command(args)
     if command == "cognitive-loop":
         return _cognitive_loop_command(args, store)
     if command == "validate":
@@ -1308,6 +1326,50 @@ def _conversation_regression_command(args: argparse.Namespace) -> int:
         report = evaluate_transcript_file(args.transcript)
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 1 if report["status"] == "fail" else 0
+    return 2
+
+
+def _eval_command(args: argparse.Namespace) -> int:
+    if args.eval_command != "rh31":
+        return 2
+    from eval.memory_os.runner.run import latest_failures, latest_summary, run_rh31_eval
+
+    report_root = str(getattr(args, "report_root", "") or "").strip() or None
+    if args.rh31_command == "run":
+        try:
+            summary = run_rh31_eval(
+                fixture=str(getattr(args, "fixture", "synthetic") or "synthetic"),
+                adapters=list(getattr(args, "adapter", []) or ["all"]),
+                report_root=report_root,
+                write_report=not bool(getattr(args, "no_write_report", False)),
+                keep_latest=max(int(getattr(args, "keep_latest", 20) or 20), 0),
+                retention_days=max(int(getattr(args, "retention_days", 30) or 30), 0),
+            )
+        except ValueError as exc:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": "memory-os.rh31_summary.v0",
+                        "status": "error",
+                        "code": "rh31_invalid_request",
+                        "error": str(exc),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if summary.get("status") != "fail" else 1
+    if args.rh31_command == "summary":
+        report = latest_summary(report_root)
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report.get("status") != "error" else 1
+    if args.rh31_command == "failures":
+        report = latest_failures(report_root, failure_class=str(getattr(args, "failure_class", "") or ""))
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report.get("status") != "error" else 1
     return 2
 
 

@@ -148,6 +148,7 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert report["system_modules_installed"] is True
     assert report["system_module_file_count"] > 0
     assert report["agent_runtime_file_count"] > 0
+    assert report["eval_runtime_file_count"] > 0
     assert runtime_root.joinpath("system", "lifecycle.py").is_file()
     assert runtime_root.joinpath("modules", "context", "digest_consolidation.py").is_file()
     assert runtime_root.joinpath("modules", "cognition", "deep_reflection.py").is_file()
@@ -157,8 +158,11 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert runtime_root.joinpath("memory", "memory_os", "store.py").is_file()
     assert runtime_root.joinpath("memory", "memory_os", "shadow_journal.py").is_file()
     assert runtime_python.joinpath("agent", "memory_provider.py").is_file()
+    assert runtime_python.joinpath("eval", "memory_os", "runner", "run.py").is_file()
+    assert runtime_python.joinpath("eval", "memory_os", "adapters", "grep.py").is_file()
     assert not any("__pycache__" in path for path in report["system_module_files"])
     assert not any("__pycache__" in path for path in report["agent_runtime_files"])
+    assert not any("__pycache__" in path for path in report["eval_runtime_files"])
 
 
 def test_installer_does_not_write_deep_reflection_config_by_default(tmp_path):
