@@ -188,6 +188,31 @@ The v0.6 monitor tracks trend signals that can support future decisions:
 The previous snapshot is local to the Codex automation directory. It is not
 written to the remote Hermes host and does not contain private bodies.
 
+## Decision Gates Supported By The Monitor
+
+The monitor supports promotion decisions, but it is not itself the decision
+maker. Promotion gates are defined in
+`29-memory-os-module-integration-contract.md`.
+
+Current monitor-supported gates:
+
+- core runtime can advance only when gateway, heartbeat, doctor, index,
+  status-tool contract, and shell alias checks have no FAIL
+- RH-27b audit-noise control can advance when the post-change window includes
+  at least 24 heartbeats and at least 5 new events, with
+  `audit_entries_per_new_event` near the 3-5 target range
+- RH-26/RH-28 ingress and context routing can advance only when the RH-26
+  heading probes and RH-28f low-clue ingress matrix match expected routes and
+  headings
+- RH-29 MemorySources can advance only when `boundary_true_count=0`,
+  forbidden-field findings are empty, and ledger growth remains explainable
+- RH-30 feedback can be collected immediately, but it must not become a strong
+  ranking signal until enough explicit owner feedback exists
+- LLM judge report-only mode can remain enabled while deterministic fallback is
+  active; bounded-live use requires a separate future gate
+- RH-31/RH-32/RH-33 must first fill the module declaration in the 29号 contract
+  and add any missing monitor fields before implementation
+
 ## Expected Healthy Snapshot
 
 A normal monitor pass should be treated as PASS when:

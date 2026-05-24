@@ -1,6 +1,6 @@
 # 29 - Memory-OS Module Integration Contract
 
-Status: draft for implementation governance
+Status: governing contract; required gate for future module integration
 Date: 2026-05-24
 Scope: all future Memory-OS runtime modules, RH items, scheduler steps, prompt
 projection changes, and monitor extensions
@@ -22,6 +22,108 @@ attribution.
 
 The fix is not to stop adding modules. The fix is to make module integration
 explicit.
+
+## Authority
+
+This document is normative for Memory-OS module integration.
+
+It is not a reference note and not a roadmap appendix. It is the gate every
+future change must pass when it touches any of these surfaces:
+
+- new module
+- new RH item
+- scheduler or timer behavior
+- provider ingress or foreground task state
+- context router or prefetch projection
+- MemorySources attribution or feedback
+- working/candidate/crystallized/identity/relationship writes
+- LLM judge mode, fallback, or live influence
+- monitor PASS/WARN/FAIL semantics
+- installer path that enables or configures any of the above
+
+Project-specific design documents may add stricter rules for a module. They may
+not weaken this contract.
+
+If a proposed change does not fit this document, the contract must be amended
+first, with evidence and review, before the code is changed.
+
+## Evidence Behind This Revision
+
+This contract is based on real integration failures and current live evidence,
+not a speculative governance exercise.
+
+Real findings that drove the contract:
+
+- RH-25/RH-25b: foreground task anchors fixed small-context compression drift,
+  but cancellation/deferred turns needed route-specific handling.
+- RH-26: router dry-run showed static context projection could select or drop
+  sections correctly, but apply needed progressive monitoring.
+- RH-27/RH-27b: cognitive-loop automation exposed that audit liveness and
+  semantic state changes must be separate signals.
+- RH-28/RH-28f: Telegram live tests showed that low-clue recall, current-task
+  continuation, deferred resume, and MemorySources attribution must share one
+  ingress decision.
+- RH-29/RH-30: attribution and feedback are useful only if they remain metadata
+  ledgers and do not become hidden memory writes or silent routing authority.
+
+Code seams inspected for this contract:
+
+- `plugins/memory/memory_os/ingress.py`
+- `plugins/memory/memory_os/__init__.py`
+- `plugins/memory/memory_os/prefetch.py`
+- `plugins/memory/memory_os/context_router.py`
+- `plugins/memory/memory_os/low_clue_recall.py`
+- `plugins/memory/memory_os/memory_sources.py`
+- `plugins/memory/memory_os/cognitive_loop.py`
+- `scripts/memory_os_3_200_monitor.py`
+
+Live 10.20.3.200 evidence at revision time:
+
+```text
+gateway=active
+heartbeat_state=fresh
+cognitive_loop.last_status=ok
+context_router.mode=apply
+context_router.apply_routes=["all"]
+low_clue_recall.llm_judge.mode=report_only
+low_clue_recall.llm_judge.on_error=deterministic_fallback
+memory_sources.mode=metadata_only
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_findings=[]
+low_clue_ingress_matrix=all expected routes/headings matched
+doctor=ok with expected hindsight_adapter_disabled warning
+classification=WARN only because rh26_casual_empty remains expected
+```
+
+## Contract Completeness Standard
+
+A module contract is incomplete if it only says what the module does.
+
+It must close the full lifecycle:
+
+```text
+design -> implementation -> deployment -> monitoring -> bug handling ->
+promotion or rollback
+```
+
+Minimum completeness checklist:
+
+- declares the owning contract surface
+- declares reads and writes
+- declares whether it affects ingress
+- declares whether it affects context projection
+- declares whether it affects live decisions
+- declares whether it uses LLMs and how it fails closed
+- declares owner-approval boundaries
+- declares scheduler behavior if any
+- declares monitor evidence
+- declares PASS/WARN/FAIL conditions
+- declares promotion criteria
+- declares rollback behavior
+- declares local, integrated, and remote validation
+- declares how P0/P1/P2/P3 findings are handled
+
+Without these fields, the module is not contract-complete.
 
 ## Current 10.20.3.200 Baseline
 
@@ -386,6 +488,77 @@ provider.prefetch -> ingress -> build_prefetch -> context_router ->
 MemorySources -> monitor
 ```
 
+## Observation And Promotion Gates
+
+Purpose:
+
+Define when monitoring data is enough to continue, when to keep observing, and
+when to stop feature work.
+
+Time alone is not enough. A gate should use both elapsed time and event volume
+when the module depends on runtime behavior.
+
+### General Rule
+
+```text
+PASS over time without relevant events is only a liveness signal.
+PASS with the required event/data volume is promotion evidence.
+```
+
+### Current Monitor Coverage
+
+The 10.20.3.200 monitor currently covers:
+
+- gateway service state and PID
+- heartbeat timer/service state
+- heartbeat_state freshness and processed event count
+- cognitive-loop timer/service state and latest cycle status
+- Memory-OS status, doctor, index health, queue backlog, and count deltas
+- status-tool contract
+- shell alias no-env usability
+- context_router config and RH-26 section-heading probes
+- RH-28 low-clue recall probe
+- RH-28f low-clue ingress matrix
+- MemorySources stats, forbidden-field checks, boundary count, and feedback
+  counts
+- DeepReflection source-class distribution and boundary booleans
+- audit action distribution and audit/event deltas
+- working-memory active/expired counts
+- compaction `focus=None` counts
+- disk usage
+
+### Promotion Gate Matrix
+
+| Area | Monitor signal | Minimum evidence before advancing | Stop / fix signal |
+| --- | --- | --- | --- |
+| Core provider/runtime | gateway, heartbeat, doctor, index, queue, status-tool contract | one clean post-deploy monitor pass plus no FAIL in the next scheduled run | any FAIL, doctor error, gateway inactive, queue backlog not clearing |
+| Heartbeat / RH-27b audit noise | heartbeat_state, audit action deltas, audit_per_new_event | at least 24 heartbeats and at least 5 new events; target audit_per_new_event 3-5 | heartbeat_state stale, service failed, audit_per_new_event repeatedly above 10 from plumbing noise |
+| Cognitive loop RH-27 | latest cycle status, step/cycle audit, boundaries | at least one completed cycle after deployment; boundaries all false | latest cycle error, missing cycle when timer is active, any boundary true |
+| Context Router RH-26 | seven public heading probes | all hard probes match expected headings; casual empty remains WARN only | cancellation/continue prompts include background sections, diagnostic/candidate routes pick wrong headings |
+| IngressDecision / RH-28f | low-clue ingress matrix | every monitored phrase matches expected route and heading for at least one post-deploy pass; live Telegram smoke confirms the same class when available | any route/heading mismatch is P1 |
+| Low-clue candidate quality RH-28g | low-clue recall probe, candidate count, source distribution, feedback | ask_choice works with bounded candidates; no raw bodies; source diversity appears when candidate pool is single-source heavy | repeated owner correction that candidates are missing/duplicated; MemorySources shows attribution but candidate pool ignores it |
+| LLM judge report-only | judge availability/status, deterministic fallback | adapter status is ok/no_match/no_selection and deterministic fallback remains active; no live influence | judge unavailable repeatedly, blocks prefetch, or affects hard routes |
+| Future LLM bounded-vote | report-only history plus feedback | do not consider until there are enough real report-only observations and explicit feedback records; hard routes still deterministic | any proposal to let LLM override foreground/cancellation/diagnostic/approval boundaries |
+| MemorySources RH-29 | record count, file size, forbidden fields, boundary count | 24h of records with boundary_true_count=0 and forbidden_field_count=0 | any forbidden field, private text, or true boundary flag |
+| Feedback RH-30 | feedback count and rating distribution | feedback may be observed immediately; do not use as strong ranking signal until enough explicit owner feedback exists | feedback mutates router weights, memory, candidates, crystallized records, identity, or relationships |
+| DeepReflection | source-class distribution and boundaries | boundaries false; source skew may remain WARN while collecting data | actual_send/execute/identity/crystallized true, or unbounded private content appears |
+| RH-31 guards | real finding plus route matrix | only add a guard when backed by live transcript/fixture and monitor can explain the route | broad wording guard without real finding, content-specific hardcode |
+| RH-32 consolidation suggestions | suggestion report counts, retention/read-only proof | only after deterministic suggestion contract and retention story are defined | any automatic approve/delete/prune of canonical memory |
+| RH-33 top-of-mind scoring | MemorySources + feedback + dry-run score reports | dry-run only until `successful_use` is defined without self-reinforcing selected-count logic | selected-by-router treated as success, hidden strong injection, new implicit tier |
+
+### Promotion Decision Rules
+
+- If the monitor has no FAIL but lacks event volume, keep observing rather than
+  declaring the feature mature.
+- If the monitor has expected WARN only, feature work may continue unless that
+  WARN is the exact signal the next feature depends on.
+- If a future feature needs a signal that is not monitored, add the monitor
+  field before implementing the feature.
+- If a feature depends on feedback, source distribution, or candidate quality,
+  the gate is data-volume based, not clock-time based.
+- If a feature changes live decisions, require both local tests and one
+  10.20.3.200 monitor pass after deployment.
+
 ## Module Integration Declaration Template
 
 Every new module or RH item that reads state, writes state, affects ingress,
@@ -722,3 +895,14 @@ No new Memory-OS module may affect ingress, prompt projection, memory writes,
 feedback scoring, scheduler behavior, or monitor semantics without an explicit
 contract row and a live evidence path.
 ```
+
+Additional hard rule:
+
+```text
+No contract row is valid unless it includes boundaries, monitor evidence,
+promotion criteria, bug handling, and rollback.
+```
+
+This contract is allowed to slow down feature work. That is intentional. The
+system is already complex enough that adding modules without lifecycle closure
+creates more risk than velocity.
