@@ -82,6 +82,16 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_history.add_argument("--limit", type=int, default=20)
     memory_sources_stats = memory_sources_subs.add_parser("stats")
     memory_sources_stats.add_argument("--hours", type=int, default=24)
+    memory_sources_feedback = memory_sources_subs.add_parser("feedback")
+    memory_sources_feedback_subs = memory_sources_feedback.add_subparsers(
+        dest="memory_sources_feedback_command",
+        required=True,
+    )
+    memory_sources_feedback_last = memory_sources_feedback_subs.add_parser("last")
+    memory_sources_feedback_last.add_argument("--rating", required=True)
+    memory_sources_feedback_last.add_argument("--note", default="")
+    memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
+    memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
 
 
 def memory_os_agent_os_command(args: argparse.Namespace) -> int:

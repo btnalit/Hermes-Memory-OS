@@ -54,6 +54,8 @@ from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
 from .memory_sources import (
+    memory_sources_feedback_history_report,
+    memory_sources_feedback_last_report,
     memory_sources_history_report,
     memory_sources_last_report,
     memory_sources_stats_report,
@@ -323,6 +325,16 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_history.add_argument("--limit", type=int, default=20)
     memory_sources_stats = memory_sources_subs.add_parser("stats")
     memory_sources_stats.add_argument("--hours", type=int, default=24)
+    memory_sources_feedback = memory_sources_subs.add_parser("feedback")
+    memory_sources_feedback_subs = memory_sources_feedback.add_subparsers(
+        dest="memory_sources_feedback_command",
+        required=True,
+    )
+    memory_sources_feedback_last = memory_sources_feedback_subs.add_parser("last")
+    memory_sources_feedback_last.add_argument("--rating", required=True)
+    memory_sources_feedback_last.add_argument("--note", default="")
+    memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
+    memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
     cognitive_loop_parser = subs.add_parser("cognitive-loop")
     cognitive_loop_subs = cognitive_loop_parser.add_subparsers(dest="cognitive_loop_command", required=True)
     cognitive_loop_subs.add_parser("status")
@@ -657,6 +669,26 @@ def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> i
             )
         )
         return 0
+    if command == "feedback":
+        feedback_command = args.memory_sources_feedback_command
+        if feedback_command == "last":
+            report = memory_sources_feedback_last_report(
+                store.roots,
+                rating=args.rating,
+                note=getattr(args, "note", ""),
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0 if report.get("status") == "ok" else 1
+        if feedback_command == "history":
+            print(
+                json.dumps(
+                    memory_sources_feedback_history_report(store.roots, limit=max(int(args.limit), 0)),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
     return 2
 
 

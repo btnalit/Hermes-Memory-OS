@@ -5651,6 +5651,130 @@ DeepReflection.actual_identity_write=false
 DeepReflection.actual_crystallized_approval=false
 ```
 
+## RH-30 Relevance Feedback Audit Deployment Gate
+
+Date: 2026-05-24
+Host: 10.20.3.200 (`hermes-media`)
+Mode: test-host installer deployment; CLI feedback smoke; read-only monitor;
+no gateway restart; no router weight changes; no memory approval
+
+Local verification before deployment:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_memory_sources.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+40 passed
+
+python -m pytest -q
+385 passed
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes \
+  bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+
+provider=memory_os
+memory-os-agent-os enabled=true
+heartbeat timer active/enabled
+cognitive-loop timer active/enabled
+doctor=ok with expected hindsight_adapter_disabled warning
+gateway restart not requested
+```
+
+CLI smoke:
+
+```text
+HERMES_HOME=/root/.hermes \
+  hermes memory-os-agent-os memory-sources feedback last \
+    --rating useful --note rh30-smoke
+
+schema_version=memory-os.memory_sources_feedback.v0
+status=ok
+feedback_id=msfb_20260524T044738044301Z_638cc9b8
+memory_source_record_id=msrc_20260523T104634235749Z_9a44a2ce
+rating=useful
+route=casual_continuity
+query_class=casual_continuity
+```
+
+Bounded history:
+
+```text
+HERMES_HOME=/root/.hermes \
+  hermes memory-os-agent-os memory-sources feedback history --limit 3
+
+schema_version=memory-os.memory_sources_feedback_history.v0
+record_count=1
+ratings=[useful]
+```
+
+Stats:
+
+```text
+HERMES_HOME=/root/.hermes \
+  hermes memory-os-agent-os memory-sources stats --hours 24
+
+schema_version=memory-os.memory_sources_stats.v0
+record_count=6
+feedback_count=1
+feedback_rating_distribution={"useful": 1}
+feedback_ledger_exists=true
+feedback_file_size_bytes=415
+boundary_true_count=0
+forbidden_field_findings=[]
+```
+
+Post-deployment monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=465190
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"] llm_judge=disabled
+
+counts:
+  audit_entries=2560
+  events=174
+  working_items=126
+  candidates=126
+  crystallized_records=0
+
+MemorySources:
+  record_count=6
+  file_size_bytes=8688
+  feedback_count=1
+  feedback_ratings={"useful": 1}
+  feedback_file_size_bytes=415
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Interpretation:
+
+- RH-30 feedback requires an explicit operator command.
+- `last` attaches to the newest Memory Sources attribution record for the
+  active profile.
+- feedback is stored as bounded metadata under the Memory Sources system
+  ledger and a bounded audit marker; it does not alter router weights or any
+  memory layer.
+- monitor now reports feedback count and rating distribution while preserving
+  the existing forbidden-field and boundary checks.
+
 Note:
 
 - the monitor's `recent_top` window still contains pre-RH-27b audit noise until

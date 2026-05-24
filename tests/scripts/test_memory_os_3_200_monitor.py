@@ -394,6 +394,9 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
         "schema_version": "memory-os.memory_sources_stats.v0",
         "record_count": 3,
         "file_size_bytes": 2048,
+        "feedback_count": 2,
+        "feedback_rating_distribution": {"useful": 1, "too_mechanistic": 1},
+        "feedback_file_size_bytes": 512,
         "route_distribution": {"ambiguous_recall": 1},
         "selected_source_class_distribution": {"recall_guard": 1},
         "selected_heading_distribution": {"Recent Event Summaries": 2},
@@ -409,6 +412,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "cognitive_loop=ok" in rendered
     assert "shell_alias_no_env" in rendered
     assert "MemorySources" in rendered
+    assert "feedback_ratings" in rendered
     assert "audit_actions" in rendered
     assert "heartbeat_state" in rendered
     assert "working_status" in rendered

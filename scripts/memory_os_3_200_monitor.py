@@ -405,6 +405,9 @@ def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
     return {
         "record_count": stats.get("record_count"),
         "file_size_bytes": stats.get("file_size_bytes"),
+        "feedback_count": stats.get("feedback_count"),
+        "feedback_ratings": stats.get("feedback_rating_distribution"),
+        "feedback_file_size_bytes": stats.get("feedback_file_size_bytes"),
         "routes": stats.get("route_distribution"),
         "selected_sources": stats.get("selected_source_class_distribution"),
         "selected_headings": stats.get("selected_heading_distribution"),

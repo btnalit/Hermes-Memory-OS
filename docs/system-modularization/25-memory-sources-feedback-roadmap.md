@@ -1,6 +1,6 @@
 # 25 - Memory Sources, Feedback, And Low-Cost Relevance Roadmap
 
-Status: design draft for review
+Status: RH-29 implemented; RH-30 implemented on 10.20.3.200 test host
 Date: 2026-05-23
 
 ## Goal
@@ -487,7 +487,7 @@ Review gate:
 
 ### RH-30: Relevance Feedback Audit
 
-Deliver second.
+Delivered second on the 10.20.3.200 test host.
 
 Scope:
 
@@ -500,6 +500,19 @@ Review gate:
 
 - verify explicit owner action required
 - verify feedback does not mutate router behavior yet
+
+Implementation status:
+
+- `hermes memory_os memory-sources feedback last --rating <rating>` records
+  explicit owner feedback for the newest Memory Sources attribution record
+- `hermes memory_os memory-sources feedback history --limit N` returns bounded
+  feedback history
+- `memory-sources stats --hours N` reports feedback counts and rating
+  distribution
+- the `memory-os-agent-os` shell alias delegates the same feedback commands
+- feedback writes only Memory Sources feedback metadata plus a bounded audit
+  marker; it does not alter router weights, working memory, candidates,
+  crystallized records, identity, or relationships
 
 ### RH-31: Deterministic Relevance Guards
 

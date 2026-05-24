@@ -87,6 +87,13 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     stats_args = parser.parse_args(["memory-sources", "stats", "--hours", "24"])
     assert stats_args.memory_sources_command == "stats"
     assert stats_args.hours == 24
+    feedback_args = parser.parse_args(["memory-sources", "feedback", "last", "--rating", "useful"])
+    assert feedback_args.memory_sources_command == "feedback"
+    assert feedback_args.memory_sources_feedback_command == "last"
+    assert feedback_args.rating == "useful"
+    feedback_history_args = parser.parse_args(["memory-sources", "feedback", "history", "--limit", "3"])
+    assert feedback_history_args.memory_sources_feedback_command == "history"
+    assert feedback_history_args.limit == 3
 
 
 def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):

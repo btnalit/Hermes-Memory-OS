@@ -205,7 +205,8 @@ A normal monitor pass should be treated as PASS when:
   - `actual_identity_write=false`
   - `actual_crystallized_approval=false`
 - Memory Sources reports schema `memory-os.memory_sources_stats.v0`,
-  `boundary_true_count=0`, and no forbidden field findings
+  `boundary_true_count=0`, no forbidden field findings, feedback count,
+  feedback rating distribution, and feedback ledger size
 
 WARN conditions:
 

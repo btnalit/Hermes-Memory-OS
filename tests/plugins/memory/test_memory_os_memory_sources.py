@@ -1,6 +1,7 @@
 import argparse
 import json
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.context_router import ContextSection
 from plugins.memory.memory_os.fixtures import build_working_item
@@ -194,6 +195,101 @@ def test_memory_sources_cli_last_history_and_stats_are_bounded(tmp_path, monkeyp
     assert stats["forbidden_field_findings"] == []
     assert "你还记得" not in rendered
     assert "Do not answer" not in rendered
+
+
+def test_memory_sources_feedback_last_records_explicit_owner_feedback_without_mutating_sources(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    store = _store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    build_prefetch(
+        "你还记得我之前跟你说过的一个设计吗？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        memory_sources_config={"enabled": True},
+    )
+    source_before = read_memory_source_records(store.roots, limit=10)
+
+    result = memory_os_command(
+        _parse_memory_os_args(
+            [
+                "memory-sources",
+                "feedback",
+                "last",
+                "--rating",
+                "too-mechanistic",
+                "--note",
+                "too much mechanism language",
+            ]
+        )
+    )
+    feedback = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert feedback["schema_version"] == "memory-os.memory_sources_feedback.v0"
+    assert feedback["status"] == "ok"
+    assert feedback["record"]["rating"] == "too_mechanistic"
+    assert feedback["record"]["memory_source_record_id"] == source_before[-1]["record_id"]
+    assert feedback["record"]["note"] == "too much mechanism language"
+    assert read_memory_source_records(store.roots, limit=10) == source_before
+    actions = [entry.get("action") for entry in read_audit_entries(store.roots.audit_path)]
+    assert "memory_sources_feedback_recorded" in actions
+
+    result = memory_os_command(_parse_memory_os_args(["memory-sources", "feedback", "history", "--limit", "5"]))
+    history = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert history["schema_version"] == "memory-os.memory_sources_feedback_history.v0"
+    assert history["record_count"] == 1
+
+    result = memory_os_command(_parse_memory_os_args(["memory-sources", "stats", "--hours", "24"]))
+    stats = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert stats["feedback_count"] == 1
+    assert stats["feedback_rating_distribution"] == {"too_mechanistic": 1}
+
+
+def test_memory_sources_feedback_last_fails_closed_without_source_record(tmp_path, monkeypatch, capsys):
+    _store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = memory_os_command(
+        _parse_memory_os_args(["memory-sources", "feedback", "last", "--rating", "useful"])
+    )
+    feedback = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert feedback["schema_version"] == "memory-os.memory_sources_feedback.v0"
+    assert feedback["status"] == "error"
+    assert feedback["code"] == "memory_sources_empty"
+    assert not (tmp_path / "memory-os" / "system" / "memory_sources_feedback.jsonl").exists()
+
+
+def test_memory_sources_feedback_last_rejects_unknown_rating(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    build_prefetch(
+        "你还记得我之前跟你说过的一个设计吗？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        memory_sources_config={"enabled": True},
+    )
+
+    result = memory_os_command(
+        _parse_memory_os_args(["memory-sources", "feedback", "last", "--rating", "random"])
+    )
+    feedback = json.loads(capsys.readouterr().out)
+
+    assert result == 1
+    assert feedback["status"] == "error"
+    assert feedback["code"] == "invalid_rating"
+    assert "useful" in feedback["allowed_ratings"]
+    assert not (tmp_path / "memory-os" / "system" / "memory_sources_feedback.jsonl").exists()
 
 
 def test_memory_sources_record_does_not_mark_available_route_unavailable(tmp_path):
