@@ -111,17 +111,18 @@ class MemoryOSStore:
                     self._quarantine_malformed_event(path, line_number, line, str(exc))
         return events
 
-    def write_working_document(self, name: str, document: dict[str, Any]) -> Path:
+    def write_working_document(self, name: str, document: dict[str, Any], *, audit: bool = True) -> Path:
         _reject_path_name(name, field_name="working document name")
         path = self.roots.working_root / f"{name}.json"
         _atomic_write_json(path, document)
-        append_audit(
-            self.roots.audit_path,
-            action="write_working_document",
-            status="ok",
-            target=str(path),
-            details={"name": name},
-        )
+        if audit:
+            append_audit(
+                self.roots.audit_path,
+                action="write_working_document",
+                status="ok",
+                target=str(path),
+                details={"name": name},
+            )
         return path
 
     def read_working_document(self, name: str) -> dict[str, Any]:

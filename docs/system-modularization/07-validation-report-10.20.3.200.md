@@ -5538,3 +5538,234 @@ Interpretation:
   boundary violations.
 - RH-27b is still not implemented. This is the pre-change baseline mechanism
   that should be used before audit write behavior is changed.
+
+## RH-27b Audit Noise Control Deployment Gate
+
+Date: 2026-05-24
+Host: 10.20.3.200 (`hermes-media`)
+Mode: test-host installer deployment; controlled heartbeat validation; no
+gateway restart; no cleanup/apply; no private body inspection
+
+Local verification before deployment:
+
+```text
+python -m pytest -q
+382 passed
+
+python -m pytest tests/plugins/memory/test_memory_os_runtime.py \
+  tests/plugins/memory/test_memory_os_working.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+32 passed
+
+git diff --check
+pass
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes \
+  bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+
+provider=memory_os
+memory-os-agent-os enabled=true
+heartbeat timer active/enabled
+cognitive-loop timer active/enabled
+doctor=ok with expected hindsight_adapter_disabled warning
+```
+
+Controlled heartbeat probe after deployment:
+
+```text
+systemctl --user start hermes-memory-os-heartbeat.service
+service_returncode=0
+
+before_total=2528
+after_total=2528
+total_delta=0
+action_delta={}
+
+before_state:
+  last_attempt_at=2026-05-24T04:14:18.525476+00:00
+  last_heartbeat_at=2026-05-24T04:14:18.525476+00:00
+  processed_event_count=164
+
+after_state:
+  last_attempt_at=2026-05-24T04:14:44.801415+00:00
+  last_heartbeat_at=2026-05-24T04:14:44.801415+00:00
+  processed_event_count=164
+  last_error=null
+```
+
+Interpretation:
+
+- a no-op/decay-only heartbeat no longer appends `runtime_heartbeat` audit
+  records
+- generic `write_working_document` audit noise is not emitted for decay-only
+  writes
+- heartbeat liveness is still observable through `heartbeat_state.json`
+- processed event count remained stable at 164, as expected for a no-op
+  heartbeat
+
+Post-deployment monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=465190
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"] llm_judge=disabled
+
+counts:
+  audit_entries=2528
+  events=164
+  working_items=126
+  candidates=126
+  crystallized_records=0
+
+heartbeat_state:
+  fresh=true
+  age_seconds=12
+  processed_event_count=164
+
+working_status:
+  lingering.json:
+    items=126
+    active=40
+    expired=86
+
+MemorySources:
+  record_count=6
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Note:
+
+- the monitor's `recent_top` window still contains pre-RH-27b audit noise until
+  the rolling 250-record window advances
+- the immediate controlled heartbeat delta is the relevant post-change signal:
+  audit did not grow, while heartbeat state refreshed
+
+Controlled cognitive-loop validation:
+
+To avoid waiting on the natural 6-hour timer, the test host received five
+bounded RH-27b validation metadata events and then ran one controlled
+`hermes-memory-os-cognitive-loop.service` cycle.
+
+The injected events were explicitly marked as test-host validation metadata:
+
+```text
+evt_rh27b_validation_20260524T042854_0
+evt_rh27b_validation_20260524T042854_1
+evt_rh27b_validation_20260524T042854_2
+evt_rh27b_validation_20260524T042854_3
+evt_rh27b_validation_20260524T042854_4
+```
+
+They used `source=cron`, `kind=cron_job_run`, `drive_policy=index_only`, and
+`candidate_allowed=false`, so they exercise event processing without creating
+new working items, candidates, sends, executes, identity writes, relationship
+writes, or crystallized records.
+
+Result:
+
+```text
+systemctl --user start hermes-memory-os-cognitive-loop.service
+service_returncode=0
+
+before_total=2528
+after_total=2559
+total_delta=31
+
+processed_event_count:
+  before=164
+  after=174
+
+new processed events=10
+audit_per_processed_event=3.1
+
+action_delta:
+  append_event=10
+  inner_drive_event_processed=10
+  runtime_heartbeat=2
+  ops_gate_report_written=2
+  cognitive_loop_cycle_completed=1
+  digest_daily_written=1
+  digest_weekly_written=1
+  evidence_scoring_run_written=1
+  governance_feedback_events_written=1
+  proposal_queue_candidate_created=1
+  self_evolution_dry_run_written=1
+
+working_status:
+  before lingering.json items=126 active=40 expired=86
+  after  lingering.json items=126 active=40 expired=86
+
+heartbeat_state:
+  before processed_event_count=164
+  after  processed_event_count=174
+  after last_error=null
+```
+
+Interpretation:
+
+- RH-27b meets the target audit density for this controlled event-processing
+  window: `audit_per_processed_event=3.1`, inside the 3-5 target range.
+- Cognitive-loop step-level and cycle-level audit records still appear, as
+  intended.
+- No working/candidate growth occurred from the validation events.
+- The post-cycle monitor remained WARN-only with no FAIL findings.
+
+Final post-validation monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=465190
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+
+counts:
+  audit_entries=2559
+  events=174
+  working_items=126
+  candidates=126
+  crystallized_records=0
+
+heartbeat_state:
+  fresh=true
+  processed_event_count=174
+
+working_status:
+  lingering.json:
+    items=126
+    active=40
+    expired=86
+
+MemorySources:
+  record_count=6
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```

@@ -80,6 +80,7 @@ class WorkingMemoryService:
         now: datetime | None = None,
         half_life_hours: float = 24.0,
         expire_below: float = 0.2,
+        audit_write: bool = True,
     ) -> list[WorkingItem]:
         self._validate_kind(kind)
         if half_life_hours <= 0:
@@ -115,7 +116,7 @@ class WorkingMemoryService:
         if changed:
             document["updated_at"] = current_ts
             document["items"] = [asdict(item) for item in updated_items]
-            self.store.write_working_document(kind, document)
+            self.store.write_working_document(kind, document, audit=audit_write)
         return updated_items
 
     def status_summary(self) -> str:

@@ -1,6 +1,8 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from plugins.memory import load_memory_provider
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.crystallized import read_candidate_queue
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.index import MemoryOSIndex
@@ -68,6 +70,147 @@ def test_runtime_heartbeat_is_idempotent_for_processed_events(tmp_path):
     assert second["processed_event_count"] == 0
     assert second["already_processed_event_count"] == 1
     assert len(read_candidate_queue(store.roots)) == 1
+
+
+def test_runtime_heartbeat_noop_updates_state_without_runtime_audit_noise(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+
+    report = MemoryOSRuntime(store).heartbeat()
+
+    actions = [entry.get("action") for entry in read_audit_entries(store.roots.audit_path)]
+    state = json.loads((tmp_path / "memory-os" / "runtime" / "heartbeat_state.json").read_text(encoding="utf-8"))
+    assert report["processed_event_count"] == 0
+    assert state["last_heartbeat_at"]
+    assert state["processed_event_count"] == 0
+    assert "runtime_heartbeat" not in actions
+
+
+def test_runtime_heartbeat_decay_only_does_not_write_generic_working_audit(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    working = store.roots.working_root / "lingering.json"
+    working.parent.mkdir(parents=True, exist_ok=True)
+    working.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.working.v0",
+                "updated_at": "2026-05-23T00:00:00+00:00",
+                "items": [
+                    {
+                        "id": "wrk_decay_only",
+                        "kind": "lingering",
+                        "status": "active",
+                        "created_at": "2026-05-23T00:00:00+00:00",
+                        "updated_at": "2026-05-23T00:00:00+00:00",
+                        "text": "Decay-only item",
+                        "source_event_id": "evt_decay_only",
+                        "tags": ["test"],
+                        "weight": 0.9,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    report = MemoryOSRuntime(store).heartbeat(now=datetime(2026, 5, 23, 1, tzinfo=timezone.utc))
+
+    actions = [entry.get("action") for entry in read_audit_entries(store.roots.audit_path)]
+    assert report["processed_event_count"] == 0
+    assert report["decayed_documents"] == ["lingering"]
+    assert "write_working_document" not in actions
+    assert "runtime_heartbeat" not in actions
+
+
+def test_runtime_heartbeat_keeps_expiry_audit_when_decay_expires_item(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    stale = datetime(2026, 5, 23, 0, tzinfo=timezone.utc)
+    now = stale + timedelta(hours=80)
+    working = store.roots.working_root / "lingering.json"
+    working.parent.mkdir(parents=True, exist_ok=True)
+    working.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.working.v0",
+                "updated_at": stale.isoformat(),
+                "items": [
+                    {
+                        "id": "wrk_expires",
+                        "kind": "lingering",
+                        "status": "active",
+                        "created_at": stale.isoformat(),
+                        "updated_at": stale.isoformat(),
+                        "text": "Expiring item",
+                        "source_event_id": "evt_expires",
+                        "tags": ["test"],
+                        "weight": 0.9,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    report = MemoryOSRuntime(store).heartbeat(now=now)
+
+    actions = [entry.get("action") for entry in read_audit_entries(store.roots.audit_path)]
+    assert report["processed_event_count"] == 0
+    assert report["decayed_documents"] == ["lingering"]
+    assert "working_item_expired" in actions
+    assert "write_working_document" not in actions
+    assert "runtime_heartbeat" not in actions
+
+
+def test_runtime_heartbeat_errors_are_audited_and_record_attempt(tmp_path, monkeypatch):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+
+    def fail_read_events():
+        raise RuntimeError("synthetic event read failure")
+
+    monkeypatch.setattr(store, "read_events", fail_read_events)
+
+    try:
+        MemoryOSRuntime(store).heartbeat(now=datetime(2026, 5, 23, 1, tzinfo=timezone.utc))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("heartbeat should re-raise the original failure")
+
+    actions = [entry.get("action") for entry in read_audit_entries(store.roots.audit_path)]
+    state = json.loads((tmp_path / "memory-os" / "runtime" / "heartbeat_state.json").read_text(encoding="utf-8"))
+    assert "heartbeat_error_summary" in actions
+    assert state["last_attempt_at"] == "2026-05-23T01:00:00+00:00"
+    assert state.get("last_error")
+
+
+def test_runtime_heartbeat_attempt_state_errors_are_audited(tmp_path, monkeypatch):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    runtime = MemoryOSRuntime(store)
+
+    def fail_attempt_state(_current):
+        raise RuntimeError("synthetic attempt-state failure")
+
+    monkeypatch.setattr(runtime, "_write_attempt_state", fail_attempt_state)
+
+    try:
+        runtime.heartbeat(now=datetime(2026, 5, 23, 1, tzinfo=timezone.utc))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("heartbeat should re-raise the attempt-state failure")
+
+    entries = read_audit_entries(store.roots.audit_path)
+    assert [entry.get("action") for entry in entries] == ["heartbeat_error_summary"]
+    assert entries[0]["details"]["error_type"] == "RuntimeError"
+    assert entries[0]["details"]["message"] == "synthetic attempt-state failure"
 
 
 def test_runtime_heartbeat_indexes_new_events_without_duplicates(tmp_path):

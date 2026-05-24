@@ -1,6 +1,6 @@
 # 27 - Monitor v0.6 And RH-27b Audit Noise Control
 
-Status: Monitor v0.6 implemented; RH-27b not implemented
+Status: Monitor v0.6 implemented; RH-27b implemented on test host
 Scope: 10.20.3.200 test-host first; production-safe defaults remain unchanged
 
 ## Purpose
@@ -155,6 +155,19 @@ is the condition RH-27b is meant to reduce.
 ## Step 2 - RH-27b Audit Noise Control
 
 RH-27b changes audit write behavior only. It must preserve runtime behavior.
+
+Implementation status:
+
+- implemented in `plugins/memory/memory_os/runtime.py`,
+  `plugins/memory/memory_os/working.py`, and
+  `plugins/memory/memory_os/store.py`
+- locally verified by `tests/plugins/memory/test_memory_os_runtime.py`
+- deployed to 10.20.3.200 through the test-host installer
+- controlled heartbeat probe showed `total_delta=0` audit records while
+  `heartbeat_state.json` refreshed successfully
+- controlled cognitive-loop probe processed 10 events with
+  `audit_per_processed_event=3.1`, inside the 3-5 target range
+- live monitor remained WARN-only with no FAIL findings after deployment
 
 ### Keep Writing State
 
