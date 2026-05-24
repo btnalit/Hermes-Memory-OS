@@ -363,6 +363,24 @@ def test_provider_enable_subprocess_stdout_is_suppressed(tmp_path, monkeypatch):
     assert calls[0][1]["stdout"] is subprocess.DEVNULL
 
 
+def test_provider_enable_missing_hermes_command_reports_actionable_error(tmp_path, monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise FileNotFoundError("hermes")
+
+    monkeypatch.setattr("scripts.install_memory_os_plugin.subprocess.run", fake_run)
+
+    try:
+        install_plugin(hermes_home=tmp_path / "home", enable=True)
+    except SystemExit as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected missing hermes command error")
+
+    assert "hermes" in message
+    assert "scripts/install_memory_os.sh" in message
+    assert "--enable" in message
+
+
 def test_installer_rejects_shell_backups_inside_plugin_scan_tree(tmp_path):
     source = tmp_path / "source"
     shutil_copy_source(SOURCE_PLUGIN_DIR, source)

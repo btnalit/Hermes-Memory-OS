@@ -3,7 +3,12 @@
 Hermes Memory-OS is a file-first memory and agent-OS runtime for long-running
 Hermes agents.
 
-The core idea is deliberately conservative:
+It is built for one practical problem: a long-running agent should remember
+stable facts, carry useful context across sessions, and run bounded reflection
+or governance loops without turning every temporary guess into permanent memory
+or taking actions on its own.
+
+The design is deliberately conservative:
 
 - canonical memory lives in profile-local files;
 - SQLite is a rebuildable index, not the source of truth;
@@ -15,7 +20,65 @@ The core idea is deliberately conservative:
 This repository is intentionally extracted as a clean project. It does not
 vendor the full Hermes agent manager source tree.
 
-## Current State
+## What It Solves
+
+Memory-OS is for Hermes operators who need more than chat-window context:
+
+- keep durable memory in inspectable profile-local files;
+- keep transient work separate from approved long-term memory;
+- make memory injection explainable through context routing and attribution;
+- let cognitive modules run in no-send / no-execute test-host mode;
+- preserve owner approval for crystallized memory and identity changes.
+
+It is not a hosted memory service, a SaaS backend, or an auto-action framework.
+The default posture is observe, report, and ask for owner approval.
+
+## Quick Start
+
+For a normal operator, start with the interactive installer:
+
+```bash
+export HERMES_HOME=/root/.hermes
+bash scripts/install_memory_os.sh
+```
+
+For a no-send test host that enables the full observation stack:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+```
+
+For a conservative profile where DeepReflection and attribution are explicitly
+safe/off unless later enabled:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
+```
+
+After install:
+
+```bash
+HERMES_HOME=/root/.hermes hermes memory
+HERMES_HOME=/root/.hermes hermes memory_os status
+HERMES_HOME=/root/.hermes hermes memory_os doctor
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
+```
+
+Expected relationship:
+
+```text
+memory.provider = memory_os
+plugins.enabled includes memory-os-agent-os
+plugins.enabled does not include memory_os
+```
+
+Short operator docs:
+
+- [Quickstart](docs/quickstart.md)
+- [Configuration](docs/configuration.md)
+- [Test-host monitor](docs/system-modularization/19-memory-os-3-200-monitor.md)
+
+## Project Status
 
 The v0 Memory-OS provider is closed and validated. The v0.1 Agent OS work adds
 portable higher-layer modules and an official-style Hermes plugin shell while
@@ -150,7 +213,8 @@ Non-interactive production-safe install:
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
 ```
 
-Minimal provider install:
+Advanced provider install with the Python installer. This requires the `hermes`
+CLI in `PATH` when `--enable` is used:
 
 ```bash
 python3 scripts/install_memory_os_plugin.py \
@@ -283,7 +347,7 @@ python -m pytest -q
 Current local baseline after the Agent OS shell installer integration:
 
 ```text
-295 passed
+399 passed
 ```
 
 ## Safety Defaults

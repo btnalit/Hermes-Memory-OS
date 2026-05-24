@@ -440,12 +440,23 @@ def _looks_like_memory_os_backup_path(rel: Path) -> bool:
 
 
 def _enable_memory_provider(hermes_home: Path, enable_command: list[str]) -> None:
-    subprocess.run(
+    _run_required_command(
         enable_command,
-        check=True,
+        missing_message=(
+            "Cannot enable memory.provider=memory_os because the `hermes` command "
+            "was not found in PATH. Use scripts/install_memory_os.sh for preflight "
+            "checks, or install/copy files without --enable."
+        ),
         env={**dict(os.environ), "HERMES_HOME": str(hermes_home)},
         stdout=subprocess.DEVNULL,
     )
+
+
+def _run_required_command(command: list[str], *, missing_message: str, **kwargs: object) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(command, check=True, **kwargs)
+    except FileNotFoundError as exc:
+        raise SystemExit(missing_message) from exc
 
 
 def _enable_agent_os_shell(hermes_home: Path) -> None:
