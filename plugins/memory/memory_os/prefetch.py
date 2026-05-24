@@ -11,6 +11,7 @@ from typing import Any
 
 from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
 from .crystallized import read_candidate_queue
+from .low_clue_recall import build_low_clue_guard_lines, normalize_low_clue_recall_config
 from .memory_sources import (
     GUARD_RECALL_CLARIFICATION,
     append_memory_source_record,
@@ -148,9 +149,11 @@ def build_prefetch(
     foreground_task_only: bool = False,
     context_router_config: dict[str, Any] | None = None,
     memory_sources_config: dict[str, Any] | None = None,
+    low_clue_recall_config: dict[str, Any] | None = None,
 ) -> str:
     router_config = _normalize_context_router_config(context_router_config)
     source_config = normalize_memory_sources_config(memory_sources_config)
+    low_clue_config = normalize_low_clue_recall_config(low_clue_recall_config)
     router_apply_enabled = _context_router_apply_enabled(router_config)
     if _should_ground_diagnostic_query(
         query,
@@ -164,6 +167,7 @@ def build_prefetch(
             diagnostic_grounding_enabled=diagnostic_grounding_enabled,
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
+            low_clue_recall_config=low_clue_config,
         )
         report = route_context_sections(
             query,
@@ -222,6 +226,7 @@ def build_prefetch(
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
             context_router_config=router_config,
+            low_clue_recall_config=low_clue_config,
         )
         if routed is not None:
             _record_memory_sources(
@@ -234,7 +239,13 @@ def build_prefetch(
                 prefetch_mode=_prefetch_mode(index),
             )
             return str(routed["context"])
-    sections = _build_prefetch_sections(query, store=store, index=index, current_task_anchor=current_task_anchor)
+    sections = _build_prefetch_sections(
+        query,
+        store=store,
+        index=index,
+        current_task_anchor=current_task_anchor,
+        low_clue_recall_config=low_clue_config,
+    )
     if not sections:
         report = route_context_sections(
             query,
@@ -290,6 +301,7 @@ def build_prefetch_section_candidates(
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
+    low_clue_recall_config: dict[str, Any] | None = None,
 ) -> list[ContextSection]:
     if _should_ground_diagnostic_query(
         query,
@@ -314,6 +326,7 @@ def build_prefetch_section_candidates(
             store=store,
             index=index,
             current_task_anchor=current_task_anchor,
+            low_clue_recall_config=low_clue_recall_config,
         )
     ]
 
@@ -327,6 +340,7 @@ def build_context_router_report(
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
+    low_clue_recall_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return route_context_sections(
         query,
@@ -337,6 +351,7 @@ def build_context_router_report(
             diagnostic_grounding_enabled=diagnostic_grounding_enabled,
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
+            low_clue_recall_config=low_clue_recall_config,
         ),
         current_task_anchor=current_task_anchor,
         budget_chars=budget_chars,
@@ -354,6 +369,7 @@ def _build_context_router_apply_prefetch(
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
     context_router_config: dict[str, Any],
+    low_clue_recall_config: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     candidates = build_prefetch_section_candidates(
         query,
@@ -362,6 +378,7 @@ def _build_context_router_apply_prefetch(
         diagnostic_grounding_enabled=diagnostic_grounding_enabled,
         runtime_facts=runtime_facts,
         current_task_anchor=current_task_anchor,
+        low_clue_recall_config=low_clue_recall_config,
     )
     report = route_context_sections(
         query,
@@ -390,9 +407,18 @@ def _build_prefetch_sections(
     store: MemoryOSStore,
     index: object | None = None,
     current_task_anchor: str | None = None,
+    low_clue_recall_config: dict[str, Any] | None = None,
 ) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
-    _append_section(sections, "Recall Clarification Guard", _recall_clarification_guard_lines(query))
+    _append_section(
+        sections,
+        "Recall Clarification Guard",
+        _recall_clarification_guard_lines(
+            query,
+            store=store,
+            low_clue_recall_config=low_clue_recall_config,
+        ),
+    )
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
@@ -504,9 +530,22 @@ def _format_selected_context_sections(sections: list[ContextSection]) -> str:
     return _format([(section.section, section.text.splitlines()) for section in nonempty])
 
 
-def _recall_clarification_guard_lines(query: str) -> list[str]:
+def _recall_clarification_guard_lines(
+    query: str,
+    *,
+    store: MemoryOSStore,
+    low_clue_recall_config: dict[str, Any] | None = None,
+) -> list[str]:
     if not is_low_clue_recall_query(query):
         return []
+    config = normalize_low_clue_recall_config(low_clue_recall_config)
+    if bool(config.get("enabled")):
+        return build_low_clue_guard_lines(
+            query,
+            store=store,
+            config=config,
+            limit=int(config.get("candidate_limit") or 4),
+        )
     return [
         "The user's recall request is underspecified.",
         "Do not answer as if one remembered item is certain.",

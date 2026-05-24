@@ -396,6 +396,22 @@ def test_installer_deep_reflection_production_safe_preset_is_explicitly_off(tmp_
     assert config["wandering_seed_enabled"] is False
 
 
+def test_installer_writes_low_clue_recall_llm_judge_report_only_config(tmp_path):
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        llm_judge_preset="report-only",
+    )
+
+    config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert report["low_clue_recall_config_written"] is True
+    assert report["llm_judge_preset"] == "report-only"
+    assert config["low_clue_recall"]["enabled"] is True
+    assert config["low_clue_recall"]["llm_judge"]["enabled"] is True
+    assert config["low_clue_recall"]["llm_judge"]["mode"] == "report_only"
+    assert config["low_clue_recall"]["llm_judge"]["provider"] == "hermes_default"
+    assert config["low_clue_recall"]["llm_judge"]["model"] is None
+
+
 def test_test_host_install_shell_wraps_full_agent_os_install():
     script = Path("scripts/install_memory_os_test_host.sh")
     text = script.read_text(encoding="utf-8")
@@ -413,6 +429,8 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "--test-host" in text
     assert "--production-safe" in text
     assert "--memory-sources-preset" in text
+    assert "--llm-judge-preset" in text
+    assert "report-only" in text
     assert "--yes" in text
     assert "--dry-run" in text
     assert "scripts/install_memory_os_plugin.py" in text

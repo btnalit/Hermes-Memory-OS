@@ -78,6 +78,10 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
 
     assert parser.parse_args(["status"]).agent_os_command == "status"
     assert parser.parse_args(["doctor"]).agent_os_command == "doctor"
+    low_clue_args = parser.parse_args(["low-clue-recall", "dry-run", "--query", "继续昨天那个"])
+    assert low_clue_args.agent_os_command == "low-clue-recall"
+    assert low_clue_args.low_clue_recall_command == "dry-run"
+    assert low_clue_args.query == "继续昨天那个"
     last_args = parser.parse_args(["memory-sources", "last"])
     assert last_args.agent_os_command == "memory-sources"
     assert last_args.memory_sources_command == "last"
@@ -134,6 +138,32 @@ def test_shell_memory_sources_alias_delegates_to_existing_memory_os_cli(monkeypa
     assert json.loads(capsys.readouterr().out) == {
         "delegated": "memory-sources",
         "subcommand": "stats",
+    }
+
+
+def test_shell_low_clue_recall_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
+    module = load_shell_module()
+    calls: list[argparse.Namespace] = []
+
+    def fake_delegate(args: argparse.Namespace) -> int:
+        calls.append(args)
+        print(json.dumps({"delegated": args.memory_os_command, "subcommand": args.low_clue_recall_command}))
+        return 0
+
+    monkeypatch.setattr(module, "_delegate_to_memory_os_cli", fake_delegate)
+    args = argparse.Namespace(
+        agent_os_command="low-clue-recall",
+        low_clue_recall_command="dry-run",
+        query="继续昨天那个",
+    )
+
+    assert module.memory_os_agent_os_command(args) == 0
+
+    assert calls[0].memory_os_command == "low-clue-recall"
+    assert calls[0].low_clue_recall_command == "dry-run"
+    assert json.loads(capsys.readouterr().out) == {
+        "delegated": "low-clue-recall",
+        "subcommand": "dry-run",
     }
 
 

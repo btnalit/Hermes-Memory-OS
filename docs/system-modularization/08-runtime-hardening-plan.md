@@ -1006,11 +1006,12 @@ Boundary:
 - no shadow journal apply
 - no production/Sannai mutation
 
-### RH-28 Low-Clue Recall Clarification Guard
+### RH-28 Low-Clue Recall Router
 
-Design and deterministic v0 guard:
+Design:
 
 - `24-low-clue-recall-clarification-guard.md`
+- `28-low-clue-recall-router-design.md`
 
 Reason:
 
@@ -1021,26 +1022,55 @@ Reason:
 
 Current behavior:
 
-- low-clue recall queries route to `ambiguous_recall`
-- prefetch includes `Recall Clarification Guard`
-- the guard tells the foreground model to list possible directions or ask for
-  a keyword/time/project/source instead of claiming one answer is certain
+- low-clue recall dry-run is exposed through:
+  - `hermes memory_os low-clue-recall dry-run --query ...`
+  - `hermes memory-os-agent-os low-clue-recall dry-run --query ...`
+- low-clue recall queries can route to `ambiguous_recall`
+- when enabled in config, prefetch includes a bounded
+  `Recall Clarification Guard` with candidate choices instead of raw memory
+  bodies
+- `low_clue_recall.enabled=false` remains the production-safe default
+- test-host installer presets can enable deterministic RH-28 with:
+  `--llm-judge-preset none`
+- optional `--llm-judge-preset report-only` reuses Hermes' configured
+  provider/model and records judge metadata only
+- `bounded-vote` is accepted as config but skipped by RH-28 runtime code until
+  a later apply gate
 
 Boundary:
 
 - no memory writes
 - no candidate creation
 - no identity/crystallized changes
-- no LLM judge in v0
+- no report-only LLM result changes live decisions
+- no `bounded-vote` apply in RH-28
 - no changes to automation wording policy
 
 Validation:
 
-- local tests cover route planning and prefetch injection
-- next Telegram smoke test should send:
-  `你还记得我之前跟你说过的一个设计吗？`
-- expected response: candidate directions or anchor request, not a single
-  overconfident answer
+- local tests cover candidate scoring, CLI dry-run, shell alias delegation,
+  prefetch guard injection, installer presets, and monitor reporting
+- 10.20.3.200 deployed deterministic mode and report-only judge mode
+- deterministic mode: all public low-clue probes stayed `ask_choice`, with
+  `llm_judge.status=disabled`
+- report-only mode: ambiguous prompts stayed `ask_choice`; the judge returned
+  `no_clear_match` for weak clues and selected the internet data collection
+  candidate only as metadata for a strong clue
+- monitor reports `low_clue_recall.llm_status=ok` in report-only mode
+- status/doctor expose non-network judge availability metadata:
+  `available=true`, `api_mode=codex_responses`,
+  `resolved_provider=openai-codex`, and `resolved_model=gpt-5.4-mini` on
+  10.20.3.200
+- if the Hermes provider/model adapter becomes unavailable after a Hermes
+  upgrade, RH-28 must warn and degrade to deterministic fallback rather than
+  blocking Memory-OS status, doctor, prefetch, or heartbeat
+- RH-28b keeps report-only LLM judge calls out of live prefetch; judge calls
+  remain available through CLI/monitor probes, while the owner's active turn
+  uses deterministic ranking only
+- RH-28b updates `direct_resume` guard wording so high-confidence candidates can
+  be stated as likely matches with a correction affordance instead of being
+  treated like low-confidence choices
+- all hard boundaries remained false
 
 ### RH-25 Small-Context Session Task Anchor
 
@@ -1054,6 +1084,12 @@ Status:
   10.20.3.200
 - Memory-OS mitigation: implemented locally as a bounded current task anchor
 - 10.20.3.200: deployed and verified with synthetic ComfyUI task-anchor probe
+- RH-25.1: deferred foreground-task resume implemented after a real Telegram
+  `/new` test showed `继续昨天那个。` could drift to an unrelated n8n working
+  memory instead of the deferred ComfyUI task
+- RH-25.1 10.20.3.200: deployed through the test-host installer, synthetic
+  deferred-resume probe passed, and test-host gateway restarted to load the
+  updated provider code
 - Hermes upstream gap: documented separately in
   `20-hermes-compression-hook-gap.md`
 
@@ -1133,6 +1169,21 @@ Why this matters:
   remaining foreground context.
 - If this is not handled, long installs, model downloads, and media jobs can
   resume into the wrong topic even when Memory-OS itself is healthy.
+
+RH-25.1 deferred-resume rule:
+
+- explicit deferral turns such as `这个先放一下，明天再说。` store a bounded
+  foreground-task anchor in `system/deferred_foreground_tasks.jsonl`
+- explicit resume turns such as `继续昨天那个。` restore the latest deferred
+  anchor for the same profile
+- if no deferred anchor exists, the turn becomes an ambiguous foreground
+  control prompt: ask the owner to choose which prior task to resume rather
+  than guessing from the latest recalled topic
+- the restored turn is foreground-only, so unrelated Working Memory,
+  Conversation Carryover, and Indexed Recall do not compete with the deferred
+  task
+- the deferred anchor is runtime system metadata, not canonical memory, not a
+  candidate, and not a crystallized record
 
 Data to collect before design:
 

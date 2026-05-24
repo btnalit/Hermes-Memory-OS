@@ -165,6 +165,80 @@ def test_continue_query_after_anchor_uses_foreground_only_prefetch(tmp_path):
     assert "Hindsight" not in context
 
 
+def test_deferred_task_survives_session_reset_for_tomorrow_continue(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider.on_pre_compress(
+        [
+            {"role": "user", "content": "继续处理 ComfyUI 的视频问题"},
+            {"role": "assistant", "content": "terminal: hyperframes inspect"},
+            {"role": "tool", "content": "layout_report.json failed: No composition found"},
+        ]
+    )
+    provider._store.write_working_document(
+        "lingering",
+        {
+            "schema_version": "memory-os.working.v0",
+            "updated_at": "2026-05-24T00:00:00+00:00",
+            "items": [
+                {
+                    "kind": "lingering",
+                    "text": "Unrelated n8n AI agent orchestration discussion should not win a deferred task resume.",
+                    "source_event_id": "evt-n8n",
+                    "weight": 0.8,
+                    "updated_at": "2026-05-24T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    deferred_context = provider.prefetch("这个先放一下，明天再说。", session_id="session-1")
+    provider.shutdown()
+
+    resumed = load_memory_provider("memory_os")
+    resumed.initialize("session-2", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    resume_context = resumed.prefetch("继续昨天那个。", session_id="session-2")
+    resumed.shutdown()
+
+    assert "### Current Foreground Task" in deferred_context
+    assert "deferred" in deferred_context.lower()
+    assert "ComfyUI" in resume_context
+    assert "layout_report.json failed: No composition found" in resume_context
+    assert "Continue this deferred foreground task" in resume_context
+    assert "Working Memory" not in resume_context
+    assert "n8n" not in resume_context
+
+
+def test_deferred_continue_without_record_asks_for_clarification(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+    provider._store.write_working_document(
+        "lingering",
+        {
+            "schema_version": "memory-os.working.v0",
+            "updated_at": "2026-05-24T00:00:00+00:00",
+            "items": [
+                {
+                    "kind": "lingering",
+                    "text": "Recent n8n AI agent orchestration discussion should not be assumed for vague yesterday resume.",
+                    "source_event_id": "evt-n8n",
+                    "weight": 0.8,
+                    "updated_at": "2026-05-24T00:00:00+00:00",
+                }
+            ],
+        },
+    )
+
+    context = provider.prefetch("继续昨天那个。", session_id="session-1")
+    provider.shutdown()
+
+    assert "### Current Foreground Task" in context
+    assert "deferred resume is ambiguous" in context
+    assert "Ask the owner to choose" in context
+    assert "Working Memory" not in context
+    assert "n8n" not in context
+
+
 def test_current_task_anchor_redacts_secrets(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")

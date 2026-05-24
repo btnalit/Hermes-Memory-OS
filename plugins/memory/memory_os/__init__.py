@@ -18,6 +18,7 @@ from .audit import append_audit, read_audit_entries
 from .crystallized import read_candidate_queue
 from .ids import new_event_id
 from .index import MemoryOSIndex
+from .low_clue_recall import low_clue_judge_availability
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -83,6 +84,7 @@ class MemoryOSProvider(MemoryProvider):
             foreground_task_only=self._foreground_task_only_prefetch,
             context_router_config=self._config.get("context_router"),
             memory_sources_config=self._config.get("memory_sources"),
+            low_clue_recall_config=self._config.get("low_clue_recall"),
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
@@ -302,6 +304,12 @@ class MemoryOSProvider(MemoryProvider):
             "hindsight_adapter_enabled": adapter_enabled,
             "hindsight_role": "optional_adapter_only_not_canonical",
             "uses_hindsight_http_api": uses_hindsight_http_api,
+            "low_clue_recall": {
+                "enabled": bool((self._config.get("low_clue_recall") or {}).get("enabled"))
+                if isinstance(self._config.get("low_clue_recall"), dict)
+                else False,
+                "judge_availability": low_clue_judge_availability(self._config.get("low_clue_recall")),
+            },
             "body_policy": "summary_only",
             "authoritative_for": [
                 "active memory provider",
@@ -320,6 +328,34 @@ class MemoryOSProvider(MemoryProvider):
         text = " ".join(str(query or "").split())
         if not text:
             return
+        if self._current_task_anchor and _is_defer_current_task_query(text):
+            self._write_deferred_current_task_anchor(
+                anchor=self._current_task_anchor,
+                deferral=text,
+                session_id=session_id or self.session_id,
+            )
+            self._current_task_anchor = _format_deferred_task_anchor(
+                deferral=text,
+                previous_anchor=self._current_task_anchor,
+                session_id=session_id or self.session_id,
+            )
+            self._foreground_task_only_prefetch = True
+            return
+        if not self._current_task_anchor and _is_deferred_continue_query(text):
+            deferred_anchor = self._read_latest_deferred_current_task_anchor()
+            if deferred_anchor:
+                self._current_task_anchor = _format_resumed_deferred_task_anchor(
+                    anchor=deferred_anchor,
+                    session_id=session_id or self.session_id,
+                )
+                self._foreground_task_only_prefetch = True
+                return
+            self._current_task_anchor = _format_ambiguous_deferred_resume_anchor(
+                query=text,
+                session_id=session_id or self.session_id,
+            )
+            self._foreground_task_only_prefetch = True
+            return
         if _is_cancel_current_task_query(text):
             self._current_task_anchor = _format_cancelled_task_anchor(
                 cancellation=text,
@@ -337,6 +373,52 @@ class MemoryOSProvider(MemoryProvider):
             session_id=session_id or self.session_id,
         )
         self._foreground_task_only_prefetch = False
+
+    def _write_deferred_current_task_anchor(self, *, anchor: str, deferral: str, session_id: str = "") -> None:
+        if self._roots is None:
+            return
+        record = _deferred_task_record(
+            anchor=anchor,
+            deferral=deferral,
+            session_id=session_id or self.session_id,
+            profile=self.profile,
+        )
+        path = _deferred_tasks_path(self._roots)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+        self._audit(
+            "deferred_foreground_task_recorded",
+            "ok",
+            {
+                "record_id": record["record_id"],
+                "session_id": record["session_id"],
+                "profile": record["profile"],
+            },
+        )
+
+    def _read_latest_deferred_current_task_anchor(self) -> str:
+        if self._roots is None:
+            return ""
+        path = _deferred_tasks_path(self._roots)
+        if not path.exists():
+            return ""
+        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("profile") or self.profile) not in {self.profile, ""}:
+                continue
+            anchor = str(record.get("anchor") or "")
+            if anchor.strip():
+                return anchor
+        return ""
 
 
 def register_memory_provider() -> MemoryProvider:
@@ -435,12 +517,73 @@ def _format_cancelled_task_anchor(*, cancellation: str, previous_anchor: str, se
     return _clip_multiline("\n".join(output), 1200)
 
 
+def _format_deferred_task_anchor(*, deferral: str, previous_anchor: str, session_id: str = "") -> str:
+    output = [
+        "### Memory-OS Current Task Anchor",
+        f"- owner deferred the foreground task: {_redact_task_text(_clip(deferral, 240))}",
+    ]
+    previous_task = _extract_anchor_current_task(previous_anchor)
+    if previous_task:
+        output.append(f"- deferred task: {_redact_task_text(_clip(previous_task, 220))}")
+    if session_id:
+        output.append(f"- session: {session_id}")
+    output.append(
+        "- response rule: Acknowledge the deferral and preserve this task for a later explicit resume. "
+        "Do not pivot to unrelated historical memory topics."
+    )
+    return _clip_multiline("\n".join(output), 1200)
+
+
+def _format_resumed_deferred_task_anchor(*, anchor: str, session_id: str = "") -> str:
+    task = _extract_anchor_current_task(anchor)
+    operations = _extract_anchor_operation_lines(anchor)
+    lines = [
+        "### Memory-OS Current Task Anchor",
+        "- owner resumed a deferred foreground task",
+    ]
+    if task:
+        lines.append(f"- current task: {_redact_task_text(_clip(task, 240))}")
+    if operations:
+        lines.append(f"- latest task state: {_redact_task_text(_clip(operations[-1], 260))}")
+    if session_id:
+        lines.append(f"- resumed in session: {session_id}")
+    lines.append(
+        "- response rule: Continue this deferred foreground task. "
+        "If details are insufficient, ask which file or artifact to inspect before guessing."
+    )
+    return _clip_multiline("\n".join(line for line in lines if line), 1200)
+
+
+def _format_ambiguous_deferred_resume_anchor(*, query: str, session_id: str = "") -> str:
+    lines = [
+        "### Memory-OS Current Task Anchor",
+        f"- deferred resume is ambiguous: {_redact_task_text(_clip(query, 240))}",
+    ]
+    if session_id:
+        lines.append(f"- session: {session_id}")
+    lines.append(
+        "- response rule: Ask the owner to choose which prior task to resume. "
+        "Do not assume the latest recalled topic or continue any historical topic "
+        "unless the owner selects it."
+    )
+    return _clip_multiline("\n".join(lines), 900)
+
+
 def _extract_anchor_current_task(anchor: str) -> str:
     for line in str(anchor or "").splitlines():
         clean = line.strip()
         if clean.startswith("- current task:"):
             return clean.split(":", 1)[1].strip()
     return ""
+
+
+def _extract_anchor_operation_lines(anchor: str) -> list[str]:
+    operations: list[str] = []
+    for line in str(anchor or "").splitlines():
+        clean = line.strip()
+        if clean.startswith("- assistant:") or clean.startswith("- tool:"):
+            operations.append(clean[2:].strip())
+    return operations[-4:]
 
 
 def _content_text(content: Any) -> str:
@@ -538,6 +681,51 @@ def _is_cancel_current_task_query(text: str) -> bool:
     return any(marker in normalized for marker in markers)
 
 
+def _is_defer_current_task_query(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        return False
+    markers = (
+        "先放一下",
+        "先放着",
+        "暂时不做",
+        "晚点再",
+        "等下再",
+        "下次再",
+        "明天再说",
+        "回头再说",
+        "先搁置",
+        "pause",
+        "defer",
+        "later",
+        "tomorrow",
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def _is_deferred_continue_query(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().lower().rstrip("。.!！?？").split())
+    if not normalized:
+        return False
+    markers = {
+        "继续昨天那个",
+        "继续昨天的",
+        "继续昨晚那个",
+        "继续昨晚的",
+        "接着昨天那个",
+        "接着昨晚那个",
+        "昨天那个继续",
+        "昨晚那个继续",
+        "继续上次那个",
+        "继续上次的",
+        "resume yesterday",
+        "continue yesterday",
+        "continue the deferred task",
+        "resume the deferred task",
+    }
+    return normalized in markers
+
+
 def _redact_task_text(value: str) -> str:
     redacted = value
     for pattern in _TASK_SECRET_PATTERNS:
@@ -550,6 +738,25 @@ def _clip_multiline(value: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rstrip() + "..."
+
+
+def _deferred_tasks_path(roots: MemoryOSRoots) -> Any:
+    return roots.memory_os_root / "system" / "deferred_foreground_tasks.jsonl"
+
+
+def _deferred_task_record(*, anchor: str, deferral: str, session_id: str, profile: str) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    seed = f"{created_at}:{session_id}:{anchor}"
+    return {
+        "schema_version": "memory-os.deferred_foreground_task.v0",
+        "record_id": f"dft_{_sha256(seed)[:16]}",
+        "created_at": created_at,
+        "profile": profile or "memoryos-test",
+        "session_id": str(session_id or ""),
+        "deferral": _redact_task_text(_clip(deferral, 240)),
+        "anchor": _clip_multiline(anchor, 1200),
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
 
 
 def _working_item_count(roots: Any) -> int:

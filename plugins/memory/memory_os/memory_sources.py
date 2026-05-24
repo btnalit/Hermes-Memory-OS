@@ -29,6 +29,9 @@ ALLOWED_FEEDBACK_RATINGS = {
     "missing_context",
     "overconfident",
     "needs_specific_recall",
+    "clarification_selected",
+    "clarification_rejected",
+    "missing_candidate",
 }
 
 GUARD_RECALL_CLARIFICATION = "guard:recall_clarification"

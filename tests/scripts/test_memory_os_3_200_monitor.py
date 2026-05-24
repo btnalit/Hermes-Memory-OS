@@ -174,7 +174,12 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True},
+        "shell_alias_no_env": {
+            "status_ok": True,
+            "doctor_ok": True,
+            "memory_sources_ok": True,
+            "low_clue_recall_ok": True,
+        },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
         "deep_reflection": {
@@ -188,6 +193,12 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             },
         },
         "compaction": {"recent_count": 2, "focus_none_count": 2},
+        "low_clue_recall": {
+            "schema_version": "memory-os.low_clue_recall.v0",
+            "decision": "ask_choice",
+            "candidate_count": 2,
+            "llm_judge": {"status": "disabled", "mode": "none"},
+        },
     }
 
     classification = classify_snapshot(snapshot)

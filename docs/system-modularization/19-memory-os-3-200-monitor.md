@@ -71,6 +71,9 @@ HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
 hermes memory-os-agent-os status
 hermes memory-os-agent-os doctor
 hermes memory-os-agent-os memory-sources stats --hours 24
+hermes memory-os-agent-os low-clue-recall dry-run \
+  --query "继续昨天那个。" \
+  --llm-judge none
 PYTHONPATH=/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins \
   HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os \
   conversation-regression status-tool-contract
@@ -160,6 +163,14 @@ The v0.6 monitor tracks trend signals that can support future decisions:
 - Memory Sources record count, file size, route distribution, selected
   source-class distribution, selected/dropped heading distribution, boundary
   true count, and forbidden field findings
+- RH-28 low-clue recall config and a bounded probe summary:
+  - deterministic decision
+  - candidate count
+  - configured judge mode
+  - report-only judge status when enabled
+  - report-only judge availability warning when the adapter degrades to
+    deterministic fallback
+  - no candidate labels or private bodies in monitor output
 - DeepReflection source-class skew
 - heartbeat/cognitive-loop service last `Result` and `ExecMainStatus`
 
@@ -190,6 +201,8 @@ A normal monitor pass should be treated as PASS when:
 - the only expected doctor warning is `hindsight_adapter_disabled`
 - `status-tool-contract` validation is `ok`
 - `context_router` config matches the intended test-host mode
+- if RH-28 report-only judge is enabled, status/doctor expose judge
+  availability and the monitor reports `low_clue_llm_judge_available`
 - RH-26 apply probes show expected section headings for the seven public
   validation prompts
 - count deltas are present after the first script-backed run
@@ -224,6 +237,9 @@ WARN conditions:
   automatic compression focus gap remains
 - audit growth per new event is high enough to warrant review, but no boundary
   violation appears
+- RH-28 report-only judge is configured but unavailable; this is a warning
+  only when deterministic fallback remains active and status/doctor otherwise
+  stay healthy
 - disk usage grows unexpectedly but no hard limit is crossed
 - a simple `is-active` service probe reports inactive, but a follow-up
   `systemctl --user show` probe reports `LoadState=loaded`,

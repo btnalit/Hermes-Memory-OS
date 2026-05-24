@@ -28,6 +28,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "record_live_prefetch": True,
         "record_dry_run": False,
     },
+    "low_clue_recall": {
+        "enabled": False,
+        "candidate_limit": 4,
+        "llm_judge": {
+            "enabled": False,
+            "mode": "none",
+            "provider": "hermes_default",
+            "model": None,
+            "temperature": 0,
+            "timeout_ms": 8000,
+            "max_tokens": 160,
+            "max_candidates": 4,
+            "on_error": "deterministic_fallback",
+        },
+    },
 }
 
 
@@ -69,6 +84,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "description": "Memory Sources attribution metadata ledger",
             "default": DEFAULT_CONFIG["memory_sources"],
         },
+        {
+            "key": "low_clue_recall",
+            "description": "Low-clue recall router and optional report-only LLM judge",
+            "default": DEFAULT_CONFIG["low_clue_recall"],
+        },
     ]
 
 
@@ -108,6 +128,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged.update(_known_values(values))
     merged["context_router"] = _merge_context_router_config(merged.get("context_router"))
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
+    merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
     return merged
 
 
@@ -142,6 +163,36 @@ def _merge_memory_sources_config(value: Any) -> dict[str, Any]:
         merged["retention_days"] = int(merged.get("retention_days") or 30)
     except (TypeError, ValueError):
         merged["retention_days"] = 30
+    return merged
+
+
+def _merge_low_clue_recall_config(value: Any) -> dict[str, Any]:
+    default = json.loads(json.dumps(DEFAULT_CONFIG["low_clue_recall"]))
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in ("enabled", "candidate_limit"):
+        if key in value:
+            merged[key] = value[key]
+    judge = dict(default["llm_judge"])
+    incoming_judge = value.get("llm_judge")
+    if isinstance(incoming_judge, dict):
+        for key in judge:
+            if key in incoming_judge:
+                judge[key] = incoming_judge[key]
+    try:
+        merged["candidate_limit"] = max(int(merged.get("candidate_limit") or 4), 1)
+    except (TypeError, ValueError):
+        merged["candidate_limit"] = 4
+    try:
+        judge["timeout_ms"] = max(int(judge.get("timeout_ms") or 8000), 100)
+    except (TypeError, ValueError):
+        judge["timeout_ms"] = 8000
+    try:
+        judge["max_candidates"] = max(int(judge.get("max_candidates") or 4), 1)
+    except (TypeError, ValueError):
+        judge["max_candidates"] = 4
+    merged["llm_judge"] = judge
     return merged
 
 

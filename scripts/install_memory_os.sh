@@ -22,6 +22,7 @@ RUNTIME_INTERVAL="${RUNTIME_INTERVAL:-5min}"
 COGNITIVE_LOOP_INTERVAL="${COGNITIVE_LOOP_INTERVAL:-6h}"
 DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
 MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-}"
+LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-}"
 
 INSTALL_SHELL=""
 ENABLE_PROVIDER=""
@@ -47,6 +48,8 @@ Options:
                                 explicitly disabled.
   --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host.
   --memory-sources-preset NAME none|production-safe|test-host.
+  --llm-judge-preset NAME      none|report-only|bounded-vote. Optional low-clue
+                                recall LLM judge; reuses Hermes provider/model config.
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
   --cognitive-loop-interval VALUE
                                 Test-host cognitive loop timer interval. Default: 6h.
@@ -81,12 +84,14 @@ while [[ $# -gt 0 ]]; do
       YES=1
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-test-host}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-test-host}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-none}"
       shift
       ;;
     --production-safe)
       MODE="production-safe"
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-production-safe}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-production-safe}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-none}"
       shift
       ;;
     --deep-reflection-preset)
@@ -95,6 +100,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --memory-sources-preset)
       MEMORY_SOURCES_PRESET="${2:?missing --memory-sources-preset value}"
+      shift 2
+      ;;
+    --llm-judge-preset)
+      LLM_JUDGE_PRESET="${2:?missing --llm-judge-preset value}"
       shift 2
       ;;
     --runtime-interval)
@@ -327,6 +336,27 @@ choose_memory_sources_preset() {
   esac
 }
 
+choose_llm_judge_preset() {
+  local default="$1"
+  local answer
+  if [[ "${YES}" == "1" ]]; then
+    echo "Low-Clue LLM judge preset [${default}] -> ${default}"
+    LLM_JUDGE_PRESET="${default}"
+    return
+  fi
+  read -r -p "Low-Clue LLM judge preset [none/report-only/bounded-vote] [${default}] " answer
+  answer="${answer:-${default}}"
+  case "${answer}" in
+    none|report-only|bounded-vote)
+      LLM_JUDGE_PRESET="${answer}"
+      ;;
+    *)
+      echo "Invalid Low-Clue LLM judge preset: ${answer}" >&2
+      choose_llm_judge_preset "${default}"
+      ;;
+  esac
+}
+
 normalize_shell_enablement() {
   [[ "${INSTALL_SHELL}" == "0" ]] || return 0
 
@@ -361,6 +391,7 @@ select_options() {
   local default_enable_cognitive_loop="no"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
+  local default_llm_judge_preset="none"
 
   if [[ "${MODE}" == "test-host" ]]; then
     default_preset="test-host"
@@ -394,6 +425,9 @@ select_options() {
   if [[ -z "${MEMORY_SOURCES_PRESET}" ]]; then
     choose_memory_sources_preset "${default_memory_sources_preset}"
   fi
+  if [[ -z "${LLM_JUDGE_PRESET}" ]]; then
+    choose_llm_judge_preset "${default_llm_judge_preset}"
+  fi
 }
 
 require_hermes_for_selected_actions() {
@@ -422,6 +456,7 @@ run_installer() {
   args+=("--cognitive-loop-interval" "${COGNITIVE_LOOP_INTERVAL}")
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
   [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
+  [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
   echo "Running installer:"

@@ -53,6 +53,7 @@ from .cognitive_loop import CognitiveLoopRunner
 from .cron_mirror import CronMirror
 from .crystallized import read_candidate_queue
 from .index import MemoryOSIndex
+from .low_clue_recall import build_low_clue_recall_report, low_clue_judge_availability
 from .memory_sources import (
     memory_sources_feedback_history_report,
     memory_sources_feedback_last_report,
@@ -87,6 +88,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
     store_counts = _store_counts(store)
     index_counts = MemoryOSIndex(store.roots).counts()
     prefetch_mode = _prefetch_mode(store)
+    config = load_config(store.roots.hermes_home)
     return {
         "schema_version": "memory-os.status.v0",
         "root": str(store.roots.memory_os_root),
@@ -102,7 +104,13 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
             {"id": event.id, "ts": event.ts, "kind": event.kind, "summary": event.summary}
             for event in sorted(events, key=lambda item: item.ts)[-5:]
         ],
-        "hindsight_adapter_enabled": bool(load_config(store.roots.hermes_home).get("hindsight_adapter_enabled")),
+        "hindsight_adapter_enabled": bool(config.get("hindsight_adapter_enabled")),
+        "low_clue_recall": {
+            "enabled": bool((config.get("low_clue_recall") or {}).get("enabled"))
+            if isinstance(config.get("low_clue_recall"), dict)
+            else False,
+            "judge_availability": low_clue_judge_availability(config.get("low_clue_recall")),
+        },
     }
 
 
@@ -142,6 +150,25 @@ def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
         )
     if not bool(load_config(store.roots.hermes_home).get("hindsight_adapter_enabled")):
         findings.append(_finding("hindsight_adapter_disabled", "warning", "Hindsight adapter is disabled."))
+    judge_availability = status.get("low_clue_recall", {}).get("judge_availability", {})
+    if (
+        isinstance(judge_availability, dict)
+        and judge_availability.get("enabled") is True
+        and judge_availability.get("available") is not True
+    ):
+        findings.append(
+            _finding(
+                "low_clue_llm_judge_unavailable",
+                "warning",
+                "Low-clue recall LLM judge is configured but unavailable; deterministic fallback remains active.",
+                {
+                    "status": judge_availability.get("status"),
+                    "code": judge_availability.get("code"),
+                    "mode": judge_availability.get("mode"),
+                    "degrades_to": "deterministic_fallback",
+                },
+            )
+        )
     return {
         "schema_version": "memory-os.meta_audit.v0",
         "root": str(store.roots.memory_os_root),
@@ -318,6 +345,17 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     context_router_dry_run.add_argument("--query", required=True)
     context_router_dry_run.add_argument("--budget", type=int, default=2200)
     context_router_dry_run.add_argument("--current-task-anchor", default="")
+    low_clue_parser = subs.add_parser("low-clue-recall")
+    low_clue_subs = low_clue_parser.add_subparsers(dest="low_clue_recall_command", required=True)
+    low_clue_dry_run = low_clue_subs.add_parser("dry-run")
+    low_clue_dry_run.add_argument("--query", required=True)
+    low_clue_dry_run.add_argument("--limit", type=int, default=4)
+    low_clue_dry_run.add_argument(
+        "--llm-judge",
+        choices=["config", "none", "report-only"],
+        default="config",
+        help="Override low-clue LLM judge for this dry-run only.",
+    )
     memory_sources_parser = subs.add_parser("memory-sources")
     memory_sources_subs = memory_sources_parser.add_subparsers(dest="memory_sources_command", required=True)
     memory_sources_subs.add_parser("last")
@@ -447,6 +485,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _conversation_regression_command(args)
     if command == "context-router":
         return _context_router_command(args, store)
+    if command == "low-clue-recall":
+        return _low_clue_recall_command(args, store)
     if command == "memory-sources":
         return _memory_sources_command(args, store)
     if command == "cognitive-loop":
@@ -1289,6 +1329,42 @@ def _context_router_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         )
         return 0
     return 2
+
+
+def _low_clue_recall_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    if args.low_clue_recall_command == "dry-run":
+        config = load_config(store.roots.hermes_home).get("low_clue_recall")
+        if args.llm_judge == "none":
+            config = _low_clue_recall_cli_config(config, llm_enabled=False, mode="none")
+        elif args.llm_judge == "report-only":
+            config = _low_clue_recall_cli_config(config, llm_enabled=True, mode="report_only")
+        print(
+            json.dumps(
+                build_low_clue_recall_report(
+                    args.query,
+                    store=store,
+                    limit=max(int(args.limit), 1),
+                    config=config,
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    return 2
+
+
+def _low_clue_recall_cli_config(config: Any, *, llm_enabled: bool, mode: str) -> dict[str, Any]:
+    source = dict(config) if isinstance(config, dict) else {}
+    source["enabled"] = True
+    judge = dict(source.get("llm_judge") if isinstance(source.get("llm_judge"), dict) else {})
+    judge["enabled"] = llm_enabled
+    judge["mode"] = mode
+    judge.setdefault("provider", "hermes_default")
+    judge.setdefault("model", None)
+    source["llm_judge"] = judge
+    return source
 
 
 def _migrate_command(args: argparse.Namespace) -> int:

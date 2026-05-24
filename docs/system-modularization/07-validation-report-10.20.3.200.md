@@ -5651,6 +5651,521 @@ DeepReflection.actual_identity_write=false
 DeepReflection.actual_crystallized_approval=false
 ```
 
+## RH-28 Low-Clue Recall Router + Report-Only LLM Judge
+
+Date: 2026-05-24
+
+Deployment target:
+
+```text
+host=10.20.3.200
+deploy_dir=/root/Hermes-Memory-OS-rh28-20260524142225
+gateway_restart_pid=473191
+```
+
+Local implementation verification before deployment:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/scripts/test_memory_os_plugin_install.py -q
+
+70 passed
+
+python -m py_compile \
+  plugins/memory/memory_os/low_clue_recall.py \
+  plugins/memory/memory_os/prefetch.py \
+  plugins/memory/memory_os/cli.py \
+  scripts/install_memory_os_plugin.py \
+  scripts/memory_os_3_200_monitor.py
+
+bash -n scripts/install_memory_os.sh
+```
+
+Mode A: deterministic-only install:
+
+```text
+bash scripts/install_memory_os.sh \
+  --yes \
+  --test-host \
+  --hermes-home /root/.hermes \
+  --llm-judge-preset none
+
+llm_judge_preset=none
+low_clue_recall.enabled=true
+low_clue_recall.llm_judge.enabled=false
+low_clue_recall.llm_judge.mode=none
+low_clue_recall.llm_judge.timeout_ms=8000
+gateway=active pid=471982
+```
+
+Mode A deterministic probes:
+
+```text
+hermes memory-os-agent-os low-clue-recall dry-run \
+  --query "继续昨天那个。" \
+  --llm-judge none
+
+decision=ask_choice
+candidate_count=4
+llm_judge.status=disabled
+boundaries all false
+
+hermes memory-os-agent-os low-clue-recall dry-run \
+  --query "你还记得我之前跟你说过的一个设计吗？" \
+  --llm-judge none
+
+decision=ask_choice
+candidate_count=4
+llm_judge.status=disabled
+boundaries all false
+
+hermes memory-os-agent-os low-clue-recall dry-run \
+  --query "那个数据采集系统怎么分层？" \
+  --llm-judge none
+
+decision=ask_choice
+candidate_count=4
+llm_judge.status=disabled
+top scores included 1.0 matches for internet data collection candidates
+boundaries all false
+```
+
+Mode A monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=471982
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+
+counts:
+  audit_entries=2587
+  events=177
+  working_items=129
+  candidates=129
+  crystallized_records=0
+
+low_clue_recall:
+  enabled=true
+  judge_mode=none
+  decision=ask_choice
+  candidate_count=4
+  llm_status=disabled
+
+MemorySources:
+  boundary_true_count=0
+  forbidden_field_count=0
+
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Mode B: report-only LLM judge install:
+
+```text
+bash scripts/install_memory_os.sh \
+  --yes \
+  --test-host \
+  --hermes-home /root/.hermes \
+  --llm-judge-preset report-only
+
+llm_judge_preset=report-only
+low_clue_recall.enabled=true
+low_clue_recall.llm_judge.enabled=true
+low_clue_recall.llm_judge.mode=report_only
+low_clue_recall.llm_judge.provider=hermes_default
+low_clue_recall.llm_judge.model=null
+low_clue_recall.llm_judge.timeout_ms=8000
+gateway=active pid=473191
+```
+
+Report-only adapter finding and fix:
+
+```text
+initial finding:
+  report-only returned skipped/hermes_runtime_adapter_unavailable
+
+root cause:
+  the OpenAI Codex backend on this host uses the Responses streaming transport
+  and requires an instructions field; ordinary responses.create did not work.
+  The monitor's provider CLI path also ran under system python, where the
+  Memory-OS runtime package named agent could shadow Hermes' agent package.
+
+fix:
+  RH-28 judge adapter now calls the Codex Responses streaming endpoint directly
+  with instructions, store=false, include=[], and session headers.
+  The monitor low-clue probe uses the installed shell alias path so it runs in
+  the Hermes runtime environment.
+
+verification:
+  monitor low_clue_recall.llm_status=ok after the fix
+```
+
+Mode B report-only probes:
+
+```text
+query="继续昨天那个。"
+deterministic decision=ask_choice
+llm_judge.status=no_clear_match
+llm_judge.confidence=0.12
+llm_judge.selected_candidate_id=""
+live decision unchanged
+boundaries all false
+
+query="你还记得我之前跟你说过的一个设计吗？"
+deterministic decision=ask_choice
+llm_judge.status=no_clear_match
+llm_judge.confidence=0.18
+llm_judge.selected_candidate_id=""
+live decision unchanged
+boundaries all false
+
+query="那个数据采集系统怎么分层？"
+deterministic decision=ask_choice
+llm_judge.status=ok
+llm_judge.confidence=0.98
+llm_judge.selected_candidate_id=lc_working_evt_20260523T055608799381Z_5d9432feac
+live decision unchanged
+boundaries all false
+```
+
+Mode B monitor after report-only fix:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=473191
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+
+low_clue_recall:
+  enabled=true
+  judge_mode=report_only
+  decision=ask_choice
+  candidate_count=4
+  llm_status=ok
+  llm_available=true
+
+MemorySources:
+  record_count=9
+  feedback_count=1
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Interpretation:
+
+- RH-28 deterministic mode prevents low-clue recall from over-committing to a
+  single answer.
+- report-only LLM judge can identify a likely candidate when the query has a
+  strong semantic clue, but it does not change the live deterministic decision.
+- ambiguous low-clue prompts remain `ask_choice`.
+- the current candidate pool is still biased toward recent working-memory
+  items, which is useful data for future source-diversity and recall-quality
+  work rather than a boundary failure.
+- No sends, executes, identity writes, relationship writes, Hindsight exports,
+  or crystallized approvals occurred.
+
+Judge availability recheck after the Hermes-default adapter hardening:
+
+```text
+command:
+  hermes memory-os-agent-os status
+
+low_clue_recall.judge_availability:
+  enabled=true
+  mode=report_only
+  provider=hermes_default
+  available=true
+  status=available
+  code=ok
+  api_mode=codex_responses
+  resolved_provider=openai-codex
+  resolved_model=gpt-5.4-mini
+  credential_present=true
+  degrades_to=deterministic_fallback
+
+command:
+  hermes memory-os-agent-os doctor
+
+doctor.status=ok
+doctor.exit_code=0
+low_clue_llm_judge_unavailable finding absent
+```
+
+The first monitor implementation checked status/doctor through the direct
+provider Python path and produced a false `low_clue_llm_judge_unavailable`
+warning because that path did not run in Hermes' installed runtime environment.
+The monitor now checks the natural shell alias path:
+
+```text
+hermes memory-os-agent-os status
+hermes memory-os-agent-os doctor
+hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个。" --llm-judge config
+```
+
+Latest monitor recheck:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+PASS includes low_clue_llm_judge_available and low_clue_recall_probe_ok
+
+gateway=active pid=473504
+index_health=healthy
+doctor=ok
+
+low_clue_recall:
+  enabled=true
+  judge_mode=report_only
+  decision=ask_choice
+  candidate_count=4
+  llm_status=ok
+  llm_available=true
+
+MemorySources:
+  boundary_true_count=0
+  forbidden_field_count=0
+
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Compatibility interpretation:
+
+- RH-28 report-only judge reuses the configured Hermes provider/model.
+- No Hermes source change is required.
+- status, doctor, and monitor expose judge availability.
+- If a future Hermes upgrade breaks the adapter path, Memory-OS reports a
+  warning and degrades to deterministic fallback; status/doctor do not block
+  the provider/runtime unless another real error appears.
+
+RH-28b local regression after architecture/code review:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_low_clue_recall.py -q
+
+10 passed
+```
+
+Validated fixes:
+
+- live prefetch disables report-only judge calls, so a slow Hermes provider/model
+  adapter cannot delay the owner's active turn
+- high-confidence `direct_resume` guard wording now says to state the likely
+  match briefly and ask for correction if wrong, rather than treating it like a
+  low-confidence choice that always requires another clarification first
+
+RH-28b remote deployment:
+
+```text
+host=10.20.3.200
+deploy_dir=/root/Hermes-Memory-OS-rh28-20260524142225
+
+python3 -m pytest tests/plugins/memory/test_memory_os_low_clue_recall.py -q
+10 passed
+
+bash scripts/install_memory_os.sh \
+  --yes \
+  --test-host \
+  --hermes-home /root/.hermes \
+  --llm-judge-preset report-only
+
+gateway restart: test-host only, required to load provider/prefetch runtime code
+gateway ActiveState=active
+gateway SubState=running
+gateway MainPID=474128
+gateway Result=success
+```
+
+Post-deploy monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=474128
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok findings=[hindsight_adapter_disabled warning]
+shell_alias_no_env_ok=true
+
+low_clue_recall:
+  enabled=true
+  judge_mode=report_only
+  decision=ask_choice
+  candidate_count=4
+  llm_status=ok
+  llm_available=true
+
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+## 2026-05-24 RH-25.1 Deferred Foreground Task Resume
+
+Real Telegram finding:
+
+```text
+13:07 owner: /new
+13:07 owner: 继续昨天那个。
+13:08 assistant: searched for n8n / AI agent orchestration and answered about n8n
+```
+
+Interpretation:
+
+- RH-25/RH-25b preserved same-session foreground tasks and cancellation turns.
+- The remaining gap was cross-session deferred resume: after an explicit
+  `明天再说` style deferral, a fresh `/new` session could still let unrelated
+  Working Memory win over the intended deferred foreground task.
+- This is not canonical Memory-OS corruption and not a crystallized-memory
+  failure; it is a foreground task lifecycle gap.
+
+Local regression:
+
+```text
+test: tests/plugins/memory/test_memory_os_current_task_anchor.py::test_deferred_task_survives_session_reset_for_tomorrow_continue
+
+setup:
+  session-1 current task: 继续处理 ComfyUI 的视频问题
+  active operation: layout_report.json failed: No composition found
+  unrelated working memory: n8n AI agent orchestration discussion
+  deferral turn: 这个先放一下，明天再说。
+  session reset: new provider instance / session-2
+  resume turn: 继续昨天那个。
+
+assertions:
+  deferred context contains Current Foreground Task
+  resume context contains ComfyUI
+  resume context contains layout_report.json failed: No composition found
+  resume context contains Continue this deferred foreground task
+  resume context excludes Working Memory
+  resume context excludes n8n
+
+second case:
+  no deferred record exists yet
+  resume turn: 继续昨天那个。
+  expected: ask owner to choose which prior task to resume
+  expected: foreground-only context
+  expected: unrelated n8n working memory is not injected
+```
+
+Verification:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_current_task_anchor.py -q
+8 passed
+
+python -m pytest \
+  tests/plugins/memory/test_memory_os_current_task_anchor.py \
+  tests/plugins/memory/test_memory_os_context_router.py \
+  tests/plugins/memory/test_memory_os_memory_sources.py -q
+39 passed
+
+python -m pytest -q
+387 passed
+```
+
+10.20.3.200 deployment:
+
+```text
+target: 10.20.3.200 only
+deploy path: HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+installer_result: success
+doctor: ok with expected hindsight_adapter_disabled warning
+heartbeat_timer: active/enabled
+cognitive_loop_timer: active/enabled
+gateway_restart: hermes-gateway.service restarted on test host only, PID 471307
+```
+
+Remote synthetic probe:
+
+```json
+{
+  "missing_record_asks_choose": true,
+  "missing_record_excludes_n8n": true,
+  "missing_record_foreground_only": true,
+  "missing_record_has_ambiguous": true,
+  "with_record_excludes_n8n": true,
+  "with_record_foreground_only": true,
+  "with_record_has_comfyui": true,
+  "with_record_has_error": true,
+  "with_record_has_rule": true
+}
+```
+
+Post-deploy monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=471307
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"] llm_judge=disabled
+
+counts:
+  audit_entries=2569
+  events=175
+  working_items=127
+  candidates=127
+  crystallized_records=0
+
+MemorySources:
+  record_count=8
+  feedback_count=1
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+```
+
+Boundary:
+
+- deferred foreground tasks are stored as bounded runtime system metadata under
+  `system/deferred_foreground_tasks.jsonl`
+- they are not written to canonical events, working memory, candidates,
+  crystallized records, identity, or relationships
+- resume turns remain foreground-only so unrelated memory cannot outvote the
+  deferred task
+
 ## RH-30 Relevance Feedback Audit Deployment Gate
 
 Date: 2026-05-24

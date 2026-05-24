@@ -108,9 +108,20 @@ continuity without turning the anchor into memory:
 - Cancellation/rejection queries switch to a cancellation anchor and suppress
   background Memory-OS prefetch sections for that turn. Examples:
   `算了`, `别做`, `不要做`, `停止`, `cancel`, `stop`, `abort`.
+- Explicit deferral queries persist a bounded foreground-task anchor as runtime
+  system metadata so a later explicit resume can recover the task across a
+  provider restart or `/new` session reset. Examples: `这个先放一下，明天再说`,
+  `先放着`, `回头再说`, `pause`, `defer`, `tomorrow`.
+- Explicit deferred-resume queries load the latest bounded deferred foreground
+  task for the same profile and use foreground-only prefetch. Examples:
+  `继续昨天那个`, `继续昨晚那个`, `继续上次那个`, `continue yesterday`.
+- If an explicit deferred-resume query has no stored deferred task, Memory-OS
+  must not guess from the latest recalled topic. It injects an ambiguous-resume
+  foreground anchor that asks the owner to choose which prior task to resume.
 - A different concrete user task can replace the current anchor.
-- The anchor is provider runtime state. It is not persisted across provider
-  restart and is not written to events, working memory, candidates,
+- The normal current anchor is provider runtime state. Deferred anchors are
+  stored only in `system/deferred_foreground_tasks.jsonl` as bounded runtime
+  system metadata. They are not written to events, working memory, candidates,
   crystallized records, identity, or relationships.
 
 This means RH-25 favors "do not lose the active job during compaction" over
@@ -129,9 +140,10 @@ Example unresolved multi-task case:
 ```
 
 The current implementation may replace the ComfyUI anchor with the Memory-OS
-doctor task when step 2 is concrete enough. A future RH-25.1 could add a
-bounded recent-task list or anchor stack, but this is intentionally deferred
-until real usage proves the need.
+doctor task when step 2 is concrete enough. RH-25.1 does not implement a task
+stack; it only persists the latest explicitly deferred foreground task.
+A bounded recent-task list or anchor stack remains deferred until real usage
+proves the need.
 
 Implementation status:
 
@@ -143,6 +155,7 @@ synthetic task-anchor probe: passed
 doctor: ok, warning-only findings
 post-deploy compactions observed: 2
 cancellation/continuation foreground-only guard: implemented
+deferred-resume guard: implemented and deployed on 10.20.3.200
 ```
 
 Synthetic probe assertions:
@@ -162,6 +175,19 @@ has_cancel=True
 foreground_only=True
 no_hindsight_marker=True
 prompt_has_cancel=True
+```
+
+RH-25.1 deferred-resume probe assertions:
+
+```text
+deferred_turn_has_foreground=True
+deferred_turn_marks_deferred=True
+resume_after_session_reset_preserves_task=True
+resume_after_session_reset_preserves_error=True
+resume_after_session_reset_foreground_only=True
+resume_after_session_reset_no_unrelated_working_memory=True
+missing_deferred_record_asks_for_choice=True
+missing_deferred_record_foreground_only=True
 ```
 
 Real post-deploy compaction observation:
@@ -187,6 +213,19 @@ Follow-up finding:
   cancellation guard and `foreground_task_only` prefetch parameter, and the
   synthetic cancellation probe confirms no Hindsight/hermes02 marker appears in
   the injected context.
+- A later real Telegram `/new` test showed the remaining deferred-resume gap:
+  after the owner said `继续昨天那个。`, the assistant recalled an unrelated n8n
+  discussion instead of the previously deferred ComfyUI video task.
+- RH-25.1 records bounded deferred foreground-task metadata on explicit
+  deferral (`明天再说`, `先放一下`, etc.) and restores it on explicit deferred
+  resume (`继续昨天那个`, `继续上次那个`, etc.). The restored turn remains
+  foreground-only so Working Memory and Conversation Carryover cannot outvote
+  the deferred task.
+- A second real Telegram `/new` test clarified the fallback behavior: if the
+  owner says `继续昨天那个。` but no deferred task was recorded yet, the assistant
+  should ask the owner to choose instead of continuing the latest recalled
+  topic. RH-25.1 therefore treats missing-record deferred resume as an
+  ambiguous foreground-control turn, not a normal memory-recall query.
 
 ## Boundaries
 

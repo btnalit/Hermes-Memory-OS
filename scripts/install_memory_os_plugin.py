@@ -92,6 +92,55 @@ MEMORY_SOURCES_PRESETS: dict[str, dict[str, object]] = {
 }
 
 
+LLM_JUDGE_PRESETS: dict[str, dict[str, object]] = {
+    "none": {
+        "enabled": True,
+        "candidate_limit": 4,
+        "llm_judge": {
+            "enabled": False,
+            "mode": "none",
+            "provider": "hermes_default",
+            "model": None,
+            "temperature": 0,
+            "timeout_ms": 8000,
+            "max_tokens": 160,
+            "max_candidates": 4,
+            "on_error": "deterministic_fallback",
+        },
+    },
+    "report-only": {
+        "enabled": True,
+        "candidate_limit": 4,
+        "llm_judge": {
+            "enabled": True,
+            "mode": "report_only",
+            "provider": "hermes_default",
+            "model": None,
+            "temperature": 0,
+            "timeout_ms": 8000,
+            "max_tokens": 160,
+            "max_candidates": 4,
+            "on_error": "deterministic_fallback",
+        },
+    },
+    "bounded-vote": {
+        "enabled": True,
+        "candidate_limit": 4,
+        "llm_judge": {
+            "enabled": True,
+            "mode": "bounded_vote",
+            "provider": "hermes_default",
+            "model": None,
+            "temperature": 0,
+            "timeout_ms": 8000,
+            "max_tokens": 160,
+            "max_candidates": 4,
+            "on_error": "deterministic_fallback",
+        },
+    },
+}
+
+
 def install_plugin(
     *,
     hermes_home: Path,
@@ -109,6 +158,7 @@ def install_plugin(
     cognitive_loop_interval: str = "6h",
     deep_reflection_preset: str | None = None,
     memory_sources_preset: str | None = None,
+    llm_judge_preset: str | None = None,
     systemd_dir: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, object]:
@@ -154,6 +204,14 @@ def install_plugin(
         memory_sources_config_path, memory_sources_config = _write_memory_sources_config(
             hermes_home,
             preset=memory_sources_preset,
+            dry_run=dry_run,
+        )
+    low_clue_recall_config: dict[str, object] | None = None
+    low_clue_recall_config_path: Path | None = None
+    if llm_judge_preset is not None:
+        low_clue_recall_config_path, low_clue_recall_config = _write_low_clue_recall_config(
+            hermes_home,
+            preset=llm_judge_preset,
             dry_run=dry_run,
         )
     runtime_artifacts: list[Path] = []
@@ -288,6 +346,10 @@ def install_plugin(
         "memory_sources_config_written": bool(memory_sources_config_path) and not dry_run,
         "memory_sources_config_path": str(memory_sources_config_path) if memory_sources_config_path else "",
         "memory_sources_config": memory_sources_config or {},
+        "llm_judge_preset": llm_judge_preset,
+        "low_clue_recall_config_written": bool(low_clue_recall_config_path) and not dry_run,
+        "low_clue_recall_config_path": str(low_clue_recall_config_path) if low_clue_recall_config_path else "",
+        "low_clue_recall_config": low_clue_recall_config or {},
         "dry_run": dry_run,
     }
 
@@ -554,6 +616,31 @@ def _write_memory_sources_config(
     return config_path, memory_sources_config
 
 
+def _write_low_clue_recall_config(
+    hermes_home: Path,
+    *,
+    preset: str,
+    dry_run: bool,
+) -> tuple[Path, dict[str, object]]:
+    if preset not in LLM_JUDGE_PRESETS:
+        choices = ", ".join(sorted(LLM_JUDGE_PRESETS))
+        raise SystemExit(f"Unsupported Low-Clue LLM judge preset: {preset}. Choices: {choices}")
+    config_path = hermes_home / "memory-os" / "config.json"
+    config = _read_json_config(config_path)
+    low_clue_recall_config = {
+        **LLM_JUDGE_PRESETS[preset],
+        "preset": preset,
+    }
+    config["low_clue_recall"] = low_clue_recall_config
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return config_path, low_clue_recall_config
+
+
 def _read_json_config(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         return {}
@@ -599,6 +686,15 @@ def main() -> int:
             "use production-safe for explicit off or test-host for metadata-only observation."
         ),
     )
+    parser.add_argument(
+        "--llm-judge-preset",
+        choices=sorted(LLM_JUDGE_PRESETS),
+        help=(
+            "Write Low-Clue Recall LLM judge config. Default is no config write; "
+            "use none for deterministic-only, report-only to reuse Hermes provider/model for reports, "
+            "or bounded-vote only after a separate review gate."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
     args = parser.parse_args()
 
@@ -618,6 +714,7 @@ def main() -> int:
         cognitive_loop_interval=args.cognitive_loop_interval,
         deep_reflection_preset=args.deep_reflection_preset,
         memory_sources_preset=args.memory_sources_preset,
+        llm_judge_preset=args.llm_judge_preset,
         dry_run=args.dry_run,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

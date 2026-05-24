@@ -177,6 +177,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         shell_alias.get("status_ok") is True
         and shell_alias.get("doctor_ok") is True
         and shell_alias.get("memory_sources_ok") is True
+        and shell_alias.get("low_clue_recall_ok") is True
     ):
         passed.append({"code": "shell_alias_no_env_ok"})
     else:
@@ -205,6 +206,24 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             warn.append({"code": "memory_sources_no_records_yet", "value": memory_sources})
     else:
         warn.append({"code": "memory_sources_stats_unavailable", "value": memory_sources})
+
+    low_clue = snapshot.get("low_clue_recall", {})
+    if low_clue.get("schema_version") == "memory-os.low_clue_recall.v0":
+        judge = low_clue.get("llm_judge", {}) if isinstance(low_clue.get("llm_judge"), dict) else {}
+        configured_judge = (
+            snapshot.get("low_clue_recall_config", {}).get("llm_judge", {})
+            if isinstance(snapshot.get("low_clue_recall_config", {}).get("llm_judge", {}), dict)
+            else {}
+        )
+        judge_status = judge.get("status")
+        if configured_judge.get("enabled") and configured_judge.get("mode") == "report_only":
+            if judge_status in {"ok", "no_clear_match", "no_match"}:
+                passed.append({"code": "low_clue_llm_judge_available"})
+            elif judge_status in {"error", "skipped"}:
+                warn.append({"code": "low_clue_llm_judge_unavailable", "value": judge})
+        passed.append({"code": "low_clue_recall_probe_ok"})
+    else:
+        warn.append({"code": "low_clue_recall_probe_unavailable", "value": low_clue})
 
     rh26_anomalies = find_rh26_heading_anomalies(list(snapshot.get("rh26_apply_probe") or []))
     for anomaly in rh26_anomalies:
@@ -310,6 +329,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
             f"- context_router={router.get('mode')} apply_routes={router.get('apply_routes')} "
             f"llm_judge={router.get('llm_judge_mode')}"
         ),
+        f"- low_clue_recall={_low_clue_summary(snapshot.get('low_clue_recall') or {}, snapshot.get('low_clue_recall_config') or {})}",
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- compaction={snapshot.get('compaction')}",
@@ -417,6 +437,19 @@ def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _low_clue_summary(report: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    judge = report.get("llm_judge") if isinstance(report.get("llm_judge"), dict) else {}
+    configured_judge = config.get("llm_judge") if isinstance(config.get("llm_judge"), dict) else {}
+    return {
+        "enabled": config.get("enabled"),
+        "judge_mode": configured_judge.get("mode"),
+        "decision": report.get("decision"),
+        "candidate_count": report.get("candidate_count"),
+        "llm_status": judge.get("status"),
+        "llm_available": judge.get("status") in {"ok", "no_clear_match", "no_match"},
+    }
+
+
 def _audit_actions_summary(stats: dict[str, Any], deltas: dict[str, Any]) -> dict[str, Any]:
     return {
         "total": stats.get("total_count"),
@@ -504,7 +537,15 @@ def load_json_cmd(cmd, env=None):
     try:
         return json.loads(r["out"])
     except Exception as exc:
-        return {"_parse_error": str(exc)}
+        text = r["out"] or ""
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except Exception:
+                pass
+        return {"_parse_error": str(exc), "_raw_prefix": text[:240]}
 
 def memory_os_cli(args):
     env = dict(os.environ)
@@ -702,21 +743,41 @@ print(json.dumps({k:status.get(k) for k in keys if k in status}, ensure_ascii=Fa
     r = run(["python3", "-c", code], env=env)
     return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
 
+def low_clue_recall_probe():
+    cfg_path = Path("/root/.hermes/memory-os/config.json")
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+    low_clue_cfg = cfg.get("low_clue_recall") if isinstance(cfg.get("low_clue_recall"), dict) else {}
+    judge = low_clue_cfg.get("llm_judge") if isinstance(low_clue_cfg.get("llm_judge"), dict) else {}
+    judge_mode = "config" if judge.get("enabled") and judge.get("mode") == "report_only" else "none"
+    report = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", judge_mode])
+    if isinstance(report, dict):
+        return {
+          "schema_version": report.get("schema_version"),
+          "decision": report.get("decision"),
+          "candidate_count": report.get("candidate_count"),
+          "reason_codes": report.get("reason_codes"),
+          "llm_judge": report.get("llm_judge"),
+        }
+    return report
+
 def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
     memory_sources = load_json_cmd(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
+    low_clue = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
       "memory_sources_ok": isinstance(memory_sources, dict) and memory_sources.get("schema_version") == "memory-os.memory_sources_stats.v0",
+      "low_clue_recall_ok": isinstance(low_clue, dict) and low_clue.get("schema_version") == "memory-os.low_clue_recall.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
       "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
+      "low_clue_recall_error": low_clue.get("_error") if isinstance(low_clue, dict) else None,
     }
 
-status = memory_os_cli(["status"])
-doctor = memory_os_cli(["doctor"])
+status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
+doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
 contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
 memory_sources = memory_os_cli(["memory-sources", "stats", "--hours", "24"])
 memory_sources = enrich_memory_sources_stats(memory_sources)
@@ -757,6 +818,8 @@ print(json.dumps({
   "audit_actions": audit_action_stats(),
   "working_status": working_status(),
   "context_router": cfg.get("context_router", {}),
+  "low_clue_recall_config": cfg.get("low_clue_recall", {}),
+  "low_clue_recall": low_clue_recall_probe(),
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),
   "hook_markers": hook_marker_counts(),
