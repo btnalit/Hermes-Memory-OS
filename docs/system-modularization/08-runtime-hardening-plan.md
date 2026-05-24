@@ -1338,6 +1338,11 @@ Recommended order:
 4. RH-32 consolidation suggestions, no approval
 5. RH-33 top-of-mind scoring only
 
+Audit noise follow-up:
+
+- Monitor v0.6 and RH-27b Audit Noise Control:
+  `27-monitor-v06-and-rh27b-audit-noise.md`
+
 Explicitly deferred:
 
 - standalone Top-of-Mind tier

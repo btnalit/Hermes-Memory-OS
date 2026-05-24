@@ -101,7 +101,14 @@ def test_compute_deltas_tracks_count_growth_and_audit_ratios():
                 "crystallized_candidates": 7,
                 "crystallized_records": 0,
             }
-        }
+        },
+        "audit_actions": {
+            "action_counts": {
+                "runtime_heartbeat": 20,
+                "write_working_document": 12,
+                "append_event": 4,
+            }
+        },
     }
     previous = {
         "memory_status": {
@@ -112,7 +119,14 @@ def test_compute_deltas_tracks_count_growth_and_audit_ratios():
                 "crystallized_candidates": 5,
                 "crystallized_records": 0,
             }
-        }
+        },
+        "audit_actions": {
+            "action_counts": {
+                "runtime_heartbeat": 10,
+                "write_working_document": 7,
+                "append_event": 2,
+            }
+        },
     }
 
     deltas = compute_deltas(current, previous)
@@ -125,6 +139,24 @@ def test_compute_deltas_tracks_count_growth_and_audit_ratios():
         "crystallized_records": 0,
     }
     assert deltas["audit_entries_per_new_event"] == 5.0
+    assert deltas["audit_action_delta"] == {
+        "append_event": 2,
+        "runtime_heartbeat": 10,
+        "write_working_document": 5,
+    }
+
+
+def test_compute_deltas_does_not_backfill_action_delta_from_legacy_snapshot():
+    current = {
+        "memory_status": {"counts": {"audit_entries": 110, "events": 12}},
+        "audit_actions": {"action_counts": {"runtime_heartbeat": 20}},
+    }
+    previous = {"memory_status": {"counts": {"audit_entries": 100, "events": 10}}}
+
+    deltas = compute_deltas(current, previous)
+
+    assert deltas["counts_delta"]["audit_entries"] == 10
+    assert deltas["audit_action_delta"] == {}
 
 
 def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
@@ -259,6 +291,35 @@ def test_classify_snapshot_fails_when_memory_sources_boundary_is_true():
     assert any(item["code"] == "memory_sources_boundary_true" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_heartbeat_state_is_stale():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {
+        "exists": True,
+        "last_heartbeat_at": "2026-05-22T00:00:00Z",
+        "fresh": False,
+        "age_seconds": 9999,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "heartbeat_state_stale" for item in classification["fail"])
+
+
+def test_classify_snapshot_passes_when_heartbeat_state_is_fresh():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {
+        "exists": True,
+        "last_heartbeat_at": "2026-05-22T00:00:00Z",
+        "fresh": True,
+        "age_seconds": 60,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "heartbeat_state_fresh" for item in classification["pass"])
+
+
 def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_boundary():
     snapshot = {
         "gateway": {"ActiveState": "active"},
@@ -305,14 +366,38 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
 
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     snapshot = _healthy_snapshot()
-    snapshot["deltas"] = {"counts_delta": {"audit_entries": 10, "events": 2}, "audit_entries_per_new_event": 5.0}
+    snapshot["deltas"] = {
+        "counts_delta": {"audit_entries": 10, "events": 2},
+        "audit_entries_per_new_event": 5.0,
+        "audit_action_delta": {"runtime_heartbeat": 3, "write_working_document": 2},
+    }
     snapshot["classification"] = {"status": "WARN", "pass": [{"code": "doctor_ok"}], "warn": [], "fail": []}
+    snapshot["audit_actions"] = {
+        "total_count": 20,
+        "recent_window": 250,
+        "recent_action_counts": {"runtime_heartbeat": 8, "write_working_document": 7},
+        "action_counts": {"runtime_heartbeat": 10, "write_working_document": 8},
+    }
+    snapshot["heartbeat_state"] = {"exists": True, "last_heartbeat_at": "2026-05-22T00:00:00Z", "fresh": True}
+    snapshot["working_status"] = {
+        "documents": {
+            "lingering.json": {
+                "items": 4,
+                "statuses": {"active": 2, "expired": 2},
+                "min_weight": 0.1,
+                "max_weight": 0.8,
+                "avg_weight": 0.45,
+            }
+        }
+    }
     snapshot["memory_sources"] = {
         "schema_version": "memory-os.memory_sources_stats.v0",
         "record_count": 3,
         "file_size_bytes": 2048,
         "route_distribution": {"ambiguous_recall": 1},
         "selected_source_class_distribution": {"recall_guard": 1},
+        "selected_heading_distribution": {"Recent Event Summaries": 2},
+        "dropped_heading_distribution": {"Working Memory": 1},
         "forbidden_field_findings": [],
         "boundary_true_count": 0,
     }
@@ -324,6 +409,10 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "cognitive_loop=ok" in rendered
     assert "shell_alias_no_env" in rendered
     assert "MemorySources" in rendered
+    assert "audit_actions" in rendered
+    assert "heartbeat_state" in rendered
+    assert "working_status" in rendered
+    assert "selected_headings" in rendered
     assert "audit_entries=+10" in rendered
     assert "events=+2" in rendered
     assert "raw event" not in rendered.lower()

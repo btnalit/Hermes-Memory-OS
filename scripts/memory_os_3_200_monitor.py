@@ -75,7 +75,7 @@ def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, 
 
 def compute_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
     if not previous:
-        return {"counts_delta": {}, "audit_entries_per_new_event": None}
+        return {"counts_delta": {}, "audit_entries_per_new_event": None, "audit_action_delta": {}}
     current_counts = _counts(current)
     previous_counts = _counts(previous)
     keys = sorted(set(current_counts) | set(previous_counts))
@@ -85,7 +85,10 @@ def compute_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> 
         audit_per_event: float | None = round(float(deltas.get("audit_entries", 0)) / float(new_events), 3)
     else:
         audit_per_event = None
-    return {"counts_delta": deltas, "audit_entries_per_new_event": audit_per_event}
+    current_actions = current.get("audit_actions", {}).get("action_counts", {})
+    previous_actions = previous.get("audit_actions", {}).get("action_counts", {})
+    action_delta = _counter_delta(current_actions, previous_actions) if previous_actions else {}
+    return {"counts_delta": deltas, "audit_entries_per_new_event": audit_per_event, "audit_action_delta": action_delta}
 
 
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -108,6 +111,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     heartbeat_service = snapshot.get("heartbeat_service", {})
     if _systemd_service_failed(heartbeat_service):
         fail.append({"code": "heartbeat_service_failed", "value": heartbeat_service})
+    heartbeat_state = snapshot.get("heartbeat_state", {})
+    if heartbeat_state:
+        if heartbeat_state.get("fresh") is True:
+            passed.append({"code": "heartbeat_state_fresh"})
+        else:
+            fail.append({"code": "heartbeat_state_stale", "value": heartbeat_state})
 
     cognitive_loop_timer = snapshot.get("cognitive_loop_timer", {})
     if (
@@ -236,6 +245,23 @@ def _systemd_service_failed(service: dict[str, Any]) -> bool:
     return service.get("ActiveState") == "failed" or service.get("Result") not in {"", "success"}
 
 
+def _counter_delta(current: Any, previous: Any) -> dict[str, int]:
+    if not isinstance(current, dict):
+        current = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    keys = sorted(set(current) | set(previous))
+    result: dict[str, int] = {}
+    for key in keys:
+        try:
+            value = int(current.get(key, 0)) - int(previous.get(key, 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            result[str(key)] = value
+    return result
+
+
 def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     classification = snapshot.get("classification") or classify_snapshot(snapshot)
     memory_status = snapshot.get("memory_status", {})
@@ -271,6 +297,9 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
             f"candidates={_signed(counts_delta.get('crystallized_candidates'))}, "
             f"audit_per_new_event={deltas.get('audit_entries_per_new_event')}"
         ),
+        f"- audit_actions={_audit_actions_summary(snapshot.get('audit_actions') or {}, deltas)}",
+        f"- heartbeat_state={_heartbeat_state_summary(snapshot.get('heartbeat_state') or {})}",
+        f"- working_status={_working_status_summary(snapshot.get('working_status') or {})}",
         (
             f"- index_health={memory_status.get('index_health')} "
             f"prefetch_mode={memory_status.get('prefetch_mode')}"
@@ -378,9 +407,57 @@ def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
         "file_size_bytes": stats.get("file_size_bytes"),
         "routes": stats.get("route_distribution"),
         "selected_sources": stats.get("selected_source_class_distribution"),
+        "selected_headings": stats.get("selected_heading_distribution"),
+        "dropped_headings": stats.get("dropped_heading_distribution"),
         "boundary_true_count": stats.get("boundary_true_count"),
         "forbidden_field_count": len(stats.get("forbidden_field_findings") or []),
     }
+
+
+def _audit_actions_summary(stats: dict[str, Any], deltas: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "total": stats.get("total_count"),
+        "recent_window": stats.get("recent_window"),
+        "recent_top": _top_dict(stats.get("recent_action_counts") or {}, 8),
+        "delta": _top_dict(deltas.get("audit_action_delta") or {}, 8),
+    }
+
+
+def _heartbeat_state_summary(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "exists": state.get("exists"),
+        "fresh": state.get("fresh"),
+        "age_seconds": state.get("age_seconds"),
+        "last_heartbeat_at": state.get("last_heartbeat_at"),
+        "processed_event_count": state.get("processed_event_count"),
+        "last_processed_event_id": state.get("last_processed_event_id"),
+    }
+
+
+def _working_status_summary(status: dict[str, Any]) -> dict[str, Any]:
+    documents = status.get("documents") if isinstance(status.get("documents"), dict) else {}
+    summary: dict[str, Any] = {}
+    for name, doc in documents.items():
+        if not isinstance(doc, dict):
+            continue
+        summary[str(name)] = {
+            "items": doc.get("items"),
+            "statuses": doc.get("statuses"),
+            "min_weight": doc.get("min_weight"),
+            "max_weight": doc.get("max_weight"),
+            "avg_weight": doc.get("avg_weight"),
+        }
+    return summary
+
+
+def _top_dict(data: dict[str, Any], limit: int) -> dict[str, Any]:
+    items: list[tuple[str, int]] = []
+    for key, value in data.items():
+        try:
+            items.append((str(key), int(value)))
+        except (TypeError, ValueError):
+            continue
+    return dict(sorted(items, key=lambda item: (-item[1], item[0]))[:limit])
 
 
 def _ssh_json(host: str, script: str) -> dict[str, Any]:
@@ -397,6 +474,8 @@ def _ssh_json(host: str, script: str) -> dict[str, Any]:
 def _remote_probe_script() -> str:
     return r'''
 import json, os, re, subprocess
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 def run(cmd, env=None):
@@ -445,6 +524,127 @@ def hook_marker_counts():
         "reset": text.count("agent_os_shell_session_reset"),
         "finalized": text.count("agent_os_shell_session_finalized"),
     }
+
+def _read_jsonl(path):
+    records = []
+    p = Path(path)
+    if not p.exists():
+        return records
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            records.append({"_parse_error": True})
+    return records
+
+def audit_action_stats(recent_window=250):
+    records = _read_jsonl("/root/.hermes/memory-os/audit/write_audit.jsonl")
+    action_counts = Counter()
+    recent_action_counts = Counter()
+    for index, record in enumerate(records):
+        action = str(record.get("action") or "unknown")
+        action_counts[action] += 1
+        if index >= max(0, len(records) - int(recent_window)):
+            recent_action_counts[action] += 1
+    return {
+        "total_count": len(records),
+        "recent_window": int(recent_window),
+        "action_counts": dict(action_counts),
+        "recent_action_counts": dict(recent_action_counts),
+    }
+
+def heartbeat_state(max_age_seconds=900):
+    path = Path("/root/.hermes/memory-os/runtime/heartbeat_state.json")
+    if not path.exists():
+        return {"exists": False, "fresh": False, "age_seconds": None}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"exists": True, "fresh": False, "parse_error": str(exc), "age_seconds": None}
+    raw_last = str(state.get("last_heartbeat_at") or "")
+    age_seconds = None
+    fresh = False
+    if raw_last:
+        try:
+            parsed = datetime.fromisoformat(raw_last.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_seconds = max(0, int((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()))
+            fresh = age_seconds <= int(max_age_seconds)
+        except Exception:
+            fresh = False
+    processed_ids = state.get("processed_event_ids")
+    last_processed = ""
+    processed_count = 0
+    if isinstance(processed_ids, list):
+        processed_count = len(processed_ids)
+        last_processed = str(processed_ids[-1]) if processed_ids else ""
+    return {
+        "exists": True,
+        "fresh": fresh,
+        "age_seconds": age_seconds,
+        "max_age_seconds": int(max_age_seconds),
+        "last_heartbeat_at": raw_last,
+        "last_attempt_at": str(state.get("last_attempt_at") or ""),
+        "processed_event_count": int(state.get("processed_event_count") or processed_count),
+        "last_processed_event_id": str(state.get("last_processed_event_id") or last_processed),
+    }
+
+def working_status():
+    root = Path("/root/.hermes/memory-os/working")
+    documents = {}
+    if not root.exists():
+        return {"documents": documents}
+    for path in sorted(root.glob("*.json")):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            documents[path.name] = {"error": str(exc)}
+            continue
+        statuses = Counter()
+        weights = []
+        for item in document.get("items", []) if isinstance(document.get("items"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            statuses[str(item.get("status") or "unknown")] += 1
+            try:
+                weights.append(float(item.get("weight", 0)))
+            except Exception:
+                pass
+        documents[path.name] = {
+            "items": len(document.get("items", [])) if isinstance(document.get("items"), list) else 0,
+            "statuses": dict(statuses),
+            "min_weight": min(weights) if weights else None,
+            "max_weight": max(weights) if weights else None,
+            "avg_weight": round(sum(weights) / len(weights), 6) if weights else None,
+            "updated_at": str(document.get("updated_at") or ""),
+        }
+    return {"documents": documents}
+
+def enrich_memory_sources_stats(stats):
+    if not isinstance(stats, dict):
+        return stats
+    records = _read_jsonl("/root/.hermes/memory-os/system/memory_sources.jsonl")
+    selected_headings = Counter()
+    dropped_headings = Counter()
+    selected_source_classes = Counter()
+    for record in records:
+        for section in record.get("selected", []) if isinstance(record.get("selected"), list) else []:
+            if isinstance(section, dict):
+                selected_headings[str(section.get("heading") or "unknown")] += 1
+                selected_source_classes[str(section.get("source_class") or "unknown")] += 1
+        for section in record.get("dropped", []) if isinstance(record.get("dropped"), list) else []:
+            if isinstance(section, dict):
+                dropped_headings[str(section.get("heading") or "unknown")] += 1
+    enriched = dict(stats)
+    enriched["selected_heading_distribution"] = dict(selected_headings)
+    enriched["dropped_heading_distribution"] = dict(dropped_headings)
+    enriched["selected_source_class_distribution"] = dict(
+        enriched.get("selected_source_class_distribution") or selected_source_classes
+    )
+    return enriched
 
 def rh26_probe():
     code = r"""
@@ -516,6 +716,7 @@ status = memory_os_cli(["status"])
 doctor = memory_os_cli(["doctor"])
 contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
 memory_sources = memory_os_cli(["memory-sources", "stats", "--hours", "24"])
+memory_sources = enrich_memory_sources_stats(memory_sources)
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
@@ -529,6 +730,7 @@ print(json.dumps({
   "gateway": system_show("hermes-gateway.service"),
   "heartbeat_timer": system_show("hermes-memory-os-heartbeat.timer"),
   "heartbeat_service": system_show("hermes-memory-os-heartbeat.service"),
+  "heartbeat_state": heartbeat_state(),
   "heartbeat_listed": "hermes-memory-os-heartbeat.timer" in heartbeat_list,
   "cognitive_loop_timer": system_show("hermes-memory-os-cognitive-loop.timer"),
   "cognitive_loop_service": system_show("hermes-memory-os-cognitive-loop.service"),
@@ -549,6 +751,8 @@ print(json.dumps({
   "shell_alias_no_env": shell_alias_no_env(),
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "memory_sources": memory_sources,
+  "audit_actions": audit_action_stats(),
+  "working_status": working_status(),
   "context_router": cfg.get("context_router", {}),
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),

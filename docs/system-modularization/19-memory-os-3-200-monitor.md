@@ -93,6 +93,21 @@ find /root/.hermes/plugins -mindepth 2 -name plugin.yaml \
 grep -R '"action": "agent_os_shell_session_' /root/.hermes/memory-os/audit \
   | tail -20
 journalctl --user -u hermes-gateway.service --since "6 hours ago" --no-pager -o cat
+python3 - <<'PY'
+# Read /root/.hermes/memory-os/audit/write_audit.jsonl and report only
+# action-count metadata: total count, recent-window action distribution,
+# and action deltas since the previous local snapshot.
+PY
+python3 - <<'PY'
+# Read /root/.hermes/memory-os/runtime/heartbeat_state.json and report
+# only liveness metadata: last_heartbeat_at, freshness, processed count,
+# and last processed event id.
+PY
+python3 - <<'PY'
+# Read /root/.hermes/memory-os/working/*.json and report only item counts,
+# active/expired status counts, and bounded weight statistics.
+# Do not print working item bodies.
+PY
 du -sh /root/.hermes/memory-os /root/.hermes/system-modules
 ```
 
@@ -120,7 +135,7 @@ report which section headings would be present for the public validation
 prompts. It must not print selected section bodies, previews, raw event
 summaries, private transcript text, or prompt-expanded context.
 
-The v0.5 monitor tracks trend signals that can support future decisions:
+The v0.6 monitor tracks trend signals that can support future decisions:
 
 - count deltas since the previous snapshot:
   - `audit_entries`
@@ -129,12 +144,22 @@ The v0.5 monitor tracks trend signals that can support future decisions:
   - `crystallized_candidates`
   - `crystallized_records`
 - `audit_entries_per_new_event`
+- audit action breakdown:
+  - total audit count
+  - recent-window action distribution
+  - action deltas since the previous snapshot
+- heartbeat state freshness from `heartbeat_state.json`
+- working-memory status:
+  - per document total items
+  - active / expired counts
+  - min / max / average weight
 - shell hook marker totals for started/reset/finalized markers
 - gateway compaction count in the last six hours
 - `focus=None` count in compression logs
 - RH-26 section-heading anomalies
 - Memory Sources record count, file size, route distribution, selected
-  source-class distribution, boundary true count, and forbidden field findings
+  source-class distribution, selected/dropped heading distribution, boundary
+  true count, and forbidden field findings
 - DeepReflection source-class skew
 - heartbeat/cognitive-loop service last `Result` and `ExecMainStatus`
 
@@ -148,6 +173,7 @@ A normal monitor pass should be treated as PASS when:
 - `hermes-gateway.service` is `active`
 - `hermes-memory-os-heartbeat.timer` is `active` and `enabled`
 - heartbeat timer appears in `systemctl --user list-timers`
+- `heartbeat_state.json` exists and has a fresh `last_heartbeat_at`
 - `hermes memory` reports active provider `memory_os`
 - `hermes plugins list` reports `memory-os-agent-os` as `enabled`
 - `hermes plugins list` reports `memory_os` as `not enabled` as a general
@@ -167,6 +193,8 @@ A normal monitor pass should be treated as PASS when:
 - RH-26 apply probes show expected section headings for the seven public
   validation prompts
 - count deltas are present after the first script-backed run
+- audit action deltas are present after the first script-backed run
+- working active/expired status counts are present
 - gateway compaction and `focus=None` counts are reported as bounded integers
 - no backup-looking Memory-OS provider/shell plugin manifests are present under
   `$HERMES_HOME/plugins/`

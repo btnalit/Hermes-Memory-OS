@@ -5442,3 +5442,99 @@ probe had no clean, route-eligible context after the latest cognitive-loop run.
 The monitor no longer escalates this empty casual context to FAIL, and it now
 checks the last systemd service result for heartbeat/cognitive-loop services so
 stale `exit-code` failures are visible.
+
+## Monitor v0.6 Audit Breakdown Gate
+
+Date: 2026-05-24
+Host: 10.20.3.200 (`hermes-media`)
+Mode: read-only monitor script, no service restart, no heartbeat trigger, no
+cleanup/apply, no private body inspection
+
+Command:
+
+```text
+python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
+```
+
+Result:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh26_casual_empty]
+
+gateway=active pid=465190
+heartbeat=active/enabled service_result=success
+cognitive_loop=ok timer=active/enabled service_result=success
+index_health=healthy
+doctor=ok
+context_router=apply apply_routes=["all"] llm_judge=disabled
+
+counts:
+  audit_entries=2524
+  events=164
+  working_items=126
+  candidates=126
+  crystallized_records=0
+
+audit_actions.recent_window=250
+audit_actions.recent_top:
+  runtime_heartbeat=105
+  write_working_document=104
+  append_event=10
+  inner_drive_event_processed=10
+  ops_gate_report_written=4
+  working_item_expired=3
+  cognitive_loop_cycle_completed=2
+  digest_daily_written=2
+
+heartbeat_state:
+  exists=true
+  fresh=true
+  age_seconds=32
+  processed_event_count=164
+  last_processed_event_id=evt_rh15_projection_20260521T010000Z
+
+working_status:
+  lingering.json:
+    items=126
+    active=40
+    expired=86
+    avg_weight=0.235779
+
+MemorySources:
+  record_count=6
+  file_size_bytes=8688
+  routes={"ambiguous_recall": 1, "casual_continuity": 5}
+  selected_sources={"event": 6, "recall_guard": 1}
+  selected_headings={"Recall Clarification Guard": 1, "Recent Event Summaries": 6}
+  dropped_headings={
+    "Conversation Carryover": 6,
+    "Current Foreground Task": 6,
+    "Indexed Recall": 1,
+    "Working Memory": 6
+  }
+  boundary_true_count=0
+  forbidden_field_count=0
+
+compaction.focus_none_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+disk_usage=/root/.hermes/memory-os 11M
+```
+
+Interpretation:
+
+- Monitor v0.6 is functioning as a read-only audit/source breakdown probe.
+- The earlier audit growth diagnosis is confirmed: recent audit volume is
+  dominated by `runtime_heartbeat` and `write_working_document`.
+- Heartbeat liveness is now observable through `heartbeat_state.json`, not only
+  through audit entries.
+- Working memory is not currently expanding; the dominant working document has
+  40 active and 86 expired items.
+- MemorySources attribution remains bounded and contains no forbidden fields or
+  boundary violations.
+- RH-27b is still not implemented. This is the pre-change baseline mechanism
+  that should be used before audit write behavior is changed.
