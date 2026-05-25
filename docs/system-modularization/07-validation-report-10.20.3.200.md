@@ -8292,3 +8292,101 @@ Interpretation:
   wording triggered mechanism filtering, and the adapter inferred route from
   headings instead of the router report.
 - No RH-31 live guard is justified for `candidate_boundary_001`.
+
+## P1-I / P1-E Monitor Coverage Validation
+
+Date:
+
+```text
+2026-05-25T04:54:15Z
+```
+
+Scope:
+
+- P1-I Monitor Hook Coverage Detection
+- P1-E Automatic Expression / Speak Gate would-send trend monitoring
+
+Command:
+
+```powershell
+python scripts\memory_os_3_200_monitor.py `
+  --host hermes-media `
+  --previous-json C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json `
+  --output summary
+```
+
+Result:
+
+```text
+monitor_status=WARN
+PASS includes:
+  hook_coverage_session_activity_with_markers
+  expression_artifact_summary_ok
+  module_artifact_summary_ok
+  memory_sources_stats_ok
+  low_clue_recall_probe_ok
+  rh31_eval_safety_ok
+WARN=[rh31_eval_has_failures]
+FAIL=[]
+```
+
+Hook coverage evidence:
+
+```text
+hook_markers:
+  started=20
+  reset=19
+  finalized=22
+  total=61
+
+session_activity:
+  total_session_events=160
+  recent_session_events=160
+  by_source={"telegram": 159, "cli": 1}
+  by_kind={"conversation_turn": 143, "memory_write": 17}
+
+delta vs previous automation snapshot:
+  marker_delta={"started": 3, "reset": 4, "finalized": 5, "total": 12}
+  session_delta={"total_session_events": 160}
+```
+
+Interpretation:
+
+- The first run after adding `session_activity` uses a previous snapshot that
+  did not yet contain that field, so `session_delta.total_session_events=160`
+  is a baseline backfill signal, not a same-window session surge.
+- Hook markers did grow during the same comparison window
+  (`started +3`, `reset +4`, `finalized +5`), so this pass does not show the
+  failure mode "session activity but hook marker silence."
+- No hook was invoked or replayed by the monitor.
+
+Expression artifact evidence:
+
+```text
+expression_artifacts.schema_version=memory-os.expression_artifact_summary.v0
+wandering_output_count=11
+wandering_would_send_count=11
+wandering_silent_count=0
+speak_gate_would_send_count=0
+speak_gate_blocked_count=0
+speak_gate_actual_send=false
+```
+
+Interpretation:
+
+- Wandering Mind is producing bounded would-send artifacts.
+- Speak Gate remains no-send: `actual_send=false`.
+- The monitor now has enough read-only fields to trend automatic expression
+  artifacts without enabling real sending.
+
+Safety:
+
+```text
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+DeepReflection.actual_send=false
+DeepReflection.actual_execute=false
+DeepReflection.actual_identity_write=false
+DeepReflection.actual_crystallized_approval=false
+crystallized_records=0
+```

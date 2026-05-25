@@ -527,6 +527,11 @@ Any module must declare:
 - boundary booleans
 - forbidden-field checks when metadata is written
 - growth/retention metrics when JSONL or reports are written
+- hook coverage evidence when session hooks are part of the module surface:
+  bounded session-activity counts plus hook-marker counts/deltas, not private
+  transcript bodies
+- expression artifact evidence when a module can produce would-send/silent
+  outputs: bounded counts only, with `actual_send=false` as a hard boundary
 - rollback trigger
 
 Hard rules:
@@ -734,6 +739,8 @@ The 10.20.3.200 monitor currently covers:
 | Heartbeat / RH-27b audit noise | heartbeat_state, audit action deltas, audit_per_new_event | at least 24 heartbeats and at least 5 new events; target audit_per_new_event 3-5 | heartbeat_state stale, service failed, audit_per_new_event repeatedly above 10 from plumbing noise |
 | Cognitive loop RH-27 | latest cycle status, step/cycle audit, boundaries | at least one completed cycle after deployment; boundaries all false | latest cycle error, missing cycle when timer is active, any boundary true |
 | Per-module artifacts P1-L | `module_artifacts` digest/wandering/evidence/proposal/self-evolution/governance/DR/ops/speak/mailbox summary | one post-deploy monitor pass with `module_artifact_summary_ok`; no private bodies; `speak_gate.actual_send=false` | module summary unavailable, unbounded/private fields, or any send/execute boundary true |
+| Automatic expression P1-E | `expression_artifacts` Wandering Mind output/would-send/silent counts plus Speak Gate would-send/block/actual-send fields | one post-deploy monitor pass with `expression_artifact_summary_ok`; `speak_gate_actual_send=false`; no private bodies | `speak_gate_actual_send=true`, missing expression summary when expression modules are enabled, or unbounded/private fields |
+| Hook coverage P1-I | hook marker counts plus session-activity metadata and deltas | monitor can distinguish no session activity from session activity with marker growth | `hook_markers_missing_for_session_activity`, private body reads, hook replay, or `/new` side effects |
 | Context Router RH-26 | seven public heading probes | all hard probes match expected headings; casual empty remains WARN only | cancellation/continue prompts include background sections, diagnostic/candidate routes pick wrong headings |
 | IngressDecision / RH-28f | low-clue ingress matrix | every monitored phrase matches expected route and heading for at least one post-deploy pass; live Telegram smoke confirms the same class when available | any route/heading mismatch is P1 |
 | Low-clue candidate quality RH-28g | low-clue recall probe, candidate count, source distribution, feedback | ask_choice works with bounded candidates; no raw bodies; source diversity appears when candidate pool is single-source heavy | repeated owner correction that candidates are missing/duplicated; MemorySources shows attribution but candidate pool ignores it |

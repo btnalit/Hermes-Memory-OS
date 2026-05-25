@@ -75,7 +75,13 @@ def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, 
 
 def compute_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
     if not previous:
-        return {"counts_delta": {}, "audit_entries_per_new_event": None, "audit_action_delta": {}}
+        return {
+            "counts_delta": {},
+            "audit_entries_per_new_event": None,
+            "audit_action_delta": {},
+            "hook_marker_delta": {},
+            "session_activity_delta": {},
+        }
     current_counts = _counts(current)
     previous_counts = _counts(previous)
     keys = sorted(set(current_counts) | set(previous_counts))
@@ -88,7 +94,19 @@ def compute_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> 
     current_actions = current.get("audit_actions", {}).get("action_counts", {})
     previous_actions = previous.get("audit_actions", {}).get("action_counts", {})
     action_delta = _counter_delta(current_actions, previous_actions) if previous_actions else {}
-    return {"counts_delta": deltas, "audit_entries_per_new_event": audit_per_event, "audit_action_delta": action_delta}
+    hook_marker_delta = _hook_marker_delta(current.get("hook_markers", {}), previous.get("hook_markers", {}))
+    session_activity_delta = _fixed_counter_delta(
+        current.get("session_activity", {}),
+        previous.get("session_activity", {}),
+        ("total_session_events",),
+    )
+    return {
+        "counts_delta": deltas,
+        "audit_entries_per_new_event": audit_per_event,
+        "audit_action_delta": action_delta,
+        "hook_marker_delta": hook_marker_delta,
+        "session_activity_delta": session_activity_delta,
+    }
 
 
 def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -206,6 +224,25 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         fail.append({"code": "shell_alias_no_env_failed", "value": shell_alias})
 
+    hook_markers = snapshot.get("hook_markers", {})
+    session_activity = snapshot.get("session_activity", {})
+    if isinstance(hook_markers, dict) and isinstance(session_activity, dict):
+        deltas = snapshot.get("deltas", {}) if isinstance(snapshot.get("deltas"), dict) else {}
+        session_delta = _int_at(deltas, ("session_activity_delta", "total_session_events"))
+        hook_delta = _int_at(deltas, ("hook_marker_delta", "total"))
+        if session_delta > 0 and hook_delta <= 0:
+            warn.append(
+                {
+                    "code": "hook_markers_missing_for_session_activity",
+                    "session_event_delta": session_delta,
+                    "hook_marker_delta": hook_delta,
+                }
+            )
+        elif session_delta == 0:
+            passed.append({"code": "hook_coverage_no_session_activity"})
+        else:
+            passed.append({"code": "hook_coverage_session_activity_with_markers"})
+
     module_artifacts = snapshot.get("module_artifacts", {})
     if module_artifacts.get("schema_version") == "memory-os.module_artifact_summary.v0":
         passed.append({"code": "module_artifact_summary_ok"})
@@ -214,6 +251,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             fail.append({"code": "module_artifact_speak_gate_actual_send_true", "value": speak_gate})
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
+
+    expression_artifacts = snapshot.get("expression_artifacts", {})
+    if expression_artifacts.get("schema_version") == "memory-os.expression_artifact_summary.v0":
+        if expression_artifacts.get("speak_gate_actual_send") is True:
+            fail.append({"code": "expression_artifact_speak_gate_actual_send_true", "value": expression_artifacts})
+        else:
+            passed.append({"code": "expression_artifact_summary_ok"})
+    elif expression_artifacts:
+        warn.append({"code": "expression_artifact_summary_unavailable", "value": expression_artifacts})
 
     rh31 = snapshot.get("rh31_eval", {})
     if rh31:
@@ -375,6 +421,39 @@ def _counter_delta(current: Any, previous: Any) -> dict[str, int]:
     return result
 
 
+def _fixed_counter_delta(current: Any, previous: Any, keys: tuple[str, ...]) -> dict[str, int]:
+    if not isinstance(current, dict):
+        current = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    return {key: _to_int(current.get(key)) - _to_int(previous.get(key)) for key in keys}
+
+
+def _hook_marker_delta(current: Any, previous: Any) -> dict[str, int]:
+    delta = _fixed_counter_delta(current, previous, ("started", "reset", "finalized"))
+    if isinstance(current, dict) and isinstance(previous, dict) and "total" in current and "total" in previous:
+        delta["total"] = _to_int(current.get("total")) - _to_int(previous.get("total"))
+    else:
+        delta["total"] = delta["started"] + delta["reset"] + delta["finalized"]
+    return delta
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _int_at(payload: dict[str, Any], path: tuple[str, ...]) -> int:
+    current: Any = payload
+    for part in path:
+        if not isinstance(current, dict):
+            return 0
+        current = current.get(part)
+    return _to_int(current)
+
+
 def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     classification = snapshot.get("classification") or classify_snapshot(snapshot)
     memory_status = snapshot.get("memory_status", {})
@@ -413,6 +492,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- audit_actions={_audit_actions_summary(snapshot.get('audit_actions') or {}, deltas)}",
         f"- heartbeat_state={_heartbeat_state_summary(snapshot.get('heartbeat_state') or {})}",
         f"- working_status={_working_status_summary(snapshot.get('working_status') or {})}",
+        f"- HookCoverage={_hook_coverage_summary(snapshot.get('hook_markers') or {}, snapshot.get('session_activity') or {}, deltas)}",
         (
             f"- index_health={memory_status.get('index_health')} "
             f"prefetch_mode={memory_status.get('prefetch_mode')}"
@@ -428,6 +508,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
+        f"- ExpressionArtifacts={_expression_artifacts_summary(snapshot.get('expression_artifacts') or {})}",
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
@@ -560,6 +641,36 @@ def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "wandering_output_count": summary.get("wandering_output_count"),
+        "wandering_would_send_count": summary.get("wandering_would_send_count"),
+        "wandering_silent_count": summary.get("wandering_silent_count"),
+        "speak_gate_would_send_count": summary.get("speak_gate_would_send_count"),
+        "speak_gate_blocked_count": summary.get("speak_gate_blocked_count"),
+        "speak_gate_actual_send": summary.get("speak_gate_actual_send"),
+    }
+
+
+def _hook_coverage_summary(
+    markers: dict[str, Any], session_activity: dict[str, Any], deltas: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "markers": {
+            "started": markers.get("started"),
+            "reset": markers.get("reset"),
+            "finalized": markers.get("finalized"),
+            "total": markers.get("total"),
+        },
+        "session_activity": {
+            "total_session_events": session_activity.get("total_session_events"),
+            "recent_session_events": session_activity.get("recent_session_events"),
+        },
+        "marker_delta": deltas.get("hook_marker_delta"),
+        "session_delta": deltas.get("session_activity_delta"),
+    }
+
+
 def _low_clue_summary(report: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     judge = report.get("llm_judge") if isinstance(report.get("llm_judge"), dict) else {}
     configured_judge = config.get("llm_judge") if isinstance(config.get("llm_judge"), dict) else {}
@@ -687,10 +798,14 @@ def compaction_stats():
 def hook_marker_counts():
     r = run(["grep", "-R", '"action": "agent_os_shell_session_', "/root/.hermes/memory-os/audit"])
     text = r["out"] if r["ok"] else ""
+    started = text.count("agent_os_shell_session_started")
+    reset = text.count("agent_os_shell_session_reset")
+    finalized = text.count("agent_os_shell_session_finalized")
     return {
-        "started": text.count("agent_os_shell_session_started"),
-        "reset": text.count("agent_os_shell_session_reset"),
-        "finalized": text.count("agent_os_shell_session_finalized"),
+        "started": started,
+        "reset": reset,
+        "finalized": finalized,
+        "total": started + reset + finalized,
     }
 
 def _read_jsonl(path):
@@ -706,6 +821,42 @@ def _read_jsonl(path):
         except Exception:
             records.append({"_parse_error": True})
     return records
+
+def session_activity_stats(recent_window=250):
+    root = Path("/root/.hermes/memory-os/events")
+    records = []
+    if root.exists():
+        for path in sorted(root.glob("*/*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    continue
+    session_events = []
+    by_source = Counter()
+    by_kind = Counter()
+    for record in records:
+        safe_ref = record.get("safe_ref") if isinstance(record.get("safe_ref"), dict) else {}
+        if safe_ref.get("session_id"):
+            session_events.append(record)
+            by_source[str(record.get("source") or "unknown")] += 1
+            by_kind[str(record.get("kind") or "unknown")] += 1
+    recent_records = records[-int(recent_window):]
+    recent_session_events = 0
+    for record in recent_records:
+        safe_ref = record.get("safe_ref") if isinstance(record.get("safe_ref"), dict) else {}
+        if safe_ref.get("session_id"):
+            recent_session_events += 1
+    return {
+        "total_events": len(records),
+        "total_session_events": len(session_events),
+        "recent_window": int(recent_window),
+        "recent_session_events": recent_session_events,
+        "by_source": dict(by_source),
+        "by_kind": dict(by_kind),
+    }
 
 def audit_action_stats(recent_window=250):
     records = _read_jsonl("/root/.hermes/memory-os/audit/write_audit.jsonl")
@@ -1028,6 +1179,37 @@ def module_artifact_summary():
       },
     }
 
+def expression_artifact_summary():
+    modules = module_artifact_summary()
+    wandering = modules.get("wandering") if isinstance(modules.get("wandering"), dict) else {}
+    speak_gate = modules.get("speak_gate") if isinstance(modules.get("speak_gate"), dict) else {}
+    reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
+    wandering_result_count = 0
+    wandering_would_send_result_count = 0
+    wandering_silent_count = 0
+    for report in reports:
+        steps = report.get("steps") if isinstance(report.get("steps"), list) else []
+        for step in steps:
+            if not isinstance(step, dict) or step.get("step") != "wandering_mind":
+                continue
+            result = step.get("result") if isinstance(step.get("result"), dict) else {}
+            wandering_result_count += 1
+            if result.get("would_send") is True:
+                wandering_would_send_result_count += 1
+            if result.get("output") == "[SILENT]" or (result.get("would_send") is False and result.get("reason")):
+                wandering_silent_count += 1
+    return {
+      "schema_version": "memory-os.expression_artifact_summary.v0",
+      "wandering_output_count": wandering.get("output_count"),
+      "wandering_would_send_count": wandering.get("would_send_count"),
+      "wandering_result_count": wandering_result_count,
+      "wandering_would_send_result_count": wandering_would_send_result_count,
+      "wandering_silent_count": wandering_silent_count,
+      "speak_gate_would_send_count": speak_gate.get("would_send_count"),
+      "speak_gate_blocked_count": speak_gate.get("blocked_send_count", 0),
+      "speak_gate_actual_send": speak_gate.get("actual_send"),
+    }
+
 def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
@@ -1095,6 +1277,7 @@ print(json.dumps({
   "memory_sources": memory_sources,
   "rh31_eval": rh31_eval,
   "module_artifacts": module_artifact_summary(),
+  "expression_artifacts": expression_artifact_summary(),
   "audit_actions": audit_action_stats(),
   "working_status": working_status(),
   "context_router": cfg.get("context_router", {}),
@@ -1104,6 +1287,7 @@ print(json.dumps({
   "rh26_apply_probe": rh26_probe(),
   "deep_reflection": deep_reflection_status(),
   "hook_markers": hook_marker_counts(),
+  "session_activity": session_activity_stats(),
   "compaction": compaction_stats(),
   "disk_df": df,
   "disk_du": du,

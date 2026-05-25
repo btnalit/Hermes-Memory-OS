@@ -135,8 +135,11 @@ provider commands work with an explicit environment variable.
 
 The hook-marker query is read-only. It may count or show bounded audit metadata
 for `agent_os_shell_session_started`, `agent_os_shell_session_reset`, and
-`agent_os_shell_session_finalized`, but it must not trigger `/new`, invoke
-hooks, or create new audit entries.
+`agent_os_shell_session_finalized`. It also reads bounded session-activity
+metadata from Memory-OS events so the monitor can distinguish "no session
+activity" from "session activity but no hook markers." It must not trigger
+`/new`, invoke hooks, replay sessions, read private message bodies, or create
+new audit entries.
 
 The RH-26 apply probe is read-only. It may call `build_prefetch` locally and
 report which section headings would be present for the public validation
@@ -162,6 +165,15 @@ The v0.6 monitor tracks trend signals that can support future decisions:
   - active / expired counts
   - min / max / average weight
 - shell hook marker totals for started/reset/finalized markers
+- bounded session-activity totals from event metadata, plus hook-marker/session
+  deltas for coverage checks
+- automatic-expression artifact summary:
+  - Wandering Mind output count
+  - Wandering Mind would-send count
+  - Wandering Mind silent/block count
+  - Speak Gate would-send count
+  - Speak Gate blocked count
+  - Speak Gate `actual_send`
 - gateway compaction count in the last six hours
 - `focus=None` count in compression logs
 - RH-26 section-heading anomalies
@@ -801,6 +813,7 @@ Track:
 - audit entries per day
 - audit entries per event
 - shell hook marker count
+- session activity count used for hook coverage
 - monitor-generated audit count, if any
 - disk usage of `/root/.hermes/memory-os`
 

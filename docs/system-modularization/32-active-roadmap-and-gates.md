@@ -287,9 +287,10 @@ Status:
 - `wandering_mind` and `speak_gate` modules exist;
 - tests prove would-send artifacts and `actual_send=false`;
 - cognitive loop includes `wandering_mind`;
-- latest live module status shows `wandering_mind.would_send_count=10`;
-- monitor checks hard send boundary but does not yet expose a clear
-  would-send/silent artifact trend.
+- latest live module status shows `wandering_mind.would_send_count=11`;
+- monitor now exposes `expression_artifacts` with Wandering Mind output,
+  would-send, silent/block, Speak Gate would-send/block, and
+  `speak_gate_actual_send` fields.
 
 Why it matters:
 
@@ -299,8 +300,7 @@ Why it matters:
 
 Next action:
 
-- add monitor fields for bounded would-send/silent artifact counts if we want
-  to evaluate expression behavior;
+- continue observing expression-artifact deltas through the scheduled monitor;
 - do not enable real send.
 
 Promotion signal:
@@ -437,11 +437,13 @@ Source:
 Status:
 
 - hook marker totals are monitored;
-- expected marker counts are not yet compared against safe session activity.
+- monitor reads bounded session-activity event metadata and compares session
+  activity deltas against hook-marker deltas.
 
 Next action:
 
-- select a safe session-count source before warning on missing hook markers.
+- continue observing whether scheduled snapshots ever produce
+  `hook_markers_missing_for_session_activity`.
 
 Promotion signal:
 

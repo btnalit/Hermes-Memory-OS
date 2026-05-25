@@ -146,6 +146,39 @@ def test_compute_deltas_tracks_count_growth_and_audit_ratios():
     }
 
 
+def test_compute_deltas_tracks_hook_marker_and_session_activity_growth():
+    current = {
+        "memory_status": {"counts": {"audit_entries": 10, "events": 5}},
+        "hook_markers": {"started": 3, "reset": 2, "finalized": 1, "total": 6},
+        "session_activity": {"total_session_events": 5},
+    }
+    previous = {
+        "memory_status": {"counts": {"audit_entries": 8, "events": 3}},
+        "hook_markers": {"started": 3, "reset": 2, "finalized": 1, "total": 6},
+        "session_activity": {"total_session_events": 3},
+    }
+
+    deltas = compute_deltas(current, previous)
+
+    assert deltas["hook_marker_delta"] == {"started": 0, "reset": 0, "finalized": 0, "total": 0}
+    assert deltas["session_activity_delta"] == {"total_session_events": 2}
+
+
+def test_compute_deltas_backfills_hook_marker_total_when_previous_snapshot_lacks_total():
+    current = {
+        "memory_status": {"counts": {"audit_entries": 10, "events": 5}},
+        "hook_markers": {"started": 20, "reset": 19, "finalized": 22, "total": 61},
+    }
+    previous = {
+        "memory_status": {"counts": {"audit_entries": 8, "events": 3}},
+        "hook_markers": {"started": 17, "reset": 15, "finalized": 17},
+    }
+
+    deltas = compute_deltas(current, previous)
+
+    assert deltas["hook_marker_delta"] == {"started": 3, "reset": 4, "finalized": 5, "total": 12}
+
+
 def test_compute_deltas_does_not_backfill_action_delta_from_legacy_snapshot():
     current = {
         "memory_status": {"counts": {"audit_entries": 110, "events": 12}},
@@ -272,6 +305,36 @@ def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_se
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "module_artifact_speak_gate_actual_send_true" for item in classification["fail"])
+
+
+def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
+    snapshot = _healthy_snapshot()
+    snapshot["session_activity"] = {"total_session_events": 12}
+    snapshot["hook_markers"] = {"started": 5, "reset": 4, "finalized": 4, "total": 13}
+    snapshot["deltas"] = {
+        "session_activity_delta": {"total_session_events": 2},
+        "hook_marker_delta": {"started": 0, "reset": 0, "finalized": 0, "total": 0},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "hook_markers_missing_for_session_activity" for item in classification["warn"])
+
+
+def test_classify_snapshot_passes_hook_coverage_when_no_session_activity_delta():
+    snapshot = _healthy_snapshot()
+    snapshot["session_activity"] = {"total_session_events": 12}
+    snapshot["hook_markers"] = {"started": 5, "reset": 4, "finalized": 4, "total": 13}
+    snapshot["deltas"] = {
+        "session_activity_delta": {"total_session_events": 0},
+        "hook_marker_delta": {"started": 0, "reset": 0, "finalized": 0, "total": 0},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "hook_coverage_no_session_activity" for item in classification["pass"])
+    assert not any(item["code"] == "hook_markers_missing_for_session_activity" for item in classification["warn"])
 
 
 def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
@@ -616,6 +679,17 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
         "forbidden_field_findings": [],
         "boundary_true_count": 0,
     }
+    snapshot["hook_markers"] = {"started": 5, "reset": 4, "finalized": 4, "total": 13}
+    snapshot["session_activity"] = {"total_session_events": 12}
+    snapshot["expression_artifacts"] = {
+        "schema_version": "memory-os.expression_artifact_summary.v0",
+        "wandering_output_count": 10,
+        "wandering_would_send_count": 10,
+        "wandering_silent_count": 2,
+        "speak_gate_would_send_count": 0,
+        "speak_gate_blocked_count": 0,
+        "speak_gate_actual_send": False,
+    }
 
     rendered = render_chinese_summary(snapshot)
 
@@ -629,6 +703,8 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "audit_actions" in rendered
     assert "heartbeat_state" in rendered
     assert "working_status" in rendered
+    assert "HookCoverage" in rendered
+    assert "ExpressionArtifacts" in rendered
     assert "selected_headings" in rendered
     assert "audit_entries=+10" in rendered
     assert "events=+2" in rendered
