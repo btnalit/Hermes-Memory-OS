@@ -21,6 +21,7 @@ SOURCE_AGENT_OS_SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
 SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
 SOURCE_AGENT_DIR = REPO_ROOT / "agent"
 SOURCE_EVAL_DIR = REPO_ROOT / "eval"
+SOURCE_OWNER_REVIEW_CRON_HELPER = REPO_ROOT / "scripts" / "memory_os_owner_review_digest.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -157,6 +158,7 @@ def install_plugin(
     install_cognitive_loop: bool = False,
     enable_cognitive_loop: bool = False,
     cognitive_loop_interval: str = "6h",
+    install_owner_review_cron_helper: bool = False,
     deep_reflection_preset: str | None = None,
     memory_sources_preset: str | None = None,
     llm_judge_preset: str | None = None,
@@ -233,6 +235,9 @@ def install_plugin(
             interval=cognitive_loop_interval,
             dry_run=dry_run,
         )
+    owner_review_cron_helper: Path | None = None
+    if install_owner_review_cron_helper:
+        owner_review_cron_helper = _write_owner_review_cron_helper(hermes_home, dry_run=dry_run)
     enabled = False
     enable_command: list[str] = []
     if enable:
@@ -346,6 +351,9 @@ def install_plugin(
         "cognitive_loop_enable_requested": enable_cognitive_loop,
         "cognitive_loop_enabled": cognitive_loop_enabled,
         "cognitive_loop_enable_command": cognitive_loop_enable_command,
+        "owner_review_cron_helper_install_requested": install_owner_review_cron_helper,
+        "owner_review_cron_helper_installed": bool(owner_review_cron_helper) and not dry_run,
+        "owner_review_cron_helper_path": str(owner_review_cron_helper or ""),
         "deep_reflection_preset": deep_reflection_preset,
         "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
         "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
@@ -603,6 +611,18 @@ def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run
     return artifacts
 
 
+def _write_owner_review_cron_helper(hermes_home: Path, *, dry_run: bool) -> Path:
+    if not SOURCE_OWNER_REVIEW_CRON_HELPER.is_file():
+        raise SystemExit(f"Owner review cron helper source is missing: {SOURCE_OWNER_REVIEW_CRON_HELPER}")
+    target = hermes_home / "scripts" / SOURCE_OWNER_REVIEW_CRON_HELPER.name
+    if dry_run:
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SOURCE_OWNER_REVIEW_CRON_HELPER, target)
+    target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return target
+
+
 def _write_deep_reflection_config(
     hermes_home: Path,
     *,
@@ -706,6 +726,11 @@ def main() -> int:
     parser.add_argument("--enable-cognitive-loop", action="store_true", help="Install and enable the user systemd cognitive-loop timer")
     parser.add_argument("--cognitive-loop-interval", default="6h", help="Cognitive-loop timer interval, default: 6h")
     parser.add_argument(
+        "--install-owner-review-cron-helper",
+        action="store_true",
+        help="Copy the Memory-OS owner review render helper into HERMES_HOME/scripts for Hermes cron --no-agent delivery. Does not create or enable a cron job.",
+    )
+    parser.add_argument(
         "--deep-reflection-preset",
         choices=sorted(DEEP_REFLECTION_PRESETS),
         help=(
@@ -748,6 +773,7 @@ def main() -> int:
         install_cognitive_loop=args.install_cognitive_loop,
         enable_cognitive_loop=args.enable_cognitive_loop,
         cognitive_loop_interval=args.cognitive_loop_interval,
+        install_owner_review_cron_helper=args.install_owner_review_cron_helper,
         deep_reflection_preset=args.deep_reflection_preset,
         memory_sources_preset=args.memory_sources_preset,
         llm_judge_preset=args.llm_judge_preset,

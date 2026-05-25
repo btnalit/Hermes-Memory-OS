@@ -621,9 +621,13 @@ Status:
   changes;
 - RH-34d `deliver-once` is reduced to legacy smoke-only in code; RH-34e must
   use Hermes cron/send for real recurring delivery;
-- RH-34e recurring owner-channel daily review is not implemented yet and must
-  be implemented as Hermes Cron Owner Review Integration, not as a
-  Memory-OS-owned scheduler/transport.
+- RH-34e minimum Hermes Cron Owner Review Integration is deployed on
+  `10.20.3.200`: the Memory-OS cron helper script is installable under
+  `$HERMES_HOME/scripts`, `review cron-status` is available through provider
+  CLI and shell alias, and monitor reports OwnerCronIntegration;
+- RH-34e recurring owner-channel daily review is not enabled yet. The Hermes
+  cron job must still be created/enabled by explicit operator or installer
+  opt-in; Memory-OS must not own the recurring scheduler/transport.
 
 Reason:
 
@@ -658,6 +662,16 @@ RH-34d smoke:
   unapproved_send_count=0
   raw_body_included_count=0
   post_smoke_delivery_gate=disabled
+RH-34e helper/status:
+  cron_status=ok
+  recurring_enabled=false
+  cron_job_present=false
+  helper_script_present=true
+  hermes_delivery_configured=false
+  helper_output_chars=3501
+  helper_has_internal_schema=false
+  helper_has_raw_marker=false
+  monitor OwnerCronIntegration.status=ok
 ```
 
 Next action:
@@ -665,11 +679,14 @@ Next action:
 1. keep RH-34a/RH-34b/RH-34c/RH-34d in observation through scheduled monitor;
 2. get external review on RH-34d smoke evidence as a compatibility smoke, not
    as approval for Memory-OS-owned recurring delivery;
-3. redesign RH-34e as Hermes Cron Owner Review Integration: installer or
-   operator opt-in creates/configures a Hermes cron delivery job that calls a
-   Memory-OS bounded digest renderer and lets Hermes own delivery;
-4. keep CLI preview as the fallback owner surface;
-5. keep `mailbox` classified as internal AI-agent mailroom evidence, not a
+3. review RH-34e helper/status evidence and decide whether to enable the first
+   Hermes cron job with explicit owner/operator opt-in;
+4. if enabled, create/configure a Hermes cron delivery job that calls
+   `$HERMES_HOME/scripts/memory_os_owner_review_digest.py` via Hermes cron
+   `--script --no-agent --deliver`, then verify one owner/window behavior and
+   config-only rollback;
+5. keep CLI preview as the fallback owner surface;
+6. keep `mailbox` classified as internal AI-agent mailroom evidence, not a
    left-brain or right-brain cognition module, not an owner digest channel, and
    not an approval path.
 
@@ -693,7 +710,8 @@ Promotion signal:
 - legacy `deliver-once` returns smoke-only and does not call transport;
 - Hermes Cron Owner Review Integration is planned as RH-34e and must prove one
   digest per owner/window, skipped/error outcomes, and rollback by disabling
-  the Hermes cron job plus Memory-OS recurring flag;
+  the Hermes cron job plus Memory-OS recurring flag. Its helper/status slice is
+  already deployed; recurring delivery remains disabled until explicit opt-in;
 - digest preview contains bounded summaries and no raw bodies;
 - monitor reports pending/stale/action/error counts;
 - feedback backflow is visible as aggregation, not immediate route mutation;

@@ -719,9 +719,9 @@ Owner Review Channel Resolver + Digest Preview (RH-34a deployed on test host)
 Memory-OS Export Eligibility Gate (RH-34b deployed on test host)
 Review Queue Aging Policy (RH-34c deployed on test host)
 One-Shot Hermes Send Compatibility Smoke (RH-34d deployed on test host; external review pending)
-Hermes Cron Owner Review Integration (RH-34e planned)
-Review Digest Renderer (RH-34e.1 planned)
-Owner Reply Parser (RH-35.2 planned)
+Review Digest Renderer (RH-34e.1 deployed on test host)
+Owner Reply Parser (RH-35.2 deployed on test host)
+Hermes Cron Owner Review Integration helper/status (RH-34e deployed on test host; recurring cron job disabled)
 Hermes owns recurring schedule, transport, platform delivery, cooldowns, and
 rate limits. Memory-OS owns review payloads, eligibility, and owner actions.
 ```
@@ -812,6 +812,15 @@ Hard rules:
 - Owner replies from Telegram, CLI, dashboard, or other Hermes frontends must
   resolve through digest anchors or stable target ids and then call
   OwnerActionProcessor. Frontends must not mutate Memory-OS state directly.
+- Hermes Cron Owner Review Integration must use a host-owned scheduler /
+  delivery seam. The minimum supported seam is Hermes cron with `--script
+  --no-agent --deliver` calling the Memory-OS helper script. A standalone
+  `hermes send` command is optional and must not be required for Memory-OS
+  installation or recurring-review compatibility.
+- The Memory-OS owner review cron helper may render bounded digest text to
+  stdout and record active digest binding. It must not call platform transport,
+  create owner actions, approve/reject targets, execute proposals, or write
+  crystallized memory.
 
 Minimum action record:
 
@@ -865,7 +874,10 @@ Required monitor evidence:
 - `digest_delivery.unapproved_send_count`
 - `digest_delivery.raw_body_included_count`
 - `hermes_cron_integration.enabled`
+- `hermes_cron_integration.status`
 - `hermes_cron_integration.job_present`
+- `hermes_cron_integration.job_enabled`
+- `hermes_cron_integration.helper_script_present`
 - `hermes_cron_integration.last_result`
 - `hermes_cron_integration.next_run_at`
 - `hermes_cron_integration.rendered_count_24h`
@@ -874,6 +886,7 @@ Required monitor evidence:
 - `hermes_cron_integration.raw_body_included_count`
 - `hermes_cron_integration.unapproved_send_count`
 - `hermes_cron_integration.hermes_delivery_configured`
+- `hermes_cron_integration.hermes_delivery_target_class`
 - `review_digest_renderer.owner_readable_count`
 - `review_digest_renderer.internal_label_primary_count`
 - `owner_reply_parser.resolved_count`
@@ -928,6 +941,10 @@ Promotion signal:
 - Hermes cron integration renders at most one bounded digest per owner/window
   and Hermes owns the delivery; Memory-OS records rendered/skipped/error
   outcomes;
+- Hermes cron integration helper/status is deployed and monitorable before any
+  recurring job is enabled. The test-host helper is installed, reports
+  `status=ok`, and keeps `raw_body_included_count=0` and
+  `unapproved_send_count=0`;
 - owner reply parser maps owner replies to OwnerActionProcessor without direct
   frontend mutations;
 - owner action application is idempotent in local and test-host tests;
@@ -965,6 +982,8 @@ Stop signal:
   for owner judgment;
 - recurring delivery starts before RH-34c/RH-34d review gates pass, before the
   renderer and reply parser are usable, or without explicit owner opt-in;
+- recurring delivery requires `hermes send` specifically instead of the Hermes
+  cron `--script --no-agent --deliver` seam available on the target host;
 - recurring delivery sends duplicate digests in the same owner schedule window;
 - recurring delivery cannot be disabled by removing/disabling the Hermes cron
   job and Memory-OS recurring flag;

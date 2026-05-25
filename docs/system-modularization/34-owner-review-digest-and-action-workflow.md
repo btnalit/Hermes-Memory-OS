@@ -4,7 +4,9 @@ Status: RH-35.1 OwnerActionProcessor, RH-34a metadata-only channel resolver
 and digest preview, RH-34b Memory-OS export eligibility gate, RH-34c review
 queue aging policy, and RH-34d one-shot Hermes send compatibility smoke are
 deployed on `10.20.3.200`; RH-34e is redirected to Hermes Cron Owner Review
-Integration, not a Memory-OS-owned recurring transport.
+Integration, not a Memory-OS-owned recurring transport. The RH-34e minimum
+helper / status integration is deployed on `10.20.3.200`; the recurring Hermes
+cron job is not enabled yet.
 Date: 2026-05-25
 Scope: RH-34 Daily Owner Review Digest, RH-35 Owner Action Processor, and the
 owner-facing governance loop needed to make Memory-OS usable without daily SSH
@@ -820,14 +822,21 @@ Hermes cron job:
   schedule: owner-selected daily window
   deliver: Hermes owner/home channel
   command:
-    hermes memory-os-agent-os review render-digest \
-      --format text --bounded --record-active --channel <owner-channel>
+    python3 $HERMES_HOME/scripts/memory_os_owner_review_digest.py
 
 Memory-OS:
-  returns bounded text and machine-readable anchors
-  returns exit/status codes for empty/skipped/blocked/error
+  helper calls review preview-digest and render-digest
+  returns bounded text and machine-readable anchors on stdout
+  returns empty stdout for no meaningful content
   does not call send_message_tool in the recurring path
 ```
+
+The integration must use Hermes cron `--script --no-agent --deliver`. This is
+the portable seam on the `10.20.3.200` test host; that host does not expose a
+standalone `hermes send` command, while `hermes cron create --script --no-agent
+--deliver` is available. Memory-OS therefore installs a helper script and a
+status command, but does not create or enable the cron job unless the operator
+explicitly opts in.
 
 Delivery rules:
 
@@ -873,6 +882,63 @@ boundary:
   actual_unapproved_crystallized_approval: false
 raw_body_included: false
 ```
+
+Implementation checkpoint (2026-05-25 local + test host):
+
+- `scripts/memory_os_owner_review_digest.py` is installed to
+  `$HERMES_HOME/scripts/memory_os_owner_review_digest.py` only when the
+  installer is run with `--install-owner-review-cron-helper` or the interactive
+  owner selects it.
+- The helper does not send messages. It calls
+  `hermes memory-os-agent-os review preview-digest` and then
+  `review render-digest --format text --bounded --record-active`, writing only
+  the bounded digest text to stdout for Hermes cron delivery.
+- If there is no action-required, review-suggested, or FYI content, the helper
+  exits successfully with empty stdout so Hermes has nothing meaningful to
+  deliver.
+- `review cron-status` reports
+  `memory-os.owner_review_cron_integration.v0` through both provider CLI and
+  `memory-os-agent-os` shell alias.
+- `scripts/memory_os_3_200_monitor.py` reads `review cron-status` and reports
+  the owner cron integration without printing digest bodies.
+- The installer copies the helper but does not create, enable, or schedule a
+  Hermes cron job.
+
+Remote evidence on `10.20.3.200`:
+
+```text
+review cron-status:
+  schema_version=memory-os.owner_review_cron_integration.v0
+  status=ok
+  enabled=false
+  job_present=false
+  helper_script_present=true
+  hermes_delivery_configured=false
+  raw_body_included_count=0
+  unapproved_send_count=0
+
+helper smoke:
+  helper_output_chars=3501
+  helper_has_internal_schema=false
+  helper_has_raw_marker=false
+  rendered_count_24h_after=2
+
+monitor:
+  OwnerCronIntegration.status=ok
+  enabled=false
+  job_present=false
+  helper_script_present=true
+  delivery_configured=false
+  raw_body_included=0
+```
+
+Interpretation:
+
+- RH-34e now has the installable Memory-OS helper and monitor evidence needed
+  for Hermes cron integration.
+- No recurring delivery is active yet.
+- The next state-changing step is explicit operator / installer opt-in that
+  creates or enables the Hermes cron job with `--deliver`.
 
 Monitor fields:
 

@@ -35,6 +35,7 @@ OWNER_REVIEW_REPLY_SCHEMA_VERSION = "memory-os.owner_review_reply.v0"
 OWNER_REVIEW_DELIVERY_GATE_SCHEMA_VERSION = "memory-os.owner_review_delivery_gate.v0"
 OWNER_REVIEW_DELIVERY_SCHEMA_VERSION = "memory-os.owner_review_delivery.v0"
 OWNER_REVIEW_DELIVERY_STATUS_SCHEMA_VERSION = "memory-os.owner_review_delivery_status.v0"
+OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_integration.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 
@@ -81,6 +82,10 @@ def owner_review_deliveries_path(roots: MemoryOSRoots) -> Path:
 
 def owner_review_rendered_digests_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "owner_review_rendered_digests.jsonl"
+
+
+def owner_review_cron_helper_path(roots: MemoryOSRoots) -> Path:
+    return roots.hermes_home / "scripts" / "memory_os_owner_review_digest.py"
 
 
 def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
@@ -144,6 +149,7 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "digest_sent_count": 0,
         "digest_boundary_true_count": 0,
         "delivery_status": owner_review_delivery_status_report(store),
+        "cron_integration": owner_review_cron_integration_report(store),
         "digest_burden": {
             "owner_active_period": owner_active_period,
             "action_required_per_digest": None,
@@ -155,6 +161,64 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
             "by_route": {},
             "by_source_class": {},
             "apply_ready_count": 0,
+        },
+    }
+
+
+def owner_review_cron_integration_report(store: MemoryOSStore) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home).get("owner_review", {})
+    if not isinstance(config, dict):
+        config = {}
+    helper_path = owner_review_cron_helper_path(store.roots)
+    job_name = str(config.get("cron_job_name") or "memory-os-owner-review-digest")
+    jobs = _read_hermes_cron_jobs(store.roots.hermes_home)
+    matched_job = _find_owner_review_cron_job(jobs, job_name=job_name, helper_name=helper_path.name)
+    rendered_records = _records_since(read_owner_review_rendered_digest_records(store.roots), hours=24)
+    raw_body_count = sum(1 for record in rendered_records if bool(record.get("raw_body_included")))
+    deliver = str((matched_job or {}).get("deliver") or "")
+    script = str((matched_job or {}).get("script") or "")
+    enabled = bool(config.get("recurring_delivery_enabled"))
+    job_enabled = bool((matched_job or {}).get("enabled")) if matched_job else False
+    delivery_configured = bool(matched_job and job_enabled and deliver and deliver != "local")
+    findings: list[dict[str, Any]] = []
+    if enabled and not helper_path.is_file():
+        findings.append(_owner_review_finding("cron_helper_missing", "error"))
+    if enabled and not matched_job:
+        findings.append(_owner_review_finding("cron_job_missing", "warning"))
+    if matched_job and not str(script).endswith(helper_path.name):
+        findings.append(_owner_review_finding("cron_job_script_mismatch", "warning"))
+    if matched_job and not deliver:
+        findings.append(_owner_review_finding("cron_delivery_target_missing", "warning"))
+    if raw_body_count > 0:
+        findings.append(_owner_review_finding("cron_rendered_digest_raw_body_included", "error"))
+    status = "error" if any(item["severity"] == "error" for item in findings) else ("warning" if findings else "ok")
+    return {
+        "schema_version": OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "enabled": enabled,
+        "mode": str(config.get("recurring_delivery_mode") or "disabled"),
+        "job_name": job_name,
+        "job_present": bool(matched_job),
+        "job_enabled": job_enabled,
+        "job_id": str((matched_job or {}).get("id") or (matched_job or {}).get("job_id") or ""),
+        "schedule_display": _cron_schedule_display(matched_job or {}),
+        "helper_script_present": helper_path.is_file(),
+        "helper_script_path": str(helper_path),
+        "helper_script_name": helper_path.name,
+        "hermes_delivery_configured": delivery_configured,
+        "hermes_delivery_target_class": _delivery_target_class(deliver),
+        "rendered_count_24h": len(rendered_records),
+        "skipped_count_24h": 0,
+        "error_count_24h": 0,
+        "raw_body_included_count": raw_body_count,
+        "unapproved_send_count": 0,
+        "findings": findings,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
         },
     }
 
@@ -2077,6 +2141,61 @@ def _find_delivery_by_key(roots: MemoryOSRoots, delivery_key: str) -> dict[str, 
         if record.get("delivery_key") == delivery_key:
             return record
     return None
+
+
+def _read_hermes_cron_jobs(hermes_home: Path) -> list[dict[str, Any]]:
+    path = hermes_home / "cron" / "jobs.json"
+    if not path.exists():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if isinstance(loaded, list):
+        jobs = loaded
+    elif isinstance(loaded, dict):
+        jobs = loaded.get("jobs", [])
+    else:
+        jobs = []
+    return [dict(item) for item in jobs if isinstance(item, dict)]
+
+
+def _find_owner_review_cron_job(
+    jobs: list[dict[str, Any]],
+    *,
+    job_name: str,
+    helper_name: str,
+) -> dict[str, Any] | None:
+    for job in jobs:
+        name = str(job.get("name") or "")
+        script = str(job.get("script") or "")
+        if name == job_name or script.endswith(helper_name):
+            return job
+    return None
+
+
+def _cron_schedule_display(job: dict[str, Any]) -> str:
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        return str(schedule.get("display") or schedule.get("expr") or "")
+    return str(schedule or "")
+
+
+def _delivery_target_class(target: str) -> str:
+    value = str(target or "").strip()
+    if not value:
+        return "missing"
+    if value == "origin":
+        return "origin"
+    if value == "local":
+        return "local"
+    if ":" in value:
+        return "explicit_target"
+    return "platform_home"
+
+
+def _owner_review_finding(code: str, severity: str) -> dict[str, str]:
+    return {"code": code, "severity": severity}
 
 
 def _apply_review_aging(store: MemoryOSStore, items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:

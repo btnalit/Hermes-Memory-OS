@@ -324,8 +324,10 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_digest_preview_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_rendered_digest_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_cron_integration_status_ok" for item in classification["pass"])
     assert "OwnerReviewAging" in rendered
     assert "OwnerReviewChannel" in rendered
+    assert "OwnerCronIntegration" in rendered
     assert "OwnerDeliveryGate" in rendered
     assert "OwnerDeliveryStatus" in rendered
     assert "OwnerDigestPreview" in rendered
@@ -381,6 +383,14 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "owner_review_unapproved_send" for item in classification["fail"])
     assert any(item["code"] == "owner_review_delivery_raw_body_included" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_cron_integration"]["enabled"] = True
+    snapshot["owner_review_cron_integration"]["helper_script_present"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_cron_helper_missing" for item in classification["fail"])
 
 
 def test_classify_snapshot_fails_when_owner_review_aging_mutates_state_or_body():
@@ -982,6 +992,7 @@ def _healthy_snapshot() -> dict:
             "review_ok": True,
             "review_aging_ok": True,
             "review_channel_ok": True,
+            "review_cron_status_ok": True,
             "review_delivery_status_ok": True,
             "review_delivery_gate_ok": True,
             "review_digest_ok": True,
@@ -1001,6 +1012,7 @@ def _healthy_snapshot() -> dict:
         "owner_review": _healthy_owner_review(),
         "owner_review_aging": _healthy_owner_review_aging(),
         "owner_review_channel": _healthy_owner_review_channel(),
+        "owner_review_cron_integration": _healthy_owner_cron_integration(),
         "owner_review_delivery_status": _healthy_owner_delivery_status(),
         "owner_review_delivery_gate": _healthy_owner_delivery_gate(),
         "owner_review_digest_preview": _healthy_owner_digest_preview(),
@@ -1055,6 +1067,37 @@ def _healthy_owner_review_channel() -> dict:
         "configured_by_owner": False,
         "fallback_used": True,
         "raw_body_included": False,
+    }
+
+
+def _healthy_owner_cron_integration() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_cron_integration.v0",
+        "status": "ok",
+        "enabled": False,
+        "mode": "disabled",
+        "job_name": "memory-os-owner-review-digest",
+        "job_present": False,
+        "job_enabled": False,
+        "job_id": "",
+        "schedule_display": "",
+        "helper_script_present": False,
+        "helper_script_path": "/root/.hermes/scripts/memory_os_owner_review_digest.py",
+        "helper_script_name": "memory_os_owner_review_digest.py",
+        "hermes_delivery_configured": False,
+        "hermes_delivery_target_class": "missing",
+        "rendered_count_24h": 0,
+        "skipped_count_24h": 0,
+        "error_count_24h": 0,
+        "raw_body_included_count": 0,
+        "unapproved_send_count": 0,
+        "findings": [],
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
     }
 
 

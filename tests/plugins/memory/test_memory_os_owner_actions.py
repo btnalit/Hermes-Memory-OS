@@ -13,6 +13,8 @@ from plugins.memory.memory_os.owner_actions import (
     owner_review_deliveries_path,
     owner_review_rendered_digests_path,
     owner_review_aging_report,
+    owner_review_cron_helper_path,
+    owner_review_cron_integration_report,
     owner_review_delivery_gate_report,
     owner_review_delivery_status_report,
     owner_review_digest_preview,
@@ -627,3 +629,53 @@ def test_deliver_once_is_legacy_smoke_only_even_when_gate_ready_and_owner_trigge
     assert status["owner_approved_digest_delivery_count"] == 0
     assert status["unapproved_send_count"] == 0
     assert status["raw_body_included_count"] == 0
+
+
+def test_cron_integration_status_reports_helper_and_redacted_delivery_target(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "cron_job_name": "memory-os-owner-review-digest",
+            }
+        },
+        tmp_path,
+    )
+    helper = owner_review_cron_helper_path(store.roots)
+    helper.parent.mkdir(parents=True)
+    helper.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    jobs_path = tmp_path / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True)
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job_owner_review",
+                        "name": "memory-os-owner-review-digest",
+                        "enabled": True,
+                        "script": "memory_os_owner_review_digest.py",
+                        "deliver": "telegram:-100123",
+                        "schedule": {"display": "0 9 * * *"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = owner_review_cron_integration_report(store)
+
+    assert report["schema_version"] == "memory-os.owner_review_cron_integration.v0"
+    assert report["status"] == "ok"
+    assert report["enabled"] is True
+    assert report["job_present"] is True
+    assert report["job_enabled"] is True
+    assert report["helper_script_present"] is True
+    assert report["hermes_delivery_configured"] is True
+    assert report["hermes_delivery_target_class"] == "explicit_target"
+    assert report["raw_body_included_count"] == 0
+    assert report["boundary"]["actual_send"] is False
+    assert "telegram:-100123" not in json.dumps(report, ensure_ascii=False)

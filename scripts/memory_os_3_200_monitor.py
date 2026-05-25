@@ -421,6 +421,24 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             warn.append({"code": "owner_review_delivery_gate_unavailable", "value": delivery_gate})
 
+    cron_integration = snapshot.get("owner_review_cron_integration", {})
+    if cron_integration:
+        if cron_integration.get("schema_version") == "memory-os.owner_review_cron_integration.v0":
+            passed.append({"code": "owner_review_cron_integration_status_ok"})
+            if int(cron_integration.get("raw_body_included_count") or 0) > 0:
+                fail.append({"code": "owner_review_cron_raw_body_included"})
+            if int(cron_integration.get("unapproved_send_count") or 0) > 0:
+                fail.append({"code": "owner_review_cron_unapproved_send"})
+            if cron_integration.get("enabled") is True and cron_integration.get("job_present") is not True:
+                warn.append({"code": "owner_review_cron_job_missing"})
+            if cron_integration.get("enabled") is True and cron_integration.get("helper_script_present") is not True:
+                fail.append({"code": "owner_review_cron_helper_missing"})
+            for item in cron_integration.get("findings") or []:
+                if isinstance(item, dict) and item.get("severity") == "error":
+                    fail.append({"code": f"owner_review_cron_{item.get('code')}"})
+        else:
+            warn.append({"code": "owner_review_cron_integration_unavailable", "value": cron_integration})
+
     rh31 = snapshot.get("rh31_eval", {})
     if rh31:
         if rh31.get("schema_version") == "memory-os.rh31_summary.v0":
@@ -678,6 +696,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerReplyDryRun={_owner_reply_dry_run_summary(snapshot.get('owner_review_reply_dry_run') or {})}",
         f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
         f"- OwnerDeliveryGate={_owner_delivery_gate_summary(snapshot.get('owner_review_delivery_gate') or {})}",
+        f"- OwnerCronIntegration={_owner_cron_integration_summary(snapshot.get('owner_review_cron_integration') or {})}",
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
@@ -938,6 +957,20 @@ def _owner_delivery_gate_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "delivery_adapter": summary.get("delivery_adapter"),
         "blocked_reasons": summary.get("blocked_reasons"),
         "boundary": summary.get("boundary"),
+    }
+
+
+def _owner_cron_integration_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "enabled": summary.get("enabled"),
+        "job_present": summary.get("job_present"),
+        "job_enabled": summary.get("job_enabled"),
+        "helper_script_present": summary.get("helper_script_present"),
+        "delivery_configured": summary.get("hermes_delivery_configured"),
+        "delivery_target_class": summary.get("hermes_delivery_target_class"),
+        "rendered_count_24h": summary.get("rendered_count_24h"),
+        "raw_body_included": summary.get("raw_body_included_count"),
     }
 
 
@@ -1536,6 +1569,7 @@ def shell_alias_no_env():
     review = load_json_cmd(["hermes", "memory-os-agent-os", "review", "status"])
     review_aging = load_json_cmd(["hermes", "memory-os-agent-os", "review", "aging-report"])
     review_channel = load_json_cmd(["hermes", "memory-os-agent-os", "review", "channel"])
+    review_cron_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "cron-status"])
     review_delivery_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-status"])
     review_delivery_gate = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-gate"])
     review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
@@ -1552,6 +1586,7 @@ def shell_alias_no_env():
       "review_ok": isinstance(review, dict) and review.get("schema_version") == "memory-os.owner_review_status.v0",
       "review_aging_ok": isinstance(review_aging, dict) and review_aging.get("schema_version") == "memory-os.owner_review_aging.v0",
       "review_channel_ok": isinstance(review_channel, dict) and review_channel.get("schema_version") == "memory-os.owner_review_channel.v0",
+      "review_cron_status_ok": isinstance(review_cron_status, dict) and review_cron_status.get("schema_version") == "memory-os.owner_review_cron_integration.v0",
       "review_delivery_status_ok": isinstance(review_delivery_status, dict) and review_delivery_status.get("schema_version") == "memory-os.owner_review_delivery_status.v0",
       "review_delivery_gate_ok": isinstance(review_delivery_gate, dict) and review_delivery_gate.get("schema_version") == "memory-os.owner_review_delivery_gate.v0",
       "review_digest_ok": isinstance(review_digest, dict) and review_digest.get("schema_version") == "memory-os.owner_review_digest_preview.v0",
@@ -1567,6 +1602,7 @@ def shell_alias_no_env():
       "review_error": review.get("_error") if isinstance(review, dict) else None,
       "review_aging_error": review_aging.get("_error") if isinstance(review_aging, dict) else None,
       "review_channel_error": review_channel.get("_error") if isinstance(review_channel, dict) else None,
+      "review_cron_status_error": review_cron_status.get("_error") if isinstance(review_cron_status, dict) else None,
       "review_delivery_status_error": review_delivery_status.get("_error") if isinstance(review_delivery_status, dict) else None,
       "review_delivery_gate_error": review_delivery_gate.get("_error") if isinstance(review_delivery_gate, dict) else None,
       "review_digest_error": review_digest.get("_error") if isinstance(review_digest, dict) else None,
@@ -1623,6 +1659,7 @@ rh31_eval = memory_os_cli(["eval", "rh31", "run", "--fixture", "synthetic", "--a
 owner_review = memory_os_cli(["review", "status"])
 owner_review_aging = memory_os_cli(["review", "aging-report"])
 owner_review_channel = memory_os_cli(["review", "channel"])
+owner_review_cron_integration = memory_os_cli(["review", "cron-status"])
 owner_review_delivery_status = memory_os_cli(["review", "delivery-status"])
 owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
@@ -1666,6 +1703,7 @@ print(json.dumps({
   "owner_review": owner_review,
   "owner_review_aging": owner_review_aging,
   "owner_review_channel": owner_review_channel,
+  "owner_review_cron_integration": owner_review_cron_integration,
   "owner_review_delivery_status": owner_review_delivery_status,
   "owner_review_delivery_gate": owner_review_delivery_gate,
   "owner_review_digest_preview": owner_review_digest_preview,

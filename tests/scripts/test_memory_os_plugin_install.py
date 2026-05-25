@@ -140,6 +140,17 @@ def test_installer_does_not_write_cognitive_loop_artifacts_by_default(tmp_path):
     assert not (tmp_path / "home" / "memory-os" / "bin" / "memory_os_cognitive_loop.sh").exists()
 
 
+def test_installer_can_copy_owner_review_cron_helper_without_enabling_cron(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home", install_owner_review_cron_helper=True)
+
+    helper = tmp_path / "home" / "scripts" / "memory_os_owner_review_digest.py"
+    assert report["owner_review_cron_helper_install_requested"] is True
+    assert report["owner_review_cron_helper_installed"] is True
+    assert report["owner_review_cron_helper_path"] == str(helper)
+    assert helper.is_file()
+    assert "Hermes cron owns scheduling" in helper.read_text(encoding="utf-8")
+
+
 def test_installer_can_install_system_module_runtime_package(tmp_path):
     report = install_plugin(hermes_home=tmp_path / "home", install_system_modules=True)
 

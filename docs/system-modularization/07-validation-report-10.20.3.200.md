@@ -9279,3 +9279,114 @@ Interpretation:
   only bounded renderer output and owner-action parsing.
 - No owner action, proposal execution, crystallized write, identity write, or
   unapproved send occurred during this validation.
+
+## RH-34e Hermes Cron Owner Review Integration Helper
+
+Date: 2026-05-25
+
+Scope:
+
+- RH-34e Hermes Cron Owner Review Integration;
+- Contract 8 OwnerAction / Hermes transport boundary;
+- installer and monitor evidence for the recurring-review helper path.
+
+Boundary decision:
+
+- Memory-OS does not own recurring scheduling or platform transport.
+- Hermes cron owns scheduling and delivery.
+- The `10.20.3.200` Hermes CLI exposes `hermes cron create --script
+  --no-agent --deliver`; it does not expose a standalone `hermes send`
+  command. RH-34e therefore uses the cron script/deliver seam rather than
+  depending on `hermes send`.
+
+Local verification:
+
+```text
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/scripts/test_memory_os_plugin_install.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py
+102 passed
+
+bash -n scripts/install_memory_os.sh
+
+python scripts/install_memory_os_plugin.py \
+  --hermes-home .tmp-install-rh34e \
+  --install-owner-review-cron-helper \
+  --dry-run
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh \
+  --yes --test-host --install-owner-review-cron-helper
+
+helper installed:
+  /root/.hermes/scripts/memory_os_owner_review_digest.py
+
+gateway restart: not requested / not performed
+heartbeat timer: active/enabled
+cognitive loop timer: active/enabled
+doctor: ok with expected hindsight_adapter_disabled warning
+```
+
+Remote RH-34e smoke:
+
+```text
+hermes memory-os-agent-os review cron-status:
+  schema_version=memory-os.owner_review_cron_integration.v0
+  status=ok
+  enabled=false
+  job_present=false
+  helper_script_present=true
+  hermes_delivery_configured=false
+  raw_body_included_count=0
+  unapproved_send_count=0
+
+python3 /root/.hermes/scripts/memory_os_owner_review_digest.py:
+  helper_output_chars=3501
+  helper_has_internal_schema=false
+  helper_has_raw_marker=false
+  rendered_count_24h_after=2
+```
+
+Read-only monitor after deployment:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes:
+  owner_review_cron_integration_status_ok
+  owner_review_rendered_digest_ok
+  owner_review_reply_dry_run_ok
+  owner_review_delivery_status_ok
+  owner_review_delivery_gate_ok
+
+OwnerCronIntegration:
+  status=ok
+  enabled=false
+  job_present=false
+  job_enabled=false
+  helper_script_present=true
+  delivery_configured=false
+  delivery_target_class=missing
+  rendered_count_24h=2
+  raw_body_included=0
+```
+
+Interpretation:
+
+- RH-34e now has an installed helper and monitorable status path on
+  `10.20.3.200`.
+- The helper produces bounded digest text for Hermes cron stdout delivery and
+  records active digest binding through the existing renderer path.
+- No cron job is present or enabled yet; recurring delivery remains disabled.
+- No raw private body, internal schema-primary text, unapproved send, owner
+  action, proposal execution, crystallized write, or identity write occurred.
+
+Next gate:
+
+- External/design review can inspect the RH-34e helper/status evidence.
+- The next state-changing step is explicit owner/operator opt-in to create or
+  enable a Hermes cron job with `--script --no-agent --deliver`.

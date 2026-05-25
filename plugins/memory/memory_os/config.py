@@ -56,6 +56,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "actions_enabled": False,
         "delivery_enabled": False,
         "delivery_adapter": "none",
+        "recurring_delivery_enabled": False,
+        "recurring_delivery_mode": "disabled",
+        "cron_job_name": "memory-os-owner-review-digest",
         "aging_enabled": True,
         "aging_action_required_days": 7,
         "aging_fyi_days": 30,
@@ -252,6 +255,9 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["actions_enabled"] = bool(merged.get("actions_enabled"))
     merged["delivery_enabled"] = bool(merged.get("delivery_enabled"))
     merged["delivery_adapter"] = str(merged.get("delivery_adapter") or "none")
+    merged["recurring_delivery_enabled"] = bool(merged.get("recurring_delivery_enabled"))
+    merged["recurring_delivery_mode"] = str(merged.get("recurring_delivery_mode") or "disabled")
+    merged["cron_job_name"] = str(merged.get("cron_job_name") or "memory-os-owner-review-digest")
     merged["aging_enabled"] = bool(merged.get("aging_enabled"))
     return merged
 

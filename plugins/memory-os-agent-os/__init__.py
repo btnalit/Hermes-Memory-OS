@@ -112,6 +112,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_subs.add_parser("status")
     review_subs.add_parser("aging-report")
     review_subs.add_parser("channel")
+    review_subs.add_parser("cron-status")
     review_subs.add_parser("delivery-status")
     review_delivery_gate = review_subs.add_parser("delivery-gate")
     review_delivery_gate.add_argument("--owner", default="")

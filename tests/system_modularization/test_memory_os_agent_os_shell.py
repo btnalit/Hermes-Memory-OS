@@ -108,6 +108,8 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_queue_args.limit == 4
     review_channel_args = parser.parse_args(["review", "channel"])
     assert review_channel_args.review_command == "channel"
+    review_cron_status_args = parser.parse_args(["review", "cron-status"])
+    assert review_cron_status_args.review_command == "cron-status"
     review_delivery_gate_args = parser.parse_args(["review", "delivery-gate", "--owner", "owner"])
     assert review_delivery_gate_args.review_command == "delivery-gate"
     assert review_delivery_gate_args.owner == "owner"

@@ -73,6 +73,7 @@ from .owner_actions import (
     apply_owner_action,
     deliver_owner_review_digest_once,
     owner_review_aging_report,
+    owner_review_cron_integration_report,
     owner_review_delivery_gate_report,
     owner_review_delivery_status_report,
     owner_review_digest_preview,
@@ -403,6 +404,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_subs.add_parser("status")
     review_subs.add_parser("aging-report")
     review_subs.add_parser("channel")
+    review_subs.add_parser("cron-status")
     review_subs.add_parser("delivery-status")
     review_delivery_gate = review_subs.add_parser("delivery-gate")
     review_delivery_gate.add_argument("--owner", default="")
@@ -867,6 +869,9 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
         return 0
     if command == "channel":
         print(json.dumps(resolve_owner_review_channel(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "cron-status":
+        print(json.dumps(owner_review_cron_integration_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if command == "delivery-status":
         print(json.dumps(owner_review_delivery_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))

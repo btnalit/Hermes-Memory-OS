@@ -32,6 +32,7 @@ INSTALL_RUNTIME=""
 ENABLE_RUNTIME=""
 INSTALL_COGNITIVE_LOOP=""
 ENABLE_COGNITIVE_LOOP=""
+INSTALL_OWNER_REVIEW_CRON_HELPER=""
 
 usage() {
   cat <<'USAGE'
@@ -60,6 +61,10 @@ Options:
   --no-enable-runtime           Do not enable heartbeat timer.
   --no-install-cognitive-loop   Do not write cognitive-loop wrapper/systemd artifacts.
   --no-enable-cognitive-loop    Do not enable cognitive-loop timer.
+  --install-owner-review-cron-helper
+                                Copy the Memory-OS owner review helper script
+                                to HERMES_HOME/scripts for Hermes cron --no-agent
+                                delivery. Does not create or enable a cron job.
   --dry-run                     Print installer report without writing.
   --skip-verify                 Skip post-install verification commands.
   --allow-create                Allow creating HERMES_HOME if it does not exist.
@@ -142,6 +147,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-enable-cognitive-loop)
       ENABLE_COGNITIVE_LOOP=0
+      shift
+      ;;
+    --install-owner-review-cron-helper)
+      INSTALL_OWNER_REVIEW_CRON_HELPER=1
       shift
       ;;
     --dry-run)
@@ -389,6 +398,7 @@ select_options() {
   local default_enable_runtime="yes"
   local default_install_cognitive_loop="no"
   local default_enable_cognitive_loop="no"
+  local default_owner_review_cron_helper="no"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
   local default_llm_judge_preset="none"
@@ -418,6 +428,7 @@ select_options() {
     ENABLE_COGNITIVE_LOOP=0
   fi
   [[ -n "${ENABLE_COGNITIVE_LOOP}" ]] || { ask_yes_no "Enable test-host cognitive-loop timer?" "${default_enable_cognitive_loop}" && ENABLE_COGNITIVE_LOOP=1 || ENABLE_COGNITIVE_LOOP=0; }
+  [[ -n "${INSTALL_OWNER_REVIEW_CRON_HELPER}" ]] || { ask_yes_no "Install owner review Hermes cron helper script?" "${default_owner_review_cron_helper}" && INSTALL_OWNER_REVIEW_CRON_HELPER=1 || INSTALL_OWNER_REVIEW_CRON_HELPER=0; }
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
     choose_preset "${default_preset}"
@@ -454,6 +465,7 @@ run_installer() {
   [[ "${INSTALL_COGNITIVE_LOOP}" == "1" ]] && args+=("--install-cognitive-loop")
   [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]] && args+=("--enable-cognitive-loop")
   args+=("--cognitive-loop-interval" "${COGNITIVE_LOOP_INTERVAL}")
+  [[ "${INSTALL_OWNER_REVIEW_CRON_HELPER}" == "1" ]] && args+=("--install-owner-review-cron-helper")
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
   [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
   [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
