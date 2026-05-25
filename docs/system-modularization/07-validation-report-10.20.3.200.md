@@ -4472,6 +4472,66 @@ context_router=apply apply_routes=["all"]
 crystallized_records=0
 ```
 
+## P1-J SessionMirror Monitor Coverage Validation
+
+Date:
+
+```text
+2026-05-25T05:04:44Z
+```
+
+Scope:
+
+- P1-J SessionMirror Global Entrance Coverage Review
+- Monitor-only SessionMirror coverage summary
+
+Command:
+
+```powershell
+python scripts\memory_os_3_200_monitor.py `
+  --host hermes-media `
+  --previous-json C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json `
+  --output summary
+```
+
+Result:
+
+```text
+monitor_status=WARN
+PASS includes:
+  session_mirror_dry_run_ok
+  hook_coverage_session_activity_with_markers
+  expression_artifact_summary_ok
+  memory_sources_stats_ok
+  low_clue_recall_probe_ok
+WARN=[session_mirror_pending_sessions, rh31_eval_has_failures]
+FAIL=[]
+```
+
+SessionMirror evidence:
+
+```text
+SessionMirror.status=ok
+session_count=54
+covered_session_count=29
+pending_session_count=25
+dry_run_status=ok
+dry_run_new_event_count=25
+dry_run_written_event_ids_count=0
+dry_run_findings_count=0
+```
+
+Interpretation:
+
+- SessionMirror still sees pending sessions, so global entrance coverage is not
+  complete.
+- The dry-run remains safe: it reports bounded would-create counts and writes
+  no event ids.
+- Pending sessions are now monitor-visible as an observation WARN, not a FAIL.
+- This does not justify recurring or one-time apply by itself. A one-time apply
+  still needs separate review because it would change the Memory-OS event
+  stream.
+
 ## P1 Gap Closure Remote Deployment Gate
 
 Date: 2026-05-23

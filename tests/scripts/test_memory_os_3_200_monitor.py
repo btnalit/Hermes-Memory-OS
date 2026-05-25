@@ -337,6 +337,47 @@ def test_classify_snapshot_passes_hook_coverage_when_no_session_activity_delta()
     assert not any(item["code"] == "hook_markers_missing_for_session_activity" for item in classification["warn"])
 
 
+def test_classify_snapshot_tracks_session_mirror_pending_as_observation():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 29,
+        "pending_session_count": 25,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 25,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "session_mirror_dry_run_ok" for item in classification["pass"])
+    assert any(item["code"] == "session_mirror_pending_sessions" for item in classification["warn"])
+    assert not any(item["code"].startswith("session_mirror_") for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_session_mirror_dry_run_writes_or_has_findings():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 29,
+        "pending_session_count": 25,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 25,
+        "dry_run_written_event_ids_count": 1,
+        "dry_run_findings_count": 2,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "session_mirror_dry_run_wrote_events" for item in classification["fail"])
+    assert any(item["code"] == "session_mirror_dry_run_findings" for item in classification["fail"])
+
+
 def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
     summary = {
         "schema_version": "memory-os.rh31_summary.v0",
@@ -690,6 +731,17 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
         "speak_gate_blocked_count": 0,
         "speak_gate_actual_send": False,
     }
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 29,
+        "pending_session_count": 25,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 25,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+    }
 
     rendered = render_chinese_summary(snapshot)
 
@@ -705,6 +757,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "working_status" in rendered
     assert "HookCoverage" in rendered
     assert "ExpressionArtifacts" in rendered
+    assert "SessionMirror" in rendered
     assert "selected_headings" in rendered
     assert "audit_entries=+10" in rendered
     assert "events=+2" in rendered

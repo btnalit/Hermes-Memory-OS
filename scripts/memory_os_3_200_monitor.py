@@ -261,6 +261,36 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     elif expression_artifacts:
         warn.append({"code": "expression_artifact_summary_unavailable", "value": expression_artifacts})
 
+    session_mirror = snapshot.get("session_mirror", {})
+    if session_mirror.get("schema_version") == "memory-os.session_mirror_monitor_summary.v0":
+        if int(session_mirror.get("dry_run_written_event_ids_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "session_mirror_dry_run_wrote_events",
+                    "value": session_mirror.get("dry_run_written_event_ids_count"),
+                }
+            )
+        if int(session_mirror.get("dry_run_findings_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "session_mirror_dry_run_findings",
+                    "value": session_mirror.get("dry_run_findings_count"),
+                }
+            )
+        if session_mirror.get("dry_run_status") == "ok" and int(session_mirror.get("dry_run_written_event_ids_count") or 0) == 0:
+            passed.append({"code": "session_mirror_dry_run_ok"})
+        else:
+            warn.append({"code": "session_mirror_dry_run_not_ok", "value": session_mirror})
+        if int(session_mirror.get("pending_session_count") or 0) > 0:
+            warn.append(
+                {
+                    "code": "session_mirror_pending_sessions",
+                    "pending_session_count": session_mirror.get("pending_session_count"),
+                }
+            )
+    elif session_mirror:
+        warn.append({"code": "session_mirror_summary_unavailable", "value": session_mirror})
+
     rh31 = snapshot.get("rh31_eval", {})
     if rh31:
         if rh31.get("schema_version") == "memory-os.rh31_summary.v0":
@@ -509,6 +539,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
         f"- ExpressionArtifacts={_expression_artifacts_summary(snapshot.get('expression_artifacts') or {})}",
+        f"- SessionMirror={_session_mirror_summary(snapshot.get('session_mirror') or {})}",
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
@@ -649,6 +680,19 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "speak_gate_would_send_count": summary.get("speak_gate_would_send_count"),
         "speak_gate_blocked_count": summary.get("speak_gate_blocked_count"),
         "speak_gate_actual_send": summary.get("speak_gate_actual_send"),
+    }
+
+
+def _session_mirror_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "session_count": summary.get("session_count"),
+        "covered_session_count": summary.get("covered_session_count"),
+        "pending_session_count": summary.get("pending_session_count"),
+        "dry_run_status": summary.get("dry_run_status"),
+        "dry_run_new_event_count": summary.get("dry_run_new_event_count"),
+        "dry_run_written_event_ids_count": summary.get("dry_run_written_event_ids_count"),
+        "dry_run_findings_count": summary.get("dry_run_findings_count"),
     }
 
 
@@ -1210,6 +1254,32 @@ def expression_artifact_summary():
       "speak_gate_actual_send": speak_gate.get("actual_send"),
     }
 
+def session_mirror_summary():
+    status_report = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
+    dry_run = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "run-once", "--module", "session_mirror", "--dry-run"])
+    session_status = {}
+    if isinstance(status_report, dict):
+        for item in status_report.get("modules", []) if isinstance(status_report.get("modules"), list) else []:
+            if isinstance(item, dict) and item.get("module") == "session_mirror":
+                session_status = item.get("status") if isinstance(item.get("status"), dict) else {}
+                break
+    written_ids = dry_run.get("written_event_ids") if isinstance(dry_run, dict) and isinstance(dry_run.get("written_event_ids"), list) else []
+    findings = dry_run.get("findings") if isinstance(dry_run, dict) and isinstance(dry_run.get("findings"), list) else []
+    return {
+      "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+      "status": session_status.get("status") or (dry_run.get("status") if isinstance(dry_run, dict) else None),
+      "session_count": session_status.get("session_count") or (dry_run.get("session_count") if isinstance(dry_run, dict) else None),
+      "covered_session_count": session_status.get("covered_session_count") or (dry_run.get("covered_session_count") if isinstance(dry_run, dict) else None),
+      "pending_session_count": session_status.get("pending_session_count"),
+      "sessions_root_present": session_status.get("sessions_root_present"),
+      "state_db_present": session_status.get("state_db_present"),
+      "dry_run_schema_version": dry_run.get("schema_version") if isinstance(dry_run, dict) else None,
+      "dry_run_status": dry_run.get("status") if isinstance(dry_run, dict) else None,
+      "dry_run_new_event_count": dry_run.get("new_event_count") if isinstance(dry_run, dict) else None,
+      "dry_run_written_event_ids_count": len(written_ids),
+      "dry_run_findings_count": len(findings),
+    }
+
 def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
@@ -1278,6 +1348,7 @@ print(json.dumps({
   "rh31_eval": rh31_eval,
   "module_artifacts": module_artifact_summary(),
   "expression_artifacts": expression_artifact_summary(),
+  "session_mirror": session_mirror_summary(),
   "audit_actions": audit_action_stats(),
   "working_status": working_status(),
   "context_router": cfg.get("context_router", {}),

@@ -465,10 +465,10 @@ Source:
 Status:
 
 - `session_mirror` is implemented and commandized;
-- latest live status reports `session_count=50`, `covered_session_count=26`,
-  and `pending_session_count=24`;
-- latest dry-run reports `new_event_count=24`, `written_event_ids=[]`, and
-  `findings=[]`;
+- latest live monitor reports `session_count=54`, `covered_session_count=29`,
+  and `pending_session_count=25`;
+- latest dry-run monitor summary reports `dry_run_new_event_count=25`,
+  `dry_run_written_event_ids_count=0`, and `dry_run_findings_count=0`;
 - read-only topic-signature correlation found:
   - pending sessions: `automation_orchestration=1`, `memory_os=8`;
   - provider-captured events: `automation_orchestration=33`,
@@ -477,6 +477,8 @@ Status:
   - pending sessions did not show an `internet_data_collection` pending-only
     signal;
 - no recurring SessionMirror apply is enabled.
+- monitor now exposes the P1-J coverage summary and treats pending sessions as
+  WARN observation rather than FAIL.
 
 Why it matters:
 
@@ -487,11 +489,11 @@ Why it matters:
 
 Next action:
 
-- decide whether a one-time apply is still useful as a coverage improvement,
-  but do not treat it as the likely fix for the earlier
-  `internet_data_collection` candidate omission;
-- update monitor with pending/covered session counts before any recurring
-  mirror behavior is considered.
+- continue scheduled monitor observation of pending/covered counts;
+- use the monitor trend to decide whether a separate one-time SessionMirror
+  apply review is worth asking Claude to inspect;
+- do not treat P1-J as the likely fix for the earlier
+  `internet_data_collection` candidate omission.
 
 Promotion signal:
 

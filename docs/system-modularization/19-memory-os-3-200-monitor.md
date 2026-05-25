@@ -174,6 +174,13 @@ The v0.6 monitor tracks trend signals that can support future decisions:
   - Speak Gate would-send count
   - Speak Gate blocked count
   - Speak Gate `actual_send`
+- SessionMirror coverage summary:
+  - total session count
+  - covered session count
+  - pending session count
+  - dry-run new event count
+  - dry-run written event id count
+  - dry-run finding count
 - gateway compaction count in the last six hours
 - `focus=None` count in compression logs
 - RH-26 section-heading anomalies
