@@ -69,6 +69,19 @@ from .migrator import (
     migration_scan_report,
     replay_shadow_import,
 )
+from .owner_actions import (
+    apply_owner_action,
+    deliver_owner_review_digest_once,
+    owner_review_aging_report,
+    owner_review_delivery_gate_report,
+    owner_review_delivery_status_report,
+    owner_review_digest_preview,
+    owner_review_queue_report,
+    owner_review_status_report,
+    parse_owner_review_reply,
+    render_owner_review_digest,
+    resolve_owner_review_channel,
+)
 from .prefetch import continuity_selector_report
 from .prefetch import build_context_router_report
 from .roots import MemoryOSRoots
@@ -112,6 +125,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
             else False,
             "judge_availability": low_clue_judge_availability(config.get("low_clue_recall")),
         },
+        "owner_review": owner_review_status_report(store),
     }
 
 
@@ -384,6 +398,63 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    review_parser = subs.add_parser("review")
+    review_subs = review_parser.add_subparsers(dest="review_command", required=True)
+    review_subs.add_parser("status")
+    review_subs.add_parser("aging-report")
+    review_subs.add_parser("channel")
+    review_subs.add_parser("delivery-status")
+    review_delivery_gate = review_subs.add_parser("delivery-gate")
+    review_delivery_gate.add_argument("--owner", default="")
+    review_deliver_once = review_subs.add_parser("deliver-once")
+    review_deliver_once.add_argument("--owner", default="")
+    review_deliver_once.add_argument("--delivery-key", default="")
+    review_deliver_once.add_argument("--owner-triggered", action="store_true")
+    review_deliver_once.add_argument("--apply", action="store_true")
+    review_queue = review_subs.add_parser("queue")
+    review_queue.add_argument("--limit", type=int, default=20)
+    review_preview = review_subs.add_parser("preview-digest")
+    review_preview.add_argument("--owner", default="")
+    review_preview.add_argument("--max-action-required", type=int)
+    review_preview.add_argument("--max-review-suggested", type=int)
+    review_preview.add_argument("--max-fyi", type=int)
+    review_render = review_subs.add_parser("render-digest")
+    review_render.add_argument("--owner", default="")
+    review_render.add_argument("--channel", default="cli")
+    review_render.add_argument("--max-action-required", type=int)
+    review_render.add_argument("--max-review-suggested", type=int)
+    review_render.add_argument("--max-fyi", type=int)
+    review_render.add_argument("--format", choices=["json", "text"], default="json")
+    review_render.add_argument("--bounded", action="store_true")
+    review_render.add_argument("--record-active", action="store_true")
+    review_reply = review_subs.add_parser("reply")
+    review_reply.add_argument("reply", nargs="+")
+    review_reply.add_argument("--owner", default="owner")
+    review_reply.add_argument("--channel", default="cli")
+    review_reply.add_argument("--digest-id", default="")
+    review_reply.add_argument("--apply", action="store_true")
+    review_reply.add_argument("--max-action-required", type=int)
+    review_reply.add_argument("--max-review-suggested", type=int)
+    review_reply.add_argument("--max-fyi", type=int)
+    review_apply = review_subs.add_parser("apply")
+    review_apply.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "approve_candidate",
+            "reject_candidate",
+            "mark_feedback",
+            "approve_proposal",
+            "reject_proposal",
+            "allow_speak_once",
+        ],
+    )
+    review_apply.add_argument("--target", required=True)
+    review_apply.add_argument("--owner", default="owner")
+    review_apply.add_argument("--channel", default="cli")
+    review_apply.add_argument("--note", default="")
+    review_apply.add_argument("--rating", default="")
+    review_apply.add_argument("--apply", action="store_true")
     eval_parser = subs.add_parser("eval")
     eval_subs = eval_parser.add_subparsers(dest="eval_command", required=True)
     eval_rh31 = eval_subs.add_parser("rh31")
@@ -516,6 +587,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _low_clue_recall_command(args, store)
     if command == "memory-sources":
         return _memory_sources_command(args, store)
+    if command == "review":
+        return _review_command(args, store)
     if command == "eval":
         return _eval_command(args)
     if command == "cognitive-loop":
@@ -781,6 +854,111 @@ def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> i
                 )
             )
             return 0
+    return 2
+
+
+def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    command = args.review_command
+    if command == "status":
+        print(json.dumps(owner_review_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "aging-report":
+        print(json.dumps(owner_review_aging_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "channel":
+        print(json.dumps(resolve_owner_review_channel(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "delivery-status":
+        print(json.dumps(owner_review_delivery_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "delivery-gate":
+        print(
+            json.dumps(
+                owner_review_delivery_gate_report(store, owner_id=args.owner),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "deliver-once":
+        report = deliver_owner_review_digest_once(
+            store,
+            owner_id=args.owner,
+            delivery_key=args.delivery_key,
+            owner_triggered=bool(args.owner_triggered),
+            apply=bool(args.apply),
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report.get("status") in {"ready", "smoke_only", "sent", "skipped", "duplicate_ignored"} else 1
+    if command == "queue":
+        print(
+            json.dumps(
+                owner_review_queue_report(store, limit=max(int(args.limit), 0)),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "preview-digest":
+        print(
+            json.dumps(
+                owner_review_digest_preview(
+                    store,
+                    owner_id=args.owner,
+                    max_action_required=args.max_action_required,
+                    max_review_suggested=args.max_review_suggested,
+                    max_fyi=args.max_fyi,
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "render-digest":
+        report = render_owner_review_digest(
+            store,
+            owner_id=args.owner,
+            channel=args.channel,
+            max_action_required=args.max_action_required,
+            max_review_suggested=args.max_review_suggested,
+            max_fyi=args.max_fyi,
+            record_active=bool(args.record_active),
+        )
+        if args.format == "text":
+            print(report["text"])
+        else:
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "reply":
+        report = parse_owner_review_reply(
+            store,
+            " ".join(args.reply),
+            owner_id=args.owner,
+            channel=args.channel,
+            digest_id=args.digest_id,
+            apply=bool(args.apply),
+            max_action_required=args.max_action_required,
+            max_review_suggested=args.max_review_suggested,
+            max_fyi=args.max_fyi,
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report.get("status") in {"ok", "needs_clarification", "unsupported"} else 1
+    if command == "apply":
+        report = apply_owner_action(
+            store,
+            action_type=args.action,
+            target=args.target,
+            owner_id=args.owner,
+            channel=args.channel,
+            note=args.note,
+            rating=args.rating,
+            apply=bool(args.apply),
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0 if report.get("status") in {"ok", "duplicate_ignored"} else 1
     return 2
 
 

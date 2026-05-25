@@ -219,6 +219,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         and shell_alias.get("low_clue_recall_ok") is True
         and shell_alias.get("modules_ok") is True
         and shell_alias.get("eval_ok") is True
+        and shell_alias.get("review_ok", True) is True
+        and shell_alias.get("review_aging_ok", True) is True
+        and shell_alias.get("review_channel_ok", True) is True
+        and shell_alias.get("review_delivery_status_ok", True) is True
+        and shell_alias.get("review_delivery_gate_ok", True) is True
+        and shell_alias.get("review_digest_ok", True) is True
+        and shell_alias.get("review_render_ok", True) is True
+        and shell_alias.get("review_reply_ok", True) is True
     ):
         passed.append({"code": "shell_alias_no_env_ok"})
     else:
@@ -290,6 +298,128 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             )
     elif session_mirror:
         warn.append({"code": "session_mirror_summary_unavailable", "value": session_mirror})
+
+    owner_review = snapshot.get("owner_review", {})
+    if owner_review:
+        if owner_review.get("schema_version") == "memory-os.owner_review_status.v0":
+            passed.append({"code": "owner_review_status_ok"})
+            if int(owner_review.get("unapproved_crystallized_write_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "owner_review_unapproved_crystallized_write",
+                        "value": owner_review.get("unapproved_crystallized_write_count"),
+                    }
+                )
+            if int(owner_review.get("error_count") or 0) > 0:
+                warn.append({"code": "owner_review_action_errors", "value": owner_review.get("error_count")})
+            stale_count = _int_at(owner_review, ("review_queue", "stale_count"))
+            if stale_count > 0:
+                warn.append({"code": "owner_review_stale_items", "value": stale_count})
+        else:
+            warn.append({"code": "owner_review_status_unavailable", "value": owner_review})
+
+    review_aging = snapshot.get("owner_review_aging", {})
+    if review_aging:
+        if review_aging.get("schema_version") == "memory-os.owner_review_aging.v0":
+            passed.append({"code": "owner_review_aging_ok"})
+            for key in ("raw_body_included", "canonical_state_changed", "owner_action_created"):
+                if review_aging.get(key) is True:
+                    fail.append({"code": f"owner_review_aging_{key}_true"})
+        else:
+            warn.append({"code": "owner_review_aging_unavailable", "value": review_aging})
+
+    review_channel = snapshot.get("owner_review_channel", {})
+    if review_channel:
+        if review_channel.get("schema_version") == "memory-os.owner_review_channel.v0":
+            if review_channel.get("status") in {"selected", "dry_run_only", "disabled"}:
+                passed.append({"code": "owner_review_channel_resolver_ok"})
+            elif review_channel.get("status") == "unresolved":
+                warn.append({"code": "owner_review_channel_unresolved", "value": review_channel})
+            if review_channel.get("raw_body_included") is True:
+                fail.append({"code": "owner_review_channel_raw_body_included"})
+        else:
+            warn.append({"code": "owner_review_channel_unavailable", "value": review_channel})
+
+    digest_preview = snapshot.get("owner_review_digest_preview", {})
+    if digest_preview:
+        if digest_preview.get("schema_version") == "memory-os.owner_review_digest_preview.v0":
+            if digest_preview.get("raw_body_included") is True:
+                fail.append({"code": "owner_review_digest_raw_body_included"})
+            if digest_preview.get("will_send") is True:
+                fail.append({"code": "owner_review_digest_would_send_true"})
+            for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
+                if (digest_preview.get("boundary") or {}).get(key) is True:
+                    fail.append({"code": f"owner_review_digest_{key}_true"})
+            if digest_preview.get("raw_body_included") is not True and digest_preview.get("will_send") is not True:
+                passed.append({"code": "owner_review_digest_preview_ok"})
+        else:
+            warn.append({"code": "owner_review_digest_preview_unavailable", "value": digest_preview})
+
+    rendered_digest = snapshot.get("owner_review_rendered_digest", {})
+    if rendered_digest:
+        if rendered_digest.get("schema_version") == "memory-os.owner_review_rendered_digest.v0":
+            if rendered_digest.get("raw_body_included") is True:
+                fail.append({"code": "owner_review_rendered_digest_raw_body_included"})
+            if rendered_digest.get("will_send") is True:
+                fail.append({"code": "owner_review_rendered_digest_would_send_true"})
+            if rendered_digest.get("text_has_internal_schema") is True:
+                fail.append({"code": "owner_review_rendered_digest_internal_schema_text"})
+            for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
+                if (rendered_digest.get("boundary") or {}).get(key) is True:
+                    fail.append({"code": f"owner_review_rendered_digest_{key}_true"})
+            if (
+                rendered_digest.get("raw_body_included") is not True
+                and rendered_digest.get("will_send") is not True
+                and rendered_digest.get("text_has_internal_schema") is not True
+            ):
+                passed.append({"code": "owner_review_rendered_digest_ok"})
+        else:
+            warn.append({"code": "owner_review_rendered_digest_unavailable", "value": rendered_digest})
+
+    reply_dry_run = snapshot.get("owner_review_reply_dry_run", {})
+    if reply_dry_run:
+        if reply_dry_run.get("schema_version") == "memory-os.owner_review_reply.v0":
+            if reply_dry_run.get("dry_run") is not True:
+                fail.append({"code": "owner_review_reply_dry_run_mutated_state", "value": reply_dry_run})
+            if reply_dry_run.get("owner_action_dry_run") is not True:
+                fail.append({"code": "owner_review_reply_owner_action_not_dry_run", "value": reply_dry_run})
+            for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
+                if (reply_dry_run.get("boundary") or {}).get(key) is True:
+                    fail.append({"code": f"owner_review_reply_{key}_true"})
+            if reply_dry_run.get("status") in {"ok", "needs_clarification", "unsupported"}:
+                passed.append({"code": "owner_review_reply_dry_run_ok"})
+        else:
+            warn.append({"code": "owner_review_reply_dry_run_unavailable", "value": reply_dry_run})
+
+    delivery_gate = snapshot.get("owner_review_delivery_gate", {})
+    delivery_status = snapshot.get("owner_review_delivery_status", {})
+    if delivery_status:
+        if delivery_status.get("schema_version") == "memory-os.owner_review_delivery_status.v0":
+            passed.append({"code": "owner_review_delivery_status_ok"})
+            if int(delivery_status.get("unapproved_send_count") or 0) > 0:
+                fail.append({"code": "owner_review_unapproved_send", "value": delivery_status.get("unapproved_send_count")})
+            if int(delivery_status.get("raw_body_included_count") or 0) > 0:
+                fail.append({"code": "owner_review_delivery_raw_body_included"})
+            if int(delivery_status.get("error_count") or 0) > 0:
+                warn.append({"code": "owner_review_delivery_errors", "value": delivery_status.get("error_count")})
+        else:
+            warn.append({"code": "owner_review_delivery_status_unavailable", "value": delivery_status})
+    if delivery_gate:
+        if delivery_gate.get("schema_version") == "memory-os.owner_review_delivery_gate.v0":
+            if delivery_gate.get("status") in {"disabled", "blocked", "ready"}:
+                passed.append({"code": "owner_review_delivery_gate_ok"})
+            if delivery_gate.get("status") == "ready":
+                warn.append({"code": "owner_review_delivery_gate_ready_for_review", "value": delivery_gate})
+            boundary = delivery_gate.get("boundary") if isinstance(delivery_gate.get("boundary"), dict) else {}
+            for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
+                if boundary.get(key) is True:
+                    fail.append({"code": f"owner_review_delivery_gate_{key}_true"})
+            digest = delivery_gate.get("digest") if isinstance(delivery_gate.get("digest"), dict) else {}
+            channel = delivery_gate.get("review_channel") if isinstance(delivery_gate.get("review_channel"), dict) else {}
+            if digest.get("raw_body_included") is True or channel.get("raw_body_included") is True:
+                fail.append({"code": "owner_review_delivery_gate_raw_body_included"})
+        else:
+            warn.append({"code": "owner_review_delivery_gate_unavailable", "value": delivery_gate})
 
     rh31 = snapshot.get("rh31_eval", {})
     if rh31:
@@ -540,6 +670,14 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
         f"- ExpressionArtifacts={_expression_artifacts_summary(snapshot.get('expression_artifacts') or {})}",
         f"- SessionMirror={_session_mirror_summary(snapshot.get('session_mirror') or {})}",
+        f"- OwnerReview={_owner_review_summary(snapshot.get('owner_review') or {})}",
+        f"- OwnerReviewAging={_owner_review_aging_summary(snapshot.get('owner_review_aging') or {})}",
+        f"- OwnerReviewChannel={_owner_review_channel_summary(snapshot.get('owner_review_channel') or {})}",
+        f"- OwnerDigestPreview={_owner_digest_preview_summary(snapshot.get('owner_review_digest_preview') or {})}",
+        f"- OwnerRenderedDigest={_owner_rendered_digest_summary(snapshot.get('owner_review_rendered_digest') or {})}",
+        f"- OwnerReplyDryRun={_owner_reply_dry_run_summary(snapshot.get('owner_review_reply_dry_run') or {})}",
+        f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
+        f"- OwnerDeliveryGate={_owner_delivery_gate_summary(snapshot.get('owner_review_delivery_gate') or {})}",
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
@@ -693,6 +831,113 @@ def _session_mirror_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "dry_run_new_event_count": summary.get("dry_run_new_event_count"),
         "dry_run_written_event_ids_count": summary.get("dry_run_written_event_ids_count"),
         "dry_run_findings_count": summary.get("dry_run_findings_count"),
+    }
+
+
+def _owner_review_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    queue = summary.get("review_queue") if isinstance(summary.get("review_queue"), dict) else {}
+    burden = summary.get("digest_burden") if isinstance(summary.get("digest_burden"), dict) else {}
+    backflow = summary.get("feedback_backflow") if isinstance(summary.get("feedback_backflow"), dict) else {}
+    return {
+        "pending": queue.get("pending_count"),
+        "action_required": queue.get("action_required_count"),
+        "stale": queue.get("stale_count"),
+        "owner_actions": summary.get("owner_action_count"),
+        "by_type": summary.get("action_type_counts"),
+        "duplicates": summary.get("duplicate_ignored_count"),
+        "errors": summary.get("error_count"),
+        "owner_approved_crystallized": summary.get("owner_approved_crystallized_write_count"),
+        "unapproved_crystallized": summary.get("unapproved_crystallized_write_count"),
+        "owner_active_period": burden.get("owner_active_period"),
+        "feedback_backflow": backflow,
+    }
+
+
+def _owner_review_aging_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": summary.get("enabled"),
+        "raw_action_required": summary.get("raw_action_required_count"),
+        "effective_action_required": summary.get("effective_action_required_count"),
+        "aged_to_review_suggested": summary.get("aged_to_review_suggested_count"),
+        "aged_to_fyi": summary.get("aged_to_fyi_count"),
+        "unknown_timestamp": summary.get("unknown_timestamp_count"),
+        "canonical_state_changed": summary.get("canonical_state_changed"),
+        "owner_action_created": summary.get("owner_action_created"),
+    }
+
+
+def _owner_review_channel_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "reason": summary.get("reason"),
+        "channel": summary.get("channel"),
+        "configured_by_owner": summary.get("configured_by_owner"),
+        "fallback_used": summary.get("fallback_used"),
+        "candidate_count": summary.get("candidate_count"),
+        "raw_body_included": summary.get("raw_body_included"),
+    }
+
+
+def _owner_digest_preview_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+    overflow = summary.get("overflow") if isinstance(summary.get("overflow"), dict) else {}
+    return {
+        "status": summary.get("status"),
+        "will_send": summary.get("will_send"),
+        "actions_enabled": summary.get("actions_enabled"),
+        "raw_body_included": summary.get("raw_body_included"),
+        "counts": counts,
+        "overflow": overflow,
+    }
+
+
+def _owner_rendered_digest_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "will_send": summary.get("will_send"),
+        "raw_body_included": summary.get("raw_body_included"),
+        "text_char_count": summary.get("text_char_count"),
+        "text_has_internal_schema": summary.get("text_has_internal_schema"),
+        "section_counts": summary.get("section_counts"),
+    }
+
+
+def _owner_reply_dry_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "dry_run": summary.get("dry_run"),
+        "parsed_action_type": summary.get("parsed_action_type"),
+        "parsed_target_type": summary.get("parsed_target_type"),
+        "owner_action_status": summary.get("owner_action_status"),
+        "owner_action_dry_run": summary.get("owner_action_dry_run"),
+        "reason": summary.get("reason"),
+    }
+
+
+def _owner_delivery_status_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    last = summary.get("last_delivery") if isinstance(summary.get("last_delivery"), dict) else {}
+    return {
+        "delivery_count": summary.get("delivery_count"),
+        "sent_count": summary.get("sent_count"),
+        "skipped_count": summary.get("skipped_count"),
+        "error_count": summary.get("error_count"),
+        "duplicate_ignored_count": summary.get("duplicate_ignored_count"),
+        "owner_approved_digest_delivery": summary.get("owner_approved_digest_delivery_count"),
+        "unapproved_send": summary.get("unapproved_send_count"),
+        "raw_body_included": summary.get("raw_body_included_count"),
+        "last_result": last.get("result"),
+        "last_delivery_id": last.get("delivery_id"),
+    }
+
+
+def _owner_delivery_gate_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "ready_for_delivery": summary.get("ready_for_delivery"),
+        "delivery_enabled": summary.get("delivery_enabled"),
+        "delivery_adapter": summary.get("delivery_adapter"),
+        "blocked_reasons": summary.get("blocked_reasons"),
+        "boundary": summary.get("boundary"),
     }
 
 
@@ -1288,6 +1533,14 @@ def shell_alias_no_env():
     low_clue = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"])
     modules = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     eval_report = load_json_cmd(["hermes", "memory-os-agent-os", "eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
+    review = load_json_cmd(["hermes", "memory-os-agent-os", "review", "status"])
+    review_aging = load_json_cmd(["hermes", "memory-os-agent-os", "review", "aging-report"])
+    review_channel = load_json_cmd(["hermes", "memory-os-agent-os", "review", "channel"])
+    review_delivery_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-status"])
+    review_delivery_gate = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-gate"])
+    review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
+    review_render = load_json_cmd(["hermes", "memory-os-agent-os", "review", "render-digest"])
+    review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "approve", "A1"])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
@@ -1296,6 +1549,14 @@ def shell_alias_no_env():
       "low_clue_recall_ok": isinstance(low_clue, dict) and low_clue.get("schema_version") == "memory-os.low_clue_recall.v0",
       "modules_ok": isinstance(modules, dict) and modules.get("schema_version") == "memory-os.modules_status.v0",
       "eval_ok": isinstance(eval_report, dict) and eval_report.get("schema_version") == "memory-os.rh31_summary.v0",
+      "review_ok": isinstance(review, dict) and review.get("schema_version") == "memory-os.owner_review_status.v0",
+      "review_aging_ok": isinstance(review_aging, dict) and review_aging.get("schema_version") == "memory-os.owner_review_aging.v0",
+      "review_channel_ok": isinstance(review_channel, dict) and review_channel.get("schema_version") == "memory-os.owner_review_channel.v0",
+      "review_delivery_status_ok": isinstance(review_delivery_status, dict) and review_delivery_status.get("schema_version") == "memory-os.owner_review_delivery_status.v0",
+      "review_delivery_gate_ok": isinstance(review_delivery_gate, dict) and review_delivery_gate.get("schema_version") == "memory-os.owner_review_delivery_gate.v0",
+      "review_digest_ok": isinstance(review_digest, dict) and review_digest.get("schema_version") == "memory-os.owner_review_digest_preview.v0",
+      "review_render_ok": isinstance(review_render, dict) and review_render.get("schema_version") == "memory-os.owner_review_rendered_digest.v0",
+      "review_reply_ok": isinstance(review_reply, dict) and review_reply.get("schema_version") == "memory-os.owner_review_reply.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
       "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
@@ -1303,6 +1564,54 @@ def shell_alias_no_env():
       "low_clue_recall_error": low_clue.get("_error") if isinstance(low_clue, dict) else None,
       "modules_error": modules.get("_error") if isinstance(modules, dict) else None,
       "eval_error": eval_report.get("_error") if isinstance(eval_report, dict) else None,
+      "review_error": review.get("_error") if isinstance(review, dict) else None,
+      "review_aging_error": review_aging.get("_error") if isinstance(review_aging, dict) else None,
+      "review_channel_error": review_channel.get("_error") if isinstance(review_channel, dict) else None,
+      "review_delivery_status_error": review_delivery_status.get("_error") if isinstance(review_delivery_status, dict) else None,
+      "review_delivery_gate_error": review_delivery_gate.get("_error") if isinstance(review_delivery_gate, dict) else None,
+      "review_digest_error": review_digest.get("_error") if isinstance(review_digest, dict) else None,
+      "review_render_error": review_render.get("_error") if isinstance(review_render, dict) else None,
+      "review_reply_error": review_reply.get("_error") if isinstance(review_reply, dict) else None,
+    }
+
+def owner_review_rendered_digest_summary():
+    report = memory_os_cli(["review", "render-digest", "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
+    if not isinstance(report, dict) or report.get("_error"):
+        return report
+    text = str(report.get("text") or "")
+    sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
+    return {
+      "schema_version": report.get("schema_version"),
+      "status": report.get("status"),
+      "will_send": report.get("will_send"),
+      "raw_body_included": report.get("raw_body_included"),
+      "text_char_count": len(text),
+      "text_has_internal_schema": any(token in text for token in ("Candidate kind=", "source_events=", "sensitivity=")),
+      "section_counts": {key: len(value) for key, value in sections.items() if isinstance(value, list)},
+      "anchors": {
+        key: [str(item.get("anchor") or "") for item in value if isinstance(item, dict)]
+        for key, value in sections.items()
+        if isinstance(value, list)
+      },
+      "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
+    }
+
+def owner_review_reply_dry_run_summary():
+    report = memory_os_cli(["review", "reply", "approve", "A1", "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
+    if not isinstance(report, dict) or report.get("_error"):
+        return report
+    parsed = report.get("parsed") if isinstance(report.get("parsed"), dict) else {}
+    owner_action = report.get("owner_action_result") if isinstance(report.get("owner_action_result"), dict) else {}
+    return {
+      "schema_version": report.get("schema_version"),
+      "status": report.get("status"),
+      "dry_run": report.get("dry_run"),
+      "reason": report.get("reason"),
+      "parsed_action_type": parsed.get("action_type"),
+      "parsed_target_type": parsed.get("target_type"),
+      "owner_action_status": owner_action.get("status"),
+      "owner_action_dry_run": owner_action.get("dry_run"),
+      "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
     }
 
 status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
@@ -1311,6 +1620,14 @@ contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
 memory_sources = memory_os_cli(["memory-sources", "stats", "--hours", "24"])
 memory_sources = enrich_memory_sources_stats(memory_sources)
 rh31_eval = memory_os_cli(["eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
+owner_review = memory_os_cli(["review", "status"])
+owner_review_aging = memory_os_cli(["review", "aging-report"])
+owner_review_channel = memory_os_cli(["review", "channel"])
+owner_review_delivery_status = memory_os_cli(["review", "delivery-status"])
+owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
+owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
+owner_review_rendered_digest = owner_review_rendered_digest_summary()
+owner_review_reply_dry_run = owner_review_reply_dry_run_summary()
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
@@ -1346,6 +1663,14 @@ print(json.dumps({
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "memory_sources": memory_sources,
   "rh31_eval": rh31_eval,
+  "owner_review": owner_review,
+  "owner_review_aging": owner_review_aging,
+  "owner_review_channel": owner_review_channel,
+  "owner_review_delivery_status": owner_review_delivery_status,
+  "owner_review_delivery_gate": owner_review_delivery_gate,
+  "owner_review_digest_preview": owner_review_digest_preview,
+  "owner_review_rendered_digest": owner_review_rendered_digest,
+  "owner_review_reply_dry_run": owner_review_reply_dry_run,
   "module_artifacts": module_artifact_summary(),
   "expression_artifacts": expression_artifact_summary(),
   "session_mirror": session_mirror_summary(),

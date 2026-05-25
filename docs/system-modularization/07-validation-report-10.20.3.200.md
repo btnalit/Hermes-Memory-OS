@@ -8450,3 +8450,832 @@ DeepReflection.actual_identity_write=false
 DeepReflection.actual_crystallized_approval=false
 crystallized_records=0
 ```
+
+## RH-34 / RH-35 Owner Governance Discovery
+
+Date:
+
+```text
+2026-05-25T07:26:00Z
+```
+
+Scope:
+
+- RH-34 Daily Owner Review Digest
+- RH-35 Owner Action Processor
+- Contract 8 - OwnerAction
+
+Reason:
+
+The no-send cognitive loop is now producing artifacts that need owner review,
+but daily review through SSH/CLI is not a sustainable product surface. This
+check inspected whether the test host already has reviewable items and whether
+an owner action/review queue surface exists.
+
+Read-only commands:
+
+```bash
+ssh hermes-media 'HERMES_HOME=/root/.hermes hermes memory-os-agent-os status'
+ssh hermes-media 'HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules status'
+ssh hermes-media 'HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules doctor'
+ssh hermes-media '<bounded Python filename/count inspection; no raw bodies printed>'
+```
+
+Live evidence:
+
+```text
+host=debian
+time=2026-05-25T03:26:00-04:00
+
+Memory-OS counts:
+  events=229
+  working_items=161
+  crystallized_candidates=161
+  crystallized_records=0
+  audit_entries=2920
+  queue_backlog=0
+  index_health=healthy
+
+proposal_queue:
+  queue_path=/root/.hermes/system-modules/proposal_queue/queue.json
+  candidate_count=15
+  state_counts={"approved_for_proposal": 1, "candidate": 14}
+  doctor_warning=pending_candidates_present
+
+wandering_mind:
+  would_send_count=11
+  outputs.jsonl lines=11
+  would_send.jsonl lines=11
+
+speak_gate:
+  would_send_count=0
+  actual_send=false
+
+DeepReflection:
+  enabled=true
+  injection_mode=auto_bounded
+  analysis_artifact_count=18
+  report_count=18
+  actual_send=false
+  actual_execute=false
+  actual_identity_write=false
+  actual_crystallized_approval=false
+
+owner/review ledgers:
+  owner_actions ledger not present
+  review_queue ledger not present
+```
+
+Interpretation:
+
+- The system is not empty. It already has pending owner-review surfaces:
+  crystallized candidates, proposal candidates, and right-brain would-send
+  artifacts.
+- Hard boundaries remain intact.
+- The missing layer is not another cognition module. The missing layer is an
+  owner governance workflow: bounded daily review digest plus idempotent owner
+  action state transitions.
+- CLI/module status is useful for operations but is too heavy as the normal
+  owner review interface.
+
+Decision:
+
+- Add `34-owner-review-digest-and-action-workflow.md`.
+- Add Contract 8 - OwnerAction to
+  `29-memory-os-module-integration-contract.md`.
+- Track the work in `32-active-roadmap-and-gates.md` as P1-M.
+- Implement RH-35 OwnerActionProcessor before Telegram digest sending.
+
+Pre-implementation review follow-up:
+
+- Legitimate owner-approved crystallized writes must be counted as owner
+  effects, not as historical hard-boundary violations.
+- Unapproved crystallized write count must remain zero and must have a monitor
+  field.
+- Owner action idempotency must exclude digest ids so repeated appearances of
+  the same candidate across digests cannot create duplicate approvals.
+- Text replies must resolve through active digest anchors or stable target ids;
+  ambiguous numeric replies must ask for clarification.
+- Digest burden metrics must distinguish cold-start from active owner use.
+
+Local RH-35.1 implementation evidence:
+
+```text
+Implemented locally:
+  - plugins/memory/memory_os/owner_actions.py
+  - hermes memory_os review status|queue|apply
+  - hermes memory-os-agent-os review status|queue|apply
+  - monitor OwnerReview summary/classification fields
+
+Verification:
+  python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py \
+    tests\system_modularization\test_memory_os_agent_os_shell.py \
+    tests\scripts\test_memory_os_3_200_monitor.py -q
+  -> 53 passed
+
+  python -m py_compile plugins\memory\memory_os\owner_actions.py \
+    plugins\memory\memory_os\cli.py \
+    plugins\memory-os-agent-os\__init__.py \
+    scripts\memory_os_3_200_monitor.py
+  -> pass
+```
+
+Boundary interpretation:
+
+- `approve_candidate` writes crystallized memory only as an explicit owner
+  action and records `owner_effect.owner_approved_crystallized_write=true`.
+- The historical hard boundary remains represented as
+  `actual_unapproved_crystallized_approval=false`.
+- Monitor separates `owner_approved_crystallized_write_count` from
+  `unapproved_crystallized_write_count`; the latter is the failure signal.
+
+Remote RH-35.1 smoke on `10.20.3.200`:
+
+```text
+Deployment:
+  /root/Hermes-Memory-OS-rh35-20260525161920
+  bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+  -> installer copied owner_actions.py and updated shell alias.
+  -> no hermes-gateway.service restart requested.
+
+Shell alias smoke:
+  hermes memory-os-agent-os review status
+    schema_version=memory-os.owner_review_status.v0
+
+  hermes memory-os-agent-os review queue --limit 3
+    schema_version=memory-os.owner_review_queue.v0
+    pending=186
+    first_items=candidate:... , candidate:... , candidate:...
+
+  hermes memory-os-agent-os review apply --action approve_candidate \
+    --target candidate:<first_candidate> --owner smoke --channel cli
+    status=ok
+    dry_run=True
+
+Monitor:
+  OwnerReview={
+    pending=186,
+    action_required=175,
+    stale=0,
+    owner_actions=0,
+    owner_approved_crystallized=0,
+    unapproved_crystallized=0,
+    owner_active_period=False
+  }
+  shell_alias_no_env.review_ok=True
+  classification=WARN
+  FAIL=[]
+```
+
+Conclusion:
+
+- RH-35.1 is live on the test host as a no-send/no-execute owner action
+  processor and review surface.
+- The high pending/action-required counts confirm the original product gap:
+  cognition modules were producing review-worthy artifacts faster than the
+  owner could reasonably inspect through SSH/CLI alone.
+- RH-34 digest generation/channel delivery remains the next gated slice and
+  must stay opt-in.
+
+## RH-34a Owner Review Channel Resolver + Digest Preview
+
+Timestamp:
+
+```text
+2026-05-25T08:54:46Z
+```
+
+Scope:
+
+- metadata-only owner review channel resolver;
+- bounded digest preview;
+- shell alias parity;
+- monitor evidence for no-send/no-raw-body digest preview.
+
+Deployment:
+
+```text
+/root/Hermes-Memory-OS-rh34a-20260525165415
+bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+-> installer copied owner_actions.py, config.py, CLI updates, and monitor-facing runtime.
+-> no hermes-gateway.service restart requested.
+```
+
+Local verification:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py \
+  tests\system_modularization\test_memory_os_agent_os_shell.py \
+  tests\scripts\test_memory_os_3_200_monitor.py -q
+-> 58 passed
+
+python -m py_compile plugins\memory\memory_os\owner_actions.py \
+  plugins\memory\memory_os\cli.py \
+  plugins\memory-os-agent-os\__init__.py \
+  scripts\memory_os_3_200_monitor.py
+-> pass
+
+python -m pytest -q
+-> 472 passed
+```
+
+Remote shell alias smoke:
+
+```text
+hermes memory-os-agent-os review channel:
+  schema_version=memory-os.owner_review_channel.v0
+  status=dry_run_only
+  reason=cli_preview_fallback
+  raw_body_included=false
+
+hermes memory-os-agent-os review preview-digest \
+  --max-action-required 2 --max-review-suggested 2 --max-fyi 2:
+  schema_version=memory-os.owner_review_digest_preview.v0
+  will_send=false
+  delivery_skipped=true
+  actions_enabled=false
+  raw_body_included=false
+  action_required_total=175
+  action_required_shown=2
+  action_required_overflow=173
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+```
+
+Remote monitor:
+
+```text
+classification=WARN
+FAIL=[]
+
+OwnerReview:
+  pending=186
+  action_required=175
+  owner_actions=0
+  owner_approved_crystallized=0
+  unapproved_crystallized=0
+
+OwnerReviewChannel:
+  status=dry_run_only
+  reason=cli_preview_fallback
+  channel=cli
+  configured_by_owner=false
+  fallback_used=true
+  candidate_count=0
+  raw_body_included=false
+
+OwnerDigestPreview:
+  status=ok
+  will_send=false
+  actions_enabled=false
+  raw_body_included=false
+  action_required_total=175
+  action_required_shown=3
+  action_required_overflow=172
+
+PASS includes:
+  owner_review_status_ok
+  owner_review_channel_resolver_ok
+  owner_review_digest_preview_ok
+  shell_alias_no_env_ok
+
+WARN:
+  session_mirror_pending_sessions
+  rh31_eval_has_failures
+```
+
+Boundary interpretation:
+
+- RH-34a does not send a digest.
+- RH-34a does not enable Telegram delivery.
+- RH-34a does not parse `session_*.json` files because those may contain
+  private message bodies; it uses explicit owner config or metadata-only
+  `state.db` session rows, otherwise CLI preview fallback.
+- Digest preview is a review surface only; it does not approve, reject,
+  execute, write crystallized memory, or create owner action records.
+
+Conclusion:
+
+- RH-34a is live on the test host as metadata-only channel resolution and
+  bounded digest preview.
+- The next gated slice is opt-in owner-channel delivery. Delivery must not be
+  enabled until an owner-configured channel is present and monitor continues to
+  show no raw bodies and no unintended send/action boundaries.
+
+## RH-34b Explicit Opt-In Delivery Gate
+
+Timestamp:
+
+```text
+2026-05-25T09:05:07Z
+```
+
+Scope:
+
+- explicit opt-in delivery gate;
+- no channel adapter;
+- no Telegram send;
+- monitor evidence for the pre-send decision surface.
+
+Deployment:
+
+```text
+/root/Hermes-Memory-OS-rh34b-20260525170441
+bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+-> installer copied owner_actions.py, config.py, CLI updates, and monitor-facing runtime.
+-> no hermes-gateway.service restart requested.
+```
+
+Local verification:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py \
+  tests\system_modularization\test_memory_os_agent_os_shell.py \
+  tests\scripts\test_memory_os_3_200_monitor.py -q
+-> 61 passed
+
+python -m py_compile plugins\memory\memory_os\owner_actions.py \
+  plugins\memory\memory_os\cli.py \
+  plugins\memory-os-agent-os\__init__.py \
+  scripts\memory_os_3_200_monitor.py
+-> pass
+
+python -m pytest -q
+-> 475 passed
+```
+
+Remote shell alias smoke:
+
+```text
+hermes memory-os-agent-os review delivery-gate:
+  schema_version=memory-os.owner_review_delivery_gate.v0
+  status=disabled
+  ready_for_delivery=false
+  delivery_enabled=false
+  delivery_adapter=none
+  blocked_reasons=[
+    delivery_not_enabled,
+    delivery_adapter_not_configured,
+    review_channel_not_selected,
+    review_channel_not_configured_by_owner
+  ]
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+```
+
+Remote monitor:
+
+```text
+classification=WARN
+FAIL=[]
+
+OwnerDeliveryGate:
+  status=disabled
+  ready_for_delivery=false
+  delivery_enabled=false
+  delivery_adapter=none
+  blocked_reasons=[
+    delivery_not_enabled,
+    delivery_adapter_not_configured,
+    review_channel_not_selected,
+    review_channel_not_configured_by_owner
+  ]
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+
+PASS includes:
+  owner_review_delivery_gate_ok
+```
+
+Boundary interpretation:
+
+- RH-34b is a pre-send decision gate, not a delivery adapter.
+- It does not send Telegram or any other owner-channel message.
+- It does not create owner action records.
+- It cannot become ready unless delivery is explicitly enabled, a delivery
+  adapter is configured, and the channel resolver selects an owner-configured
+  channel.
+
+Review gate:
+
+- Claude/external review is required before enabling any live owner-channel
+  delivery adapter or setting test-host config into a send-capable path.
+- Disabled-by-default gate code, tests, and monitor fields do not require
+  external review to remain deployed because all send/execution/write
+  boundaries stay false.
+
+Conclusion:
+
+- RH-34b is live on the test host as a disabled-by-default opt-in delivery
+  gate.
+- The next slice, if pursued, must be a reviewed channel adapter / delivery
+  apply gate, not another preview-only monitor field.
+
+## RH-34c Review Queue Aging Policy
+
+Timestamp:
+
+```text
+2026-05-25T09:32:45Z
+```
+
+Scope:
+
+- review queue aging projection;
+- shell alias parity through `hermes memory-os-agent-os review aging-report`;
+- monitor evidence for raw/effective owner-review burden;
+- no send, no approval, no rejection, no crystallized write, no canonical
+  mutation.
+
+Deployment:
+
+```text
+bundle=/root/Hermes-Memory-OS-rh34c-20260525173213
+command=bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+gateway_restart=not performed
+```
+
+Local verification:
+
+```text
+python -m pytest -q
+-> 477 passed
+
+git diff --check
+-> pass
+```
+
+Live smoke:
+
+```text
+owner_review_aging.schema_version=memory-os.owner_review_aging.v0
+owner_review_aging.enabled=true
+raw_action_required=175
+effective_action_required=14
+aged_to_review_suggested=161
+aged_to_fyi=0
+unknown_timestamp=161
+raw_body_included=false
+canonical_state_changed=false
+owner_action_created=false
+
+owner_review.pending=186
+owner_review.action_required=14
+owner_review.review_suggested=172
+
+owner_digest_preview:
+  pending=186
+  raw_action_required_total=175
+  action_required_total=14
+  action_required_shown=3
+  action_required_overflow=11
+  will_send=false
+  raw_body_included=false
+
+owner_delivery_gate:
+  status=disabled
+  ready_for_delivery=false
+  actual_send=false
+```
+
+Monitor result:
+
+```text
+status=WARN
+PASS includes:
+  owner_review_status_ok
+  owner_review_aging_ok
+  owner_review_channel_resolver_ok
+  owner_review_digest_preview_ok
+  owner_review_delivery_gate_ok
+FAIL=[]
+WARN=[
+  session_mirror_pending_sessions,
+  rh31_eval_has_failures
+]
+```
+
+Boundary interpretation:
+
+- RH-34c is projection-only. It changes `effective_priority` for review queue
+  and digest display, while preserving `source_priority` and raw backlog
+  counts.
+- It did not create owner action records, did not mutate candidates/proposals,
+  did not approve/reject/crystallize, and did not send a digest.
+- The immediate owner burden is much lower than RH-34a/RH-34b
+  (`effective_action_required=14` versus raw `175`), but still above the
+  steady-state target of `<=3`.
+
+Conclusion:
+
+- RH-34c is live on the test host and satisfies the projection-only boundary.
+- At this checkpoint, RH-34d one-shot real-send smoke still needed external
+  review before crossing into actual owner-channel delivery. The later RH-34d
+  section records the one-shot smoke evidence.
+
+## RH-34d One-Shot Real Send Smoke
+
+Timestamp:
+
+```text
+2026-05-25T09:57:22Z
+```
+
+Scope:
+
+- one owner-triggered digest delivery smoke;
+- delivery ledger and delivery status monitor fields;
+- no recurring delivery;
+- no owner action application;
+- no proposal execution;
+- no candidate approval/rejection;
+- no crystallized memory write;
+- raw-body-free bounded digest text.
+
+Deployment:
+
+```text
+bundle=/root/Hermes-Memory-OS-rh34d-20260525055605
+command=bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+gateway_restart=not performed
+```
+
+Local verification:
+
+```text
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py
+-> 65 passed
+
+python -m pytest -q
+-> 479 passed
+```
+
+One-shot smoke:
+
+```text
+delivery_key=rh34d-smoke-20260525T095719Z
+gate_status=ready
+gate_ready=true
+gate_blocked_reasons=[]
+result_status=sent
+result_dry_run=false
+
+record.schema_version=memory-os.owner_review_delivery.v0
+record.delivery_id=odel_20260525T095722076292Z_b8f57721
+record.digest_id=odig_20260525T095722076178Z_5f4487c4
+record.result=sent
+record.raw_body_included=false
+record.text_char_count=742
+record.boundary.actual_unapproved_send=false
+record.boundary.actual_execute=false
+record.boundary.actual_identity_write=false
+record.boundary.actual_unapproved_crystallized_approval=false
+record.owner_effect.owner_approved_digest_delivery=true
+
+delivery_status.delivery_count=1
+delivery_status.sent_count=1
+delivery_status.error_count=0
+delivery_status.duplicate_ignored_count=0
+delivery_status.owner_approved_digest_delivery_count=1
+delivery_status.unapproved_send_count=0
+delivery_status.raw_body_included_count=0
+```
+
+The smoke temporarily enabled `owner_review.delivery_enabled=true` and
+`delivery_adapter=hermes_owner_channel` with the configured owner channel, sent
+one bounded digest through Hermes' existing send-message path, then restored
+the prior `owner_review` delivery config. The target channel id is intentionally
+not recorded here.
+
+Post-smoke config check:
+
+```text
+owner_review.channel=null
+owner_review.delivery_adapter=null
+owner_review.delivery_enabled=null
+owner_review.direct_message=null
+owner_review.enabled=null
+owner_review.mode=null
+owner_review.target_ref=null
+```
+
+Post-smoke monitor:
+
+```text
+status=WARN
+FAIL=[]
+
+OwnerDeliveryStatus:
+  delivery_count=1
+  sent_count=1
+  skipped_count=0
+  error_count=0
+  duplicate_ignored_count=0
+  owner_approved_digest_delivery=1
+  unapproved_send=0
+  raw_body_included=0
+  last_result=sent
+  last_delivery_id=odel_20260525T095722076292Z_b8f57721
+
+OwnerDeliveryGate:
+  status=disabled
+  ready_for_delivery=false
+  delivery_enabled=false
+  delivery_adapter=none
+  blocked_reasons=[
+    delivery_not_enabled,
+    delivery_adapter_not_configured,
+    review_channel_not_selected,
+    review_channel_not_configured_by_owner
+  ]
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+
+PASS includes:
+  owner_review_delivery_status_ok
+  owner_review_delivery_gate_ok
+
+WARN=[
+  session_mirror_pending_sessions,
+  rh31_eval_has_failures
+]
+```
+
+Boundary interpretation:
+
+- RH-34d proves the selected owner channel can receive exactly one bounded
+  owner-approved digest.
+- The send is recorded as `owner_approved_digest_delivery`, not as an
+  unapproved-send boundary violation.
+- No raw private body was included.
+- No owner action, proposal execution, candidate approval/rejection, or
+  crystallized write occurred as a side effect of delivery.
+- Delivery config was restored to disabled after the smoke.
+
+Conclusion:
+
+- RH-34d live one-shot smoke passed on `10.20.3.200`.
+- RH-34d is now treated as Hermes send compatibility evidence only. It proved
+  that Hermes can deliver one bounded Memory-OS digest, but it does not make
+  Memory-OS responsible for recurring scheduling or transport.
+- RH-34e recurring daily review remains blocked and must be redesigned as
+  Hermes Cron Owner Review Integration: Memory-OS renders bounded review
+  payloads and action anchors, while Hermes owns cron delivery and platform
+  send gates.
+- Before RH-34e, the digest renderer must stop exposing internal schema labels
+  such as `kind=moment` as primary owner-facing text, and owner replies must map
+  through OwnerActionProcessor.
+
+## RH-34e.1 / RH-35.2 Renderer, Recorded Digest Binding, And Smoke-Only Correction
+
+Date: 2026-05-25
+
+Mode: test-host installer deployment; installed shell alias smoke; read-only
+monitor after deployment. No gateway restart was performed by the installer.
+
+Scope:
+
+- RH-34e.1 Review Digest Renderer
+- RH-35.2 Owner Reply Parser
+- RH-34d `deliver-once` legacy smoke-only correction
+- Contract 8 OwnerAction / Hermes transport boundary
+
+Local verification:
+
+```text
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py
+70 passed
+
+python -m pytest -q
+484 passed
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash /tmp/memory-os-rh34e-rh35-binding/scripts/install_memory_os.sh --yes --test-host
+provider=memory_os
+shell_plugin=memory-os-agent-os enabled
+heartbeat_timer=active/enabled
+cognitive_loop_timer=active/enabled
+doctor=ok with expected hindsight_adapter_disabled warning
+```
+
+Remote renderer smoke:
+
+```text
+command:
+  hermes memory-os-agent-os review render-digest \
+    --format json --record-active --owner owner --channel telegram \
+    --max-action-required 2 --max-review-suggested 2 --max-fyi 2
+
+schema=memory-os.owner_review_rendered_digest.v0
+status=ok
+recorded_active_digest=true
+text_has_candidate_schema=false
+candidate_has_proposed_memory=true
+raw_body_included=false
+will_send=false
+```
+
+Remote owner-reply binding smoke:
+
+```text
+command:
+  hermes memory-os-agent-os review reply approve A1 \
+    --owner owner --channel telegram --digest-id <recorded_digest_id>
+
+status=ok
+binding=recorded_digest
+dry_run=true
+parsed_action=approve_proposal
+
+command:
+  hermes memory-os-agent-os review reply approve A1 \
+    --owner owner --channel telegram
+
+status=ok
+binding=latest_recorded_digest
+dry_run=true
+
+owner_action_count remained 0 after dry-run smoke.
+```
+
+Remote legacy deliver-once smoke-only check:
+
+```text
+command:
+  hermes memory-os-agent-os review deliver-once \
+    --owner owner --delivery-key rh34e-smoke-only-20260525T1141Z \
+    --owner-triggered --apply
+
+status=skipped
+record_result=skipped
+blocked_reasons=delivery_not_enabled,delivery_adapter_not_configured,
+  review_channel_not_selected,review_channel_not_configured_by_owner
+unapproved_send=false
+owner_approved_delivery=false
+
+delivery_status.sent_count=1        # historical RH-34d smoke only
+delivery_status.skipped_count=2
+delivery_status.unapproved_send_count=0
+delivery_status.raw_body_included_count=0
+```
+
+Read-only monitor after deployment:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes:
+  owner_review_rendered_digest_ok
+  owner_review_reply_dry_run_ok
+  owner_review_delivery_status_ok
+  owner_review_delivery_gate_ok
+WARN:
+  session_mirror_pending_sessions
+  rh31_eval_has_failures
+OwnerRenderedDigest:
+  status=ok
+  will_send=false
+  raw_body_included=false
+  text_has_internal_schema=false
+  section_counts={action_required:2, review_suggested:2, fyi:2}
+OwnerReplyDryRun:
+  status=ok
+  dry_run=true
+  owner_action_dry_run=true
+OwnerDeliveryGate:
+  status=disabled
+  delivery_enabled=false
+  boundary.actual_send=false
+OwnerDeliveryStatus:
+  sent_count=1
+  skipped_count=2
+  unapproved_send=0
+  raw_body_included=0
+```
+
+Interpretation:
+
+- Candidate review cards now include bounded proposed-memory text, so owner
+  approval is actionable without exposing raw source bodies as primary text.
+- Owner replies bind to a recorded digest snapshot when available, so anchors
+  are not silently reinterpreted after the queue changes.
+- `deliver-once` is no longer a Memory-OS transport path for RH-34e. Recurring
+  owner review must be implemented by Hermes cron/send with Memory-OS providing
+  only bounded renderer output and owner-action parsing.
+- No owner action, proposal execution, crystallized write, identity write, or
+  unapproved send occurred during this validation.

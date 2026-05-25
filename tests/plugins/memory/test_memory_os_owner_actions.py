@@ -1,0 +1,629 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+
+from plugins.memory.memory_os.config import save_config
+from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+from plugins.memory.memory_os.memory_sources import append_memory_source_record, memory_sources_feedback_path
+from plugins.memory.memory_os.owner_actions import (
+    apply_owner_action,
+    deliver_owner_review_digest_once,
+    owner_actions_path,
+    owner_review_deliveries_path,
+    owner_review_rendered_digests_path,
+    owner_review_aging_report,
+    owner_review_delivery_gate_report,
+    owner_review_delivery_status_report,
+    owner_review_digest_preview,
+    owner_review_queue_report,
+    owner_review_status_report,
+    parse_owner_review_reply,
+    render_owner_review_digest,
+    resolve_owner_review_channel,
+)
+from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.modules.governance.proposal_queue import ProposalQueueModule
+
+
+def _store(tmp_path, *, profile: str = "main") -> MemoryOSStore:
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile=profile)
+    store = MemoryOSStore(roots)
+    store.initialize()
+    return store
+
+
+def _candidate() -> CrystallizedCandidate:
+    return CrystallizedCandidate(
+        candidate_id="cand_owner_001",
+        kind="preference",
+        body="User prefers concise owner-review summaries with clear approve or reject choices.",
+        source_event_ids=["evt_owner_001"],
+        sensitivity="private",
+        tags=["owner-review"],
+    )
+
+
+def _jsonl(path):
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_review_queue_lists_bounded_candidates_without_raw_body(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(store=store, title="Review bounded proposal", body="RAW PROPOSAL BODY")
+
+    report = owner_review_queue_report(store, limit=10)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert report["pending_count"] == 2
+    assert report["review_aging"]["raw_action_required_count"] == 2
+    assert report["action_required_count"] == 1
+    assert report["review_suggested_count"] == 1
+    assert [item["anchor"] for item in report["items"]] == ["A1", "R1"]
+    assert all(item["raw_body_included"] is False for item in report["items"])
+    assert "Candidate kind=" not in serialized
+    assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_review_aging_projects_old_and_unknown_items_without_mutating_state(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(store=store, title="Old proposal", body="RAW PROPOSAL BODY")
+    queue = proposal.read_queue()
+    queue["items"][0]["created_at"] = "2000-01-01T00:00:00Z"
+    proposal.queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
+    report = owner_review_queue_report(store, limit=10)
+    aging = owner_review_aging_report(store)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert aging["schema_version"] == "memory-os.owner_review_aging.v0"
+    assert aging["raw_action_required_count"] == 2
+    assert aging["effective_action_required_count"] == 0
+    assert aging["aged_to_review_suggested_count"] == 1
+    assert aging["aged_to_fyi_count"] == 1
+    assert aging["unknown_timestamp_count"] == 1
+    assert aging["canonical_state_changed"] is False
+    assert aging["owner_action_created"] is False
+    assert report["action_required_count"] == 0
+    assert report["review_suggested_count"] == 1
+    assert report["fyi_count"] == 1
+    assert {item["source_priority"] for item in report["items"]} == {"action_required"}
+    assert {item["effective_priority"] for item in report["items"]} == {"review_suggested", "fyi"}
+    assert "Candidate kind=" not in serialized
+    assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_approve_candidate_requires_apply_and_is_idempotent(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+
+    dry_run = apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        apply=False,
+    )
+
+    assert dry_run["status"] == "ok"
+    assert dry_run["dry_run"] is True
+    assert not owner_actions_path(store.roots).exists()
+    assert not (store.roots.crystallized_root / "owner_approved.md").exists()
+
+    applied = apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        note="Approved.",
+        apply=True,
+    )
+
+    assert applied["status"] == "ok"
+    record = applied["record"]
+    assert record["idempotency_key"] == "owner|candidate|cand_owner_001|approve_candidate"
+    assert record["boundary"]["actual_unapproved_crystallized_approval"] is False
+    assert record["owner_effect"]["owner_approved_crystallized_write"] is True
+    assert (store.roots.crystallized_root / "owner_approved.md").exists()
+
+    duplicate = apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    records = _jsonl(owner_actions_path(store.roots))
+    crystallized_text = (store.roots.crystallized_root / "owner_approved.md").read_text(encoding="utf-8")
+    assert duplicate["status"] == "duplicate_ignored"
+    assert len(records) == 2
+    assert sum(1 for record in records if record["result"] == "applied") == 1
+    assert sum(1 for record in records if record["result"] == "duplicate_ignored") == 1
+    assert crystallized_text.count("candidate_id: cand_owner_001") == 1
+
+
+def test_owner_actions_status_counts_queue_and_owner_effects(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    status = owner_review_status_report(store)
+
+    assert status["review_queue"]["pending_count"] == 0
+    assert status["owner_actions"]["count"] == 1
+    assert status["owner_actions"]["owner_approved_crystallized_write_count"] == 1
+    assert status["owner_actions"]["unapproved_crystallized_write_count"] == 0
+    assert status["digest_burden"]["owner_active_period"] is True
+
+
+def test_proposal_actions_transition_without_execution_or_crystallized_approval(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(store=store, title="Run a proposal", body="Proposal body")
+
+    result = apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    updated = proposal_queue.read_queue()["items"][0]
+    assert result["status"] == "ok"
+    assert updated["state"] == "approved_for_proposal"
+    assert updated["crystallized_approved"] is False
+    assert result["record"]["boundary"]["actual_execute"] is False
+    assert result["record"]["owner_effect"]["owner_approved_crystallized_write"] is False
+
+
+def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_test_001",
+            "created_at": "2026-05-25T00:00:00Z",
+            "route": "ambiguous_recall",
+            "query_class": "ambiguous_recall",
+        },
+    )
+
+    result = apply_owner_action(
+        store,
+        action_type="mark_feedback",
+        target="memory_source:msrc_test_001",
+        owner_id="owner",
+        channel="cli",
+        rating="too_mechanistic",
+        note="Too report-like.",
+        apply=True,
+    )
+
+    feedback = _jsonl(memory_sources_feedback_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert feedback["memory_source_record_id"] == "msrc_test_001"
+    assert feedback["rating"] == "too_mechanistic"
+    assert feedback["source"] == "owner_action"
+    assert result["record"]["boundary"]["actual_send"] is False
+
+
+def test_review_channel_uses_explicit_config_and_never_reads_body(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "mode": "dry_run",
+                "owner_id": "owner",
+                "channel": "telegram",
+                "target_ref": "telegram:12345",
+                "direct_message": True,
+            }
+        },
+        tmp_path,
+    )
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "sessions" / "session_private.json").write_text(
+        json.dumps(
+            {
+                "id": "private_session",
+                "platform": "telegram",
+                "chat_id": "12345",
+                "direct_message": True,
+                "messages": [{"role": "user", "content": "PRIVATE BODY SHOULD NOT APPEAR"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = resolve_owner_review_channel(store)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert report["schema_version"] == "memory-os.owner_review_channel.v0"
+    assert report["status"] == "selected"
+    assert report["configured_by_owner"] is True
+    assert report["channel"] == "telegram"
+    assert report["target_ref"] == "telegram:12345"
+    assert "PRIVATE BODY" not in serialized
+
+
+def test_review_channel_uses_metadata_candidate_as_dry_run_only(tmp_path):
+    store = _store(tmp_path)
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "create table sessions (id text, platform text, chat_id text, updated_at text, is_direct integer)"
+        )
+        conn.execute(
+            "insert into sessions values (?, ?, ?, ?, ?)",
+            ("sess_1", "telegram", "98765", "2026-05-25T00:00:00Z", 1),
+        )
+        conn.execute("create table messages (session_id text, role text, content text)")
+        conn.execute("insert into messages values (?, ?, ?)", ("sess_1", "user", "PRIVATE BODY SHOULD NOT APPEAR"))
+
+    report = resolve_owner_review_channel(store)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert report["status"] == "dry_run_only"
+    assert report["reason"] == "single_owner_direct_metadata_candidate"
+    assert report["channel"] == "telegram"
+    assert report["target_ref"] == "telegram:98765"
+    assert report["raw_body_included"] is False
+    assert "PRIVATE BODY" not in serialized
+
+
+def test_review_channel_ignores_session_json_body_files_and_falls_back_to_cli(tmp_path):
+    store = _store(tmp_path)
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "sessions" / "session_private.json").write_text(
+        json.dumps(
+            {
+                "id": "private_session",
+                "platform": "telegram",
+                "chat_id": "12345",
+                "direct_message": True,
+                "messages": [{"role": "user", "content": "PRIVATE BODY SHOULD NOT APPEAR"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = resolve_owner_review_channel(store)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert report["status"] == "dry_run_only"
+    assert report["reason"] == "cli_preview_fallback"
+    assert report["channel"] == "cli"
+    assert report["candidate_count"] == 0
+    assert "PRIVATE BODY" not in serialized
+
+
+def test_digest_preview_is_bounded_no_send_and_no_raw_body(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(store=store, title="Review bounded proposal", body="RAW PROPOSAL BODY")
+
+    preview = owner_review_digest_preview(store, max_action_required=1, max_review_suggested=1, max_fyi=1)
+    serialized = json.dumps(preview, ensure_ascii=False)
+
+    assert preview["schema_version"] == "memory-os.owner_review_digest_preview.v0"
+    assert preview["will_send"] is False
+    assert preview["delivery_skipped"] is True
+    assert preview["actions_enabled"] is False
+    assert preview["raw_body_included"] is False
+    assert preview["counts"]["raw_action_required_total"] == 2
+    assert preview["counts"]["action_required_total"] == 1
+    assert preview["counts"]["action_required_shown"] == 1
+    assert preview["overflow"]["action_required"] == 0
+    assert preview["sections"]["action_required"][0]["anchor"] == "A1"
+    assert preview["review_aging"]["aged_to_review_suggested_count"] == 1
+    assert "Candidate kind=" not in serialized
+    assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(store=store, title="Review bounded proposal", body="RAW PROPOSAL BODY")
+
+    rendered = render_owner_review_digest(store, max_action_required=1, max_review_suggested=1, max_fyi=1)
+    serialized = json.dumps(rendered, ensure_ascii=False)
+    text = rendered["text"]
+    item = rendered["sections"]["action_required"][0]
+
+    assert rendered["schema_version"] == "memory-os.owner_review_rendered_digest.v0"
+    assert item["anchor"] == "A1"
+    assert item["source_module"] in {"proposal_queue", "crystallized_candidates"}
+    assert item["question"]
+    assert item["suggested_action"]
+    assert item["reason"]
+    assert item["consequence"]
+    assert item["raw_body_included"] is False
+    assert "User prefers concise owner-review summaries" in text
+    assert "proposed_memory_text" in serialized
+    assert "Candidate kind=" not in text
+    assert "source_events=" not in text
+    assert "sensitivity=" not in text
+    assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    delivered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    # The queue changes after delivery. The reply must still bind to the
+    # delivered digest, not a freshly rendered digest with shifted anchors.
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(store=store, title="Newer proposal", body="RAW PROPOSAL BODY")
+
+    dry_run = parse_owner_review_reply(
+        store,
+        "approve R1",
+        owner_id="owner",
+        channel="telegram",
+        digest_id=delivered["digest_id"],
+        apply=False,
+    )
+
+    assert dry_run["schema_version"] == "memory-os.owner_review_reply.v0"
+    assert dry_run["status"] == "ok"
+    assert dry_run["dry_run"] is True
+    assert dry_run["active_digest"]["binding"] == "recorded_digest"
+    assert dry_run["parsed"]["action_type"] == "approve_candidate"
+    assert dry_run["parsed"]["target_type"] == "candidate"
+    assert dry_run["parsed"]["target_id"] == "cand_owner_001"
+    assert dry_run["owner_action_result"]["status"] == "ok"
+    assert not owner_actions_path(store.roots).exists()
+
+    applied = parse_owner_review_reply(
+        store,
+        "approve R1",
+        owner_id="owner",
+        channel="telegram",
+        digest_id=delivered["digest_id"],
+        apply=True,
+    )
+
+    assert applied["status"] == "ok"
+    assert applied["owner_action_result"]["record"]["owner_effect"]["owner_approved_crystallized_write"] is True
+    assert (store.roots.crystallized_root / "owner_approved.md").exists()
+    assert owner_review_rendered_digests_path(store.roots).exists()
+
+
+def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_queue(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(store=store, title="Newer proposal", body="RAW PROPOSAL BODY")
+
+    result = parse_owner_review_reply(store, "reject R1", owner_id="owner", channel="telegram", apply=False)
+
+    assert result["status"] == "ok"
+    assert result["active_digest"]["binding"] == "latest_recorded_digest"
+    assert result["parsed"]["action_type"] == "reject_candidate"
+    assert result["parsed"]["target_id"] == "cand_owner_001"
+
+
+def test_reply_parser_handles_feedback_anchor_without_route_mutation(tmp_path):
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_test_001",
+            "created_at": "2026-05-25T00:00:00Z",
+            "route": "ambiguous_recall",
+            "query_class": "ambiguous_recall",
+        },
+    )
+
+    result = parse_owner_review_reply(
+        store,
+        "feedback F1 too_mechanistic",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+        max_fyi=1,
+    )
+
+    feedback = _jsonl(memory_sources_feedback_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "mark_feedback"
+    assert result["parsed"]["target_type"] == "memory_source"
+    assert result["parsed"]["target_id"] == "msrc_test_001"
+    assert feedback["rating"] == "too_mechanistic"
+    assert result["owner_action_result"]["record"]["boundary"]["actual_send"] is False
+
+
+def test_reply_parser_unknown_anchor_needs_clarification_without_mutation(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+
+    result = parse_owner_review_reply(store, "approve A99", owner_id="owner", channel="telegram", apply=True)
+
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "anchor_not_found_in_current_digest"
+    assert not owner_actions_path(store.roots).exists()
+
+
+def test_delivery_gate_is_disabled_by_default_and_never_sends(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+
+    gate = owner_review_delivery_gate_report(store)
+
+    assert gate["schema_version"] == "memory-os.owner_review_delivery_gate.v0"
+    assert gate["status"] == "disabled"
+    assert gate["ready_for_delivery"] is False
+    assert gate["delivery_enabled"] is False
+    assert "delivery_not_enabled" in gate["blocked_reasons"]
+    assert gate["boundary"] == {
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+
+
+def test_delivery_gate_can_be_ready_only_with_explicit_owner_channel_and_adapter(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "mode": "dry_run",
+                "owner_id": "owner",
+                "channel": "telegram",
+                "target_ref": "telegram:12345",
+                "direct_message": True,
+                "delivery_enabled": True,
+                "delivery_adapter": "hermes_owner_channel",
+            }
+        },
+        tmp_path,
+    )
+
+    gate = owner_review_delivery_gate_report(store)
+
+    assert gate["status"] == "ready"
+    assert gate["ready_for_delivery"] is True
+    assert gate["blocked_reasons"] == []
+    assert gate["review_channel"]["configured_by_owner"] is True
+    assert gate["review_channel"]["channel"] == "telegram"
+    assert gate["digest"]["raw_body_included"] is False
+    assert gate["digest"]["will_send"] is False
+    assert gate["boundary"]["actual_send"] is False
+
+
+def test_delivery_gate_blocks_unconfigured_adapter_even_with_channel(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "channel": "telegram",
+                "target_ref": "telegram:12345",
+                "direct_message": True,
+                "delivery_enabled": True,
+                "delivery_adapter": "none",
+            }
+        },
+        tmp_path,
+    )
+
+    gate = owner_review_delivery_gate_report(store)
+
+    assert gate["status"] == "blocked"
+    assert "delivery_adapter_not_configured" in gate["blocked_reasons"]
+    assert gate["boundary"]["actual_send"] is False
+
+
+def test_deliver_once_requires_owner_trigger_and_does_not_send_by_default(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+
+    result = deliver_owner_review_digest_once(
+        store,
+        owner_id="owner",
+        delivery_key="rh34d-test",
+        owner_triggered=False,
+        apply=True,
+    )
+
+    assert result["status"] == "skipped"
+    assert "owner_trigger_required" in result["record"]["blocked_reasons"]
+    assert "delivery_not_enabled" in result["record"]["blocked_reasons"]
+    assert result["record"]["boundary"]["actual_unapproved_send"] is False
+    assert result["record"]["owner_effect"]["owner_approved_digest_delivery"] is False
+    assert owner_review_deliveries_path(store.roots).exists()
+    status = owner_review_delivery_status_report(store)
+    assert status["delivery_count"] == 1
+    assert status["sent_count"] == 0
+    assert status["skipped_count"] == 1
+    assert status["unapproved_send_count"] == 0
+
+
+def test_deliver_once_is_legacy_smoke_only_even_when_gate_ready_and_owner_triggered(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(store=store, title="Review bounded proposal", body="RAW PROPOSAL BODY")
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "mode": "dry_run",
+                "owner_id": "owner",
+                "channel": "telegram",
+                "target_ref": "telegram:12345",
+                "direct_message": True,
+                "delivery_enabled": True,
+                "delivery_adapter": "hermes_owner_channel",
+            }
+        },
+        tmp_path,
+    )
+    result = deliver_owner_review_digest_once(
+        store,
+        owner_id="owner",
+        delivery_key="rh34d-test",
+        owner_triggered=True,
+        apply=True,
+    )
+    duplicate = deliver_owner_review_digest_once(
+        store,
+        owner_id="owner",
+        delivery_key="rh34d-test",
+        owner_triggered=True,
+        apply=True,
+    )
+
+    assert result["status"] == "smoke_only"
+    assert duplicate["status"] == "duplicate_ignored"
+    assert "legacy_smoke_only_use_hermes_cron" in result["record"]["blocked_reasons"]
+
+    status = owner_review_delivery_status_report(store)
+    assert status["delivery_count"] == 2
+    assert status["sent_count"] == 0
+    assert status["duplicate_ignored_count"] == 1
+    assert status["owner_approved_digest_delivery_count"] == 0
+    assert status["unapproved_send_count"] == 0
+    assert status["raw_body_included_count"] == 0

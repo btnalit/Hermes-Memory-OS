@@ -61,6 +61,9 @@ proposal_queue: candidate_count=15, pending candidate state count=14
 evidence_scoring: score_count=560
 crystallized_records: 0
 RH-31 eval: warning, failure_count=3 after P1-B attribution fix
+OwnerReviewChannel: dry_run_only, cli preview fallback, raw_body=false
+OwnerDigestPreview: ok, will_send=false, raw_body=false
+OwnerDeliveryGate: disabled, ready_for_delivery=false, actual_send=false
 ```
 
 This means the system is healthy enough to continue development, but not all
@@ -116,6 +119,7 @@ These are not the remaining queue, but future work depends on them.
 | RH-31.0-31.3 eval harness | implemented | first deterministic scorecard exists; P1-B projection miss attributed to fixture/adapter bug; warning findings remain lexical/FTS measurement signals |
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
+| RH-34/RH-35 owner governance | RH-35.1 + RH-34a + RH-34b + RH-34c + RH-34d live on test host; RH-34e redirected | owner action processor, review queue/status/apply CLI, metadata-only channel resolver, digest preview, Memory-OS export eligibility gate, aging projection, and one-shot Hermes send compatibility smoke are deployed; recurring daily review must use Hermes cron/send, with renderer and reply parser still planned |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
 
@@ -582,6 +586,146 @@ Stop signal:
 
 - a module is claimed as active only because the cycle is active, while its own
   artifact count is missing, stale, or unbounded.
+
+### P1-M - Owner Review Digest And Action Workflow
+
+Source:
+
+- `34-owner-review-digest-and-action-workflow.md`
+- `29-memory-os-module-integration-contract.md` Contract 8 - OwnerAction
+
+Status:
+
+- RH-35.1 deployed on `10.20.3.200`: owner action data model, idempotent
+  processor, review queue/status/apply CLI, shell alias parity, and monitor
+  summary fields;
+- RH-34a deployed on `10.20.3.200`: metadata-only owner review channel
+  resolver, bounded digest preview, shell alias parity, and monitor fields;
+- RH-34b deployed on `10.20.3.200`: explicit opt-in delivery gate, shell alias
+  parity, and monitor fields;
+- RH-34c deployed on `10.20.3.200`: review queue aging projection, shell alias
+  parity, and monitor fields;
+- live shell-alias smoke and monitor evidence collected on `10.20.3.200`;
+- RH-34d deployed on `10.20.3.200`: one owner-triggered real-send smoke,
+  delivery ledger, delivery status CLI/shell alias parity, and monitor fields;
+- RH-34d is reclassified as Hermes send compatibility evidence only, not the
+  production recurring delivery architecture;
+- RH-34e.1 deployed on `10.20.3.200`: review digest renderer turns internal review
+  artifacts into owner-readable questions/actions/reasons/consequences with
+  anchors, source-module context, and bounded proposed-memory text for
+  candidate approvals;
+- RH-35.2 deployed on `10.20.3.200`: owner reply parser maps `approve A1`,
+  `reject R2`, `allow A1`, and `feedback F1 too_mechanistic` style replies to
+  OwnerActionProcessor without frontend state mutation, using recorded digest
+  binding when available so anchors are not reinterpreted after the queue
+  changes;
+- RH-34d `deliver-once` is reduced to legacy smoke-only in code; RH-34e must
+  use Hermes cron/send for real recurring delivery;
+- RH-34e recurring owner-channel daily review is not implemented yet and must
+  be implemented as Hermes Cron Owner Review Integration, not as a
+  Memory-OS-owned scheduler/transport.
+
+Reason:
+
+- The cognitive loop now produces review-worthy artifacts, but the owner-facing
+  daily review and approval flow is missing.
+- CLI/status output is a debugging surface, not a sustainable owner workflow.
+- From the owner perspective, the loop is still not closed until a readable
+  digest renderer, owner reply parser, and Hermes cron/send integration are in
+  place. Monitor-only visibility is engineering evidence, not owner
+  governance.
+
+Live evidence:
+
+```text
+crystallized_candidates=161
+crystallized_records=0
+proposal_queue.candidate_count=15
+proposal_queue.state_counts={"approved_for_proposal": 1, "candidate": 14}
+wandering_mind.would_send_count=11
+owner_actions ledger: 0 records after dry-run smoke
+review queue: pending=186, action_required=175
+monitor OwnerReview: unapproved_crystallized=0, owner_actions=0
+review_channel: status=dry_run_only, reason=cli_preview_fallback, raw_body=false
+digest_preview: status=ok, will_send=false, raw_body=false, action_required_total=175
+delivery_gate: status=disabled, ready_for_delivery=false, delivery_enabled=false, actual_send=false
+burden finding: action_required=175, overflow=172-173; first digest would overwhelm owner
+RH-34d smoke:
+  delivery_key=rh34d-smoke-20260525T095719Z
+  result=sent
+  sent_count=1
+  owner_approved_digest_delivery_count=1
+  unapproved_send_count=0
+  raw_body_included_count=0
+  post_smoke_delivery_gate=disabled
+```
+
+Next action:
+
+1. keep RH-34a/RH-34b/RH-34c/RH-34d in observation through scheduled monitor;
+2. get external review on RH-34d smoke evidence as a compatibility smoke, not
+   as approval for Memory-OS-owned recurring delivery;
+3. redesign RH-34e as Hermes Cron Owner Review Integration: installer or
+   operator opt-in creates/configures a Hermes cron delivery job that calls a
+   Memory-OS bounded digest renderer and lets Hermes own delivery;
+4. keep CLI preview as the fallback owner surface;
+5. keep `mailbox` classified as internal AI-agent mailroom evidence, not a
+   left-brain or right-brain cognition module, not an owner digest channel, and
+   not an approval path.
+
+Promotion signal:
+
+- owner action state transitions are idempotent;
+- channel resolver can explain selected/dry-run/unresolved status without
+  reading private bodies;
+- digest preview is bounded, no-send, no-action, and raw-body-free;
+- delivery gate is disabled by default and reports ready only after explicit
+  opt-in prerequisites are satisfied;
+- review aging reports raw/effective burden separately and reduced the deployed
+  first digest from `raw_action_required=175` to `effective_action_required=14`
+  without mutating or hiding backlog;
+- one-shot send smoke proved Hermes can deliver one bounded Memory-OS digest,
+  with `unapproved_send_count=0` and `raw_body_included_count=0`;
+- review digest renderer produces owner-readable action briefs;
+- candidate approval cards show bounded proposed-memory text;
+- owner replies can be parsed into OwnerActionProcessor calls with recorded
+  digest binding and ambiguity protection;
+- legacy `deliver-once` returns smoke-only and does not call transport;
+- Hermes Cron Owner Review Integration is planned as RH-34e and must prove one
+  digest per owner/window, skipped/error outcomes, and rollback by disabling
+  the Hermes cron job plus Memory-OS recurring flag;
+- digest preview contains bounded summaries and no raw bodies;
+- monitor reports pending/stale/action/error counts;
+- feedback backflow is visible as aggregation, not immediate route mutation;
+- proposal approval does not execute;
+- candidate approval creates crystallized records only through explicit owner
+  action.
+- unapproved crystallized write count remains zero, while owner-approved
+  crystallized writes are counted separately with matching owner action records;
+- digest burden metrics distinguish cold-start from active owner use.
+
+Stop signal:
+
+- digest includes raw private body;
+- digest sends to an unverified, unresolved, group, or non-owner channel;
+- delivery gate reports ready before explicit opt-in and owner channel config;
+- delivery gate or delivery adapter sets `actual_send=true` without external
+  review and owner opt-in;
+- aging closes, rejects, approves, or hides review items instead of changing
+  display priority only;
+- one-shot smoke sends more than one message or monitor cannot distinguish
+  owner-approved send from unapproved send;
+- recurring daily delivery starts before RH-34c/RH-34d review gates pass,
+  before renderer/reply-parser are usable, or without explicit owner opt-in;
+- Memory-OS implements a parallel recurring transport/scheduler instead of
+  handing bounded digest output to Hermes cron/send-message;
+- recurring daily delivery sends duplicate digests in one schedule window;
+- any owner action bypasses OwnerActionProcessor;
+- duplicate owner actions mutate the same target twice;
+- crystallized memory is written without a matching owner action record;
+- proposal approval causes actual execution;
+- feedback is treated as crystallized approval;
+- speak-once enables default sending.
 
 ## Active P2 Queue
 

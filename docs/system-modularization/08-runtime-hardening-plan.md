@@ -1417,6 +1417,100 @@ Recommended order:
 6. RH-32 consolidation suggestions, no approval
 7. RH-33 top-of-mind scoring only
 
+Owner governance addition:
+
+- RH-34 Daily Owner Review Digest and RH-35 Owner Action Processor are now the
+  next product-usability layer after the no-send cognitive loop. They are
+  documented in `34-owner-review-digest-and-action-workflow.md`.
+- The reason is live evidence, not speculation: `10.20.3.200` currently has
+  161 crystallized candidates, 15 proposal queue items with 14 pending
+  candidates, and 11 wandering would-send artifacts, but no owner action ledger
+  or review queue ledger.
+- RH-35 must come before RH-34 Telegram send. OwnerActionProcessor can be used
+  by CLI and dry-run digest previews first; digest delivery is only a frontend.
+- Digest delivery is opt-in. No free-form proactive send is allowed.
+- All owner actions must pass Contract 8 - OwnerAction in
+  `29-memory-os-module-integration-contract.md`.
+
+RH-35.1 implementation note:
+
+- The OwnerActionProcessor slice is deployed on `10.20.3.200` with idempotent
+  `review status|queue|apply` commands and shell alias parity.
+- Monitor has OwnerReview fields for pending/stale/action/error counts,
+  feedback backflow, owner-approved crystallized writes, and unapproved
+  crystallized write failures. The first live monitor after deployment showed
+  `pending=186`, `action_required=175`, `owner_actions=0`, and
+  `unapproved_crystallized=0`.
+- RH-34 digest generation and channel delivery remain gated; no proactive
+  Telegram/send behavior is enabled by this slice.
+
+RH-34a implementation note:
+
+- The metadata-only Owner Review Channel Resolver and bounded digest preview
+  are deployed on `10.20.3.200`.
+- Shell alias parity is available through
+  `hermes memory-os-agent-os review channel` and
+  `hermes memory-os-agent-os review preview-digest`.
+- The resolver reads explicit owner config or metadata-only `state.db` session
+  rows. It intentionally does not parse `session_*.json` files because they may
+  contain private message bodies.
+- The first live monitor showed:
+  `OwnerReviewChannel.status=dry_run_only`,
+  `OwnerReviewChannel.reason=cli_preview_fallback`,
+  `OwnerDigestPreview.status=ok`,
+  `OwnerDigestPreview.will_send=false`,
+  `OwnerDigestPreview.raw_body_included=false`, and no FAIL.
+- Channel delivery remains opt-in and gated. RH-34a is preview/resolution only;
+  it does not send Telegram messages or create owner action records.
+
+RH-34b implementation note:
+
+- The explicit opt-in delivery gate is deployed on `10.20.3.200` as
+  `hermes memory-os-agent-os review delivery-gate`.
+- It is a pre-send decision surface, not a delivery adapter. It does not send
+  Telegram or any other channel message.
+- Default live state:
+  `status=disabled`, `ready_for_delivery=false`,
+  `delivery_enabled=false`, `delivery_adapter=none`,
+  `actual_send=false`, `actual_execute=false`,
+  `actual_identity_write=false`, and
+  `actual_unapproved_crystallized_approval=false`.
+- Monitor now reports `OwnerDeliveryGate` and passes
+  `owner_review_delivery_gate_ok`.
+- External review is required before enabling a real owner-channel delivery
+  adapter or setting the live gate into a send-capable path.
+
+RH-34c/RH-34d implementation note:
+
+- Live evidence exposed an owner-burden issue: `pending=186`,
+  `action_required=175`, and digest overflow above 170 items.
+- RH-34c is deployed on `10.20.3.200` as review queue aging projection.
+  It reduced the live digest burden from `raw_action_required=175` to
+  `effective_action_required=14` while preserving raw backlog visibility and
+  keeping `canonical_state_changed=false`, `owner_action_created=false`, and
+  `actual_send=false`.
+- RH-34d is deployed on `10.20.3.200` as exactly one owner-triggered
+  real-send smoke. The smoke used the configured owner channel, wrote one
+  `memory-os.owner_review_delivery.v0` ledger record with
+  `owner_approved_digest_delivery=true`, restored the delivery config to
+  disabled afterward, and monitor reported `sent_count=1`,
+  `unapproved_send_count=0`, and `raw_body_included_count=0`.
+- RH-34d is compatibility evidence for Hermes' existing send path, not a
+  decision that Memory-OS should own recurring transport.
+- Review of the `10.20.2.88` Hermes prototype showed that Hermes already owns
+  `send_message_tool`, `hermes cron --deliver`, home-channel delivery,
+  cooldown/rate-limit/no-reply behavior, and mailbox final-only/proactive-send
+  gates.
+- RH-34e is redirected to Hermes Cron Owner Review Integration. Memory-OS must
+  render bounded review payloads and eligibility status; Hermes must own the
+  schedule and delivery.
+- Before RH-34e implementation, add RH-34e.1 Review Digest Renderer and
+  RH-35.2 Owner Reply Parser so owner-facing digest text is actionable and
+  replies flow through OwnerActionProcessor.
+- RH-34e must remain disabled until RH-34c/RH-34d pass review, renderer and
+  reply parser are usable, the owner explicitly opts in, and rollback is
+  possible by disabling the Hermes cron job plus Memory-OS recurring flag.
+
 The active roadmap document is the current source for queue visibility. It
 also tracks earlier module lines that should not be lost while RH-31 work is
 active: DeepReflection / Conversation Carryover session injection,

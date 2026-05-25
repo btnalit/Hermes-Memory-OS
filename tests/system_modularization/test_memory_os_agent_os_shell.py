@@ -98,6 +98,103 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     feedback_history_args = parser.parse_args(["memory-sources", "feedback", "history", "--limit", "3"])
     assert feedback_history_args.memory_sources_feedback_command == "history"
     assert feedback_history_args.limit == 3
+    review_status_args = parser.parse_args(["review", "status"])
+    assert review_status_args.agent_os_command == "review"
+    assert review_status_args.review_command == "status"
+    review_aging_args = parser.parse_args(["review", "aging-report"])
+    assert review_aging_args.review_command == "aging-report"
+    review_queue_args = parser.parse_args(["review", "queue", "--limit", "4"])
+    assert review_queue_args.review_command == "queue"
+    assert review_queue_args.limit == 4
+    review_channel_args = parser.parse_args(["review", "channel"])
+    assert review_channel_args.review_command == "channel"
+    review_delivery_gate_args = parser.parse_args(["review", "delivery-gate", "--owner", "owner"])
+    assert review_delivery_gate_args.review_command == "delivery-gate"
+    assert review_delivery_gate_args.owner == "owner"
+    review_delivery_status_args = parser.parse_args(["review", "delivery-status"])
+    assert review_delivery_status_args.review_command == "delivery-status"
+    review_deliver_once_args = parser.parse_args(
+        [
+            "review",
+            "deliver-once",
+            "--owner",
+            "owner",
+            "--delivery-key",
+            "rh34d-test",
+            "--owner-triggered",
+            "--apply",
+        ]
+    )
+    assert review_deliver_once_args.review_command == "deliver-once"
+    assert review_deliver_once_args.owner == "owner"
+    assert review_deliver_once_args.delivery_key == "rh34d-test"
+    assert review_deliver_once_args.owner_triggered is True
+    assert review_deliver_once_args.apply is True
+    review_preview_args = parser.parse_args(
+        [
+            "review",
+            "preview-digest",
+            "--owner",
+            "owner",
+            "--max-action-required",
+            "2",
+            "--max-review-suggested",
+            "3",
+            "--max-fyi",
+            "4",
+        ]
+    )
+    assert review_preview_args.review_command == "preview-digest"
+    assert review_preview_args.owner == "owner"
+    assert review_preview_args.max_action_required == 2
+    assert review_preview_args.max_review_suggested == 3
+    assert review_preview_args.max_fyi == 4
+    review_render_args = parser.parse_args(
+        [
+            "review",
+            "render-digest",
+            "--owner",
+            "owner",
+            "--channel",
+            "telegram",
+            "--format",
+            "text",
+            "--bounded",
+            "--record-active",
+        ]
+    )
+    assert review_render_args.review_command == "render-digest"
+    assert review_render_args.owner == "owner"
+    assert review_render_args.channel == "telegram"
+    assert review_render_args.format == "text"
+    assert review_render_args.bounded is True
+    assert review_render_args.record_active is True
+    review_reply_args = parser.parse_args(
+        ["review", "reply", "approve", "A1", "--owner", "owner", "--digest-id", "odig_test", "--apply"]
+    )
+    assert review_reply_args.review_command == "reply"
+    assert review_reply_args.reply == ["approve", "A1"]
+    assert review_reply_args.owner == "owner"
+    assert review_reply_args.digest_id == "odig_test"
+    assert review_reply_args.apply is True
+    review_apply_args = parser.parse_args(
+        [
+            "review",
+            "apply",
+            "--action",
+            "approve_candidate",
+            "--target",
+            "candidate:cand_1",
+            "--owner",
+            "owner",
+            "--apply",
+        ]
+    )
+    assert review_apply_args.review_command == "apply"
+    assert review_apply_args.action == "approve_candidate"
+    assert review_apply_args.target == "candidate:cand_1"
+    assert review_apply_args.owner == "owner"
+    assert review_apply_args.apply is True
     metadata_retention_args = parser.parse_args(
         ["metadata-retention", "--memory-sources-days", "30", "--eval-report-root", "eval/reports/memory-os-rh31"]
     )

@@ -22,6 +22,7 @@ _ALLOWED_ALIASES = {
     "low-clue-recall",
     "memory-sources",
     "metadata-retention",
+    "review",
     "modules",
     "eval",
 }
@@ -106,6 +107,63 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    review_parser = subs.add_parser("review")
+    review_subs = review_parser.add_subparsers(dest="review_command", required=True)
+    review_subs.add_parser("status")
+    review_subs.add_parser("aging-report")
+    review_subs.add_parser("channel")
+    review_subs.add_parser("delivery-status")
+    review_delivery_gate = review_subs.add_parser("delivery-gate")
+    review_delivery_gate.add_argument("--owner", default="")
+    review_deliver_once = review_subs.add_parser("deliver-once")
+    review_deliver_once.add_argument("--owner", default="")
+    review_deliver_once.add_argument("--delivery-key", default="")
+    review_deliver_once.add_argument("--owner-triggered", action="store_true")
+    review_deliver_once.add_argument("--apply", action="store_true")
+    review_queue = review_subs.add_parser("queue")
+    review_queue.add_argument("--limit", type=int, default=20)
+    review_preview = review_subs.add_parser("preview-digest")
+    review_preview.add_argument("--owner", default="")
+    review_preview.add_argument("--max-action-required", type=int)
+    review_preview.add_argument("--max-review-suggested", type=int)
+    review_preview.add_argument("--max-fyi", type=int)
+    review_render = review_subs.add_parser("render-digest")
+    review_render.add_argument("--owner", default="")
+    review_render.add_argument("--channel", default="cli")
+    review_render.add_argument("--max-action-required", type=int)
+    review_render.add_argument("--max-review-suggested", type=int)
+    review_render.add_argument("--max-fyi", type=int)
+    review_render.add_argument("--format", choices=["json", "text"], default="json")
+    review_render.add_argument("--bounded", action="store_true")
+    review_render.add_argument("--record-active", action="store_true")
+    review_reply = review_subs.add_parser("reply")
+    review_reply.add_argument("reply", nargs="+")
+    review_reply.add_argument("--owner", default="owner")
+    review_reply.add_argument("--channel", default="cli")
+    review_reply.add_argument("--digest-id", default="")
+    review_reply.add_argument("--apply", action="store_true")
+    review_reply.add_argument("--max-action-required", type=int)
+    review_reply.add_argument("--max-review-suggested", type=int)
+    review_reply.add_argument("--max-fyi", type=int)
+    review_apply = review_subs.add_parser("apply")
+    review_apply.add_argument(
+        "--action",
+        required=True,
+        choices=[
+            "approve_candidate",
+            "reject_candidate",
+            "mark_feedback",
+            "approve_proposal",
+            "reject_proposal",
+            "allow_speak_once",
+        ],
+    )
+    review_apply.add_argument("--target", required=True)
+    review_apply.add_argument("--owner", default="owner")
+    review_apply.add_argument("--channel", default="cli")
+    review_apply.add_argument("--note", default="")
+    review_apply.add_argument("--rating", default="")
+    review_apply.add_argument("--apply", action="store_true")
     metadata_retention_parser = subs.add_parser("metadata-retention")
     metadata_retention_parser.add_argument("--memory-sources-days", type=int, default=30)
     metadata_retention_parser.add_argument("--feedback-days", type=int, default=30)

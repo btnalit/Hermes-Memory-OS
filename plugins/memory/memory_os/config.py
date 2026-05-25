@@ -43,6 +43,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "on_error": "deterministic_fallback",
         },
     },
+    "owner_review": {
+        "enabled": False,
+        "mode": "dry_run",
+        "owner_id": "owner",
+        "channel": "cli",
+        "target_ref": "",
+        "direct_message": False,
+        "allow_group": False,
+        "schedule": "daily",
+        "raw_body": False,
+        "actions_enabled": False,
+        "delivery_enabled": False,
+        "delivery_adapter": "none",
+        "aging_enabled": True,
+        "aging_action_required_days": 7,
+        "aging_fyi_days": 30,
+        "max_action_required": 3,
+        "max_review_suggested": 5,
+        "max_fyi": 5,
+    },
 }
 
 
@@ -89,6 +109,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "description": "Low-clue recall router and optional report-only LLM judge",
             "default": DEFAULT_CONFIG["low_clue_recall"],
         },
+        {
+            "key": "owner_review",
+            "description": "Owner review digest and channel resolver settings",
+            "default": DEFAULT_CONFIG["owner_review"],
+        },
     ]
 
 
@@ -129,6 +154,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["context_router"] = _merge_context_router_config(merged.get("context_router"))
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
+    merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
     return merged
 
 
@@ -193,6 +219,40 @@ def _merge_low_clue_recall_config(value: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         judge["max_candidates"] = 4
     merged["llm_judge"] = judge
+    return merged
+
+
+def _merge_owner_review_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["owner_review"])
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in default:
+        if key in value:
+            merged[key] = value[key]
+    for key in (
+        "max_action_required",
+        "max_review_suggested",
+        "max_fyi",
+        "aging_action_required_days",
+        "aging_fyi_days",
+    ):
+        try:
+            merged[key] = max(int(merged.get(key) or default[key]), 0)
+        except (TypeError, ValueError):
+            merged[key] = default[key]
+    merged["mode"] = str(merged.get("mode") or "dry_run")
+    merged["channel"] = str(merged.get("channel") or "cli")
+    merged["target_ref"] = str(merged.get("target_ref") or "")
+    merged["owner_id"] = str(merged.get("owner_id") or "owner")
+    merged["enabled"] = bool(merged.get("enabled"))
+    merged["direct_message"] = bool(merged.get("direct_message"))
+    merged["allow_group"] = bool(merged.get("allow_group"))
+    merged["raw_body"] = False
+    merged["actions_enabled"] = bool(merged.get("actions_enabled"))
+    merged["delivery_enabled"] = bool(merged.get("delivery_enabled"))
+    merged["delivery_adapter"] = str(merged.get("delivery_adapter") or "none")
+    merged["aging_enabled"] = bool(merged.get("aging_enabled"))
     return merged
 
 

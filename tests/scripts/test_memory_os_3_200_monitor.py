@@ -215,6 +215,8 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             "low_clue_recall_ok": True,
             "modules_ok": True,
             "eval_ok": True,
+            "review_ok": True,
+            "review_aging_ok": True,
         },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
@@ -278,6 +280,121 @@ def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "rh31_eval_forbidden_fields" for item in classification["fail"])
+
+
+def test_classify_snapshot_tracks_owner_review_status_and_illegal_crystallized_writes():
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review"] = {
+        "schema_version": "memory-os.owner_review_status.v0",
+        "review_queue": {"pending_count": 3, "action_required_count": 2, "stale_count": 0},
+        "owner_action_count": 4,
+        "action_type_counts": {"approve_candidate": 1, "reject_candidate": 1},
+        "duplicate_ignored_count": 0,
+        "error_count": 0,
+        "owner_approved_crystallized_write_count": 1,
+        "unapproved_crystallized_write_count": 0,
+        "digest_burden": {"owner_active_period": True},
+        "feedback_backflow": {"feedback_action_count": 1},
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "owner_review_status_ok" for item in classification["pass"])
+    assert "OwnerReview" in rendered
+    assert "'owner_approved_crystallized': 1" in rendered
+
+    snapshot["owner_review"]["unapproved_crystallized_write_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_unapproved_crystallized_write" for item in classification["fail"])
+
+
+def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_boundaries():
+    snapshot = _healthy_snapshot()
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "owner_review_aging_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_channel_resolver_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_delivery_status_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_delivery_gate_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_digest_preview_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_rendered_digest_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
+    assert "OwnerReviewAging" in rendered
+    assert "OwnerReviewChannel" in rendered
+    assert "OwnerDeliveryGate" in rendered
+    assert "OwnerDeliveryStatus" in rendered
+    assert "OwnerDigestPreview" in rendered
+
+    snapshot["owner_review_digest_preview"]["will_send"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_digest_would_send_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_channel"]["raw_body_included"] = True
+    snapshot["owner_review_digest_preview"]["raw_body_included"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_channel_raw_body_included" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_digest_raw_body_included" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_rendered_digest"]["text_has_internal_schema"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_rendered_digest_internal_schema_text" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_reply_dry_run"]["dry_run"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_reply_dry_run_mutated_state" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_delivery_gate"]["boundary"]["actual_send"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_delivery_gate_actual_send_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_delivery_gate"]["status"] = "ready"
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "owner_review_delivery_gate_ready_for_review" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_delivery_status"]["unapproved_send_count"] = 1
+    snapshot["owner_review_delivery_status"]["raw_body_included_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_unapproved_send" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_delivery_raw_body_included" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_owner_review_aging_mutates_state_or_body():
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_aging"]["canonical_state_changed"] = True
+    snapshot["owner_review_aging"]["owner_action_created"] = True
+    snapshot["owner_review_aging"]["raw_body_included"] = True
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_aging_canonical_state_changed_true" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_aging_owner_action_created_true" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_aging_raw_body_included_true" for item in classification["fail"])
 
 
 def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_send():
@@ -793,7 +910,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             },
             "doctor": {"status": "ok", "findings": []},
             "status_tool_contract": {"status": "ok", "findings": []},
-                "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "metadata_retention_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
+            "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "metadata_retention_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True, "review_ok": True, "review_aging_ok": True},
             "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
             "rh26_apply_probe": [],
             "deep_reflection": {},
@@ -854,7 +971,23 @@ def _healthy_snapshot() -> dict:
         },
         "doctor": {"status": "ok", "findings": [("hindsight_adapter_disabled", "warning")]},
         "status_tool_contract": {"status": "ok", "findings": []},
-        "shell_alias_no_env": {"status_ok": True, "doctor_ok": True, "memory_sources_ok": True, "metadata_retention_ok": True, "low_clue_recall_ok": True, "modules_ok": True, "eval_ok": True},
+        "shell_alias_no_env": {
+            "status_ok": True,
+            "doctor_ok": True,
+            "memory_sources_ok": True,
+            "metadata_retention_ok": True,
+            "low_clue_recall_ok": True,
+            "modules_ok": True,
+            "eval_ok": True,
+            "review_ok": True,
+            "review_aging_ok": True,
+            "review_channel_ok": True,
+            "review_delivery_status_ok": True,
+            "review_delivery_gate_ok": True,
+            "review_digest_ok": True,
+            "review_render_ok": True,
+            "review_reply_ok": True,
+        },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {
@@ -865,6 +998,181 @@ def _healthy_snapshot() -> dict:
         },
         "compaction": {},
         "module_artifacts": _healthy_module_artifacts(),
+        "owner_review": _healthy_owner_review(),
+        "owner_review_aging": _healthy_owner_review_aging(),
+        "owner_review_channel": _healthy_owner_review_channel(),
+        "owner_review_delivery_status": _healthy_owner_delivery_status(),
+        "owner_review_delivery_gate": _healthy_owner_delivery_gate(),
+        "owner_review_digest_preview": _healthy_owner_digest_preview(),
+        "owner_review_rendered_digest": _healthy_owner_rendered_digest(),
+        "owner_review_reply_dry_run": _healthy_owner_reply_dry_run(),
+    }
+
+
+def _healthy_owner_review() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_status.v0",
+        "review_queue": {"pending_count": 0, "action_required_count": 0, "stale_count": 0},
+        "owner_action_count": 0,
+        "action_type_counts": {},
+        "duplicate_ignored_count": 0,
+        "error_count": 0,
+        "owner_approved_crystallized_write_count": 0,
+        "unapproved_crystallized_write_count": 0,
+        "digest_burden": {"owner_active_period": False, "phase": "cold_start"},
+        "feedback_backflow": {"feedback_action_count": 0},
+    }
+
+
+def _healthy_owner_review_aging() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_aging.v0",
+        "enabled": True,
+        "action_required_days": 7,
+        "fyi_days": 30,
+        "raw_action_required_count": 0,
+        "effective_action_required_count": 0,
+        "aged_to_review_suggested_count": 0,
+        "aged_to_fyi_count": 0,
+        "unknown_timestamp_count": 0,
+        "raw_body_included": False,
+        "canonical_state_changed": False,
+        "owner_action_created": False,
+    }
+
+
+def _healthy_owner_review_channel() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_channel.v0",
+        "status": "dry_run_only",
+        "reason": "cli_preview_fallback",
+        "profile": "default",
+        "owner_id": "owner",
+        "channel": "cli",
+        "target_ref": "",
+        "direct_message": False,
+        "last_owner_activity_at": "",
+        "configured_by_owner": False,
+        "fallback_used": True,
+        "raw_body_included": False,
+    }
+
+
+def _healthy_owner_digest_preview() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_digest_preview.v0",
+        "status": "ok",
+        "digest_id": "digest_test",
+        "owner_id": "owner",
+        "will_send": False,
+        "delivery_skipped": True,
+        "actions_enabled": False,
+        "raw_body_included": False,
+        "counts": {
+            "action_required_total": 0,
+            "action_required_shown": 0,
+            "review_suggested_total": 0,
+            "review_suggested_shown": 0,
+            "fyi_total": 1,
+            "fyi_shown": 1,
+        },
+        "overflow": {"action_required": 0, "review_suggested": 0, "fyi": 0},
+        "sections": {"action_required": [], "review_suggested": [], "fyi": []},
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+    }
+
+
+def _healthy_owner_rendered_digest() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_rendered_digest.v0",
+        "status": "ok",
+        "will_send": False,
+        "raw_body_included": False,
+        "text_char_count": 120,
+        "text_has_internal_schema": False,
+        "section_counts": {"action_required": 0, "review_suggested": 0, "fyi": 1},
+        "anchors": {"action_required": [], "review_suggested": [], "fyi": ["F1"]},
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+    }
+
+
+def _healthy_owner_reply_dry_run() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_reply.v0",
+        "status": "ok",
+        "dry_run": True,
+        "reason": "",
+        "parsed_action_type": "approve_proposal",
+        "parsed_target_type": "proposal",
+        "owner_action_status": "ok",
+        "owner_action_dry_run": True,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+    }
+
+
+def _healthy_owner_delivery_status() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_delivery_status.v0",
+        "delivery_count": 0,
+        "sent_count": 0,
+        "skipped_count": 0,
+        "error_count": 0,
+        "duplicate_ignored_count": 0,
+        "owner_approved_digest_delivery_count": 0,
+        "unapproved_send_count": 0,
+        "raw_body_included_count": 0,
+        "last_delivery": {},
+    }
+
+
+def _healthy_owner_delivery_gate() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_delivery_gate.v0",
+        "profile": "default",
+        "owner_id": "owner",
+        "status": "disabled",
+        "ready_for_delivery": False,
+        "delivery_enabled": False,
+        "delivery_adapter": "none",
+        "blocked_reasons": ["delivery_not_enabled", "delivery_adapter_not_configured"],
+        "review_channel": {
+            "status": "dry_run_only",
+            "reason": "cli_preview_fallback",
+            "channel": "cli",
+            "target_ref": "",
+            "direct_message": False,
+            "configured_by_owner": False,
+            "fallback_used": True,
+            "raw_body_included": False,
+        },
+        "digest": {
+            "schema_version": "memory-os.owner_review_digest_preview.v0",
+            "status": "ok",
+            "raw_body_included": False,
+            "will_send": False,
+            "actions_enabled": False,
+        },
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
     }
 
 
