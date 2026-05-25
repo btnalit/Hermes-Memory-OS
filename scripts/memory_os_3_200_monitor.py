@@ -364,6 +364,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_rendered_digest_would_send_true"})
             if rendered_digest.get("text_has_internal_schema") is True:
                 fail.append({"code": "owner_review_rendered_digest_internal_schema_text"})
+            if rendered_digest.get("text_has_transcript_marker") is True:
+                fail.append({"code": "owner_review_rendered_digest_transcript_marker"})
+            if int(rendered_digest.get("text_char_count") or 0) > 2400:
+                fail.append({"code": "owner_review_rendered_digest_too_long", "value": rendered_digest.get("text_char_count")})
             for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
                 if (rendered_digest.get("boundary") or {}).get(key) is True:
                     fail.append({"code": f"owner_review_rendered_digest_{key}_true"})
@@ -371,6 +375,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 rendered_digest.get("raw_body_included") is not True
                 and rendered_digest.get("will_send") is not True
                 and rendered_digest.get("text_has_internal_schema") is not True
+                and rendered_digest.get("text_has_transcript_marker") is not True
+                and int(rendered_digest.get("text_char_count") or 0) <= 2400
             ):
                 passed.append({"code": "owner_review_rendered_digest_ok"})
         else:
@@ -381,7 +387,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         if reply_dry_run.get("schema_version") == "memory-os.owner_review_reply.v0":
             if reply_dry_run.get("dry_run") is not True:
                 fail.append({"code": "owner_review_reply_dry_run_mutated_state", "value": reply_dry_run})
-            if reply_dry_run.get("owner_action_dry_run") is not True:
+            if reply_dry_run.get("status") == "ok" and reply_dry_run.get("owner_action_dry_run") is not True:
                 fail.append({"code": "owner_review_reply_owner_action_not_dry_run", "value": reply_dry_run})
             for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
                 if (reply_dry_run.get("boundary") or {}).get(key) is True:
@@ -390,6 +396,34 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 passed.append({"code": "owner_review_reply_dry_run_ok"})
         else:
             warn.append({"code": "owner_review_reply_dry_run_unavailable", "value": reply_dry_run})
+
+    ingress_guard = snapshot.get("owner_review_ingress_guard", {})
+    if ingress_guard:
+        if ingress_guard.get("schema_version") == "memory-os.owner_review_ingress_guard.v0":
+            if ingress_guard.get("legacy_anchor_accepted") is True:
+                fail.append({"code": "owner_review_legacy_anchor_accepted", "value": "approve A2"})
+            if ingress_guard.get("legacy_reject_anchor_accepted") is True:
+                fail.append({"code": "owner_review_legacy_reject_anchor_accepted", "value": "reject R1"})
+            if ingress_guard.get("ordinary_anchor_text_accepted") is True:
+                fail.append({"code": "owner_review_ordinary_anchor_text_accepted"})
+            if ingress_guard.get("token_command_accepted") is not True:
+                fail.append({"code": "owner_review_token_command_not_accepted"})
+            if ingress_guard.get("slash_token_command_accepted") is not True:
+                fail.append({"code": "owner_review_slash_token_command_not_accepted"})
+            if ingress_guard.get("feedback_token_command_accepted") is not True:
+                fail.append({"code": "owner_review_feedback_token_command_not_accepted"})
+            if (
+                ingress_guard.get("legacy_anchor_accepted") is not True
+                and ingress_guard.get("legacy_reject_anchor_accepted") is not True
+                and ingress_guard.get("ordinary_anchor_text_accepted") is not True
+                and ingress_guard.get("token_command_accepted") is True
+                and ingress_guard.get("slash_token_command_accepted") is True
+                and ingress_guard.get("feedback_token_command_accepted") is True
+            ):
+                passed.append({"code": "owner_review_ingress_guard_token_only"})
+        else:
+            warn.append({"code": "owner_review_ingress_guard_unavailable", "value": ingress_guard})
+
 
     delivery_gate = snapshot.get("owner_review_delivery_gate", {})
     delivery_status = snapshot.get("owner_review_delivery_status", {})
@@ -694,6 +728,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerDigestPreview={_owner_digest_preview_summary(snapshot.get('owner_review_digest_preview') or {})}",
         f"- OwnerRenderedDigest={_owner_rendered_digest_summary(snapshot.get('owner_review_rendered_digest') or {})}",
         f"- OwnerReplyDryRun={_owner_reply_dry_run_summary(snapshot.get('owner_review_reply_dry_run') or {})}",
+        f"- OwnerIngressGuard={_owner_ingress_guard_summary(snapshot.get('owner_review_ingress_guard') or {})}",
         f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
         f"- OwnerDeliveryGate={_owner_delivery_gate_summary(snapshot.get('owner_review_delivery_gate') or {})}",
         f"- OwnerCronIntegration={_owner_cron_integration_summary(snapshot.get('owner_review_cron_integration') or {})}",
@@ -917,6 +952,7 @@ def _owner_rendered_digest_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "raw_body_included": summary.get("raw_body_included"),
         "text_char_count": summary.get("text_char_count"),
         "text_has_internal_schema": summary.get("text_has_internal_schema"),
+        "text_has_transcript_marker": summary.get("text_has_transcript_marker"),
         "section_counts": summary.get("section_counts"),
     }
 
@@ -930,6 +966,18 @@ def _owner_reply_dry_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "owner_action_status": summary.get("owner_action_status"),
         "owner_action_dry_run": summary.get("owner_action_dry_run"),
         "reason": summary.get("reason"),
+        "command_source": summary.get("command_source"),
+    }
+
+
+def _owner_ingress_guard_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "legacy_anchor_accepted": summary.get("legacy_anchor_accepted"),
+        "legacy_reject_anchor_accepted": summary.get("legacy_reject_anchor_accepted"),
+        "ordinary_anchor_text_accepted": summary.get("ordinary_anchor_text_accepted"),
+        "token_command_accepted": summary.get("token_command_accepted"),
+        "slash_token_command_accepted": summary.get("slash_token_command_accepted"),
+        "feedback_token_command_accepted": summary.get("feedback_token_command_accepted"),
     }
 
 
@@ -1574,7 +1622,7 @@ def shell_alias_no_env():
     review_delivery_gate = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-gate"])
     review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
     review_render = load_json_cmd(["hermes", "memory-os-agent-os", "review", "render-digest"])
-    review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "approve", "A1"])
+    review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "memory", "approve", "oa_deadbeef"])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
@@ -1623,6 +1671,7 @@ def owner_review_rendered_digest_summary():
       "raw_body_included": report.get("raw_body_included"),
       "text_char_count": len(text),
       "text_has_internal_schema": any(token in text for token in ("Candidate kind=", "source_events=", "sensitivity=")),
+      "text_has_transcript_marker": any(token in text for token in ("User:", "Assistant:", "用户:", "助手:", "用户：", "助手：", "| Assistant:", "| User:")),
       "section_counts": {key: len(value) for key, value in sections.items() if isinstance(value, list)},
       "anchors": {
         key: [str(item.get("anchor") or "") for item in value if isinstance(item, dict)]
@@ -1633,7 +1682,22 @@ def owner_review_rendered_digest_summary():
     }
 
 def owner_review_reply_dry_run_summary():
-    report = memory_os_cli(["review", "reply", "approve", "A1", "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
+    command = _latest_recorded_owner_command()
+    command_source = "latest_recorded_digest" if command else ""
+    if not command:
+        command_source = "fresh_render_no_record"
+        rendered = memory_os_cli(["review", "render-digest", "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
+        if isinstance(rendered, dict):
+            command = _first_rendered_action_command(rendered)
+    if not command:
+        return {
+          "schema_version": "memory-os.owner_review_reply.v0",
+          "status": "needs_clarification",
+          "dry_run": True,
+          "reason": "no_action_command_available",
+          "command_source": command_source,
+        }
+    report = memory_os_cli(["review", "reply", *command.split(), "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
     if not isinstance(report, dict) or report.get("_error"):
         return report
     parsed = report.get("parsed") if isinstance(report.get("parsed"), dict) else {}
@@ -1643,12 +1707,69 @@ def owner_review_reply_dry_run_summary():
       "status": report.get("status"),
       "dry_run": report.get("dry_run"),
       "reason": report.get("reason"),
+      "command_source": command_source,
       "parsed_action_type": parsed.get("action_type"),
       "parsed_target_type": parsed.get("target_type"),
       "owner_action_status": owner_action.get("status"),
       "owner_action_dry_run": owner_action.get("dry_run"),
       "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
     }
+
+def _first_rendered_action_command(rendered):
+    for items in (rendered.get("sections") or {}).values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            commands = item.get("action_commands") if isinstance(item.get("action_commands"), list) else []
+            command = str(commands[0] if commands else "")
+            if command:
+                return command
+    return ""
+
+def _latest_recorded_owner_command():
+    path = Path("/root/.hermes/memory-os/system/owner_review_rendered_digests.jsonl")
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except Exception:
+            continue
+        digest = record.get("rendered_digest") if isinstance(record.get("rendered_digest"), dict) else {}
+        command = _first_rendered_action_command(digest)
+        if command:
+            return command
+    return ""
+
+def owner_review_ingress_guard_summary():
+    env = dict(os.environ)
+    env["HERMES_HOME"] = "/root/.hermes"
+    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins:" + env.get("PYTHONPATH", "")
+    code = """
+import json
+from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply
+cases = {
+    "legacy_anchor_accepted": _looks_like_owner_review_reply("approve A2"),
+    "legacy_reject_anchor_accepted": _looks_like_owner_review_reply("reject R1"),
+    "ordinary_anchor_text_accepted": _looks_like_owner_review_reply("普通聊天里提到 approve A2"),
+    "token_command_accepted": _looks_like_owner_review_reply("memory approve oa_12345678"),
+    "slash_token_command_accepted": _looks_like_owner_review_reply("/memory reject oa_12345678"),
+    "feedback_token_command_accepted": _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanistic"),
+}
+print(json.dumps({"schema_version": "memory-os.owner_review_ingress_guard.v0", **cases}, ensure_ascii=False, sort_keys=True))
+"""
+    report = load_json_cmd(["python3", "-c", code], env=env)
+    if isinstance(report, dict) and report.get("_error"):
+        report.setdefault("schema_version", "memory-os.owner_review_ingress_guard.v0")
+    return report
 
 status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
 doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
@@ -1665,6 +1786,7 @@ owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
 owner_review_reply_dry_run = owner_review_reply_dry_run_summary()
+owner_review_ingress_guard = owner_review_ingress_guard_summary()
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
 df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
@@ -1709,6 +1831,7 @@ print(json.dumps({
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,
   "owner_review_reply_dry_run": owner_review_reply_dry_run,
+  "owner_review_ingress_guard": owner_review_ingress_guard,
   "module_artifacts": module_artifact_summary(),
   "expression_artifacts": expression_artifact_summary(),
   "session_mirror": session_mirror_summary(),

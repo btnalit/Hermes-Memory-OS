@@ -20,6 +20,7 @@ from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
 from .low_clue_recall import low_clue_judge_availability
+from .owner_actions import parse_owner_review_reply
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -44,6 +45,8 @@ class MemoryOSProvider(MemoryProvider):
         self._worker_stop = threading.Event()
         self._current_task_anchor = ""
         self._foreground_task_only_prefetch = False
+        self._last_owner_review_reply_result: dict[str, Any] | None = None
+        self._last_owner_review_reply_query = ""
 
     @property
     def name(self) -> str:
@@ -70,6 +73,8 @@ class MemoryOSProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._store is None:
             return ""
+        if self._last_owner_review_reply_result and query == self._last_owner_review_reply_query:
+            return _owner_review_reply_context_block(self._last_owner_review_reply_result)
         self._refresh_current_task_anchor_from_query(query, session_id=session_id)
         return build_prefetch(
             query,
@@ -89,6 +94,12 @@ class MemoryOSProvider(MemoryProvider):
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        if not (
+            self._last_owner_review_reply_query == user_content
+            and self._last_owner_review_reply_result
+            and self._last_owner_review_reply_result.get("status") == "ok"
+        ):
+            self._process_owner_review_reply_ingress(user_content, turn_number=None, phase="sync_turn")
         event = self._build_event(
             kind="conversation_turn",
             summary=_turn_summary(user_content, assistant_content),
@@ -105,6 +116,8 @@ class MemoryOSProvider(MemoryProvider):
         if not self._store:
             return ""
         lines = ["# Memory-OS", "Active. Conversation capture is summary-only by default."]
+        if self._last_owner_review_reply_result:
+            lines.extend(["", _owner_review_reply_system_instruction(self._last_owner_review_reply_result)])
         if self._current_task_anchor:
             lines.extend(["", self._current_task_anchor])
         return "\n".join(lines)
@@ -135,6 +148,62 @@ class MemoryOSProvider(MemoryProvider):
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         return None
+
+    def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
+        self._last_owner_review_reply_result = None
+        self._last_owner_review_reply_query = ""
+        self._process_owner_review_reply_ingress(message, turn_number=turn_number, phase="turn_start")
+
+    def _process_owner_review_reply_ingress(self, message: str, *, turn_number: int | None, phase: str) -> None:
+        if self._store is None or not _looks_like_owner_review_reply(message):
+            return
+        owner_review = self._config.get("owner_review")
+        if not isinstance(owner_review, dict):
+            owner_review = {}
+        if owner_review.get("reply_ingress_enabled", True) is False:
+            return
+        owner_id = str(owner_review.get("owner_id") or "owner")
+        channels = _owner_review_reply_channels(str(self.platform or ""), owner_review)
+        result: dict[str, Any] | None = None
+        channel = channels[0]
+        for candidate_channel in channels:
+            candidate = parse_owner_review_reply(
+                self._store,
+                message,
+                owner_id=owner_id,
+                channel=candidate_channel,
+                apply=True,
+                require_recorded_digest=True,
+            )
+            result = candidate
+            channel = candidate_channel
+            if candidate.get("status") == "ok":
+                break
+            if candidate.get("reason") not in {
+                "digest_not_found_or_expired",
+                "anchor_not_found_in_current_digest",
+                "action_token_not_found_in_recorded_digest",
+            }:
+                break
+        if result is None:
+            return
+        self._last_owner_review_reply_result = result
+        self._last_owner_review_reply_query = message
+        self._audit(
+            "owner_review_reply_ingress",
+            "ok" if result.get("status") == "ok" else "warning",
+            {
+                "turn_number": turn_number,
+                "phase": phase,
+                "status": result.get("status"),
+                "reason": result.get("reason", ""),
+                "channel": channel,
+                "owner_id": owner_id,
+                "anchor": (result.get("parsed") or {}).get("anchor", ""),
+                "action_token": (result.get("parsed") or {}).get("action_token", ""),
+                "action_type": (result.get("parsed") or {}).get("action_type", ""),
+            },
+        )
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         self._current_task_anchor = _build_current_task_anchor(messages, session_id=self.session_id)
@@ -606,6 +675,81 @@ def _content_text(content: Any) -> str:
                 parts.append(item)
         return " ".join(" ".join(parts).split())
     return " ".join(str(content or "").split())
+
+
+def _looks_like_owner_review_reply(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().split())
+    if not normalized:
+        return False
+    if normalized.startswith("/memory "):
+        normalized = "memory " + normalized[len("/memory ") :]
+    return bool(
+        re.fullmatch(r"(?i)(memory|mos)\s+(approve|reject|allow|批准|通过|拒绝|允许)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?", normalized)
+        or re.fullmatch(
+            r"(?i)(memory|mos)\s+(feedback|mark|反馈)\s+oa_[0-9a-f]{8,32}\s+(useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall)[：:,.，。!！?？]?",
+            normalized,
+        )
+    )
+
+
+def _owner_review_reply_channels(platform: str, owner_review: dict[str, Any]) -> list[str]:
+    candidates = [
+        platform,
+        str(owner_review.get("recurring_delivery_channel") or ""),
+        str(owner_review.get("channel") or ""),
+        "unknown",
+    ]
+    channels: list[str] = []
+    for candidate in candidates:
+        channel = str(candidate or "").strip()
+        if not channel or channel in channels:
+            continue
+        channels.append(channel)
+    return channels or ["unknown"]
+
+
+def _owner_review_reply_context_block(result: dict[str, Any]) -> str:
+    parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+    action_result = result.get("owner_action_result") if isinstance(result.get("owner_action_result"), dict) else {}
+    active_digest = result.get("active_digest") if isinstance(result.get("active_digest"), dict) else {}
+    lines = [
+        "### Memory-OS Owner Review Reply",
+        f"- status: {_clip(str(result.get('status') or 'unknown'), 80)}",
+        f"- anchor: {_clip(str(parsed.get('anchor') or ''), 40)}",
+        f"- action_token: {_clip(str(parsed.get('action_token') or ''), 40)}",
+        f"- action: {_clip(str(parsed.get('action_type') or ''), 80)}",
+        f"- target: {_clip(str(parsed.get('target_type') or ''), 40)}:{_clip(str(parsed.get('target_id') or ''), 120)}",
+        f"- digest_binding: {_clip(str(active_digest.get('binding') or ''), 80)}",
+        f"- result: {_clip(str(action_result.get('status') or result.get('reason') or ''), 120)}",
+        "- response rule: This owner-review command has already been processed by Memory-OS. "
+        "Reply with a short confirmation or clarification only; do not continue the normal conversation thread.",
+    ]
+    return _clip_multiline("\n".join(lines), 900)
+
+
+def _owner_review_reply_system_instruction(result: dict[str, Any]) -> str:
+    parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+    action_result = result.get("owner_action_result") if isinstance(result.get("owner_action_result"), dict) else {}
+    status = str(result.get("status") or "unknown")
+    if status == "ok":
+        action_type = str(parsed.get("action_type") or "owner review action")
+        result_status = str(action_result.get("status") or "ok")
+        return (
+            "### Memory-OS Owner Review Reply Instruction\n"
+            f"- processed action: {_clip(action_type, 80)}\n"
+            f"- anchor: {_clip(str(parsed.get('anchor') or ''), 40)}\n"
+            f"- action_token: {_clip(str(parsed.get('action_token') or ''), 40)}\n"
+            f"- processor result: {_clip(result_status, 80)}\n"
+            "- response rule: Acknowledge the processed owner-review action in one short sentence. "
+            "Do not ask the owner to choose another review anchor unless Memory-OS reported a clarification need."
+        )
+    return (
+        "### Memory-OS Owner Review Reply Instruction\n"
+        f"- parser status: {_clip(status, 80)}\n"
+        f"- parser reason: {_clip(str(result.get('reason') or ''), 120)}\n"
+        "- response rule: Ask for the exact review command or digest anchor. "
+        "Do not reinterpret the message as ordinary conversation."
+    )
 
 
 def _looks_like_operation_context(text: str) -> bool:

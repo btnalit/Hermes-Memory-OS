@@ -48,6 +48,10 @@ For a no-send test host that enables the full observation stack:
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
 ```
 
+`--test-host` also installs and enables the owner review digest through Hermes
+cron by default. Hermes owns the scheduled delivery; Memory-OS only renders the
+bounded review text and stable owner-action tokens.
+
 For a conservative profile where DeepReflection and attribution are explicitly
 safe/off unless later enabled:
 
@@ -77,6 +81,12 @@ Short operator docs:
 - [Quickstart](docs/quickstart.md)
 - [Configuration](docs/configuration.md)
 - [Test-host monitor](docs/system-modularization/19-memory-os-3-200-monitor.md)
+
+Owner review digests show display numbers such as `A1`, `R1`, and `F1` for
+scanning only. Approval commands must use the stable token printed in the
+digest, for example `memory approve oa_<token>` or `memory reject oa_<token>`.
+Hermes cron owns delivery and transport; Memory-OS owns bounded digest rendering
+and the owner action state machine.
 
 ## Project Status
 
@@ -201,8 +211,11 @@ The interactive installer:
   - portable L2-L4 system modules
   - heartbeat runtime artifacts
   - heartbeat timer
+  - owner review Hermes cron helper and recurring delivery gate
   - DeepReflection preset
 - delegates writes to `scripts/install_memory_os_plugin.py`;
+- when enabled, creates the daily owner review job through Hermes cron
+  `--script --no-agent --deliver` rather than a Memory-OS transport path;
 - verifies provider and shell status after install;
 - does not restart `hermes-gateway.service`;
 - does not run cleanup apply or shadow-journal apply.
@@ -212,6 +225,22 @@ Non-interactive test-host install:
 ```bash
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
 ```
+
+Override the owner review cron target or disable it:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host \
+  --owner-review-cron-schedule "0 9 * * *" \
+  --owner-review-cron-deliver telegram
+
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host \
+  --no-enable-owner-review-cron
+```
+
+For non-test-host installs, the owner review delivery target defaults to
+`origin`, which asks Hermes cron to deliver back through Hermes' origin/home
+channel semantics. `--test-host` resolves the default to `telegram` because the
+`10.20.3.200` validation host uses Telegram as its owner channel.
 
 Non-interactive production-safe install:
 
@@ -276,6 +305,8 @@ Installer behavior:
 - writes heartbeat runtime artifacts when `--install-runtime` is passed;
 - enables the user systemd heartbeat timer when `--enable-runtime` is passed;
 - installs portable modules when `--install-system-modules` is passed;
+- installs owner review cron helper/gate scripts and, unless disabled, enables
+  the Hermes cron owner review job from the shell installer;
 - keeps Memory-OS backup manifests out of `$HERMES_HOME/plugins/`; backups
   belong under `$HERMES_HOME/plugin-backups/`.
 

@@ -9381,7 +9381,8 @@ Interpretation:
   `10.20.3.200`.
 - The helper produces bounded digest text for Hermes cron stdout delivery and
   records active digest binding through the existing renderer path.
-- No cron job is present or enabled yet; recurring delivery remains disabled.
+- At this helper/status checkpoint, no cron job was present or enabled yet;
+  the later default test-host enable gate below supersedes this disabled state.
 - No raw private body, internal schema-primary text, unapproved send, owner
   action, proposal execution, crystallized write, or identity write occurred.
 
@@ -9390,3 +9391,749 @@ Next gate:
 - External/design review can inspect the RH-34e helper/status evidence.
 - The next state-changing step is explicit owner/operator opt-in to create or
   enable a Hermes cron job with `--script --no-agent --deliver`.
+
+## RH-34e Recurring Enable Gate Dry-Run
+
+Date: 2026-05-25
+
+Scope:
+
+- explicit owner/operator gate for recurring owner review delivery;
+- no-write validation of Hermes cron compatibility and bounded renderer output.
+
+Local verification:
+
+```text
+python -m pytest -q tests/scripts/test_memory_os_owner_review_cron_gate.py \
+  tests/scripts/test_memory_os_plugin_install.py
+36 passed
+
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/scripts/test_memory_os_plugin_install.py \
+  tests/scripts/test_memory_os_owner_review_cron_gate.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py
+107 passed
+
+bash -n scripts/install_memory_os.sh
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh \
+  --yes --test-host --install-owner-review-cron-helper
+
+installed:
+  /root/.hermes/scripts/memory_os_owner_review_digest.py
+  /root/.hermes/scripts/memory_os_owner_review_cron_gate.py
+```
+
+Remote no-write gate dry-run:
+
+```text
+command:
+  python3 /root/.hermes/scripts/memory_os_owner_review_cron_gate.py \
+    --hermes-home /root/.hermes \
+    --schedule '0 9 * * *' \
+    --deliver telegram
+
+schema_version=memory-os.owner_review_cron_enable_gate.v0
+status=dry_run
+apply_requested=false
+config_updated=false
+helper_script_present=true
+hermes_cron_create_available=true
+hermes_cron_supports_script_no_agent_deliver=true
+existing_job_present=false
+deliver_target_class=platform_home
+render_check.ok=true
+render_check.text_char_count=3501
+render_check.raw_body_included=false
+render_check.internal_schema_primary=false
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+```
+
+Read-only monitor after gate dry-run:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes:
+  owner_review_cron_integration_status_ok
+OwnerCronIntegration:
+  status=ok
+  enabled=false
+  job_present=false
+  job_enabled=false
+  helper_script_present=true
+  delivery_configured=false
+  raw_body_included=0
+```
+
+Interpretation:
+
+- The recurring enable gate can validate the chosen schedule and Hermes
+  delivery class without creating a cron job or writing Memory-OS recurring
+  config.
+- The gate redacts raw delivery target values in its normal report.
+- Apply remains blocked unless the operator supplies `--apply
+  --owner-approved`; `deliver=local`, missing helper, missing Hermes cron
+  support, duplicate jobs, or unsafe renderer output stop the gate.
+- No send, owner action, proposal execution, crystallized write, or identity
+  write occurred during this validation.
+
+## RH-34e Default Test-Host Recurring Enable And Hermes Cron Run
+
+Date: 2026-05-25
+
+Scope:
+
+- default test-host deployment of the Hermes cron owner-review digest;
+- actual Hermes cron run through `--script --no-agent --deliver`;
+- monitor evidence for bounded output and transport ownership.
+
+Local verification:
+
+```text
+bash -n scripts/install_memory_os.sh
+
+python -m pytest -q tests/scripts/test_memory_os_owner_review_cron_gate.py \
+  tests/scripts/test_memory_os_plugin_install.py
+36 passed
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+
+owner review cron gate:
+  schema_version=memory-os.owner_review_cron_enable_gate.v0
+  status=applied
+  job_id=2af755464ca8
+  job_name=memory-os-owner-review-digest
+  schedule=0 9 * * *
+  deliver_target_class=platform_home
+  config_updated=true
+  render_check.ok=true
+  render_check.text_char_count=3501
+  render_check.raw_body_included=false
+  render_check.internal_schema_primary=false
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+```
+
+Remote status:
+
+```text
+hermes memory-os-agent-os review cron-status:
+  schema_version=memory-os.owner_review_cron_integration.v0
+  status=ok
+  enabled=true
+  job_present=true
+  job_enabled=true
+  job_id=2af755464ca8
+  helper_script_present=true
+  hermes_delivery_configured=true
+  hermes_delivery_target_class=platform_home
+  raw_body_included_count=0
+  unapproved_send_count=0
+
+hermes cron list --all:
+  id=2af755464ca8
+  name=memory-os-owner-review-digest
+  active=true
+  schedule=0 9 * * *
+  deliver=telegram
+  script=memory_os_owner_review_digest.py
+  mode=no-agent
+```
+
+Actual Hermes cron run smoke:
+
+```text
+hermes cron run --accept-hooks 2af755464ca8
+hermes cron tick --accept-hooks
+
+hermes cron list --all after tick:
+  last_run=2026-05-25T08:47:39.776368-04:00 ok
+
+cron output:
+  path=/root/.hermes/cron/output/2af755464ca8/2026-05-25_08-47-38.md
+  output_chars=3637
+  output_has_internal_schema=false
+  output_has_raw_marker=false
+  first_line="# Cron Job: memory-os-owner-review-digest"
+```
+
+Read-only monitor after cron run:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes:
+  owner_review_cron_integration_status_ok
+
+OwnerCronIntegration:
+  status=ok
+  enabled=true
+  job_present=true
+  job_enabled=true
+  helper_script_present=true
+  delivery_configured=true
+  delivery_target_class=platform_home
+  rendered_count_24h=3
+  raw_body_included=0
+  unapproved_send_count=0
+
+Expected WARN still present:
+  session_mirror_pending_sessions
+  rh31_eval_has_failures
+```
+
+Interpretation:
+
+- The default `--test-host` install now enables the owner review digest through
+  Hermes cron and does not create a Memory-OS-owned transport path.
+- Hermes owns the schedule and platform delivery (`deliver=telegram`,
+  `mode=no-agent`); Memory-OS only renders bounded digest text and action
+  anchors.
+- The actual cron run produced one bounded output artifact with no raw-body or
+  internal-schema-primary evidence.
+- Memory-OS hard boundaries stayed false; `unapproved_send_count=0`.
+- Final owner-facing validation still requires the owner to confirm the
+  Telegram-delivered message is readable and useful before using reply actions
+  such as `approve A1` or `reject R1`.
+
+## RH-34f / RH-34g / RH-36 Follow-Up Validation
+
+Date: 2026-05-25
+
+Scope:
+
+- owner home channel autodiscovery default (`auto` -> `origin`, test-host ->
+  `telegram`);
+- owner review renderer budget and candidate quality;
+- module closure matrix documentation for left/right brain, governance,
+  feedback, scheduler, monitor, and Hermes transport seams.
+
+Local verification:
+
+```text
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/scripts/test_memory_os_owner_review_cron_gate.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/scripts/test_memory_os_plugin_install.py
+94 passed
+
+bash -n scripts/install_memory_os.sh
+git diff --check
+```
+
+Installer dry-run evidence:
+
+```text
+normal non-interactive:
+  OWNER_REVIEW_CRON_DELIVER=auto
+  resolved target=origin
+
+controlled --test-host:
+  OWNER_REVIEW_CRON_DELIVER=auto
+  resolved target=telegram
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --skip-verify
+
+owner review cron gate:
+  schema_version=memory-os.owner_review_cron_enable_gate.v0
+  status=already_configured
+  job_id=2af755464ca8
+  job_name=memory-os-owner-review-digest
+  schedule=0 9 * * *
+  deliver_target_class=platform_home
+  render_check.text_char_count=2231
+  render_check.raw_body_included=false
+  render_check.internal_schema_primary=false
+  config_updated=true
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+```
+
+Remote digest preview quality:
+
+```text
+helper_preview:
+  chars=2231
+  line_count=33
+  has_bad_marker=false
+  action_items=3
+  review_items=2
+  fyi_items=0
+  ends_partial_owner=false
+```
+
+Actual Hermes cron run smoke:
+
+```text
+hermes cron run --accept-hooks 2af755464ca8
+hermes cron tick --accept-hooks
+
+hermes cron list --all:
+  job=2af755464ca8
+  name=memory-os-owner-review-digest
+  active=true
+  deliver=telegram
+  script=memory_os_owner_review_digest.py
+  mode=no-agent
+  last_run=2026-05-25T09:37:08.950764-04:00 ok
+
+latest cron output:
+  path=/root/.hermes/cron/output/2af755464ca8/2026-05-25_09-37-04.md
+  chars=2367
+  has_bad_marker=false
+  action_items=3
+  review_items=2
+  fyi_items=0
+  ends_partial_owner=false
+```
+
+Read-only monitor after RH-34g cron run:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes:
+  owner_review_cron_integration_status_ok
+  owner_review_rendered_digest_ok
+  owner_review_reply_dry_run_ok
+
+OwnerRenderedDigest:
+  status=ok
+  text_char_count=2289
+  text_has_internal_schema=false
+  text_has_transcript_marker=false
+  section_counts={action_required:2, review_suggested:2, fyi:2}
+
+OwnerCronIntegration:
+  status=ok
+  enabled=true
+  job_present=true
+  job_enabled=true
+  delivery_configured=true
+  delivery_target_class=platform_home
+  rendered_count_24h=6
+  raw_body_included=0
+
+Expected WARN still present:
+  session_mirror_pending_sessions
+  rh31_eval_has_failures
+```
+
+Interpretation:
+
+- The installer no longer hardcodes Telegram for ordinary open-source installs:
+  the default `auto` target resolves to Hermes cron `origin` outside
+  `--test-host`, while `10.20.3.200` still resolves to `telegram` as the
+  controlled validation host.
+- RH-34g fixed the owner-visible digest shape enough to resume review testing:
+  rendered text stays below the 2400-character channel budget, omits whole
+  items instead of truncating them, and keeps transcript-like candidates out of
+  the approvable memory path.
+- RH-36 records the module closure matrix so future left/right brain,
+  governance, feedback, and scheduler modules declare whether they write owner
+  actions, propose memory, request execution, request speech, or only feed
+  monitor/context loops.
+- Next state-changing gate remains owner reply E2E: use a delivered digest
+  anchor such as `reject R1` or `approve A1`, verify OwnerActionProcessor state
+  change, and keep all send/execute/identity/unapproved-crystallized
+  boundaries false.
+
+## 2026-05-25 - RH-35.3 Owner Reply Ingress Finding And Fix
+
+Live Telegram finding:
+
+```text
+Owner replied to the digest with: reject R1
+Observed assistant response:
+  Got it — not R1.
+  Which one should we continue with: R2, R3, or R4?
+```
+
+Diagnosis:
+
+```text
+Owner Reply Parser existed through CLI:
+  hermes memory-os-agent-os review reply reject R1 --channel telegram
+  -> status=ok
+  -> parsed.action_type=reject_candidate
+  -> target_id=cand_evt_20260520T023001000000Z_0000002329
+
+But live Telegram ingress did not call the parser:
+  owner_review.owner_action_count remained 0 after the Telegram reply
+  the message fell through to ordinary chat / recall behavior
+```
+
+Corrected state for the owner-intended action:
+
+```text
+hermes memory-os-agent-os review reply reject R1 --apply
+  status=ok
+  owner_action_result.status=ok
+  result_ref.state=owner_rejected
+  action_type=reject_candidate
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+```
+
+Code fix deployed:
+
+```text
+MemoryOSProvider.on_turn_start
+  exact command detector:
+    approve A1
+    reject R1
+    allow A1
+    feedback F1 too_mechanistic
+  -> parse_owner_review_reply(..., apply=true, require_recorded_digest=true)
+  -> OwnerActionProcessor
+  -> one-turn prefetch/system-prompt confirmation block
+```
+
+Safety rule:
+
+```text
+Live ingress requires a recorded digest for the owner/platform channel.
+It must not render a fresh digest and bind a stale owner reply to shifted
+anchors.
+```
+
+Local verification:
+
+```text
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py
+  25 passed
+
+python -m pytest -q \
+  tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/plugins/memory/test_memory_os_lifecycle.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/scripts/test_memory_os_owner_review_cron_gate.py
+  77 passed
+
+git diff --check
+  pass
+```
+
+Remote install and restart:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --skip-verify
+  copied_file_count=36
+  owner_review_cron_gate.status=already_configured
+  render_check.text_char_count=2100
+  render_check.raw_body_included=false
+
+systemctl --user restart hermes-gateway.service
+  ActiveState=active
+  SubState=running
+  ExecMainPID=496082
+```
+
+Remote provider smoke:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python python3 ...
+  context_has_owner_reply=True
+  prompt_has_reject=True
+  actions_exists=True
+```
+
+Read-only monitor after restart:
+
+```text
+classification=WARN
+FAIL=[]
+
+OwnerReview:
+  pending=188
+  action_required=15
+  owner_actions=1
+  by_type={reject_candidate:1}
+  owner_approved_crystallized=0
+  unapproved_crystallized=0
+  owner_active_period=true
+
+OwnerReplyDryRun:
+  status=ok
+  dry_run=true
+  parsed_action_type=approve_proposal
+  owner_action_status=ok
+
+OwnerCronIntegration:
+  status=ok
+  enabled=true
+  job_present=true
+  job_enabled=true
+  raw_body_included=0
+
+Expected WARN still present:
+  session_mirror_pending_sessions
+  rh31_eval_has_failures
+```
+
+Interpretation:
+
+- RH-35.2 parser was correct, but RH-35.3 live ingress was missing.
+- The fix keeps the boundary inside the MemoryProvider plugin; Hermes still
+  owns delivery and platform transport.
+- The owner-intended `reject R1` action is now represented in
+  OwnerActionProcessor state, and the next live Telegram retest should confirm
+  instead of continuing ordinary recall/chat.
+
+## 2026-05-25 - RH-35.5 Stable Owner Action Tokens
+
+Scope:
+
+- Correct the owner review action model after comparing against the
+  `10.20.2.88` Sannai/CW-019 owner-review prototype.
+- Stop treating display anchors (`A1/R1/F1`) as durable approval identity.
+- Keep Hermes cron/send as the delivery owner; Memory-OS renders bounded
+  digest text and processes explicit owner action commands only.
+
+Reference prototype finding:
+
+```text
+10.20.2.88 Sannai owner review:
+  - digest/report is delivered by Hermes cron with deliver=origin
+  - candidate review uses stable candidate IDs
+  - weekly consolidation apply requires --proposal-hash
+  - display order is not used as the approval authority
+```
+
+Implementation change:
+
+```text
+render_owner_review_digest()
+  -> displays [A1]/[R1] as readable anchors only
+  -> emits stable commands:
+       memory approve oa_<token>
+       memory reject oa_<token>
+       memory allow oa_<token>
+       memory feedback oa_<token> <rating>
+
+parse_owner_review_reply()
+  -> resolves oa_<token> against recorded digest action_tokens
+  -> maps to target_type + target_id + action_type
+  -> calls OwnerActionProcessor only
+
+MemoryOSProvider live ingress
+  -> intercepts only explicit prefixed token commands
+  -> no longer treats approve A1 / reject R1 as live state-changing input
+```
+
+Local verification:
+
+```text
+python -m pytest -q \
+  tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/scripts/test_memory_os_owner_review_digest_helper.py \
+  tests/scripts/test_memory_os_owner_review_cron_gate.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py
+
+90 passed
+```
+
+Remote deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --skip-verify
+  copied_file_count=36
+  owner_review_cron_gate.status=already_configured
+  render_check.text_char_count=2359
+  render_check.raw_body_included=false
+
+systemctl --user restart hermes-gateway.service
+  ActiveState=active
+  SubState=running
+  MainPID=498070
+```
+
+Remote smoke evidence:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python \
+  python3 /root/.hermes/scripts/memory_os_owner_review_digest.py
+
+Output includes:
+  Action: memory approve oa_40b674ced068f7 / memory reject oa_9b53f82a9ab231
+  Ref: proposal:prop_20260521T032500041194Z_2f96a933aa
+
+summary:
+  chars=2359
+  command_count=8
+  has_token=true
+  has_legacy_approve_anchor=false
+```
+
+Dry-run parser evidence:
+
+```text
+hermes memory-os-agent-os review reply memory approve oa_40b674ced068f7 --channel telegram
+
+status=ok
+dry_run=true
+active_digest.binding=latest_recorded_digest
+active_digest.delivery_scope=owner_home
+parsed.action_type=approve_proposal
+parsed.target_type=proposal
+parsed.target_id=prop_20260521T032500041194Z_2f96a933aa
+owner_action_status=ok
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+```
+
+Legacy-anchor safety smoke:
+
+```text
+provider.on_turn_start("approve A2")
+owner_action_count before=1
+owner_action_count after=1
+mutated=false
+```
+
+Real owner action smoke:
+
+```text
+Selected delivered-digest item:
+  anchor=A2
+  question=Tune ordinary memory conversation tone
+  command=memory approve oa_df197efe059ae9
+  target=proposal:prop_20260521T093627745201Z_aa81f796ec
+
+hermes memory-os-agent-os review reply memory approve oa_df197efe059ae9 \
+  --channel telegram --apply
+
+result:
+  status=ok
+  dry_run=false
+  parsed.action_type=approve_proposal
+  parsed.target_type=proposal
+  parsed.target_id=prop_20260521T093627745201Z_aa81f796ec
+  owner_action_status=ok
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+
+post-status:
+  owner_action_count=2
+  action_type_counts={reject_candidate:1, approve_proposal:1}
+  proposal_approved_count=1
+  proposal_rejected_count=0
+  owner_approved_crystallized_write_count=0
+  unapproved_crystallized_write_count=0
+  cron_integration.raw_body_included_count=0
+  cron_integration.unapproved_send_count=0
+```
+
+Interpretation:
+
+- This was a real OwnerActionProcessor state transition, not a dry-run.
+- Proposal approval created follow-up state only:
+  `result_ref.state=approved_for_proposal`.
+- No execution, send, identity write, or crystallized-memory write happened.
+
+Conclusion:
+
+- RH-35.4 channel-binding patch alone was not enough; it still relied on weak
+  display anchors.
+- RH-35.5 aligns Memory-OS owner actions with the safer 10.20.2.88 pattern:
+  stable target identity first, readable digest anchors second.
+- Next live owner action smoke must use the rendered stable command, not
+  `approve A2`.
+
+## 2026-05-25 - RH-35.5 Monitor Evidence After Token-Only Guard
+
+Scope:
+
+- read-only monitor run after the real `memory approve oa_<token>` proposal
+  approval smoke;
+- monitor updated to expose owner-review ingress guard status;
+- no service restart, heartbeat trigger, cleanup, shadow ingest, raw event
+  summary print, or private body read.
+
+Command:
+
+```text
+python scripts/memory_os_3_200_monitor.py \
+  --host hermes-media \
+  --previous-json C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json \
+  --snapshot-out C:\Users\btnal\.codex\automations\memory-os-3-200-monitor\last-snapshot.json \
+  --output summary
+```
+
+Result:
+
+```text
+status=WARN
+FAIL=[]
+
+owner_action_count=2
+owner_action_type_counts={approve_proposal:1, reject_candidate:1}
+proposal_queue.state_counts={approved_for_proposal:2, candidate:14}
+owner_approved_crystallized_write_count=0
+unapproved_crystallized_write_count=0
+
+owner_review_ingress_guard.legacy_anchor_accepted=false
+owner_review_ingress_guard.legacy_reject_anchor_accepted=false
+owner_review_ingress_guard.ordinary_anchor_text_accepted=false
+owner_review_ingress_guard.token_command_accepted=true
+owner_review_ingress_guard.slash_token_command_accepted=true
+owner_review_ingress_guard.feedback_token_command_accepted=true
+
+owner_review_cron_integration.status=ok
+owner_review_cron_integration.enabled=true
+owner_review_cron_integration.job_present=true
+owner_review_cron_integration.job_enabled=true
+owner_review_cron_integration.raw_body_included_count=0
+owner_review_cron_integration.unapproved_send_count=0
+
+owner_delivery_status.unapproved_send=0
+owner_delivery_status.raw_body_included=0
+memory_sources.boundary_true_count=0
+memory_sources.forbidden_field_count=0
+```
+
+Expected WARN:
+
+```text
+session_mirror_pending_sessions
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+Interpretation:
+
+- Legacy display-anchor commands such as `approve A2` and `reject R1` are no
+  longer live ingress commands.
+- Token commands such as `memory approve oa_<token>` are recognized by the
+  installed provider ingress guard.
+- The real approved proposal is visible as `approved_for_proposal`, and it did
+  not execute work. The follow-up projection for approved proposals remains a
+  next closure item.

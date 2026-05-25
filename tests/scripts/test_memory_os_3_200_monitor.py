@@ -324,6 +324,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_digest_preview_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_rendered_digest_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
     assert any(item["code"] == "owner_review_cron_integration_status_ok" for item in classification["pass"])
     assert "OwnerReviewAging" in rendered
     assert "OwnerReviewChannel" in rendered
@@ -355,11 +356,46 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_rendered_digest_internal_schema_text" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["owner_review_rendered_digest"]["text_has_transcript_marker"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_rendered_digest_transcript_marker" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_rendered_digest"]["text_char_count"] = 2401
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_rendered_digest_too_long" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_reply_dry_run"]["dry_run"] = False
     classification = classify_snapshot(snapshot)
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "owner_review_reply_dry_run_mutated_state" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_reply_dry_run"]["status"] = "needs_clarification"
+    snapshot["owner_review_reply_dry_run"]["owner_action_dry_run"] = None
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "owner_review_reply_owner_action_not_dry_run" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"]["legacy_anchor_accepted"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_legacy_anchor_accepted" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"]["token_command_accepted"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_token_command_not_accepted" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_delivery_gate"]["boundary"]["actual_send"] = True
@@ -1018,6 +1054,7 @@ def _healthy_snapshot() -> dict:
         "owner_review_digest_preview": _healthy_owner_digest_preview(),
         "owner_review_rendered_digest": _healthy_owner_rendered_digest(),
         "owner_review_reply_dry_run": _healthy_owner_reply_dry_run(),
+        "owner_review_ingress_guard": _healthy_owner_ingress_guard(),
     }
 
 
@@ -1138,6 +1175,7 @@ def _healthy_owner_rendered_digest() -> dict:
         "raw_body_included": False,
         "text_char_count": 120,
         "text_has_internal_schema": False,
+        "text_has_transcript_marker": False,
         "section_counts": {"action_required": 0, "review_suggested": 0, "fyi": 1},
         "anchors": {"action_required": [], "review_suggested": [], "fyi": ["F1"]},
         "boundary": {
@@ -1155,6 +1193,7 @@ def _healthy_owner_reply_dry_run() -> dict:
         "status": "ok",
         "dry_run": True,
         "reason": "",
+        "command_source": "latest_recorded_digest",
         "parsed_action_type": "approve_proposal",
         "parsed_target_type": "proposal",
         "owner_action_status": "ok",
@@ -1165,6 +1204,18 @@ def _healthy_owner_reply_dry_run() -> dict:
             "actual_identity_write": False,
             "actual_unapproved_crystallized_approval": False,
         },
+    }
+
+
+def _healthy_owner_ingress_guard() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_ingress_guard.v0",
+        "legacy_anchor_accepted": False,
+        "legacy_reject_anchor_accepted": False,
+        "ordinary_anchor_text_accepted": False,
+        "token_command_accepted": True,
+        "slash_token_command_accepted": True,
+        "feedback_token_command_accepted": True,
     }
 
 

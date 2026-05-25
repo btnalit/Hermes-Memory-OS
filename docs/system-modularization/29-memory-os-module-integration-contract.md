@@ -721,7 +721,10 @@ Review Queue Aging Policy (RH-34c deployed on test host)
 One-Shot Hermes Send Compatibility Smoke (RH-34d deployed on test host; external review pending)
 Review Digest Renderer (RH-34e.1 deployed on test host)
 Owner Reply Parser (RH-35.2 deployed on test host)
-Hermes Cron Owner Review Integration helper/status (RH-34e deployed on test host; recurring cron job disabled)
+Provider Owner Reply Ingress (RH-35.3 deployed on test host)
+Hermes Cron Owner Review Integration helper/status and recurring enable gate
+(RH-34e deployed on test host; recurring cron job enabled by the test-host
+installer through Hermes cron)
 Hermes owns recurring schedule, transport, platform delivery, cooldowns, and
 rate limits. Memory-OS owns review payloads, eligibility, and owner actions.
 ```
@@ -766,10 +769,11 @@ Hard rules:
 - The first real send remains a one-shot owner-triggered compatibility smoke,
   not recurring daily delivery and not proof that Memory-OS should own
   transport.
-- Recurring daily delivery must remain disabled until RH-34c aging and RH-34d
-  smoke both pass external review, the review digest renderer is usable for
-  owner action, the owner reply parser is defined, and the owner explicitly
-  enables the Hermes cron integration.
+- Recurring daily delivery must use the Hermes cron integration. The
+  interactive path still requires explicit owner/operator enablement; the
+  controlled `--test-host` installer preset enables the reviewed Hermes cron
+  digest by default and must provide opt-out with
+  `--no-enable-owner-review-cron`.
 - All owner actions that change candidate/proposal/feedback/speak/crystallized
   state must pass through OwnerActionProcessor.
 - `approve_proposal` does not execute. It only creates an approved proposal or
@@ -792,9 +796,10 @@ Hard rules:
 - OwnerAction idempotency must be scoped to `owner_id + target_type +
   target_id + action_type`; digest ids and review item ids are UI/evidence
   context and must not be part of the dedupe key.
-- Digest text replies must resolve through active digest anchors or stable
-  target ids. Ambiguous numeric replies must ask for clarification instead of
-  guessing.
+- Digest text replies must resolve through stable action tokens printed in the
+  digest, for example `memory approve oa_<token>`. Display anchors such as
+  `A1/R1/F1` are scan aids only and must not be accepted as live approval
+  identity.
 - Legitimate owner-approved crystallization is reported as an owner effect,
   not as a violation of the historical hard-boundary fields. Any crystallized
   write without a matching OwnerActionProcessor record is a hard failure.
@@ -810,8 +815,9 @@ Hard rules:
   such as `kind=moment` or `source_events=1` may appear only as secondary
   metadata, not as the main approval text.
 - Owner replies from Telegram, CLI, dashboard, or other Hermes frontends must
-  resolve through digest anchors or stable target ids and then call
-  OwnerActionProcessor. Frontends must not mutate Memory-OS state directly.
+  resolve through stable digest action tokens and then call
+  OwnerActionProcessor. Frontends must not mutate Memory-OS state directly or
+  treat display anchors as approval authority.
 - Hermes Cron Owner Review Integration must use a host-owned scheduler /
   delivery seam. The minimum supported seam is Hermes cron with `--script
   --no-agent --deliver` calling the Memory-OS helper script. A standalone
@@ -821,6 +827,20 @@ Hard rules:
   stdout and record active digest binding. It must not call platform transport,
   create owner actions, approve/reject targets, execute proposals, or write
   crystallized memory.
+- The recurring enable gate must be explicit and dry-run first. Apply requires
+  owner/operator approval, a schedule, and a Hermes delivery target; reports
+  must redact raw delivery targets. The gate may create the Hermes cron job and
+  update Memory-OS recurring config only after its helper, Hermes cron flag,
+  bounded-render, duplicate-job, and delivery-target checks pass.
+- Owner review delivery target defaults must be portable. The shell installer
+  may resolve `auto` to `telegram` only for the controlled `--test-host` preset;
+  ordinary installs should use Hermes `origin` or an explicit owner-selected
+  target instead of hardcoding Telegram. The gate must reject unresolved `auto`
+  and `local`.
+- Owner review digest rendering must be whole-item bounded. It may omit lower
+  priority items to stay within channel budget, but it must not cut a review
+  item mid-sentence. Transcript-like candidates must be routed to cleanup/FYI
+  rather than presented as approvable long-term memory.
 
 Minimum action record:
 
@@ -892,6 +912,8 @@ Required monitor evidence:
 - `owner_reply_parser.resolved_count`
 - `owner_reply_parser.ambiguous_count`
 - `owner_reply_parser.error_count`
+- `owner_reply_ingress_guard.legacy_anchor_accepted`
+- `owner_reply_ingress_guard.token_command_accepted`
 - `review_queue.pending_count`
 - `review_queue.action_required_count`
 - `review_queue.stale_count`
@@ -935,9 +957,14 @@ Promotion signal:
 - review digest renderer produces owner-readable action briefs instead of raw
   internal artifact labels and includes bounded proposed-memory text for
   candidate approvals;
-- owner reply parser binds anchors to a recorded digest snapshot when one
-  exists; it must not silently re-render the current queue and reinterpret an
-  old `approve A1` against shifted anchors;
+- owner reply parser binds stable action tokens to a recorded digest snapshot
+  when one exists; it must not silently re-render the current queue and
+  reinterpret an old command against shifted targets;
+- live owner-review reply ingress must run before ordinary chat interpretation
+  and must require a recorded digest for that owner/channel. It may intercept
+  only explicit tokenized commands such as `memory approve oa_<token>`,
+  `memory reject oa_<token>`, `memory allow oa_<token>`, or
+  `memory feedback oa_<token> too_mechanistic`;
 - Hermes cron integration renders at most one bounded digest per owner/window
   and Hermes owns the delivery; Memory-OS records rendered/skipped/error
   outcomes;
@@ -945,6 +972,15 @@ Promotion signal:
   recurring job is enabled. The test-host helper is installed, reports
   `status=ok`, and keeps `raw_body_included_count=0` and
   `unapproved_send_count=0`;
+- the recurring enable gate dry-runs successfully with
+  `memory-os.owner_review_cron_enable_gate.v0`, no config write, no cron job
+  creation, bounded renderer output, and a redacted delivery target;
+- the test-host installer can apply the recurring enable gate, create one
+  active Hermes cron job, update recurring config, and keep Memory-OS out of
+  platform transport. Current test-host evidence: job
+  `memory-os-owner-review-digest` (`2af755464ca8`), schedule `0 9 * * *`,
+  `deliver=telegram`, `mode=no-agent`, last run ok, rendered output has
+  `raw_body_included=0` and `unapproved_send_count=0`;
 - owner reply parser maps owner replies to OwnerActionProcessor without direct
   frontend mutations;
 - owner action application is idempotent in local and test-host tests;
@@ -976,12 +1012,16 @@ Stop signal:
 - legacy Memory-OS `deliver-once` calls transport after the RH-34e boundary
   correction instead of returning smoke-only / handing recurring delivery to
   Hermes cron;
-- owner reply parser binds an action to a different target because the digest
-  was re-rendered after delivery;
+- owner reply parser binds an action to a different target because it uses a
+  shifting display anchor rather than a stable action token;
 - candidate approval review cards hide the bounded proposed-memory text needed
   for owner judgment;
 - recurring delivery starts before RH-34c/RH-34d review gates pass, before the
   renderer and reply parser are usable, or without explicit owner opt-in;
+- recurring enable gate prints a raw delivery target in normal reports;
+- recurring enable gate applies without `--owner-approved`, without a schedule,
+  without a delivery target, with `deliver=local`, or while bounded renderer
+  output contains raw-body/internal-schema-primary text;
 - recurring delivery requires `hermes send` specifically instead of the Hermes
   cron `--script --no-agent --deliver` seam available on the target host;
 - recurring delivery sends duplicate digests in the same owner schedule window;
@@ -990,8 +1030,8 @@ Stop signal:
 - unapproved digest send count is greater than zero;
 - digest primary text is dominated by internal artifact labels instead of
   owner-readable action briefs;
-- owner reply parser maps an ambiguous anchor to a state mutation instead of
-  asking for clarification;
+- owner reply parser maps an ambiguous anchor or non-token ordinary message to
+  a state mutation instead of asking for clarification / falling through;
 - owner action mutates state outside OwnerActionProcessor;
 - proposal approval triggers actual execution;
 - feedback is treated as crystallized approval;
@@ -1202,6 +1242,7 @@ contracts:
 | evidence_scoring | events/working/candidates/proposals | evidence and score artifacts | no | indirect through DR/self-evolution | no approval | none | score_count, subject_counts |
 | self_evolution | evidence, ops gate, proposal queue | dry-run reports, proposal candidates | no | indirect through governance feedback | no execute | none | report_count, proposal_count |
 | speak_gate | expression payloads/proposals | would-send/blocked-send decision artifacts | no | no | no send in v0.1 | none | would_send_count, actual_send=false |
+| OwnerReviewDigest | review queue, aging, rendered digest | owner-readable review payload | no | no | Hermes cron delivery only | none | cron status, rendered digest safety |
 | RH-31 eval harness (31.0-31.3) | synthetic/redacted fixtures, bounded monitor metadata, MemorySources fixtures, public projection seams | gitignored eval reports and promoted scorecards only | no | report-only adapter reads only | no | none/report-only only | eval report count, forbidden fields, retention, adapter scorecard |
 | Future RH-31 guards | real findings | tests/docs, maybe route rules | must use IngressDecision | maybe | maybe | none/report-only only | route matrix |
 | Future RH-32 consolidation suggestions | events/candidates/metadata | suggestion reports only | no | no | no | deterministic-only initially | suggestion count, no approval |
@@ -1230,8 +1271,11 @@ Before implementation:
 
 1. Fill the module integration declaration, including the reverse scope gate.
 2. State which contract owns the change.
-3. Identify any hard route or owner approval boundary touched.
-4. Identify the monitor fields that will prove the change is safe.
+3. For any new or changed module/RH/scheduler/review artifact, fill or update
+   the RH-36 closure classification: `delivery_class`,
+   `state_change_class`, and `cadence_class`.
+4. Identify any hard route or owner approval boundary touched.
+5. Identify the monitor fields that will prove the change is safe.
 
 Reverse scope gate:
 
@@ -1271,6 +1315,18 @@ decision feature must answer these questions before design review can pass:
 Missing or vague reverse-scope answers are a P1 contract gap. A design that
 duplicates Hermes-owned transport, scheduling, gateway delivery, or platform
 rate-limiting is blocked until it is rewritten as an integration design.
+
+Closure matrix gate:
+
+- Missing RH-36 delivery/state/cadence classification is a P1 contract gap for
+  any non-trivial module, scheduler, delivery path, review artifact, or live
+  decision change.
+- If a module cannot be expressed with an existing RH-36 class, update RH-36
+  first; do not implement an implicit new class in code.
+- Owner-actionable artifacts without an owner-visible review/action path are
+  blocked from promotion beyond monitor-only status.
+- Cadence changes require generated/skipped/error monitor fields before they
+  can be called an observation period.
 
 Before local merge:
 

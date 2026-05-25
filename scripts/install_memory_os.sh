@@ -20,6 +20,10 @@ HERMES_HOME_INPUT="${HERMES_HOME:-}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 RUNTIME_INTERVAL="${RUNTIME_INTERVAL:-5min}"
 COGNITIVE_LOOP_INTERVAL="${COGNITIVE_LOOP_INTERVAL:-6h}"
+OWNER_REVIEW_CRON_SCHEDULE="${OWNER_REVIEW_CRON_SCHEDULE:-0 9 * * *}"
+OWNER_REVIEW_CRON_DELIVER="${OWNER_REVIEW_CRON_DELIVER:-auto}"
+OWNER_REVIEW_CRON_OWNER="${OWNER_REVIEW_CRON_OWNER:-owner}"
+OWNER_REVIEW_CRON_CHANNEL="${OWNER_REVIEW_CRON_CHANNEL:-auto}"
 DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
 MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-}"
 LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-}"
@@ -33,6 +37,7 @@ ENABLE_RUNTIME=""
 INSTALL_COGNITIVE_LOOP=""
 ENABLE_COGNITIVE_LOOP=""
 INSTALL_OWNER_REVIEW_CRON_HELPER=""
+ENABLE_OWNER_REVIEW_CRON=""
 
 usage() {
   cat <<'USAGE'
@@ -62,9 +67,25 @@ Options:
   --no-install-cognitive-loop   Do not write cognitive-loop wrapper/systemd artifacts.
   --no-enable-cognitive-loop    Do not enable cognitive-loop timer.
   --install-owner-review-cron-helper
-                                Copy the Memory-OS owner review helper script
-                                to HERMES_HOME/scripts for Hermes cron --no-agent
-                                delivery. Does not create or enable a cron job.
+                                Copy the Memory-OS owner review helper and
+                                explicit recurring-enable gate to
+                                HERMES_HOME/scripts. Does not create or enable
+                                a cron job.
+  --enable-owner-review-cron    Enable recurring owner review delivery through
+                                Hermes cron --script --no-agent --deliver.
+  --no-enable-owner-review-cron Do not create/enable the Hermes owner review
+                                cron job.
+  --owner-review-cron-schedule VALUE
+                                Hermes cron schedule. Default: 0 9 * * *
+  --owner-review-cron-deliver VALUE
+                                Hermes cron --deliver target. Default: auto.
+                                auto resolves to telegram for --test-host and
+                                origin otherwise.
+  --owner-review-cron-owner VALUE
+                                Owner id used by the digest helper. Default: owner
+  --owner-review-cron-channel VALUE
+                                Channel label for active digest binding.
+                                Default: auto, derived from --owner-review-cron-deliver.
   --dry-run                     Print installer report without writing.
   --skip-verify                 Skip post-install verification commands.
   --allow-create                Allow creating HERMES_HOME if it does not exist.
@@ -152,6 +173,31 @@ while [[ $# -gt 0 ]]; do
     --install-owner-review-cron-helper)
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
       shift
+      ;;
+    --enable-owner-review-cron)
+      ENABLE_OWNER_REVIEW_CRON=1
+      INSTALL_OWNER_REVIEW_CRON_HELPER=1
+      shift
+      ;;
+    --no-enable-owner-review-cron)
+      ENABLE_OWNER_REVIEW_CRON=0
+      shift
+      ;;
+    --owner-review-cron-schedule)
+      OWNER_REVIEW_CRON_SCHEDULE="${2:?missing --owner-review-cron-schedule value}"
+      shift 2
+      ;;
+    --owner-review-cron-deliver)
+      OWNER_REVIEW_CRON_DELIVER="${2:?missing --owner-review-cron-deliver value}"
+      shift 2
+      ;;
+    --owner-review-cron-owner)
+      OWNER_REVIEW_CRON_OWNER="${2:?missing --owner-review-cron-owner value}"
+      shift 2
+      ;;
+    --owner-review-cron-channel)
+      OWNER_REVIEW_CRON_CHANNEL="${2:?missing --owner-review-cron-channel value}"
+      shift 2
       ;;
     --dry-run)
       DRY_RUN=1
@@ -398,7 +444,8 @@ select_options() {
   local default_enable_runtime="yes"
   local default_install_cognitive_loop="no"
   local default_enable_cognitive_loop="no"
-  local default_owner_review_cron_helper="no"
+  local default_owner_review_cron_helper="yes"
+  local default_enable_owner_review_cron="yes"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
   local default_llm_judge_preset="none"
@@ -408,6 +455,9 @@ select_options() {
     default_memory_sources_preset="test-host"
     default_install_cognitive_loop="yes"
     default_enable_cognitive_loop="yes"
+  fi
+  if [[ "${MODE}" == "production-safe" ]]; then
+    default_enable_owner_review_cron="no"
   fi
 
   [[ -n "${INSTALL_SHELL}" ]] || { ask_yes_no "Install/update memory-os-agent-os shell plugin?" "${default_shell}" && INSTALL_SHELL=1 || INSTALL_SHELL=0; }
@@ -428,7 +478,13 @@ select_options() {
     ENABLE_COGNITIVE_LOOP=0
   fi
   [[ -n "${ENABLE_COGNITIVE_LOOP}" ]] || { ask_yes_no "Enable test-host cognitive-loop timer?" "${default_enable_cognitive_loop}" && ENABLE_COGNITIVE_LOOP=1 || ENABLE_COGNITIVE_LOOP=0; }
-  [[ -n "${INSTALL_OWNER_REVIEW_CRON_HELPER}" ]] || { ask_yes_no "Install owner review Hermes cron helper script?" "${default_owner_review_cron_helper}" && INSTALL_OWNER_REVIEW_CRON_HELPER=1 || INSTALL_OWNER_REVIEW_CRON_HELPER=0; }
+  [[ -n "${INSTALL_OWNER_REVIEW_CRON_HELPER}" ]] || { ask_yes_no "Install owner review Hermes cron helper/gate scripts?" "${default_owner_review_cron_helper}" && INSTALL_OWNER_REVIEW_CRON_HELPER=1 || INSTALL_OWNER_REVIEW_CRON_HELPER=0; }
+  [[ -n "${ENABLE_OWNER_REVIEW_CRON}" ]] || { ask_yes_no "Enable daily owner review through Hermes cron?" "${default_enable_owner_review_cron}" && ENABLE_OWNER_REVIEW_CRON=1 || ENABLE_OWNER_REVIEW_CRON=0; }
+  if [[ "${ENABLE_OWNER_REVIEW_CRON}" == "1" ]]; then
+    INSTALL_OWNER_REVIEW_CRON_HELPER=1
+    resolve_owner_review_cron_deliver
+    resolve_owner_review_cron_channel
+  fi
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
     choose_preset "${default_preset}"
@@ -441,15 +497,69 @@ select_options() {
   fi
 }
 
+resolve_owner_review_cron_deliver() {
+  if [[ "${OWNER_REVIEW_CRON_DELIVER}" != "auto" ]]; then
+    return 0
+  fi
+  if [[ "${MODE}" == "test-host" ]]; then
+    OWNER_REVIEW_CRON_DELIVER="telegram"
+    echo "Owner review cron deliver target [auto] -> telegram (--test-host)"
+    return 0
+  fi
+  if [[ "${YES}" == "1" ]]; then
+    OWNER_REVIEW_CRON_DELIVER="origin"
+    echo "Owner review cron deliver target [auto] -> origin (non-interactive default)"
+    return 0
+  fi
+
+  local answer
+  echo "Hermes cron delivery targets are owned by Hermes. Common targets:"
+  echo "  origin, telegram, discord, signal, platform:chat_id"
+  read -r -p "Owner review cron deliver target [origin]: " answer
+  answer="${answer:-origin}"
+  OWNER_REVIEW_CRON_DELIVER="${answer}"
+}
+
+resolve_owner_review_cron_channel() {
+  case "${OWNER_REVIEW_CRON_CHANNEL}" in
+    ""|"auto"|"owner_review_cron"|"unknown")
+      local target="${OWNER_REVIEW_CRON_DELIVER}"
+      target="${target%%:*}"
+      target="${target//-/_}"
+      OWNER_REVIEW_CRON_CHANNEL="${target:-unknown}"
+      ;;
+  esac
+}
+
 require_hermes_for_selected_actions() {
   [[ "${DRY_RUN}" == "1" ]] && return 0
   command_exists hermes && return 0
 
-  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
+  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${ENABLE_OWNER_REVIEW_CRON}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
     echo "ERROR: hermes command not found in PATH." >&2
     echo "Install Hermes or rerun with --skip-verify and without provider/shell enablement for file-copy-only installs." >&2
     exit 1
   fi
+}
+
+enable_owner_review_cron() {
+  [[ "${ENABLE_OWNER_REVIEW_CRON}" == "1" ]] || return 0
+  local gate="${HERMES_HOME}/scripts/memory_os_owner_review_cron_gate.py"
+  local args=("${PYTHON_BIN}" "${gate}" "--hermes-home" "${HERMES_HOME}" "--schedule" "${OWNER_REVIEW_CRON_SCHEDULE}" "--deliver" "${OWNER_REVIEW_CRON_DELIVER}" "--owner" "${OWNER_REVIEW_CRON_OWNER}" "--channel" "${OWNER_REVIEW_CRON_CHANNEL}")
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo
+    echo "Dry-run owner review Hermes cron enable plan:"
+    printf '  %q' "${args[@]}" "--apply" "--owner-approved"
+    echo
+    return 0
+  fi
+  args+=("--apply" "--owner-approved")
+
+  echo
+  echo "Configuring owner review Hermes cron:"
+  printf '  %q' "${args[@]}"
+  echo
+  "${args[@]}"
 }
 
 run_installer() {
@@ -518,6 +628,7 @@ inspect_current_state
 select_options
 require_hermes_for_selected_actions
 run_installer
+enable_owner_review_cron
 verify_install
 
 echo

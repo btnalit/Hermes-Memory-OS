@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +39,7 @@ OWNER_REVIEW_DELIVERY_STATUS_SCHEMA_VERSION = "memory-os.owner_review_delivery_s
 OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_integration.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
+OWNER_REVIEW_TEXT_LIMIT = 2400
 
 ACTION_TYPES = {
     "approve_candidate",
@@ -208,6 +210,7 @@ def owner_review_cron_integration_report(store: MemoryOSStore) -> dict[str, Any]
         "helper_script_name": helper_path.name,
         "hermes_delivery_configured": delivery_configured,
         "hermes_delivery_target_class": _delivery_target_class(deliver),
+        "recurring_delivery_channel": _safe_channel(str(config.get("recurring_delivery_channel") or "")),
         "rendered_count_24h": len(rendered_records),
         "skipped_count_24h": 0,
         "error_count_24h": 0,
@@ -352,16 +355,26 @@ def owner_review_digest_preview(
         config = {}
     resolved_owner = str(owner_id or config.get("owner_id") or "owner")
     action_limit = _positive_limit(max_action_required, config.get("max_action_required"), 3)
-    suggested_limit = _positive_limit(max_review_suggested, config.get("max_review_suggested"), 5)
-    fyi_limit = _positive_limit(max_fyi, config.get("max_fyi"), 5)
+    suggested_limit = _positive_limit(max_review_suggested, config.get("max_review_suggested"), 2)
+    fyi_limit = _positive_limit(max_fyi, config.get("max_fyi"), 2)
     queue = owner_review_queue_report(store, limit=1000)
     status = owner_review_status_report(store)
     channel = resolve_owner_review_channel(store, owner_id=resolved_owner)
     action_items = _digest_items(queue.get("items") or [], "action_required", action_limit)
     suggested_items = _digest_items(queue.get("items") or [], "review_suggested", suggested_limit)
-    memory_fyi_items = _memory_source_fyi_items(store, limit=fyi_limit)
-    fyi_items = memory_fyi_items + _fyi_items(status, limit=max(fyi_limit - len(memory_fyi_items), 0), start=len(memory_fyi_items) + 1)
-    fyi_total = len(memory_fyi_items) + 2
+    queue_fyi_items = _digest_items(queue.get("items") or [], "fyi", fyi_limit)
+    memory_fyi_items = _memory_source_fyi_items(
+        store,
+        limit=max(fyi_limit - len(queue_fyi_items), 0),
+        start=len(queue_fyi_items) + 1,
+    )
+    status_fyi_items = _fyi_items(
+        status,
+        limit=max(fyi_limit - len(queue_fyi_items) - len(memory_fyi_items), 0),
+        start=len(queue_fyi_items) + len(memory_fyi_items) + 1,
+    )
+    fyi_items = queue_fyi_items + memory_fyi_items + status_fyi_items
+    fyi_total = int(queue.get("fyi_count") or 0) + len(memory_fyi_items) + 2
     digest_id = _digest_id()
     preview = {
         "schema_version": OWNER_REVIEW_DIGEST_PREVIEW_SCHEMA_VERSION,
@@ -458,6 +471,7 @@ def render_owner_review_digest(
         "delivery_skipped": True,
         "actions_enabled": False,
         "raw_body_included": False,
+        "delivery_binding": _owner_review_delivery_binding(store, channel),
         "review_channel": preview.get("review_channel"),
         "limits": preview.get("limits"),
         "counts": preview.get("counts"),
@@ -486,15 +500,22 @@ def parse_owner_review_reply(
     channel: str = "cli",
     apply: bool = False,
     digest_id: str = "",
+    require_recorded_digest: bool = False,
     max_action_required: int | None = None,
     max_review_suggested: int | None = None,
     max_fyi: int | None = None,
 ) -> dict[str, Any]:
+    parsed = _parse_owner_reply_text(reply_text)
+    anchor = str(parsed.get("anchor") or "").upper() if parsed.get("status") == "ok" else ""
+    action_token = str(parsed.get("action_token") or "").lower() if parsed.get("status") == "ok" else ""
     rendered, binding = _resolve_reply_digest(
         store,
         owner_id=owner_id,
         channel=channel,
         digest_id=digest_id,
+        require_recorded_digest=require_recorded_digest,
+        anchor=anchor,
+        action_token=action_token,
         max_action_required=max_action_required,
         max_review_suggested=max_review_suggested,
         max_fyi=max_fyi,
@@ -510,7 +531,6 @@ def parse_owner_review_reply(
             rendered=rendered,
             binding=binding,
         )
-    parsed = _parse_owner_reply_text(reply_text)
     if parsed["status"] != "ok":
         return _reply_result(
             status=parsed["status"],
@@ -522,9 +542,29 @@ def parse_owner_review_reply(
             rendered=rendered,
             binding=binding,
         )
-    anchor_map = _rendered_anchor_map(rendered)
-    anchor = str(parsed["anchor"]).upper()
-    item = anchor_map.get(anchor)
+    item: dict[str, Any] | None = None
+    action_type = ""
+    if action_token:
+        token_match = _rendered_action_token_map(rendered).get(action_token)
+        if token_match:
+            item = token_match["item"]
+            action_type = str(token_match.get("action_type") or "")
+        if not item:
+            return _reply_result(
+                status="needs_clarification",
+                reply_text=reply_text,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                reason="action_token_not_found_in_recorded_digest",
+                rendered=rendered,
+                parsed=parsed,
+                binding=binding,
+            )
+    else:
+        anchor_map = _rendered_anchor_map(rendered)
+        anchor = str(parsed["anchor"]).upper()
+        item = anchor_map.get(anchor)
     if not item:
         return _reply_result(
             status="needs_clarification",
@@ -537,7 +577,8 @@ def parse_owner_review_reply(
             parsed=parsed,
             binding=binding,
         )
-    action_type = _owner_action_type_from_reply(parsed["verb"], item)
+    if not action_type:
+        action_type = _owner_action_type_from_reply(parsed["verb"], item)
     if not action_type:
         return _reply_result(
             status="unsupported",
@@ -553,13 +594,26 @@ def parse_owner_review_reply(
         )
     target_type = str(item.get("target_type") or "")
     target_id = str(item.get("target_id") or "")
+    if action_token and not _reply_verb_matches_action_type(str(parsed.get("verb") or ""), action_type):
+        return _reply_result(
+            status="unsupported",
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            reason="action_token_verb_mismatch",
+            rendered=rendered,
+            parsed={**parsed, "action_type": action_type, "target_type": target_type, "target_id": target_id},
+            item=item,
+            binding=binding,
+        )
     action_result = apply_owner_action(
         store,
         action_type=action_type,
         target=f"{target_type}:{target_id}",
         owner_id=owner_id,
         channel=channel,
-        note=f"owner reply: {anchor}",
+        note=f"owner command: {action_token or anchor}",
         rating=str(parsed.get("rating") or ""),
         apply=apply,
     )
@@ -867,6 +921,9 @@ def _resolve_reply_digest(
     owner_id: str,
     channel: str,
     digest_id: str,
+    require_recorded_digest: bool = False,
+    anchor: str = "",
+    action_token: str = "",
     max_action_required: int | None,
     max_review_suggested: int | None,
     max_fyi: int | None,
@@ -886,6 +943,18 @@ def _resolve_reply_digest(
     record = _latest_rendered_digest_record(store.roots, owner_id=owner_id, channel=channel)
     if record:
         return _rendered_digest_from_record(record), "latest_recorded_digest"
+
+    record = _latest_owner_home_digest_record(
+        store.roots,
+        owner_id=owner_id,
+        anchor=anchor,
+        action_token=action_token,
+    )
+    if record:
+        return _rendered_digest_from_record(record), "latest_owner_home_digest"
+
+    if require_recorded_digest:
+        return _empty_rendered_digest(store, owner_id=owner_id), "digest_not_found"
 
     return (
         render_owner_review_digest(
@@ -909,6 +978,7 @@ def _append_owner_review_rendered_digest(store: MemoryOSStore, rendered: dict[st
         "profile": store.roots.profile or "default",
         "owner_id": str(rendered.get("owner_id") or "owner"),
         "channel": _safe_channel(channel),
+        "delivery_binding": rendered.get("delivery_binding") if isinstance(rendered.get("delivery_binding"), dict) else {},
         "rendered_digest": _bounded_rendered_digest(rendered),
         "raw_body_included": False,
     }
@@ -922,6 +992,7 @@ def _append_owner_review_rendered_digest(store: MemoryOSStore, rendered: dict[st
             "digest_id": record["digest_id"],
             "owner_id": record["owner_id"],
             "channel": record["channel"],
+            "delivery_scope": (record.get("delivery_binding") or {}).get("scope", ""),
             "raw_body_included": False,
         },
     )
@@ -953,6 +1024,43 @@ def _latest_rendered_digest_record(roots: MemoryOSRoots, *, owner_id: str, chann
             continue
         return record
     return None
+
+
+def _latest_owner_home_digest_record(
+    roots: MemoryOSRoots,
+    *,
+    owner_id: str,
+    anchor: str = "",
+    action_token: str = "",
+) -> dict[str, Any] | None:
+    target_anchor = str(anchor or "").upper()
+    target_token = str(action_token or "").lower()
+    for record in reversed(read_owner_review_rendered_digest_records(roots)):
+        if owner_id and str(record.get("owner_id") or "") != owner_id:
+            continue
+        binding = record.get("delivery_binding") if isinstance(record.get("delivery_binding"), dict) else {}
+        if str(binding.get("scope") or "") != "owner_home":
+            continue
+        if target_anchor and not _record_has_anchor(record, target_anchor):
+            continue
+        if target_token and not _record_has_action_token(record, target_token):
+            continue
+        return record
+    return None
+
+
+def _record_has_anchor(record: dict[str, Any], anchor: str) -> bool:
+    target_anchor = str(anchor or "").upper()
+    if not target_anchor:
+        return True
+    return target_anchor in _rendered_anchor_map(_rendered_digest_from_record(record))
+
+
+def _record_has_action_token(record: dict[str, Any], action_token: str) -> bool:
+    target_token = str(action_token or "").lower()
+    if not target_token:
+        return True
+    return target_token in _rendered_action_token_map(_rendered_digest_from_record(record))
 
 
 def _rendered_digest_from_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -990,6 +1098,7 @@ def _bounded_rendered_digest(rendered: dict[str, Any]) -> dict[str, Any]:
         "will_send": False,
         "actions_enabled": False,
         "raw_body_included": False,
+        "delivery_binding": rendered.get("delivery_binding") if isinstance(rendered.get("delivery_binding"), dict) else {},
         "counts": rendered.get("counts") if isinstance(rendered.get("counts"), dict) else {},
         "overflow": rendered.get("overflow") if isinstance(rendered.get("overflow"), dict) else {},
         "sections": {
@@ -1004,6 +1113,27 @@ def _bounded_rendered_digest(rendered: dict[str, Any]) -> dict[str, Any]:
             "actual_identity_write": False,
             "actual_unapproved_crystallized_approval": False,
         },
+    }
+
+
+def _owner_review_delivery_binding(store: MemoryOSStore, channel: str) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home).get("owner_review", {})
+    if not isinstance(config, dict):
+        config = {}
+    safe_channel = _safe_channel(channel)
+    recurring_channel = _safe_channel(str(config.get("recurring_delivery_channel") or ""))
+    recurring_enabled = bool(config.get("recurring_delivery_enabled"))
+    recurring_mode = str(config.get("recurring_delivery_mode") or "")
+    scope = "channel"
+    if recurring_enabled and recurring_mode == "hermes_cron" and recurring_channel == safe_channel:
+        scope = "owner_home"
+    return {
+        "schema_version": "memory-os.owner_review_delivery_binding.v0",
+        "scope": scope,
+        "channel": safe_channel,
+        "recurring_delivery_channel": recurring_channel,
+        "deliver_target_class": str(config.get("recurring_delivery_target_class") or "missing"),
+        "raw_body_included": False,
     }
 
 
@@ -1022,6 +1152,11 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "consequence": _bounded_text(str(item.get("consequence") or ""), 240),
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360),
         "available_actions": [str(action) for action in item.get("available_actions") or []][:8],
+        "action_tokens": {
+            str(key): str(value)
+            for key, value in (item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}).items()
+        },
+        "action_commands": [str(command) for command in item.get("action_commands") or []][:8],
         "safe_source_ids": [str(source_id) for source_id in item.get("safe_source_ids") or []][:12],
         "raw_body_included": False,
     }
@@ -1414,18 +1549,23 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
         target_ref = f"candidate:{candidate.candidate_id}"
         if target_ref in closed:
             continue
+        needs_consolidation = _candidate_needs_consolidation(candidate.body)
         items.append(
             {
                 "schema_version": "memory-os.review_item.v0",
                 "review_item_id": f"review:{target_ref}",
-                "target_type": "candidate",
+                "target_type": "candidate_cleanup" if needs_consolidation else "candidate",
                 "target_id": candidate.candidate_id,
                 "source_module": "crystallized_candidates",
-                "priority": "action_required",
+                "priority": "fyi" if needs_consolidation else "action_required",
                 "created_at": "",
                 "status": "pending",
-                "summary": _bounded_text(f"Proposed memory: {candidate.body}", 260),
-                "proposed_memory_text": _bounded_text(candidate.body, 360),
+                "summary": (
+                    "Memory candidate is a transcript/event excerpt and needs consolidation before approval"
+                    if needs_consolidation
+                    else _bounded_text(f"Proposed memory: {candidate.body}", 260)
+                ),
+                "proposed_memory_text": "" if needs_consolidation else _bounded_text(candidate.body, 360),
                 "candidate_kind": candidate.kind,
                 "safe_source_ids": [f"event:{event_id}" for event_id in candidate.source_event_ids],
                 "raw_body_included": False,
@@ -1488,7 +1628,7 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
     return items
 
 
-def _memory_source_fyi_items(store: MemoryOSStore, *, limit: int) -> list[dict[str, Any]]:
+def _memory_source_fyi_items(store: MemoryOSStore, *, limit: int, start: int = 1) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
     records = read_memory_source_records(store.roots, limit=50)
@@ -1497,7 +1637,7 @@ def _memory_source_fyi_items(store: MemoryOSStore, *, limit: int) -> list[dict[s
         record_id = str(record.get("record_id") or "")
         if not record_id:
             continue
-        anchor = f"F{len(selected) + 1}"
+        anchor = f"F{start + len(selected)}"
         selected.append(
             {
                 "anchor": anchor,
@@ -1698,12 +1838,14 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
     target_type = str(item.get("target_type") or item.get("kind") or "digest_status")
     source_module = str(item.get("source_module") or "owner_review")
     anchor = str(item.get("anchor") or "")
+    target_id = str(item.get("target_id") or item.get("kind") or "")
+    actions = _review_actions(target_type, target_id)
     question = _review_question(target_type, item)
-    suggested_action = _review_suggested_action(anchor, target_type)
+    suggested_action = _review_suggested_action(actions, target_type)
     return {
         "anchor": anchor,
         "target_type": target_type,
-        "target_id": str(item.get("target_id") or item.get("kind") or ""),
+        "target_id": target_id,
         "source_module": source_module,
         "section": section,
         "question": question,
@@ -1713,7 +1855,9 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360)
         if target_type == "candidate"
         else "",
-        "available_actions": _review_available_actions(anchor, target_type),
+        "available_actions": [action["command"] for action in actions],
+        "action_tokens": {action["action_type"]: action["token"] for action in actions},
+        "action_commands": [action["command"] for action in actions],
         "safe_source_ids": item.get("safe_source_ids") or [],
         "raw_body_included": False,
     }
@@ -1725,6 +1869,8 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
         if proposed:
             return f"Should this proposed memory become owner-approved long-term memory? {proposed}"
         return "Should this proposed memory become owner-approved long-term memory?"
+    if target_type == "candidate_cleanup":
+        return "This memory candidate needs consolidation before owner approval."
     if target_type == "proposal":
         summary = str(item.get("summary") or "this proposal")
         return _bounded_text(f"Should this proposal move forward for human-controlled follow-up? {summary}", 180)
@@ -1735,18 +1881,16 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     return "Review this Memory-OS status signal."
 
 
-def _review_suggested_action(anchor: str, target_type: str) -> str:
-    if target_type == "candidate":
-        return f"approve {anchor} or reject {anchor}"
-    if target_type == "proposal":
-        return f"approve {anchor} or reject {anchor}"
-    if target_type == "memory_source":
-        return (
-            f"feedback {anchor} useful|irrelevant|too_mechanistic|"
-            "missing_context|overconfident|needs_specific_recall"
-        )
-    if target_type == "speak":
-        return f"allow {anchor} only if this out-of-policy proactive send is acceptable once"
+def _review_suggested_action(actions: list[dict[str, str]], target_type: str) -> str:
+    commands = [action["command"] for action in actions]
+    if target_type in {"candidate", "proposal"} and len(commands) >= 2:
+        return f"{commands[0]} or {commands[1]}"
+    if target_type == "memory_source" and commands:
+        return commands[0]
+    if target_type == "speak" and commands:
+        return f"{commands[0]} only if this out-of-policy proactive send is acceptable once"
+    if target_type == "candidate_cleanup":
+        return "no action in this digest; wait for consolidation or review queue cleanup"
     return "no action required"
 
 
@@ -1758,6 +1902,13 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
         return _bounded_text(
             f"Source module {source_module} suggested a stable memory candidate from {source_count} safe refs; "
             f"queue reason {aging}.",
+            220,
+        )
+    if target_type == "candidate_cleanup":
+        source_count = len(item.get("safe_source_ids") or [])
+        return _bounded_text(
+            f"Source module {source_module} produced a candidate from {source_count} safe refs, "
+            "but it still looks like a transcript or event excerpt instead of a stable memory.",
             220,
         )
     if target_type == "proposal":
@@ -1778,6 +1929,8 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
 def _review_consequence(target_type: str) -> str:
     if target_type == "candidate":
         return "Approve writes one owner-approved crystallized memory; reject keeps audit evidence and closes the item."
+    if target_type == "candidate_cleanup":
+        return "No memory is written. The item stays as review backlog until consolidation or explicit cleanup handles it."
     if target_type == "proposal":
         return "Approve only marks the proposal approved for follow-up; it does not execute work. Reject downranks/closes it."
     if target_type == "memory_source":
@@ -1787,21 +1940,44 @@ def _review_consequence(target_type: str) -> str:
     return "FYI only; no state change is needed."
 
 
-def _review_available_actions(anchor: str, target_type: str) -> list[str]:
-    if target_type in {"candidate", "proposal"}:
-        return [f"approve {anchor}", f"reject {anchor}"]
-    if target_type == "memory_source":
+def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
+    if not target_id:
+        return []
+    if target_type == "candidate":
         return [
-            f"feedback {anchor} useful",
-            f"feedback {anchor} irrelevant",
-            f"feedback {anchor} too_mechanistic",
-            f"feedback {anchor} missing_context",
-            f"feedback {anchor} overconfident",
-            f"feedback {anchor} needs_specific_recall",
+            _review_action("approve", "approve_candidate", target_type, target_id),
+            _review_action("reject", "reject_candidate", target_type, target_id),
         ]
+    if target_type == "proposal":
+        return [
+            _review_action("approve", "approve_proposal", target_type, target_id),
+            _review_action("reject", "reject_proposal", target_type, target_id),
+        ]
+    if target_type == "memory_source":
+        return [_review_action("feedback", "mark_feedback", target_type, target_id)]
     if target_type == "speak":
-        return [f"allow {anchor}"]
+        return [_review_action("allow", "allow_speak_once", target_type, target_id)]
     return []
+
+
+def _review_action(verb: str, action_type: str, target_type: str, target_id: str) -> dict[str, str]:
+    token = _action_token(action_type=action_type, target_type=target_type, target_id=target_id)
+    command = f"memory {verb} {token}"
+    if action_type == "mark_feedback":
+        command += " useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall"
+    return {
+        "verb": verb,
+        "action_type": action_type,
+        "target_type": target_type,
+        "target_id": target_id,
+        "token": token,
+        "command": command,
+    }
+
+
+def _action_token(*, action_type: str, target_type: str, target_id: str) -> str:
+    payload = "|".join([str(action_type), str(target_type), str(target_id)])
+    return "oa_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:14]
 
 
 def _digest_text_preview(
@@ -1818,16 +1994,33 @@ def _digest_text_preview(
 
 
 def _rendered_digest_text(sections: dict[str, list[dict[str, Any]]]) -> str:
+    max_chars = OWNER_REVIEW_TEXT_LIMIT
     lines = ["Memory-OS owner review preview", ""]
+    omitted = 0
     for title, key in (
         ("Action Required", "action_required"),
         ("Review Suggested", "review_suggested"),
         ("FYI", "fyi"),
     ):
-        lines.append(f"{title}:")
-        lines.extend(_rendered_digest_lines(sections.get(key, [])))
+        section_lines = [f"{title}:"]
+        items = sections.get(key, [])
+        if not items:
+            section_lines.append("- none")
+        for item in items:
+            item_lines = _rendered_digest_item_lines(item)
+            candidate = lines + section_lines + item_lines + [""]
+            if len("\n".join(candidate).rstrip()) > max_chars:
+                omitted += 1
+                continue
+            section_lines.extend(item_lines)
+        if key == "fyi" and omitted:
+            summary_line = f"- {omitted} more item(s) omitted to keep this Telegram digest bounded."
+            candidate = lines + section_lines + [summary_line, ""]
+            if len("\n".join(candidate).rstrip()) <= max_chars:
+                section_lines.append(summary_line)
+        lines.extend(section_lines)
         lines.append("")
-    return "\n".join(lines).rstrip()[:3500]
+    return "\n".join(lines).rstrip()
 
 
 def _delivery_message_from_preview(preview: dict[str, Any]) -> str:
@@ -1858,12 +2051,22 @@ def _rendered_digest_lines(items: list[dict[str, Any]]) -> list[str]:
         return ["- none"]
     lines: list[str] = []
     for item in items:
-        lines.append(f"- [{item.get('anchor')}] {item.get('question')}")
-        lines.append(f"  Action: {item.get('suggested_action')}")
-        lines.append(f"  Reason: {item.get('reason')}")
-        lines.append(f"  Consequence: {item.get('consequence')}")
-        lines.append(f"  Source: {item.get('source_module')}")
+        lines.extend(_rendered_digest_item_lines(item))
     return lines
+
+
+def _rendered_digest_item_lines(item: dict[str, Any]) -> list[str]:
+    target_ref = f"{item.get('target_type')}:{item.get('target_id')}"
+    commands = [str(command) for command in item.get("action_commands") or []]
+    action_line = " / ".join(commands) if commands else str(item.get("suggested_action") or "no action required")
+    return [
+        f"- [{item.get('anchor')}] {item.get('question')}",
+        f"  Action: {action_line}",
+        f"  Ref: {target_ref}",
+        f"  Reason: {item.get('reason')}",
+        f"  Consequence: {item.get('consequence')}",
+        f"  Source: {item.get('source_module')}",
+    ]
 
 
 def _rendered_anchor_map(rendered: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1878,29 +2081,70 @@ def _rendered_anchor_map(rendered: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return result
 
 
+def _rendered_action_token_map(rendered: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    sections = rendered.get("sections") if isinstance(rendered.get("sections"), dict) else {}
+    result: dict[str, dict[str, Any]] = {}
+    for items in sections.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
+            for action_type, token in tokens.items():
+                clean = str(token or "").lower()
+                if not clean:
+                    continue
+                result[clean] = {"item": item, "action_type": str(action_type)}
+    return result
+
+
 def _parse_owner_reply_text(reply_text: str) -> dict[str, Any]:
-    parts = str(reply_text or "").strip().split()
+    text = " ".join(str(reply_text or "").strip().split())
+    if text.startswith("/memory "):
+        text = "memory " + text[len("/memory ") :]
+    parts = text.split()
     if len(parts) < 2:
         return {"status": "needs_clarification", "reason": "expected_action_and_anchor"}
+    prefixed = False
+    if parts[0].lower() in {"memory", "mos"}:
+        prefixed = True
+        parts = parts[1:]
+        if len(parts) < 2:
+            return {"status": "needs_clarification", "reason": "expected_action_and_token"}
     verb = _normalize_reply_verb(parts[0])
     if not verb:
         return {"status": "needs_clarification", "reason": "unknown_action_verb"}
-    anchor = parts[1].strip("：:,.，。[]()").upper()
-    if not anchor:
-        return {"status": "needs_clarification", "reason": "missing_anchor"}
+    target = parts[1].strip("：:,.，。[]()")
+    action_token = ""
+    anchor = ""
+    if target.lower().startswith("oa_"):
+        action_token = target.lower()
+    elif prefixed:
+        return {"status": "needs_clarification", "reason": "expected_action_token"}
+    else:
+        anchor = target.upper()
+    if not anchor and not action_token:
+        return {"status": "needs_clarification", "reason": "missing_anchor_or_token"}
     rating = ""
     if verb == "feedback":
         if len(parts) < 3:
-            return {"status": "needs_clarification", "reason": "missing_feedback_rating", "anchor": anchor}
+            return {
+                "status": "needs_clarification",
+                "reason": "missing_feedback_rating",
+                "anchor": anchor,
+                "action_token": action_token,
+            }
         rating = parts[2].strip("：:,.，。")
         if rating not in ALLOWED_FEEDBACK_RATINGS:
             return {
                 "status": "needs_clarification",
                 "reason": "invalid_feedback_rating",
                 "anchor": anchor,
+                "action_token": action_token,
                 "rating": rating,
             }
-    return {"status": "ok", "verb": verb, "anchor": anchor, "rating": rating}
+    return {"status": "ok", "verb": verb, "anchor": anchor, "action_token": action_token, "rating": rating}
 
 
 def _normalize_reply_verb(value: str) -> str:
@@ -1937,6 +2181,18 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
     return ""
 
 
+def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
+    if verb == "approve":
+        return action_type in {"approve_candidate", "approve_proposal"}
+    if verb == "reject":
+        return action_type in {"reject_candidate", "reject_proposal"}
+    if verb == "feedback":
+        return action_type == "mark_feedback"
+    if verb == "allow":
+        return action_type == "allow_speak_once"
+    return False
+
+
 def _reply_result(
     *,
     status: str,
@@ -1952,6 +2208,7 @@ def _reply_result(
     action_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     anchors = sorted(_rendered_anchor_map(rendered))
+    delivery_binding = rendered.get("delivery_binding") if isinstance(rendered.get("delivery_binding"), dict) else {}
     return {
         "schema_version": OWNER_REVIEW_REPLY_SCHEMA_VERSION,
         "profile": rendered.get("profile") or "default",
@@ -1967,6 +2224,8 @@ def _reply_result(
         "active_digest": {
             "digest_id": rendered.get("digest_id"),
             "binding": binding,
+            "delivery_scope": delivery_binding.get("scope", ""),
+            "delivery_channel": delivery_binding.get("channel", ""),
             "anchor_count": len(anchors),
             "anchors": anchors,
             "raw_body_included": False,
@@ -2008,7 +2267,7 @@ def _digest_id() -> str:
 
 def _safe_channel(value: str) -> str:
     channel = str(value or "").strip().lower().replace("-", "_")
-    allowed = {"telegram", "cli", "web", "slack", "whatsapp", "wecom", "matrix", "discord", "unknown"}
+    allowed = {"telegram", "cli", "web", "slack", "whatsapp", "wecom", "matrix", "discord", "origin", "unknown"}
     return channel if channel in allowed else "unknown"
 
 
@@ -2366,6 +2625,32 @@ def _safe_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if str(item).strip()]
+
+
+def _candidate_needs_consolidation(value: str) -> bool:
+    text = " ".join(str(value or "").split())
+    lowered = text.lower()
+    transcript_markers = (
+        "user:",
+        "assistant:",
+        "用户:",
+        "用户：",
+        "助手:",
+        "助手：",
+        "菸草:",
+        "菸草：",
+        "agentcoco:",
+        "agentcoco：",
+        "| assistant:",
+        "| user:",
+    )
+    if any(marker in lowered for marker in transcript_markers):
+        return True
+    if "evt_" in text and len(text) > 120:
+        return True
+    if len(text) > 240 and ("|" in text or "：" in text):
+        return True
+    return False
 
 
 def _bounded_text(value: str, limit: int) -> str:

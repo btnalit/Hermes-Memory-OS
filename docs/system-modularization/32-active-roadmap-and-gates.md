@@ -119,7 +119,8 @@ These are not the remaining queue, but future work depends on them.
 | RH-31.0-31.3 eval harness | implemented | first deterministic scorecard exists; P1-B projection miss attributed to fixture/adapter bug; warning findings remain lexical/FTS measurement signals |
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
-| RH-34/RH-35 owner governance | RH-35.1 + RH-34a + RH-34b + RH-34c + RH-34d live on test host; RH-34e redirected | owner action processor, review queue/status/apply CLI, metadata-only channel resolver, digest preview, Memory-OS export eligibility gate, aging projection, and one-shot Hermes send compatibility smoke are deployed; recurring daily review must use Hermes cron/send, with renderer and reply parser still planned |
+| RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.3 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, reply parser, provider owner-reply ingress, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text, Hermes owns delivery |
+| RH-36 module closure matrix | documented | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
 
@@ -614,20 +615,51 @@ Status:
   artifacts into owner-readable questions/actions/reasons/consequences with
   anchors, source-module context, and bounded proposed-memory text for
   candidate approvals;
-- RH-35.2 deployed on `10.20.3.200`: owner reply parser maps `approve A1`,
-  `reject R2`, `allow A1`, and `feedback F1 too_mechanistic` style replies to
-  OwnerActionProcessor without frontend state mutation, using recorded digest
-  binding when available so anchors are not reinterpreted after the queue
-  changes;
+- RH-35.2 deployed on `10.20.3.200`: owner reply parser initially mapped
+  `approve A1`, `reject R2`, `allow A1`, and `feedback F1 too_mechanistic`
+  style replies to OwnerActionProcessor without frontend state mutation;
+  RH-35.5 supersedes this display-anchor command style with stable action
+  tokens.
+- RH-35.3 deployed on `10.20.3.200`: provider owner-reply ingress catches exact
+  owner-review commands at turn start, requires a recorded digest for the
+  owner/platform channel, applies through OwnerActionProcessor, and injects a
+  one-turn confirmation instruction so explicit commands do not fall through to
+  ordinary chat;
 - RH-34d `deliver-once` is reduced to legacy smoke-only in code; RH-34e must
   use Hermes cron/send for real recurring delivery;
 - RH-34e minimum Hermes Cron Owner Review Integration is deployed on
   `10.20.3.200`: the Memory-OS cron helper script is installable under
   `$HERMES_HOME/scripts`, `review cron-status` is available through provider
   CLI and shell alias, and monitor reports OwnerCronIntegration;
-- RH-34e recurring owner-channel daily review is not enabled yet. The Hermes
-  cron job must still be created/enabled by explicit operator or installer
-  opt-in; Memory-OS must not own the recurring scheduler/transport.
+- RH-34e recurring enable gate is implemented and installed with the helper:
+  it validates schedule/delivery target, Hermes cron `--script --no-agent
+  --deliver` support, duplicate job state, and bounded render output; apply is
+  blocked unless explicitly owner/operator approved;
+- RH-34e recurring owner-channel daily review is enabled on the controlled
+  `10.20.3.200` test host by the test-host installer default. It uses Hermes
+  cron `--script --no-agent --deliver`; Memory-OS must not own the recurring
+  scheduler/transport.
+- RH-34f deployed: the installer no longer hardcodes Telegram for ordinary
+  installs. `--owner-review-cron-deliver auto` resolves to `telegram` only for
+  `--test-host` and to Hermes cron `origin` otherwise; interactive installs can
+  choose an explicit Hermes delivery target.
+- RH-34g deployed: rendered owner-review digest text is whole-item bounded
+  below the Telegram-safe budget and transcript-like candidates are downgraded
+  to cleanup/FYI instead of approvable long-term memory.
+- RH-35.5 deployed and monitor-observed on `10.20.3.200`: owner-facing commands now use stable
+  `memory <verb> oa_<token>` action tokens derived from target type, target id,
+  and action type. `A1/R1/F1` are display anchors only, following the
+  10.20.2.88 Sannai pattern of candidate ids / proposal hashes for review
+  apply. Live ingress no longer intercepts plain `approve A1` style text.
+  Monitor reports `legacy_anchor_accepted=false` and
+  `token_command_accepted=true`.
+- Real owner action smoke applied `memory approve oa_<token>` for A2 through
+  OwnerActionProcessor. The proposal moved to `approved_for_proposal`; no work
+  executed.
+- RH-36 documented: all currently known left/right brain and governance modules
+  have a closure path that says whether they generate owner actions, speech
+  requests, direct context feedback, proposals, candidates, or monitor-only
+  evidence.
 
 Reason:
 
@@ -664,13 +696,54 @@ RH-34d smoke:
   post_smoke_delivery_gate=disabled
 RH-34e helper/status:
   cron_status=ok
-  recurring_enabled=false
-  cron_job_present=false
+  recurring_enabled=true
+  cron_job_present=true
+  cron_job_enabled=true
+  job_id=2af755464ca8
   helper_script_present=true
-  hermes_delivery_configured=false
+  hermes_delivery_configured=true
+  hermes_delivery_target_class=platform_home
   helper_output_chars=3501
   helper_has_internal_schema=false
   helper_has_raw_marker=false
+  monitor OwnerCronIntegration.status=ok
+RH-34e enable gate dry-run:
+  status=dry_run
+  apply_requested=false
+  helper_script_present=true
+  hermes_cron_supports_script_no_agent_deliver=true
+  existing_job_present=false
+  deliver_target_class=platform_home
+  render_check.raw_body_included=false
+  render_check.internal_schema_primary=false
+RH-34e default deploy / cron run:
+  installer_gate_status=applied
+  job_name=memory-os-owner-review-digest
+  schedule=0 9 * * *
+  deliver=telegram
+  cron_last_run=2026-05-25T08:47:39.776368-04:00 ok
+  output_chars=3637
+  output_has_internal_schema=false
+  output_has_raw_marker=false
+  config_updated=false
+RH-34f installer default:
+  non_test_host_auto_target=origin
+  test_host_auto_target=telegram
+  gate_rejects_auto=true
+  gate_rejects_local=true
+RH-34g redeploy / cron run:
+  gate_status=already_configured
+  render_check_text_char_count=2231
+  helper_preview_chars=2231
+  helper_preview_has_bad_marker=false
+  latest_cron_output_chars=2367
+  latest_cron_output_has_bad_marker=false
+  latest_cron_output_action_items=3
+  latest_cron_output_review_items=2
+  latest_cron_output_ends_partial_owner=false
+  monitor OwnerRenderedDigest.text_char_count=2289
+  monitor OwnerRenderedDigest.text_has_internal_schema=false
+  monitor OwnerRenderedDigest.text_has_transcript_marker=false
   monitor OwnerCronIntegration.status=ok
 ```
 
@@ -679,14 +752,17 @@ Next action:
 1. keep RH-34a/RH-34b/RH-34c/RH-34d in observation through scheduled monitor;
 2. get external review on RH-34d smoke evidence as a compatibility smoke, not
    as approval for Memory-OS-owned recurring delivery;
-3. review RH-34e helper/status evidence and decide whether to enable the first
-   Hermes cron job with explicit owner/operator opt-in;
-4. if enabled, create/configure a Hermes cron delivery job that calls
-   `$HERMES_HOME/scripts/memory_os_owner_review_digest.py` via Hermes cron
-   `--script --no-agent --deliver`, then verify one owner/window behavior and
-   config-only rollback;
-5. keep CLI preview as the fallback owner surface;
-6. keep `mailbox` classified as internal AI-agent mailroom evidence, not a
+3. observe the enabled Hermes cron job through monitor and owner-visible
+   Telegram receipt; verify one owner/window behavior and config-only rollback;
+4. run the next owner-reply action smoke only with the rendered stable command
+   (`memory approve oa_<token>` or `memory reject oa_<token>`), not with
+   display anchors such as `approve A1`;
+5. design and implement the approved-proposal follow-up projection so
+   `approved_for_proposal` items do not become another hidden backlog. This is
+   a projection/follow-up surface only; actual execution still requires a
+   separate explicit execution/apply command;
+6. keep CLI preview as the fallback owner surface;
+7. keep `mailbox` classified as internal AI-agent mailroom evidence, not a
    left-brain or right-brain cognition module, not an owner digest channel, and
    not an approval path.
 
@@ -706,13 +782,17 @@ Promotion signal:
 - review digest renderer produces owner-readable action briefs;
 - candidate approval cards show bounded proposed-memory text;
 - owner replies can be parsed into OwnerActionProcessor calls with recorded
-  digest binding and ambiguity protection;
+  digest action-token binding and ambiguity protection;
 - legacy `deliver-once` returns smoke-only and does not call transport;
-- Hermes Cron Owner Review Integration is planned as RH-34e and must prove one
-  digest per owner/window, skipped/error outcomes, and rollback by disabling
-  the Hermes cron job plus Memory-OS recurring flag. Its helper/status slice is
-  already deployed; recurring delivery remains disabled until explicit opt-in;
+- Hermes Cron Owner Review Integration is deployed as RH-34e and must continue
+  proving one digest per owner/window, skipped/error outcomes, and rollback by
+  disabling the Hermes cron job plus Memory-OS recurring flag. On the test
+  host, recurring delivery is enabled by the installer default;
 - digest preview contains bounded summaries and no raw bodies;
+- rendered digest text stays within budget, does not truncate items, and does
+  not show transcript-like candidates as approvable memory;
+- open-source installer defaults use Hermes origin/home delivery semantics or
+  an explicit owner-selected target, not a Telegram hardcode;
 - monitor reports pending/stale/action/error counts;
 - feedback backflow is visible as aggregation, not immediate route mutation;
 - proposal approval does not execute;
@@ -725,6 +805,9 @@ Promotion signal:
 Stop signal:
 
 - digest includes raw private body;
+- digest contains transcript markers or internal schema labels in primary
+  owner-facing text;
+- digest exceeds the owner-channel budget or truncates inside an item;
 - digest sends to an unverified, unresolved, group, or non-owner channel;
 - delivery gate reports ready before explicit opt-in and owner channel config;
 - delivery gate or delivery adapter sets `actual_send=true` without external
@@ -744,6 +827,8 @@ Stop signal:
 - proposal approval causes actual execution;
 - feedback is treated as crystallized approval;
 - speak-once enables default sending.
+- live ingress accepts plain display-anchor commands such as `approve A1` as
+  state-changing input.
 
 ## Active P2 Queue
 

@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
 def main() -> int:
@@ -76,9 +77,27 @@ def _has_meaningful_content(preview: dict[str, object]) -> bool:
 
 
 def _resolve_channel() -> str:
+    configured = _configured_recurring_channel()
+    if configured:
+        return configured
     report = _run_json(["hermes", "memory-os-agent-os", "review", "channel"])
     channel = str(report.get("channel") or "").strip()
     return channel or "owner_review_cron"
+
+
+def _configured_recurring_channel() -> str:
+    hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+    path = hermes_home / "memory-os" / "config.json"
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(loaded, dict):
+        return ""
+    owner_review = loaded.get("owner_review")
+    if not isinstance(owner_review, dict):
+        return ""
+    return str(owner_review.get("recurring_delivery_channel") or "").strip()
 
 
 def _run_json(command: list[str]) -> dict[str, object]:

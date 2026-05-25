@@ -28,6 +28,14 @@ No-send test-host install:
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
 ```
 
+The test-host preset installs the owner review helper and enables the daily
+owner review digest through Hermes cron by default. Use
+`--no-enable-owner-review-cron` if you want the helper installed but no recurring
+delivery job. Outside `--test-host`, the installer resolves the default owner
+review delivery target to Hermes cron `origin` rather than hardcoding Telegram.
+Hermes owns the scheduled delivery and platform transport; Memory-OS only
+renders the bounded digest and processes owner actions.
+
 Production-safe install:
 
 ```bash
@@ -67,6 +75,8 @@ They do not need to expose `hermes memory_os ...` as a top-level command.
   `$HERMES_HOME/memory-os/runtime/python/`
 - optional heartbeat and cognitive-loop systemd user units under
   `$HERMES_HOME/memory-os/systemd/`
+- optional owner review digest helper/gate under `$HERMES_HOME/scripts/`; the
+  test-host preset enables the daily Hermes cron job unless explicitly disabled
 
 Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 `$HERMES_HOME/plugins/`.
@@ -79,3 +89,21 @@ apply shadow journals.
 
 Test-host mode enables observation loops. It does not enable real sends,
 executes, identity writes, or crystallized approvals.
+
+## 6. Owner Review Commands
+
+Owner review digests use short display anchors such as `A1`, `R1`, and `F1` to
+make the list readable. Those anchors are not durable approval identities.
+
+Use the stable token printed on the digest item:
+
+```text
+memory approve oa_<token>
+memory reject oa_<token>
+memory allow oa_<token>
+memory feedback oa_<token> too_mechanistic
+```
+
+Plain text such as `approve A1` or `reject R1` is treated as ordinary chat and
+must not mutate Memory-OS state. A proposal approval only marks the proposal as
+approved for human-controlled follow-up; it does not execute work.

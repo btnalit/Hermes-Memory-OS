@@ -54,10 +54,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "schedule": "daily",
         "raw_body": False,
         "actions_enabled": False,
+        "reply_ingress_enabled": True,
         "delivery_enabled": False,
         "delivery_adapter": "none",
         "recurring_delivery_enabled": False,
         "recurring_delivery_mode": "disabled",
+        "recurring_delivery_channel": "unknown",
+        "recurring_delivery_target_class": "missing",
         "cron_job_name": "memory-os-owner-review-digest",
         "aging_enabled": True,
         "aging_action_required_days": 7,
@@ -253,10 +256,13 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["allow_group"] = bool(merged.get("allow_group"))
     merged["raw_body"] = False
     merged["actions_enabled"] = bool(merged.get("actions_enabled"))
+    merged["reply_ingress_enabled"] = bool(merged.get("reply_ingress_enabled"))
     merged["delivery_enabled"] = bool(merged.get("delivery_enabled"))
     merged["delivery_adapter"] = str(merged.get("delivery_adapter") or "none")
     merged["recurring_delivery_enabled"] = bool(merged.get("recurring_delivery_enabled"))
     merged["recurring_delivery_mode"] = str(merged.get("recurring_delivery_mode") or "disabled")
+    merged["recurring_delivery_channel"] = str(merged.get("recurring_delivery_channel") or "unknown")
+    merged["recurring_delivery_target_class"] = str(merged.get("recurring_delivery_target_class") or "missing")
     merged["cron_job_name"] = str(merged.get("cron_job_name") or "memory-os-owner-review-digest")
     merged["aging_enabled"] = bool(merged.get("aging_enabled"))
     return merged

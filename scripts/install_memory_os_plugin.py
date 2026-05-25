@@ -22,6 +22,7 @@ SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
 SOURCE_AGENT_DIR = REPO_ROOT / "agent"
 SOURCE_EVAL_DIR = REPO_ROOT / "eval"
 SOURCE_OWNER_REVIEW_CRON_HELPER = REPO_ROOT / "scripts" / "memory_os_owner_review_digest.py"
+SOURCE_OWNER_REVIEW_CRON_GATE = REPO_ROOT / "scripts" / "memory_os_owner_review_cron_gate.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -235,7 +236,7 @@ def install_plugin(
             interval=cognitive_loop_interval,
             dry_run=dry_run,
         )
-    owner_review_cron_helper: Path | None = None
+    owner_review_cron_helper: dict[str, Path] = {}
     if install_owner_review_cron_helper:
         owner_review_cron_helper = _write_owner_review_cron_helper(hermes_home, dry_run=dry_run)
     enabled = False
@@ -352,8 +353,9 @@ def install_plugin(
         "cognitive_loop_enabled": cognitive_loop_enabled,
         "cognitive_loop_enable_command": cognitive_loop_enable_command,
         "owner_review_cron_helper_install_requested": install_owner_review_cron_helper,
-        "owner_review_cron_helper_installed": bool(owner_review_cron_helper) and not dry_run,
-        "owner_review_cron_helper_path": str(owner_review_cron_helper or ""),
+        "owner_review_cron_helper_installed": bool(owner_review_cron_helper.get("helper")) and not dry_run,
+        "owner_review_cron_helper_path": str(owner_review_cron_helper.get("helper") or ""),
+        "owner_review_cron_gate_path": str(owner_review_cron_helper.get("gate") or ""),
         "deep_reflection_preset": deep_reflection_preset,
         "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
         "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
@@ -611,16 +613,23 @@ def _write_cognitive_loop_artifacts(hermes_home: Path, *, interval: str, dry_run
     return artifacts
 
 
-def _write_owner_review_cron_helper(hermes_home: Path, *, dry_run: bool) -> Path:
+def _write_owner_review_cron_helper(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
     if not SOURCE_OWNER_REVIEW_CRON_HELPER.is_file():
         raise SystemExit(f"Owner review cron helper source is missing: {SOURCE_OWNER_REVIEW_CRON_HELPER}")
-    target = hermes_home / "scripts" / SOURCE_OWNER_REVIEW_CRON_HELPER.name
+    if not SOURCE_OWNER_REVIEW_CRON_GATE.is_file():
+        raise SystemExit(f"Owner review cron gate source is missing: {SOURCE_OWNER_REVIEW_CRON_GATE}")
+    helper_target = hermes_home / "scripts" / SOURCE_OWNER_REVIEW_CRON_HELPER.name
+    gate_target = hermes_home / "scripts" / SOURCE_OWNER_REVIEW_CRON_GATE.name
     if dry_run:
-        return target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SOURCE_OWNER_REVIEW_CRON_HELPER, target)
-    target.chmod(target.stat().st_mode | stat.S_IXUSR)
-    return target
+        return {"helper": helper_target, "gate": gate_target}
+    helper_target.parent.mkdir(parents=True, exist_ok=True)
+    for source, target in (
+        (SOURCE_OWNER_REVIEW_CRON_HELPER, helper_target),
+        (SOURCE_OWNER_REVIEW_CRON_GATE, gate_target),
+    ):
+        shutil.copy2(source, target)
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return {"helper": helper_target, "gate": gate_target}
 
 
 def _write_deep_reflection_config(
@@ -728,7 +737,7 @@ def main() -> int:
     parser.add_argument(
         "--install-owner-review-cron-helper",
         action="store_true",
-        help="Copy the Memory-OS owner review render helper into HERMES_HOME/scripts for Hermes cron --no-agent delivery. Does not create or enable a cron job.",
+        help="Copy the Memory-OS owner review render helper and explicit recurring-enable gate into HERMES_HOME/scripts. Does not create or enable a cron job.",
     )
     parser.add_argument(
         "--deep-reflection-preset",

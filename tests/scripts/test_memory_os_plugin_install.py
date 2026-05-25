@@ -144,11 +144,15 @@ def test_installer_can_copy_owner_review_cron_helper_without_enabling_cron(tmp_p
     report = install_plugin(hermes_home=tmp_path / "home", install_owner_review_cron_helper=True)
 
     helper = tmp_path / "home" / "scripts" / "memory_os_owner_review_digest.py"
+    gate = tmp_path / "home" / "scripts" / "memory_os_owner_review_cron_gate.py"
     assert report["owner_review_cron_helper_install_requested"] is True
     assert report["owner_review_cron_helper_installed"] is True
     assert report["owner_review_cron_helper_path"] == str(helper)
+    assert report["owner_review_cron_gate_path"] == str(gate)
     assert helper.is_file()
+    assert gate.is_file()
     assert "Hermes cron owns scheduling" in helper.read_text(encoding="utf-8")
+    assert "Explicit opt-in gate" in gate.read_text(encoding="utf-8")
 
 
 def test_installer_can_install_system_module_runtime_package(tmp_path):

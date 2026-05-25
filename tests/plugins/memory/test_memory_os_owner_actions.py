@@ -5,6 +5,7 @@ import sqlite3
 
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+from plugins.memory.memory_os import MemoryOSProvider
 from plugins.memory.memory_os.memory_sources import append_memory_source_record, memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import (
     apply_owner_action,
@@ -49,6 +50,26 @@ def _candidate() -> CrystallizedCandidate:
 
 def _jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _review_command(rendered, anchor: str, action_type: str) -> str:
+    for items in (rendered.get("sections") or {}).values():
+        for item in items:
+            if item.get("anchor") == anchor:
+                tokens = item.get("action_tokens") or {}
+                token = tokens[action_type]
+                verb = {
+                    "approve_candidate": "approve",
+                    "reject_candidate": "reject",
+                    "approve_proposal": "approve",
+                    "reject_proposal": "reject",
+                    "mark_feedback": "feedback",
+                    "allow_speak_once": "allow",
+                }[action_type]
+                if action_type == "mark_feedback":
+                    return f"memory {verb} {token} too_mechanistic"
+                return f"memory {verb} {token}"
+    raise AssertionError(f"missing anchor {anchor}")
 
 
 def test_review_queue_lists_bounded_candidates_without_raw_body(tmp_path):
@@ -361,13 +382,56 @@ def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_p
     assert item["suggested_action"]
     assert item["reason"]
     assert item["consequence"]
+    assert item["action_commands"]
+    assert all(command.startswith("memory ") for command in item["action_commands"])
     assert item["raw_body_included"] is False
+    assert "memory approve oa_" in text or "memory reject oa_" in text
     assert "User prefers concise owner-review summaries" in text
     assert "proposed_memory_text" in serialized
     assert "Candidate kind=" not in text
     assert "source_events=" not in text
     assert "sensitivity=" not in text
     assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_render_digest_downgrades_transcript_like_candidate_to_cleanup_fyi(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand_transcript_001",
+            kind="moment",
+            body="User: 你了解我们记忆系统吗？ | Assistant: 是的，我非常了解。目前的记忆系统是由 Memory-OS 驱动的。",
+            source_event_ids=["evt_transcript_001"],
+            sensitivity="private",
+            tags=["owner-review"],
+        ),
+    )
+
+    rendered = render_owner_review_digest(store, max_action_required=0, max_review_suggested=0, max_fyi=2)
+    text = rendered["text"]
+    fyi = rendered["sections"]["fyi"][0]
+
+    assert fyi["target_type"] == "candidate_cleanup"
+    assert fyi["available_actions"] == []
+    assert "needs consolidation" in text
+    assert "User:" not in text
+    assert "Assistant:" not in text
+
+
+def test_render_digest_keeps_telegram_text_bounded_without_partial_item(tmp_path):
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    for index in range(12):
+        proposal.create_candidate(store=store, title=f"Verbose proposal {index}", body="RAW PROPOSAL BODY")
+
+    rendered = render_owner_review_digest(store)
+    text = rendered["text"]
+
+    assert len(text) <= 2400
+    assert not text.endswith("owner-")
+    assert rendered["counts"]["action_required_shown"] <= 3
+    assert "RAW PROPOSAL BODY" not in text
 
 
 def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp_path):
@@ -389,7 +453,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
 
     dry_run = parse_owner_review_reply(
         store,
-        "approve R1",
+        _review_command(delivered, "R1", "approve_candidate"),
         owner_id="owner",
         channel="telegram",
         digest_id=delivered["digest_id"],
@@ -408,7 +472,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
 
     applied = parse_owner_review_reply(
         store,
-        "approve R1",
+        _review_command(delivered, "R1", "approve_candidate"),
         owner_id="owner",
         channel="telegram",
         digest_id=delivered["digest_id"],
@@ -424,7 +488,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
 def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_queue(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
-    render_owner_review_digest(
+    rendered = render_owner_review_digest(
         store,
         channel="telegram",
         max_action_required=0,
@@ -435,12 +499,284 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")
     proposal_queue.create_candidate(store=store, title="Newer proposal", body="RAW PROPOSAL BODY")
 
-    result = parse_owner_review_reply(store, "reject R1", owner_id="owner", channel="telegram", apply=False)
+    result = parse_owner_review_reply(
+        store,
+        _review_command(rendered, "R1", "reject_candidate"),
+        owner_id="owner",
+        channel="telegram",
+        apply=False,
+    )
 
     assert result["status"] == "ok"
     assert result["active_digest"]["binding"] == "latest_recorded_digest"
     assert result["parsed"]["action_type"] == "reject_candidate"
     assert result["parsed"]["target_id"] == "cand_owner_001"
+
+
+def test_provider_owner_review_reply_ingress_processes_recorded_digest_before_prefetch(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate")
+    provider.on_turn_start(1, command)
+    context = provider.prefetch(command, session_id="session-owner-review")
+    prompt_block = provider.system_prompt_block()
+
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    assert records[0]["target_id"] == "cand_owner_001"
+    assert records[0]["channel"] == "telegram"
+    assert "Owner Review Reply" in context
+    assert "processed action: reject_candidate" in prompt_block
+    assert "Do not ask the owner to choose another review anchor" in prompt_block
+
+
+def test_provider_owner_review_reply_sync_fallback_is_idempotent(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate")
+    provider.on_turn_start(1, command)
+    provider.sync_turn(command, "ack", session_id="session-owner-review")
+
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    audit = _jsonl(store.roots.audit_path)
+    ingress = [item for item in audit if item.get("action") == "owner_review_reply_ingress"]
+    assert {item["details"]["phase"] for item in ingress} == {"turn_start"}
+
+
+def test_provider_owner_review_reply_sync_fallback_processes_when_turn_start_missed(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate")
+    provider.sync_turn(command, "ack", session_id="session-owner-review")
+
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    audit = _jsonl(store.roots.audit_path)
+    ingress = [item for item in audit if item.get("action") == "owner_review_reply_ingress"]
+    assert {item["details"]["phase"] for item in ingress} == {"sync_turn"}
+
+
+def test_provider_owner_review_reply_ingress_falls_back_to_recurring_delivery_channel(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "owner_id": "owner",
+                "recurring_delivery_channel": "cli",
+            }
+        },
+        str(tmp_path),
+    )
+    render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="cli",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    provider.on_turn_start(1, _review_command(rendered, "R1", "reject_candidate"))
+
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    assert records[0]["target_id"] == "cand_owner_001"
+    assert records[0]["channel"] == "cli"
+
+
+def test_provider_owner_review_reply_ingress_uses_owner_home_binding_not_platform_label(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "owner_id": "owner",
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": "origin",
+                "recurring_delivery_target_class": "origin",
+            }
+        },
+        str(tmp_path),
+    )
+    append_candidate_queue(store, _candidate())
+    render_owner_review_digest(
+        store,
+        channel="cli",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+    rendered = render_owner_review_digest(
+        store,
+        channel="origin",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate")
+    provider.on_turn_start(1, command)
+    context = provider.prefetch(command, session_id="session-owner-review")
+
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    assert records[0]["channel"] == "telegram"
+    assert "latest_owner_home_digest" in context
+
+
+def test_provider_owner_review_reply_ingress_requires_recorded_digest(tmp_path):
+    store = _store(tmp_path)
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+
+    provider.on_turn_start(1, "memory reject oa_deadbeef")
+    context = provider.prefetch("memory reject oa_deadbeef", session_id="session-owner-review")
+
+    assert "digest_not_found_or_expired" in context
+    assert not owner_actions_path(store.roots).exists()
+
+
+def test_provider_owner_review_reply_ingress_accepts_punctuation_and_ignores_chatter(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    chatter = MemoryOSProvider()
+    chatter.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    chatter.on_turn_start(1, "普通聊天里提到 memory reject oa_deadbeef")
+    assert not owner_actions_path(store.roots).exists()
+
+    legacy = MemoryOSProvider()
+    legacy.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    legacy.on_turn_start(2, "reject R1")
+    assert not owner_actions_path(store.roots).exists()
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate") + "。"
+    provider.on_turn_start(3, command)
+    context = provider.prefetch(command, session_id="session-owner-review")
+
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    assert records[0]["target_id"] == "cand_owner_001"
+    assert "Owner Review Reply" in context
 
 
 def test_reply_parser_handles_feedback_anchor_without_route_mutation(tmp_path):
@@ -456,9 +792,10 @@ def test_reply_parser_handles_feedback_anchor_without_route_mutation(tmp_path):
         },
     )
 
+    rendered = render_owner_review_digest(store, max_action_required=0, max_review_suggested=0, max_fyi=1)
     result = parse_owner_review_reply(
         store,
-        "feedback F1 too_mechanistic",
+        _review_command(rendered, "F1", "mark_feedback"),
         owner_id="owner",
         channel="telegram",
         apply=True,
@@ -478,10 +815,10 @@ def test_reply_parser_unknown_anchor_needs_clarification_without_mutation(tmp_pa
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
 
-    result = parse_owner_review_reply(store, "approve A99", owner_id="owner", channel="telegram", apply=True)
+    result = parse_owner_review_reply(store, "memory approve oa_deadbeef", owner_id="owner", channel="telegram", apply=True)
 
     assert result["status"] == "needs_clarification"
-    assert result["reason"] == "anchor_not_found_in_current_digest"
+    assert result["reason"] == "action_token_not_found_in_recorded_digest"
     assert not owner_actions_path(store.roots).exists()
 
 
