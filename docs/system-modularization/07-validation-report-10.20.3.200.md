@@ -8176,3 +8176,119 @@ Interpretation:
 - Live output is now a bounded `ask_choice` list with shorter topic labels.
 - The remaining WARN items are unrelated to RH-28 candidate display:
   transient/stale index warning and the existing RH-31 eval warning.
+
+#### RH-31 P1-B Candidate Boundary Attribution
+
+Date: 2026-05-25.
+
+Reason: the first RH-31 scorecard reported
+`context_projection/candidate_boundary_001` as a projection miss. This needed
+live comparison before adding any guard because scorecard warnings are
+measurement signals until they map to a real behavior failure.
+
+Remote no-write live projection probe on `10.20.3.200`:
+
+```text
+query:
+  candidate 分数很高，是不是就自动变成长期记忆？
+
+candidate_count=161
+route=candidate_review
+selected=[
+  Current Foreground Task,
+  Crystallized Review Candidates,
+  Recent Event Summaries
+]
+dropped=[
+  Conversation Carryover,
+  Working Memory,
+  Indexed Recall
+]
+boundary_true=false
+```
+
+Local RH-31 attribution after fixture/adapter correction:
+
+```text
+python -m pytest tests/eval/test_memory_os_eval_rh31.py -q
+9 passed
+
+python -m pytest \
+  tests/eval/test_memory_os_eval_rh31.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/plugins/memory/test_memory_os_prefetch.py -q
+47 passed
+```
+
+Bounded scorecard after the fix:
+
+```text
+status=warning
+score_count=27
+failure_count=3
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1}
+candidate_boundary_001/context_projection=pass
+actual_route=candidate_review
+actual_headings include Crystallized Review Candidates
+boundary_true_count=0
+forbidden_field_count=0
+```
+
+Remote RH-31 no-write scorecard after deploying the eval-only fix to
+`10.20.3.200`:
+
+```text
+hermes memory-os-agent-os eval rh31 run --fixture synthetic \
+  --adapter all --no-write-report
+
+status=warning
+score_count=27
+failure_count=3
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1}
+candidate_boundary_001/context_projection=pass
+actual_route=candidate_review
+actual_headings include Crystallized Review Candidates
+boundary_true_count=0
+forbidden_field_count=0
+```
+
+Read-only monitor after deploy:
+
+```text
+host=debian
+time=2026-05-25T04:36:45Z
+monitor_status=WARN
+PASS=[
+  gateway_active,
+  heartbeat_timer_active,
+  heartbeat_state_fresh,
+  cognitive_loop_timer_active,
+  cognitive_loop_last_cycle_present,
+  index_healthy,
+  doctor_ok,
+  status_tool_contract_ok,
+  shell_alias_no_env_ok,
+  module_artifact_summary_ok,
+  rh31_eval_safety_ok,
+  context_router_apply,
+  memory_sources_stats_ok,
+  low_clue_recall_probe_ok
+]
+WARN=[rh31_eval_has_failures]
+FAIL=[]
+
+RH31Eval.status=warning
+RH31Eval.failure_count=3
+RH31Eval.boundary_true_count=0
+RH31Eval.forbidden_field_count=0
+```
+
+Interpretation:
+
+- The deployed live projection path already handles candidate-boundary prompts
+  as `candidate_review`.
+- The RH-31 failure was caused by eval fixture/adapter drift:
+  synthetic candidate corpus was not written to the candidate queue, the fixture
+  wording triggered mechanism filtering, and the adapter inferred route from
+  headings instead of the router report.
+- No RH-31 live guard is justified for `candidate_boundary_001`.

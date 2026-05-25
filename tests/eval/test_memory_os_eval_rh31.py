@@ -110,6 +110,20 @@ def test_rh31_synthetic_fixtures_are_reviewable_jsonl_and_secret_free():
     assert "cookie" not in rendered.lower()
 
 
+def test_rh31_synthetic_candidate_fixture_populates_candidate_queue():
+    from eval.memory_os.data.rh31_synthetic import load_corpus
+    from eval.memory_os.runner.fixture_store import synthetic_store
+    from plugins.memory.memory_os.crystallized import read_candidate_queue
+
+    with synthetic_store(load_corpus()) as store:
+        candidates = read_candidate_queue(store.roots)
+
+    assert len(candidates) == 1
+    assert candidates[0].candidate_id == "cand_rh31_003"
+    assert "不是已经批准的长期记忆" in candidates[0].body
+    assert "crystallized candidates" not in candidates[0].body.lower()
+
+
 def test_rh31_first_six_adapters_are_deterministic_and_report_metric_scope(tmp_path):
     from eval.memory_os.runner.run import run_rh31_eval
 
@@ -132,6 +146,22 @@ def test_rh31_first_six_adapters_are_deterministic_and_report_metric_scope(tmp_p
     assert {score["metric_scope"] for score in summary["scores"]} <= {"context", "performance", "answer"}
     assert any(score["metric_scope"] == "context" for score in summary["scores"])
     assert all(score["live_behavior_changed"] is False for score in summary["scores"])
+
+
+def test_rh31_context_projection_candidate_boundary_uses_review_candidate_section(tmp_path):
+    from eval.memory_os.runner.run import run_rh31_eval
+
+    summary = run_rh31_eval(
+        fixture="synthetic",
+        adapters=["context_projection"],
+        report_root=tmp_path / "eval" / "reports",
+        write_report=False,
+    )
+    score = next(item for item in summary["scores"] if item["case_id"] == "candidate_boundary_001")
+
+    assert score["status"] == "pass"
+    assert score["actual_route"] == "candidate_review"
+    assert "Crystallized Review Candidates" in score["actual_headings"]
 
 
 def test_rh31_memory_sources_replay_exercises_every_case_before_scoring(tmp_path):

@@ -4,7 +4,7 @@ from eval.memory_os.adapters.common import headings_from_context, make_score
 from eval.memory_os.runner.fixture_store import synthetic_store
 from eval.memory_os.runner.types import Rh31Case, Rh31Document, Rh31Score
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import build_prefetch
+from plugins.memory.memory_os.prefetch import build_context_router_report, build_prefetch
 
 
 NAME = "context_projection"
@@ -16,6 +16,15 @@ def run(cases: list[Rh31Case], corpus: list[Rh31Document]) -> list[Rh31Score]:
         index = MemoryOSIndex(store.roots)
         index.rebuild_from_store(store)
         for case in cases:
+            router_report = build_context_router_report(
+                case.query,
+                budget_chars=2400,
+                store=store,
+                index=index,
+                runtime_facts={"provider": "memory_os", "prefetch_mode": "indexed"},
+                current_task_anchor="### Memory-OS Current Task Anchor\n- current task: install ComfyUI plugins.",
+                low_clue_recall_config={"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
+            )
             context = build_prefetch(
                 case.query,
                 budget_chars=2400,
@@ -35,20 +44,16 @@ def run(cases: list[Rh31Case], corpus: list[Rh31Document]) -> list[Rh31Score]:
                     case=case,
                     passed=passed,
                     failure_class="projection_miss",
-                    actual_route=_route_from_heading(headings),
+                    actual_route=str(router_report.get("route") or "unknown"),
                     actual_headings=headings,
                     source_classes=["context_projection"],
-                    details={"char_count": len(context)},
+                    details={
+                        "char_count": len(context),
+                        "selected_sections": [
+                            str(item.get("section") or "")
+                            for item in router_report.get("selected_sections", [])
+                        ],
+                    },
                 )
             )
     return scores
-
-
-def _route_from_heading(headings: list[str]) -> str:
-    if "Recall Clarification Guard" in headings:
-        return "ambiguous_recall"
-    if "Diagnostic Grounding" in headings:
-        return "diagnostic_current_status"
-    if "Current Foreground Task" in headings:
-        return "active_task"
-    return "unknown"

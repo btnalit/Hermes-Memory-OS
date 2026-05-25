@@ -1403,3 +1403,147 @@ rh32_suggestion_reports.exists=false
 
 The no-env monitor alias check now includes `metadata-retention` and reports
 `metadata_retention_ok=true` on the test host.
+
+## P1-B Attribution - candidate_boundary_001
+
+Date: 2026-05-25
+
+Finding under review:
+
+```text
+context_projection/candidate_boundary_001 -> projection_miss
+reported actual_route=active_task
+reported headings=[
+  Current Foreground Task,
+  Working Memory,
+  Indexed Recall,
+  Recent Event Summaries
+]
+```
+
+Root cause:
+
+- The synthetic fixture had a `source_class="candidate"` document, but
+  `synthetic_store()` only wrote corpus documents as events and working items.
+  It did not populate `crystallized_candidates/candidates.jsonl`, so the live
+  prefetch surface for `Crystallized Review Candidates` was absent in the eval
+  fixture.
+- The candidate fixture text used the phrase `crystallized candidates`, which
+  is intentionally treated as mechanism/diagnostic-style wording in the
+  projection filter. That made the candidate body unsuitable for testing
+  user-facing candidate review projection.
+- The `context_projection` adapter inferred `actual_route` from projected
+  headings. Because `Current Foreground Task` was selected by score, the adapter
+  reported `active_task` even though the router itself classified the query as
+  `candidate_review`.
+
+Fix:
+
+- `synthetic_store()` now writes `source_class="candidate"` documents to the
+  candidate review queue as synthetic `CrystallizedCandidate` records.
+- The `candidate_boundary_001` corpus text now uses user-facing candidate queue
+  wording instead of mechanism-heavy `crystallized candidates` wording.
+- The `context_projection` adapter records the actual router route from
+  `build_context_router_report()` instead of deriving it from headings.
+
+Local evidence after the fix:
+
+```text
+python -m pytest tests/eval/test_memory_os_eval_rh31.py -q
+9 passed
+
+python -m pytest \
+  tests/eval/test_memory_os_eval_rh31.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/plugins/memory/test_memory_os_prefetch.py -q
+47 passed
+```
+
+Bounded scorecard evidence after the fix:
+
+```text
+status=warning
+score_count=27
+failure_count=3
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1}
+boundary_true_count=0
+forbidden_field_count=0
+
+candidate_boundary_001/context_projection:
+  status=pass
+  actual_route=candidate_review
+  actual_headings=[
+    Current Foreground Task,
+    Working Memory,
+    Crystallized Review Candidates,
+    Indexed Recall,
+    Recent Event Summaries
+  ]
+```
+
+Remote live no-write projection check on `10.20.3.200`:
+
+```text
+query="candidate 分数很高，是不是就自动变成长期记忆？"
+candidate_count=161
+route=candidate_review
+selected=[
+  Current Foreground Task,
+  Crystallized Review Candidates,
+  Recent Event Summaries
+]
+dropped=[
+  Conversation Carryover,
+  Working Memory,
+  Indexed Recall
+]
+boundary_true=false
+```
+
+Remote RH-31 no-write scorecard after deploying the eval-only fix to
+`10.20.3.200`:
+
+```text
+hermes memory-os-agent-os eval rh31 run --fixture synthetic \
+  --adapter all --no-write-report
+
+status=warning
+score_count=27
+failure_count=3
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1}
+boundary_true_count=0
+forbidden_field_count=0
+
+candidate_boundary_001/context_projection:
+  status=pass
+  actual_route=candidate_review
+  actual_headings=[
+    Current Foreground Task,
+    Working Memory,
+    Crystallized Review Candidates,
+    Indexed Recall,
+    Recent Event Summaries
+  ]
+  failure_class=null
+```
+
+Remote read-only monitor after deploy:
+
+```text
+time=2026-05-25T04:36:45Z
+monitor_status=WARN
+WARN=[rh31_eval_has_failures]
+FAIL=[]
+RH31Eval.status=warning
+RH31Eval.failure_count=3
+RH31Eval.boundary_true_count=0
+RH31Eval.forbidden_field_count=0
+```
+
+Decision:
+
+- `candidate_boundary_001` was an eval fixture/attribution bug, not a live
+  ContextProjection regression.
+- Do not add an RH-31 live guard for this case.
+- The remaining first-scorecard warning items are measurement signals:
+  lexical/FTS misses only.

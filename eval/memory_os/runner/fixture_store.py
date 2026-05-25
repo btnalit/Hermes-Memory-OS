@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterator
 
 from eval.memory_os.runner.types import Rh31Document
+from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -33,6 +34,18 @@ def synthetic_store(documents: list[Rh31Document]) -> Iterator[MemoryOSStore]:
                     tags=list(document.tags),
                 )
             )
+            if document.source_class == "candidate":
+                append_candidate_queue(
+                    store,
+                    CrystallizedCandidate(
+                        candidate_id=f"cand_rh31_{index:03d}",
+                        kind="synthetic",
+                        body=document.text,
+                        source_event_ids=[event_id],
+                        sensitivity="private",
+                        tags=list(document.tags),
+                    ),
+                )
             working_items.append(
                 {
                     "id": f"work_rh31_{index:03d}",

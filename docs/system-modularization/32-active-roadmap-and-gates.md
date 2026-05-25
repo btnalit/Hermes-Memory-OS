@@ -36,7 +36,7 @@ Latest read-only monitor evidence used for this roadmap refresh:
 
 ```text
 host: 10.20.3.200
-date_utc: 2026-05-25T03:14:31Z
+date_utc: 2026-05-25T04:36:45Z
 classification: WARN
 FAIL: none
 
@@ -56,12 +56,11 @@ DeepReflection: enabled, auto_bounded, boundaries false
 DeepReflection optional outputs: self_evolution_proposals_enabled=true,
   wandering_seed_enabled=true, working_updates_enabled=false
 module status inventory: 16 modules visible
-session_mirror: session_count=50, covered=26, pending=24
-wandering_mind: would_send_count=10
-proposal_queue: candidate_count=14, pending candidate state count=13
-evidence_scoring: score_count=545
+wandering_mind: would_send_count=11
+proposal_queue: candidate_count=15, pending candidate state count=14
+evidence_scoring: score_count=560
 crystallized_records: 0
-RH-31 eval: warning, failure_count=4
+RH-31 eval: warning, failure_count=3 after P1-B attribution fix
 ```
 
 This means the system is healthy enough to continue development, but not all
@@ -114,7 +113,7 @@ These are not the remaining queue, but future work depends on them.
 | Mirror family | implemented, operator-triggered | cron/session/state/shadow status and dry-run/apply commands exist; recurring apply is not enabled |
 | RH-29 MemorySources attribution | implemented | ledger stats, forbidden-field and boundary checks pass |
 | RH-30 relevance feedback audit | implemented | feedback ledger exists; current feedback volume is low |
-| RH-31.0-31.3 eval harness | implemented | first deterministic scorecard exists; warning findings remain |
+| RH-31.0-31.3 eval harness | implemented | first deterministic scorecard exists; P1-B projection miss attributed to fixture/adapter bug; warning findings remain lexical/FTS measurement signals |
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
 
@@ -142,7 +141,8 @@ progress.
 
 ### P1-B - RH-31 Failure Attribution And Fixture Loop
 
-Status: first scorecard generated; attribution table added below.
+Status: first scorecard generated; `candidate_boundary_001` attribution
+completed.
 
 Reason:
 
@@ -151,9 +151,10 @@ Reason:
 
 Next action:
 
-1. review the four current failures in the table below;
-2. decide whether any failure maps to a real Telegram/live finding;
-3. only then create a redacted fixture or a deterministic guard proposal.
+1. keep the remaining lexical/FTS warnings as measurement signals;
+2. do not create a live guard from `candidate_boundary_001`;
+3. only create future fixtures or guards when a scorecard failure maps to live
+   evidence or an owner-approved redacted fixture.
 
 Finding flow:
 
@@ -667,7 +668,7 @@ forbidden_field_count=0
 | lexical miss | `grep` | `mechanism_noise_001` | baseline lexical search found no match | Weak baseline / fixture coverage signal, not a live bug | Do not add guard; review whether fixture expects lexical recall or should be baseline-negative |
 | FTS miss | `memory_os_fts` | `diagnostic_grounding_001` | indexed search found no hit | Diagnostic grounding should come from current runtime facts, not historical FTS alone | Do not tune live route; keep diagnostic adapter as projection/status-path check |
 | FTS miss | `memory_os_fts` | `mechanism_noise_001` | indexed search found no hit | Mechanism-heavy casual noise should not necessarily be retrievable | Treat as measurement signal; no live guard |
-| projection miss | `context_projection` | `candidate_boundary_001` | projected `active_task` headings instead of candidate-review-focused context | Potential routing/projection fixture gap; could become actionable if reproduced in live candidate/crystallized prompts | Convert to reviewed fixture or live repro before any RH-31 guard |
+| projection miss | `context_projection` | `candidate_boundary_001` | eval reported `active_task` headings instead of candidate-review-focused context | Attributed to fixture/adapter bug: candidate corpus was not written to candidate queue, fixture wording was mechanism-heavy, and adapter inferred route from headings | Fixed fixture and adapter; no live guard |
 
 Decision:
 
@@ -675,8 +676,28 @@ Decision:
 Do not add the first RH-31 live guard from this scorecard alone.
 ```
 
-The only potentially actionable row is `candidate_boundary_001`, and it still
-needs either live evidence or a reviewed fixture correction.
+P1-B attribution update:
+
+```text
+candidate_boundary_001 was an eval fixture/adapter attribution bug:
+  - synthetic candidate documents did not populate the candidate queue;
+  - fixture wording used mechanism-heavy "crystallized candidates" text;
+  - context_projection inferred actual_route from headings instead of the
+    router report.
+
+After the fix:
+  context_projection/candidate_boundary_001 = pass
+  actual_route = candidate_review
+  actual_headings include Crystallized Review Candidates
+  failure_count = 3
+  failure_class_distribution = {"fts_miss": 2, "lexical_miss": 1}
+  boundary_true_count = 0
+  forbidden_field_count = 0
+
+10.20.3.200 no-write live projection already selected
+Crystallized Review Candidates for the same public query, so no live guard is
+justified.
+```
 
 ## Immediate Next Work
 
