@@ -77,6 +77,24 @@ planned modules are mature enough for promotion.
 | planned | Design exists, but implementation should not start until gates are met. |
 | blocked | A required contract, monitor field, or evidence source is missing. |
 | deferred | Explicitly not part of the current v0.1 slice. |
+| superseded | Replaced by a newer contract or RH item; kept only for history. |
+| deprecated | Still present but should not be used for new implementation. |
+
+## Roadmap Maintenance Rule
+
+This document must be kept current whenever a new RH/module changes priority,
+status, monitor gates, or validation evidence. This is an operating rule, not
+an executable P1 work item.
+
+Maintenance signal:
+
+- every active item has a source document, status, monitor signal, and next
+  action.
+
+Stop signal:
+
+- a new module starts without appearing in this roadmap and the 29号 contract
+  table.
 
 ## Implemented Baseline
 
@@ -109,7 +127,7 @@ to disappear if the roadmap only tracks recent RH work.
 | Item | Document promise | Code state | Live state | Gap / next action |
 | --- | --- | --- | --- | --- |
 | v0.1 portable modules | `03` and `06` define mailbox, household_digest, wandering_mind, inner_drive, ops_gate, proposal_queue, evidence_scoring, self_evolution, speak_gate | all are importable and visible through `modules status` | most run through cognitive loop or expose status only | keep them as individual contract rows, not only as "cognitive loop" aggregate |
-| Mirror family | `09`, `10`, and RH-18 define cron/session/state/shadow coverage | cron/session/state/shadow commands and tests exist | status ok; session_mirror has 24 pending sessions; dry-run would generate 24 bounded events and write none | decide whether a one-time SessionMirror apply is safe before claiming global entrance recall is complete |
+| Mirror family | `09`, `10`, and RH-18 define cron/session/state/shadow coverage | cron/session/state/shadow commands and tests exist | status ok; session_mirror has 24 pending sessions; dry-run would generate 24 bounded events and write none | verify whether pending sessions correlate with RH-28 candidate omissions before deciding on one-time SessionMirror apply |
 | DeepReflection optional outputs | `17` allows working updates, self-evolution proposal, and wandering seed as secondary outputs | implemented and tested | proposals/seeds enabled; working updates disabled | monitor optional output counts explicitly before promoting analysis behavior |
 | Automatic expression | `03`, `06`, and `23` require Wandering Mind through Speak Gate, no-send/would-send only | implemented and tested | `wandering_mind.would_send_count=10`; `speak_gate.would_send_count=0` | add monitor trend for would-send/silent artifacts if expression becomes an evaluation focus |
 | Per-module monitor evidence | `23` asks for deltas for evidence scores, proposal states, digest counts, DR counts, wandering artifacts, governance events | data exists in module artifacts/status | monitor now reports `module_artifacts` summary with digest/wandering/evidence/proposal/self-evolution/governance/DR/ops/speak/mailbox fields | continue trend observation through scheduled monitor |
@@ -118,28 +136,9 @@ to disappear if the roadmap only tracks recent RH work.
 
 ## Active P1 Queue
 
-### P1-A - Keep This Active Roadmap Current
-
-Reason:
-
-- task visibility became unreliable once work spread across many RH documents;
-- the active queue must show not only recall/eval work, but also LLM analysis,
-  automatic would-send expression, and session injection lines.
-
-Next action:
-
-- update this document whenever a new RH/module changes priority, status, or
-  monitor gate.
-
-Promotion signal:
-
-- every active item has a source document, status, monitor signal, and next
-  action.
-
-Stop signal:
-
-- a new module is started without appearing in this roadmap and the 29号
-  contract table.
+P1-A is intentionally not used for a work item. It is reserved by the Roadmap
+Maintenance Rule above so the queue does not treat maintenance as feature
+progress.
 
 ### P1-B - RH-31 Failure Attribution And Fixture Loop
 
@@ -155,6 +154,15 @@ Next action:
 1. review the four current failures in the table below;
 2. decide whether any failure maps to a real Telegram/live finding;
 3. only then create a redacted fixture or a deterministic guard proposal.
+
+Finding flow:
+
+- live Telegram behavior issues are owned first by the relevant live RH item
+  such as P1-G/RH-28;
+- if the issue can be safely redacted, add an RH-31 fixture with the same
+  finding id;
+- RH-31 synthetic failures remain measurement signals unless live evidence or
+  owner-approved redacted fixtures prove the same failure class.
 
 Promotion signal:
 
@@ -194,11 +202,15 @@ Next action:
 
 - continue collecting source-class distribution and natural conversation
   behavior;
-- run or refresh the DeepReflection A/B behavior review only when enough real
-  carryover examples exist.
+- run or refresh the DeepReflection A/B behavior review only after the first
+  threshold window below is met.
 
 Promotion signal:
 
+- at least 7 days of scheduled monitor evidence after the last DR behavior
+  change, or at least 30 live MemorySources records involving ordinary
+  conversation after that change;
+- at least 10 DeepReflection injection history records in the same window;
 - selected/dropped source classes are explainable;
 - no mechanism text leaks into ordinary answers;
 - `actual_send=false`, `actual_execute=false`, `actual_identity_write=false`,
@@ -336,12 +348,46 @@ Status:
 
 - RH-28f/g fixed shared ingress and deterministic source diversity;
 - monitor probes pass;
+- P1-J bounded topic-signature correlation did not show the specific
+  `internet_data_collection` topic as pending-only, so the earlier real
+  Telegram candidate omission should not be assumed to be caused by
+  SessionMirror pending coverage;
+- 2026-05-25 real Telegram retest for `继续昨天那个` produced a bounded
+  four-item clarification list through Recall Guard; candidate 1 was the
+  intended `internet_data_collection` topic, but candidate 2 was a non-topic
+  attachment/vision placeholder;
+- matching dry-run showed `candidate_quality.source_distribution={working:127,
+  event:1}` and `diversity_applied=false`;
+- 2026-05-25 follow-up fixed generic topic-title eligibility and exact-label
+  source preservation:
+  - `filtered_non_topic_title_count=2`
+  - `diversity_applied=true`
+  - `source_distribution={working:128,event:16}`
+  - `selected_source_distribution={working:4,event:4}`
+  - `decision=ask_choice`
+  - boundaries all false;
+- 2026-05-25 follow-up tightened Telegram choice labels to
+  `max_title_chars=40` while preserving `ask_choice` and boundary safety;
+- post-gateway Telegram retest showed the live response now returns concise
+  topic labels:
+  - `互联网数据采集系统 重新设计分层`
+  - `rohitg00 / agentmemory / Memory-OS 相关`
+  - `Built-in / Hermes / skill / Voice 相关`
+  - `记忆系统带来的变化 这条`
+  with no attachment placeholders, internal projection headings, or duplicate
+  raw session-search variants;
+- `memory_sources` did not produce an eligible topic candidate in that run,
+  so candidate quality still needs live observation rather than a maturity
+  claim;
 - real Telegram still remains the highest-value validation path for candidate
   wording, duplicate merging, and owner correction flow.
 
 Next action:
 
-- collect new live correction examples;
+- retest `继续昨天那个` through real Telegram after gateway reload/restart when
+  a live-process verification is needed;
+- continue observing whether `memory_sources` can produce eligible topic
+  candidates or whether its contribution should remain attribution-only;
 - convert repeated failures into RH-31 fixtures before writing any new guard.
 
 Promotion signal:
@@ -354,7 +400,9 @@ Stop signal:
 
 - raw `session_search` results bypass Recall Clarification Guard;
 - internal labels such as route names or projection headings appear as user
-  topics.
+  topics;
+- attachment placeholders, tool-render snippets, or other non-topic artifacts
+  appear as user-facing recall choices.
 
 ### P1-H - RH-30 Feedback Collection Volume
 
@@ -418,6 +466,13 @@ Status:
   and `pending_session_count=24`;
 - latest dry-run reports `new_event_count=24`, `written_event_ids=[]`, and
   `findings=[]`;
+- read-only topic-signature correlation found:
+  - pending sessions: `automation_orchestration=1`, `memory_os=8`;
+  - provider-captured events: `automation_orchestration=33`,
+    `internet_data_collection=10`, `memory_os=53`, `comfyui_media=47`,
+    `mindvideo_api=10`;
+  - pending sessions did not show an `internet_data_collection` pending-only
+    signal;
 - no recurring SessionMirror apply is enabled.
 
 Why it matters:
@@ -429,7 +484,9 @@ Why it matters:
 
 Next action:
 
-- decide whether a one-time apply is safe on the test host;
+- decide whether a one-time apply is still useful as a coverage improvement,
+  but do not treat it as the likely fix for the earlier
+  `internet_data_collection` candidate omission;
 - update monitor with pending/covered session counts before any recurring
   mirror behavior is considered.
 

@@ -50,6 +50,13 @@ _ARTIFACT_PATTERNS = (
     re.compile(r"(?i)\b[A-Za-z]:\\[^\s]+"),
     re.compile(r"(?<!:)\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+){1,}\S*"),
 )
+_NON_TOPIC_TITLE_PATTERNS = (
+    re.compile(r"(?i)^\s*\[[^\]]*\buser\s+(sent|uploaded|attached)\b"),
+    re.compile(r"(?i)^\s*(the\s+)?user\s+(sent|uploaded|attached)\b"),
+    re.compile(r"(?i)\bhere(?:'|’)?s\s+what\s+i\s+can\s+see\b"),
+    re.compile(r"(?i)^\s*(tool|browser|terminal|execute_code|session_search|read_file|skill_view)\s*[:：]"),
+    re.compile(r"(?i)^\s*(tool output|browser output|terminal output|render preview|attachment preview)\b"),
+)
 
 _ASCII_ENTITY_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9_.+-]{1,40}\b")
 _CHINESE_KEYWORDS = {
@@ -198,6 +205,7 @@ _SOURCE_DIVERSITY_LIMIT_AFTER_CORRECTION = 1
 _MIN_LOW_CLUE_SELECT_SCORE = 0.12
 _MIN_SOURCE_DIVERSITY_FALLBACK_SCORE = 0.03
 _TITLE_MAX_CHARS = 96
+_CHOICE_TITLE_MAX_CHARS = 40
 _SPEAKER_PREFIX_RE = re.compile(r"(?i)\b(user|assistant|system)\s*[:：]\s*")
 _TITLE_LEAD_RE = re.compile(
     r"^(记得|对|好的|明白|应该是|更像|那更像|这更像|你说的是|我觉得|不是这个|不是|不|看了|刚才那个|那|行)[，,。:：\s]*"
@@ -560,7 +568,12 @@ def _build_quality_candidates(
     limit: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     correction_active = _recent_correction_signal(store)
-    adjusted = [_apply_correction_penalty(candidate) for candidate in candidates] if correction_active else list(candidates)
+    eligible_candidates, filtered_non_topic_count = _filter_topic_title_eligible(candidates)
+    adjusted = (
+        [_apply_correction_penalty(candidate) for candidate in eligible_candidates]
+        if correction_active
+        else list(eligible_candidates)
+    )
     clusters = _cluster_candidates(adjusted)
     selected, diversity_applied = _select_diverse_clusters(
         clusters,
@@ -570,10 +583,15 @@ def _build_quality_candidates(
     )
     quality = {
         "raw_candidate_count": len(candidates),
+        "eligible_candidate_count": len(eligible_candidates),
+        "filtered_non_topic_title_count": filtered_non_topic_count,
         "cluster_count": len(clusters),
-        "source_distribution": _source_distribution(candidates),
+        "primary_source_distribution": _source_distribution(candidates),
+        "source_distribution": _source_distribution(candidates, include_source_classes=True),
+        "eligible_source_distribution": _source_distribution(eligible_candidates, include_source_classes=True),
+        "selected_source_distribution": _source_distribution(selected, include_source_classes=True),
         "merged_duplicates": max(len(candidates) - len(clusters), 0),
-        "diversity_applied": diversity_applied,
+        "diversity_applied": diversity_applied or _selected_has_source_diversity(selected, candidates),
         "feedback_penalty_applied": correction_active,
         "title_normalization_applied": any(
             "title_normalized" in candidate.get("reason_codes", []) for candidate in clusters
@@ -581,6 +599,17 @@ def _build_quality_candidates(
         "max_title_chars": max((len(str(candidate.get("label") or "")) for candidate in selected), default=0),
     }
     return selected, quality
+
+
+def _filter_topic_title_eligible(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    eligible: list[dict[str, Any]] = []
+    filtered_count = 0
+    for candidate in candidates:
+        if _is_non_topic_title(str(candidate.get("label") or "")):
+            filtered_count += 1
+            continue
+        eligible.append(candidate)
+    return eligible, filtered_count
 
 
 def _apply_correction_penalty(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -616,8 +645,10 @@ def _cluster_to_candidate(candidates: list[dict[str, Any]], topic_terms: set[str
         reverse=True,
     )
     primary = dict(ranked[0])
-    source_classes = _dedupe([str(item.get("source_class") or "unknown") for item in ranked])
-    source_ids = _dedupe([str(item.get("source_id") or "") for item in ranked if str(item.get("source_id") or "")])
+    source_classes = _dedupe(
+        [source_class for item in ranked for source_class in _candidate_source_classes(item)]
+    )
+    source_ids = _dedupe([source_id for item in ranked for source_id in _candidate_source_ids(item)])
     merged_count = len(ranked)
     if merged_count > 1:
         primary["score"] = round(min(float(primary.get("score") or 0.0) + min(0.12, 0.04 * (merged_count - 1)), 1.0), 3)
@@ -736,12 +767,21 @@ def _recent_correction_signal(store: MemoryOSStore) -> bool:
     return False
 
 
-def _source_distribution(candidates: list[dict[str, Any]]) -> dict[str, int]:
+def _source_distribution(candidates: list[dict[str, Any]], *, include_source_classes: bool = False) -> dict[str, int]:
     result: dict[str, int] = {}
     for candidate in candidates:
-        source_class = str(candidate.get("source_class") or "unknown")
-        result[source_class] = result.get(source_class, 0) + 1
+        source_classes = candidate.get("source_classes") if include_source_classes else None
+        values = source_classes if isinstance(source_classes, list) and source_classes else [candidate.get("source_class")]
+        for item in values:
+            source_class = str(item or "unknown")
+            result[source_class] = result.get(source_class, 0) + 1
     return result
+
+
+def _selected_has_source_diversity(selected: list[dict[str, Any]], all_candidates: list[dict[str, Any]]) -> bool:
+    if len(_source_distribution(all_candidates, include_source_classes=True)) <= 1:
+        return False
+    return len(_source_distribution(selected, include_source_classes=True)) > 1
 
 
 def _normalized_cluster_title(candidates: list[dict[str, Any]], topic_terms: set[str]) -> tuple[str, bool]:
@@ -752,13 +792,25 @@ def _normalized_cluster_title(candidates: list[dict[str, Any]], topic_terms: set
     title = _best_title_segment(labels, topic_terms) or fallback
     if fallback and _title_should_use_terms(title):
         title = fallback
-    title = _clip(_clean_title(title), _TITLE_MAX_CHARS)
+    title = _compress_choice_title(_clean_title(title), fallback)
     if not title:
-        title = _clip(_clean_title(labels[0]), _TITLE_MAX_CHARS)
+        title = _compress_choice_title(_clean_title(labels[0]), fallback)
     normalized = any(title != label for label in labels) or any(
         marker in title for marker in ("User:", "Assistant:", "|")
     )
     return title, normalized
+
+
+def _compress_choice_title(title: str, fallback: str) -> str:
+    clean = _clean_title(title)
+    fallback_clean = _clean_title(fallback)
+    if len(clean) <= _CHOICE_TITLE_MAX_CHARS:
+        return clean
+    if fallback_clean and len(fallback_clean) <= _CHOICE_TITLE_MAX_CHARS:
+        return fallback_clean
+    if fallback_clean:
+        return _clip(fallback_clean, _CHOICE_TITLE_MAX_CHARS - 2)
+    return _clip(clean, _CHOICE_TITLE_MAX_CHARS - 2)
 
 
 def _best_title_segment(labels: list[str], topic_terms: set[str]) -> str:
@@ -767,7 +819,7 @@ def _best_title_segment(labels: list[str], topic_terms: set[str]) -> str:
         for segment in _title_segments(label):
             for option in _title_options(segment):
                 clean = _clean_title(option)
-                if not clean or _looks_too_mechanistic(clean):
+                if not clean or _looks_too_mechanistic(clean) or _is_non_topic_title(clean):
                     continue
                 if len(clean) > _TITLE_MAX_CHARS:
                     continue
@@ -1237,6 +1289,13 @@ def _looks_too_mechanistic(text: str) -> bool:
     )
 
 
+def _is_non_topic_title(text: str) -> bool:
+    clean = _clean_title(text)
+    if not clean:
+        return True
+    return any(pattern.search(clean) for pattern in _NON_TOPIC_TITLE_PATTERNS)
+
+
 def _safe_id(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(value or ""))[:80] or "unknown"
 
@@ -1251,14 +1310,48 @@ def _safe_source_id(value: str) -> bool:
 
 def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    by_key: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
         key = str(candidate.get("label") or "").lower()
-        if not key or key in seen:
+        if not key:
             continue
-        result.append(candidate)
-        seen.add(key)
+        existing = by_key.get(key)
+        if existing is None:
+            item = dict(candidate)
+            by_key[key] = item
+            result.append(item)
+            continue
+        existing["source_classes"] = _dedupe(_candidate_source_classes(existing) + _candidate_source_classes(candidate))
+        existing["source_ids"] = _dedupe(_candidate_source_ids(existing) + _candidate_source_ids(candidate))[:6]
+        existing["reason_codes"] = _dedupe(
+            [str(item) for item in existing.get("reason_codes", [])]
+            + [str(item) for item in candidate.get("reason_codes", [])]
+            + ["deduped_source_class"]
+        )
+        existing["score"] = round(max(float(existing.get("score") or 0.0), float(candidate.get("score") or 0.0)), 3)
+        if str(candidate.get("last_seen_at") or "") > str(existing.get("last_seen_at") or ""):
+            existing["last_seen_at"] = str(candidate.get("last_seen_at") or "")
     return result
+
+
+def _candidate_source_classes(candidate: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    source_classes = candidate.get("source_classes")
+    if isinstance(source_classes, list):
+        values.extend(str(item) for item in source_classes if str(item))
+    values.append(str(candidate.get("source_class") or "unknown"))
+    return _dedupe(values)
+
+
+def _candidate_source_ids(candidate: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    source_ids = candidate.get("source_ids")
+    if isinstance(source_ids, list):
+        values.extend(str(item) for item in source_ids if str(item))
+    source_id = str(candidate.get("source_id") or "")
+    if source_id:
+        values.append(source_id)
+    return [value for value in _dedupe(values) if _safe_source_id(value)]
 
 
 def _redact(value: str) -> str:

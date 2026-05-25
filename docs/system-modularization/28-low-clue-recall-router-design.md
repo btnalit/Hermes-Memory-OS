@@ -1803,6 +1803,118 @@ WARN=[rh26_casual_empty]
 gateway=active pid=479171
 ```
 
+### RH-28k Topic Eligibility And Merged Source Preservation
+
+A later real Telegram retest showed another candidate-quality defect:
+
+```text
+2. [The user sent an image~ Here's what I can see
+```
+
+This is not a user topic. It is a transcript/attachment artifact that should
+not be offered as a recall choice. The fix is generic and does not hardcode any
+domain topic:
+
+- reject attachment placeholders and visual/tool-render snippets before
+  candidate clustering
+- keep `ask_choice` for ambiguous recall
+- do not create a new direct-resume path
+- preserve source diversity when exact-label de-duplication merges `working`,
+  `event`, or other safe source classes into the same topic candidate
+
+Implementation notes:
+
+- `_filter_topic_title_eligible()` removes non-topic title candidates before
+  clustering and reports `filtered_non_topic_title_count`.
+- `_dedupe_candidates()` merges duplicate labels by preserving
+  `source_classes`, `source_ids`, and reason codes.
+- candidate quality now includes `primary_source_distribution`,
+  `eligible_source_distribution`, and `selected_source_distribution`.
+
+Regression fixtures:
+
+```text
+attachment placeholder + three real topics
+=> placeholder is filtered
+=> decision remains ask_choice
+
+same label from working + event
+=> source_classes include both working and event
+=> selected_source_distribution includes event
+```
+
+Remote validation on 10.20.3.200:
+
+```text
+low-clue-recall dry-run --query "继续昨天那个" --llm-judge none
+decision=ask_choice
+candidate_count=4
+filtered_non_topic_title_count=2
+diversity_applied=true
+primary_source_distribution={"working": 128}
+source_distribution={"working": 128, "event": 16}
+eligible_source_distribution={"working": 126, "event": 15}
+selected_source_distribution={"working": 4, "event": 4}
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+```
+
+Remaining limitation:
+
+- `memory_sources` did not produce an eligible topic candidate in this live run.
+  That is reported as the current data shape rather than hidden by the router.
+- A true Telegram live retest may require gateway reload/restart because the
+  long-running gateway process can keep old imported provider code in memory.
+
+### RH-28l Telegram Button Title Compression
+
+The RH-28k fix removed non-topic artifacts, but the real Telegram UI still
+showed one candidate label that was too long for an inline choice button. RH-28l
+keeps the routing behavior unchanged and only tightens topic title length.
+
+Rules:
+
+- keep `ask_choice` for ambiguous recall
+- do not add a direct-resume shortcut
+- do not hardcode domain topics
+- compress long sentence-like labels into compact topic-term titles
+- cap low-clue choice labels at 40 characters
+
+Regression fixture:
+
+```text
+agentmemory is not something to copy wholesale, but a few pieces are useful...
+
+=> candidate label contains agentmemory
+=> no label contains the long sentence fragment
+=> every candidate label length <= 40
+```
+
+Remote validation on 10.20.3.200:
+
+```text
+low-clue-recall dry-run --query "继续昨天那个" --llm-judge none
+decision=ask_choice
+candidate_count=4
+max_title_chars=40
+filtered_non_topic_title_count=2
+diversity_applied=true
+selected_source_distribution={"working": 4, "event": 4}
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+```
+
+Representative result:
+
+```text
+2. rohitg00 / agentmemory / Memory-OS /...
+3. Built-in / Hermes / skill / Voice / v...
+```
+
 ### RH-28e Priority Correction
 
 A second Telegram retest showed the first RH-28e patch was incomplete:

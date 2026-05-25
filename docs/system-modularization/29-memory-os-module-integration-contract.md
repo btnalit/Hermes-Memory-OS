@@ -950,6 +950,28 @@ This applies to:
 - module interaction conflicts
 - architecture-level contract violations
 
+### Finding Flow Rules
+
+Use these rules before deciding where a finding belongs:
+
+1. Live user-facing behavior findings are owned first by the live behavior
+   module/RH that produced them.
+   - Example: a real Telegram low-clue recall miss belongs first to RH-28/P1-G.
+   - It may also become an RH-31 fixture, but only after redaction or owner
+     approval.
+2. RH-31 scorecard failures are measurement findings by default.
+   - They do not justify a live guard until a real transcript, redacted fixture,
+     or owner-approved example proves the same failure class.
+3. Data-coverage findings must be checked before downstream router fixes.
+   - Example: if SessionMirror has pending sessions, verify whether those
+     pending sessions correlate with missing low-clue candidates before tuning
+     RH-28 candidate ranking.
+4. A single finding may have a shared `finding_id` across documents, but it
+   must have exactly one owning fix path.
+5. No finding may be fixed with topic-specific hardcoding unless the topic is
+   itself the product contract. Current recall fixes must improve generic
+   ingress, source diversity, clustering, projection, or monitor evidence.
+
 ### Severity Classes
 
 | Severity | Meaning | Examples | Required action |

@@ -7800,3 +7800,379 @@ python -m pytest -q
 git diff --check
 clean
 ```
+
+## 2026-05-25 P1-J SessionMirror / RH-28 Candidate Correlation Probe
+
+Source: read-only diagnostic against `10.20.3.200`.
+
+Purpose:
+
+- Check whether the 24 pending SessionMirror sessions plausibly explain the
+  earlier real Telegram low-clue candidate omission.
+- Do this without printing raw private message bodies.
+
+Method:
+
+- Load SessionMirror discovery state read-only.
+- Compute pending versus provider-captured counts.
+- Scan only bounded topic-signature groups in memory; print aggregate counts
+  and hashed session examples only.
+- Do not write events, MemorySources, feedback, candidates, or audit records.
+
+Result:
+
+```text
+schema_version=memory-os.session_mirror_correlation_probe.v0
+dry_run_only=true
+session_count=50
+covered_session_count=26
+pending_session_count=24
+pending_platform_counts={acp:5, cli:8, telegram:11}
+pending_event_kind_counts={conversation_turn_mirrored:16, session_observed:8}
+pending_message_count_min=0
+pending_message_count_max=253
+raw_private_body_printed=false
+
+topic_group_counts.pending_sessions={
+  automation_orchestration:1,
+  memory_os:8
+}
+
+topic_group_counts.provider_captured_events={
+  automation_orchestration:33,
+  comfyui_media:47,
+  internet_data_collection:10,
+  memory_os:53,
+  mindvideo_api:10
+}
+
+topic_group_counts.existing_mirrored_events={}
+
+correlation_findings=[
+  automation_orchestration: pending_and_provider_both_present,
+  memory_os: pending_and_provider_both_present
+]
+```
+
+Interpretation:
+
+- Pending sessions exist and may still be worth a one-time test-host apply
+  review for coverage.
+- The specific `internet_data_collection` topic is already present in
+  provider-captured events and was not detected as pending-only in this bounded
+  probe.
+- Therefore the earlier real Telegram candidate omission should not be assumed
+  to be caused by SessionMirror pending coverage.
+- Next diagnostic owner is P1-G / RH-28 live Telegram retest and candidate
+  collection quality, not immediate SessionMirror apply.
+
+## 2026-05-25 P1-G Telegram Low-Clue Retest
+
+Source: real Telegram test plus read-only Memory-OS probes on `10.20.3.200`.
+
+Telegram transcript excerpt supplied by owner:
+
+```text
+2026-05-25 11:48 Asia/Shanghai
+/new
+继续昨天那个
+
+agent response:
+  1. 我们之前说的互联网数据采集系统，如果重新设计，你会怎么分层
+  2. [The user sent an image~ Here's what I can see
+  3. Built-in / Hermes / skill / Voice / voicebox
+  4. 我们继续聊刚才那套记忆系统，你觉得它现在带来的变化是什么
+```
+
+Low-clue dry-run against the same query:
+
+```text
+command:
+  hermes memory-os-agent-os low-clue-recall dry-run \
+    --query '继续昨天那个' --llm-judge none
+
+schema_version=memory-os.low_clue_recall.v0
+query_class=ambiguous_recall
+decision=ask_choice
+candidate_count=4
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+candidate_quality.raw_candidate_count=128
+candidate_quality.cluster_count=41
+candidate_quality.merged_duplicates=87
+candidate_quality.title_normalization_applied=true
+candidate_quality.diversity_applied=false
+candidate_quality.source_distribution={working:127,event:1}
+```
+
+The dry-run candidate labels matched the Telegram response. The first candidate
+was the intended `internet_data_collection` topic, so the earlier omission is
+not reproduced in this pass.
+
+MemorySources in the same 2h window:
+
+```text
+record_count=1
+route_distribution={ambiguous_recall:1}
+query_class_distribution={ambiguous_recall:1}
+selected_source_class_distribution={recall_guard:1}
+boundary_true_count=0
+forbidden_field_findings=[]
+```
+
+Monitor after the Telegram test:
+
+```text
+monitor_status=WARN
+FAIL=[]
+WARN includes index_stale and rh31_eval_has_failures
+low_clue_ingress_matrix=all expected routes/headings matched
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_findings=[]
+compaction.focus_none_count=0
+```
+
+Interpretation:
+
+- The live Telegram response appears to be using the RH-28 Recall Clarification
+  Guard rather than bypassing it with raw `session_search` output.
+- Candidate 1 shows the `internet_data_collection` topic is now present.
+- Candidate 2 is a poor topic candidate: an attachment/vision placeholder was
+  promoted into the user-facing choice list.
+- Candidate quality remains working-heavy (`working=127`, `event=1`) and
+  `diversity_applied=false`, so RH-28g source diversity is not yet mature on
+  the live data shape.
+- This is a P1-G candidate-quality finding, not a SessionMirror coverage
+  finding and not a boundary failure.
+
+Next action:
+
+- Add a generic topic-title eligibility / non-topic artifact suppression rule
+  for low-clue candidates.
+- Do not hardcode `n8n`, `Make`, image text, or any specific topic.
+- Keep live behavior at `ask_choice`; do not add a direct-resume shortcut from
+  this evidence.
+
+#### RH-28 Follow-up: Topic Eligibility And Merged Source Preservation
+
+Date: 2026-05-25.
+
+Scope: small RH-28 candidate-quality fix. No live direct-resume change.
+
+Changes validated:
+
+- generic topic-title eligibility rejects attachment placeholders, tool/render
+  snippets, and non-topic transcript artifacts before clustering;
+- exact-label de-duplication now preserves merged `source_classes` and
+  `source_ids` instead of keeping only the first source;
+- candidate-quality metadata now reports:
+  - `eligible_candidate_count`
+  - `filtered_non_topic_title_count`
+  - `primary_source_distribution`
+  - `eligible_source_distribution`
+  - `selected_source_distribution`
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+51 passed
+```
+
+Remote validation on `10.20.3.200` after reinstall:
+
+```text
+command:
+  hermes memory-os-agent-os low-clue-recall dry-run \
+    --query '继续昨天那个' --llm-judge none
+
+schema_version=memory-os.low_clue_recall.v0
+query_class=ambiguous_recall
+decision=ask_choice
+candidate_count=4
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+candidate_quality.raw_candidate_count=128
+candidate_quality.eligible_candidate_count=126
+candidate_quality.filtered_non_topic_title_count=2
+candidate_quality.cluster_count=41
+candidate_quality.merged_duplicates=87
+candidate_quality.title_normalization_applied=true
+candidate_quality.diversity_applied=true
+candidate_quality.primary_source_distribution={working:128}
+candidate_quality.source_distribution={working:128,event:16}
+candidate_quality.eligible_source_distribution={working:126,event:15}
+candidate_quality.selected_source_distribution={working:4,event:4}
+```
+
+Observed candidate-quality result:
+
+- the previous attachment placeholder candidate was removed from the shortlist;
+- `ask_choice` remained in force;
+- no direct-resume shortcut was added;
+- the first candidate remained the intended internet-data-collection topic;
+- event participation is now visible after exact-label de-duplication;
+- `memory_sources` produced no eligible topic candidate in this run, so it did
+  not participate in the selected shortlist.
+
+Monitor after deployment:
+
+```text
+monitor_status=WARN
+FAIL=[]
+WARN=[rh31_eval_has_failures]
+gateway=active
+heartbeat_state_fresh=true
+cognitive_loop_timer_active=true
+index_health=healthy
+doctor=ok
+low_clue_ingress_matrix=all expected routes/headings matched
+low_clue_recall.decision=ask_choice
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_findings=[]
+```
+
+Interpretation:
+
+- This fixes the P1-G non-topic artifact and merged-source reporting defects.
+- It does not claim candidate quality is fully mature: future work still needs
+  real Telegram retest after gateway reload/restart if we want to verify the
+  live long-running gateway process uses the updated module code.
+
+#### RH-28 Follow-up: Telegram Button Title Compression
+
+Date: 2026-05-25.
+
+Reason: the 2026-05-25 Telegram retest showed that candidate labels were now
+topic-like, but one label was still visually too long for Telegram choice
+buttons. This follow-up keeps the same `ask_choice` behavior and only tightens
+candidate title length.
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_low_clue_recall.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+52 passed
+```
+
+Remote validation on `10.20.3.200` after reinstall:
+
+```text
+command:
+  hermes memory-os-agent-os low-clue-recall dry-run \
+    --query '继续昨天那个' --llm-judge none
+
+decision=ask_choice
+candidate_count=4
+candidate_quality.max_title_chars=40
+candidate_quality.filtered_non_topic_title_count=2
+candidate_quality.diversity_applied=true
+candidate_quality.source_distribution={working:128,event:16}
+candidate_quality.selected_source_distribution={working:4,event:4}
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+```
+
+Representative compressed candidates:
+
+```text
+1. 我们之前说的互联网数据采集系统，如果重新设计，你会怎么分层
+2. rohitg00 / agentmemory / Memory-OS /...
+3. Built-in / Hermes / skill / Voice / v...
+4. 我们继续聊刚才那套记忆系统，你觉得它现在带来的变化是什么
+```
+
+Monitor after deployment:
+
+```text
+monitor_status=WARN
+FAIL=[]
+WARN=[rh31_eval_has_failures]
+gateway=active pid=488921
+index_health=healthy
+doctor=ok
+low_clue_recall.decision=ask_choice
+low_clue_recall.internal_label_count=0
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+```
+
+Note: the gateway process was not restarted after this title-compression
+deployment. CLI/shell dry-run uses the updated runtime immediately; Telegram
+live verification requires a gateway reload/restart.
+
+Post-gateway Telegram retest:
+
+```text
+2026-05-25 12:19 Asia/Shanghai
+query:
+  继续昨天那个
+
+agent response:
+  1. 互联网数据采集系统 重新设计分层
+  2. rohitg00 / agentmemory / Memory-OS 相关
+  3. Built-in / Hermes / skill / Voice 相关
+  4. 记忆系统带来的变化 这条
+```
+
+Comparison with bounded dry-run after the same gateway reload:
+
+```text
+decision=ask_choice
+candidate_count=4
+candidate_quality.max_title_chars=40
+candidate_quality.filtered_non_topic_title_count=2
+candidate_quality.diversity_applied=true
+candidate_quality.source_distribution={working:128,event:17}
+candidate_quality.selected_source_distribution={working:4,event:4}
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+```
+
+1h MemorySources attribution:
+
+```text
+record_count=3
+route_distribution={ambiguous_recall:3}
+selected_source_class_distribution={recall_guard:3}
+boundary_true_count=0
+forbidden_field_findings=[]
+```
+
+Monitor after retest:
+
+```text
+monitor_status=WARN
+FAIL=[]
+WARN=[index_not_healthy, doctor_warning_finding, rh31_eval_has_failures]
+gateway=active pid=489403
+low_clue_recall.decision=ask_choice
+low_clue_recall.internal_label_count=0
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+compaction.focus_none_count=0
+```
+
+Interpretation:
+
+- The long-running Telegram gateway loaded the RH-28 title-compression code
+  after restart.
+- The live response no longer exposes attachment placeholders, internal
+  projection headings, or duplicate raw session-search variants.
+- Live output is now a bounded `ask_choice` list with shorter topic labels.
+- The remaining WARN items are unrelated to RH-28 candidate display:
+  transient/stale index warning and the existing RH-31 eval warning.

@@ -284,6 +284,51 @@ def test_low_clue_recall_filters_system_note_candidates_and_keeps_titles_short(t
     assert any("Project Cygnus" in label for label in labels)
 
 
+def test_low_clue_recall_filters_non_topic_transcript_artifact_titles(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "[The user sent an attachment~ Here's what I can see in the preview panel.]",
+            "Project Delta data intake architecture: source registry, fetch queue, parser, validator.",
+            "Render pipeline composition gate: inspect template, data binding, and export readiness.",
+            "Automation orchestration boundary: deterministic flow runner, agent judgment, audit trail.",
+        ],
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    labels = [candidate["label"] for candidate in report["candidates"]]
+    assert report["decision"] == "ask_choice"
+    assert report["candidate_quality"]["filtered_non_topic_title_count"] == 1
+    assert all("The user sent" not in label and "Here's what I can see" not in label for label in labels)
+    assert any("Project Delta" in label for label in labels)
+
+
+def test_low_clue_recall_compresses_sentence_titles_for_choice_buttons(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "Project Orion memory planning: scoring, attribution, retention, owner feedback.",
+            (
+                "agentmemory is not something to copy wholesale, but a few pieces are useful for "
+                "the current Memory-OS design: consent, relevant source attribution, and memory "
+                "management review."
+            ),
+            "Workflow automation boundary: deterministic runner, model judgment, rollback, audit.",
+        ],
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    labels = [candidate["label"] for candidate in report["candidates"]]
+    assert report["decision"] == "ask_choice"
+    assert any("agentmemory" in label for label in labels)
+    assert all(len(label) <= 40 for label in labels)
+    assert all("not something to copy wholesale" not in label for label in labels)
+
+
 def test_low_clue_recall_removes_artifact_paths_from_titles(tmp_path):
     store = _store(tmp_path)
     _write_working(
@@ -303,6 +348,48 @@ def test_low_clue_recall_removes_artifact_paths_from_titles(tmp_path):
     labels = [candidate["label"] for candidate in report["candidates"]]
     assert all("MEDIA:" not in label and ".png" not in label and "/workspace/" not in label for label in labels)
     assert any("Tutorial" in label or "evidence" in label for label in labels)
+
+
+def test_low_clue_recall_counts_merged_event_source_as_selected_diversity(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "Project Epsilon recall architecture: candidate clustering, source quota, clarification guard.",
+            "Project Epsilon recall routing: candidate clustering, source quota, owner clarification.",
+            "Render pipeline quality gate: composition inspection before export.",
+        ],
+    )
+    _append_event(
+        store,
+        seed=904,
+        summary="Project Epsilon recall architecture: candidate clustering and source diversity validation.",
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    selected_distribution = report["candidate_quality"]["selected_source_distribution"]
+    labels = [candidate["label"] for candidate in report["candidates"]]
+    assert report["candidate_quality"]["diversity_applied"] is True
+    assert selected_distribution["working"] >= 1
+    assert selected_distribution["event"] >= 1
+    assert any("Epsilon" in label for label in labels)
+
+
+def test_low_clue_recall_preserves_duplicate_label_sources_across_collectors(tmp_path):
+    store = _store(tmp_path)
+    topic = "Project Zeta recall contract: source diversity, topic eligibility, owner clarification."
+    _write_working(store, [topic, "Render pipeline quality gate: composition inspection before export."])
+    _append_event(store, seed=905, summary=topic)
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    selected_distribution = report["candidate_quality"]["selected_source_distribution"]
+    zeta = next(candidate for candidate in report["candidates"] if "zeta" in candidate["cluster_terms"])
+    assert "working" in zeta["source_classes"]
+    assert "event" in zeta["source_classes"]
+    assert selected_distribution["working"] >= 1
+    assert selected_distribution["event"] >= 1
 
 
 def test_low_clue_recall_removes_artifact_paths_even_when_single_candidate(tmp_path):
