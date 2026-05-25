@@ -1463,7 +1463,7 @@ Initial action types:
 | `approve_candidate` | candidate pending -> owner_approved -> crystallized record | index refresh, candidate closed, approval audit | owner action required; idempotent |
 | `reject_candidate` | candidate pending -> owner_rejected | candidate closed, negative scoring signal | canonical event/audit retained |
 | `mark_feedback` | MemorySources / answer source -> feedback ledger | RH-30 signal for route/source quality | not long-term memory approval |
-| `approve_proposal` | proposal candidate -> approved_for_proposal -> execution ticket | may be manually executed later through OpsGate | approval does not execute |
+| `approve_proposal` | proposal candidate -> approved_for_proposal -> follow-up projection | may be manually executed later through OpsGate and a separate explicit apply command | approval does not execute |
 | `reject_proposal` | proposal candidate -> owner_declined | similar deterministic proposal class downweighted | does not delete proposal evidence |
 | `allow_speak_once` | out-of-policy proactive-send item -> one-shot permission ticket | exactly one bounded send opportunity outside the default policy | does not enable default send or approve future speech |
 
@@ -1474,12 +1474,25 @@ Approved proposal follow-up:
   human-controlled follow-up surface. It is not an execution ticket yet and it
   must not call tools, send messages, mutate files, or change runtime config by
   itself.
-- The next closure slice must add an explicit approved-proposal follow-up
-  projection so approved proposals do not become another hidden backlog. That
-  projection can be consumed by OpsGate or an owner review digest, but actual
-  execution still requires a separate explicit execution/apply command.
+- The approved-proposal follow-up projection makes accepted proposals visible
+  without creating execution tickets. It can be consumed by OpsGate or an owner
+  review digest, but actual execution still requires a separate explicit
+  execution/apply command.
 - Monitor evidence must keep `proposal_approved_count`, proposal state counts,
   and any future execution-ticket count separate.
+
+Implementation checkpoint (RH-35.6):
+
+- `review proposal-followups` returns
+  `memory-os.approved_proposal_followups.v0`.
+- It reads proposal queue items in `approved_for_proposal`, joins the matching
+  `approve_proposal` owner action when available, and emits bounded follow-up
+  items.
+- It is read-only: `execution_ticket_count=0`, `actual_execute=false`, and no
+  proposal/body raw text is emitted.
+- Monitor exposes `OwnerProposalFollowups` and WARNs when approved proposals
+  are pending follow-up, so approved items cannot silently disappear after the
+  owner says yes.
 
 Idempotency:
 

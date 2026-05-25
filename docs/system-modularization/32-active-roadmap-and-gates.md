@@ -656,6 +656,9 @@ Status:
 - Real owner action smoke applied `memory approve oa_<token>` for A2 through
   OwnerActionProcessor. The proposal moved to `approved_for_proposal`; no work
   executed.
+- RH-35.6 deployed and monitor-observed on `10.20.3.200`: `review proposal-followups` projects
+  `approved_for_proposal` items into a bounded follow-up surface with
+  `execution_ticket_count=0` and `actual_execute=false`.
 - RH-36 documented: all currently known left/right brain and governance modules
   have a closure path that says whether they generate owner actions, speech
   requests, direct context feedback, proposals, candidates, or monitor-only
@@ -757,10 +760,9 @@ Next action:
 4. run the next owner-reply action smoke only with the rendered stable command
    (`memory approve oa_<token>` or `memory reject oa_<token>`), not with
    display anchors such as `approve A1`;
-5. design and implement the approved-proposal follow-up projection so
-   `approved_for_proposal` items do not become another hidden backlog. This is
-   a projection/follow-up surface only; actual execution still requires a
-   separate explicit execution/apply command;
+5. keep RH-35.6 in monitor observation. Approved proposals must stay visible as
+   follow-up items with `execution_ticket_count=0`; actual execution still
+   requires a separate explicit execution/apply command;
 6. keep CLI preview as the fallback owner surface;
 7. keep `mailbox` classified as internal AI-agent mailroom evidence, not a
    left-brain or right-brain cognition module, not an owner digest channel, and
@@ -796,6 +798,8 @@ Promotion signal:
 - monitor reports pending/stale/action/error counts;
 - feedback backflow is visible as aggregation, not immediate route mutation;
 - proposal approval does not execute;
+- approved proposal follow-up projection is visible and reports
+  `execution_ticket_count=0`;
 - candidate approval creates crystallized records only through explicit owner
   action.
 - unapproved crystallized write count remains zero, while owner-approved
@@ -825,6 +829,8 @@ Stop signal:
 - duplicate owner actions mutate the same target twice;
 - crystallized memory is written without a matching owner action record;
 - proposal approval causes actual execution;
+- approved proposals disappear from monitor/review surfaces after approval;
+- approved proposal follow-up projection creates execution tickets;
 - feedback is treated as crystallized approval;
 - speak-once enables default sending.
 - live ingress accepts plain display-anchor commands such as `approve A1` as

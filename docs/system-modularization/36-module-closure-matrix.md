@@ -288,6 +288,9 @@ module emits proposal
 `approved_for_proposal` is not execution and is not yet an execution ticket. It
 must surface through a follow-up projection so accepted proposals do not become
 a hidden backlog, while actual execution remains a separate explicit command.
+The projection itself is monitor/review evidence: it reads proposal queue
+state, emits bounded follow-up items, and must keep `actual_execute=false` and
+`execution_ticket_count=0`.
 
 ### Expression / Proactive Send
 

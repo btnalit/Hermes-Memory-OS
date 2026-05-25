@@ -123,6 +123,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_deliver_once.add_argument("--apply", action="store_true")
     review_queue = review_subs.add_parser("queue")
     review_queue.add_argument("--limit", type=int, default=20)
+    review_followups = review_subs.add_parser("proposal-followups")
+    review_followups.add_argument("--limit", type=int, default=20)
     review_preview = review_subs.add_parser("preview-digest")
     review_preview.add_argument("--owner", default="")
     review_preview.add_argument("--max-action-required", type=int)

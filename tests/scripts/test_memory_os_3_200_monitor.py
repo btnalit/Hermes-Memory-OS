@@ -325,6 +325,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_rendered_digest_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_proposal_followups_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_cron_integration_status_ok" for item in classification["pass"])
     assert "OwnerReviewAging" in rendered
     assert "OwnerReviewChannel" in rendered
@@ -396,6 +397,20 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "owner_review_token_command_not_accepted" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["boundary"]["actual_execute"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_proposal_followups_actual_execute_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["pending_followup_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "owner_review_approved_proposals_pending_followup" for item in classification["warn"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_delivery_gate"]["boundary"]["actual_send"] = True
@@ -1055,6 +1070,7 @@ def _healthy_snapshot() -> dict:
         "owner_review_rendered_digest": _healthy_owner_rendered_digest(),
         "owner_review_reply_dry_run": _healthy_owner_reply_dry_run(),
         "owner_review_ingress_guard": _healthy_owner_ingress_guard(),
+        "owner_review_proposal_followups": _healthy_owner_proposal_followups(),
     }
 
 
@@ -1216,6 +1232,25 @@ def _healthy_owner_ingress_guard() -> dict:
         "token_command_accepted": True,
         "slash_token_command_accepted": True,
         "feedback_token_command_accepted": True,
+    }
+
+
+def _healthy_owner_proposal_followups() -> dict:
+    return {
+        "schema_version": "memory-os.approved_proposal_followups.v0",
+        "status": "ok",
+        "pending_followup_count": 0,
+        "shown_count": 0,
+        "overflow_count": 0,
+        "execution_ticket_count": 0,
+        "raw_body_included": False,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+        "items": [],
     }
 
 

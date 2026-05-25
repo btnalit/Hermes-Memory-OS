@@ -455,6 +455,28 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             warn.append({"code": "owner_review_delivery_gate_unavailable", "value": delivery_gate})
 
+    proposal_followups = snapshot.get("owner_review_proposal_followups", {})
+    if proposal_followups:
+        if proposal_followups.get("schema_version") == "memory-os.approved_proposal_followups.v0":
+            passed.append({"code": "owner_review_proposal_followups_ok"})
+            if proposal_followups.get("raw_body_included") is True:
+                fail.append({"code": "owner_review_proposal_followups_raw_body_included"})
+            if int(proposal_followups.get("execution_ticket_count") or 0) > 0:
+                fail.append({"code": "owner_review_proposal_followups_execution_ticket_created"})
+            boundary = proposal_followups.get("boundary") if isinstance(proposal_followups.get("boundary"), dict) else {}
+            for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
+                if boundary.get(key) is True:
+                    fail.append({"code": f"owner_review_proposal_followups_{key}_true"})
+            if int(proposal_followups.get("pending_followup_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "owner_review_approved_proposals_pending_followup",
+                        "value": proposal_followups.get("pending_followup_count"),
+                    }
+                )
+        else:
+            warn.append({"code": "owner_review_proposal_followups_unavailable", "value": proposal_followups})
+
     cron_integration = snapshot.get("owner_review_cron_integration", {})
     if cron_integration:
         if cron_integration.get("schema_version") == "memory-os.owner_review_cron_integration.v0":
@@ -729,6 +751,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerRenderedDigest={_owner_rendered_digest_summary(snapshot.get('owner_review_rendered_digest') or {})}",
         f"- OwnerReplyDryRun={_owner_reply_dry_run_summary(snapshot.get('owner_review_reply_dry_run') or {})}",
         f"- OwnerIngressGuard={_owner_ingress_guard_summary(snapshot.get('owner_review_ingress_guard') or {})}",
+        f"- OwnerProposalFollowups={_owner_proposal_followups_summary(snapshot.get('owner_review_proposal_followups') or {})}",
         f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
         f"- OwnerDeliveryGate={_owner_delivery_gate_summary(snapshot.get('owner_review_delivery_gate') or {})}",
         f"- OwnerCronIntegration={_owner_cron_integration_summary(snapshot.get('owner_review_cron_integration') or {})}",
@@ -978,6 +1001,16 @@ def _owner_ingress_guard_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "token_command_accepted": summary.get("token_command_accepted"),
         "slash_token_command_accepted": summary.get("slash_token_command_accepted"),
         "feedback_token_command_accepted": summary.get("feedback_token_command_accepted"),
+    }
+
+
+def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "pending": summary.get("pending_followup_count"),
+        "shown": summary.get("shown_count"),
+        "overflow": summary.get("overflow_count"),
+        "execution_tickets": summary.get("execution_ticket_count"),
+        "raw_body_included": summary.get("raw_body_included"),
     }
 
 
@@ -1620,6 +1653,7 @@ def shell_alias_no_env():
     review_cron_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "cron-status"])
     review_delivery_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-status"])
     review_delivery_gate = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-gate"])
+    review_followups = load_json_cmd(["hermes", "memory-os-agent-os", "review", "proposal-followups"])
     review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
     review_render = load_json_cmd(["hermes", "memory-os-agent-os", "review", "render-digest"])
     review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "memory", "approve", "oa_deadbeef"])
@@ -1637,6 +1671,7 @@ def shell_alias_no_env():
       "review_cron_status_ok": isinstance(review_cron_status, dict) and review_cron_status.get("schema_version") == "memory-os.owner_review_cron_integration.v0",
       "review_delivery_status_ok": isinstance(review_delivery_status, dict) and review_delivery_status.get("schema_version") == "memory-os.owner_review_delivery_status.v0",
       "review_delivery_gate_ok": isinstance(review_delivery_gate, dict) and review_delivery_gate.get("schema_version") == "memory-os.owner_review_delivery_gate.v0",
+      "review_followups_ok": isinstance(review_followups, dict) and review_followups.get("schema_version") == "memory-os.approved_proposal_followups.v0",
       "review_digest_ok": isinstance(review_digest, dict) and review_digest.get("schema_version") == "memory-os.owner_review_digest_preview.v0",
       "review_render_ok": isinstance(review_render, dict) and review_render.get("schema_version") == "memory-os.owner_review_rendered_digest.v0",
       "review_reply_ok": isinstance(review_reply, dict) and review_reply.get("schema_version") == "memory-os.owner_review_reply.v0",
@@ -1653,6 +1688,7 @@ def shell_alias_no_env():
       "review_cron_status_error": review_cron_status.get("_error") if isinstance(review_cron_status, dict) else None,
       "review_delivery_status_error": review_delivery_status.get("_error") if isinstance(review_delivery_status, dict) else None,
       "review_delivery_gate_error": review_delivery_gate.get("_error") if isinstance(review_delivery_gate, dict) else None,
+      "review_followups_error": review_followups.get("_error") if isinstance(review_followups, dict) else None,
       "review_digest_error": review_digest.get("_error") if isinstance(review_digest, dict) else None,
       "review_render_error": review_render.get("_error") if isinstance(review_render, dict) else None,
       "review_reply_error": review_reply.get("_error") if isinstance(review_reply, dict) else None,
@@ -1783,6 +1819,7 @@ owner_review_channel = memory_os_cli(["review", "channel"])
 owner_review_cron_integration = memory_os_cli(["review", "cron-status"])
 owner_review_delivery_status = memory_os_cli(["review", "delivery-status"])
 owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
+owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups", "--limit", "10"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
 owner_review_reply_dry_run = owner_review_reply_dry_run_summary()
@@ -1828,6 +1865,7 @@ print(json.dumps({
   "owner_review_cron_integration": owner_review_cron_integration,
   "owner_review_delivery_status": owner_review_delivery_status,
   "owner_review_delivery_gate": owner_review_delivery_gate,
+  "owner_review_proposal_followups": owner_review_proposal_followups,
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,
   "owner_review_reply_dry_run": owner_review_reply_dry_run,

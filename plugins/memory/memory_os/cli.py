@@ -70,6 +70,7 @@ from .migrator import (
     replay_shadow_import,
 )
 from .owner_actions import (
+    approved_proposal_followups_report,
     apply_owner_action,
     deliver_owner_review_digest_once,
     owner_review_aging_report,
@@ -415,6 +416,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_deliver_once.add_argument("--apply", action="store_true")
     review_queue = review_subs.add_parser("queue")
     review_queue.add_argument("--limit", type=int, default=20)
+    review_followups = review_subs.add_parser("proposal-followups")
+    review_followups.add_argument("--limit", type=int, default=20)
     review_preview = review_subs.add_parser("preview-digest")
     review_preview.add_argument("--owner", default="")
     review_preview.add_argument("--max-action-required", type=int)
@@ -900,6 +903,16 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
         print(
             json.dumps(
                 owner_review_queue_report(store, limit=max(int(args.limit), 0)),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if command == "proposal-followups":
+        print(
+            json.dumps(
+                approved_proposal_followups_report(store, limit=max(int(args.limit), 0)),
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,

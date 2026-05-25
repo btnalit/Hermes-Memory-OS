@@ -106,6 +106,9 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     review_queue_args = parser.parse_args(["review", "queue", "--limit", "4"])
     assert review_queue_args.review_command == "queue"
     assert review_queue_args.limit == 4
+    review_followups_args = parser.parse_args(["review", "proposal-followups", "--limit", "4"])
+    assert review_followups_args.review_command == "proposal-followups"
+    assert review_followups_args.limit == 4
     review_channel_args = parser.parse_args(["review", "channel"])
     assert review_channel_args.review_command == "channel"
     review_cron_status_args = parser.parse_args(["review", "cron-status"])

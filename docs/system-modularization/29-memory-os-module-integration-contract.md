@@ -776,9 +776,10 @@ Hard rules:
   `--no-enable-owner-review-cron`.
 - All owner actions that change candidate/proposal/feedback/speak/crystallized
   state must pass through OwnerActionProcessor.
-- `approve_proposal` does not execute. It only creates an approved proposal or
-  execution-ticket state that still requires OpsGate and an explicit execution
-  command.
+- `approve_proposal` does not execute and does not create an execution ticket.
+  It creates `approved_for_proposal`, which must be projected into an
+  approved-proposal follow-up surface. OpsGate and a separate explicit
+  execution/apply command are still required for any work execution.
 - `approve_candidate` is the only owner action allowed to produce a
   crystallized record, and it must be idempotent.
 - `reject_candidate` and `reject_proposal` keep canonical events, audit, and
@@ -928,6 +929,8 @@ Required monitor evidence:
 - `candidate_rejected_count`
 - `proposal_approved_count`
 - `proposal_rejected_count`
+- `approved_proposal_followups.pending_followup_count`
+- `approved_proposal_followups.execution_ticket_count`
 - `feedback_by_rating`
 - `crystallized_created_by_owner_action`
 - `digest_generated_count`

@@ -8,6 +8,7 @@ from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_
 from plugins.memory.memory_os import MemoryOSProvider
 from plugins.memory.memory_os.memory_sources import append_memory_source_record, memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import (
+    approved_proposal_followups_report,
     apply_owner_action,
     deliver_owner_review_digest_once,
     owner_actions_path,
@@ -215,6 +216,36 @@ def test_proposal_actions_transition_without_execution_or_crystallized_approval(
     assert updated["crystallized_approved"] is False
     assert result["record"]["boundary"]["actual_execute"] is False
     assert result["record"]["owner_effect"]["owner_approved_crystallized_write"] is False
+
+
+def test_approved_proposal_followups_project_state_without_execution_ticket(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(store=store, title="Run a proposal", body="PRIVATE RAW BODY")
+
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    report = approved_proposal_followups_report(store)
+
+    assert report["schema_version"] == "memory-os.approved_proposal_followups.v0"
+    assert report["pending_followup_count"] == 1
+    assert report["execution_ticket_count"] == 0
+    assert report["raw_body_included"] is False
+    assert report["boundary"]["actual_execute"] is False
+    assert report["items"][0]["proposal_id"] == candidate["candidate_id"]
+    assert report["items"][0]["followup_state"] == "awaiting_human_controlled_followup"
+    assert report["items"][0]["execution_ticket_created"] is False
+    assert "PRIVATE RAW BODY" not in json.dumps(report, ensure_ascii=False)
+
+    status = owner_review_status_report(store)
+    assert status["approved_proposal_followups"]["pending_followup_count"] == 1
 
 
 def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):

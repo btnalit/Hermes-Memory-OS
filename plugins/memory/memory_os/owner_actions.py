@@ -37,6 +37,7 @@ OWNER_REVIEW_DELIVERY_GATE_SCHEMA_VERSION = "memory-os.owner_review_delivery_gat
 OWNER_REVIEW_DELIVERY_SCHEMA_VERSION = "memory-os.owner_review_delivery.v0"
 OWNER_REVIEW_DELIVERY_STATUS_SCHEMA_VERSION = "memory-os.owner_review_delivery_status.v0"
 OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_integration.v0"
+APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_followups.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
@@ -164,6 +165,78 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
             "by_source_class": {},
             "apply_ready_count": 0,
         },
+        "approved_proposal_followups": _approved_proposal_followups_summary(store),
+    }
+
+
+def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20) -> dict[str, Any]:
+    """Project owner-approved proposals into a bounded follow-up surface.
+
+    This report is intentionally read-only. It makes approved proposals visible
+    for human-controlled follow-up without creating execution tickets or
+    executing work.
+    """
+
+    proposals = [item for item in _read_proposal_queue(store) if str(item.get("state") or "") == "approved_for_proposal"]
+    approvals = _latest_proposal_approval_by_target(read_owner_action_records(store.roots))
+    items: list[dict[str, Any]] = []
+    for proposal in proposals:
+        proposal_id = str(proposal.get("candidate_id") or "")
+        if not proposal_id:
+            continue
+        approval = approvals.get(proposal_id, {})
+        approved_at = str(approval.get("created_at") or proposal.get("updated_at") or "")
+        items.append(
+            {
+                "schema_version": "memory-os.approved_proposal_followup_item.v0",
+                "followup_id": f"proposal_followup:{proposal_id}",
+                "proposal_id": proposal_id,
+                "title": _bounded_text(str(proposal.get("title") or "Approved proposal"), 140),
+                "source_module": "proposal_queue",
+                "proposal_kind": str(proposal.get("kind") or "proposal"),
+                "state": "approved_for_proposal",
+                "followup_state": "awaiting_human_controlled_followup",
+                "approved_at": approved_at,
+                "owner_action_id": str(approval.get("owner_action_id") or ""),
+                "owner_id": str(approval.get("owner_id") or ""),
+                "safe_source_ids": _safe_list(proposal.get("source_refs")),
+                "next_step": "inspect or route through OpsGate; actual execution requires a separate explicit apply command",
+                "execution_ticket_created": False,
+                "actual_execute": False,
+                "raw_body_included": False,
+            }
+        )
+    items = sorted(items, key=lambda item: (str(item.get("approved_at") or ""), str(item.get("proposal_id") or "")), reverse=True)
+    bounded_limit = max(int(limit), 0)
+    shown = items[:bounded_limit]
+    return {
+        "schema_version": APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": "ok",
+        "pending_followup_count": len(items),
+        "shown_count": len(shown),
+        "overflow_count": max(len(items) - bounded_limit, 0),
+        "execution_ticket_count": 0,
+        "raw_body_included": False,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+        "items": shown,
+    }
+
+
+def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]:
+    report = approved_proposal_followups_report(store, limit=5)
+    return {
+        "schema_version": report["schema_version"],
+        "pending_followup_count": report["pending_followup_count"],
+        "shown_count": report["shown_count"],
+        "overflow_count": report["overflow_count"],
+        "execution_ticket_count": report["execution_ticket_count"],
+        "raw_body_included": report["raw_body_included"],
     }
 
 
@@ -2343,6 +2416,22 @@ def _read_proposal_queue(store: MemoryOSStore) -> list[dict[str, Any]]:
         return []
     items = parsed.get("items", []) if isinstance(parsed, dict) else []
     return [item for item in items if isinstance(item, dict)]
+
+
+def _latest_proposal_approval_by_target(actions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    approvals: dict[str, dict[str, Any]] = {}
+    for action in actions:
+        if action.get("result") != "applied":
+            continue
+        if action.get("action_type") != "approve_proposal":
+            continue
+        if action.get("target_type") != "proposal":
+            continue
+        target_id = str(action.get("target_id") or "")
+        if not target_id:
+            continue
+        approvals[target_id] = action
+    return approvals
 
 
 def _closed_targets(actions: list[dict[str, Any]]) -> set[str]:

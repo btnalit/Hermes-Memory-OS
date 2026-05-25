@@ -10137,3 +10137,134 @@ Interpretation:
 - The real approved proposal is visible as `approved_for_proposal`, and it did
   not execute work. The follow-up projection for approved proposals remains a
   next closure item.
+
+## 2026-05-25 - RH-35.6 Approved Proposal Follow-Up Projection
+
+Scope:
+
+- close the remaining owner-action loop after `approve_proposal`;
+- expose `approved_for_proposal` as a bounded follow-up projection;
+- do not create execution tickets, execute work, send messages, write identity,
+  or write crystallized memory.
+
+Local verification:
+
+```text
+python -m pytest -q \
+  tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py
+
+81 passed
+```
+
+Remote deploy:
+
+```text
+HERMES_HOME=/root/.hermes bash /tmp/memory-os-rh35-6/scripts/install_memory_os.sh \
+  --yes --test-host --skip-verify
+
+installer copied owner_actions.py, cli.py, shell plugin, monitor-facing runtime,
+and owner review helper/gate scripts.
+```
+
+Remote shell alias evidence:
+
+```text
+hermes memory-os-agent-os review proposal-followups --limit 5
+
+schema_version=memory-os.approved_proposal_followups.v0
+status=ok
+pending_followup_count=2
+shown_count=2
+overflow_count=0
+execution_ticket_count=0
+raw_body_included=false
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+
+items:
+  - proposal_id=prop_20260521T093627745201Z_aa81f796ec
+    title=Tune ordinary memory conversation tone
+    state=approved_for_proposal
+    followup_state=awaiting_human_controlled_followup
+    owner_action_id=oact_20260525T155152508018Z_70c60a8e
+    execution_ticket_created=false
+  - proposal_id=prop_20260521T032500038479Z_d6d4850b02
+    title=Fresh deployment proposal queue validation
+    state=approved_for_proposal
+    followup_state=awaiting_human_controlled_followup
+    execution_ticket_created=false
+```
+
+Monitor evidence:
+
+```text
+status=WARN
+FAIL=[]
+
+OwnerProposalFollowups={
+  pending: 2,
+  shown: 2,
+  overflow: 0,
+  execution_tickets: 0,
+  raw_body_included: false
+}
+
+PASS includes:
+  owner_review_proposal_followups_ok
+
+WARN includes:
+  owner_review_approved_proposals_pending_followup
+```
+
+Interpretation:
+
+- `approve_proposal` is no longer a hidden terminal state. Approved proposals
+  now appear in an explicit follow-up projection.
+- This projection is still not execution. It exists so OpsGate / owner review
+  can decide a later explicit execution/apply path.
+
+Latest read-only monitor recheck:
+
+```text
+time=2026-05-25T16:28:54Z
+status=WARN
+FAIL=[]
+
+owner_review_proposal_followups_ok=true
+OwnerProposalFollowups={
+  pending: 2,
+  shown: 2,
+  overflow: 0,
+  execution_tickets: 0,
+  raw_body_included: false
+}
+
+OwnerReview.owner_actions=2
+OwnerReview.by_type={approve_proposal:1, reject_candidate:1}
+ModuleArtifacts.proposal_queue.state_counts={approved_for_proposal:2, candidate:14}
+
+OwnerDeliveryStatus.unapproved_send=0
+OwnerDeliveryStatus.raw_body_included=0
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+```
+
+Expected WARN:
+
+```text
+session_mirror_pending_sessions
+owner_review_approved_proposals_pending_followup
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+Gate judgment:
+
+- RH-35.6 is deployed and visible through both provider CLI and shell alias.
+- The approved-proposal backlog is now observable instead of hidden.
+- No execution ticket was created by projection, so proposal execution remains a
+  future explicit OpsGate/apply design item.
