@@ -206,6 +206,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         fail.append({"code": "shell_alias_no_env_failed", "value": shell_alias})
 
+    module_artifacts = snapshot.get("module_artifacts", {})
+    if module_artifacts.get("schema_version") == "memory-os.module_artifact_summary.v0":
+        passed.append({"code": "module_artifact_summary_ok"})
+        speak_gate = module_artifacts.get("speak_gate") if isinstance(module_artifacts.get("speak_gate"), dict) else {}
+        if speak_gate.get("actual_send") is True:
+            fail.append({"code": "module_artifact_speak_gate_actual_send_true", "value": speak_gate})
+    else:
+        warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
+
     rh31 = snapshot.get("rh31_eval", {})
     if rh31:
         if rh31.get("schema_version") == "memory-os.rh31_summary.v0":
@@ -418,6 +427,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- low_clue_ingress={_probe_summary(snapshot.get('low_clue_ingress_matrix') or [])}",
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
+        f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
@@ -533,6 +543,20 @@ def _rh31_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "boundary_true_count": summary.get("boundary_true_count"),
         "forbidden_field_count": summary.get("forbidden_field_count"),
         "report_written": bool(summary.get("report_dir")),
+    }
+
+
+def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "digest": summary.get("digest"),
+        "wandering": summary.get("wandering"),
+        "evidence": summary.get("evidence"),
+        "proposal_queue": summary.get("proposal_queue"),
+        "self_evolution": summary.get("self_evolution"),
+        "governance_feedback": summary.get("governance_feedback"),
+        "deep_reflection": summary.get("deep_reflection"),
+        "ops_gate": summary.get("ops_gate"),
+        "speak_gate": summary.get("speak_gate"),
     }
 
 
@@ -926,6 +950,84 @@ def low_clue_recall_probe():
         }
     return report
 
+def module_artifact_summary():
+    report = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
+    if not isinstance(report, dict) or report.get("schema_version") != "memory-os.modules_status.v0":
+        return {
+          "schema_version": "memory-os.module_artifact_summary.v0",
+          "status": "unavailable",
+          "error": report.get("_error") if isinstance(report, dict) else "modules status unavailable",
+        }
+    modules = {}
+    for item in report.get("modules", []) if isinstance(report.get("modules"), list) else []:
+        if isinstance(item, dict):
+            status = item.get("status") if isinstance(item.get("status"), dict) else {}
+            modules[str(item.get("module") or "")] = status
+
+    def status(module_id):
+        return modules.get(module_id, {})
+
+    digest = status("digest_consolidation")
+    household = status("household_digest")
+    wandering = status("wandering_mind")
+    evidence = status("evidence_scoring")
+    proposal = status("proposal_queue")
+    self_evolution = status("self_evolution")
+    governance = status("governance_feedback")
+    deep_reflection = status("deep_reflection")
+    ops_gate = status("ops_gate")
+    speak_gate = status("speak_gate")
+    mailbox = status("mailbox")
+    return {
+      "schema_version": "memory-os.module_artifact_summary.v0",
+      "status": "ok",
+      "module_count": report.get("module_count"),
+      "digest": {
+        "daily_artifact_count": digest.get("daily_artifact_count"),
+        "weekly_artifact_count": digest.get("weekly_artifact_count"),
+        "household_artifact_exists": household.get("artifact_exists"),
+      },
+      "wandering": {
+        "output_count": len(_read_jsonl("/root/.hermes/system-modules/wandering_mind/outputs.jsonl")),
+        "would_send_count": wandering.get("would_send_count"),
+      },
+      "evidence": {
+        "evidence_count": evidence.get("evidence_count"),
+        "score_count": evidence.get("score_count"),
+        "subject_counts": evidence.get("subject_counts"),
+      },
+      "proposal_queue": {
+        "candidate_count": proposal.get("candidate_count"),
+        "state_counts": proposal.get("state_counts"),
+      },
+      "self_evolution": {
+        "report_count": self_evolution.get("report_count"),
+        "proposal_count": self_evolution.get("proposal_count"),
+        "last_status": self_evolution.get("last_status"),
+      },
+      "governance_feedback": {
+        "emitted_event_count": governance.get("emitted_event_count"),
+      },
+      "deep_reflection": {
+        "report_count": deep_reflection.get("report_count"),
+        "analysis_artifact_count": deep_reflection.get("analysis_artifact_count"),
+        "current_injection_exists": deep_reflection.get("current_injection_exists"),
+        "wandering_seed_count": len(_read_jsonl("/root/.hermes/system-modules/deep_reflection/wandering_seeds.jsonl")),
+      },
+      "ops_gate": {
+        "report_count": ops_gate.get("report_count"),
+        "blocked_decision_count": ops_gate.get("blocked_decision_count"),
+      },
+      "speak_gate": {
+        "would_send_count": speak_gate.get("would_send_count"),
+        "actual_send": speak_gate.get("actual_send"),
+      },
+      "mailbox": {
+        "mailbox_exists": mailbox.get("mailbox_exists"),
+        "would_send_count": mailbox.get("would_send_count"),
+      },
+    }
+
 def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
     doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
@@ -992,6 +1094,7 @@ print(json.dumps({
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
   "memory_sources": memory_sources,
   "rh31_eval": rh31_eval,
+  "module_artifacts": module_artifact_summary(),
   "audit_actions": audit_action_stats(),
   "working_status": working_status(),
   "context_router": cfg.get("context_router", {}),

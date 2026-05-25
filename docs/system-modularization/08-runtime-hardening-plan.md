@@ -1398,6 +1398,8 @@ Design:
   `29-memory-os-module-integration-contract.md`
 - RH-31 recall eval and derived retrieval gate:
   `31-recall-eval-and-derived-retrieval-plan.md`
+- Active roadmap and gates:
+  `32-active-roadmap-and-gates.md`
 
 Purpose:
 
@@ -1414,6 +1416,12 @@ Recommended order:
 5. RH-31 deterministic relevance guards only from scorecard-backed real findings
 6. RH-32 consolidation suggestions, no approval
 7. RH-33 top-of-mind scoring only
+
+The active roadmap document is the current source for queue visibility. It
+also tracks earlier module lines that should not be lost while RH-31 work is
+active: DeepReflection / Conversation Carryover session injection,
+observation-driven LLM/governance analysis, and Speak Gate would-send
+expression observation.
 
 Contract gate:
 

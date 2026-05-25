@@ -29,6 +29,36 @@ def test_modules_status_reports_commandized_and_uncommandized_modules(tmp_path, 
     assert "raw_body" not in json.dumps(output)
 
 
+def test_modules_status_inner_drive_includes_runtime_heartbeat_authority(tmp_path, monkeypatch, capsys):
+    store = _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    heartbeat_root = store.roots.memory_os_root / "runtime"
+    heartbeat_root.mkdir(parents=True)
+    (heartbeat_root / "heartbeat_state.json").write_text(
+        json.dumps(
+            {
+                "last_heartbeat_at": "2026-05-25T03:00:00Z",
+                "last_attempt_at": "2026-05-25T03:00:00Z",
+                "processed_event_count": 221,
+                "last_processed_event_id": "event_221",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = memory_os_command(_parse_memory_os_args(["modules", "status"]))
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    modules = {item["module"]: item for item in output["modules"]}
+    runtime = modules["inner_drive"]["status"]["runtime_heartbeat"]
+    assert runtime["schema_version"] == "memory-os.heartbeat_runtime_status.v0"
+    assert runtime["exists"] is True
+    assert runtime["processed_event_count"] == 221
+    assert runtime["last_processed_event_id"] == "event_221"
+
+
 def test_memory_os_module_main_exposes_provider_cli_without_hermes_command(tmp_path, monkeypatch, capsys):
     _init_store(tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -51,6 +81,27 @@ def test_modules_doctor_returns_ok_for_warning_only_uncommandized_modules(tmp_pa
     assert output["schema_version"] == "memory-os.modules_doctor.v0"
     assert output["status"] in {"ok", "warning"}
     assert not any(finding["severity"] == "error" for finding in output["findings"])
+
+
+def test_modules_doctor_injects_self_evolution_dependencies(tmp_path, monkeypatch, capsys):
+    _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = memory_os_command(_parse_memory_os_args(["modules", "doctor"]))
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    self_evolution = next(item for item in output["modules"] if item["module"] == "self_evolution")
+    assert self_evolution["doctor"]["schema_version"] == "hermes.self_evolution_doctor.v0"
+    assert not any(
+        finding.get("code") == "missing_required_runtime_dependency"
+        for finding in self_evolution["doctor"].get("findings", [])
+    )
+    assert not any(
+        finding.get("module") == "self_evolution"
+        and finding.get("code") == "missing_required_runtime_dependency"
+        for finding in output["findings"]
+    )
 
 
 def test_modules_run_once_cron_mirror_defaults_to_dry_run(tmp_path, monkeypatch, capsys):

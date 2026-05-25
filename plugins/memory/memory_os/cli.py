@@ -869,7 +869,7 @@ def _modules_doctor_report(store: MemoryOSStore) -> dict[str, Any]:
                 }
             )
             continue
-        doctor = _call_module_method(entry["_instance"], "doctor", store=store)
+        doctor = _module_doctor(store, definition["module"], entry["_instance"])
         entry.pop("_instance", None)
         if isinstance(doctor, dict):
             module_reports[-1]["doctor"] = _bounded_module_payload(doctor)
@@ -899,6 +899,16 @@ def _modules_doctor_report(store: MemoryOSStore) -> dict[str, Any]:
         "modules": module_reports,
         "findings": findings,
     }
+
+
+def _module_doctor(store: MemoryOSStore, module_id: str, instance: Any) -> Any:
+    if module_id == "self_evolution":
+        return instance.doctor(
+            ops_gate=_ops_gate_module(store),
+            proposal_queue=_proposal_queue_module(store),
+            evidence_scoring=_evidence_scoring_module(store),
+        )
+    return _call_module_method(instance, "doctor", store=store)
 
 
 def _modules_run_once_report(store: MemoryOSStore, *, module_id: str, apply: bool) -> dict[str, Any]:
@@ -1055,10 +1065,45 @@ def _module_status_entry(store: MemoryOSStore, definition: dict[str, Any]) -> di
         return entry
     entry["status_available"] = isinstance(status, dict)
     entry["status"] = _bounded_module_payload(status) if isinstance(status, dict) else {}
+    if definition["module"] == "inner_drive" and isinstance(entry["status"], dict):
+        entry["status"]["runtime_heartbeat"] = _heartbeat_runtime_status(store)
+    if definition["module"] == "self_evolution" and isinstance(entry["status"], dict):
+        entry["status"]["dependency_context"] = "standalone status reads reports; doctor injects loop dependencies"
     entry["_instance"] = instance
     if not entry["commandized"] and not entry["unavailable_reason"]:
         entry["unavailable_reason"] = "run_once_not_commandized"
     return entry
+
+
+def _heartbeat_runtime_status(store: MemoryOSStore) -> dict[str, Any]:
+    path = store.roots.memory_os_root / "runtime" / "heartbeat_state.json"
+    if not path.exists():
+        return {
+            "schema_version": "memory-os.heartbeat_runtime_status.v0",
+            "exists": False,
+            "processed_event_count": 0,
+            "last_processed_event_id": "",
+            "source": "memory-os/runtime/heartbeat_state.json",
+        }
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "schema_version": "memory-os.heartbeat_runtime_status.v0",
+            "exists": True,
+            "status": "error",
+            "error": str(exc),
+            "source": "memory-os/runtime/heartbeat_state.json",
+        }
+    return {
+        "schema_version": "memory-os.heartbeat_runtime_status.v0",
+        "exists": True,
+        "last_heartbeat_at": str(document.get("last_heartbeat_at") or ""),
+        "last_attempt_at": str(document.get("last_attempt_at") or ""),
+        "processed_event_count": int(document.get("processed_event_count") or 0),
+        "last_processed_event_id": str(document.get("last_processed_event_id") or ""),
+        "source": "memory-os/runtime/heartbeat_state.json",
+    }
 
 
 def _module_definition(module_id: str) -> dict[str, Any] | None:

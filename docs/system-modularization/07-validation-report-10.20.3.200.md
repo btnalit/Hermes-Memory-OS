@@ -7618,3 +7618,185 @@ FAIL=[]
 This closes the immediate RH-17 metadata/report retention gap at the planning
 layer. Physical apply/prune remains intentionally open and should require a
 separate gate.
+
+## 2026-05-25 P1-J/K/L Module Coverage And Monitor Evidence
+
+Source: test-host redeploy and read-only validation against `10.20.3.200`.
+
+Deployment:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+```
+
+Result:
+
+```text
+provider=memory_os
+shell_plugin=memory-os-agent-os enabled
+heartbeat_timer=active/enabled
+cognitive_loop_timer=active/enabled
+gateway_restart_performed=false
+```
+
+### P1-J SessionMirror Dry-Run
+
+Command:
+
+```text
+hermes memory-os-agent-os modules run-once --module session_mirror --dry-run
+```
+
+Result:
+
+```text
+schema_version=memory-os.session_mirror_report.v0
+status=ok
+dry_run=true
+session_count=50
+covered_session_count=26
+new_event_count=24
+written_event_ids=[]
+findings=[]
+```
+
+Interpretation:
+
+- The 24 pending sessions can be represented as bounded mirror events in
+  dry-run.
+- No events were written in this gate.
+- No private message bodies were printed or copied into the validation report.
+- A real apply remains a separate reviewed gate.
+
+### P1-K Module Status / Doctor Parity
+
+The previous live mismatch was:
+
+```text
+inner_drive.status.processed_event_count=0
+heartbeat_state.processed_event_count=221
+self_evolution standalone doctor warned about missing injected dependencies
+```
+
+Post-deploy `modules status` now makes the source-of-truth split explicit:
+
+```text
+inner_drive.status.processed_event_count=0              # module-local state
+inner_drive.status.runtime_heartbeat.exists=true
+inner_drive.status.runtime_heartbeat.processed_event_count=221
+inner_drive.status.runtime_heartbeat.last_processed_event_id=evt_gov_d632960417e868fb3e29
+
+self_evolution.status.dependency_context=
+  "standalone status reads reports; doctor injects loop dependencies"
+self_evolution.status.report_count=11
+self_evolution.status.proposal_count=11
+self_evolution.status.last_status=ok
+```
+
+Post-deploy `modules doctor` no longer reports
+`missing_required_runtime_dependency` for `self_evolution`:
+
+```text
+modules_doctor.status=warning
+findings=[
+  mailbox_root_missing: warning,
+  pending_candidates_present: warning
+]
+self_evolution.doctor.status=ok
+self_evolution.doctor.findings=[]
+inner_drive.doctor.status=ok
+inner_drive.doctor.event_count=221
+```
+
+Interpretation:
+
+- `inner_drive` now exposes runtime heartbeat state alongside module-local state,
+  so operator output no longer makes the running heartbeat look idle.
+- `self_evolution doctor` is now called with the same dependency family used by
+  the cognitive loop (`ops_gate`, `proposal_queue`, `evidence_scoring`).
+- Remaining warnings are expected operator state, not hidden dependency failure.
+
+### P1-L Per-Module Artifact Monitor Summary
+
+Command:
+
+```text
+python scripts/memory_os_3_200_monitor.py --host hermes-media --output json
+```
+
+Result:
+
+```text
+monitor_status=WARN
+FAIL=[]
+PASS includes module_artifact_summary_ok
+WARN=["rh31_eval_has_failures", "rh26_casual_empty"]
+```
+
+New bounded `module_artifacts` summary:
+
+```text
+module_count=16
+digest.daily_artifact_count=2
+digest.weekly_artifact_count=1
+digest.household_artifact_exists=true
+wandering.output_count=10
+wandering.would_send_count=10
+evidence.evidence_count=545
+evidence.score_count=545
+evidence.subject_counts={crystallized_candidate:158,event:216,proposal:13,working:158}
+proposal_queue.candidate_count=14
+proposal_queue.state_counts={approved_for_proposal:1,candidate:13}
+self_evolution.report_count=11
+self_evolution.proposal_count=11
+self_evolution.last_status=ok
+governance_feedback.emitted_event_count=57
+deep_reflection.report_count=17
+deep_reflection.analysis_artifact_count=17
+deep_reflection.current_injection_exists=true
+deep_reflection.wandering_seed_count=2
+ops_gate.report_count=22
+ops_gate.blocked_decision_count=0
+speak_gate.would_send_count=0
+speak_gate.actual_send=false
+mailbox.would_send_count=0
+```
+
+Other live monitor signals:
+
+```text
+gateway=active
+heartbeat_state.fresh=true
+cognitive_loop.last_status=ok
+index_health.state=healthy
+doctor.status=ok
+status_tool_contract.status=ok
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_findings=[]
+RH31.boundary_true_count=0
+RH31.forbidden_field_count=0
+low_clue_ingress_matrix=all expected routes/headings matched
+compaction.focus_none_count=0
+crystallized_records=0
+```
+
+Interpretation:
+
+- The monitor now shows each cognitive-loop module's artifact trend without
+  reading private bodies.
+- `speak_gate.actual_send=false`; no automatic send boundary was crossed.
+- This closes the immediate observability gap where a healthy cognitive loop
+  could hide inactive per-module outputs.
+
+Local verification for this P1-J/K/L package:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_cli_modules.py tests\scripts\test_memory_os_3_200_monitor.py -q
+38 passed
+
+python -m pytest -q
+449 passed
+
+git diff --check
+clean
+```

@@ -247,6 +247,33 @@ def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
     assert any(item["code"] == "rh31_eval_forbidden_fields" for item in classification["fail"])
 
 
+def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_send():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"] = {
+        "schema_version": "memory-os.module_artifact_summary.v0",
+        "status": "ok",
+        "digest": {"daily_artifact_count": 2, "weekly_artifact_count": 1},
+        "wandering": {"output_count": 10, "would_send_count": 10},
+        "evidence": {"score_count": 545, "subject_counts": {"candidate": 158}},
+        "proposal_queue": {"candidate_count": 14, "state_counts": {"candidate": 13}},
+        "self_evolution": {"report_count": 11, "proposal_count": 11, "last_status": "ok"},
+        "governance_feedback": {"emitted_event_count": 57},
+        "deep_reflection": {"report_count": 17, "current_injection_exists": True},
+        "ops_gate": {"report_count": 22, "blocked_decision_count": 0},
+        "speak_gate": {"would_send_count": 0, "actual_send": False},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "module_artifact_summary_ok" for item in classification["pass"])
+
+    snapshot["module_artifacts"]["speak_gate"]["actual_send"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "module_artifact_speak_gate_actual_send_true" for item in classification["fail"])
+
+
 def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
     summary = {
         "schema_version": "memory-os.rh31_summary.v0",
@@ -597,6 +624,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "cognitive_loop=ok" in rendered
     assert "shell_alias_no_env" in rendered
     assert "MemorySources" in rendered
+    assert "ModuleArtifacts" in rendered
     assert "feedback_ratings" in rendered
     assert "audit_actions" in rendered
     assert "heartbeat_state" in rendered
@@ -707,4 +735,22 @@ def _healthy_snapshot() -> dict:
             "actual_crystallized_approval": False,
         },
         "compaction": {},
+        "module_artifacts": _healthy_module_artifacts(),
+    }
+
+
+def _healthy_module_artifacts() -> dict:
+    return {
+        "schema_version": "memory-os.module_artifact_summary.v0",
+        "status": "ok",
+        "digest": {"daily_artifact_count": 0, "weekly_artifact_count": 0, "household_artifact_exists": False},
+        "wandering": {"output_count": 0, "would_send_count": 0},
+        "evidence": {"evidence_count": 0, "score_count": 0, "subject_counts": {}},
+        "proposal_queue": {"candidate_count": 0, "state_counts": {}},
+        "self_evolution": {"report_count": 0, "proposal_count": 0, "last_status": "missing"},
+        "governance_feedback": {"emitted_event_count": 0},
+        "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},
+        "ops_gate": {"report_count": 0, "blocked_decision_count": 0},
+        "speak_gate": {"would_send_count": 0, "actual_send": False},
+        "mailbox": {"mailbox_exists": False, "would_send_count": 0},
     }

@@ -85,8 +85,9 @@ heartbeat_state=fresh
 cognitive_loop.last_status=ok
 context_router.mode=apply
 context_router.apply_routes=["all"]
-low_clue_recall.llm_judge.mode=report_only
-low_clue_recall.llm_judge.on_error=deterministic_fallback
+low_clue_recall.llm_judge.mode=none
+low_clue_recall.llm_judge.enabled=false
+low_clue_recall deterministic fallback path is active
 memory_sources.mode=metadata_only
 MemorySources.boundary_true_count=0
 MemorySources.forbidden_field_findings=[]
@@ -140,7 +141,7 @@ doctor: ok, with expected hindsight_adapter_disabled warning
 status-tool contract: ok
 context_router: enabled, mode=apply, apply_routes=["all"]
 MemorySources: enabled, boundary_true_count=0, forbidden_field_findings=[]
-low_clue_llm_judge: available in report-only probe
+low_clue_llm_judge: disabled; deterministic fallback active
 low_clue_ingress_matrix: all expected routes/headings matched
 DeepReflection: enabled, auto_bounded, no send/execute/identity/crystallized write
 crystallized_records: 0
@@ -716,6 +717,9 @@ The 10.20.3.200 monitor currently covers:
 - RH-28f low-clue ingress matrix
 - MemorySources stats, forbidden-field checks, boundary count, and feedback
   counts
+- per-module artifact summary for digest, wandering, evidence, proposal queue,
+  self-evolution, governance feedback, DeepReflection, ops gate, speak gate,
+  and mailbox would-send state
 - DeepReflection source-class distribution and boundary booleans
 - audit action distribution and audit/event deltas
 - working-memory active/expired counts
@@ -729,6 +733,7 @@ The 10.20.3.200 monitor currently covers:
 | Core provider/runtime | gateway, heartbeat, doctor, index, queue, status-tool contract | one clean post-deploy monitor pass plus no FAIL in the next scheduled run | any FAIL, doctor error, gateway inactive, queue backlog not clearing |
 | Heartbeat / RH-27b audit noise | heartbeat_state, audit action deltas, audit_per_new_event | at least 24 heartbeats and at least 5 new events; target audit_per_new_event 3-5 | heartbeat_state stale, service failed, audit_per_new_event repeatedly above 10 from plumbing noise |
 | Cognitive loop RH-27 | latest cycle status, step/cycle audit, boundaries | at least one completed cycle after deployment; boundaries all false | latest cycle error, missing cycle when timer is active, any boundary true |
+| Per-module artifacts P1-L | `module_artifacts` digest/wandering/evidence/proposal/self-evolution/governance/DR/ops/speak/mailbox summary | one post-deploy monitor pass with `module_artifact_summary_ok`; no private bodies; `speak_gate.actual_send=false` | module summary unavailable, unbounded/private fields, or any send/execute boundary true |
 | Context Router RH-26 | seven public heading probes | all hard probes match expected headings; casual empty remains WARN only | cancellation/continue prompts include background sections, diagnostic/candidate routes pick wrong headings |
 | IngressDecision / RH-28f | low-clue ingress matrix | every monitored phrase matches expected route and heading for at least one post-deploy pass; live Telegram smoke confirms the same class when available | any route/heading mismatch is P1 |
 | Low-clue candidate quality RH-28g | low-clue recall probe, candidate count, source distribution, feedback | ask_choice works with bounded candidates; no raw bodies; source diversity appears when candidate pool is single-source heavy | repeated owner correction that candidates are missing/duplicated; MemorySources shows attribution but candidate pool ignores it |
@@ -846,10 +851,40 @@ contracts:
 | Heartbeat / Inner Drive | events | working, candidates, heartbeat state | no | no | no | none | heartbeat_state, working counts |
 | Cognitive Loop RH-27 | store, module reports | module reports, audit, bounded events | no | indirect through generated state | no send/execute | DR may use LLM per config | cycle status, boundary report |
 | DeepReflection | working, digest, governance | injection cards/reports | no | carryover section | bounded injection | auto_bounded | source-class distribution, boundaries |
+| CronMirror | Hermes cron jobs/output metadata | mirror events only on explicit apply | no | no | no | none | modules status/doctor/run-once dry-run |
+| SessionMirror | profile session metadata/state.db | mirrored bounded session events only on explicit apply | no | indirect through event stream after apply | no | none | session_count, covered_session_count, pending_session_count |
+| StateSourceMirror | allowlisted state roots | state_source_changed events only on explicit apply | no | indirect through event stream after apply | no | none | source_count, pending_source_count |
+| ShadowJournal | producer spool records | bounded canonical events/quarantine only on explicit apply | no | indirect through event stream after apply | no | none | pending_record_count, malformed_record_count |
+| mailbox | mailbox roots | status/would-send artifacts only | no | no | no send | none | roots, would_send_count |
+| household_digest | recent Memory-OS events | household digest artifact | no | indirect through digest/DR inputs | no | none | artifact_exists; needs trend if promoted |
+| digest_consolidation | events/candidates/proposals | daily/weekly digest artifacts, proposal candidates | no | indirect through digest/DR inputs | no approval | none | daily/weekly artifact counts |
+| wandering_mind | household digest, safe recent state | outputs and would-send artifacts | no | indirect through DR/speak gate | no send | none | output/would-send counts |
+| ops_gate | proposed actions | report-only gate artifacts | no | indirect through governance feedback | no execute | none | report_count, blocked_decision_count |
+| proposal_queue | proposal/candidate inputs | proposal queue candidates/states | no | indirect through DR/evidence | no crystallized approval | none | candidate_count, state_counts |
+| evidence_scoring | events/working/candidates/proposals | evidence and score artifacts | no | indirect through DR/self-evolution | no approval | none | score_count, subject_counts |
+| self_evolution | evidence, ops gate, proposal queue | dry-run reports, proposal candidates | no | indirect through governance feedback | no execute | none | report_count, proposal_count |
+| speak_gate | expression payloads/proposals | would-send/blocked-send decision artifacts | no | no | no send in v0.1 | none | would_send_count, actual_send=false |
 | RH-31 eval harness (31.0-31.3) | synthetic/redacted fixtures, bounded monitor metadata, MemorySources fixtures, public projection seams | gitignored eval reports and promoted scorecards only | no | report-only adapter reads only | no | none/report-only only | eval report count, forbidden fields, retention, adapter scorecard |
 | Future RH-31 guards | real findings | tests/docs, maybe route rules | must use IngressDecision | maybe | maybe | none/report-only only | route matrix |
 | Future RH-32 consolidation suggestions | events/candidates/metadata | suggestion reports only | no | no | no | deterministic-only initially | suggestion count, no approval |
 | Future RH-33 scoring | MemorySources + feedback | scoring metadata only | no | yes | no until apply gate | none/report-only first | attribution and feedback trend |
+
+2026-05-25 reconciliation notes:
+
+- The original v0.1 modules are already implemented and visible through
+  `modules status`, but most are run by the cognitive loop rather than exposed
+  as generic `modules run-once` commands. Contract and roadmap tracking must
+  keep those facts separate.
+- `SessionMirror` currently reports real pending coverage on the test host.
+  Pending session counts are source-coverage evidence and must not disappear
+  behind the aggregate cognitive-loop row.
+- `inner_drive` has two observable surfaces: provider heartbeat state is the
+  active runtime truth, while the standalone module status may be module-local.
+  Future status work must make that distinction explicit.
+- `self_evolution` can run successfully inside the cognitive loop with
+  dependencies injected by the runner while its standalone doctor may warn when
+  called without those dependencies. Operator output should eventually make the
+  dependency context explicit.
 
 ## Integration Gates
 
