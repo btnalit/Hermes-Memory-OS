@@ -7448,6 +7448,111 @@ This validates the P1C requirement: RH-31 can be probed from the monitor
 without touching live prefetch, live routing, scheduler behavior,
 crystallized approval, send/execute gates, identity, or canonical memory.
 
+## 2026-05-25 RH-31 Scorecard Coverage Follow-Up
+
+Source: post-review local and remote validation after tightening the
+`memory_sources_replay` adapter and monitor snapshot contract.
+
+Finding:
+
+```text
+memory_sources_replay previously generated scores for all 6 synthetic cases
+after replaying only the first 3 cases into MemorySources.
+```
+
+Fix:
+
+```text
+memory_sources_replay now replays all 6 cases before scoring.
+Each score records:
+  record_count=6
+  replayed_case_count=6
+  replayed_case_ids=[all synthetic case ids]
+```
+
+Local evidence:
+
+```text
+command:
+  python -m plugins.memory.memory_os eval rh31 run --fixture synthetic \
+    --adapter memory_sources_replay --no-write-report
+
+status=pass
+case_count=6
+score_count=6
+failure_count=0
+boundary_true_count=0
+forbidden_field_count=0
+report_dir=""
+```
+
+Monitor contract follow-up:
+
+```text
+The monitor now stores RH-31 summary-only metadata in snapshots.
+The `rh31_eval` snapshot block keeps status/count/distribution fields and
+does not retain the per-score `scores` array.
+```
+
+Local monitor JSON evidence before remote redeploy:
+
+```text
+command:
+  python scripts/memory_os_3_200_monitor.py --host hermes-media --output json
+
+rh31_eval.status=warning
+rh31_eval.score_count=27
+rh31_eval.failure_count=4
+rh31_eval.boundary_true_count=0
+rh31_eval.forbidden_field_count=0
+rh31_eval.report_written=false
+rh31_eval.scores field absent
+```
+
+Remote deployment gate:
+
+```text
+Completed. The provider/runtime was redeployed to 10.20.3.200.
+```
+
+Remote no-write scorecard after redeploy:
+
+```text
+command:
+  hermes memory-os-agent-os eval rh31 run --fixture synthetic \
+    --adapter all --no-write-report
+
+schema_version=memory-os.rh31_summary.v0
+status=warning
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=4
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1, "projection_miss": 1}
+memory_sources_replay_record_counts=[6]
+memory_sources_replay_replayed_counts=[6]
+boundary_true_count=0
+forbidden_field_count=0
+report_dir=""
+```
+
+Remote monitor after local summary-only snapshot change:
+
+```text
+command:
+  python scripts/memory_os_3_200_monitor.py --host hermes-media --output json
+
+monitor_status=WARN
+FAIL=[]
+WARN=["rh31_eval_has_failures", "rh26_casual_empty"]
+rh31_has_scores=false
+rh31_status=warning
+rh31_score_count=27
+rh31_failure_count=4
+rh31_boundary_true_count=0
+rh31_forbidden_field_count=0
+```
+
 ## 2026-05-25 RH-17 Metadata Retention Dry-Run Smoke
 
 Source: read-only remote smoke against `10.20.3.200` after deploying the

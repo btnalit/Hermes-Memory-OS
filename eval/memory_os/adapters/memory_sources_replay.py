@@ -16,7 +16,8 @@ def run(cases: list[Rh31Case], corpus: list[Rh31Document]) -> list[Rh31Score]:
     with synthetic_store(corpus) as store:
         index = MemoryOSIndex(store.roots)
         index.rebuild_from_store(store)
-        for case in cases[:3]:
+        replayed_case_ids: list[str] = []
+        for case in cases:
             build_prefetch(
                 case.query,
                 budget_chars=2400,
@@ -26,6 +27,7 @@ def run(cases: list[Rh31Case], corpus: list[Rh31Document]) -> list[Rh31Score]:
                 memory_sources_config={"enabled": True},
                 low_clue_recall_config={"enabled": True, "llm_judge": {"enabled": False, "mode": "none"}},
             )
+            replayed_case_ids.append(case.case_id)
         stats = memory_sources_stats_report(store.roots, hours=24)
         source_distribution = stats.get("selected_source_class_distribution")
         source_classes = sorted(source_distribution) if isinstance(source_distribution, dict) else []
@@ -41,6 +43,8 @@ def run(cases: list[Rh31Case], corpus: list[Rh31Document]) -> list[Rh31Score]:
                     source_classes=source_classes,
                     details={
                         "record_count": stats.get("record_count"),
+                        "replayed_case_count": len(replayed_case_ids),
+                        "replayed_case_ids": replayed_case_ids,
                         "boundary_true_count": boundary_true,
                         "forbidden_field_count": forbidden,
                     },

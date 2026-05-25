@@ -247,6 +247,39 @@ def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
     assert any(item["code"] == "rh31_eval_forbidden_fields" for item in classification["fail"])
 
 
+def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
+    summary = {
+        "schema_version": "memory-os.rh31_summary.v0",
+        "status": "warning",
+        "adapter_count": 6,
+        "case_count": 6,
+        "score_count": 27,
+        "failure_count": 4,
+        "failure_class_distribution": {"projection_miss": 1},
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+        "report_dir": "",
+        "scores": [{"case_id": "private_case", "details": {"raw": "should not be retained"}}],
+        "source_distribution": {"working": 8},
+    }
+
+    compact = monitor.compact_rh31_eval_summary(summary)
+
+    assert compact == {
+        "schema_version": "memory-os.rh31_summary.v0",
+        "status": "warning",
+        "adapter_count": 6,
+        "case_count": 6,
+        "score_count": 27,
+        "failure_count": 4,
+        "failure_class_distribution": {"projection_miss": 1},
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+        "report_written": False,
+        "source_distribution": {"working": 8},
+    }
+
+
 def test_classify_snapshot_fails_on_low_clue_ingress_route_mismatch():
     snapshot = _healthy_snapshot()
     snapshot["low_clue_ingress_matrix"] = [

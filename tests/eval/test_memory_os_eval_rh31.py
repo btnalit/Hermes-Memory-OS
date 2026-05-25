@@ -134,6 +134,28 @@ def test_rh31_first_six_adapters_are_deterministic_and_report_metric_scope(tmp_p
     assert all(score["live_behavior_changed"] is False for score in summary["scores"])
 
 
+def test_rh31_memory_sources_replay_exercises_every_case_before_scoring(tmp_path):
+    from eval.memory_os.data.rh31_synthetic import load_cases
+    from eval.memory_os.runner.run import run_rh31_eval
+
+    cases = load_cases()
+    summary = run_rh31_eval(
+        fixture="synthetic",
+        adapters=["memory_sources_replay"],
+        report_root=tmp_path / "eval" / "reports",
+        write_report=False,
+    )
+
+    assert summary["adapter_count"] == 1
+    assert summary["case_count"] == len(cases)
+    assert summary["score_count"] == len(cases)
+    for score in summary["scores"]:
+        details = score["details"]
+        assert details["replayed_case_count"] == len(cases)
+        assert details["record_count"] == len(cases)
+        assert score["status"] == "pass"
+
+
 def test_rh31_report_retention_dry_run_keeps_latest_and_never_touches_canonical(tmp_path):
     from eval.memory_os.runner.retention import build_report_retention_plan
 

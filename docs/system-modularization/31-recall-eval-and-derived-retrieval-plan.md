@@ -1223,6 +1223,146 @@ Guard decision:
 - The FTS/lexical misses support improving fixtures and measurement coverage,
   not adding broad wording guards.
 
+## Post-Review Coverage Fix - MemorySources Replay
+
+Date: 2026-05-25
+
+Review finding:
+
+```text
+memory_sources_replay previously replayed only the first 3 synthetic cases but
+emitted pass/fail scores for all 6 cases.
+```
+
+Contract decision:
+
+- `memory_sources_replay` remains a ledger-safety adapter, not a per-answer
+  quality adapter.
+- It must replay every case it scores.
+- Every score includes bounded replay metadata:
+  - `record_count`
+  - `replayed_case_count`
+  - `replayed_case_ids`
+- It must not write canonical memory and must keep `boundary_true_count=0` and
+  `forbidden_field_count=0`.
+
+Local post-fix smoke:
+
+```text
+command:
+  python -m plugins.memory.memory_os eval rh31 run --fixture synthetic \
+    --adapter memory_sources_replay --no-write-report
+
+status=pass
+case_count=6
+score_count=6
+failure_count=0
+record_count=6
+replayed_case_count=6
+boundary_true_count=0
+forbidden_field_count=0
+report_dir=""
+```
+
+Full scorecard after the fix remains a warning because the existing
+measurement misses are still present:
+
+```text
+command:
+  python -m plugins.memory.memory_os eval rh31 run --fixture synthetic \
+    --adapter all --no-write-report
+
+status=warning
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=4
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1, "projection_miss": 1}
+boundary_true_count=0
+forbidden_field_count=0
+report_dir=""
+```
+
+Guard decision remains unchanged: do not add the first RH-31 live guard from
+this scorecard alone.
+
+## Post-Review Monitor Snapshot Fix
+
+Date: 2026-05-25
+
+Review finding:
+
+```text
+The monitor's JSON snapshot retained the full RH-31 `scores` list. This was
+acceptable at 27 scores but would grow with fixture expansion and automation
+memory snapshots.
+```
+
+Contract decision:
+
+- The monitor may run the RH-31 no-write probe.
+- The monitor snapshot must retain only summary fields:
+  - `schema_version`
+  - `status`
+  - `adapter_count`
+  - `case_count`
+  - `score_count`
+  - `failure_count`
+  - `failure_class_distribution`
+  - `boundary_true_count`
+  - `forbidden_field_count`
+  - `report_written`
+  - `source_distribution`
+- Score-level details remain available through the explicit provider or shell
+  CLI and generated eval reports when intentionally written.
+- Monitor snapshots must not retain `scores`.
+
+Local monitor JSON smoke after the fix:
+
+```text
+rh31_eval.status=warning
+rh31_eval.score_count=27
+rh31_eval.failure_count=4
+rh31_eval.boundary_true_count=0
+rh31_eval.forbidden_field_count=0
+rh31_eval.report_written=false
+rh31_eval contains no scores field
+```
+
+Remote 10.20.3.200 smoke after redeploy:
+
+```text
+command:
+  hermes memory-os-agent-os eval rh31 run --fixture synthetic \
+    --adapter all --no-write-report
+
+status=warning
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=4
+failure_class_distribution={"fts_miss": 2, "lexical_miss": 1, "projection_miss": 1}
+memory_sources_replay_record_counts=[6]
+memory_sources_replay_replayed_counts=[6]
+boundary_true_count=0
+forbidden_field_count=0
+report_dir=""
+```
+
+Remote monitor smoke after redeploy:
+
+```text
+monitor_status=WARN
+FAIL=[]
+WARN=["rh31_eval_has_failures", "rh26_casual_empty"]
+rh31_has_scores=false
+rh31_status=warning
+rh31_score_count=27
+rh31_failure_count=4
+rh31_boundary_true_count=0
+rh31_forbidden_field_count=0
+```
+
 RH-17 metadata retention support:
 
 - `plugins/memory/memory_os/metadata_retention.py` adds

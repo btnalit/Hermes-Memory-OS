@@ -91,6 +91,26 @@ def compute_deltas(current: dict[str, Any], previous: dict[str, Any] | None) -> 
     return {"counts_delta": deltas, "audit_entries_per_new_event": audit_per_event, "audit_action_delta": action_delta}
 
 
+def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        return {}
+    if summary.get("schema_version") != "memory-os.rh31_summary.v0":
+        return dict(summary)
+    return {
+        "schema_version": summary.get("schema_version"),
+        "status": summary.get("status"),
+        "adapter_count": summary.get("adapter_count"),
+        "case_count": summary.get("case_count"),
+        "score_count": summary.get("score_count"),
+        "failure_count": summary.get("failure_count"),
+        "failure_class_distribution": summary.get("failure_class_distribution") or {},
+        "boundary_true_count": summary.get("boundary_true_count"),
+        "forbidden_field_count": summary.get("forbidden_field_count"),
+        "report_written": bool(summary.get("report_dir")),
+        "source_distribution": summary.get("source_distribution") or {},
+    }
+
+
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
@@ -412,6 +432,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
 
 def collect_snapshot(*, host: str = "hermes-media", previous: dict[str, Any] | None = None) -> dict[str, Any]:
     raw = _ssh_json(host, _remote_probe_script())
+    raw["rh31_eval"] = compact_rh31_eval_summary(raw.get("rh31_eval") or {})
     raw["deltas"] = compute_deltas(raw, previous)
     raw["classification"] = classify_snapshot(raw)
     return raw

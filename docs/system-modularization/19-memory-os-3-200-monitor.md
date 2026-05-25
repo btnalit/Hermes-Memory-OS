@@ -172,10 +172,16 @@ The v0.6 monitor tracks trend signals that can support future decisions:
   - `schema_version`
   - status (`pass` / `warning` / `fail`)
   - adapter count
+  - case count
+  - score count
   - failure count
+  - failure-class distribution
   - boundary true count
   - forbidden field count
+  - source-class distribution
   - no report directory written during monitor smoke
+  - full per-score details are stripped before local snapshot write; use the
+    explicit RH-31 CLI for score-level review
 - RH-28 low-clue recall config and a bounded probe summary:
   - deterministic decision
   - candidate count
