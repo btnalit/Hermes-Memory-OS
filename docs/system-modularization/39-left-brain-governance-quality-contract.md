@@ -8,7 +8,7 @@ Current implementation state:
 
 - P1-S slice 1 is implemented and deployed on `10.20.3.200`:
   EvidenceScoring skips expired working items by default.
-- P1-S slice 2 is implemented locally: SelfEvolution skips duplicate
+- P1-S slice 2 is implemented and deployed on `10.20.3.200`: SelfEvolution skips duplicate
   unresolved self-evolution proposals and reports novelty skip counts.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output.
@@ -217,7 +217,25 @@ status() reports:
   duplicate_unresolved_proposal_count
 ```
 
-This is a local PASS only until deployed and observed on `10.20.3.200`.
+Live deployment evidence:
+
+```text
+commit=b6c276e Skip duplicate self-evolution proposals
+cycle_id=cloop_20260526T081348363087Z_d6f5880b4f
+self_evolution.proposal_created=false
+self_evolution.novelty_skipped=true
+self_evolution.reason=duplicate_unresolved_proposal
+self_evolution.existing_proposal_id=prop_20260521T032500041194Z_2f96a933aa
+
+monitor.ModuleArtifacts.self_evolution:
+  proposal_count=19
+  report_count=20
+  novelty_skipped_count=1
+  duplicate_unresolved_proposal_count=1
+```
+
+This is a live PASS for duplicate unresolved proposal suppression only. It does
+not close feature-based scoring, feedback backflow, or production cadence.
 
 ### 3. Feedback Backflow Is Not Closed
 

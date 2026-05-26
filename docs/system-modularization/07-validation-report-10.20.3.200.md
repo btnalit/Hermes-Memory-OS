@@ -12388,3 +12388,71 @@ closure still requires deployment to 10.20.3.200, a new cognitive-loop run, and
 monitor evidence that novelty_skipped_count increments while proposal_count does
 not grow from another duplicate self-evolution run.
 ```
+
+## 2026-05-26 - P1-S Slice 2 10.20.3.200 Deployment Evidence
+
+Deployment:
+
+```text
+commit=b6c276e Skip duplicate self-evolution proposals
+target=10.20.3.200
+repo=/tmp/hermes-memory-os-validation/repo
+hermes_home=/root/.hermes
+```
+
+Remote cognitive-loop smoke:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python \
+HERMES_HOME=/root/.hermes \
+python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply
+
+cycle_id=cloop_20260526T081348363087Z_d6f5880b4f
+status=ok
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+
+SelfEvolution:
+  proposal_created=false
+  novelty_skipped=true
+  reason=duplicate_unresolved_proposal
+  existing_proposal_id=prop_20260521T032500041194Z_2f96a933aa
+  actual_execute=false
+```
+
+Post-deploy monitor:
+
+```text
+python scripts/memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+
+ModuleArtifacts.self_evolution:
+  report_count=20
+  proposal_count=19
+  novelty_skipped_count=1
+  duplicate_unresolved_proposal_count=1
+  last_status=ok
+
+ModuleArtifacts.evidence:
+  expired_used_in_scoring_count=0
+
+PASS includes:
+  left_brain_expired_working_not_scored
+  right_brain_review_speak_preview_visible
+```
+
+Interpretation:
+
+```text
+LIVE PASS for P1-S slice 2 duplicate unresolved proposal suppression:
+  SelfEvolution no longer creates another proposal when an unresolved
+  self_evolution proposal already exists.
+
+NOT CLOSED:
+  Feature-based EvidenceScoring v2 is still not implemented.
+  Feedback backflow remains report/proposal future work.
+  Production cadence split remains future work.
+```

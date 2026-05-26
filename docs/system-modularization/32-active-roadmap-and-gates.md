@@ -1149,13 +1149,15 @@ Reason:
   mature;
 - EvidenceScoring currently uses deterministic hash-derived scores, which are
   replayable but not meaningful importance/risk/feedback scores;
-- local P1-S slice 2 adds a SelfEvolution novelty/idempotency gate for
+- deployed P1-S slice 2 adds a SelfEvolution novelty/idempotency gate for
   duplicate unresolved proposals before OpsGate/proposal creation;
 - feedback ledgers exist, but feedback is not yet consumed as first-class
   GovernanceFeedback / scoring / reflection input;
 - deployed P1-S slice 1 filters expired working from EvidenceScoring and adds
   monitor visibility for expired scoring contamination;
-- live deployment evidence for slice 2 is still pending;
+- live monitor reports `novelty_skipped_count=1` and
+  `duplicate_unresolved_proposal_count=1` after the first deployed duplicate
+  skip;
 - expired working handling in DeepReflection is still not fixed;
 - approved proposals are visible and safe, but execution-decision state remains
   future work.
@@ -1177,8 +1179,8 @@ Required design work:
 
 1. define feature-based EvidenceScoring v2 in report-only mode before replacing
    legacy hash scoring;
-2. deploy SelfEvolution novelty/idempotency gates for unresolved proposals and
-   repeated score refs;
+2. SelfEvolution novelty/idempotency gates are deployed for unresolved
+   proposals and repeated score refs;
 3. route MemorySources / owner / expression feedback into GovernanceFeedback as
    bounded evidence only;
 4. filter or explicitly downweight expired working in scoring and reflection;
