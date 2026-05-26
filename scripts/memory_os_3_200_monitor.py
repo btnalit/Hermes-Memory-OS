@@ -458,6 +458,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_agent_tool_not_ok", "value": ingress_guard})
             if ingress_guard.get("review_reply_tool_input_mode") != "structured":
                 fail.append({"code": "owner_review_agent_tool_not_structured", "value": ingress_guard})
+            if int(ingress_guard.get("structured_review_reply_count") or 0) < 1:
+                fail.append({"code": "owner_review_structured_reply_probe_missing"})
+            if int(ingress_guard.get("reply_fallback_used_count") or 0) > 0:
+                warn.append({"code": "owner_review_reply_fallback_used", "value": ingress_guard.get("reply_fallback_used_count")})
             if int(ingress_guard.get("owner_command_event_count") or 0) > 0:
                 fail.append({"code": "owner_review_command_captured_as_event"})
             if int(ingress_guard.get("owner_command_working_count") or 0) > 0:
@@ -466,6 +470,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_command_promoted_to_candidate"})
             if ingress_guard.get("owner_command_promoted_to_candidate") is True:
                 fail.append({"code": "owner_review_command_candidate_pollution"})
+            if int(ingress_guard.get("owner_review_command_pollution_count") or 0) > 0:
+                fail.append({"code": "owner_review_command_pollution_count_nonzero"})
             if (
                 ingress_guard.get("legacy_anchor_accepted") is not True
                 and ingress_guard.get("legacy_reject_anchor_accepted") is not True
@@ -479,9 +485,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 and ingress_guard.get("review_reply_tool_available") is True
                 and ingress_guard.get("review_reply_tool_status") == "ok"
                 and ingress_guard.get("review_reply_tool_input_mode") == "structured"
+                and int(ingress_guard.get("structured_review_reply_count") or 0) >= 1
+                and int(ingress_guard.get("reply_fallback_used_count") or 0) == 0
                 and int(ingress_guard.get("owner_command_event_count") or 0) == 0
                 and int(ingress_guard.get("owner_command_working_count") or 0) == 0
                 and int(ingress_guard.get("owner_command_candidate_count") or 0) == 0
+                and int(ingress_guard.get("owner_review_command_pollution_count") or 0) == 0
             ):
                 passed.append({"code": "owner_review_ingress_guard_token_only"})
         else:
@@ -526,6 +535,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_proposal_followups_raw_body_included"})
             if int(proposal_followups.get("execution_ticket_count") or 0) > 0:
                 fail.append({"code": "owner_review_proposal_followups_execution_ticket_created"})
+            if proposal_followups.get("actual_execute") is True:
+                fail.append({"code": "owner_review_proposal_followups_actual_execute_true"})
             boundary = proposal_followups.get("boundary") if isinstance(proposal_followups.get("boundary"), dict) else {}
             for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
                 if boundary.get(key) is True:
@@ -1007,6 +1018,10 @@ def _owner_review_aging_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "aged_to_review_suggested": summary.get("aged_to_review_suggested_count"),
         "aged_to_fyi": summary.get("aged_to_fyi_count"),
         "unknown_timestamp": summary.get("unknown_timestamp_count"),
+        "unknown_timestamp_by_item_type": summary.get("unknown_timestamp_by_item_type"),
+        "created_at_coverage_ratio": summary.get("created_at_coverage_ratio"),
+        "true_aged": summary.get("true_aged_count"),
+        "unknown_aged": summary.get("unknown_aged_count"),
         "canonical_state_changed": summary.get("canonical_state_changed"),
         "owner_action_created": summary.get("owner_action_created"),
     }
@@ -1091,22 +1106,28 @@ def _owner_ingress_guard_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "feedback_token_command_accepted": summary.get("feedback_token_command_accepted"),
         "bare_feedback_token_command_accepted": summary.get("bare_feedback_token_command_accepted"),
         "gateway_hook_registered": summary.get("gateway_hook_registered"),
+        "gateway_safety_skip_count": summary.get("gateway_safety_skip_count"),
         "review_reply_tool_available": summary.get("review_reply_tool_available"),
         "review_reply_tool_status": summary.get("review_reply_tool_status"),
+        "structured_review_reply_count": summary.get("structured_review_reply_count"),
+        "reply_fallback_used_count": summary.get("reply_fallback_used_count"),
         "owner_command_event_count": summary.get("owner_command_event_count"),
         "owner_command_working_count": summary.get("owner_command_working_count"),
         "owner_command_candidate_count": summary.get("owner_command_candidate_count"),
+        "owner_review_command_pollution_count": summary.get("owner_review_command_pollution_count"),
     }
 
 
 def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
+        "approved": summary.get("approved_proposal_count"),
         "pending": summary.get("pending_followup_count"),
         "shown": summary.get("shown_count"),
         "overflow": summary.get("overflow_count"),
         "awaiting_ops_gate": summary.get("awaiting_ops_gate_count"),
         "ops_gate_reviewed": summary.get("ops_gate_reviewed_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
+        "actual_execute": summary.get("actual_execute"),
         "raw_body_included": summary.get("raw_body_included"),
     }
 
@@ -1191,6 +1212,12 @@ def _audit_actions_summary(stats: dict[str, Any], deltas: dict[str, Any]) -> dic
         "recent_window": stats.get("recent_window"),
         "recent_top": _top_dict(stats.get("recent_action_counts") or {}, 8),
         "delta": _top_dict(deltas.get("audit_action_delta") or {}, 8),
+        "structured_review_reply_count": stats.get("structured_review_reply_count"),
+        "reply_fallback_used_count": stats.get("reply_fallback_used_count"),
+        "recent_structured_review_reply_count": stats.get("recent_structured_review_reply_count"),
+        "recent_reply_fallback_used_count": stats.get("recent_reply_fallback_used_count"),
+        "gateway_safety_skip_count": stats.get("gateway_safety_skip_count"),
+        "recent_gateway_safety_skip_count": stats.get("recent_gateway_safety_skip_count"),
     }
 
 
@@ -1362,16 +1389,39 @@ def audit_action_stats(recent_window=250):
     records = _read_jsonl("/root/.hermes/memory-os/audit/write_audit.jsonl")
     action_counts = Counter()
     recent_action_counts = Counter()
+    owner_review_reply_input_modes = Counter()
+    recent_owner_review_reply_input_modes = Counter()
+    gateway_safety_skip_count = 0
+    recent_gateway_safety_skip_count = 0
     for index, record in enumerate(records):
         action = str(record.get("action") or "unknown")
         action_counts[action] += 1
-        if index >= max(0, len(records) - int(recent_window)):
+        is_recent = index >= max(0, len(records) - int(recent_window))
+        details = record.get("details") if isinstance(record.get("details"), dict) else {}
+        if action == "owner_review_reply_ingress":
+            mode = str(details.get("input_mode") or "unknown")
+            owner_review_reply_input_modes[mode] += 1
+            if is_recent:
+                recent_owner_review_reply_input_modes[mode] += 1
+        if action == "owner_review_reply_sync_turn_skipped":
+            gateway_safety_skip_count += 1
+            if is_recent:
+                recent_gateway_safety_skip_count += 1
+        if is_recent:
             recent_action_counts[action] += 1
     return {
         "total_count": len(records),
         "recent_window": int(recent_window),
         "action_counts": dict(action_counts),
         "recent_action_counts": dict(recent_action_counts),
+        "owner_review_reply_input_modes": dict(owner_review_reply_input_modes),
+        "recent_owner_review_reply_input_modes": dict(recent_owner_review_reply_input_modes),
+        "reply_fallback_used_count": int(owner_review_reply_input_modes.get("reply_fallback") or 0),
+        "structured_review_reply_count": int(owner_review_reply_input_modes.get("structured") or 0),
+        "recent_reply_fallback_used_count": int(recent_owner_review_reply_input_modes.get("reply_fallback") or 0),
+        "recent_structured_review_reply_count": int(recent_owner_review_reply_input_modes.get("structured") or 0),
+        "gateway_safety_skip_count": gateway_safety_skip_count,
+        "recent_gateway_safety_skip_count": recent_gateway_safety_skip_count,
     }
 
 def heartbeat_state(max_age_seconds=900):
@@ -2021,10 +2071,14 @@ control_plane = {
     "owner_command_working_count": 0,
     "owner_command_candidate_count": 0,
     "owner_command_promoted_to_candidate": False,
+    "owner_review_command_pollution_count": 0,
     "gateway_hook_plugin_present": False,
     "gateway_hook_registered": False,
+    "gateway_safety_skip_count": 0,
     "review_reply_tool_available": False,
     "review_reply_tool_status": "",
+    "structured_review_reply_count": 0,
+    "reply_fallback_used_count": 0,
 }
 try:
     plugin_path = Path("/root/.hermes/plugins/memory-os-agent-os/__init__.py")
@@ -2061,14 +2115,14 @@ try:
         rendered = render_owner_review_digest(
             store,
             channel="telegram",
-            max_action_required=0,
-            max_review_suggested=1,
+            max_action_required=1,
+            max_review_suggested=0,
             max_fyi=0,
             record_active=True,
         )
         command = ""
-        for item in (rendered.get("sections") or {}).get("review_suggested", []):
-            if item.get("anchor") == "R1":
+        for item in (rendered.get("sections") or {}).get("action_required", []):
+            if item.get("anchor") == "A1":
                 command = "memory reject " + str((item.get("action_tokens") or {}).get("reject_candidate") or "")
                 break
         provider = MemoryOSProvider()
@@ -2091,19 +2145,28 @@ try:
                     {
                         "action": "reject",
                         "action_token": token,
-                        "owner_utterance": "reject R1",
+                        "owner_utterance": "reject A1",
                     },
                 )
             )
             control_plane["review_reply_tool_status"] = str(tool_result.get("status") or "")
             control_plane["review_reply_tool_input_mode"] = str((tool_result.get("tool_input") or {}).get("mode") or "")
-            provider.sync_turn("reject R1", "ack", session_id="session-monitor-owner-ingress")
+            if control_plane["review_reply_tool_input_mode"] == "structured":
+                control_plane["structured_review_reply_count"] = 1
+            elif control_plane["review_reply_tool_input_mode"] == "reply_fallback":
+                control_plane["reply_fallback_used_count"] = 1
+            provider.sync_turn("reject A1", "ack", session_id="session-monitor-owner-ingress")
             provider.shutdown()
             heartbeat = MemoryOSRuntime(store).heartbeat()
             control_plane["owner_command_event_count"] = len(store.read_events())
             control_plane["owner_command_working_count"] = int(heartbeat.get("working_created_count") or 0)
             control_plane["owner_command_candidate_count"] = int(heartbeat.get("candidate_created_count") or 0)
             control_plane["owner_command_promoted_to_candidate"] = bool(control_plane["owner_command_candidate_count"])
+            control_plane["owner_review_command_pollution_count"] = (
+                int(control_plane["owner_command_event_count"])
+                + int(control_plane["owner_command_working_count"])
+                + int(control_plane["owner_command_candidate_count"])
+            )
             control_plane["owner_command_action_count"] = len(
                 [line for line in owner_actions_path(roots).read_text(encoding="utf-8").splitlines() if line.strip()]
             ) if owner_actions_path(roots).exists() else 0

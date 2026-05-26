@@ -28,6 +28,7 @@ class CrystallizedCandidate:
     sensitivity: str = "private"
     tags: list[str] | None = None
     bridge_state: str = ""
+    created_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -115,6 +116,7 @@ def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidat
     path.parent.mkdir(parents=True, exist_ok=True)
     data = asdict(candidate)
     data["tags"] = list(candidate.tags or [])
+    data["created_at"] = str(data.get("created_at") or _timestamp(None))
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(data, ensure_ascii=False, sort_keys=True))
         handle.write("\n")
@@ -150,6 +152,7 @@ def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
                 sensitivity=str(raw.get("sensitivity", "private")),
                 tags=[str(item) for item in (raw.get("tags") or [])],
                 bridge_state=str(raw.get("bridge_state", "")),
+                created_at=str(raw.get("created_at") or ""),
             )
         )
     return candidates

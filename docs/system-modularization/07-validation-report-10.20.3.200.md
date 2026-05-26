@@ -11465,3 +11465,167 @@ NOT CLOSED:
   - future explicit execution/apply path remains separate and must not be
     inferred from proposal approval.
 ```
+
+Follow-up local closure:
+
+```text
+P1-O implemented locally:
+  - monitor now exposes structured_review_reply_count,
+    reply_fallback_used_count, gateway_safety_skip_count, and
+    owner_review_command_pollution_count.
+  - provider audit records owner_review_reply_ingress input_mode so fallback
+    use is measurable.
+
+P1-P implemented locally for new crystallized candidates and review-aging
+projection:
+  - new candidate queue entries carry bounded created_at.
+  - review aging reports unknown_timestamp_by_item_type,
+    created_at_coverage_ratio, true_aged_count, and unknown_aged_count.
+
+P1-Q reinforced locally:
+  - approved proposal follow-up projection reports approved_proposal_count and
+    actual_execute=false.
+  - monitor fails if approved proposal follow-up reports top-level, boundary,
+    or item-level actual_execute=true.
+
+Local checks:
+  python -m pytest tests/plugins/memory/test_memory_os_owner_actions.py \
+    tests/plugins/memory/test_memory_os_lifecycle.py \
+    tests/scripts/test_memory_os_3_200_monitor.py \
+    tests/scripts/test_memory_os_closure_matrix_check.py -q
+  89 passed
+
+NOT LIVE CLOSED YET:
+  - deploy/read-only monitor smoke on 10.20.3.200 is still required before
+    claiming live closure for P1-O/P1-P/P1-Q.
+```
+
+Live deployment and monitor closure:
+
+```text
+deployment host: 10.20.3.200 / hermes-media
+bundle: /root/Hermes-Memory-OS-p1opq-20260526142349c
+
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+result: install complete
+owner review cron gate:
+  status=already_configured
+  job_id=2af755464ca8
+  render_check.ok=true
+  render_check.raw_body_included=false
+  render_check.internal_schema_primary=false
+  render_check.text_char_count=2226
+
+gateway reload:
+  systemctl --user restart hermes-gateway.service
+  ActiveState=active
+  MainPID=507769
+
+monitor:
+  python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
+  status=WARN
+  FAIL=[]
+```
+
+Live evidence:
+
+```text
+P1-O:
+  owner_review_ingress_guard_token_only=PASS
+  review_reply_tool_status=ok
+  structured_review_reply_count=1
+  reply_fallback_used_count=0
+  gateway_hook_registered=false
+  gateway_safety_skip_count=0
+  owner_review_command_pollution_count=0
+
+P1-P:
+  OwnerReviewAging.unknown_timestamp=0
+  unknown_timestamp_by_item_type={}
+  created_at_coverage_ratio=1.0
+  true_aged=0
+  unknown_aged=0
+
+P1-Q:
+  OwnerProposalFollowups.approved=7
+  pending=7
+  awaiting_ops_gate=6
+  ops_gate_reviewed=1
+  execution_tickets=0
+  actual_execute=false
+
+Other safety:
+  MemorySources.boundary_true_count=0
+  MemorySources.forbidden_field_count=0
+  OwnerCronIntegration.status=ok
+  OwnerCronIntegration.raw_body_included=0
+  DeepReflection actual_send/execute/identity/crystallized boundaries=false
+```
+
+Remaining WARNs:
+
+```text
+session_mirror_pending_sessions
+owner_review_approved_proposals_pending_followup
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+## RH-36c Active Work Closure Mapping
+
+Purpose:
+
+```text
+Upgrade RH-36 from module classification into a development-entry gate:
+active roadmap work must map to an RH-36 closure row or explicitly declare why
+the closure matrix does not apply.
+```
+
+Preflight:
+
+```yaml
+source_of_truth: "29 contract, 32 roadmap, 36 closure matrix, current diff"
+finding_type: "contract gap / documentation drift"
+owning_seam: "RH-36 closure matrix enforcement"
+reverse_scope: "no host/Hermes capability; this is local governance validation"
+equivalent_contract_or_project_contract: "29-series contract + RH-36 matrix"
+evidence_loop: "local contract check + fixture tests"
+monitor_or_validation_fields:
+  - active_work_item_count
+  - active_work_mapping_count
+  - missing_active_work_items
+  - invalid_active_work_mapping_count
+promotion_signal: "closure check status=ok and all active P1/P2-F items mapped"
+stop_or_rollback_signal: "missing/stale active mapping or unknown closure row"
+external_review: "not required for local governance check; useful before public claim"
+```
+
+Evidence:
+
+```text
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=26
+active_work_item_count=17
+active_work_mapping_count=17
+finding_count=0
+
+python -m pytest tests/scripts/test_memory_os_closure_matrix_check.py -q
+4 passed
+```
+
+Self-review:
+
+```text
+PASS:
+  - Active P1/P2-F roadmap items are now machine-checked against RH-36.
+  - Missing active mapping is covered by a regression test.
+  - Freeform class text and missing live-module rows remain covered.
+  - 29 contract now treats missing active mapping as a P1 contract gap.
+
+NOT CLOSED:
+  - This is still a local check, not a CI gate.
+  - New roadmap item naming outside P1-* or P2-F will need an explicit parser
+    update instead of silently relying on conversation history.
+```

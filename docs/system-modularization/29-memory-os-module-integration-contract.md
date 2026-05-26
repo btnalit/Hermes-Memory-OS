@@ -992,6 +992,14 @@ Required monitor evidence:
 - `hermes_cron_integration.job_present`
 - `hermes_cron_integration.job_enabled`
 - `hermes_cron_integration.helper_script_present`
+- `owner_review_ingress_guard.structured_review_reply_count`
+- `owner_review_ingress_guard.reply_fallback_used_count`
+- `owner_review_ingress_guard.gateway_hook_registered`
+- `owner_review_ingress_guard.gateway_safety_skip_count`
+- `owner_review_ingress_guard.owner_review_command_pollution_count`
+- `audit_actions.structured_review_reply_count`
+- `audit_actions.reply_fallback_used_count`
+- `audit_actions.gateway_safety_skip_count`
 - `hermes_cron_integration.last_result`
 - `hermes_cron_integration.next_run_at`
 - `hermes_cron_integration.rendered_count_24h`
@@ -1012,6 +1020,11 @@ Required monitor evidence:
 - `review_queue.action_required_count`
 - `review_queue.stale_count`
 - `review_queue.overflow_count`
+- `review_aging.unknown_timestamp_count`
+- `review_aging.unknown_timestamp_by_item_type`
+- `review_aging.created_at_coverage_ratio`
+- `review_aging.true_aged_count`
+- `review_aging.unknown_aged_count`
 - `owner_actions.count_24h`
 - `owner_actions.by_type`
 - `owner_actions.duplicate_action_ignored_count`
@@ -1460,6 +1473,10 @@ Closure matrix gate:
   for this gate. It must pass before a module/RH is called implemented when the
   change touches module behavior, owner review, scheduling, delivery, context
   projection, persistence, feedback, or monitor evidence.
+- The RH-36 active-work mapping is part of the gate. Every active `P1-*`
+  roadmap item and `P2-F` must map to an RH-36 Classification Overlay row or
+  explicitly declare `not_applicable` with a reason. A missing mapping is a P1
+  contract gap because the work has no declared closure path.
 - A failing closure-matrix check is a P1 contract gap. Do not paper over it by
   adding prose to the RH-36 table; either map the module to an existing
   machine-readable class or update RH-36 with a new explicit class first.

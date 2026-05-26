@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "memory-os.closure_matrix_check.v0"
+SCHEMA_VERSION = "memory-os.closure_matrix_check.v1"
 
 VALID_DELIVERY_CLASSES = {
     "none",
@@ -77,6 +78,8 @@ REQUIRED_CONTRACT_LABELS = {
     "Owner Review Hermes Cron Helper",
 }
 
+ACTIVE_WORK_ITEM_RE = re.compile(r"^### (P1-[A-Z]|P2-F) - ")
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -94,8 +97,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def build_report(repo_root: Path) -> dict[str, Any]:
     matrix_path = repo_root / "docs" / "system-modularization" / "36-module-closure-matrix.md"
-    rows = parse_classification_overlay(matrix_path.read_text(encoding="utf-8"))
+    matrix_text = matrix_path.read_text(encoding="utf-8")
+    rows = parse_classification_overlay(matrix_text)
     row_by_module = {row["module"]: row for row in rows}
+    active_work_mappings = parse_active_work_closure_mapping(matrix_text)
+    mapping_by_item = {mapping["work_item"]: mapping for mapping in active_work_mappings}
+
+    roadmap_path = repo_root / "docs" / "system-modularization" / "32-active-roadmap-and-gates.md"
+    active_work_items = parse_active_work_items(roadmap_path.read_text(encoding="utf-8"))
 
     live_modules = load_live_module_definitions(repo_root)
     unknown_live_modules = sorted(
@@ -111,6 +120,17 @@ def build_report(repo_root: Path) -> dict[str, Any]:
     )
     missing_contract_labels = sorted(label for label in REQUIRED_CONTRACT_LABELS if label not in row_by_module)
     invalid_rows = [row for row in rows if row_classification_errors(row)]
+    missing_active_work_items = sorted(item for item in active_work_items if item not in mapping_by_item)
+    stale_active_work_mappings = sorted(
+        mapping["work_item"]
+        for mapping in active_work_mappings
+        if mapping["work_item"] not in active_work_items
+    )
+    invalid_active_work_mappings = [
+        mapping
+        for mapping in active_work_mappings
+        if active_work_mapping_errors(mapping, row_by_module)
+    ]
 
     findings: list[dict[str, Any]] = []
     for module in unknown_live_modules:
@@ -146,18 +166,50 @@ def build_report(repo_root: Path) -> dict[str, Any]:
                 "errors": row_classification_errors(row),
             }
         )
+    for item in missing_active_work_items:
+        findings.append(
+            {
+                "code": "active_work_item_missing_closure_mapping",
+                "severity": "error",
+                "work_item": item,
+            }
+        )
+    for item in stale_active_work_mappings:
+        findings.append(
+            {
+                "code": "active_work_mapping_stale",
+                "severity": "error",
+                "work_item": item,
+            }
+        )
+    for mapping in invalid_active_work_mappings:
+        findings.append(
+            {
+                "code": "invalid_active_work_closure_mapping",
+                "severity": "error",
+                "work_item": mapping["work_item"],
+                "errors": active_work_mapping_errors(mapping, row_by_module),
+            }
+        )
 
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "ok" if not findings else "fail",
         "matrix_path": str(matrix_path),
+        "roadmap_path": str(roadmap_path),
         "live_module_count": len(live_modules),
         "matrix_module_count": len(rows),
+        "active_work_item_count": len(active_work_items),
+        "active_work_mapping_count": len(active_work_mappings),
         "live_modules": live_modules,
+        "active_work_items": active_work_items,
         "missing_live_modules": missing_live_modules,
         "missing_contract_labels": missing_contract_labels,
         "unknown_live_modules": unknown_live_modules,
         "invalid_row_count": len(invalid_rows),
+        "missing_active_work_items": missing_active_work_items,
+        "stale_active_work_mappings": stale_active_work_mappings,
+        "invalid_active_work_mapping_count": len(invalid_active_work_mappings),
         "findings": findings,
     }
 
@@ -189,6 +241,41 @@ def parse_classification_overlay(text: str) -> list[dict[str, str]]:
     return rows
 
 
+def parse_active_work_closure_mapping(text: str) -> list[dict[str, str]]:
+    in_mapping = False
+    rows: list[dict[str, str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "## Active Work Closure Mapping":
+            in_mapping = True
+            continue
+        if in_mapping and stripped.startswith("## "):
+            break
+        if not in_mapping or not stripped.startswith("|"):
+            continue
+        cells = [cell.strip().strip("`") for cell in stripped.strip("|").split("|")]
+        if len(cells) != 4 or cells[0] in {"Work item", "---"} or set(cells[0]) == {"-"}:
+            continue
+        rows.append(
+            {
+                "work_item": cells[0],
+                "closure_rows": cells[1],
+                "not_applicable_reason": cells[2],
+                "validation_note": cells[3],
+            }
+        )
+    return rows
+
+
+def parse_active_work_items(text: str) -> list[str]:
+    items: list[str] = []
+    for line in text.splitlines():
+        match = ACTIVE_WORK_ITEM_RE.match(line.strip())
+        if match:
+            items.append(match.group(1))
+    return sorted(items)
+
+
 def load_live_module_definitions(repo_root: Path) -> list[str]:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -208,6 +295,29 @@ def row_classification_errors(row: dict[str, str]) -> list[str]:
     return errors
 
 
+def active_work_mapping_errors(
+    mapping: dict[str, str],
+    row_by_module: dict[str, dict[str, str]],
+) -> list[str]:
+    errors: list[str] = []
+    closure_rows = mapping["closure_rows"].strip()
+    reason = mapping["not_applicable_reason"].strip()
+    if closure_rows == "not_applicable":
+        if not reason:
+            errors.append("not_applicable_reason")
+        return errors
+    if reason:
+        errors.append("not_applicable_reason_must_be_empty_when_mapped")
+    labels = [label.strip() for label in closure_rows.split(";") if label.strip()]
+    if not labels:
+        errors.append("closure_rows")
+        return errors
+    missing = [label for label in labels if label not in row_by_module]
+    if missing:
+        errors.append("unknown_closure_rows:" + ",".join(missing))
+    return errors
+
+
 def _classes_are_valid(value: str, allowed: set[str]) -> bool:
     parts = [
         part.strip()
@@ -223,10 +333,12 @@ def render_summary(report: dict[str, Any]) -> str:
         f"status={report['status']}",
         f"live_module_count={report['live_module_count']}",
         f"matrix_module_count={report['matrix_module_count']}",
+        f"active_work_item_count={report['active_work_item_count']}",
+        f"active_work_mapping_count={report['active_work_mapping_count']}",
         f"finding_count={len(report['findings'])}",
     ]
     for finding in report["findings"]:
-        lines.append(f"- {finding['code']}: {finding.get('module')}")
+        lines.append(f"- {finding['code']}: {finding.get('module') or finding.get('work_item')}")
     return "\n".join(lines)
 
 

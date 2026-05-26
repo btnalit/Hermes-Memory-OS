@@ -431,6 +431,8 @@ What it checks:
 - non-live but contract-critical surfaces such as MemorySources, RH-31 eval,
   OwnerActionProcessor, review renderer, review surface, owner reply tool, and
   Hermes cron helper also have rows;
+- active `P1-*` roadmap items and `P2-F` map to Classification Overlay rows
+  or provide a `not_applicable` reason;
 - `delivery_class`, `state_change_class`, and `cadence_class` contain known
   machine-readable class values, not freeform prose;
 - failures return a non-zero exit code.
@@ -462,6 +464,8 @@ closure matrix check:
   status=ok
   live_module_count=16
   matrix_module_count=26
+  active_work_item_count=17
+  active_work_mapping_count=17
   finding_count=0
 ```
 
@@ -484,6 +488,39 @@ Enforcement rule:
   pass this check before it is called implemented;
 - if the check fails because a new module does not fit an existing class, RH-36
   must be updated first, then the check and tests must pass.
+
+## Active Work Closure Mapping
+
+RH-36c adds a second enforcement layer: active roadmap work cannot live only in
+conversation history or a planning paragraph. Every active `P1-*` item and the
+public productization item `P2-F` must map to one or more rows in the
+Classification Overlay, or explicitly state why RH-36 does not apply. This is a
+development gate, not a progress claim.
+
+| Work item | Closure rows | not_applicable_reason | Validation note |
+| --- | --- | --- | --- |
+| P1-B | RH-31 Eval Harness | | Eval failures are measurement signals until mapped to live evidence or owner-approved redacted fixtures. |
+| P1-C | DeepReflection; Conversation Carryover; Context Router / Low-Clue Recall | | DR/carryover may affect context projection, proposal review, or speak permission depending on output type. |
+| P1-D | Governance Feedback; Self-Evolution | | LLM/governance analysis remains feedback/proposal evidence, not live tuning. |
+| P1-E | Wandering Mind; Speak Gate | | Would-send artifacts and one-shot permission remain governed by speak gate closure. |
+| P1-F | Heartbeat / Inner Drive; Metadata Retention | | Audit density and working expiry are runtime/write-surface observation and metadata-retention concerns. |
+| P1-G | Context Router / Low-Clue Recall; MemorySources Attribution | | Live Telegram candidate-quality findings must close through context projection plus attribution evidence. |
+| P1-H | MemorySources Attribution | | Feedback collection volume remains feedback-ledger evidence until a bounded apply gate exists. |
+| P1-I | Cron / Session / State Mirrors | | Hook coverage detection is monitor-only evidence over entrance/mirror state. |
+| P1-J | Cron / Session / State Mirrors; Context Router / Low-Clue Recall | | Pending session coverage must correlate with recall behavior before any apply path. |
+| P1-K | not_applicable | Module status/doctor truthfulness is a CLI presentation parity task over existing rows; it adds no new module or closure class. | If it changes module behavior, add the affected row before implementation. |
+| P1-L | Household Digest; Wandering Mind; Evidence Scoring; Self-Evolution; Governance Feedback; DeepReflection | | Per-module artifact summaries expose monitor-only outputs from cognitive-loop modules. |
+| P1-M | Review Digest Renderer; Agent-Mediated Review Surface; Agent-Mediated Owner Reply Tool; OwnerActionProcessor; Owner Review Hermes Cron Helper | | Owner review must stay Hermes-mediated and processor-mutated. |
+| P1-N | Agent / Memory-OS Collaboration Contract | | Contract-only gate for Hermes agent and Memory-OS collaboration. |
+| P1-O | Agent-Mediated Owner Reply Tool; Owner Reply Parser; OwnerActionProcessor | | Fallback and gateway-hook closure protects the structured owner-action path. |
+| P1-P | Heartbeat / Inner Drive; Proposal Queue; Wandering Mind; Owner Review Queue / Aging | | Producers and review projections must carry bounded timestamps for aging. |
+| P1-Q | Ops Gate; Proposal Queue; Agent-Mediated Review Surface; OwnerActionProcessor | | Approved proposal follow-up stays visible and report-only until explicit execution apply exists. |
+| P2-F | Review Digest Renderer; Agent-Mediated Review Surface; Agent-Mediated Owner Reply Tool; OwnerActionProcessor; Owner Review Hermes Cron Helper; Agent / Memory-OS Collaboration Contract | | Public material must explain the owner-governance subsystem without expanding Memory-OS transport or execution ownership. |
+
+The local check validates this table against
+`docs/system-modularization/32-active-roadmap-and-gates.md`. Missing mappings,
+stale mappings, unknown closure rows, and `not_applicable` rows without a reason
+are P1 contract gaps.
 
 ## Stop Signals
 

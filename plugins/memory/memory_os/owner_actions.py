@@ -224,6 +224,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         "schema_version": APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
         "status": "ok",
+        "approved_proposal_count": len(proposals),
         "pending_followup_count": len(items),
         "shown_count": len(shown),
         "overflow_count": max(len(items) - bounded_limit, 0),
@@ -232,6 +233,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
             1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
         ),
         "execution_ticket_count": 0,
+        "actual_execute": False,
         "raw_body_included": False,
         "boundary": {
             "actual_send": False,
@@ -247,12 +249,14 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
     report = approved_proposal_followups_report(store, limit=5)
     return {
         "schema_version": report["schema_version"],
+        "approved_proposal_count": report["approved_proposal_count"],
         "pending_followup_count": report["pending_followup_count"],
         "shown_count": report["shown_count"],
         "overflow_count": report["overflow_count"],
         "awaiting_ops_gate_count": report["awaiting_ops_gate_count"],
         "ops_gate_reviewed_count": report["ops_gate_reviewed_count"],
         "execution_ticket_count": report["execution_ticket_count"],
+        "actual_execute": report["actual_execute"],
         "raw_body_included": report["raw_body_included"],
     }
 
@@ -1824,7 +1828,7 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
                 "target_id": candidate.candidate_id,
                 "source_module": "crystallized_candidates",
                 "priority": "fyi" if needs_consolidation else "action_required",
-                "created_at": "",
+                "created_at": _candidate_created_at(store, candidate),
                 "status": "pending",
                 "summary": (
                     "Memory candidate is a transcript/event excerpt and needs consolidation before approval"
@@ -1838,6 +1842,22 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
             }
         )
     return items
+
+
+def _candidate_created_at(store: MemoryOSStore, candidate: CrystallizedCandidate) -> str:
+    if candidate.created_at:
+        return candidate.created_at
+    if not candidate.source_event_ids:
+        return ""
+    events_by_id = {str(event.id): event for event in store.read_events()}
+    for event_id in candidate.source_event_ids:
+        event = events_by_id.get(str(event_id))
+        if not event:
+            continue
+        created_at = str(getattr(event, "ts", "") or "")
+        if created_at:
+            return created_at
+    return ""
 
 
 def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
@@ -3042,6 +3062,14 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
     unknown_timestamp_count = sum(
         1 for item in items if item.get("source_priority") == "action_required" and item.get("age_days") is None
     )
+    unknown_timestamp_by_item_type = Counter(
+        str(item.get("target_type") or "unknown")
+        for item in items
+        if item.get("source_priority") == "action_required" and item.get("age_days") is None
+    )
+    known_created_at_count = sum(1 for item in items if _parse_dt(str(item.get("created_at") or "")))
+    true_aged_count = sum(1 for item in items if str(item.get("aging_reason") or "").startswith("older_than_"))
+    unknown_aged_count = sum(1 for item in items if item.get("aging_reason") == "unknown_timestamp")
     action_required_ages = [
         int(item["age_days"])
         for item in items
@@ -3068,6 +3096,10 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
             1 for item in items if item.get("source_priority") == "action_required" and item.get("effective_priority") == "fyi"
         ),
         "unknown_timestamp_count": unknown_timestamp_count,
+        "unknown_timestamp_by_item_type": dict(unknown_timestamp_by_item_type),
+        "created_at_coverage_ratio": round(known_created_at_count / len(items), 3) if items else 1.0,
+        "true_aged_count": true_aged_count,
+        "unknown_aged_count": unknown_aged_count,
         "oldest_action_required_age_days": max(action_required_ages) if action_required_ages else None,
         "raw_body_included": False,
         "canonical_state_changed": False,

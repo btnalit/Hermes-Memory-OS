@@ -271,7 +271,12 @@ class MemoryOSProvider(MemoryProvider):
                     self._last_owner_review_reply_result = result
                     self._last_owner_review_reply_query = owner_utterance
                 return json.dumps(result, ensure_ascii=False, sort_keys=True)
-            result = self._process_owner_review_reply_ingress(reply, turn_number=None, phase="tool_call")
+            result = self._process_owner_review_reply_ingress(
+                reply,
+                turn_number=None,
+                phase="tool_call",
+                input_mode=str(tool_input.get("mode") or ""),
+            )
             if result is None:
                 result = _owner_review_reply_not_processed("not_owner_review_token_command")
             result["tool_input"] = tool_input
@@ -318,6 +323,7 @@ class MemoryOSProvider(MemoryProvider):
         *,
         turn_number: int | None,
         phase: str,
+        input_mode: str = "",
     ) -> dict[str, Any] | None:
         if self._store is None or not _looks_like_owner_review_reply(message):
             return None
@@ -359,6 +365,7 @@ class MemoryOSProvider(MemoryProvider):
             {
                 "turn_number": turn_number,
                 "phase": phase,
+                "input_mode": input_mode,
                 "status": result.get("status"),
                 "reason": result.get("reason", ""),
                 "channel": channel,

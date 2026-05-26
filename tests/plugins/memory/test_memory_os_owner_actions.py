@@ -30,6 +30,7 @@ from plugins.memory.memory_os.owner_actions import (
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
+from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
@@ -87,17 +88,61 @@ def test_review_queue_lists_bounded_candidates_without_raw_body(tmp_path):
 
     assert report["pending_count"] == 2
     assert report["review_aging"]["raw_action_required_count"] == 2
-    assert report["action_required_count"] == 1
-    assert report["review_suggested_count"] == 1
-    assert [item["anchor"] for item in report["items"]] == ["A1", "R1"]
+    assert report["review_aging"]["unknown_timestamp_count"] == 0
+    assert report["review_aging"]["created_at_coverage_ratio"] == 1.0
+    assert report["action_required_count"] == 2
+    assert report["review_suggested_count"] == 0
+    assert [item["anchor"] for item in report["items"]] == ["A1", "A2"]
     assert all(item["raw_body_included"] is False for item in report["items"])
     assert "Candidate kind=" not in serialized
     assert "RAW PROPOSAL BODY" not in serialized
 
 
+def test_review_queue_derives_legacy_candidate_created_at_from_source_event(tmp_path):
+    store = _store(tmp_path)
+    event_ts = "2026-05-20T02:30:01.000000+00:00"
+    store.append_event(
+        EventEnvelope(
+            schema_version=EVENT_SCHEMA_VERSION,
+            id="evt_owner_001",
+            ts=event_ts,
+            profile="main",
+            source="test",
+            kind="foreground_conversation_turn",
+            summary="safe bounded test summary",
+            sensitivity="private",
+            body_policy="summary_only",
+            promotion_state="raw",
+        )
+    )
+    append_candidate_queue(store, _candidate())
+
+    # Simulate a pre-P1-P candidate record that did not carry created_at yet.
+    candidate_path = store.roots.crystallized_root / "candidates.jsonl"
+    records = _jsonl(candidate_path)
+    records[0].pop("created_at", None)
+    candidate_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    report = owner_review_queue_report(store)
+
+    assert report["items"][0]["created_at"] == event_ts
+    assert report["review_aging"]["unknown_timestamp_count"] == 0
+    assert report["review_aging"]["created_at_coverage_ratio"] == 1.0
+
+
 def test_review_aging_projects_old_and_unknown_items_without_mutating_state(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
+    candidate_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidate_lines = _jsonl(candidate_path)
+    candidate_lines[0].pop("created_at", None)
+    candidate_path.write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in candidate_lines) + "\n",
+        encoding="utf-8",
+    )
     proposal = ProposalQueueModule(tmp_path, profile="main")
     proposal.create_candidate(store=store, title="Old proposal", body="RAW PROPOSAL BODY")
     queue = proposal.read_queue()
@@ -114,6 +159,10 @@ def test_review_aging_projects_old_and_unknown_items_without_mutating_state(tmp_
     assert aging["aged_to_review_suggested_count"] == 1
     assert aging["aged_to_fyi_count"] == 1
     assert aging["unknown_timestamp_count"] == 1
+    assert aging["unknown_timestamp_by_item_type"] == {"candidate": 1}
+    assert aging["true_aged_count"] == 1
+    assert aging["unknown_aged_count"] == 1
+    assert aging["created_at_coverage_ratio"] == 0.5
     assert aging["canonical_state_changed"] is False
     assert aging["owner_action_created"] is False
     assert report["action_required_count"] == 0
@@ -238,8 +287,10 @@ def test_approved_proposal_followups_project_state_without_execution_ticket(tmp_
     report = approved_proposal_followups_report(store)
 
     assert report["schema_version"] == "memory-os.approved_proposal_followups.v0"
+    assert report["approved_proposal_count"] == 1
     assert report["pending_followup_count"] == 1
     assert report["execution_ticket_count"] == 0
+    assert report["actual_execute"] is False
     assert report["raw_body_included"] is False
     assert report["boundary"]["actual_execute"] is False
     assert report["items"][0]["proposal_id"] == candidate["candidate_id"]
@@ -248,6 +299,7 @@ def test_approved_proposal_followups_project_state_without_execution_ticket(tmp_
     assert "PRIVATE RAW BODY" not in json.dumps(report, ensure_ascii=False)
 
     status = owner_review_status_report(store)
+    assert status["approved_proposal_followups"]["approved_proposal_count"] == 1
     assert status["approved_proposal_followups"]["pending_followup_count"] == 1
 
 
@@ -303,6 +355,7 @@ def test_approved_proposal_followup_routes_to_ops_gate_without_execution(tmp_pat
     assert followups["ops_gate_reviewed_count"] == 1
     assert followups["awaiting_ops_gate_count"] == 0
     assert followups["execution_ticket_count"] == 0
+    assert followups["actual_execute"] is False
     assert followups["items"][0]["followup_state"] == "ops_gate_reviewed_awaiting_explicit_execution"
 
     duplicate = route_approved_proposal_followup_to_ops_gate(
@@ -459,11 +512,11 @@ def test_digest_preview_is_bounded_no_send_and_no_raw_body(tmp_path):
     assert preview["actions_enabled"] is False
     assert preview["raw_body_included"] is False
     assert preview["counts"]["raw_action_required_total"] == 2
-    assert preview["counts"]["action_required_total"] == 1
+    assert preview["counts"]["action_required_total"] == 2
     assert preview["counts"]["action_required_shown"] == 1
-    assert preview["overflow"]["action_required"] == 0
+    assert preview["overflow"]["action_required"] == 1
     assert preview["sections"]["action_required"][0]["anchor"] == "A1"
-    assert preview["review_aging"]["aged_to_review_suggested_count"] == 1
+    assert preview["review_aging"]["aged_to_review_suggested_count"] == 0
     assert "Candidate kind=" not in serialized
     assert "RAW PROPOSAL BODY" not in serialized
 
@@ -608,18 +661,18 @@ def test_review_surface_detail_expands_latest_digest_anchor_without_applying_act
     render_owner_review_digest(
         store,
         channel="origin",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
     )
 
-    report = owner_review_surface_report(store, operation="detail", anchor="R1", channel="telegram")
+    report = owner_review_surface_report(store, operation="detail", anchor="A1", channel="telegram")
     missing = owner_review_surface_report(store, operation="detail", anchor="R9", channel="telegram")
 
     assert report["status"] == "ok"
     assert report["binding"] == "latest_owner_home_digest"
-    assert report["item"]["anchor"] == "R1"
+    assert report["item"]["anchor"] == "A1"
     assert report["item"]["action_tokens"]["approve_candidate"].startswith("oa_")
     assert "这条候选记忆" in report["text"]
     assert report["boundary"]["actual_send"] is False
@@ -634,7 +687,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
     delivered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -647,7 +700,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
 
     dry_run = parse_owner_review_reply(
         store,
-        _review_command(delivered, "R1", "approve_candidate"),
+        _review_command(delivered, "A1", "approve_candidate"),
         owner_id="owner",
         channel="telegram",
         digest_id=delivered["digest_id"],
@@ -666,7 +719,7 @@ def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp
 
     applied = parse_owner_review_reply(
         store,
-        _review_command(delivered, "R1", "approve_candidate"),
+        _review_command(delivered, "A1", "approve_candidate"),
         owner_id="owner",
         channel="telegram",
         digest_id=delivered["digest_id"],
@@ -685,7 +738,7 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -695,7 +748,7 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
 
     result = parse_owner_review_reply(
         store,
-        _review_command(rendered, "R1", "reject_candidate"),
+        _review_command(rendered, "A1", "reject_candidate"),
         owner_id="owner",
         channel="telegram",
         apply=False,
@@ -713,7 +766,7 @@ def test_provider_owner_review_reply_tool_processes_recorded_digest_before_prefe
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -727,7 +780,7 @@ def test_provider_owner_review_reply_tool_processes_recorded_digest_before_prefe
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate")
+    command = _review_command(rendered, "A1", "reject_candidate")
     tool_result = json.loads(provider.handle_tool_call("memory_os_review_reply", {"reply": command}))
     context = provider.prefetch(command, session_id="session-owner-review")
     prompt_block = provider.system_prompt_block()
@@ -749,7 +802,7 @@ def test_provider_owner_review_reply_tool_accepts_structured_action_token(tmp_pa
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -763,7 +816,7 @@ def test_provider_owner_review_reply_tool_accepts_structured_action_token(tmp_pa
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate")
+    command = _review_command(rendered, "A1", "reject_candidate")
     token = command.split()[2]
     tool_result = json.loads(
         provider.handle_tool_call(
@@ -875,7 +928,7 @@ def test_provider_owner_review_reply_tool_makes_sync_turn_idempotent(tmp_path):
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -889,7 +942,7 @@ def test_provider_owner_review_reply_tool_makes_sync_turn_idempotent(tmp_path):
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate")
+    command = _review_command(rendered, "A1", "reject_candidate")
     provider.handle_tool_call("memory_os_review_reply", {"reply": command})
     provider.sync_turn(command, "ack", session_id="session-owner-review")
 
@@ -913,7 +966,7 @@ def test_provider_owner_review_reply_tool_skips_unprefixed_token_sync_capture(tm
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -927,7 +980,7 @@ def test_provider_owner_review_reply_tool_skips_unprefixed_token_sync_capture(tm
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate").removeprefix("memory ")
+    command = _review_command(rendered, "A1", "reject_candidate").removeprefix("memory ")
     tool_result = json.loads(provider.handle_tool_call("memory_os_review_reply", {"reply": command}))
     provider.sync_turn(command, "Approved.", session_id="session-owner-review")
 
@@ -946,7 +999,7 @@ def test_provider_owner_review_reply_sync_turn_warns_and_skips_when_tool_was_not
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -960,7 +1013,7 @@ def test_provider_owner_review_reply_sync_turn_warns_and_skips_when_tool_was_not
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate")
+    command = _review_command(rendered, "A1", "reject_candidate")
     provider.sync_turn(command, "ack", session_id="session-owner-review")
 
     assert not owner_actions_path(store.roots).exists()
@@ -989,7 +1042,7 @@ def test_provider_owner_review_reply_tool_falls_back_to_recurring_delivery_chann
     render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=0,
         max_fyi=0,
         record_active=True,
@@ -998,8 +1051,8 @@ def test_provider_owner_review_reply_tool_falls_back_to_recurring_delivery_chann
     rendered = render_owner_review_digest(
         store,
         channel="cli",
-        max_action_required=0,
-        max_review_suggested=1,
+        max_action_required=1,
+        max_review_suggested=0,
         max_fyi=0,
         record_active=True,
     )
@@ -1012,7 +1065,7 @@ def test_provider_owner_review_reply_tool_falls_back_to_recurring_delivery_chann
         agent_identity="main",
         worker_autostart=False,
     )
-    provider.handle_tool_call("memory_os_review_reply", {"reply": _review_command(rendered, "R1", "reject_candidate")})
+    provider.handle_tool_call("memory_os_review_reply", {"reply": _review_command(rendered, "A1", "reject_candidate")})
 
     records = _jsonl(owner_actions_path(store.roots))
     assert len(records) == 1
@@ -1039,7 +1092,7 @@ def test_provider_owner_review_reply_tool_uses_owner_home_binding_not_platform_l
     render_owner_review_digest(
         store,
         channel="cli",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -1047,7 +1100,7 @@ def test_provider_owner_review_reply_tool_uses_owner_home_binding_not_platform_l
     rendered = render_owner_review_digest(
         store,
         channel="origin",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -1061,7 +1114,7 @@ def test_provider_owner_review_reply_tool_uses_owner_home_binding_not_platform_l
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate")
+    command = _review_command(rendered, "A1", "reject_candidate")
     provider.handle_tool_call("memory_os_review_reply", {"reply": command})
     context = provider.prefetch(command, session_id="session-owner-review")
 
@@ -1097,7 +1150,7 @@ def test_provider_owner_review_reply_tool_accepts_punctuation_and_ignores_chatte
     rendered = render_owner_review_digest(
         store,
         channel="telegram",
-        max_action_required=0,
+        max_action_required=1,
         max_review_suggested=1,
         max_fyi=0,
         record_active=True,
@@ -1137,7 +1190,7 @@ def test_provider_owner_review_reply_tool_accepts_punctuation_and_ignores_chatte
         agent_identity="main",
         worker_autostart=False,
     )
-    command = _review_command(rendered, "R1", "reject_candidate") + "。"
+    command = _review_command(rendered, "A1", "reject_candidate") + "。"
     provider.handle_tool_call("memory_os_review_reply", {"reply": command})
     context = provider.prefetch(command, session_id="session-owner-review")
 

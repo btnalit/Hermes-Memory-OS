@@ -121,7 +121,7 @@ These are not the remaining queue, but future work depends on them.
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
 | RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.5/35.8 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, stable action-token parser, agent-mediated `memory_os_review_reply` tool, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text and exposes tools/state, Hermes owns delivery and agent interaction |
-| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules and contract-critical non-live surfaces against RH-36 and currently reports `status=ok`, `live_module_count=16`, `matrix_module_count=26`, `finding_count=0` |
+| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=16`, `matrix_module_count=26`, `active_work_item_count=17`, `active_work_mapping_count=17`, `finding_count=0` |
 | RH-37 Agent / Memory-OS collaboration contract | design contract active; no new execution capability | defines how Hermes agent reads bounded Memory-OS review context, explains owner questions, suggests without deciding, asks when ambiguous, and calls structured tools only after definite owner intent; follow-up implementation remains split into P1 items below |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
@@ -945,7 +945,9 @@ Stop signal:
 
 ### P1-O - Reply Fallback And Gateway Hook Boundary Closure
 
-Status: planned.
+Status: deployed on `10.20.3.200`; monitor structured owner-review ingress
+probe passes. A fresh owner-visible Telegram reply smoke can still be repeated
+on demand, but it was not required to close this monitor/gateway slice.
 
 Reason:
 
@@ -954,13 +956,22 @@ Reason:
 - gateway hooks must be safety-only pollution guards, not the normal owner
   approval path.
 
+Implemented local slice:
+
+- monitor tracks `reply_fallback_used_count`,
+  `structured_review_reply_count`, gateway safety skips, and owner-review
+  command pollution;
+- model-facing schema remains structured `action + action_token + rating`
+  while `reply` remains a counted legacy/CLI fallback;
+- gateway hook remains safety-only and must not be the normal approval path.
+
 Next action:
 
-1. add monitor fields such as `reply_fallback_used_count`,
-   `structured_review_reply_count`, and gateway safety/pollution counts;
-2. document fallback deprecation conditions;
-3. verify live owner-review tasks use structured tool calls through Hermes
-   agent, while fallback remains non-primary compatibility.
+1. continue watching live `structured_review_reply_count` versus
+   `reply_fallback_used_count`;
+2. repeat an owner-visible Telegram token action if Hermes agent interaction
+   behavior changes again;
+3. deprecate fallback only after structured live use stays stable.
 
 Stop signal:
 
@@ -970,20 +981,29 @@ Stop signal:
 
 ### P1-P - Candidate / Proposal Timestamp Schema Repair
 
-Status: planned.
+Status: deployed on `10.20.3.200`; live monitor reports
+`unknown_timestamp=0` and `created_at_coverage_ratio=1.0` for the current
+review queue projection.
 
 Reason:
 
 - RH-34c aging found `unknown_timestamp=161`, which means much of the first
   aging reduction came from missing producer metadata rather than true age.
 
+Implemented local slice:
+
+- new crystallized candidate queue entries receive bounded `created_at`;
+- review queue projection can derive candidate display time from safe source
+  refs when needed;
+- aging summary and monitor expose `unknown_timestamp_count`,
+  `unknown_timestamp_by_item_type`, `created_at_coverage_ratio`,
+  `true_aged_count`, and `unknown_aged_count`.
+
 Next action:
 
-1. require producers of candidates, proposals, speak review items, and review
-   queue entries to write bounded `created_at`;
-2. keep unknown timestamp handling conservative but visible;
-3. add monitor fields such as `unknown_timestamp_count` and timestamp coverage
-   by review item type.
+1. extend the same producer rule to any remaining proposal/speak producers
+   when their next write path is touched;
+2. keep old missing timestamps visible instead of rewriting canonical data.
 
 Stop signal:
 
@@ -992,8 +1012,9 @@ Stop signal:
 
 ### P1-Q - Approved Proposal Follow-Up To OpsGate / Manual Apply
 
-Status: partly implemented as report-only projection; execution apply remains
-future work.
+Status: deployed on `10.20.3.200`; monitor reports approved proposal follow-up
+visibility with `execution_tickets=0` and `actual_execute=false`. Real
+execution apply remains future work.
 
 Reason:
 
@@ -1002,12 +1023,18 @@ Reason:
   OpsGate report-only review, but execution still requires a separate explicit
   apply gate.
 
+Implemented local slice:
+
+- approved proposal follow-up summaries expose approved counts and
+  `actual_execute=false`;
+- monitor fails if top-level, boundary, or item-level proposal follow-up sets
+  `actual_execute=true`;
+- OpsGate follow-up remains report-only and idempotent.
+
 Next action:
 
-1. keep the current report-only OpsGate follow-up visible and idempotent;
-2. design the future manual execution/apply path separately;
-3. require explicit owner/operator intent, monitor fields, and rollback before
-   any execution ticket can be created.
+1. design future manual execution/apply separately with explicit owner/operator
+   intent, monitor fields, rollback, and external review.
 
 Stop signal:
 

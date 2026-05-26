@@ -449,7 +449,27 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_agent_tool_not_structured" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"]["reply_fallback_used_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "owner_review_reply_fallback_used" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"]["owner_review_command_pollution_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_command_pollution_count_nonzero" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_proposal_followups"]["boundary"]["actual_execute"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_proposal_followups_actual_execute_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["actual_execute"] = True
     classification = classify_snapshot(snapshot)
 
     assert classification["status"] == "FAIL"
@@ -1174,6 +1194,10 @@ def _healthy_owner_review_aging() -> dict:
         "aged_to_review_suggested_count": 0,
         "aged_to_fyi_count": 0,
         "unknown_timestamp_count": 0,
+        "unknown_timestamp_by_item_type": {},
+        "created_at_coverage_ratio": 1.0,
+        "true_aged_count": 0,
+        "unknown_aged_count": 0,
         "raw_body_included": False,
         "canonical_state_changed": False,
         "owner_action_created": False,
@@ -1326,13 +1350,17 @@ def _healthy_owner_ingress_guard() -> dict:
         "bare_feedback_token_command_accepted": True,
         "gateway_hook_plugin_present": True,
         "gateway_hook_registered": False,
+        "gateway_safety_skip_count": 0,
         "review_reply_tool_available": True,
         "review_reply_tool_status": "ok",
         "review_reply_tool_input_mode": "structured",
+        "structured_review_reply_count": 1,
+        "reply_fallback_used_count": 0,
         "owner_command_event_count": 0,
         "owner_command_working_count": 0,
         "owner_command_candidate_count": 0,
         "owner_command_promoted_to_candidate": False,
+        "owner_review_command_pollution_count": 0,
     }
 
 
@@ -1340,12 +1368,14 @@ def _healthy_owner_proposal_followups() -> dict:
     return {
         "schema_version": "memory-os.approved_proposal_followups.v0",
         "status": "ok",
+        "approved_proposal_count": 0,
         "pending_followup_count": 0,
         "shown_count": 0,
         "overflow_count": 0,
         "awaiting_ops_gate_count": 0,
         "ops_gate_reviewed_count": 0,
         "execution_ticket_count": 0,
+        "actual_execute": False,
         "raw_body_included": False,
         "boundary": {
             "actual_send": False,
