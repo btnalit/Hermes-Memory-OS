@@ -104,6 +104,8 @@ class DeepReflectionModule:
     def status(self) -> dict[str, Any]:
         config = self._read_config()
         current_injection = _read_json_document(self.current_injection_path)
+        reports = _read_jsonl(self.reports_path)
+        latest_report = reports[-1] if reports else {}
         return {
             "schema_version": "hermes.deep_reflection_status.v0",
             "module": "deep_reflection",
@@ -111,11 +113,16 @@ class DeepReflectionModule:
             "enabled": bool(config.get("enabled", False)),
             "injection_mode": str(config.get("injection_mode", "disabled")),
             "analysis_artifact_count": len(list(self.internal_analysis_root.glob("*.json"))),
-            "report_count": len(_read_jsonl(self.reports_path)),
+            "report_count": len(reports),
             "current_injection_exists": self.current_injection_path.exists(),
             "latest_injection_source_classes": _injection_source_class_distribution(current_injection),
             "rolling_injection_source_classes": _rolling_injection_source_class_distribution(
                 self.module_root / "injection" / "history.jsonl"
+            ),
+            "latest_active_working_input_count": int(latest_report.get("active_working_input_count", 0) or 0),
+            "latest_expired_working_skipped_count": int(latest_report.get("expired_working_skipped_count", 0) or 0),
+            "latest_expired_working_used_in_analysis_count": int(
+                latest_report.get("expired_working_used_in_analysis_count", 0) or 0
             ),
             "actual_send": False,
             "actual_execute": False,
@@ -243,6 +250,11 @@ class DeepReflectionModule:
             "analysis_artifact_ref": artifact["artifact_ref"],
             "source_event_count": len(input_snapshot["recent_events"]),
             "input_ref_count": len(input_snapshot["input_refs"]),
+            "active_working_input_count": int(input_snapshot["working_item_hygiene"]["active_input_count"]),
+            "expired_working_skipped_count": int(input_snapshot["working_item_hygiene"]["expired_skipped_count"]),
+            "expired_working_used_in_analysis_count": int(
+                input_snapshot["working_item_hygiene"]["expired_used_in_analysis_count"]
+            ),
             "selected_injection_count": injection_report["selected_count"],
             "dropped_injection_count": injection_report["dropped_count"],
             "selected_injection_by_source_class": injection_report["selected_by_source_class"],
@@ -514,7 +526,7 @@ class DeepReflectionModule:
             for event in events
             if _is_governance_event(event)
         ][:max_events]
-        working_items = self._collect_working_items(store=store, limit=max_working_items)
+        working_items, working_hygiene = self._collect_working_items_with_hygiene(store=store, limit=max_working_items)
         digest_artifacts = self._collect_digest_artifacts(limit=max_digest_artifacts)
         evidence_scores = self._collect_evidence_scores(evidence=evidence, limit=max_scores)
         proposal_backlog = self._collect_proposal_backlog(proposal_queue=proposal_queue, limit=max_proposals)
@@ -533,6 +545,7 @@ class DeepReflectionModule:
             "profile": self.profile,
             "recent_events": recent_events,
             "working_items": working_items,
+            "working_item_hygiene": working_hygiene,
             "digest_artifacts": digest_artifacts,
             "evidence_scores": evidence_scores,
             "proposal_backlog": proposal_backlog,
@@ -545,7 +558,18 @@ class DeepReflectionModule:
         }
 
     def _collect_working_items(self, *, store: MemoryOSStore, limit: int) -> list[dict[str, Any]]:
+        items, _hygiene = self._collect_working_items_with_hygiene(store=store, limit=limit)
+        return items
+
+    def _collect_working_items_with_hygiene(
+        self,
+        *,
+        store: MemoryOSStore,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         items: list[dict[str, Any]] = []
+        skipped_by_status: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
         for path in sorted(store.roots.working_root.glob("*.json")):
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
@@ -557,17 +581,34 @@ class DeepReflectionModule:
                 item_id = str(raw_item.get("id", ""))
                 if not item_id:
                     continue
+                status = str(raw_item.get("status", "")).strip().lower()
+                status_key = status or "unknown"
+                status_counts[status_key] = status_counts.get(status_key, 0) + 1
+                if status == "expired":
+                    skipped_by_status[status_key] = skipped_by_status.get(status_key, 0) + 1
+                    continue
                 items.append(
                     {
                         "ref": f"working:{path.stem}:{item_id}",
                         "kind": str(raw_item.get("kind", path.stem)),
-                        "status": str(raw_item.get("status", "")),
+                        "status": status_key,
                         "text": _clip(str(raw_item.get("text", "")), 220),
                         "source_event_ref": _optional_event_ref(raw_item.get("source_event_id", "")),
                         "updated_at": str(raw_item.get("updated_at", "")),
                     }
                 )
-        return sorted(items, key=lambda item: (item.get("updated_at", ""), item.get("ref", "")), reverse=True)[:limit]
+        selected = sorted(items, key=lambda item: (item.get("updated_at", ""), item.get("ref", "")), reverse=True)[:limit]
+        return selected, {
+            "total_seen_count": sum(status_counts.values()),
+            "working_input_count": len(selected),
+            "active_available_count": status_counts.get("active", 0),
+            "active_input_count": sum(1 for item in selected if item.get("status") == "active"),
+            "expired_skipped_count": skipped_by_status.get("expired", 0),
+            "expired_used_in_analysis_count": sum(1 for item in selected if item.get("status") == "expired"),
+            "skipped_count": sum(skipped_by_status.values()),
+            "skipped_by_status": skipped_by_status,
+            "status_counts": status_counts,
+        }
 
     def _collect_digest_artifacts(self, *, limit: int) -> list[dict[str, Any]]:
         digest_root = self.hermes_home / "system-modules" / "digest_consolidation"

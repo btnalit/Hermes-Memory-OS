@@ -90,9 +90,73 @@ class EvidenceScoringModule:
     def feature_scores_path(self) -> Path:
         return self.module_root / "feature_scores.jsonl"
 
+    @property
+    def runs_path(self) -> Path:
+        return self.module_root / "runs.jsonl"
+
     def score_all(self, *, store: MemoryOSStore, proposal_queue: Any | None = None) -> dict[str, Any]:
         store.initialize()
         subjects, collection_stats = self._collect_subjects(store=store, proposal_queue=proposal_queue)
+        input_fingerprint = _input_fingerprint(subjects=subjects, collection_stats=collection_stats, profile=self.profile)
+        latest_run = _latest_jsonl_record(self.runs_path)
+        if (
+            latest_run.get("input_fingerprint") == input_fingerprint
+            and self.evidence_path.exists()
+            and self.scores_path.exists()
+            and self.feature_scores_path.exists()
+        ):
+            score_records = self.read_scores()
+            feature_score_records = self.read_feature_scores()
+            evidence_records = self.read_evidence()
+            result = {
+                "schema_version": "hermes.evidence_scoring_result.v0",
+                "module": "evidence_scoring",
+                "profile": self.profile,
+                "status": "ok",
+                "skipped": True,
+                "cadence_skipped": True,
+                "reason": "unchanged_input_fingerprint",
+                "input_fingerprint": input_fingerprint,
+                "score_mode": "feature_maturity_v2",
+                "score_count": len(score_records),
+                "evidence_count": len(evidence_records),
+                "feature_score_mode": "primary",
+                "feature_score_count": len(feature_score_records),
+                "generated_score_count": 0,
+                "hash_score_legacy_count": 0,
+                "legacy_hash_comparison_count": len(feature_score_records),
+                "comparison_count": min(len(feature_score_records), len(score_records)),
+                "feature_score_report_count": 1 if feature_score_records else 0,
+                "feature_score_live_applied": False,
+                "prototype_aligned_score_count": len(feature_score_records),
+                "maturity_dimension_count": len(MATURITY_DIMENSION_KEYS),
+                "maturity_dimension_keys": list(MATURITY_DIMENSION_KEYS),
+                "maturity_live_applied": False,
+                "score_fingerprints": _fingerprints(score_records),
+                "actual_approve": False,
+                "actual_execute": False,
+                "self_evolution_triggered": False,
+                "scores_path": str(self.scores_path),
+                "feature_scores_path": str(self.feature_scores_path),
+                "evidence_path": str(self.evidence_path),
+                **collection_stats,
+            }
+            _append_jsonl(self.runs_path, result)
+            append_audit(
+                store.roots.audit_path,
+                action="evidence_scoring_run_skipped",
+                status="ok",
+                target=str(self.module_root),
+                details={
+                    "reason": "unchanged_input_fingerprint",
+                    "input_fingerprint": input_fingerprint,
+                    "score_count": len(score_records),
+                    "generated_score_count": 0,
+                    "actual_execute": False,
+                },
+            )
+            return result
+
         subject_stats = _subject_signal_stats(subjects)
         evidence_records: list[dict[str, Any]] = []
         score_records: list[dict[str, Any]] = []
@@ -136,11 +200,15 @@ class EvidenceScoringModule:
             "module": "evidence_scoring",
             "profile": self.profile,
             "status": "ok",
+            "skipped": False,
+            "cadence_skipped": False,
+            "input_fingerprint": input_fingerprint,
             "score_mode": "feature_maturity_v2",
             "score_count": len(score_records),
             "evidence_count": len(evidence_records),
             "feature_score_mode": "primary",
             "feature_score_count": len(feature_score_records),
+            "generated_score_count": len(score_records),
             "hash_score_legacy_count": 0,
             "legacy_hash_comparison_count": len(feature_score_records),
             "comparison_count": min(len(feature_score_records), len(score_records)),
@@ -159,6 +227,7 @@ class EvidenceScoringModule:
             "evidence_path": str(self.evidence_path),
             **collection_stats,
         }
+        _append_jsonl(self.runs_path, result)
         append_audit(
             store.roots.audit_path,
             action="evidence_scoring_run_written",
@@ -170,6 +239,7 @@ class EvidenceScoringModule:
                 "score_mode": "feature_maturity_v2",
                 "feature_score_mode": "primary",
                 "feature_score_count": len(feature_score_records),
+                "generated_score_count": len(score_records),
                 "hash_score_legacy_count": 0,
                 "legacy_hash_comparison_count": len(feature_score_records),
                 "comparison_count": min(len(feature_score_records), len(score_records)),
@@ -180,6 +250,7 @@ class EvidenceScoringModule:
                 "actual_approve": False,
                 "actual_execute": False,
                 "self_evolution_triggered": False,
+                "input_fingerprint": input_fingerprint,
                 **collection_stats,
             },
         )
@@ -293,6 +364,9 @@ class EvidenceScoringModule:
         scores = self.read_scores()
         feature_scores = self.read_feature_scores()
         evidence = self.read_evidence()
+        runs = _read_jsonl(self.runs_path)
+        skipped_runs = [record for record in runs if record.get("skipped") is True]
+        latest_run = runs[-1] if runs else {}
         subject_counts: dict[str, int] = {}
         for score in scores:
             subject_kind = str(score.get("subject_kind", ""))
@@ -324,6 +398,12 @@ class EvidenceScoringModule:
             "subject_counts": dict(sorted(subject_counts.items())),
             "working_subject_count": subject_counts.get("working", 0),
             "expired_used_in_scoring_count": expired_used,
+            "run_report_count": len(runs),
+            "skipped_run_count": len(skipped_runs),
+            "latest_skipped": latest_run.get("skipped") is True,
+            "latest_cadence_skipped": latest_run.get("cadence_skipped") is True,
+            "latest_skip_reason": str(latest_run.get("reason") or ""),
+            "latest_input_fingerprint": str(latest_run.get("input_fingerprint") or ""),
             "delivery_mode": "no-send",
             "actual_approve": False,
             "actual_execute": False,
@@ -501,6 +581,34 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _latest_jsonl_record(path: Path) -> dict[str, Any]:
+    records = _read_jsonl(path)
+    return records[-1] if records else {}
+
+
+def _input_fingerprint(
+    *,
+    subjects: list[dict[str, str]],
+    collection_stats: dict[str, int],
+    profile: str,
+) -> str:
+    payload = {
+        "profile": profile,
+        "score_mode": "feature_maturity_v2",
+        "maturity_dimensions": list(MATURITY_DIMENSION_KEYS),
+        "subjects": subjects,
+        "collection_stats": collection_stats,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _expired_working_subject_count(evidence: list[dict[str, Any]], hermes_home: Path) -> int:

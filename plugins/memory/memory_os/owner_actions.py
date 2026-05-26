@@ -107,6 +107,10 @@ def expression_feedback_ledger_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
 
 
+def right_brain_expression_outcomes_path(roots: MemoryOSRoots) -> Path:
+    return roots.hermes_home / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+
+
 def owner_review_deliveries_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "owner_review_deliveries.jsonl"
 
@@ -1349,6 +1353,11 @@ def apply_owner_action(
     if action_type not in ACTION_TYPES:
         return _action_error(store, action_type, target, owner_id, channel, "invalid_action_type", apply=apply)
     target_type, target_id = _normalize_target(action_type, target)
+    original_target_id = target_id
+    if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES and target_type == "expression":
+        outcome = _find_right_brain_expression_outcome(store.roots, target_id)
+        if outcome and str(outcome.get("outcome_id") or ""):
+            target_id = str(outcome.get("outcome_id") or "")
     idempotency_key = _idempotency_key(
         owner_id=owner_id,
         target_type=target_type,
@@ -1396,6 +1405,8 @@ def apply_owner_action(
         note=note,
         rating=rating,
     )
+    if original_target_id != target_id:
+        record["original_target_id"] = original_target_id
     result_ref: dict[str, Any] = {}
     if apply:
         result_ref = _apply_state_transition(store, record, note=note, rating=rating)
@@ -1756,7 +1767,13 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         return {"ticket_id": ticket["ticket_id"], "target_id": target_id}
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         feedback = _append_expression_feedback(store, record, note=note)
-        return {"feedback_id": feedback["feedback_id"], "draft_id": target_id}
+        return {
+            "feedback_id": feedback["feedback_id"],
+            "draft_id": feedback["draft_id"],
+            "outcome_id": feedback.get("outcome_id", ""),
+            "request_id": feedback.get("request_id", ""),
+            "outcome_feedback_linked": bool(feedback.get("outcome_feedback_linked")),
+        }
     return {}
 
 
@@ -1842,6 +1859,12 @@ def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[s
 
 def _append_expression_feedback(store: MemoryOSStore, record: dict[str, Any], *, note: str) -> dict[str, Any]:
     created_at = datetime.now(timezone.utc)
+    target_id = str(record["target_id"])
+    outcome = _find_right_brain_expression_outcome(store.roots, target_id)
+    linked_outcome_id = str(outcome.get("outcome_id") or "") if outcome else ""
+    linked_request_id = str(outcome.get("request_id") or "") if outcome else ""
+    feedback_target_id = linked_outcome_id or target_id
+    expression_target_id = str(record.get("original_target_id") or target_id)
     feedback = {
         "schema_version": EXPRESSION_FEEDBACK_SCHEMA_VERSION,
         "feedback_id": f"efb_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
@@ -1850,10 +1873,19 @@ def _append_expression_feedback(store: MemoryOSStore, record: dict[str, Any], *,
         "owner_id": str(record["owner_id"]),
         "channel": str(record.get("channel") or "unknown"),
         "owner_action_id": str(record["owner_action_id"]),
-        "draft_id": str(record["target_id"]),
+        "draft_id": feedback_target_id,
+        "expression_target_id": expression_target_id,
         "action_type": str(record["action_type"]),
         "note": _bounded_text(note, 240),
         "source": "owner_action",
+        "outcome_feedback_linked": bool(outcome),
+        "outcome_id": linked_outcome_id,
+        "request_id": linked_request_id,
+        "outcome_observed_at": str(outcome.get("observed_at") or "") if outcome else "",
+        "policy_version": outcome.get("policy_version") if outcome else None,
+        "outcome_silent": outcome.get("silent") if outcome else None,
+        "outcome_preview_chars": int(outcome.get("outcome_preview_chars") or 0) if outcome else 0,
+        "outcome_preview": "",
         "raw_body_included": False,
         "live_policy_changed": False,
         "actual_send": False,
@@ -1871,10 +1903,32 @@ def _append_expression_feedback(store: MemoryOSStore, record: dict[str, Any], *,
             "draft_id": feedback["draft_id"],
             "action_type": feedback["action_type"],
             "owner_action_id": record["owner_action_id"],
+            "outcome_id": feedback["outcome_id"],
+            "request_id": feedback["request_id"],
+            "outcome_feedback_linked": feedback["outcome_feedback_linked"],
             "live_policy_changed": False,
         },
     )
     return feedback
+
+
+def _find_right_brain_expression_outcome(roots: MemoryOSRoots, target_id: str) -> dict[str, Any] | None:
+    records = [
+        record
+        for record in _read_jsonl(right_brain_expression_outcomes_path(roots))
+        if isinstance(record, dict)
+    ]
+    if not records:
+        return None
+    normalized = str(target_id or "").strip()
+    if normalized in {"latest", "latest_outcome", "last", "last_outcome"}:
+        return records[-1]
+    for record in reversed(records):
+        if str(record.get("outcome_id") or "") == normalized:
+            return record
+        if str(record.get("request_id") or "") == normalized:
+            return record
+    return None
 
 
 def _append_action_specific_ledger(store: MemoryOSStore, record: dict[str, Any]) -> None:

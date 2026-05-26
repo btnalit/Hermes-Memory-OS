@@ -296,6 +296,22 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "expression_feedback_live_policy_changed"})
             else:
                 passed.append({"code": "expression_feedback_report_only"})
+            linked_missing = int(expression_feedback.get("linked_outcome_missing_count") or 0)
+            linked_count = int(expression_feedback.get("linked_outcome_count") or 0)
+            if linked_missing > 0:
+                fail.append(
+                    {
+                        "code": "right_brain_expression_feedback_missing_outcome",
+                        "linked_outcome_missing_count": linked_missing,
+                    }
+                )
+            elif linked_count > 0:
+                passed.append(
+                    {
+                        "code": "right_brain_expression_feedback_linked",
+                        "linked_outcome_count": linked_count,
+                    }
+                )
         expired_used = int(evidence.get("expired_used_in_scoring_count") or 0)
         if expired_used > 0:
             warn.append(
@@ -330,6 +346,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 warn.append({"code": "left_brain_feature_scoring_primary_incomplete", "value": evidence})
         elif int(evidence.get("score_count") or 0) > 0:
             warn.append({"code": "left_brain_feature_scoring_missing", "score_count": evidence.get("score_count")})
+        skipped_run_count = int(evidence.get("skipped_run_count") or 0)
+        if skipped_run_count > 0 and evidence.get("latest_cadence_skipped") is True:
+            passed.append(
+                {
+                    "code": "evidence_scoring_cadence_skip_visible",
+                    "skipped_run_count": skipped_run_count,
+                    "latest_skip_reason": evidence.get("latest_skip_reason"),
+                }
+            )
         maturity_live_applied = evidence.get("maturity_live_applied") is True
         prototype_aligned_count = int(evidence.get("prototype_aligned_score_count") or 0)
         maturity_dimension_count = int(evidence.get("maturity_dimension_count") or 0)
@@ -368,6 +393,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "right_brain_expression_outcome_raw_body_included", "value": right_brain_adapter})
             elif int(right_brain_adapter.get("outcome_internal_marker_count") or 0) > 0:
                 fail.append({"code": "right_brain_expression_outcome_internal_marker", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("outcome_feedback_missing_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_feedback_missing_outcome", "value": right_brain_adapter})
             elif int(right_brain_adapter.get("outcome_count") or 0) > 0:
                 passed.append(
                     {
@@ -375,6 +402,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "outcome_count": right_brain_adapter.get("outcome_count"),
                         "latest_policy_version": right_brain_adapter.get("latest_outcome_policy_version"),
                         "latest_silent": right_brain_adapter.get("latest_outcome_silent"),
+                        "outcome_feedback_count": right_brain_adapter.get("outcome_feedback_count"),
                     }
                 )
             elif int(right_brain_adapter.get("request_count") or 0) > 0:
@@ -904,6 +932,23 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     selected_by_source = rolling.get("selected_by_source_class", {}) if isinstance(rolling, dict) else {}
     if selected_by_source and set(selected_by_source) == {"working"}:
         warn.append({"code": "deep_reflection_source_skew", "selected_by_source_class": selected_by_source})
+    if "latest_expired_working_used_in_analysis_count" in deep_reflection:
+        expired_used_in_dr = int(deep_reflection.get("latest_expired_working_used_in_analysis_count") or 0)
+        if expired_used_in_dr > 0:
+            warn.append(
+                {
+                    "code": "deep_reflection_expired_working_used_in_analysis",
+                    "expired_used_in_analysis_count": expired_used_in_dr,
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "deep_reflection_expired_working_not_used",
+                    "expired_skipped_count": int(deep_reflection.get("latest_expired_working_skipped_count") or 0),
+                    "active_input_count": int(deep_reflection.get("latest_active_working_input_count") or 0),
+                }
+            )
 
     compaction = snapshot.get("compaction", {})
     if int(compaction.get("focus_none_count") or 0) > 0:
@@ -1129,6 +1174,9 @@ def _deep_reflection_summary(status: dict[str, Any]) -> dict[str, Any]:
         "injection_mode": status.get("injection_mode"),
         "latest": status.get("latest_injection_source_classes"),
         "rolling": status.get("rolling_injection_source_classes"),
+        "active_working_input_count": status.get("latest_active_working_input_count"),
+        "expired_working_skipped_count": status.get("latest_expired_working_skipped_count"),
+        "expired_working_used_in_analysis_count": status.get("latest_expired_working_used_in_analysis_count"),
         "actual_send": status.get("actual_send"),
         "actual_execute": status.get("actual_execute"),
         "actual_identity_write": status.get("actual_identity_write"),
@@ -1191,6 +1239,8 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "expression_draft_missing_count": summary.get("expression_draft_missing_count"),
         "latest_expression_draft_missing_count": summary.get("latest_expression_draft_missing_count"),
         "expression_feedback_count": summary.get("expression_feedback_count"),
+        "expression_feedback_linked_outcome_count": summary.get("expression_feedback_linked_outcome_count"),
+        "expression_feedback_unlinked_count": summary.get("expression_feedback_unlinked_count"),
         "speak_gate_evaluated_count": summary.get("speak_gate_evaluated_count"),
         "speak_gate_missing_evaluation_count": summary.get("speak_gate_missing_evaluation_count"),
         "latest_speak_gate_missing_evaluation_count": summary.get("latest_speak_gate_missing_evaluation_count"),
@@ -1211,6 +1261,8 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "right_brain_adapter_latest_outcome_silent": summary.get("right_brain_adapter_latest_outcome_silent"),
         "right_brain_adapter_latest_outcome_policy_version": summary.get("right_brain_adapter_latest_outcome_policy_version"),
         "right_brain_adapter_outcome_internal_marker_count": summary.get("right_brain_adapter_outcome_internal_marker_count"),
+        "right_brain_adapter_outcome_feedback_count": summary.get("right_brain_adapter_outcome_feedback_count"),
+        "right_brain_adapter_latest_outcome_feedback_count": summary.get("right_brain_adapter_latest_outcome_feedback_count"),
     }
 
 
@@ -1869,7 +1921,9 @@ keys = [
   "self_evolution_proposals_enabled","wandering_seed_enabled",
   "current_injection_exists","latest_injection_source_classes",
   "rolling_injection_source_classes","actual_send","actual_execute",
-  "actual_identity_write","actual_crystallized_approval"
+  "actual_identity_write","actual_crystallized_approval",
+  "latest_active_working_input_count","latest_expired_working_skipped_count",
+  "latest_expired_working_used_in_analysis_count"
 ]
 print(json.dumps({k:status.get(k) for k in keys if k in status}, ensure_ascii=False, sort_keys=True))
 """
@@ -1971,6 +2025,32 @@ def module_artifact_summary():
         if right_brain_expression_outcomes and isinstance(right_brain_expression_outcomes[-1], dict)
         else {}
     )
+    right_brain_outcome_ids = {
+        str(item.get("outcome_id") or "")
+        for item in right_brain_expression_outcomes
+        if isinstance(item, dict) and str(item.get("outcome_id") or "")
+    }
+    latest_right_brain_outcome_id = str(latest_right_brain_expression_outcome.get("outcome_id") or "")
+    expression_feedback_linked = [
+        item
+        for item in expression_feedback
+        if isinstance(item, dict) and str(item.get("outcome_id") or "")
+    ]
+    expression_feedback_linked_missing = [
+        item
+        for item in expression_feedback_linked
+        if str(item.get("outcome_id") or "") not in right_brain_outcome_ids
+    ]
+    right_brain_outcome_feedback_count = sum(
+        1
+        for item in expression_feedback_linked
+        if str(item.get("outcome_id") or "") in right_brain_outcome_ids
+    )
+    latest_right_brain_outcome_feedback_count = sum(
+        1
+        for item in expression_feedback_linked
+        if latest_right_brain_outcome_id and str(item.get("outcome_id") or "") == latest_right_brain_outcome_id
+    )
     ops_gate_reports = _read_jsonl("/root/.hermes/system-modules/ops_gate/reports.jsonl")
     proposal_followup_action_counts = {}
     for report_item in ops_gate_reports:
@@ -2023,6 +2103,10 @@ def module_artifact_summary():
         "subject_counts": evidence.get("subject_counts"),
         "working_subject_count": evidence.get("working_subject_count"),
         "expired_used_in_scoring_count": evidence.get("expired_used_in_scoring_count"),
+        "run_report_count": evidence.get("run_report_count"),
+        "skipped_run_count": evidence.get("skipped_run_count"),
+        "latest_cadence_skipped": evidence.get("latest_cadence_skipped"),
+        "latest_skip_reason": evidence.get("latest_skip_reason"),
       },
       "proposal_queue": {
         "candidate_count": proposal.get("candidate_count"),
@@ -2052,6 +2136,11 @@ def module_artifact_summary():
         "report_count": deep_reflection.get("report_count"),
         "analysis_artifact_count": deep_reflection.get("analysis_artifact_count"),
         "current_injection_exists": deep_reflection.get("current_injection_exists"),
+        "latest_active_working_input_count": deep_reflection.get("latest_active_working_input_count"),
+        "latest_expired_working_skipped_count": deep_reflection.get("latest_expired_working_skipped_count"),
+        "latest_expired_working_used_in_analysis_count": deep_reflection.get(
+            "latest_expired_working_used_in_analysis_count"
+        ),
         "wandering_seed_count": len(_read_jsonl("/root/.hermes/system-modules/deep_reflection/wandering_seeds.jsonl")),
       },
       "ops_gate": {
@@ -2075,6 +2164,14 @@ def module_artifact_summary():
         "feedback_count": len(expression_feedback),
         "live_policy_changed_count": sum(1 for item in expression_feedback if isinstance(item, dict) and item.get("live_policy_changed") is True),
         "raw_body_included_count": sum(1 for item in expression_feedback if isinstance(item, dict) and item.get("raw_body_included") is True),
+        "linked_outcome_count": len(expression_feedback_linked),
+        "unlinked_count": sum(1 for item in expression_feedback if isinstance(item, dict) and not str(item.get("outcome_id") or "")),
+        "linked_outcome_missing_count": len(expression_feedback_linked_missing),
+        "latest_linked_outcome_id": (
+            expression_feedback_linked[-1].get("outcome_id")
+            if expression_feedback_linked and isinstance(expression_feedback_linked[-1], dict)
+            else ""
+        ),
       },
       "right_brain_expression_adapter": {
         "request_count": len(right_brain_expression_requests),
@@ -2136,6 +2233,9 @@ def module_artifact_summary():
             for item in right_brain_expression_outcomes
             if isinstance(item, dict)
         ),
+        "outcome_feedback_count": right_brain_outcome_feedback_count,
+        "latest_outcome_feedback_count": latest_right_brain_outcome_feedback_count,
+        "outcome_feedback_missing_count": len(expression_feedback_linked_missing),
       },
       "mailbox": {
         "mailbox_exists": mailbox.get("mailbox_exists"),
@@ -2213,6 +2313,8 @@ def expression_artifact_summary():
       "expression_draft_missing_count": expression_draft_missing_count,
       "latest_expression_draft_missing_count": latest_expression_draft_missing_count,
       "expression_feedback_count": modules.get("expression_feedback", {}).get("feedback_count") if isinstance(modules.get("expression_feedback"), dict) else None,
+      "expression_feedback_linked_outcome_count": modules.get("expression_feedback", {}).get("linked_outcome_count") if isinstance(modules.get("expression_feedback"), dict) else None,
+      "expression_feedback_unlinked_count": modules.get("expression_feedback", {}).get("unlinked_count") if isinstance(modules.get("expression_feedback"), dict) else None,
       "speak_gate_evaluated_count": speak_gate_evaluated_count,
       "speak_gate_missing_evaluation_count": speak_gate_missing_evaluation_count,
       "latest_speak_gate_missing_evaluation_count": latest_speak_gate_missing_evaluation_count,
@@ -2234,6 +2336,8 @@ def expression_artifact_summary():
       "right_brain_adapter_latest_outcome_silent": right_brain_adapter.get("latest_outcome_silent"),
       "right_brain_adapter_latest_outcome_policy_version": right_brain_adapter.get("latest_outcome_policy_version"),
       "right_brain_adapter_outcome_internal_marker_count": right_brain_adapter.get("outcome_internal_marker_count"),
+      "right_brain_adapter_outcome_feedback_count": right_brain_adapter.get("outcome_feedback_count"),
+      "right_brain_adapter_latest_outcome_feedback_count": right_brain_adapter.get("latest_outcome_feedback_count"),
     }
 
 def module_cadence_summary():

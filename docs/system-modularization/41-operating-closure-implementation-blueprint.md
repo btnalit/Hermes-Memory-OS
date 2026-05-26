@@ -1189,15 +1189,31 @@ Completed baseline:
    visible without modifying Hermes cron or systemd timers.
 9. P1-T first split is deployed: SelfEvolution adds module-local same-day /
    same-signal skip gating while leaving Hermes cron/systemd timers unchanged.
+10. P1-R outcome-feedback linkage is deployed: owner expression feedback can
+    link to recorded final Hermes-agent outcomes by `outcome_id` /
+    `request_id` / `policy_version`, monitor reports linked/missing counts,
+    and EvidenceScoring/SelfEvolution see the feedback without duplicate
+    proposal spam.
+11. P1-S DeepReflection expired-working hygiene is deployed: DR input
+    collection skips expired working items, records active/skipped/used counts,
+    and live monitor reports `deep_reflection_expired_working_not_used`.
+12. P1-T second split is deployed: EvidenceScoring records an input
+    fingerprint, skips unchanged reruns with `cadence_skipped=true`, and
+    exposes skipped run counts through module status, cadence report, and
+    monitor.
 
 Next runtime order:
 
-1. P1-R outcome feedback volume: link recorded outcomes to owner feedback and
-   policy/prompt/cadence proposals without adding Memory-OS transport.
-2. P1-S DeepReflection expired-working hygiene and feedback backflow checks.
-3. P1-T choose the next module split from generated/skipped/error/duplicate
-   counters after SelfEvolution evidence is stable.
-4. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
+1. P1-S feedback backflow quality checks for proposal usefulness, without
+   direct policy/prompt/cadence mutation.
+2. P1-T choose the next module split from refreshed generated/skipped/error/
+   duplicate counters after SelfEvolution and EvidenceScoring evidence is
+   stable.
+3. P1-Q extend explicit apply only for one concrete proposal kind with
+   owner/OpsGate evidence, bounded runtime target, rollback, and monitor
+   fields.
+4. P1-P timestamp / aging quality.
+5. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
    bounded-live gate.
 
 This order is deliberate:
@@ -1205,10 +1221,11 @@ This order is deliberate:
 - SelfEvolution is the first split because it already has quality gates and
   duplicate evidence, and repeated owner-facing proposals are the highest
   visible cadence risk;
-- right-brain now has outcome evidence after delivery, so the next gap is
-  reaction volume and cadence evaluation, not another send path;
-- cadence report came before scheduler changes; the next cadence slice must add
-  a module-local skip gate before changing timers;
+- right-brain now has outcome evidence and one linked owner-reaction smoke, so
+  the next right-brain gap is reaction volume and cadence evaluation, not
+  another send path;
+- cadence report came before scheduler changes; each cadence slice must add a
+  module-local skip/error/duplicate gate before changing timers;
 - left-brain checker comes before claiming proposal quality maturity;
 - LLM capability must stay attached to Hermes agent / approved bounded adapter
   surfaces, not a Memory-OS-owned conversation model;

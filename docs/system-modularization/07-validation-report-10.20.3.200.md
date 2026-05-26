@@ -14421,3 +14421,401 @@ Conclusion:
 - Hard boundaries stayed false.
 - Remaining `module_cadence_split_pending` is expected because 10 other modules
   still need split decisions based on counters.
+
+## 2026-05-27 - P1-R Outcome Feedback Linkage Runtime Evidence
+
+Scope:
+
+- Link final Hermes-agent right-brain expression outcomes to owner expression
+  feedback without changing Hermes transport, cron, or delivery.
+- Keep Memory-OS responsibility limited to bounded outcome lookup, feedback
+  ledger fields, OwnerActionProcessor result references, and monitor counters.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=38/40/41 P1-R, current right_brain_expression_adapter outcomes, and 10.20.3.200 monitor
+finding_type=feedback/monitor gap
+owning_seam=OwnerActionProcessor + expression_feedback_ledger + monitor
+reverse_scope=Hermes owns expression wording and delivery; Memory-OS records bounded outcome-feedback linkage only
+evidence_loop=owner action tests + monitor tests + live outcome feedback smoke + monitor
+monitor_or_validation_fields=expression_feedback.linked_outcome_count,linked_outcome_missing_count,right_brain_expression_adapter.outcome_feedback_count,latest_outcome_feedback_count
+promotion_signal=owner feedback references a recorded outcome and enters EvidenceScoring/SelfEvolution without duplicate proposal spam
+stop_or_rollback_signal=missing linked outcome; raw body included; live policy changed directly; actual_send/actual_execute true
+external_review=not required for this bounded ledger/monitor slice
+```
+
+Local validation:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py tests\scripts\test_memory_os_3_200_monitor.py -q
+94 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+updated:
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+```
+
+Live owner-action smoke:
+
+```text
+latest_outcome_id=rbout_aa416c239b761e2b
+latest_request_id=rbexpr_20260526T135329054000Z
+latest_policy_version=1
+action=too_mechanical
+target=expression:rbout_aa416c239b761e2b
+
+result.status=ok
+result_ref.outcome_feedback_linked=true
+result_ref.outcome_id=rbout_aa416c239b761e2b
+result_ref.request_id=rbexpr_20260526T135329054000Z
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+```
+
+Backflow smoke:
+
+```text
+EvidenceScoring.score_all status=ok
+score_mode=feature_maturity_v2
+score_count=205
+expression_feedback_subject_count=3
+expired_used_in_scoring_count=0
+
+SelfEvolution.run_once status=ok
+proposal_class=expression_policy:too_mechanical
+proposal_created=false
+skipped=true
+cadence_skipped=true
+reason=cadence_same_day_same_signal
+previous_proposal_id=prop_20260526T163619303093Z_7340cb3573
+actual_execute=false
+```
+
+Monitor after smoke:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes right_brain_expression_feedback_linked
+PASS includes right_brain_expression_outcome_recorded
+
+ModuleArtifacts.expression_feedback.feedback_count=3
+ModuleArtifacts.expression_feedback.linked_outcome_count=1
+ModuleArtifacts.expression_feedback.linked_outcome_missing_count=0
+ModuleArtifacts.expression_feedback.unlinked_count=2
+
+ModuleArtifacts.right_brain_expression_adapter.outcome_count=2
+ModuleArtifacts.right_brain_expression_adapter.outcome_feedback_count=1
+ModuleArtifacts.right_brain_expression_adapter.latest_outcome_feedback_count=1
+ModuleArtifacts.right_brain_expression_adapter.latest_outcome_id=rbout_aa416c239b761e2b
+
+ExpressionArtifacts.expression_feedback_linked_outcome_count=1
+ExpressionArtifacts.right_brain_adapter_outcome_feedback_count=1
+ExpressionArtifacts.right_brain_adapter_latest_outcome_feedback_count=1
+```
+
+Conclusion:
+
+- `P1-R` outcome-feedback linkage is live on the test host.
+- The path is now:
+
+```text
+Hermes-agent expression outcome
+-> owner expression feedback
+-> expression_feedback_ledger with outcome_id/request_id/policy_version
+-> EvidenceScoring expression_feedback subject
+-> SelfEvolution expression_policy class
+-> same-day/same-signal cadence gate prevents duplicate proposal spam
+```
+
+- This does not close mature right-brain learning volume yet. It establishes
+  the measurable runtime path and keeps transport/delivery owned by Hermes.
+## 2026-05-27 - P1-S DeepReflection Expired-Working Hygiene Runtime Evidence
+
+Scope:
+
+- P1-S / RH-39 DeepReflection input hygiene.
+- This slice only prevents expired working items from driving DeepReflection
+  analysis and exposes monitor fields.
+- It does not change Hermes transport, expression delivery, owner approval, or
+  generic execution behavior.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth: 39-left-brain-governance-quality-contract.md; 40-memory-os-unified-control-plane.md; live monitor working expired counts
+finding_type: left-brain data hygiene / live monitor gap
+owning_seam: DeepReflection input collection and monitor evidence
+reverse_scope: Memory-OS owns bounded reflection input; Hermes owns agent/transport; no scheduler or delivery changes
+equivalent_contract_or_project_contract: 29 MemoryWriteSurface/MonitorEvidence; 36 DeepReflection closure row; 39 left-brain quality contract
+evidence_loop: failing local tests -> implementation -> local targeted/full tests -> 10.20.3.200 dry-run -> monitor summary
+monitor_or_validation_fields: latest_active_working_input_count; latest_expired_working_skipped_count; latest_expired_working_used_in_analysis_count; deep_reflection_expired_working_not_used
+promotion_signal: expired_working_used_in_analysis_count=0 with monitor PASS
+stop_or_rollback_signal: expired working text appears in DR input snapshot/themes, or monitor warns deep_reflection_expired_working_used_in_analysis
+external_review: not required for report-only/input-hygiene slice
+```
+
+Local TDD:
+
+```text
+python -m pytest tests\system_modularization\test_deep_reflection_module.py -q
+
+Initial failing tests:
+- test_deep_reflection_collect_inputs_skips_expired_working_items
+- test_deep_reflection_run_once_reports_expired_working_hygiene
+
+Failure signal:
+- missing working_item_hygiene
+- missing active/expired working result fields
+
+Final result:
+24 passed
+```
+
+Local monitor tests:
+
+```text
+python -m pytest tests\scripts\test_memory_os_3_200_monitor.py tests\system_modularization\test_deep_reflection_module.py -q
+
+Result:
+70 passed
+```
+
+Runtime deployment:
+
+```text
+scp plugins\modules\cognition\deep_reflection.py \
+  hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/cognition/deep_reflection.py
+```
+
+Live dry-run:
+
+```text
+ssh hermes-media "hermes memory-os-agent-os modules run-once --module deep_reflection --dry-run"
+```
+
+Result summary:
+
+```text
+status=ok
+dry_run=true
+active_working_input_count=8
+expired_working_skipped_count=158
+expired_working_used_in_analysis_count=0
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+```
+
+Status recheck:
+
+```text
+report_count=36
+latest_active_working_input_count=8
+latest_expired_working_skipped_count=158
+latest_expired_working_used_in_analysis_count=0
+actual_send=false
+actual_execute=false
+```
+
+Monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+```
+
+Result:
+
+```text
+status=WARN
+FAIL=[]
+PASS includes:
+- deep_reflection_expired_working_not_used
+- left_brain_expired_working_not_scored
+- left_brain_pipeline_check_visible
+
+DeepReflection:
+- active_working_input_count=8
+- expired_working_skipped_count=158
+- expired_working_used_in_analysis_count=0
+```
+
+Remaining WARN items are outside this slice:
+
+```text
+module_cadence_split_pending
+session_mirror_pending_sessions
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+Conclusion:
+
+- LIVE PASS / MONITOR PASS for P1-S DeepReflection expired-working hygiene.
+- Expired working items are still counted for observability but no longer enter
+  DeepReflection input or deterministic analysis.
+
+## 2026-05-27 - P1-T EvidenceScoring Cadence Split Runtime Evidence
+
+Scope:
+
+- P1-T second module-local cadence split.
+- Target module: `EvidenceScoring`.
+- This slice does not modify Hermes cron/systemd timers and does not add a
+  Memory-OS scheduler. It only prevents unchanged scoring input from rewriting
+  evidence/score artifacts.
+
+Selection basis:
+
+```text
+Refreshed cadence report before implementation:
+- evidence_scoring.generated_count=205
+- evidence_scoring.skipped_count=0
+- target_cadence_class=daily_or_on_new_signal
+
+Reason:
+- EvidenceScoring had the largest current generated artifact count after the
+  existing SelfEvolution split.
+- speak_gate.error_count=15 remains a historical/missing-evaluation signal,
+  not a timer split by itself.
+```
+
+Dynamic closure preflight:
+
+```text
+source_of_truth: P1-T roadmap, 41 blueprint, live module_cadence counters
+finding_type: module cadence / repeated artifact generation
+owning_seam: EvidenceScoring.score_all module-local run gate
+reverse_scope: Hermes keeps scheduler ownership; Memory-OS only adds input-fingerprint skip evidence
+equivalent_contract_or_project_contract: 36 cadence classification; 39 left-brain governance quality; 40 control plane
+evidence_loop: failing local TDD -> implementation -> cadence-report counter test -> live two-run smoke -> live cadence report -> monitor
+monitor_or_validation_fields: skipped_run_count; latest_cadence_skipped; latest_skip_reason; evidence_scoring_cadence_skip_visible
+promotion_signal: unchanged second run returns cadence_skipped=true and generated_score_count=0
+stop_or_rollback_signal: new input is incorrectly skipped, scores disappear, or boundary fields change
+external_review: not required for module-local report-only skip gate
+```
+
+Local TDD:
+
+```text
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py -q
+
+Initial failure:
+- missing skipped/cadence_skipped/generated_score_count fields
+
+Final result:
+12 passed
+```
+
+Local cadence/monitor tests:
+
+```text
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py tests\scripts\test_memory_os_module_cadence_report.py tests\scripts\test_memory_os_3_200_monitor.py -q
+
+Result:
+61 passed
+```
+
+Runtime deployment:
+
+```text
+scp plugins\modules\evidence\scoring.py \
+  hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/evidence/scoring.py
+
+scp scripts\memory_os_module_cadence_report.py \
+  hermes-media:/root/.hermes/scripts/memory_os_module_cadence_report.py
+```
+
+Live two-run smoke:
+
+```text
+first.status=ok
+first.skipped=false
+first.cadence_skipped=false
+first.score_count=514
+first.generated_score_count=514
+
+second.status=ok
+second.skipped=true
+second.cadence_skipped=true
+second.reason=unchanged_input_fingerprint
+second.score_count=514
+second.generated_score_count=0
+
+status.run_report_count=2
+status.skipped_run_count=1
+status.latest_cadence_skipped=true
+status.latest_skip_reason=unchanged_input_fingerprint
+status.expired_used_in_scoring_count=0
+```
+
+Live cadence report:
+
+```text
+python3 /root/.hermes/scripts/memory_os_module_cadence_report.py --apply
+
+evidence_scoring.generated_count=514
+evidence_scoring.skipped_count=1
+evidence_scoring.run_count=515
+evidence_scoring.error_count=0
+boundary.cron_modified=false
+actual_send=false
+actual_execute=false
+```
+
+Monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+```
+
+Result:
+
+```text
+status=WARN
+FAIL=[]
+PASS includes:
+- evidence_scoring_cadence_skip_visible
+- left_brain_feature_scoring_primary_ok
+- left_brain_expired_working_not_scored
+
+ModuleArtifacts.evidence:
+- score_count=514
+- skipped_run_count=1
+- latest_cadence_skipped=true
+- latest_skip_reason=unchanged_input_fingerprint
+```
+
+Remaining WARN items are outside this slice:
+
+```text
+module_cadence_split_pending
+session_mirror_pending_sessions
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+Conclusion:
+
+- LIVE PASS / MONITOR PASS for EvidenceScoring module-local cadence split.
+- This is not production cadence maturity yet; it is the second safe local skip
+  gate after SelfEvolution.

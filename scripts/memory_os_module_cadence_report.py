@@ -418,6 +418,11 @@ def _observed_module_counters(hermes_home: Path, cognitive_reports: list[dict[st
         counters,
         "evidence_scoring",
         generated_count=len(_read_jsonl(hermes_home / "system-modules" / "evidence_scoring" / "feature_scores.jsonl")),
+        skipped_count=sum(
+            1
+            for item in _read_jsonl(hermes_home / "system-modules" / "evidence_scoring" / "runs.jsonl")
+            if isinstance(item, dict) and (item.get("skipped") is True or item.get("cadence_skipped") is True)
+        ),
         error_count=_jsonl_error_count(hermes_home / "system-modules" / "evidence_scoring" / "feature_scores.jsonl"),
     )
     _merge_artifact_counter(

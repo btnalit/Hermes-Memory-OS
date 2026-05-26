@@ -1108,10 +1108,11 @@ Stop signal:
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
-Status: runtime outcome baseline deployed on `10.20.3.200`: P1-R
+Status: runtime outcome-feedback baseline deployed on `10.20.3.200`: P1-R
 draft/SpeakGate, owner preview, expression feedback ledger, Hermes-agent
-expression adapter, expression-policy apply, and final expression outcome
-ledger are live with WARN-only monitor evidence and no hard failures.
+expression adapter, expression-policy apply, final expression outcome ledger,
+and outcome-linked owner feedback are live with WARN-only monitor evidence and
+no hard failures.
 
 Implementation blueprint:
 
@@ -1159,6 +1160,17 @@ Reason:
   `right_brain_adapter_latest_outcome_policy_version=1`,
   `right_brain_adapter_outcome_internal_marker_count=0`, and PASS
   `right_brain_expression_outcome_recorded`.
+- latest outcome-feedback monitor reports
+  `expression_feedback.linked_outcome_count=1`,
+  `expression_feedback.linked_outcome_missing_count=0`,
+  `right_brain_adapter_outcome_feedback_count=1`,
+  `right_brain_adapter_latest_outcome_feedback_count=1`, and PASS
+  `right_brain_expression_feedback_linked`.
+- live backflow smoke reports `expression_feedback_subject_count=3`; a
+  `too_mechanical` owner reaction reached SelfEvolution as
+  `proposal_class=expression_policy:too_mechanical`, then the same-day
+  same-signal cadence gate returned `proposal_created=false` and
+  `reason=cadence_same_day_same_signal`.
 
 Implemented runtime slices:
 
@@ -1176,12 +1188,14 @@ Implemented runtime slices:
 5. owner review bounded expression preview is deployed for shown speak items;
 6. Hermes-agent final expression outcomes are recorded from Hermes cron output
    as bounded outcome ledger entries without Memory-OS owning transport.
-7. expression feedback types: `like`, `too_mechanical`, `too_frequent`,
+7. final outcomes can be linked to owner feedback by `outcome_id`,
+   `request_id`, and `policy_version` without copying raw expression body;
+8. expression feedback types: `like`, `too_mechanical`, `too_frequent`,
    `boundary_private`, `off_voice`, `mute_period`;
-8. expression outcomes can enter GovernanceFeedback / SelfEvolution as
+9. expression outcomes can enter GovernanceFeedback / SelfEvolution as
    proposals, not direct prompt/cadence mutation;
-9. monitor fields listed in RH-38 are present for the deployed slices;
-10. owner/Hermes expression feedback tokens are visible in the digest and are
+10. monitor fields listed in RH-38 are present for the deployed slices;
+11. owner/Hermes expression feedback tokens are visible in the digest and are
    accepted through the structured review-reply tool, not only through SSH/CLI.
 
 Prototype-informed runtime slices:
@@ -1202,6 +1216,8 @@ Promotion signal:
 - expression feedback can produce owner-reviewed prompt/policy/frequency
   proposals, and bounded `expression_policy` proposals can be explicitly
   applied after owner approval plus OpsGate report-only review;
+- owner reactions can be linked back to recorded Hermes-agent expression
+  outcomes and counted by monitor;
 - Hermes owns delivery and all hard boundaries remain false.
 
 Stop signal:
@@ -1271,7 +1287,11 @@ Reason:
 - live monitor reports `prototype_aligned_score_count=508`,
   `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
   `left_brain_maturity_scoring_primary_ok`;
-- expired working handling in DeepReflection is still not fixed;
+- P1-S DeepReflection expired-working hygiene is deployed on `10.20.3.200`:
+  latest dry-run reports `active_working_input_count=8`,
+  `expired_working_skipped_count=158`,
+  `expired_working_used_in_analysis_count=0`, and monitor PASS
+  `deep_reflection_expired_working_not_used`;
 - approved proposals are visible and safe; the first bounded
   `expression_policy` proposal completed owner approval, OpsGate report-only
   review, and explicit policy apply; generic external execution remains future
@@ -1308,7 +1328,8 @@ Required design work:
    stale/terminal state;
 5. route MemorySources / owner / expression feedback into GovernanceFeedback as
    bounded evidence only;
-6. filter or explicitly downweight expired working in scoring and reflection;
+6. keep expired working filtered from scoring and DeepReflection, with monitor
+   visibility for any future regression;
 7. keep approved proposal follow-up visible and extend explicit apply only for
    proposal kinds with owner approval, OpsGate report-only evidence, bounded
    runtime target, rollback, and monitor fields;
@@ -1338,9 +1359,9 @@ Stop signal:
 
 ### P1-T - Prototype-Informed Module Cadence Split
 
-Status: report-only runtime baseline deployed on `10.20.3.200`; first runtime
-split deployed for `SelfEvolution` as a module-local same-day/same-signal skip
-gate; no Hermes cron/systemd scheduling changes have been made.
+Status: report-only runtime baseline deployed on `10.20.3.200`; runtime
+splits are deployed for `SelfEvolution` and `EvidenceScoring` as module-local
+skip gates; no Hermes cron/systemd scheduling changes have been made.
 
 Implementation blueprint:
 
@@ -1426,6 +1447,27 @@ Stop signal:
 - SelfEvolution still creates a new proposal for a same-day same-signal rerun;
 - SelfEvolution cadence skip hides an error, suppresses new distinct evidence,
   or changes `actual_execute` / `actual_send`.
+
+Second split decision:
+
+- target module: `EvidenceScoring`;
+- reason: refreshed live cadence counters show
+  `evidence_scoring.generated_count=205` before the split and
+  `skipped_count=0`, while target cadence is `daily_or_on_new_signal`;
+- prototype reference: `10.20.2.88` separates scoring/governance-style work
+  into staged pipelines, but Memory-OS keeps Hermes as scheduler owner and adds
+  a module-local input fingerprint instead of copying timer tables;
+- implementation: `EvidenceScoringModule.score_all()` records an
+  `input_fingerprint` and returns `skipped=true`,
+  `cadence_skipped=true`, `reason=unchanged_input_fingerprint` when the
+  subjects are unchanged and existing evidence/score artifacts are present;
+- live evidence: two consecutive `score_all` calls on `10.20.3.200` produced
+  first `generated_score_count=514`, then `generated_score_count=0`,
+  `cadence_skipped=true`, and monitor PASS
+  `evidence_scoring_cadence_skip_visible`;
+- cadence report evidence: latest report shows
+  `evidence_scoring.generated_count=514`, `skipped_count=1`,
+  `run_count=515`, `error_count=0`.
 
 ## Active P2 Queue
 

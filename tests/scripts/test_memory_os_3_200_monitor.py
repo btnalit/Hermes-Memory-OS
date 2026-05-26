@@ -650,6 +650,23 @@ def test_classify_snapshot_warns_when_expired_working_is_scored():
     assert any(item["code"] == "left_brain_expired_working_used_in_scoring" for item in classification["warn"])
 
 
+def test_classify_snapshot_tracks_deep_reflection_expired_working_hygiene():
+    snapshot = _healthy_snapshot()
+    snapshot["deep_reflection"]["latest_active_working_input_count"] = 3
+    snapshot["deep_reflection"]["latest_expired_working_skipped_count"] = 12
+    snapshot["deep_reflection"]["latest_expired_working_used_in_analysis_count"] = 0
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "deep_reflection_expired_working_not_used" for item in classification["pass"])
+
+    snapshot["deep_reflection"]["latest_expired_working_used_in_analysis_count"] = 2
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "deep_reflection_expired_working_used_in_analysis" for item in classification["warn"])
+
+
 def test_classify_snapshot_tracks_primary_feature_scoring_and_legacy_comparison():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
@@ -667,14 +684,20 @@ def test_classify_snapshot_tracks_primary_feature_scoring_and_legacy_comparison(
         "feature_score_live_applied": False,
         "owner_feedback_signal_count": 0,
         "expression_feedback_subject_count": 0,
+        "run_report_count": 2,
+        "skipped_run_count": 1,
+        "latest_cadence_skipped": True,
+        "latest_skip_reason": "unchanged_input_fingerprint",
     }
 
     classification = classify_snapshot(snapshot)
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
     assert any(item["code"] == "left_brain_feature_scoring_primary_ok" for item in classification["pass"])
+    assert any(item["code"] == "evidence_scoring_cadence_skip_visible" for item in classification["pass"])
     assert "feature_score_count" in rendered
     assert "legacy_hash_comparison_count" in rendered
+    assert "skipped_run_count" in rendered
 
     snapshot["module_artifacts"]["evidence"]["hash_score_legacy_count"] = 4
     classification = classify_snapshot(snapshot)
@@ -780,19 +803,35 @@ def test_classify_snapshot_tracks_right_brain_expression_outcomes():
         "outcome_actual_execute_count": 0,
         "outcome_raw_body_included_count": 0,
         "outcome_internal_marker_count": 0,
+        "outcome_feedback_count": 1,
+        "latest_outcome_feedback_count": 1,
+        "outcome_feedback_missing_count": 0,
+    }
+    snapshot["module_artifacts"]["expression_feedback"] = {
+        "feedback_count": 1,
+        "live_policy_changed_count": 0,
+        "raw_body_included_count": 0,
+        "linked_outcome_count": 1,
+        "unlinked_count": 0,
+        "linked_outcome_missing_count": 0,
     }
     snapshot["expression_artifacts"]["right_brain_adapter_request_count"] = 2
     snapshot["expression_artifacts"]["right_brain_adapter_outcome_count"] = 1
     snapshot["expression_artifacts"]["right_brain_adapter_latest_outcome_silent"] = False
     snapshot["expression_artifacts"]["right_brain_adapter_latest_outcome_policy_version"] = 1
     snapshot["expression_artifacts"]["right_brain_adapter_outcome_internal_marker_count"] = 0
+    snapshot["expression_artifacts"]["right_brain_adapter_outcome_feedback_count"] = 1
+    snapshot["expression_artifacts"]["right_brain_adapter_latest_outcome_feedback_count"] = 1
+    snapshot["expression_artifacts"]["expression_feedback_linked_outcome_count"] = 1
 
     classification = classify_snapshot(snapshot)
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
     assert not any(item["code"] == "right_brain_expression_outcome_missing" for item in classification["warn"])
     assert any(item["code"] == "right_brain_expression_outcome_recorded" for item in classification["pass"])
+    assert any(item["code"] == "right_brain_expression_feedback_linked" for item in classification["pass"])
     assert "right_brain_adapter_outcome_count" in rendered
+    assert "right_brain_adapter_outcome_feedback_count" in rendered
 
     snapshot["module_artifacts"]["right_brain_expression_adapter"]["outcome_internal_marker_count"] = 1
     snapshot["expression_artifacts"]["right_brain_adapter_outcome_internal_marker_count"] = 1
@@ -800,6 +839,25 @@ def test_classify_snapshot_tracks_right_brain_expression_outcomes():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "right_brain_expression_outcome_internal_marker" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_expression_feedback_links_missing_outcome():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["right_brain_expression_adapter"]["outcome_count"] = 1
+    snapshot["module_artifacts"]["right_brain_expression_adapter"]["outcome_feedback_missing_count"] = 1
+    snapshot["module_artifacts"]["expression_feedback"] = {
+        "feedback_count": 1,
+        "live_policy_changed_count": 0,
+        "raw_body_included_count": 0,
+        "linked_outcome_count": 1,
+        "unlinked_count": 0,
+        "linked_outcome_missing_count": 1,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "right_brain_expression_feedback_missing_outcome" for item in classification["fail"])
 
 
 def test_classify_snapshot_tracks_module_cadence_report():
@@ -1900,6 +1958,9 @@ def _healthy_module_artifacts() -> dict:
             "feedback_count": 0,
             "live_policy_changed_count": 0,
             "raw_body_included_count": 0,
+            "linked_outcome_count": 0,
+            "unlinked_count": 0,
+            "linked_outcome_missing_count": 0,
         },
         "right_brain_expression_adapter": {
             "request_count": 0,
@@ -1918,6 +1979,9 @@ def _healthy_module_artifacts() -> dict:
             "outcome_actual_execute_count": 0,
             "outcome_raw_body_included_count": 0,
             "outcome_internal_marker_count": 0,
+            "outcome_feedback_count": 0,
+            "latest_outcome_feedback_count": 0,
+            "outcome_feedback_missing_count": 0,
         },
         "mailbox": {"mailbox_exists": False, "would_send_count": 0},
     }
@@ -1934,6 +1998,8 @@ def _healthy_expression_artifacts() -> dict:
         "expression_draft_missing_count": 0,
         "latest_expression_draft_missing_count": 0,
         "expression_feedback_count": 0,
+        "expression_feedback_linked_outcome_count": 0,
+        "expression_feedback_unlinked_count": 0,
         "speak_gate_evaluated_count": 0,
         "speak_gate_missing_evaluation_count": 0,
         "latest_speak_gate_missing_evaluation_count": 0,
@@ -1951,4 +2017,6 @@ def _healthy_expression_artifacts() -> dict:
         "right_brain_adapter_latest_outcome_silent": None,
         "right_brain_adapter_latest_outcome_policy_version": None,
         "right_brain_adapter_outcome_internal_marker_count": 0,
+        "right_brain_adapter_outcome_feedback_count": 0,
+        "right_brain_adapter_latest_outcome_feedback_count": 0,
     }

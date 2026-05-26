@@ -103,6 +103,26 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
         + "\n",
         encoding="utf-8",
     )
+    evidence_root = home / "system-modules" / "evidence_scoring"
+    evidence_root.mkdir(parents=True)
+    (evidence_root / "runs.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "schema_version": "hermes.evidence_scoring_result.v0",
+                        "status": "ok",
+                        "skipped": True,
+                        "cadence_skipped": True,
+                        "reason": "unchanged_input_fingerprint",
+                    },
+                    ensure_ascii=False,
+                )
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     report = module.build_cadence_report(hermes_home=home, profile="main", apply=True)
 
@@ -143,6 +163,7 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
     }
     assert by_module["digest_consolidation"]["cadence_counters"]["generated_count"] == 1
     assert by_module["evidence_scoring"]["cadence_counters"]["error_count"] == 1
+    assert by_module["evidence_scoring"]["cadence_counters"]["skipped_count"] == 1
     assert report["generated_count"] >= 2
     assert report["skipped_count"] >= 1
     assert report["error_count"] >= 1

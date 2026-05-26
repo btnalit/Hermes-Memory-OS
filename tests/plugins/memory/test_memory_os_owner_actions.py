@@ -607,6 +607,149 @@ def test_expression_feedback_records_quality_signal_without_policy_mutation(tmp_
     assert result["record"]["boundary"]["actual_send"] is False
 
 
+
+
+def test_expression_feedback_links_to_right_brain_outcome_without_raw_body(tmp_path):
+    store = _store(tmp_path)
+    outcome_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    outcome_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.right_brain_expression_outcome.v0",
+                "outcome_id": "rbout_test_001",
+                "request_id": "rbexpr_test_001",
+                "observed_at": "2026-05-26T12:00:00Z",
+                "policy_version": 3,
+                "silent": False,
+                "outcome_preview": "今天这边很安静，我就在。",
+                "outcome_preview_chars": 12,
+                "raw_body_included": False,
+                "actual_send": False,
+                "actual_execute": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = apply_owner_action(
+        store,
+        action_type="too_mechanical",
+        target="expression:rbout_test_001",
+        owner_id="owner",
+        channel="telegram",
+        note="这句还是有点报告感。",
+        apply=True,
+    )
+
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert result["result_ref"]["outcome_id"] == "rbout_test_001"
+    assert result["result_ref"]["request_id"] == "rbexpr_test_001"
+    assert feedback["draft_id"] == "rbout_test_001"
+    assert feedback["outcome_feedback_linked"] is True
+    assert feedback["outcome_id"] == "rbout_test_001"
+    assert feedback["request_id"] == "rbexpr_test_001"
+    assert feedback["policy_version"] == 3
+    assert feedback["outcome_silent"] is False
+    assert feedback["outcome_preview_chars"] == 12
+    assert feedback["outcome_preview"] == ""
+    assert feedback["raw_body_included"] is False
+    assert feedback["live_policy_changed"] is False
+    assert result["record"]["boundary"]["actual_send"] is False
+
+
+def test_expression_feedback_latest_outcome_alias_links_to_latest_record(tmp_path):
+    store = _store(tmp_path)
+    outcome_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        {"outcome_id": "rbout_old", "request_id": "rbexpr_old", "observed_at": "2026-05-26T10:00:00Z"},
+        {
+            "outcome_id": "rbout_latest",
+            "request_id": "rbexpr_latest",
+            "observed_at": "2026-05-26T13:00:00Z",
+            "policy_version": 4,
+            "silent": False,
+            "outcome_preview_chars": 18,
+            "raw_body_included": False,
+            "actual_send": False,
+            "actual_execute": False,
+        },
+    ]
+    outcome_path.write_text("".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records), encoding="utf-8")
+
+    result = apply_owner_action(
+        store,
+        action_type="off_voice",
+        target="expression:latest_outcome",
+        owner_id="owner",
+        channel="telegram",
+        note="刚才那句不像右脑。",
+        apply=True,
+    )
+
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert result["result_ref"]["outcome_id"] == "rbout_latest"
+    assert feedback["draft_id"] == "rbout_latest"
+    assert feedback["expression_target_id"] == "latest_outcome"
+    assert feedback["outcome_feedback_linked"] is True
+    assert feedback["policy_version"] == 4
+
+
+def test_expression_feedback_latest_outcome_alias_is_idempotent_per_resolved_outcome(tmp_path):
+    store = _store(tmp_path)
+    outcome_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    outcome_path.write_text(
+        json.dumps(
+            {
+                "outcome_id": "rbout_first",
+                "request_id": "rbexpr_first",
+                "observed_at": "2026-05-26T13:00:00Z",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    first = apply_owner_action(
+        store,
+        action_type="too_mechanical",
+        target="expression:latest_outcome",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    with outcome_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "outcome_id": "rbout_second",
+                    "request_id": "rbexpr_second",
+                    "observed_at": "2026-05-26T14:00:00Z",
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+    second = apply_owner_action(
+        store,
+        action_type="too_mechanical",
+        target="expression:latest_outcome",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert [item["outcome_id"] for item in feedback] == ["rbout_first", "rbout_second"]
+
 def test_review_channel_uses_explicit_config_and_never_reads_body(tmp_path):
     store = _store(tmp_path)
     save_config(

@@ -66,7 +66,7 @@ Memory-OS has four layers. Only the first is currently closed.
 | --- | --- | --- |
 | Layer 1 - Safety governance | Closed on test host | Hard boundaries, owner action, audit, monitor, and Hermes transport boundary are working. |
 | Layer 2 - Intelligent judgment | Not mature | EvidenceScoring and SelfEvolution are safe, but scoring quality and proposal novelty are not mature. |
-| Layer 3 - Right-brain expression operations | Not closed | Test-host would-send observation exists; formal scheduled expression and expression feedback backflow do not. |
+| Layer 3 - Right-brain expression operations | Runtime baseline, not mature | Test-host Hermes-agent expression, outcome ledger, expression-policy apply, and first outcome-linked feedback path work; reaction volume and cadence/prompt evaluation are not mature. |
 | Layer 4 - Hermes agent collaboration | Partially corrected | Hermes agent owns interaction; Memory-OS still needs stronger collaboration surfaces and fallback deprecation. |
 
 Allowed public/internal claims:
@@ -75,7 +75,8 @@ Allowed public/internal claims:
 - Owner action through OwnerActionProcessor works.
 - MemorySources attribution and monitor boundaries are clean.
 - Approved proposals are visible and do not execute.
-- Right-brain and left-brain quality systems are design-gated, not mature.
+- Right-brain and left-brain quality systems have runtime baselines, not mature
+  product closure.
 
 Forbidden claims:
 
@@ -261,21 +262,21 @@ Design synthesis for Memory-OS:
 7. **Evidence/retention layer**: RH-31 eval, monitor, retention, and RH-36
    matrix prove what is working, what is only observed, and what is blocked.
 
-Near-term work order after synthesis and the 2026-05-26 runtime outcome
-baseline:
+Near-term work order after synthesis and the 2026-05-27 runtime
+outcome-feedback baseline:
 
-1. **P1-S pipeline quality**: resolve the current
-   `left_brain_pipeline_check_warn`, duplicate/unresolved proposal findings,
-   and DeepReflection expired-working hygiene.
-2. **P1-R owner reaction / cadence feedback**: outcome ledger is live; connect
-   final Hermes-agent expressions to owner feedback/reaction and
-   policy/prompt/cadence proposals. Do not build Memory-OS transport.
-3. **P1-T cadence split implementation**: cadence report is live; the next
-   step is module-specific generated/skipped/error/duplicate counters before
-   any timer or cron change.
-4. **P1-Q extension only for concrete proposal kinds**: extend explicit apply
+1. **P1-S feedback backflow quality**: left-brain pipeline check is currently
+   ok and DR expired-working hygiene is live; the remaining P1-S work is
+   improving proposal quality from feedback signals without direct mutation.
+2. **P1-T next cadence split**: cadence report is live and SelfEvolution plus
+   EvidenceScoring now have module-local skip gates; choose the next module
+   from refreshed counters, not a timer guess.
+3. **P1-Q extension only for concrete proposal kinds**: extend explicit apply
    only when a proposal kind has owner approval, OpsGate report-only evidence,
    bounded runtime target, rollback, and monitor fields.
+4. **P1-P timestamp / aging quality**: keep cleaning unknown timestamps and
+   aging projections so review queue maturity is not simulated by conservative
+   downgrade.
 5. **LLM capability surfaces**: keep right-brain expression on the Hermes-agent
    adapter path; keep recall judge / DeepReflection / left-brain semantic
    advisor report-only or proposal-only until their own gates pass.
@@ -347,11 +348,21 @@ Current truth:
   output and recorded as bounded outcome evidence with policy version and hard
   boundary fields. Latest monitor reports `right_brain_adapter_outcome_count=2`
   and PASS `right_brain_expression_outcome_recorded`.
+- outcome-linked expression feedback is deployed on `10.20.3.200`: owner
+  feedback can target `expression:<outcome_id>` or `expression:latest_outcome`;
+  the ledger stores bounded `outcome_id`, `request_id`, and `policy_version`
+  fields without raw expression body, and monitor reports
+  `linked_outcome_count=1`, `outcome_feedback_count=1`,
+  `latest_outcome_feedback_count=1`, and PASS
+  `right_brain_expression_feedback_linked`.
+- the live backflow smoke reached EvidenceScoring and SelfEvolution:
+  `expression_feedback_subject_count=3`; SelfEvolution identified
+  `proposal_class=expression_policy:too_mechanical` and correctly skipped a
+  duplicate same-day same-signal proposal with `actual_execute=false`.
 
 Still required before claiming mature product closure:
 
 - owner/user feedback volume on real expression output;
-- owner reaction and feedback linked to recorded outcomes;
 - production cadence tuning separate from the test-host harness.
 
 ### P1-S - RH-39 Left-Brain Governance Quality
@@ -390,7 +401,11 @@ Current truth:
   groups are `0`, follow-up duplicate groups are `0`, and the remaining
   `legacy_template_duplicate_group_count=1` is historical template noise rather
   than a current owner-agenda blocker;
-- DeepReflection expired-working handling is still not fixed;
+- P1-S DeepReflection expired-working hygiene is deployed: latest
+  `10.20.3.200` dry-run reports `active_working_input_count=8`,
+  `expired_working_skipped_count=158`,
+  `expired_working_used_in_analysis_count=0`, and monitor PASS
+  `deep_reflection_expired_working_not_used`;
 - P1-T cadence report is deployed on `10.20.3.200`; live monitor reports
   `module_cadence_report_visible`, `module_count=18`, `cron_job_count=2`,
   `integration_harness_member_count=11`, `split_recommended_count=11`,
@@ -406,10 +421,15 @@ Current truth:
   still may call the module as a test-host harness. This follows the
   `10.20.2.88` lesson of module-specific cadence without copying the prototype
   timer table or moving scheduler ownership into Memory-OS.
+- P1-T second split is live: EvidenceScoring now records an input fingerprint
+  and skips unchanged reruns with `cadence_skipped=true`. Latest
+  `10.20.3.200` smoke produced `generated_score_count=514` on the first run
+  and `generated_score_count=0`, `reason=unchanged_input_fingerprint` on the
+  second run; monitor PASS includes `evidence_scoring_cadence_skip_visible`.
 
 Implementation order:
 
-1. expired working filter / monitor;
+1. expired working filter / monitor for EvidenceScoring and DeepReflection;
 2. SelfEvolution novelty and idempotency gate;
 3. feature-based EvidenceScoring v2 primary scoring;
 4. prototype-aligned maturity dimensions primary scoring;
@@ -417,9 +437,9 @@ Implementation order:
 6. proposal lifecycle / approved-follow-up state;
 7. feedback backflow report-only/proposal-only;
 8. approved-proposal execution-decision state design;
-9. production cadence split after report-specific counters; SelfEvolution-local
-   same-day/same-signal skip gating is deployed, next module must be chosen from
-   counter evidence;
+9. production cadence split after report-specific counters; SelfEvolution and
+   EvidenceScoring module-local skip gates are deployed, and the next module
+   must still be chosen from refreshed counter evidence;
 10. ContextRouter / Ingress de-duplication with parity tests.
 
 ### P1-O - Owner Review Fallback / Gateway Boundary

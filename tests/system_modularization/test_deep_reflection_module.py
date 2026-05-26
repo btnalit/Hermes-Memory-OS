@@ -747,6 +747,91 @@ def test_deep_reflection_collect_inputs_prefers_recent_working_items(tmp_path):
     assert "别像报告一样" in snapshot["working_items"][0]["text"]
 
 
+def test_deep_reflection_collect_inputs_skips_expired_working_items(tmp_path):
+    store = _store(tmp_path)
+    active = build_working_item(seed=60, source_event_id="evt-active")
+    expired = build_working_item(seed=61, source_event_id="evt-expired")
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": "memory-os.working.v0",
+            "updated_at": expired.updated_at,
+            "items": [
+                {
+                    **active.__dict__,
+                    "status": "active",
+                    "updated_at": "2026-05-21T09:25:12+00:00",
+                    "text": "Active continuity signal should remain visible to Deep Reflection.",
+                },
+                {
+                    **expired.__dict__,
+                    "status": "expired",
+                    "updated_at": "2026-05-22T09:25:12+00:00",
+                    "text": "Expired working signal must not drive Deep Reflection analysis.",
+                },
+            ],
+        },
+    )
+    module = DeepReflectionModule(tmp_path, profile="main")
+
+    snapshot = module.collect_inputs(store=store, max_working_items=8)
+
+    serialized = str(snapshot)
+    hygiene = snapshot["working_item_hygiene"]
+    assert len(snapshot["working_items"]) == 1
+    assert snapshot["working_items"][0]["status"] == "active"
+    assert "Active continuity signal" in snapshot["working_items"][0]["text"]
+    assert "Expired working signal" not in serialized
+    assert f"working:lingering:{expired.id}" not in snapshot["input_refs"]
+    assert hygiene["active_input_count"] == 1
+    assert hygiene["expired_skipped_count"] == 1
+    assert hygiene["expired_used_in_analysis_count"] == 0
+    assert hygiene["skipped_by_status"] == {"expired": 1}
+
+
+def test_deep_reflection_run_once_reports_expired_working_hygiene(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=62, profile="main"),
+            "summary": "Deep Reflection should analyze active continuity only.",
+        }
+    )
+    store.append_event(event)
+    active = build_working_item(seed=63, source_event_id=event.id)
+    expired = build_working_item(seed=64, source_event_id=event.id)
+    store.write_working_document(
+        "attention",
+        {
+            "schema_version": "memory-os.working.v0",
+            "updated_at": expired.updated_at,
+            "items": [
+                {
+                    **active.__dict__,
+                    "status": "active",
+                    "text": "Active Deep Reflection working text.",
+                },
+                {
+                    **expired.__dict__,
+                    "status": "expired",
+                    "text": "Expired Deep Reflection working text.",
+                },
+            ],
+        },
+    )
+    module = DeepReflectionModule(tmp_path, profile="main")
+
+    result = module.run_once(store=store, dry_run=True)
+    artifact_path = next(module.internal_analysis_root.glob("*.json"))
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+    assert result["active_working_input_count"] == 1
+    assert result["expired_working_skipped_count"] == 1
+    assert result["expired_working_used_in_analysis_count"] == 0
+    assert "Expired Deep Reflection working text" not in str(artifact["input_snapshot"])
+    assert "Expired Deep Reflection working text" not in str(artifact["themes"])
+
+
 def test_deep_reflection_doctor_reports_safe_default_state(tmp_path):
     store = _store(tmp_path)
     module = DeepReflectionModule(tmp_path, profile="main")

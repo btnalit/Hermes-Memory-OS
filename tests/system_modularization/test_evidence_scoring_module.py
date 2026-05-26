@@ -327,6 +327,46 @@ def test_evidence_scoring_is_replayable_against_same_fixture(tmp_path):
     ]
 
 
+def test_evidence_scoring_skips_unchanged_input_after_first_run(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = _seed_scoring_inputs(tmp_path, store)
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    first = module.score_all(store=store, proposal_queue=proposal_queue)
+    second = module.score_all(store=store, proposal_queue=proposal_queue)
+
+    assert first["skipped"] is False
+    assert first["generated_score_count"] == 4
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_input_fingerprint"
+    assert second["generated_score_count"] == 0
+    assert second["score_count"] == first["score_count"]
+    assert second["score_fingerprints"] == first["score_fingerprints"]
+    run_reports = [
+        json.loads(line)
+        for line in module.runs_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [report["skipped"] for report in run_reports] == [False, True]
+    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
+    assert any("evidence_scoring_run_skipped" in line for line in audit_lines)
+
+    store.append_event(
+        EventEnvelope.from_dict(
+            {
+                **build_event(seed=66, profile="main"),
+                "summary": "A new event should break the EvidenceScoring cadence skip.",
+            }
+        )
+    )
+    third = module.score_all(store=store, proposal_queue=proposal_queue)
+
+    assert third["skipped"] is False
+    assert third["cadence_skipped"] is False
+    assert third["generated_score_count"] == third["score_count"] == first["score_count"] + 1
+    assert third["input_fingerprint"] != first["input_fingerprint"]
+
+
 def test_evidence_scoring_status_and_doctor_do_not_expose_subject_bodies(tmp_path):
     store = _store(tmp_path)
     proposal_queue = _seed_scoring_inputs(tmp_path, store)
