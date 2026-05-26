@@ -56,12 +56,16 @@ class LeftBrainPipelineCheckModule:
 
     def status(self) -> dict[str, Any]:
         report = self.read_latest()
+        duplicate = report.get("duplicate_unresolved") if isinstance(report.get("duplicate_unresolved"), dict) else {}
         return {
             "schema_version": "hermes.memory_os.left_brain_pipeline_check_status.v0",
             "module": "left_brain_pipeline_check",
             "profile": self.profile,
             "status": report.get("status", "missing"),
             "finding_count": len(report.get("findings", [])) if isinstance(report.get("findings"), list) else 0,
+            "active_duplicate_group_count": duplicate.get("active_duplicate_group_count"),
+            "followup_duplicate_group_count": duplicate.get("followup_duplicate_group_count"),
+            "legacy_template_duplicate_group_count": duplicate.get("legacy_template_duplicate_group_count"),
             "report_path": str(self.report_path),
             "actual_execute": False,
         }
@@ -154,13 +158,13 @@ class LeftBrainPipelineCheckModule:
                 }
             )
         unresolved_duplicates = self._duplicate_unresolved(proposals)
-        if unresolved_duplicates["duplicate_group_count"]:
+        if unresolved_duplicates["active_duplicate_group_count"]:
             findings.append(
                 {
                     "severity": "warning",
                     "code": "duplicate_unresolved_proposals",
-                    "message": "Multiple unresolved proposal candidates share the same title/kind.",
-                    "count": unresolved_duplicates["duplicate_group_count"],
+                    "message": "Multiple owner-actionable proposal candidates share the same class/dedupe key.",
+                    "count": unresolved_duplicates["active_duplicate_group_count"],
                 }
             )
         return findings
@@ -175,24 +179,42 @@ class LeftBrainPipelineCheckModule:
         }
 
     def _duplicate_unresolved(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
-        unresolved = [
-            item
-            for item in proposals
-            if str(item.get("state", "")) not in {"owner_declined", "expired", "pressure_blocked"}
-        ]
-        groups: dict[str, list[str]] = {}
-        for item in unresolved:
-            key = "|".join(
-                [
-                    str(item.get("kind") or "proposal"),
-                    " ".join(str(item.get("title") or "").lower().split()),
-                ]
-            )
-            groups.setdefault(key, []).append(str(item.get("candidate_id", "")))
-        duplicates = {key: ids for key, ids in groups.items() if len([item for item in ids if item]) > 1}
+        active_groups: dict[str, list[str]] = {}
+        followup_groups: dict[str, list[str]] = {}
+        legacy_template_groups: dict[str, list[str]] = {}
+        resolved_or_terminal_skipped_count = 0
+        for item in proposals:
+            if not isinstance(item, dict):
+                continue
+            candidate_id = str(item.get("candidate_id", ""))
+            if not candidate_id:
+                continue
+            if _proposal_resolved_or_terminal(item):
+                resolved_or_terminal_skipped_count += 1
+                continue
+            key = _proposal_duplicate_key(item)
+            if _legacy_template_proposal(item):
+                legacy_template_groups.setdefault(key, []).append(candidate_id)
+                continue
+            state = str(item.get("state", "candidate"))
+            if state in {"candidate", "owner_eligible", "owner_defer"}:
+                active_groups.setdefault(key, []).append(candidate_id)
+            elif state == "approved_for_proposal":
+                followup_groups.setdefault(key, []).append(candidate_id)
+        active_duplicates = _duplicate_groups(active_groups)
+        followup_duplicates = _duplicate_groups(followup_groups)
+        legacy_template_duplicates = _duplicate_groups(legacy_template_groups)
         return {
-            "duplicate_group_count": len(duplicates),
-            "duplicate_candidate_count": sum(len(ids) for ids in duplicates.values()),
+            "duplicate_group_count": len(active_duplicates),
+            "duplicate_candidate_count": sum(len(ids) for ids in active_duplicates.values()),
+            "active_duplicate_group_count": len(active_duplicates),
+            "active_duplicate_candidate_count": sum(len(ids) for ids in active_duplicates.values()),
+            "followup_duplicate_group_count": len(followup_duplicates),
+            "followup_duplicate_candidate_count": sum(len(ids) for ids in followup_duplicates.values()),
+            "legacy_template_duplicate_group_count": len(legacy_template_duplicates),
+            "legacy_template_duplicate_candidate_count": sum(len(ids) for ids in legacy_template_duplicates.values()),
+            "resolved_or_terminal_skipped_count": resolved_or_terminal_skipped_count,
+            "grouping": "dedupe_key_or_proposal_class_with_title_fallback",
         }
 
     def _approved_followup(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -228,3 +250,44 @@ class LeftBrainPipelineCheckModule:
                 if bool(score.get("live_applied", False)) or bool(score.get("maturity_live_applied", False))
             ),
         }
+
+
+def _proposal_resolved_or_terminal(item: dict[str, Any]) -> bool:
+    state = str(item.get("state", ""))
+    followup_state = str(item.get("followup_state", ""))
+    if state in {"owner_declined", "expired", "pressure_blocked"}:
+        return True
+    return followup_state in {"closed", "applied_expression_policy"}
+
+
+def _proposal_duplicate_key(item: dict[str, Any]) -> str:
+    dedupe_key = " ".join(str(item.get("dedupe_key") or "").lower().split())
+    if dedupe_key:
+        return f"dedupe:{dedupe_key}"
+    proposal_class = " ".join(str(item.get("proposal_class") or "").lower().split())
+    if proposal_class:
+        return f"class:{proposal_class}"
+    return "|".join(
+        [
+            str(item.get("kind") or "proposal"),
+            " ".join(str(item.get("title") or "").lower().split()),
+        ]
+    )
+
+
+def _legacy_template_proposal(item: dict[str, Any]) -> bool:
+    title = str(item.get("title") or "")
+    body = " ".join(str(item.get("body") or "").split())
+    if "Proposed change:" in body and "Acceptance criteria:" in body:
+        return False
+    if "具体改动:" in body and "验收标准:" in body:
+        return False
+    if title == "Self-Evolution dry-run proposal":
+        return True
+    if title == "Tune right-brain expression policy" and "prompt/cadence/policy proposal" in body:
+        return True
+    return False
+
+
+def _duplicate_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {key: ids for key, ids in groups.items() if len(ids) > 1}

@@ -171,9 +171,11 @@ evidence, not local-only tests.
 
 External review is required before:
 
-- enabling scheduled right-brain expression delivery;
+- enabling or broadening scheduled right-brain expression delivery beyond the
+  current test-host owner-configured path;
 - replacing hash scoring as live scoring input;
-- any execution/apply capability after proposal approval;
+- any new execution/apply capability after proposal approval beyond the
+  current bounded `expression_policy` apply path;
 - LLM judge bounded-live mode;
 - owner-boundary changes;
 - public product claims.
@@ -184,6 +186,30 @@ External review is optional for:
 - documentation reconciliation;
 - local fixture repairs;
 - no-behavior refactors with adequate tests.
+
+### Gate 6 - LLM Capability Surface Registry
+
+LLM use is not a generic Memory-OS module. Each surface must declare the host
+agent/runtime owner, the Memory-OS role, the allowed mode, and the bounded live
+scope before implementation.
+
+| Surface | Owner | Memory-OS role | Current mode | May affect live behavior? | Next gate |
+| --- | --- | --- | --- | --- | --- |
+| Right-brain expression | Hermes agent / cron `deliver=origin` | Bounded context, expression policy, request/outcome evidence, monitor | `bounded-live` for wording or `[SILENT]` only | Yes, only owner-configured low-frequency expression text through Hermes | P1-R outcome ledger + feedback evidence |
+| Low-clue recall judge | Hermes configured judge adapter | Bounded candidate metadata and report evidence | `report-only` | No | bounded-live only inside `ambiguous_recall` ranking after real evidence |
+| DeepReflection reflective adapter | Future Hermes agent adapter if approved | Bounded reflection substrate, report/proposal evidence | not enabled; future `report-only` or `proposal-only` | No | contract + monitor before any LLM reflection runtime |
+| Left-brain semantic advisor | Future Hermes agent/governance adapter if approved | Explain feature scores, risks, and proposal suggestions | not enabled; future `report-only` or `proposal-only` | No | cannot replace feature scoring without explicit apply gate |
+
+Mode rules:
+
+- `report-only`: evidence only; no state mutation.
+- `proposal-only`: may create an owner-reviewed proposal; no apply.
+- `bounded-live`: affects only the declared bounded surface. It cannot expand
+  into route override, send/transport ownership, execution, identity write,
+  crystallized write, or hidden prompt/policy mutation.
+
+Any new module/RH that uses an LLM must add a RH-36 mapping row and fill the
+29-series `llm` block. Missing declaration is a P1 contract gap.
 
 ## 10.20.2.88 Prototype Reference, Not Blueprint
 
@@ -235,20 +261,24 @@ Design synthesis for Memory-OS:
 7. **Evidence/retention layer**: RH-31 eval, monitor, retention, and RH-36
    matrix prove what is working, what is only observed, and what is blocked.
 
-Near-term work order after synthesis:
+Near-term work order after synthesis and the 2026-05-26 runtime outcome
+baseline:
 
-1. **P1-R.3/P1-R.4**: create Memory-OS `ExpressionDraft` and Hermes-agent
-   expression adapter. This is not Sannai free-time copied into Memory-OS; it
-   is a generic bounded right-brain draft interface that any profile can use.
-2. **P1-R.5/P1-R.6**: route every non-silent draft through SpeakGate and record
-   expression feedback. This closes the current Wandering/SpeakGate gap.
-3. **P1-S.5/P1-S.6**: build a Memory-OS read-only pipeline checker and proposal
-   lifecycle fields. This borrows the prototype checker principle, not its
-   script sequence.
-4. **P1-Q**: move approved proposals into explicit follow-up / OpsGate
-   visibility without creating execution tickets.
-5. **P1-T**: split production cadence by module class using Hermes cron as the
-   scheduler owner and Memory-OS counters as maturity evidence.
+1. **P1-S pipeline quality**: resolve the current
+   `left_brain_pipeline_check_warn`, duplicate/unresolved proposal findings,
+   and DeepReflection expired-working hygiene.
+2. **P1-R owner reaction / cadence feedback**: outcome ledger is live; connect
+   final Hermes-agent expressions to owner feedback/reaction and
+   policy/prompt/cadence proposals. Do not build Memory-OS transport.
+3. **P1-T cadence split implementation**: cadence report is live; the next
+   step is module-specific generated/skipped/error/duplicate counters before
+   any timer or cron change.
+4. **P1-Q extension only for concrete proposal kinds**: extend explicit apply
+   only when a proposal kind has owner approval, OpsGate report-only evidence,
+   bounded runtime target, rollback, and monitor fields.
+5. **LLM capability surfaces**: keep right-brain expression on the Hermes-agent
+   adapter path; keep recall judge / DeepReflection / left-brain semantic
+   advisor report-only or proposal-only until their own gates pass.
 
 Forbidden shortcut:
 
@@ -308,12 +338,20 @@ Current truth:
   PASS `right_brain_review_speak_preview_visible`;
 - expression feedback ledger and GovernanceFeedback summary backflow are
   implemented; SelfEvolution can create expression-policy proposals from
-  expression feedback; policy/prompt/cadence apply is not automatic.
+  expression feedback; owner-approved `expression_policy` proposals can pass
+  OpsGate report-only review and explicit apply into
+  `right_brain_expression_adapter/policy.json`; automatic prompt/cadence
+  mutation remains forbidden.
+- right-brain expression outcome ledger is deployed on `10.20.3.200`: final
+  Hermes-agent `## Response` text or `[SILENT]` is extracted from Hermes cron
+  output and recorded as bounded outcome evidence with policy version and hard
+  boundary fields. Latest monitor reports `right_brain_adapter_outcome_count=2`
+  and PASS `right_brain_expression_outcome_recorded`.
 
 Still required before claiming mature product closure:
 
 - owner/user feedback volume on real expression output;
-- expression-policy proposals reviewed through owner/OpsGate apply;
+- owner reaction and feedback linked to recorded outcomes;
 - production cadence tuning separate from the test-host harness.
 
 ### P1-S - RH-39 Left-Brain Governance Quality
@@ -331,26 +369,43 @@ Current truth:
   `score_mode=feature_maturity_v2`, `feature_score_mode=primary`,
   `hash_score_legacy_count=0`, and legacy hash only as comparison evidence;
 - deployed P1-S slice 2 adds a SelfEvolution duplicate unresolved proposal
-  gate with novelty skip counters; last recorded 07 monitor evidence reports
-  `novelty_skipped_count=1` and `duplicate_unresolved_proposal_count=1`;
+  gate with novelty skip counters; latest monitor evidence reports
+  `novelty_skipped_count=11` and `duplicate_unresolved_proposal_count=11`;
 - expression feedback can enter EvidenceScoring/SelfEvolution as proposal
   evidence; direct policy/prompt/cadence mutation remains blocked;
 - deployed P1-S slice 1 filters expired working out of EvidenceScoring and
   adds monitor visibility for expired scoring contamination;
 - last recorded 07 monitor evidence reports `expired_used_in_scoring_count=0` and PASS
   `left_brain_expired_working_not_scored`;
-- latest 10.20.3.200 monitor evidence reports `feature_score_count=496`,
-  `hash_score_legacy_count=0`, `legacy_hash_comparison_count=496`,
+- latest 10.20.3.200 monitor evidence reports `feature_score_count=508`,
+  `hash_score_legacy_count=0`, `legacy_hash_comparison_count=508`,
   and PASS `left_brain_feature_scoring_primary_ok`;
-- latest monitor evidence reports `prototype_aligned_score_count=496`,
+- latest monitor evidence reports `prototype_aligned_score_count=508`,
   `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
   `left_brain_maturity_scoring_primary_ok`;
-- latest live evidence reports `left_brain_pipeline_check.status=warn`,
-  `finding_count=1`, `feature_scoring.report_only=true`,
-  `execution_ticket_count=0`, and `actual_execute=false`; the WARN finding is
-  `duplicate_unresolved_proposals`.
+- latest live evidence reports `left_brain_pipeline_check.status=ok`,
+  `finding_count=0`, `feature_scoring.report_only=true`,
+  `execution_ticket_count=0`, and `actual_execute=false`;
+- P1-S duplicate-maturity cleanup is live: active owner-actionable duplicate
+  groups are `0`, follow-up duplicate groups are `0`, and the remaining
+  `legacy_template_duplicate_group_count=1` is historical template noise rather
+  than a current owner-agenda blocker;
 - DeepReflection expired-working handling is still not fixed;
-- production cadence is not mature.
+- P1-T cadence report is deployed on `10.20.3.200`; live monitor reports
+  `module_cadence_report_visible`, `module_count=18`, `cron_job_count=2`,
+  `integration_harness_member_count=11`, `split_recommended_count=11`,
+  `expected_hermes_cron_missing_count=0`, `generated_count=874`,
+  `skipped_count=12`, `error_count=15`, `duplicate_count=11`, and
+  `counter_coverage_count=18`;
+- production cadence is not mature because the report intentionally shows 11
+  modules still needing cadence split work. The counters now make that split
+  observable instead of timer-only.
+- P1-T first split is live: SelfEvolution-local cadence gating now makes a
+  same-day same-signal rerun return monitor-visible `cadence_skipped=true`
+  instead of generating another proposal or calling OpsGate. The cognitive loop
+  still may call the module as a test-host harness. This follows the
+  `10.20.2.88` lesson of module-specific cadence without copying the prototype
+  timer table or moving scheduler ownership into Memory-OS.
 
 Implementation order:
 
@@ -362,7 +417,9 @@ Implementation order:
 6. proposal lifecycle / approved-follow-up state;
 7. feedback backflow report-only/proposal-only;
 8. approved-proposal execution-decision state design;
-9. production cadence split;
+9. production cadence split after report-specific counters; SelfEvolution-local
+   same-day/same-signal skip gating is deployed, next module must be chosen from
+   counter evidence;
 10. ContextRouter / Ingress de-duplication with parity tests.
 
 ### P1-O - Owner Review Fallback / Gateway Boundary
@@ -396,7 +453,9 @@ Owning docs:
 Current truth:
 
 - `approved_for_proposal` is visible;
-- OpsGate report-only follow-up exists;
+- OpsGate report-only follow-up exists and the pending batch route is deployed;
+- latest monitor evidence reports `pending=0`, `awaiting_ops_gate=0`,
+  `ops_gate_reviewed=7`, `awaiting_explicit_execution=7`;
 - execution tickets remain zero;
 - the first bounded `expression_policy` proposal has a live explicit apply path
   after owner approval and OpsGate `would_allow`;

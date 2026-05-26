@@ -30,8 +30,14 @@ Current implementation state:
   feature scoring is the primary scoring path.
 - P1-S pipeline-check slice is implemented and deployed on `10.20.3.200`:
   cognitive loop writes `left_brain_pipeline_check/latest.json`; monitor reports
-  `left_brain_pipeline_check.status`, `finding_count`, and `actual_execute`.
-  The current live finding is `duplicate_unresolved_proposals` as a WARN.
+  `left_brain_pipeline_check.status`, `finding_count`, `actual_execute`, and
+  duplicate maturity buckets.
+- P1-S duplicate-maturity cleanup is implemented and deployed on
+  `10.20.3.200`: pipeline check now distinguishes owner-actionable active
+  duplicates from follow-up duplicates and historical template duplicates.
+  Current live evidence reports `status=ok`, `finding_count=0`,
+  `active_duplicate_group_count=0`, `followup_duplicate_group_count=0`, and
+  `legacy_template_duplicate_group_count=1`.
 - This replaces legacy hash scoring as the primary scoring path. It does not
   implement automatic prompt/policy/cadence apply, production cadence, or
   execution apply.
@@ -96,6 +102,9 @@ monitor_or_validation_fields:
   - left_brain_scoring.maturity_live_applied
   - self_evolution.novelty_skipped_count
   - self_evolution.duplicate_unresolved_proposal_count
+  - left_brain_pipeline_check.active_duplicate_group_count
+  - left_brain_pipeline_check.followup_duplicate_group_count
+  - left_brain_pipeline_check.legacy_template_duplicate_group_count
   - feedback_backflow.consumed_count
   - feedback_backflow.apply_ready_count
   - approved_proposal_followups.awaiting_ops_gate_count
@@ -136,6 +145,32 @@ This means:
 - feedback has not become a real governance input;
 - approved proposals are visible, but many still need follow-up;
 - execution remains correctly blocked.
+
+P1-Q live follow-up correction on `10.20.3.200`:
+
+```text
+owner_review.proposal_followup_batch.schema=memory-os.approved_proposal_ops_gate_batch.v0
+dry_run=false
+eligible_count=0
+execution_ticket_created=false
+actual_execute=false
+
+approved_proposal_followups.approved=8
+approved_proposal_followups.pending=0
+approved_proposal_followups.open=7
+approved_proposal_followups.awaiting_ops_gate=0
+approved_proposal_followups.ops_gate_reviewed=7
+approved_proposal_followups.awaiting_explicit_execution=7
+approved_proposal_followups.policy_apply_count=1
+approved_proposal_followups.execution_tickets=0
+approved_proposal_followups.actual_execute=false
+```
+
+This means the P1-Q runtime gap is no longer "approved proposals are waiting
+for OpsGate review." The current state is narrower: generic approved proposals
+are visible after OpsGate report-only review and wait for a separate explicit
+execution/apply decision. That decision path must stay proposal-kind-specific
+and must not become a generic executor.
 
 P1-S slice 1 deployment evidence on `10.20.3.200`:
 
@@ -637,6 +672,10 @@ Memory-OS implementation synthesis:
    - keep the 6-hour cognitive loop as test-host integration harness;
    - define Hermes cron classes for owner-origin, local/no-agent, monitor-poll,
      and on-demand/manual apply.
+   - first runtime split is implemented: SelfEvolution adds a module-local
+     cadence gate that skips same-day same-signal reruns after processing,
+     without creating new proposals, without calling OpsGate again, and without
+     changing Hermes cron.
 
 Do not promote P1-S from primary scoring to direct live execution, routing, or
 policy/prompt/cadence apply until the pipeline checker is green, proposal
@@ -655,7 +694,8 @@ Do not replace live behavior in one step. The safe path is:
 6. proposal lifecycle/follow-up fields;
 7. feedback backflow into GovernanceFeedback in report-only/proposal-only mode;
 8. approved proposal execution-decision state design;
-9. production cadence split with generated/skipped/error fields;
+9. production cadence split with generated/skipped/error fields; first slice,
+   SelfEvolution-local cadence skip, is deployed and is not a timer change;
 10. ContextRouter/Ingress de-duplication with parity tests.
 
 Each step must update RH-36 mapping, monitor fields, and 07 evidence before it

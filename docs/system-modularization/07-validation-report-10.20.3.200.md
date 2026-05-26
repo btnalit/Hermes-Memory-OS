@@ -13746,3 +13746,678 @@ Interpretation:
 - Remaining WARN items are unrelated observation work: left-brain pipeline
   warning, SessionMirror pending sessions, RH-31 eval failures, and RH-26
   casual-empty.
+
+## 2026-05-26 - P1-R Outcome Ledger Deployment Evidence
+
+Scope:
+
+- P1-R right-brain expression outcome ledger.
+- Memory-OS records final Hermes-agent expression outcomes from Hermes-owned
+  cron output.
+- No Memory-OS transport, no Hermes agent call, no policy write, no execution.
+
+Local verification:
+
+```text
+python -m pytest tests\scripts\test_memory_os_right_brain_expression_outcome.py tests\scripts\test_memory_os_right_brain_expression_helper.py tests\scripts\test_memory_os_plugin_install.py tests\scripts\test_memory_os_3_200_monitor.py -q
+81 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+python -m pytest tests\scripts\test_memory_os_closure_matrix_check.py -q
+5 passed
+
+git diff --check
+PASS
+```
+
+Live deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+installed=/root/.hermes/scripts/memory_os_right_brain_expression_outcome.py
+job=memory-os-right-brain-expression
+job_id=5c0b7a27abae
+deliver=origin
+```
+
+Dry-run scan before apply:
+
+```text
+schema_version=memory-os.right_brain_expression_outcome_scan.v0
+status=ok
+job_count=1
+existing_outcome_count=0
+new_outcome_count=2
+written_outcome_count=0
+internal_marker_count=0
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+boundary.raw_body_included=false
+```
+
+Apply result:
+
+```text
+status=ok
+new_outcome_count=2
+written_outcome_count=2
+outcomes_path=/root/.hermes/system-modules/right_brain_expression_adapter/outcomes.jsonl
+internal_marker_count=0
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+boundary.raw_body_included=false
+```
+
+Ledger summary:
+
+```text
+outcome_count=2
+latest_request_id=rbexpr_20260526T135329054000Z
+latest_policy_version=1
+latest_silent=false
+latest_outcome_preview_chars=30
+latest_internal_marker_count=0
+latest_actual_send=false
+latest_actual_execute=false
+latest_raw_body_included=false
+```
+
+Monitor after live apply:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes right_brain_expression_outcome_recorded
+WARN no longer includes right_brain_expression_outcome_missing
+
+ModuleArtifacts.right_brain_expression_adapter:
+  request_count=4
+  policy_version=1
+  policy_apply_count=1
+  outcome_count=2
+  latest_outcome_request_id=rbexpr_20260526T135329054000Z
+  latest_outcome_policy_version=1
+  latest_outcome_silent=false
+  latest_outcome_preview_chars=30
+  outcome_internal_marker_count=0
+  outcome_raw_body_included_count=0
+  outcome_actual_send_count=0
+  outcome_actual_execute_count=0
+
+ExpressionArtifacts:
+  right_brain_adapter_outcome_count=2
+  right_brain_adapter_latest_outcome_silent=false
+  right_brain_adapter_latest_outcome_policy_version=1
+  right_brain_adapter_outcome_internal_marker_count=0
+```
+
+Interpretation:
+
+- This closes the P1-R outcome-ledger runtime gap on the test host.
+- The scanner extracts only the Hermes cron `## Response` section or
+  `[SILENT]`; Hermes cron prompt/script-output audit sections are not recorded
+  as the expression outcome.
+- Memory-OS still does not own final wording, conversation, schedule, retry, or
+  delivery. Hermes remains the interaction and origin-delivery owner.
+- Remaining right-brain maturity work is owner reaction volume and cadence /
+  prompt evaluation, not another send path.
+
+## 2026-05-26 - P1-T Module Cadence Report Deployment Evidence
+
+Scope:
+
+- P1-T module cadence report-only baseline.
+- Hermes remains the scheduler/cron/transport owner.
+- Memory-OS reads cron metadata and module reports, then writes bounded cadence
+  evidence only.
+- No cron job, timer, transport, send, execution, or policy is modified.
+
+Local verification:
+
+```text
+python -m pytest tests\scripts\test_memory_os_module_cadence_report.py tests\scripts\test_memory_os_plugin_install.py tests\scripts\test_memory_os_3_200_monitor.py -q
+78 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+python -m pytest tests\scripts\test_memory_os_closure_matrix_check.py -q
+5 passed
+
+git diff --check
+PASS
+```
+
+Live deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+installed=/root/.hermes/scripts/memory_os_module_cadence_report.py
+```
+
+Dry-run result:
+
+```text
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=11
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Apply result:
+
+```text
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=11
+actual_send=False
+actual_execute=False
+cron_modified=False
+reports_path=/root/.hermes/system-modules/module_cadence/reports.jsonl
+report_count=1
+```
+
+Monitor after live apply:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes module_cadence_report_visible
+WARN includes module_cadence_split_pending
+
+ModuleCadence:
+  schema_version=memory-os.module_cadence_monitor_summary.v0
+  report_count=1
+  module_count=18
+  cron_job_count=2
+  cognitive_loop_report_count=28
+  integration_harness_member_count=11
+  split_recommended_count=11
+  expected_hermes_cron_missing_count=0
+  finding_count=11
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.cron_modified=false
+```
+
+Interpretation:
+
+- This closes the first P1-T evidence slice: module cadence ownership is now
+  observable on the test host.
+- The result intentionally remains WARN because 11 modules still need
+  production cadence split/counter work.
+- The two expected Hermes cron-owned owner-facing jobs are present:
+  owner-review digest and right-brain expression.
+- No production cadence change has been made yet.
+
+## 2026-05-26 - P1-S Left-Brain Duplicate Maturity Cleanup Evidence
+
+Scope:
+
+- P1-S left-brain pipeline quality / duplicate maturity cleanup.
+- This slice does not mutate proposal queue state, create execution tickets,
+  change schedules, or alter Hermes transport.
+- The fix separates active owner-actionable duplicates from follow-up
+  duplicates and historical legacy-template duplicates.
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_left_brain_pipeline_checker.py tests\system_modularization\test_self_evolution_module.py tests\scripts\test_memory_os_3_200_monitor.py -q
+60 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+
+python -m pytest -q
+577 passed
+```
+
+Live deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+updated:
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/pipeline_checker.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/self_evolution.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/proposal_queue.py
+```
+
+Live pipeline-check apply:
+
+```text
+status=ok
+finding_count=0
+actual_execute=false
+active_duplicate_group_count=0
+active_duplicate_candidate_count=0
+followup_duplicate_group_count=0
+followup_duplicate_candidate_count=0
+legacy_template_duplicate_group_count=1
+legacy_template_duplicate_candidate_count=18
+resolved_or_terminal_skipped_count=2
+grouping=dedupe_key_or_proposal_class_with_title_fallback
+```
+
+Monitor after live apply:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes left_brain_pipeline_check_visible
+WARN no longer includes left_brain_pipeline_check_warn
+
+ModuleArtifacts.left_brain_pipeline_check:
+  status=ok
+  finding_count=0
+  active_duplicate_group_count=0
+  followup_duplicate_group_count=0
+  legacy_template_duplicate_group_count=1
+  actual_execute=false
+
+ModuleArtifacts.self_evolution:
+  duplicate_unresolved_proposal_count=10
+  novelty_skipped_count=10
+  proposal_count=20
+```
+
+Interpretation:
+
+- This does not pretend the historical backlog disappeared.
+- The live warning source is corrected: no active owner-actionable duplicate
+  proposal group remains.
+- The remaining duplicate group is historical legacy-template proposal noise;
+  it should be handled by a later cleanup/retention path, not by continuing to
+  warn the current owner agenda or by creating more proposals.
+- SelfEvolution now writes proposal `proposal_class`, `dedupe_key`, and bounded
+  `proposal_quality` metadata for new proposals so later duplicate checks do
+  not rely only on title text.
+
+## 2026-05-26 - P1-Q Approved Proposal Follow-Up To OpsGate Evidence
+
+Scope:
+
+- P1-Q approved proposal follow-up to OpsGate/report-only.
+- This slice routes already owner-approved proposals into OpsGate report-only
+  follow-up so they do not disappear after approval.
+- It does not create execution tickets, does not run external work, and does
+  not set `actual_execute`.
+
+Local verification before live apply:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py tests\plugins\memory\test_memory_os_cli_modules.py tests\system_modularization\test_memory_os_agent_os_shell.py tests\scripts\test_memory_os_3_200_monitor.py -q
+122 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+
+python -m pytest -q
+578 passed
+```
+
+Live deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+updated:
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/cli.py
+  /root/.hermes/plugins/memory-os-agent-os/__init__.py
+```
+
+Live report-only apply command:
+
+```text
+hermes memory-os-agent-os review proposal-followups --ops-gate --all-pending --limit 20 --apply
+```
+
+Live apply result:
+
+```text
+schema_version=memory-os.approved_proposal_ops_gate_batch.v0
+status=ok
+dry_run=false
+eligible_count=0
+selected_count=0
+ops_gate_report_written_count=0
+execution_ticket_created=false
+actual_execute=false
+raw_body_included=false
+```
+
+The zero eligible count is expected at this point because the previously
+pending approved proposals had already been routed through OpsGate report-only
+review before this verification pass.
+
+Follow-up surface after apply:
+
+```text
+approved_proposal_count=8
+pending_followup_count=0
+open_followup_count=7
+awaiting_ops_gate_count=0
+ops_gate_reviewed_count=7
+awaiting_explicit_execution_count=7
+policy_apply_count=1
+execution_ticket_count=0
+actual_execute=false
+raw_body_included=false
+```
+
+Monitor after live verification:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes owner_review_proposal_followups_ok
+WARN no longer includes owner_review_approved_proposals_pending_followup
+
+OwnerProposalFollowups:
+  approved=8
+  pending=0
+  open=7
+  awaiting_ops_gate=0
+  ops_gate_reviewed=7
+  awaiting_explicit_execution=7
+  policy_apply_count=1
+  execution_tickets=0
+  actual_execute=false
+  raw_body_included=false
+```
+
+Interpretation:
+
+- P1-Q report-only follow-up is closed for the current approved proposal set:
+  no approved proposal is still waiting for OpsGate review.
+- The current open state is explicit execution/apply decision, not hidden
+  follow-up.
+- Generic external execution remains unimplemented by design.
+- Future apply paths must be proposal-kind-specific and prove owner approval,
+  OpsGate `would_allow`, bounded runtime target, rollback, and monitor fields.
+
+## 2026-05-27 - P1-T Module Cadence Generated/Skipped/Error/Duplicate Counters Evidence
+
+Scope:
+
+- P1-T second runtime slice: expose per-module generated/skipped/error/duplicate
+  counters before any cadence timer split.
+- This slice does not modify Hermes cron, systemd timers, gateway behavior,
+  delivery, or module execution cadence.
+
+Local TDD verification:
+
+```text
+python -m pytest tests\scripts\test_memory_os_module_cadence_report.py -q
+3 passed
+
+python -m pytest tests\scripts\test_memory_os_module_cadence_report.py tests\scripts\test_memory_os_3_200_monitor.py -q
+47 passed
+```
+
+Live deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+updated:
+  /root/.hermes/scripts/memory_os_module_cadence_report.py
+```
+
+Live apply command:
+
+```text
+python3 /root/.hermes/scripts/memory_os_module_cadence_report.py --apply --format summary
+```
+
+Live apply result:
+
+```text
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=11
+generated_count=870
+skipped_count=10
+error_count=15
+duplicate_count=10
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Monitor after live apply:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes module_cadence_report_visible
+WARN includes module_cadence_split_pending
+
+ModuleCadence:
+  schema_version=memory-os.module_cadence_monitor_summary.v0
+  report_count=3
+  module_count=18
+  counter_coverage_count=18
+  cron_job_count=2
+  cognitive_loop_report_count=28
+  integration_harness_member_count=11
+  split_recommended_count=11
+  expected_hermes_cron_missing_count=0
+  generated_count=870
+  skipped_count=10
+  error_count=15
+  duplicate_count=10
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.cron_modified=false
+```
+
+Selected module counters:
+
+```text
+cognitive_loop.generated_count=28
+owner_review_digest.generated_count=18
+right_brain_expression_adapter.generated_count=4
+self_evolution.generated_count=30
+self_evolution.skipped_count=10
+self_evolution.duplicate_count=10
+speak_gate.generated_count=13
+speak_gate.error_count=15
+```
+
+Interpretation:
+
+- P1-T is no longer timer-only. Every active cadence row now has machine-readable
+  generated/skipped/error/duplicate counters in the report and monitor summary.
+- The remaining WARN is the intended production-cadence split gap: 11 modules
+  still run under the test-host cognitive-loop harness or need split decisions.
+- `speak_gate.error_count=15` is historical missing-evaluation evidence from
+  earlier right-brain wiring; latest expression monitor already reports the
+  current cycle evaluation complete.
+
+## 2026-05-27 - P1-T SelfEvolution First Cadence Split Live Evidence
+
+Scope:
+
+- First production-cadence split slice for `SelfEvolution`.
+- Keeps Hermes as scheduler owner and keeps the 6-hour cognitive loop as the
+  test-host integration harness.
+- Adds a module-local skip gate so same-day same-signal reruns do not create a
+  new proposal or call OpsGate.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=32/36/39/40/41 P1-T and 10.20.2.88 read-only prototype cadence evidence
+finding_type=production cadence gap / repeated proposal risk
+owning_seam=SelfEvolution module-local cadence gate
+reverse_scope=Hermes owns cron/scheduler/delivery; Memory-OS owns bounded skip/idempotency evidence
+evidence_loop=local tests + live 10.20.3.200 run_once + module cadence report + monitor
+monitor_or_validation_fields=self_evolution.cadence_skipped_count,same_signal_skipped_count,ModuleCadence.skipped_count,duplicate_count
+promotion_signal=same-day same-signal rerun returns cadence_skipped=true and proposal_created=false
+stop_or_rollback_signal=new proposal created for same-day same-signal rerun; actual_execute/send true; skip hides error
+external_review=not required for this first slice because no scheduler/transport/execution boundary changed
+```
+
+Local validation:
+
+```text
+python -m pytest tests\system_modularization\test_self_evolution_module.py tests\scripts\test_memory_os_module_cadence_report.py tests\scripts\test_memory_os_3_200_monitor.py -q
+61 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+```
+
+Deployment:
+
+```text
+target=10.20.3.200 / hermes-media
+updated:
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/self_evolution.py
+  /root/.hermes/scripts/memory_os_module_cadence_report.py
+```
+
+Live finding during first smoke:
+
+```text
+proposal_created=true
+proposal_class=expression_policy:too_mechanical
+proposal_id=prop_20260526T163619303093Z_7340cb3573
+actual_execute=false
+direct_self_modify=false
+```
+
+Interpretation:
+
+- The first deployed version only used new `reports.jsonl` fingerprints, so it
+  did not recognize the already-applied same-day expression-policy history.
+- This was a real live finding, not a contract failure: hard boundaries stayed
+  false, but the cadence gate was incomplete.
+- The duplicate proposal created by this smoke was closed with an audited
+  `ProposalQueue.transition(..., decision=reject, reviewer=codex_p1t_regression_cleanup)`
+  so it does not remain in the owner agenda.
+
+Fix and live rerun:
+
+```text
+proposal_created=false
+reason=cadence_same_day_same_signal
+skipped=true
+cadence_skipped=true
+previous_proposal_id=prop_20260526T163619303093Z_7340cb3573
+proposal_class=expression_policy:too_mechanical
+actual_execute=false
+direct_self_modify=false
+```
+
+SelfEvolution live status after rerun:
+
+```text
+report_count=33
+proposal_count=21
+novelty_skipped_count=11
+duplicate_unresolved_proposal_count=11
+cadence_skipped_count=1
+same_signal_skipped_count=1
+actual_execute=false
+direct_self_modify=false
+```
+
+Module cadence report after rerun:
+
+```text
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=11
+generated_count=874
+skipped_count=12
+error_count=15
+duplicate_count=11
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Monitor after rerun:
+
+```text
+classification=WARN
+FAIL=[]
+PASS includes module_cadence_report_visible
+WARN includes module_cadence_split_pending
+
+ModuleArtifacts.self_evolution.cadence_skipped_count=1
+ModuleArtifacts.self_evolution.same_signal_skipped_count=1
+ModuleCadence.module_counters.self_evolution.run_count=45
+ModuleCadence.module_counters.self_evolution.generated_count=33
+ModuleCadence.module_counters.self_evolution.skipped_count=12
+ModuleCadence.module_counters.self_evolution.duplicate_count=11
+ModuleCadence.boundary.actual_send=false
+ModuleCadence.boundary.actual_execute=false
+ModuleCadence.boundary.cron_modified=false
+```
+
+Conclusion:
+
+- `P1-T` first runtime split is live for SelfEvolution.
+- This is not a timer split. The cognitive loop can still call SelfEvolution,
+  but the module now owns a same-day/same-signal skip decision before
+  OpsGate/proposal creation.
+- Hard boundaries stayed false.
+- Remaining `module_cadence_split_pending` is expected because 10 other modules
+  still need split decisions based on counters.

@@ -79,7 +79,11 @@ class ProposalQueueModule:
         body: str,
         source_refs: list[str] | None = None,
         kind: str = "proposal",
+        proposal_class: str = "",
+        dedupe_key: str = "",
+        proposal_quality: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        now = _timestamp()
         candidate = {
             "schema_version": "hermes.proposal_candidate.v0",
             "candidate_id": _new_candidate_id(),
@@ -92,14 +96,20 @@ class ProposalQueueModule:
             "legacy_state": "",
             "approval_purpose": "proposal_queue_only",
             "crystallized_approved": False,
-            "created_at": _timestamp(),
-            "updated_at": _timestamp(),
+            "created_at": now,
+            "updated_at": now,
             "followup_state": "none",
             "execution_decision_state": "not_requested",
             "execution_ticket_count": 0,
             "actual_execute": False,
             "reviews": [],
         }
+        if proposal_class:
+            candidate["proposal_class"] = _bounded_token(proposal_class, 96)
+        if dedupe_key:
+            candidate["dedupe_key"] = _bounded_token(dedupe_key, 160)
+        if proposal_quality:
+            candidate["proposal_quality"] = _bounded_proposal_quality(proposal_quality)
         queue = self.read_queue()
         queue["items"].append(candidate)
         self._write_queue(queue)
@@ -306,3 +316,41 @@ def _stable_digest(value: str) -> str:
 
 def _timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _bounded_token(value: str, limit: int) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[:limit]
+
+
+def _bounded_proposal_quality(value: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "trigger_rule",
+        "top_subject_ref",
+        "top_subject_kind",
+        "maturity_score",
+        "evidence_ref_count",
+        "maturity_dimensions",
+    }
+    result: dict[str, Any] = {}
+    for key in allowed:
+        if key not in value:
+            continue
+        item = value[key]
+        if key == "maturity_dimensions" and isinstance(item, dict):
+            result[key] = item
+        elif key == "maturity_score":
+            try:
+                result[key] = round(float(item), 3)
+            except (TypeError, ValueError):
+                continue
+        elif key == "evidence_ref_count":
+            try:
+                result[key] = max(int(item), 0)
+            except (TypeError, ValueError):
+                continue
+        else:
+            result[key] = _bounded_token(str(item), 240)
+    return result

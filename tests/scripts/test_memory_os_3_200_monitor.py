@@ -516,10 +516,21 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_proposal_followups"]["pending_followup_count"] = 1
+    snapshot["owner_review_proposal_followups"]["awaiting_ops_gate_count"] = 1
     classification = classify_snapshot(snapshot)
 
     assert classification["status"] == "WARN"
     assert any(item["code"] == "owner_review_approved_proposals_pending_followup" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["pending_followup_count"] = 0
+    snapshot["owner_review_proposal_followups"]["open_followup_count"] = 2
+    snapshot["owner_review_proposal_followups"]["awaiting_ops_gate_count"] = 0
+    snapshot["owner_review_proposal_followups"]["ops_gate_reviewed_count"] = 2
+    snapshot["owner_review_proposal_followups"]["awaiting_explicit_execution_count"] = 2
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "owner_review_approved_proposals_pending_followup" for item in classification["warn"])
 
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["ops_gate"]["duplicate_proposal_followup_count"] = 1
@@ -724,6 +735,11 @@ def test_classify_snapshot_tracks_right_brain_expression_adapter_requests():
         "latest_actual_send": False,
         "raw_body_included_count": 0,
         "silent_request_count": 0,
+        "outcome_count": 0,
+        "outcome_actual_send_count": 0,
+        "outcome_actual_execute_count": 0,
+        "outcome_raw_body_included_count": 0,
+        "outcome_internal_marker_count": 0,
     }
     snapshot["expression_artifacts"]["right_brain_adapter_request_count"] = 2
     snapshot["expression_artifacts"]["right_brain_adapter_latest_channel"] = "origin"
@@ -734,6 +750,7 @@ def test_classify_snapshot_tracks_right_brain_expression_adapter_requests():
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
     assert any(item["code"] == "right_brain_expression_adapter_visible" for item in classification["pass"])
+    assert any(item["code"] == "right_brain_expression_outcome_missing" for item in classification["warn"])
     assert "right_brain_adapter_request_count" in rendered
 
     snapshot["module_artifacts"]["right_brain_expression_adapter"]["latest_actual_send"] = True
@@ -742,6 +759,160 @@ def test_classify_snapshot_tracks_right_brain_expression_adapter_requests():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "right_brain_expression_adapter_actual_send_true" for item in classification["fail"])
+
+
+def test_classify_snapshot_tracks_right_brain_expression_outcomes():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["right_brain_expression_adapter"] = {
+        "request_count": 2,
+        "latest_channel": "origin",
+        "latest_delivery_mode": "hermes_cron_agent",
+        "latest_actual_send": False,
+        "raw_body_included_count": 0,
+        "silent_request_count": 0,
+        "outcome_count": 1,
+        "latest_outcome_id": "rbout_123",
+        "latest_outcome_request_id": "rbexpr_123",
+        "latest_outcome_policy_version": 1,
+        "latest_outcome_silent": False,
+        "latest_outcome_preview_chars": 38,
+        "outcome_actual_send_count": 0,
+        "outcome_actual_execute_count": 0,
+        "outcome_raw_body_included_count": 0,
+        "outcome_internal_marker_count": 0,
+    }
+    snapshot["expression_artifacts"]["right_brain_adapter_request_count"] = 2
+    snapshot["expression_artifacts"]["right_brain_adapter_outcome_count"] = 1
+    snapshot["expression_artifacts"]["right_brain_adapter_latest_outcome_silent"] = False
+    snapshot["expression_artifacts"]["right_brain_adapter_latest_outcome_policy_version"] = 1
+    snapshot["expression_artifacts"]["right_brain_adapter_outcome_internal_marker_count"] = 0
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert not any(item["code"] == "right_brain_expression_outcome_missing" for item in classification["warn"])
+    assert any(item["code"] == "right_brain_expression_outcome_recorded" for item in classification["pass"])
+    assert "right_brain_adapter_outcome_count" in rendered
+
+    snapshot["module_artifacts"]["right_brain_expression_adapter"]["outcome_internal_marker_count"] = 1
+    snapshot["expression_artifacts"]["right_brain_adapter_outcome_internal_marker_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "right_brain_expression_outcome_internal_marker" for item in classification["fail"])
+
+
+def test_classify_snapshot_tracks_module_cadence_report():
+    snapshot = _healthy_snapshot()
+    snapshot["module_cadence"] = {
+        "schema_version": "memory-os.module_cadence_monitor_summary.v0",
+        "report_count": 1,
+        "latest_report_id": "cadence_123",
+        "latest_status": "warning",
+        "module_count": 18,
+        "cron_job_count": 2,
+        "cognitive_loop_report_count": 30,
+        "integration_harness_member_count": 11,
+        "split_recommended_count": 10,
+        "expected_hermes_cron_missing_count": 0,
+        "finding_count": 10,
+        "generated_count": 17,
+        "skipped_count": 3,
+        "error_count": 1,
+        "duplicate_count": 2,
+        "counter_coverage_count": 18,
+        "module_counters": {
+            "self_evolution": {
+                "run_count": 2,
+                "generated_count": 1,
+                "skipped_count": 1,
+                "error_count": 0,
+                "duplicate_count": 1,
+                "last_run_at": "2026-05-26T02:00:00+00:00",
+                "last_status": "ok",
+            }
+        },
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "cron_modified": False,
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "module_cadence_report_visible" for item in classification["pass"])
+    assert any(item["code"] == "module_cadence_split_pending" for item in classification["warn"])
+    assert "ModuleCadence" in rendered
+    assert snapshot["module_cadence"]["module_counters"]["self_evolution"]["duplicate_count"] == 1
+
+    snapshot["module_cadence"]["boundary"]["cron_modified"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "module_cadence_boundary_true" for item in classification["fail"])
+
+
+def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counters(monkeypatch):
+    report = {
+        "schema_version": "memory-os.module_cadence_report.v0",
+        "report_id": "cadence_123",
+        "status": "warning",
+        "module_count": 18,
+        "cron_job_count": 2,
+        "cognitive_loop_report_count": 30,
+        "integration_harness_member_count": 11,
+        "split_recommended_count": 10,
+        "expected_hermes_cron_missing_count": 0,
+        "finding_count": 10,
+        "generated_count": 17,
+        "skipped_count": 3,
+        "error_count": 1,
+        "duplicate_count": 2,
+        "counter_coverage_count": 18,
+        "modules": [
+            {
+                "module": "self_evolution",
+                "cadence_counters": {
+                    "run_count": 2,
+                    "generated_count": 1,
+                    "skipped_count": 1,
+                    "error_count": 0,
+                    "duplicate_count": 1,
+                    "last_run_at": "2026-05-26T02:00:00+00:00",
+                    "last_status": "ok",
+                },
+            }
+        ],
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "cron_modified": False,
+        },
+    }
+    namespace: dict[str, object] = {}
+    exec(
+        monitor._remote_probe_script().split(
+            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            1,
+        )[0],
+        namespace,
+    )
+    monkeypatch.setitem(namespace, "_read_jsonl", lambda path: [report])
+
+    summary = namespace["module_cadence_summary"]()
+
+    assert summary["generated_count"] == 17
+    assert summary["skipped_count"] == 3
+    assert summary["error_count"] == 1
+    assert summary["duplicate_count"] == 2
+    assert summary["counter_coverage_count"] == 18
+    assert summary["module_counters"]["self_evolution"]["duplicate_count"] == 1
 
 
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
@@ -1622,10 +1793,12 @@ def _healthy_owner_proposal_followups() -> dict:
         "status": "ok",
         "approved_proposal_count": 0,
         "pending_followup_count": 0,
+        "open_followup_count": 0,
         "shown_count": 0,
         "overflow_count": 0,
         "awaiting_ops_gate_count": 0,
         "ops_gate_reviewed_count": 0,
+        "awaiting_explicit_execution_count": 0,
         "execution_ticket_count": 0,
         "actual_execute": False,
         "raw_body_included": False,
@@ -1700,7 +1873,14 @@ def _healthy_module_artifacts() -> dict:
         "proposal_queue": {"candidate_count": 0, "state_counts": {}},
         "self_evolution": {"report_count": 0, "proposal_count": 0, "last_status": "missing"},
         "governance_feedback": {"emitted_event_count": 0},
-        "left_brain_pipeline_check": {"status": "ok", "finding_count": 0, "actual_execute": False},
+        "left_brain_pipeline_check": {
+            "status": "ok",
+            "finding_count": 0,
+            "active_duplicate_group_count": 0,
+            "followup_duplicate_group_count": 0,
+            "legacy_template_duplicate_group_count": 0,
+            "actual_execute": False,
+        },
         "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},
         "ops_gate": {
             "report_count": 0,
@@ -1728,6 +1908,16 @@ def _healthy_module_artifacts() -> dict:
             "latest_delivery_mode": None,
             "latest_actual_send": False,
             "raw_body_included_count": 0,
+            "outcome_count": 0,
+            "latest_outcome_id": "",
+            "latest_outcome_request_id": "",
+            "latest_outcome_policy_version": None,
+            "latest_outcome_silent": None,
+            "latest_outcome_preview_chars": None,
+            "outcome_actual_send_count": 0,
+            "outcome_actual_execute_count": 0,
+            "outcome_raw_body_included_count": 0,
+            "outcome_internal_marker_count": 0,
         },
         "mailbox": {"mailbox_exists": False, "would_send_count": 0},
     }
@@ -1757,4 +1947,8 @@ def _healthy_expression_artifacts() -> dict:
         "right_brain_adapter_latest_delivery_mode": None,
         "right_brain_adapter_latest_actual_send": False,
         "right_brain_adapter_raw_body_included_count": 0,
+        "right_brain_adapter_outcome_count": 0,
+        "right_brain_adapter_latest_outcome_silent": None,
+        "right_brain_adapter_latest_outcome_policy_version": None,
+        "right_brain_adapter_outcome_internal_marker_count": 0,
     }

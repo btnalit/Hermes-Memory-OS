@@ -360,7 +360,30 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "right_brain_expression_policy_actual_execute_true", "value": right_brain_adapter})
             elif int(right_brain_adapter.get("policy_raw_body_included_count") or 0) > 0:
                 fail.append({"code": "right_brain_expression_policy_raw_body_included", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("outcome_actual_send_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_outcome_actual_send_true", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("outcome_actual_execute_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_outcome_actual_execute_true", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("outcome_raw_body_included_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_outcome_raw_body_included", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("outcome_internal_marker_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_outcome_internal_marker", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("outcome_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "right_brain_expression_outcome_recorded",
+                        "outcome_count": right_brain_adapter.get("outcome_count"),
+                        "latest_policy_version": right_brain_adapter.get("latest_outcome_policy_version"),
+                        "latest_silent": right_brain_adapter.get("latest_outcome_silent"),
+                    }
+                )
             elif int(right_brain_adapter.get("request_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "right_brain_expression_outcome_missing",
+                        "request_count": right_brain_adapter.get("request_count"),
+                    }
+                )
                 passed.append(
                     {
                         "code": "right_brain_expression_adapter_visible",
@@ -370,6 +393,21 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 )
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
+
+    module_cadence = snapshot.get("module_cadence", {})
+    if isinstance(module_cadence, dict) and module_cadence:
+        if module_cadence.get("schema_version") == "memory-os.module_cadence_monitor_summary.v0":
+            boundary = module_cadence.get("boundary") if isinstance(module_cadence.get("boundary"), dict) else {}
+            if any(boundary.get(key) is True for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval", "cron_modified")):
+                fail.append({"code": "module_cadence_boundary_true", "value": module_cadence})
+            else:
+                passed.append({"code": "module_cadence_report_visible"})
+            if int(module_cadence.get("expected_hermes_cron_missing_count") or 0) > 0:
+                warn.append({"code": "module_cadence_expected_cron_missing", "value": module_cadence})
+            if int(module_cadence.get("split_recommended_count") or 0) > 0:
+                warn.append({"code": "module_cadence_split_pending", "value": module_cadence})
+        else:
+            warn.append({"code": "module_cadence_report_unavailable", "value": module_cadence})
 
     expression_artifacts = snapshot.get("expression_artifacts", {})
     if expression_artifacts.get("schema_version") == "memory-os.expression_artifact_summary.v0":
@@ -710,11 +748,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_proposal_followups_item_actual_execute_true"})
             if any(isinstance(item, dict) and item.get("execution_ticket_created") is True for item in items):
                 fail.append({"code": "owner_review_proposal_followups_item_execution_ticket_created"})
-            if int(proposal_followups.get("pending_followup_count") or 0) > 0:
+            awaiting_ops_gate_count = int(
+                proposal_followups.get("awaiting_ops_gate_count")
+                if proposal_followups.get("awaiting_ops_gate_count") is not None
+                else proposal_followups.get("pending_followup_count")
+                or 0
+            )
+            if awaiting_ops_gate_count > 0:
                 warn.append(
                     {
                         "code": "owner_review_approved_proposals_pending_followup",
-                        "value": proposal_followups.get("pending_followup_count"),
+                        "value": awaiting_ops_gate_count,
                     }
                 )
         else:
@@ -985,6 +1029,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
+        f"- ModuleCadence={snapshot.get('module_cadence')}",
         f"- ExpressionArtifacts={_expression_artifacts_summary(snapshot.get('expression_artifacts') or {})}",
         f"- SessionMirror={_session_mirror_summary(snapshot.get('session_mirror') or {})}",
         f"- OwnerReview={_owner_review_summary(snapshot.get('owner_review') or {})}",
@@ -1162,6 +1207,10 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "right_brain_adapter_policy_present": summary.get("right_brain_adapter_policy_present"),
         "right_brain_adapter_policy_version": summary.get("right_brain_adapter_policy_version"),
         "right_brain_adapter_policy_apply_count": summary.get("right_brain_adapter_policy_apply_count"),
+        "right_brain_adapter_outcome_count": summary.get("right_brain_adapter_outcome_count"),
+        "right_brain_adapter_latest_outcome_silent": summary.get("right_brain_adapter_latest_outcome_silent"),
+        "right_brain_adapter_latest_outcome_policy_version": summary.get("right_brain_adapter_latest_outcome_policy_version"),
+        "right_brain_adapter_outcome_internal_marker_count": summary.get("right_brain_adapter_outcome_internal_marker_count"),
     }
 
 
@@ -1327,10 +1376,12 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
     return {
         "approved": summary.get("approved_proposal_count"),
         "pending": summary.get("pending_followup_count"),
+        "open": summary.get("open_followup_count"),
         "shown": summary.get("shown_count"),
         "overflow": summary.get("overflow_count"),
         "awaiting_ops_gate": summary.get("awaiting_ops_gate_count"),
         "ops_gate_reviewed": summary.get("ops_gate_reviewed_count"),
+        "awaiting_explicit_execution": summary.get("awaiting_explicit_execution_count"),
         "policy_apply_count": summary.get("policy_apply_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
         "actual_execute": summary.get("actual_execute"),
@@ -1907,9 +1958,17 @@ def module_artifact_summary():
     right_brain_expression_policy_applies = _read_jsonl(
         "/root/.hermes/system-modules/right_brain_expression_adapter/policy_applies.jsonl"
     )
+    right_brain_expression_outcomes = _read_jsonl(
+        "/root/.hermes/system-modules/right_brain_expression_adapter/outcomes.jsonl"
+    )
     latest_right_brain_expression_request = (
         right_brain_expression_requests[-1]
         if right_brain_expression_requests and isinstance(right_brain_expression_requests[-1], dict)
+        else {}
+    )
+    latest_right_brain_expression_outcome = (
+        right_brain_expression_outcomes[-1]
+        if right_brain_expression_outcomes and isinstance(right_brain_expression_outcomes[-1], dict)
         else {}
     )
     ops_gate_reports = _read_jsonl("/root/.hermes/system-modules/ops_gate/reports.jsonl")
@@ -1974,6 +2033,8 @@ def module_artifact_summary():
         "proposal_count": self_evolution.get("proposal_count"),
         "novelty_skipped_count": self_evolution.get("novelty_skipped_count"),
         "duplicate_unresolved_proposal_count": self_evolution.get("duplicate_unresolved_proposal_count"),
+        "cadence_skipped_count": self_evolution.get("cadence_skipped_count"),
+        "same_signal_skipped_count": self_evolution.get("same_signal_skipped_count"),
         "last_status": self_evolution.get("last_status"),
       },
       "governance_feedback": {
@@ -1982,6 +2043,9 @@ def module_artifact_summary():
       "left_brain_pipeline_check": {
         "status": left_brain_pipeline.get("status"),
         "finding_count": left_brain_pipeline.get("finding_count"),
+        "active_duplicate_group_count": left_brain_pipeline.get("active_duplicate_group_count"),
+        "followup_duplicate_group_count": left_brain_pipeline.get("followup_duplicate_group_count"),
+        "legacy_template_duplicate_group_count": left_brain_pipeline.get("legacy_template_duplicate_group_count"),
         "actual_execute": left_brain_pipeline.get("actual_execute"),
       },
       "deep_reflection": {
@@ -2045,6 +2109,32 @@ def module_artifact_summary():
             1
             for item in right_brain_expression_requests
             if isinstance(item, dict) and item.get("raw_body_included") is True
+        ),
+        "outcome_count": len(right_brain_expression_outcomes),
+        "latest_outcome_id": latest_right_brain_expression_outcome.get("outcome_id"),
+        "latest_outcome_request_id": latest_right_brain_expression_outcome.get("request_id"),
+        "latest_outcome_policy_version": latest_right_brain_expression_outcome.get("policy_version"),
+        "latest_outcome_silent": latest_right_brain_expression_outcome.get("silent"),
+        "latest_outcome_preview_chars": latest_right_brain_expression_outcome.get("outcome_preview_chars"),
+        "outcome_actual_send_count": sum(
+            1
+            for item in right_brain_expression_outcomes
+            if isinstance(item, dict) and item.get("actual_send") is True
+        ),
+        "outcome_actual_execute_count": sum(
+            1
+            for item in right_brain_expression_outcomes
+            if isinstance(item, dict) and item.get("actual_execute") is True
+        ),
+        "outcome_raw_body_included_count": sum(
+            1
+            for item in right_brain_expression_outcomes
+            if isinstance(item, dict) and item.get("raw_body_included") is True
+        ),
+        "outcome_internal_marker_count": sum(
+            int(item.get("internal_marker_count") or 0)
+            for item in right_brain_expression_outcomes
+            if isinstance(item, dict)
         ),
       },
       "mailbox": {
@@ -2140,6 +2230,49 @@ def expression_artifact_summary():
       "right_brain_adapter_policy_present": right_brain_adapter.get("policy_present"),
       "right_brain_adapter_policy_version": right_brain_adapter.get("policy_version"),
       "right_brain_adapter_policy_apply_count": right_brain_adapter.get("policy_apply_count"),
+      "right_brain_adapter_outcome_count": right_brain_adapter.get("outcome_count"),
+      "right_brain_adapter_latest_outcome_silent": right_brain_adapter.get("latest_outcome_silent"),
+      "right_brain_adapter_latest_outcome_policy_version": right_brain_adapter.get("latest_outcome_policy_version"),
+      "right_brain_adapter_outcome_internal_marker_count": right_brain_adapter.get("outcome_internal_marker_count"),
+    }
+
+def module_cadence_summary():
+    reports = _read_jsonl("/root/.hermes/system-modules/module_cadence/reports.jsonl")
+    latest = reports[-1] if reports and isinstance(reports[-1], dict) else {}
+    boundary = latest.get("boundary") if isinstance(latest.get("boundary"), dict) else {}
+    module_counters = {}
+    for item in latest.get("modules", []) if isinstance(latest.get("modules"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        counters = item.get("cadence_counters") if isinstance(item.get("cadence_counters"), dict) else {}
+        module_id = str(item.get("module") or "")
+        if module_id and counters:
+            module_counters[module_id] = counters
+    return {
+      "schema_version": "memory-os.module_cadence_monitor_summary.v0",
+      "report_count": len(reports),
+      "latest_report_id": latest.get("report_id"),
+      "latest_status": latest.get("status"),
+      "module_count": latest.get("module_count"),
+      "cron_job_count": latest.get("cron_job_count"),
+      "cognitive_loop_report_count": latest.get("cognitive_loop_report_count"),
+      "integration_harness_member_count": latest.get("integration_harness_member_count"),
+      "split_recommended_count": latest.get("split_recommended_count"),
+      "expected_hermes_cron_missing_count": latest.get("expected_hermes_cron_missing_count"),
+      "finding_count": latest.get("finding_count"),
+      "generated_count": latest.get("generated_count"),
+      "skipped_count": latest.get("skipped_count"),
+      "error_count": latest.get("error_count"),
+      "duplicate_count": latest.get("duplicate_count"),
+      "counter_coverage_count": latest.get("counter_coverage_count"),
+      "module_counters": module_counters,
+      "boundary": {
+        "actual_send": boundary.get("actual_send"),
+        "actual_execute": boundary.get("actual_execute"),
+        "actual_identity_write": boundary.get("actual_identity_write"),
+        "actual_unapproved_crystallized_approval": boundary.get("actual_unapproved_crystallized_approval"),
+        "cron_modified": boundary.get("cron_modified"),
+      },
     }
 
 def session_mirror_summary():
@@ -2645,6 +2778,7 @@ print(json.dumps({
   "owner_review_surface": owner_review_surface,
   "owner_review_ingress_guard": owner_review_ingress_guard,
   "module_artifacts": module_artifact_summary(),
+  "module_cadence": module_cadence_summary(),
   "expression_artifacts": expression_artifact_summary(),
   "session_mirror": session_mirror_summary(),
   "audit_actions": audit_action_stats(),

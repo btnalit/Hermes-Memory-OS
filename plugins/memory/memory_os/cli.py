@@ -86,6 +86,7 @@ from .owner_actions import (
     render_owner_review_digest,
     resolve_owner_review_channel,
     route_approved_proposal_followup_to_ops_gate,
+    route_pending_approved_proposal_followups_to_ops_gate,
 )
 from .prefetch import continuity_selector_report
 from .prefetch import build_context_router_report
@@ -432,6 +433,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_followups.add_argument("--limit", type=int, default=20)
     review_followups.add_argument("--proposal-id", default="")
     review_followups.add_argument("--ops-gate", action="store_true")
+    review_followups.add_argument("--all-pending", action="store_true")
     review_followups.add_argument("--execution-apply", action="store_true")
     review_followups.add_argument("--owner-approved", action="store_true")
     review_followups.add_argument("--owner", default="owner")
@@ -976,6 +978,23 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
             )
             return 0 if report.get("status") in {"ready", "applied", "duplicate_ignored"} else 1
         if bool(getattr(args, "ops_gate", False)):
+            if bool(getattr(args, "all_pending", False)):
+                report = route_pending_approved_proposal_followups_to_ops_gate(
+                    store,
+                    owner_id=str(args.owner),
+                    channel=str(args.channel),
+                    limit=max(int(args.limit), 0),
+                    apply=bool(args.apply),
+                )
+                print(
+                    json.dumps(
+                        report,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                return 0 if report.get("status") == "ok" else 1
             report = route_approved_proposal_followup_to_ops_gate(
                 store,
                 proposal_id=str(args.proposal_id),

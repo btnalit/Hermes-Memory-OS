@@ -121,6 +121,7 @@ Cadence rules:
 | Wandering Mind | household digest, safe recent state | wandering output, expression drafts, would-send artifacts | no owner action for ordinary scheduled expression; exceptional proactive-send permission only | possible through Hermes origin after SpeakGate and owner-configured cadence | SpeakGate, RH-38, Hermes transport | expression feedback and ignored/delivered trends feed speak policy and review burden |
 | Expression Draft | bounded memory view, Wandering/DR/household seeds | expression draft artifacts with preview, source refs, risk flags | no direct owner action | no direct delivery; downstream SpeakGate decides | RH-38 + SpeakGate | drafts become visible through review/speak surfaces and expression feedback ledger |
 | Speak Gate | expression payloads, proposal queue, expression policy | scheduled-expression / would-send / blocked-send / silent decisions | `allow_speak_once` only for out-of-policy proactive sends | only via Hermes after scheduled config or one-shot permission | SpeakGate + RH-38 + Hermes delivery | blocked/allowed/delivered/feedback counts feed expression tuning |
+| RightBrainExpressionAdapter | bounded expression context, expression policy, safe refs | adapter request/outcome evidence, policy read evidence | no direct owner action; policy changes require proposal approval/apply | Hermes-agent wording only through owner-configured origin delivery | RH-37 + RH-38 + Hermes cron/origin | final expression outcome and owner feedback feed expression policy proposals |
 | DeepReflection | working, digest, governance, proposal/evidence summaries | carryover cards, analysis, optional proposals, optional wandering seeds | split by output type | only wandering seeds indirectly | ContextProjection, Proposal approval, SpeakGate | source-class distribution, selected/dropped classes, optional output outcomes |
 | Ops Gate | operational proposals / policies | allow/block reports | approved proposals may be routed into report-only OpsGate review; never execution | no | OpsGate + explicit execution command | approved/rejected proposal classes influence future governance |
 | Proposal Queue | proposal candidates, legacy owner-review inputs | proposal queue state | approve/reject proposal | no | OwnerActionProcessor | approval creates follow-up state only; rejection downranks similar deterministic class |
@@ -158,6 +159,7 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Wandering Mind | owner_origin / none | expression_feedback / speak_permission / monitor_only | disabled_until_opt_in / daily_once / cycle_each | Tier 1 test-host observation is would-send only; Tier 2 scheduled expression needs RH-38; exceptional proactive send needs speak permission |
 | Expression Draft | none | monitor_only | on_demand / cycle_each | creates bounded expression drafts only; downstream SpeakGate and Hermes own gate/delivery |
 | Speak Gate | owner_origin / none | expression_feedback / speak_permission / monitor_only | on_demand / cycle_each | every non-silent expression draft must receive a SpeakGate decision; one-shot allow only through owner action |
+| RightBrainExpressionAdapter | owner_origin | monitor_only | owner_daily / on_demand | Hermes agent owns wording and delivery; Memory-OS records bounded request/outcome/policy evidence |
 | DeepReflection | none | context_projection / proposal_review / speak_permission / monitor_only | cycle_each | output type determines route; TTL/minimum-signal gates live in the action path |
 | Ops Gate | none | proposal_review / monitor_only | cycle_each | approval creates follow-up state, never execution |
 | Proposal Queue | none | proposal_review | on_demand + cycle_each | approve/reject through OwnerActionProcessor; cycle status is monitor-only |
@@ -493,7 +495,7 @@ Current live reconciliation:
 closure matrix check:
   status=ok
   live_module_count=18
-  matrix_module_count=30
+  matrix_module_count=31
   active_work_item_count=18
   active_work_mapping_count=18
   finding_count=0
@@ -531,7 +533,7 @@ development gate, not a progress claim.
 | --- | --- | --- | --- |
 | P1-B | RH-31 Eval Harness | | Eval failures are measurement signals until mapped to live evidence or owner-approved redacted fixtures. |
 | P1-C | DeepReflection; Conversation Carryover; Context Router / Low-Clue Recall | | DR/carryover may affect context projection, proposal review, or speak permission depending on output type. |
-| P1-D | Governance Feedback; Self-Evolution | | LLM/governance analysis remains feedback/proposal evidence, not live tuning. |
+| P1-D | Governance Feedback; Self-Evolution | | LLM/governance analysis remains report-only or proposal-only evidence, not live tuning. Any LLM use must declare Hermes-agent/host ownership and RH-37/29 mode. |
 | P1-E | Wandering Mind; Speak Gate | | Would-send artifacts and one-shot permission remain governed by speak gate closure. |
 | P1-F | Heartbeat / Inner Drive; Metadata Retention | | Audit density and working expiry are runtime/write-surface observation and metadata-retention concerns. |
 | P1-G | Context Router / Low-Clue Recall; MemorySources Attribution | | Live Telegram candidate-quality findings must close through context projection plus attribution evidence. |
@@ -545,9 +547,9 @@ development gate, not a progress claim.
 | P1-O | Agent-Mediated Owner Reply Tool; Owner Reply Parser; OwnerActionProcessor | | Fallback and gateway-hook closure protects the structured owner-action path. |
 | P1-P | Heartbeat / Inner Drive; Proposal Queue; Wandering Mind; Owner Review Queue / Aging | | Producers and review projections must carry bounded timestamps for aging. |
 | P1-Q | Ops Gate; Proposal Queue; Agent-Mediated Review Surface; OwnerActionProcessor | | Approved proposal follow-up stays visible and report-only until explicit execution apply exists. |
-| P1-R | Wandering Mind; Expression Draft; Speak Gate; DeepReflection; Governance Feedback; Self-Evolution; Right-Brain Expression Closure Contract | | Formal right-brain expression is not closed by test-host would-send observation; RH-38 must define draft, gate, delivery, feedback, and proposal backflow before runtime expression delivery. |
-| P1-S | Evidence Scoring; Self-Evolution; Governance Feedback; Left-Brain Pipeline Check; Proposal Queue; Ops Gate; Heartbeat / Inner Drive; Left-Brain Governance Quality Contract | | Left-brain safety governance is closed, but judgment quality, feedback learning, expired-working hygiene, proposal novelty, approved-proposal execution decision, and production cadence are not mature. |
-| P1-T | Cron / Session / State Mirrors; Household Digest; Wandering Mind; Speak Gate; Evidence Scoring; Self-Evolution; Governance Feedback; DeepReflection; Owner Review Hermes Cron Helper | | Prototype-aligned cadence split must keep Hermes as scheduler/delivery owner while Memory-OS exposes bounded module generated/skipped/error/duplicate evidence. |
+| P1-R | Wandering Mind; Expression Draft; Speak Gate; DeepReflection; Governance Feedback; Self-Evolution; Right-Brain Expression Closure Contract; RightBrainExpressionAdapter | | Formal right-brain expression uses Hermes agent as the LLM/interaction owner. Test-host outcome ledger is live; remaining closure is owner reaction/feedback volume and cadence evidence. |
+| P1-S | Evidence Scoring; Self-Evolution; Governance Feedback; Left-Brain Pipeline Check; Proposal Queue; Ops Gate; Heartbeat / Inner Drive; Left-Brain Governance Quality Contract | | Left-brain safety governance is closed, feature scoring and first expression-policy apply are live, but pipeline WARN, duplicate maturity, DeepReflection expired-working hygiene, and production cadence are not mature. Future LLM semantic advice is report-only/proposal-only unless separately gated. |
+| P1-T | Cron / Session / State Mirrors; Household Digest; Wandering Mind; Speak Gate; Evidence Scoring; Self-Evolution; Governance Feedback; DeepReflection; Owner Review Hermes Cron Helper | | Prototype-aligned cadence split must keep Hermes as scheduler/delivery owner while Memory-OS exposes bounded module generated/skipped/error/duplicate evidence. The first runtime split is SelfEvolution-local same-day/same-signal skip gating, not a Memory-OS timer or transport change. |
 | P2-F | Review Digest Renderer; Agent-Mediated Review Surface; Agent-Mediated Owner Reply Tool; OwnerActionProcessor; Owner Review Hermes Cron Helper; Agent / Memory-OS Collaboration Contract | | Public material must explain the owner-governance subsystem without expanding Memory-OS transport or execution ownership. |
 
 The local check validates this table against

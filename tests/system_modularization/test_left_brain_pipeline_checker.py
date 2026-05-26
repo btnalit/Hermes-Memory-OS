@@ -47,3 +47,71 @@ def test_left_brain_pipeline_checker_detects_live_feature_scoring_as_fail(tmp_pa
 
     assert report["status"] == "fail"
     assert any(finding["code"] == "feature_score_live_applied" for finding in report["findings"])
+
+
+def test_left_brain_pipeline_checker_warns_on_active_concrete_duplicate_proposals(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    for _ in range(2):
+        proposal_queue.create_candidate(
+            store=store,
+            title="调整右脑表达策略：too_mechanical 反馈",
+            body="具体改动: tune policy\n证据: owner feedback\n验收标准: monitor\n后续状态: report-only",
+            kind="expression_policy",
+            proposal_class="expression_policy:too_mechanical",
+            dedupe_key="expression_policy:too_mechanical",
+        )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+
+    assert report["status"] == "warn"
+    assert report["duplicate_unresolved"]["active_duplicate_group_count"] == 1
+    assert report["duplicate_unresolved"]["active_duplicate_candidate_count"] == 2
+    assert any(finding["code"] == "duplicate_unresolved_proposals" for finding in report["findings"])
+
+
+def test_left_brain_pipeline_checker_does_not_warn_for_legacy_template_duplicates(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    for _ in range(2):
+        proposal_queue.create_candidate(
+            store=store,
+            title="Self-Evolution dry-run proposal",
+            body="Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+            source_refs=["feature_score:legacy"],
+            kind="self_evolution",
+        )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+
+    assert report["status"] == "ok"
+    assert report["duplicate_unresolved"]["active_duplicate_group_count"] == 0
+    assert report["duplicate_unresolved"]["legacy_template_duplicate_group_count"] == 1
+    assert not any(finding["code"] == "duplicate_unresolved_proposals" for finding in report["findings"])
+
+
+def test_left_brain_pipeline_checker_tracks_followup_duplicates_without_owner_action_warn(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    for _ in range(2):
+        candidate = proposal_queue.create_candidate(
+            store=store,
+            title="调整右脑表达策略：too_mechanical 反馈",
+            body="具体改动: tune policy\n证据: owner feedback\n验收标准: monitor\n后续状态: report-only",
+            kind="expression_policy",
+            proposal_class="expression_policy:too_mechanical",
+            dedupe_key="expression_policy:too_mechanical",
+        )
+        proposal_queue.transition(
+            store=store,
+            candidate_id=candidate["candidate_id"],
+            decision="approve",
+            reviewer="owner",
+        )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+
+    assert report["status"] == "ok"
+    assert report["duplicate_unresolved"]["active_duplicate_group_count"] == 0
+    assert report["duplicate_unresolved"]["followup_duplicate_group_count"] == 1
+    assert report["approved_followup"]["approved_for_proposal_count"] == 2

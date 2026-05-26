@@ -40,6 +40,7 @@ OWNER_REVIEW_DELIVERY_STATUS_SCHEMA_VERSION = "memory-os.owner_review_delivery_s
 OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_integration.v0"
 APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_followups.v0"
 APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate.v0"
+APPROVED_PROPOSAL_OPS_GATE_BATCH_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate_batch.v0"
 APPROVED_PROPOSAL_EXECUTION_APPLY_SCHEMA_VERSION = "memory-os.approved_proposal_execution_apply.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
@@ -251,19 +252,24 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     items = sorted(items, key=lambda item: (str(item.get("approved_at") or ""), str(item.get("proposal_id") or "")), reverse=True)
     bounded_limit = max(int(limit), 0)
     shown = items[:bounded_limit]
+    awaiting_ops_gate_count = sum(1 for item in items if item.get("followup_state") == "awaiting_ops_gate_review")
+    ops_gate_reviewed_count = sum(
+        1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
+    )
+    policy_apply_count = sum(1 for item in items if item.get("followup_state") == "applied_expression_policy")
     return {
         "schema_version": APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
         "status": "ok",
         "approved_proposal_count": len(proposals),
-        "pending_followup_count": sum(1 for item in items if item.get("followup_state") != "applied_expression_policy"),
+        "pending_followup_count": awaiting_ops_gate_count,
+        "open_followup_count": sum(1 for item in items if item.get("followup_state") != "applied_expression_policy"),
         "shown_count": len(shown),
         "overflow_count": max(len(items) - bounded_limit, 0),
-        "awaiting_ops_gate_count": sum(1 for item in items if item.get("followup_state") == "awaiting_ops_gate_review"),
-        "ops_gate_reviewed_count": sum(
-            1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
-        ),
-        "policy_apply_count": sum(1 for item in items if item.get("followup_state") == "applied_expression_policy"),
+        "awaiting_ops_gate_count": awaiting_ops_gate_count,
+        "ops_gate_reviewed_count": ops_gate_reviewed_count,
+        "awaiting_explicit_execution_count": ops_gate_reviewed_count,
+        "policy_apply_count": policy_apply_count,
         "execution_ticket_count": 0,
         "actual_execute": False,
         "raw_body_included": False,
@@ -283,10 +289,12 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "schema_version": report["schema_version"],
         "approved_proposal_count": report["approved_proposal_count"],
         "pending_followup_count": report["pending_followup_count"],
+        "open_followup_count": report["open_followup_count"],
         "shown_count": report["shown_count"],
         "overflow_count": report["overflow_count"],
         "awaiting_ops_gate_count": report["awaiting_ops_gate_count"],
         "ops_gate_reviewed_count": report["ops_gate_reviewed_count"],
+        "awaiting_explicit_execution_count": report["awaiting_explicit_execution_count"],
         "policy_apply_count": report["policy_apply_count"],
         "execution_ticket_count": report["execution_ticket_count"],
         "actual_execute": report["actual_execute"],
@@ -467,6 +475,64 @@ def route_approved_proposal_followup_to_ops_gate(
         "actual_execute": False,
         "raw_body_included": False,
         "boundary": _owner_review_false_boundary(),
+    }
+
+
+def route_pending_approved_proposal_followups_to_ops_gate(
+    store: MemoryOSStore,
+    *,
+    owner_id: str = "owner",
+    channel: str = "cli",
+    limit: int = 50,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Route all approved proposals still awaiting OpsGate review.
+
+    This is a bounded operator/agent helper for closing the report-only
+    follow-up stage. It never creates execution tickets and never executes
+    work. Re-running it is idempotent because already reviewed proposals are
+    skipped by the underlying single-proposal route.
+    """
+
+    report = approved_proposal_followups_report(store, limit=1_000_000)
+    items = [
+        item
+        for item in report.get("items", [])
+        if isinstance(item, dict) and item.get("followup_state") == "awaiting_ops_gate_review"
+    ]
+    bounded_limit = max(min(int(limit or 50), 200), 0)
+    selected = items[:bounded_limit]
+    results = [
+        route_approved_proposal_followup_to_ops_gate(
+            store,
+            proposal_id=str(item.get("proposal_id") or ""),
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+        )
+        for item in selected
+    ]
+    status = "ok"
+    if any(result.get("status") == "error" for result in results):
+        status = "error"
+    return {
+        "schema_version": APPROVED_PROPOSAL_OPS_GATE_BATCH_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "eligible_count": len(items),
+        "selected_count": len(selected),
+        "overflow_count": max(len(items) - bounded_limit, 0),
+        "ops_gate_report_written_count": sum(1 for result in results if result.get("ops_gate_report_written") is True),
+        "duplicate_ignored_count": sum(1 for result in results if result.get("status") == "duplicate_ignored"),
+        "error_count": sum(1 for result in results if result.get("status") == "error"),
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+        "results": results[:20],
     }
 
 

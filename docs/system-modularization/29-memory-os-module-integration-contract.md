@@ -292,6 +292,32 @@ If the deterministic ingress classifier does not match:
   the ambiguous recall path
 - no LLM result may turn an unclassified query into send/execute/write approval
 
+LLM capability rule:
+
+```text
+Memory-OS must not add an implicit internal LLM worker. Every LLM-using surface
+must declare its Hermes agent / host-runtime owner, mode, bounded live scope,
+fallback, monitor fields, and stop signal before implementation.
+```
+
+Allowed modes:
+
+| Mode | Meaning | May mutate state? |
+| --- | --- | --- |
+| `none` | No LLM involvement. | no |
+| `report-only` | LLM output is evidence only. | no |
+| `proposal-only` | LLM output may create an owner-reviewed proposal. | proposal state only, never apply |
+| `bounded-live` | LLM output affects one declared bounded surface. | only within declared scope and never hard boundaries |
+
+Current declared LLM surfaces:
+
+| Surface | Owner | Mode | Bounded scope |
+| --- | --- | --- | --- |
+| Right-brain expression | Hermes agent / cron `deliver=origin` | `bounded-live` | final expression wording or `[SILENT]`; no Memory-OS transport, execution, memory write, identity write, or policy write without owner-approved apply |
+| RH-28 low-clue recall judge | Hermes configured judge adapter | `report-only` | duplicate/title/ranking evidence inside `ambiguous_recall`; hard routes remain deterministic |
+| DeepReflection reflective adapter | future Hermes agent adapter only after review | `report-only` or `proposal-only` | analysis, seed, or proposal evidence; no direct context injection beyond existing projection gates |
+| Left-brain semantic advisor | future Hermes agent/governance adapter only after review | `report-only` or `proposal-only` | explanation/risk/proposal suggestion; no replacement of feature scoring without explicit apply gate |
+
 Required tests for any ingress-affecting change:
 
 - no-punctuation Telegram-style phrase
@@ -1076,6 +1102,10 @@ Required monitor evidence:
 - `right_brain_expression.speak_gate_evaluated_count`
 - `right_brain_expression.speak_gate_missing_evaluation_count`
 - `right_brain_expression.speak_gate_decision_distribution`
+- `right_brain_expression.outcome_count`
+- `right_brain_expression.latest_outcome_policy_version`
+- `right_brain_expression.latest_outcome_silent`
+- `right_brain_expression.outcome_internal_marker_count`
 - `right_brain_expression.scheduled_delivered_count`
 - `right_brain_expression.exceptional_permission_count`
 - `right_brain_expression.owner_feedback_by_type`
@@ -1373,7 +1403,9 @@ contracts:
     forbidden_field_checks:
 
   llm:
-    uses_llm: none | report-only | bounded-live
+    uses_llm: none | report-only | proposal-only | bounded-live
+    host_or_agent_owner:
+    bounded_live_scope:
     provider_source:
     timeout_ms:
     fallback:
@@ -1400,8 +1432,8 @@ contracts:
 | MemorySources RH-29 | route reports, selected sections | metadata ledger | no | attribution only | no | none | stats, forbidden fields, boundary count |
 | Feedback RH-30 | MemorySources records | feedback ledger + audit | no | bounded scoring signal | no live authority | none | feedback count and ratings |
 | Heartbeat / Inner Drive | events | working, candidates, heartbeat state | no | no | no | none | heartbeat_state, working counts |
-| Cognitive Loop RH-27 | store, module reports | module reports, audit, bounded events | no | indirect through generated state | no send/execute | DR may use LLM per config | cycle status, boundary report |
-| DeepReflection | working, digest, governance | injection cards/reports | no | carryover section | bounded injection | auto_bounded | source-class distribution, boundaries |
+| Cognitive Loop RH-27 | store, module reports | module reports, audit, bounded events | no | indirect through generated state | no send/execute | none in scheduler; module surfaces declare separately | cycle status, boundary report |
+| DeepReflection | working, digest, governance | injection cards/reports | no | carryover section | bounded injection | none today; future report-only/proposal-only Hermes-agent adapter only | source-class distribution, boundaries |
 | CronMirror | Hermes cron jobs/output metadata | mirror events only on explicit apply | no | no | no | none | modules status/doctor/run-once dry-run |
 | SessionMirror | profile session metadata/state.db | mirrored bounded session events only on explicit apply | no | indirect through event stream after apply | no | none | session_count, covered_session_count, pending_session_count |
 | StateSourceMirror | allowlisted state roots | state_source_changed events only on explicit apply | no | indirect through event stream after apply | no | none | source_count, pending_source_count |
@@ -1409,12 +1441,13 @@ contracts:
 | mailbox | mailbox roots | status/would-send artifacts only | no | no | no send | none | roots, would_send_count |
 | household_digest | recent Memory-OS events | household digest artifact | no | indirect through digest/DR inputs | no | none | artifact_exists; needs trend if promoted |
 | digest_consolidation | events/candidates/proposals | daily/weekly digest artifacts, proposal candidates | no | indirect through digest/DR inputs | no approval | none | daily/weekly artifact counts |
-| wandering_mind | household digest, safe recent state | outputs and would-send artifacts | no | indirect through DR/speak gate | no send | none | output/would-send counts |
+| wandering_mind | household digest, safe recent state | outputs and would-send artifacts | no | indirect through DR/speak gate | no send | none; formal LLM expression is the Hermes-agent expression adapter | output/would-send counts |
 | ops_gate | proposed actions | report-only gate artifacts | no | indirect through governance feedback | no execute | none | report_count, blocked_decision_count |
 | proposal_queue | proposal/candidate inputs | proposal queue candidates/states | no | indirect through DR/evidence | no crystallized approval | none | candidate_count, state_counts |
 | evidence_scoring | events/working/candidates/proposals | evidence and score artifacts | no | indirect through DR/self-evolution | no approval | none | score_count, subject_counts |
 | self_evolution | evidence, ops gate, proposal queue | dry-run reports, proposal candidates | no | indirect through governance feedback | no execute | none | report_count, proposal_count |
-| speak_gate | expression payloads/proposals | would-send/blocked-send decision artifacts | no | no | no send in v0.1 | none | would_send_count, actual_send=false |
+| speak_gate | expression payloads/proposals | would-send/blocked-send decision artifacts | no | no | no send by Memory-OS | none | would_send_count, actual_send=false |
+| RightBrainExpressionAdapter RH-38 | bounded expression context, policy, feedback aggregates | adapter requests, expression outcome evidence, policy read evidence | no | no | Hermes-owned low-frequency expression wording only | bounded-live via Hermes agent; Memory-OS does not own model runtime | request_count, outcome_count, policy_version, raw_body=false, boundaries=false |
 | OwnerReviewDigest | review queue, aging, rendered digest | owner-readable review payload | no | no | Hermes cron delivery only | none | cron status, rendered digest safety |
 | RH-31 eval harness (31.0-31.3) | synthetic/redacted fixtures, bounded monitor metadata, MemorySources fixtures, public projection seams | gitignored eval reports and promoted scorecards only | no | report-only adapter reads only | no | none/report-only only | eval report count, forbidden fields, retention, adapter scorecard |
 | Future RH-31 guards | real findings | tests/docs, maybe route rules | must use IngressDecision | maybe | maybe | none/report-only only | route matrix |

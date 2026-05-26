@@ -271,6 +271,7 @@ Not closed until all are true:
 | ExpressionDraft | `plugins/modules/expression/expression_draft.py` | Implemented and deployed on test host. | Continue as structured bounded draft object: text preview, source refs, feeling tags, risk flags, silence reason. | `tests/system_modularization/test_expression_draft_module.py` |
 | SpeakGate | `plugins/modules/expression/speak_gate.py` | Can evaluate wandering output, no full draft policy. | Evaluate every non-silent ExpressionDraft; count silent / allowed / blocked / would-send / permission-required. | `tests/system_modularization/test_speak_gate_module.py` |
 | Hermes-Agent Expression Adapter | `scripts/memory_os_right_brain_expression.py` + `scripts/memory_os_right_brain_expression_cron_gate.py` | Implemented and deployed on test host. | Memory-OS emits bounded context; Hermes agent owns final wording, silence judgment, and origin delivery. | `tests/scripts/test_memory_os_right_brain_expression_helper.py`, `tests/scripts/test_memory_os_right_brain_expression_cron_gate.py` |
+| RightBrainExpressionOutcomeLedger | `scripts/memory_os_right_brain_expression_outcome.py` + `scripts/memory_os_3_200_monitor.py` | Implemented and deployed on test host. | Scan Hermes cron output, extract only final `## Response` or `[SILENT]`, record policy version and boundary evidence; do not send or call Hermes. | `tests/scripts/test_memory_os_right_brain_expression_outcome.py`, `tests/scripts/test_memory_os_3_200_monitor.py` |
 | ExpressionFeedbackLedger | `plugins/memory/memory_os/owner_actions.py` | Implemented as no-send ledger. | Store `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period`; no direct live mutation. | `tests/plugins/memory/test_memory_os_owner_actions.py` |
 | GovernanceFeedback | `plugins/modules/governance/feedback_bridge.py` | Consumes evidence / ops / proposal / self-evolution. | Consume expression feedback and delivery outcomes as bounded governance events. | `tests/system_modularization/test_governance_feedback_bridge_module.py` |
 | EvidenceScoring | `plugins/modules/evidence/scoring.py` | Feature-maturity v2 is the primary score path; legacy hash is comparison only. | Keep score dimensions visible; do not let scores directly execute, route, or mutate policy. | `tests/system_modularization/test_evidence_scoring_module.py` |
@@ -343,8 +344,10 @@ class ExpressionDraftModule:
 
 Hard rules:
 
-- no LLM call inside Memory-OS unless a separate owner-approved adapter is
-  explicitly designed;
+- no Memory-OS-owned general LLM runtime for conversation, transport,
+  approval, or execution;
+- LLM use must be declared as a capability surface owned by Hermes agent /
+  host runtime, or by a separately approved bounded adapter;
 - no delivery;
 - no raw body;
 - no tool execution;
@@ -369,8 +372,20 @@ memory_os_expression_context(profile: str, limit: int) -> bounded context
 memory_os_expression_draft(text_preview, source_refs, feeling_tags, risk_flags, silence_reason)
 ```
 
-The first implementation can be CLI/provider-local and disabled by default.
-Scheduled origin delivery requires external review.
+The first runtime baseline is deployed on the test host through
+`scripts/memory_os_right_brain_expression.py` and Hermes cron `deliver=origin`.
+Memory-OS emits bounded prompt/context/policy; Hermes agent owns final wording,
+silence judgment, and platform delivery.
+
+Next required closure is not another transport path. It is outcome evidence:
+
+- record final expression text or `[SILENT]` as a bounded outcome;
+- link outcome to adapter request, policy version, SpeakGate decision, and
+  Hermes-owned cron run;
+- record owner feedback/reaction when present;
+- keep `actual_send=false` on Memory-OS records because Hermes owns delivery;
+- fail monitor if raw body, execution, identity write, or unapproved memory
+  write appears.
 
 ### SpeakGate v2
 
@@ -830,7 +845,9 @@ Acceptance:
 
 - reports ok/warn/fail;
 - detects approved proposals without follow-up;
-- detects duplicate unresolved proposal classes;
+- detects owner-actionable active duplicate proposal classes;
+- separates active duplicate groups from follow-up duplicates and historical
+  template duplicates;
 - detects execution ticket creation as failure;
 - does not mutate state.
 
@@ -863,6 +880,16 @@ Acceptance:
 - no execution ticket;
 - repeated review is idempotent.
 
+Runtime status:
+
+- deployed on `10.20.3.200`;
+- batch command `review proposal-followups --ops-gate --all-pending --apply`
+  is live;
+- latest monitor reports `pending=0`, `awaiting_ops_gate=0`,
+  `ops_gate_reviewed=7`, `awaiting_explicit_execution=7`,
+  `execution_tickets=0`, and `actual_execute=false`;
+- the remaining work is explicit proposal-kind apply, not generic execution.
+
 ### Slice 8 - P1-T Module Cadence Report
 
 Purpose:
@@ -889,6 +916,18 @@ Acceptance:
 - generated/skipped/duplicate/error counters visible;
 - owner-origin modules remain disabled unless Hermes config enables them;
 - cognitive loop is labelled integration harness.
+
+Runtime status:
+
+- deployed on `10.20.3.200`;
+- `memory_os_module_cadence_report.py --apply` writes
+  `system-modules/module_cadence/reports.jsonl`;
+- latest monitor reports `module_count=18`, `counter_coverage_count=18`,
+  `generated_count=874`, `skipped_count=12`, `error_count=15`,
+  `duplicate_count=11`, `expected_hermes_cron_missing_count=0`, and
+  `cron_modified=false`;
+- `module_cadence_split_pending` remains WARN because cadence timers have not
+  been split yet.
 
 ### Slice 9 - 10.20.3.200 Live Closure Smoke
 
@@ -1134,25 +1173,43 @@ external review required:
 
 ## Expected Near-Term Order
 
-1. Commit current governance / contract baseline.
-2. Implement Slice 1 ExpressionDraft.
-3. Implement Slice 2 Hermes-agent expression adapter contract.
-4. Implement Slice 3 SpeakGate mandatory draft decision.
-5. Implement Slice 4 expression feedback ledger.
-6. Implement Slice 6 left-brain pipeline checker.
-7. Implement Slice 7 proposal lifecycle / follow-up.
-8. Implement Slice 5 expression feedback backflow.
-9. Implement Slice 8 cadence report.
-10. Only then discuss scheduled right-brain owner-origin expression.
+Completed baseline:
+
+1. Governance / contract baseline is committed.
+2. Slice 1 ExpressionDraft baseline is deployed.
+3. Slice 2 Hermes-agent expression adapter is deployed on the test host.
+4. Slice 3 SpeakGate mandatory decision for new cognitive-loop output is
+   deployed.
+5. Slice 4 expression feedback ledger is deployed.
+6. Expression-feedback-to-policy proposal and explicit `expression_policy`
+   apply are deployed for the bounded right-brain policy target.
+7. P1-R outcome ledger and monitor are deployed: final Hermes-agent expression
+   outcomes are recorded from Hermes cron output as bounded evidence.
+8. P1-T module cadence report is deployed: current module cadence ownership is
+   visible without modifying Hermes cron or systemd timers.
+9. P1-T first split is deployed: SelfEvolution adds module-local same-day /
+   same-signal skip gating while leaving Hermes cron/systemd timers unchanged.
+
+Next runtime order:
+
+1. P1-R outcome feedback volume: link recorded outcomes to owner feedback and
+   policy/prompt/cadence proposals without adding Memory-OS transport.
+2. P1-S DeepReflection expired-working hygiene and feedback backflow checks.
+3. P1-T choose the next module split from generated/skipped/error/duplicate
+   counters after SelfEvolution evidence is stable.
+4. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
+   bounded-live gate.
 
 This order is deliberate:
 
-- right-brain needs draft and gate before delivery;
-- feedback needs owner-visible content before learning;
-- Hermes-agent expression adapter must be explicit before Memory-OS starts
-  recording formal expression drafts from agent output;
-- left-brain needs checker and lifecycle before feedback backflow can safely
-  create proposal pressure;
-- left-brain needs checker and lifecycle before execution;
-- cadence report comes before scheduler changes;
+- SelfEvolution is the first split because it already has quality gates and
+  duplicate evidence, and repeated owner-facing proposals are the highest
+  visible cadence risk;
+- right-brain now has outcome evidence after delivery, so the next gap is
+  reaction volume and cadence evaluation, not another send path;
+- cadence report came before scheduler changes; the next cadence slice must add
+  a module-local skip gate before changing timers;
+- left-brain checker comes before claiming proposal quality maturity;
+- LLM capability must stay attached to Hermes agent / approved bounded adapter
+  surfaces, not a Memory-OS-owned conversation model;
 - Hermes delivery remains host-owned throughout.

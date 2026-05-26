@@ -1060,8 +1060,10 @@ Stop signal:
 Status: deployed on `10.20.3.200`; approved proposals are visible, can be
 routed through OpsGate report-only review, and the first bounded
 `expression_policy` proposal has passed an explicit owner-approved apply into
-the right-brain expression adapter policy. Generic external execution remains
-future work.
+the right-brain expression adapter policy. The batch report-only follow-up route
+has also moved all pending approved proposals through OpsGate review, leaving
+them visible at the explicit execution-decision stage. Generic external
+execution remains future work.
 
 Reason:
 
@@ -1073,10 +1075,15 @@ Reason:
 Implemented runtime slice:
 
 - approved proposal follow-up summaries expose approved counts and
-  `actual_execute=false`;
+  `pending_followup_count`, `open_followup_count`,
+  `awaiting_ops_gate_count`, `ops_gate_reviewed_count`,
+  `awaiting_explicit_execution_count`, and `actual_execute=false`;
 - monitor fails if top-level, boundary, or item-level proposal follow-up sets
   `actual_execute=true`;
 - OpsGate follow-up remains report-only and idempotent.
+- `review proposal-followups --ops-gate --all-pending --apply` routes pending
+  approved proposals through OpsGate report-only review without creating
+  execution tickets;
 - `expression_policy` proposals that are owner-approved and OpsGate
   `would_allow` can be explicitly applied with
   `review proposal-followups --execution-apply --owner-approved --apply`;
@@ -1101,10 +1108,10 @@ Stop signal:
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
-Status: runtime baseline deployed on `10.20.3.200`: P1-R draft/SpeakGate,
-owner preview, expression feedback ledger, Hermes-agent expression adapter, and
-owner/Hermes expression feedback action tokens are live with WARN-only monitor
-evidence and no hard failures.
+Status: runtime outcome baseline deployed on `10.20.3.200`: P1-R
+draft/SpeakGate, owner preview, expression feedback ledger, Hermes-agent
+expression adapter, expression-policy apply, and final expression outcome
+ledger are live with WARN-only monitor evidence and no hard failures.
 
 Implementation blueprint:
 
@@ -1148,6 +1155,10 @@ Reason:
   `right_brain_adapter_latest_delivery_mode=hermes_cron_agent`,
   `right_brain_adapter_raw_body_included_count=0`, and PASS
   `right_brain_expression_adapter_visible`.
+- latest outcome ledger monitor reports `right_brain_adapter_outcome_count=2`,
+  `right_brain_adapter_latest_outcome_policy_version=1`,
+  `right_brain_adapter_outcome_internal_marker_count=0`, and PASS
+  `right_brain_expression_outcome_recorded`.
 
 Implemented runtime slices:
 
@@ -1163,12 +1174,14 @@ Implemented runtime slices:
    `exceptional_proactive_send`;
 4. every current-cycle non-silent expression draft passes SpeakGate;
 5. owner review bounded expression preview is deployed for shown speak items;
-6. expression feedback types: `like`, `too_mechanical`, `too_frequent`,
+6. Hermes-agent final expression outcomes are recorded from Hermes cron output
+   as bounded outcome ledger entries without Memory-OS owning transport.
+7. expression feedback types: `like`, `too_mechanical`, `too_frequent`,
    `boundary_private`, `off_voice`, `mute_period`;
-7. expression outcomes can enter GovernanceFeedback / SelfEvolution as
+8. expression outcomes can enter GovernanceFeedback / SelfEvolution as
    proposals, not direct prompt/cadence mutation;
-8. monitor fields listed in RH-38 are present for the deployed slices;
-9. owner/Hermes expression feedback tokens are visible in the digest and are
+9. monitor fields listed in RH-38 are present for the deployed slices;
+10. owner/Hermes expression feedback tokens are visible in the digest and are
    accepted through the structured review-reply tool, not only through SSH/CLI.
 
 Prototype-informed runtime slices:
@@ -1187,7 +1200,8 @@ Promotion signal:
 - every non-silent draft has a SpeakGate decision;
 - owner can see and feedback expression content;
 - expression feedback can produce owner-reviewed prompt/policy/frequency
-  proposals;
+  proposals, and bounded `expression_policy` proposals can be explicitly
+  applied after owner approval plus OpsGate report-only review;
 - Hermes owns delivery and all hard boundaries remain false.
 
 Stop signal:
@@ -1195,14 +1209,16 @@ Stop signal:
 - actual send happens without owner-configured scheduled expression;
 - raw private body appears in expression draft/review;
 - right-brain text becomes task/proposal/agenda language;
-- feedback directly mutates prompts, cadence, routing, or delivery.
+- feedback directly mutates prompts, cadence, routing, or delivery without an
+  owner-reviewed proposal, OpsGate report-only evidence, explicit apply, and
+  monitor fields.
 
 ### P1-S - RH-39 Left-Brain Governance Quality
 
-Status: design gate added; P1-S slices 1, 2, 3, and 4 are deployed on
-`10.20.3.200` with WARN-only monitor evidence and no hard failures. The runtime
-closure baseline promotes EvidenceScoring v2 to the primary score path while
-retaining legacy hash only as comparison evidence.
+Status: design gate added; P1-S slices 1-5 plus duplicate-maturity cleanup are
+deployed on `10.20.3.200` with WARN-only overall monitor evidence and no hard
+failures. The runtime closure baseline promotes EvidenceScoring v2 to the
+primary score path while retaining legacy hash only as comparison evidence.
 
 Implementation blueprint:
 
@@ -1242,9 +1258,13 @@ Reason:
   only in an owner-action ledger;
 - deployed P1-S slice 1 filters expired working from EvidenceScoring and adds
   monitor visibility for expired scoring contamination;
-- live monitor reports `novelty_skipped_count=1` and
-  `duplicate_unresolved_proposal_count=1` after the first deployed duplicate
-  skip;
+- live monitor reports `novelty_skipped_count=10` and
+  `duplicate_unresolved_proposal_count=10`; those are historical skip counters,
+  while the current pipeline check now reports zero active duplicate groups;
+- latest live pipeline check reports `status=ok`, `finding_count=0`,
+  `active_duplicate_group_count=0`, `followup_duplicate_group_count=0`, and
+  `legacy_template_duplicate_group_count=1`; the remaining duplicate is legacy
+  template noise, not an owner-actionable proposal duplicate;
 - latest monitor evidence reports `feature_score_count=508`,
   `hash_score_legacy_count=0`, `legacy_hash_comparison_count=508`, and PASS
   `left_brain_feature_scoring_primary_ok`;
@@ -1252,8 +1272,14 @@ Reason:
   `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
   `left_brain_maturity_scoring_primary_ok`;
 - expired working handling in DeepReflection is still not fixed;
-- approved proposals are visible and safe, but execution-decision state remains
-  future work.
+- approved proposals are visible and safe; the first bounded
+  `expression_policy` proposal completed owner approval, OpsGate report-only
+  review, and explicit policy apply; generic external execution remains future
+  work.
+- latest P1-Q monitor evidence reports `OwnerProposalFollowups.pending=0`,
+  `awaiting_ops_gate=0`, `ops_gate_reviewed=7`,
+  `awaiting_explicit_execution=7`, `execution_tickets=0`, and
+  `actual_execute=false`.
 
 Latest slice-1 evidence:
 
@@ -1265,8 +1291,8 @@ Latest slice-1 evidence:
 - monitor reports `expired_used_in_scoring_count=0` and PASS
   `left_brain_expired_working_not_scored`;
 - monitor remains WARN because of unrelated/open observation items:
-  right-brain historical SpeakGate gaps, SessionMirror pending sessions,
-  approved proposal follow-up, RH-31 eval warnings, and RH-26 casual-empty.
+  module cadence split pending, SessionMirror pending sessions, RH-31 eval
+  warnings, and RH-26 casual-empty.
 
 Required design work:
 
@@ -1283,8 +1309,9 @@ Required design work:
 5. route MemorySources / owner / expression feedback into GovernanceFeedback as
    bounded evidence only;
 6. filter or explicitly downweight expired working in scoring and reflection;
-7. keep approved proposal follow-up visible while designing a separate
-   execution-decision gate;
+7. keep approved proposal follow-up visible and extend explicit apply only for
+   proposal kinds with owner approval, OpsGate report-only evidence, bounded
+   runtime target, rollback, and monitor fields;
 8. split production cadence from the test-host cognitive-loop integration
    harness;
 9. reduce ContextRouter/Ingress classification duplication through parity tests
@@ -1311,7 +1338,9 @@ Stop signal:
 
 ### P1-T - Prototype-Informed Module Cadence Split
 
-Status: design required before production scheduling changes.
+Status: report-only runtime baseline deployed on `10.20.3.200`; first runtime
+split deployed for `SelfEvolution` as a module-local same-day/same-signal skip
+gate; no Hermes cron/systemd scheduling changes have been made.
 
 Implementation blueprint:
 
@@ -1324,6 +1353,7 @@ Source:
 - `docs/system-modularization/36-module-closure-matrix.md`
 - `docs/system-modularization/38-right-brain-expression-closure-contract.md`
 - `docs/system-modularization/39-left-brain-governance-quality-contract.md`
+- `docs/system-modularization/07-validation-report-10.20.3.200.md`
 - read-only `10.20.2.88` Hermes/Sannai cron evidence
 
 Reason:
@@ -1343,25 +1373,59 @@ Required design work:
 
 1. classify each active module as one of:
    `integration_harness`, `owner_origin`, `local_no_agent`, `monitor_poll`,
-   or `on_demand_manual`;
-2. define generated/skipped/error/duplicate counters per module;
+   or `on_demand_manual` - report-only baseline deployed as
+   `memory_os_module_cadence_report.py`;
+2. define generated/skipped/error/duplicate counters per module - deployed in
+   report/monitor form on `10.20.3.200`;
 3. keep Hermes as the scheduler/delivery owner;
 4. keep Memory-OS as bounded state/draft/gate/monitor owner;
 5. update installer defaults so production does not silently enable
    owner-origin expression without explicit owner configuration.
 
+First split decision:
+
+- target module: `SelfEvolution`;
+- reason: live counters show `self_evolution.generated_count=33`,
+  `skipped_count=12`, and `duplicate_count=11`, and owner-facing proposal
+  quality already improved enough that repeated proposal generation is now the
+  next visible operational risk;
+- prototype reference: `10.20.2.88` separates Self-Evolution into daily/weekly
+  Hermes-owned pipelines, but Memory-OS has more modules and must not copy the
+  prototype timer table directly;
+- first implementation: keep the 6-hour cognitive loop as the test-host
+  integration harness, keep Hermes as scheduler owner, and add a
+  SelfEvolution-local cadence gate so a same-day same-signal run returns a
+  bounded skip instead of creating another proposal or calling OpsGate;
+- non-goals: do not create Memory-OS cron, do not change Hermes cron/systemd
+  timers, do not auto-apply prompt/policy/cadence changes, and do not create
+  execution tickets.
+
 Promotion signal:
 
-- module-local cadence report exists;
+- module-local cadence report exists; live `10.20.3.200` evidence currently
+  reports `module_count=18`, `cron_job_count=2`,
+  `integration_harness_member_count=11`, `split_recommended_count=11`,
+  `expected_hermes_cron_missing_count=0`, `generated_count=874`,
+  `skipped_count=12`, `error_count=15`, `duplicate_count=11`,
+  `counter_coverage_count=18`, and PASS
+  `module_cadence_report_visible`;
 - no module uses production cadence without generated/skipped/error counters;
 - owner-origin jobs are all Hermes cron jobs;
 - Memory-OS cognitive loop remains available as a test-host harness.
+- SelfEvolution returns `cadence_skipped=true` / `skipped=true` for same-day
+  same-signal reruns after the signal was already processed, without creating a
+  proposal, without calling OpsGate again, and with monitor-visible skip counts.
+  Live `10.20.3.200` evidence currently reports `cadence_skipped_count=1` and
+  `same_signal_skipped_count=1`.
 
 Stop signal:
 
 - Memory-OS creates its own scheduler or platform delivery layer;
 - a module runs owner-visible origin delivery without owner-configured cadence;
 - production cadence hides skipped/error/duplicate outcomes.
+- SelfEvolution still creates a new proposal for a same-day same-signal rerun;
+- SelfEvolution cadence skip hides an error, suppresses new distinct evidence,
+  or changes `actual_execute` / `actual_send`.
 
 ## Active P2 Queue
 

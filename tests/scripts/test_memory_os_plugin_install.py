@@ -160,14 +160,18 @@ def test_installer_can_copy_right_brain_expression_cron_helper_without_enabling_
 
     helper = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression.py"
     gate = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_cron_gate.py"
+    outcome = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_outcome.py"
     assert report["right_brain_expression_cron_helper_install_requested"] is True
     assert report["right_brain_expression_cron_helper_installed"] is True
     assert report["right_brain_expression_cron_helper_path"] == str(helper)
     assert report["right_brain_expression_cron_gate_path"] == str(gate)
+    assert report["right_brain_expression_outcome_path"] == str(outcome)
     assert helper.is_file()
     assert gate.is_file()
+    assert outcome.is_file()
     assert "Hermes agent owns the final expression" in helper.read_text(encoding="utf-8")
     assert "Right-brain expression Hermes cron" in gate.read_text(encoding="utf-8")
+    assert "Hermes owns the agent turn" in outcome.read_text(encoding="utf-8")
 
 
 def test_installer_can_install_system_module_runtime_package(tmp_path):
@@ -175,10 +179,14 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
 
     runtime_python = tmp_path / "home" / "memory-os" / "runtime" / "python"
     runtime_root = runtime_python / "plugins"
+    cadence_report = tmp_path / "home" / "scripts" / "memory_os_module_cadence_report.py"
     assert report["system_modules_installed"] is True
     assert report["system_module_file_count"] > 0
     assert report["agent_runtime_file_count"] > 0
     assert report["eval_runtime_file_count"] > 0
+    assert report["module_cadence_report_path"] == str(cadence_report)
+    assert cadence_report.is_file()
+    assert "Hermes owns cron" in cadence_report.read_text(encoding="utf-8")
     assert runtime_root.joinpath("system", "lifecycle.py").is_file()
     assert runtime_root.joinpath("modules", "context", "digest_consolidation.py").is_file()
     assert runtime_root.joinpath("modules", "cognition", "deep_reflection.py").is_file()

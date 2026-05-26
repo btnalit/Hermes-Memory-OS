@@ -14,7 +14,7 @@ def test_closure_matrix_check_passes_for_current_repo() -> None:
     assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
     assert report["status"] == "ok"
     assert report["live_module_count"] == 18
-    assert report["matrix_module_count"] == 30
+    assert report["matrix_module_count"] == 31
     assert report["active_work_item_count"] == 20
     assert report["active_work_mapping_count"] == 20
     assert report["missing_live_modules"] == []

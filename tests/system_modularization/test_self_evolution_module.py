@@ -70,6 +70,10 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert proposal["kind"] == "self_evolution"
     assert proposal["state"] == "candidate"
     assert proposal["crystallized_approved"] is False
+    assert proposal["proposal_class"].startswith("self_evolution:")
+    assert proposal["dedupe_key"].startswith(proposal["proposal_class"])
+    assert proposal["proposal_quality"]["trigger_rule"] == "feature_maturity_top_signal"
+    assert proposal["proposal_quality"]["evidence_ref_count"] >= 1
     assert proposal["title"] != "Self-Evolution dry-run proposal"
     assert "具体改动:" in proposal["body"]
     assert "证据:" in proposal["body"]
@@ -155,6 +159,101 @@ def test_self_evolution_skips_duplicate_unresolved_proposal(tmp_path):
     assert len(ops_gate.read_reports()) == 1
 
 
+def test_self_evolution_cadence_skips_same_day_same_signal_after_closed_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue, evidence = _seed_evidence(tmp_path, store)
+    ops_gate = OpsGateModule(tmp_path, profile="main")
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    first = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+    proposal_queue.transition(
+        store=store,
+        candidate_id=first["proposal_id"],
+        decision="reject",
+        reviewer="owner",
+    )
+    second = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+    status = module.status()
+
+    assert first["proposal_created"] is True
+    assert second["proposal_created"] is False
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "cadence_same_day_same_signal"
+    assert second["cadence_input_fingerprint"] == first["cadence_input_fingerprint"]
+    assert len(proposal_queue.read_queue()["items"]) == 1
+    assert len(ops_gate.read_reports()) == 1
+    assert status["proposal_count"] == 1
+    assert status["cadence_skipped_count"] == 1
+    assert status["same_signal_skipped_count"] == 1
+
+
+def test_self_evolution_cadence_skips_same_day_expression_policy_history(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    old = proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body="具体改动: 已处理\n证据: owner feedback\n验收标准: monitor\n后续状态: applied",
+        source_refs=["feature_score:older"],
+        kind="expression_policy",
+    )
+    queue = proposal_queue.read_queue()
+    for item in queue["items"]:
+        if item["candidate_id"] == old["candidate_id"]:
+            item["state"] = "approved_for_proposal"
+            item["followup_state"] = "applied_expression_policy"
+            item["execution_decision_state"] = "owner_applied_expression_policy"
+    proposal_queue._write_queue(queue)
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.memory_os.expression_feedback.v0",
+                "feedback_id": "efb_existing",
+                "profile": "main",
+                "target_type": "expression",
+                "target_id": "expr_existing",
+                "rating": "too_mechanical",
+                "source_module": "owner_action",
+                "live_policy_changed": False,
+                "raw_body_included": False,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evidence = EvidenceScoringModule(tmp_path, profile="main")
+    evidence.score_all(store=store, proposal_queue=proposal_queue)
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is False
+    assert result["cadence_skipped"] is True
+    assert result["reason"] == "cadence_same_day_same_signal"
+    assert result["previous_proposal_id"] == old["candidate_id"]
+    assert len(proposal_queue.read_queue()["items"]) == 1
+
+
 def test_self_evolution_legacy_template_proposal_does_not_block_concrete_proposal(tmp_path):
     store = _store(tmp_path)
     proposal_queue, evidence = _seed_evidence(tmp_path, store)
@@ -220,6 +319,9 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     assert result["proposal_created"] is True
     proposal = proposal_queue.read_queue()["items"][0]
     assert proposal["kind"] == "expression_policy"
+    assert proposal["proposal_class"] == "expression_policy:too_mechanical"
+    assert proposal["dedupe_key"] == "expression_policy:too_mechanical"
+    assert proposal["proposal_quality"]["trigger_rule"] == "expression_feedback_policy"
     assert "调整右脑表达策略" in proposal["title"]
     assert "具体改动:" in proposal["body"]
     assert "证据:" in proposal["body"]
@@ -227,6 +329,57 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     assert "验收标准:" in proposal["body"]
     assert "后续状态:" in proposal["body"]
     assert proposal["actual_execute"] is False
+
+
+def test_self_evolution_skips_unresolved_expression_policy_by_class(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body="具体改动: tune policy\n证据: owner feedback\n验收标准: monitor\n后续状态: report-only",
+        source_refs=["feature_score:older"],
+        kind="expression_policy",
+        proposal_class="expression_policy:too_mechanical",
+        dedupe_key="expression_policy:too_mechanical",
+    )
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.memory_os.expression_feedback.v0",
+                "feedback_id": "efb_2",
+                "profile": "main",
+                "target_type": "expression",
+                "target_id": "expr_2",
+                "rating": "too_mechanical",
+                "source_module": "owner_action",
+                "live_policy_changed": False,
+                "raw_body_included": False,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evidence = EvidenceScoringModule(tmp_path, profile="main")
+    evidence.score_all(store=store, proposal_queue=proposal_queue)
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is False
+    assert result["novelty_skipped"] is True
+    assert result["reason"] == "duplicate_unresolved_proposal"
+    assert result["proposal_class"] == "expression_policy:too_mechanical"
+    assert len(proposal_queue.read_queue()["items"]) == 1
 
 
 def test_self_evolution_concrete_proposal_is_owner_agenda_eligible(tmp_path):

@@ -118,6 +118,13 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_followups_gate_args.proposal_id == "prop_1"
     assert review_followups_gate_args.ops_gate is True
     assert review_followups_gate_args.apply is True
+    review_followups_all_args = parser.parse_args(
+        ["review", "proposal-followups", "--ops-gate", "--all-pending", "--apply"]
+    )
+    assert review_followups_all_args.review_command == "proposal-followups"
+    assert review_followups_all_args.ops_gate is True
+    assert review_followups_all_args.all_pending is True
+    assert review_followups_all_args.apply is True
     review_followups_apply_args = parser.parse_args(
         [
             "review",

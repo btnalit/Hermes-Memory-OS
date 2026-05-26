@@ -35,6 +35,11 @@ Current implementation state:
   origin delivery, and interaction. The adapter records
   `memory-os.right_brain_expression_adapter_request.v0` with all hard boundary
   fields false.
+- P1-R outcome ledger is deployed on `10.20.3.200`:
+  `memory_os_right_brain_expression_outcome.py` scans Hermes cron output,
+  extracts only the final `## Response` expression or `[SILENT]`, and records
+  bounded `memory-os.right_brain_expression_outcome.v0` evidence. It does not
+  call Hermes, send, execute, or write policy.
 - This does not apply policy/prompt/cadence changes automatically. Such changes
   still require expression feedback -> governance/SelfEvolution proposal ->
   owner/OpsGate apply.
@@ -46,6 +51,10 @@ Current implementation state:
   `expression_feedback_count=2`, `expression_feedback_subject_count=2`,
   `structured_review_reply_count=1`, `reply_fallback_used_count=0`, and no
   FAIL findings.
+- Latest live outcome scan records `outcome_count=2`, latest
+  `policy_version=1`, `latest_outcome_silent=false`,
+  `outcome_internal_marker_count=0`, `outcome_raw_body_included_count=0`,
+  `outcome_actual_send_count=0`, and `outcome_actual_execute_count=0`.
 - EvidenceScoring now preserves expression feedback labels in the left-brain
   maturity dimensions; the live feedback records show
   `feedback_rating=too_mechanical` rather than `unknown`.
@@ -90,6 +99,10 @@ monitor_or_validation_fields:
   - right_brain_expression.engine_available
   - right_brain_expression.adapter_request_count
   - right_brain_expression.adapter_delivery_mode
+  - right_brain_expression.outcome_count
+  - right_brain_expression.outcome_internal_marker_count
+  - right_brain_expression.latest_outcome_policy_version
+  - right_brain_expression.latest_outcome_silent
   - right_brain_expression.draft_count
   - right_brain_expression.silent_count
   - right_brain_expression.speak_gate_evaluated_count
@@ -100,12 +113,13 @@ monitor_or_validation_fields:
   - right_brain_expression.prompt_version
 promotion_signal: "formal expression path has bounded drafts, every non-silent draft has a SpeakGate decision, owner can see/feedback expression content, and hard boundaries remain false"
 stop_or_rollback_signal: "actual_send without owner-configured scheduled expression; private raw body in draft/review; task/proposal/agenda language in right-brain text; feedback cannot be traced back to policy/proposal"
-external_review: "required before enabling scheduled right-brain expression delivery"
+external_review: "required before broadening scheduled expression beyond the current test-host owner-configured path or adding new LLM bounded-live surfaces"
 ```
 
 ## Current Evidence
 
-The current code and monitor support a safe observation path only:
+The current code and monitor support a safe observation path plus a test-host
+formal expression baseline:
 
 - Wandering Mind currently emits deterministic text from recent event summaries.
 - The shell plugin deliberately does not register LLM-call hooks.
@@ -121,8 +135,8 @@ The current code and monitor support a safe observation path only:
   bounded expression previews for shown Wandering payload refs. Live monitor
   reports `speak_item_count=2`, `speak_expression_preview_count=2`, and
   `speak_expression_preview_missing_count=0`.
-- Governance feedback currently consumes evidence / ops / proposal /
-  self-evolution outcomes, not full wandering/speak feedback outcomes.
+- Governance feedback consumes deployed expression feedback summaries; the
+  remaining gap is full final-outcome and owner-reaction backflow.
 - The Hermes-agent adapter is now a real runtime path, not only a contract:
   `hermes cron run memory-os-right-brain-expression` executes the helper in
   agent mode (`--script`, no `--no-agent`), deliver target `origin`, and writes
@@ -133,7 +147,10 @@ Therefore v0.1 should be described as:
 ```text
 right-brain observation shell: implemented
 formal low-frequency Hermes-agent expression path: implemented on test host
-expression feedback driven policy/prompt/cadence apply: not implemented
+expression feedback -> proposal -> owner approve -> OpsGate report-only
+  -> explicit expression_policy apply: implemented on test host (policy_version=1)
+expression outcome ledger: implemented on test host
+owner reaction volume / cadence split: still open
 ```
 
 ## Right-Brain Subsystem Audit
@@ -151,10 +168,10 @@ route and must not be flattened into `would-send`.
 | DeepReflection wandering seed | Seed future associative expression without sending. | `emit_optional_outputs()` can append `deep_reflection.wandering_seed.v0`; live evidence shows seed counts, but seeds are not consumed by a formal expression engine. | Input to RightBrainExpressionEngine, then SpeakGate, then scheduled/exceptional expression route. | Seed production exists, but seed consumption is not wired into Wandering/SpeakGate formal expression closure. |
 | Conversation Carryover | Preserve bounded conversational continuity. | Prefetch projects carryover / DR cards into context and RH-29 records sources. | ContextProjection plus MemorySources and RH-30 feedback. | Carryover is not owner-visible expression and must not be counted as right-brain delivery. |
 | Wandering Mind | Generate non-task free association / feeling expression or silence. | `WanderingMindModule.run_once()` currently builds deterministic text from the latest event summary and records would-send artifacts with `actual_send=false`. | RightBrainExpressionEngine output draft; every non-silent draft must pass SpeakGate. | Current module is a safe deterministic draft shell, not a real right-brain expression engine. |
-| SpeakGate | Decide whether an expression draft is silent, scheduled-allowed, blocked, would-send observation, or exceptional permission-required. | P1-R slice 1 routes new cognitive-loop Wandering output through `SpeakGateModule.evaluate_wandering_output()` and records evaluated/missing decision monitor fields. Historical reports can still contain Wandering artifacts without SpeakGate decisions. | Mandatory decision for every non-silent expression draft. | The current gap is no `ExpressionDraft` object and no formal RightBrainExpressionEngine / feedback / scheduled-expression route; historical missing evaluations remain evidence of the old wiring, not the current new-cycle path. |
-| Owner Review for expression | Let the owner judge expression quality and exceptional send permission. | Owner review can surface speak/would-send items and action tokens. | Show bounded expression preview, why it appeared, delivery tier, and stable token if action is needed. | Payload refs / action tokens alone are not enough to judge "voice"; expression content feedback is missing. |
-| Expression feedback | Convert owner judgment into bounded evidence. | Expression quality labels and owner/Hermes feedback tokens are deployed for shown speak items; records are written to `expression_feedback_ledger.jsonl` and consumed as scoring/governance inputs. | `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period` into expression feedback ledger. | Live policy/prompt/cadence still does not change directly; feedback-to-policy remains proposal-only. |
-| GovernanceFeedback / SelfEvolution backflow | Turn expression outcomes into policy/prompt/frequency proposals. | GovernanceFeedback consumes evidence, ops, proposal, and self-evolution outcomes; it does not currently consume full wandering/speak outcomes. | Bounded governance events and owner-reviewed proposals only. | Expression outcomes cannot yet improve prompt, cadence, or SpeakGate policy. |
+| SpeakGate | Decide whether an expression draft is silent, scheduled-allowed, blocked, would-send observation, or exceptional permission-required. | P1-R slice 1 routes new cognitive-loop Wandering output through `SpeakGateModule.evaluate_wandering_output()` and records evaluated/missing decision monitor fields. Historical reports can still contain Wandering artifacts without SpeakGate decisions. | Mandatory decision for every non-silent expression draft. | The current gap is not initial wiring; it is final Hermes-agent outcome recording, owner reaction volume, and production cadence. Historical missing evaluations remain evidence of the old wiring, not the current new-cycle path. |
+| Owner Review for expression | Let the owner judge expression quality and exceptional send permission. | Owner review resolves shown speak/would-send payload refs into bounded expression previews and action tokens. | Show bounded expression preview, why it appeared, delivery tier, and stable token if action is needed. | The remaining gap is not preview visibility; it is linking final delivered Hermes-agent expression outcomes and owner reactions back to the review/feedback ledger. |
+| Expression feedback | Convert owner judgment into bounded evidence. | Expression quality labels and owner/Hermes feedback tokens are deployed for shown speak items; records are written to `expression_feedback_ledger.jsonl` and consumed as scoring/governance inputs. | `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period` into expression feedback ledger. | Feedback can now drive an owner-reviewed `expression_policy` proposal and explicit policy apply. The remaining gap is outcome-ledger volume and cadence/prompt evaluation, not raw feedback capture. |
+| GovernanceFeedback / SelfEvolution backflow | Turn expression outcomes into policy/prompt/frequency proposals. | GovernanceFeedback consumes expression feedback as bounded evidence; SelfEvolution can create concrete expression-policy proposals, and one such proposal has been explicitly applied to `right_brain_expression_adapter/policy.json` on the test host. P1-R outcome ledger now records final Hermes-agent expression results with policy version and boundary fields. | Bounded governance events and owner-reviewed proposals only, followed by OpsGate report-only review and explicit apply for proposal kinds with a bounded runtime target. | Owner reaction volume and cadence/prompt evaluation are still thin; outcome evidence exists but is not yet enough to claim mature expression learning. |
 
 The current right-brain chain is therefore:
 
@@ -238,7 +255,20 @@ Rules:
 - delivery does not execute work, write identity, write crystallized memory, or
   create proposals by itself.
 
-Tier 2 is not implemented yet.
+Tier 2 is implemented as a test-host baseline, not yet a mature product loop.
+The current deployed path is:
+
+```text
+Memory-OS bounded context + expression policy
+-> Hermes cron agent turn (`deliver=origin`)
+-> Hermes agent final wording or [SILENT]
+-> owner-visible low-frequency expression
+```
+
+What remains open is the closure evidence after delivery: final expression
+outcome ledger, owner reaction/feedback volume, and module-level cadence
+reporting. Memory-OS still must not own platform transport or conversation
+recovery.
 
 ### Tier 3 - Exceptional Proactive Send
 
@@ -297,6 +327,44 @@ Allowed implementation owners:
 - Memory-OS may call a bounded expression adapter only if RH-37 is satisfied
   and the adapter cannot execute, send, or mutate state.
 - Memory-OS stores drafts and evidence; Hermes owns conversation and delivery.
+
+### Hermes-Agent LLM Capability Design
+
+Right-brain expression uses LLM capability through Hermes agent, not through a
+Memory-OS-owned model runtime. The active contract is:
+
+| Capability surface | LLM owner | Memory-OS role | Mode | Allowed output | Forbidden output |
+| --- | --- | --- | --- | --- | --- |
+| `right_brain_expression` | Hermes agent / host runtime | Provide bounded context, policy, source refs, and record adapter request/outcome evidence | `bounded-live` for expression wording only | short expression text or `[SILENT]` | execute, route, approve, write memory/identity, expose raw body |
+| `deep_reflection_reflective_adapter` | Future Hermes agent adapter if approved | Provide bounded reflection substrate and store report/proposal evidence | `report-only` or `proposal-only` | analysis, carryover seed, proposal candidate | direct context injection, identity write, policy write, send |
+| `low_clue_recall_judge` | Hermes configured judge adapter | Provide bounded candidate titles/metadata | `report-only`; future `bounded-live` only inside `ambiguous_recall` ranking | duplicate/merge/rank/title advice | hard ingress override, direct resume, approval, send/execute/write |
+| `left_brain_semantic_advisor` | Future Hermes agent/governance adapter if approved | Provide bounded score evidence and receive explanation/proposal suggestions | `report-only` or `proposal-only` | explanation, risk notes, proposal suggestion | replace auditable feature scoring, mutate proposal state, execute |
+
+Mode definitions:
+
+- `report-only`: LLM output is written as evidence and cannot change live state.
+- `proposal-only`: LLM output may create an owner-reviewed proposal, but cannot
+  apply the change.
+- `bounded-live`: LLM output affects only the declared bounded surface. For
+  right-brain expression that means wording or `[SILENT]`; it does not include
+  transport, approval, execution, memory write, route override, or policy write.
+
+Required monitor fields for every LLM surface:
+
+```text
+llm_surface
+llm_owner
+mode
+request_count
+latest_status
+fallback_count
+raw_body_included_count
+actual_send
+actual_execute
+actual_identity_write
+actual_unapproved_crystallized_approval
+bounded_live_scope
+```
 
 Forbidden:
 
@@ -447,6 +515,8 @@ bounded memory view
 
 Implementation slices:
 
+Completed baseline slices:
+
 1. `P1-R.3` - Expression draft surface:
    - create a bounded `ExpressionDraft` artifact;
    - support `[SILENT]` as first-class output;
@@ -468,10 +538,9 @@ Implementation slices:
    - Hermes cron/origin owns schedule and delivery;
    - Memory-OS provides bounded stdout/draft state and monitor evidence.
 
-Do not call Tier 2 formal right-brain expression closed until at least one
-owner-configured scheduled expression path has produced a bounded draft,
-SpeakGate decision, Hermes-origin delivery or `[SILENT]`, and feedback/monitor
-evidence without boundary violations.
+Current runtime has produced a Hermes-origin expression on the test host without
+boundary violations. Do not call Tier 2 mature until final outcome records,
+owner reaction/feedback evidence, and module cadence evidence exist.
 
 ## Roadmap Placement
 
@@ -481,5 +550,7 @@ This becomes P1-R in the active roadmap:
 P1-R - Right-Brain Expression Closure Contract And Implementation Plan
 ```
 
-P1-R must complete design and monitor contract before any runtime expression
-engine or scheduled expression delivery is implemented.
+P1-R has completed the first runtime outcome baseline. The next work item is
+owner reaction volume and cadence evaluation: connect recorded Hermes-agent
+outcomes to owner feedback and policy/prompt/cadence proposals without
+reimplementing Hermes transport.

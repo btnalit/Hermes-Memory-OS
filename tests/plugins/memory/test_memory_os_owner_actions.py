@@ -29,6 +29,7 @@ from plugins.memory.memory_os.owner_actions import (
     resolve_owner_review_channel,
     apply_approved_proposal_execution_decision,
     route_approved_proposal_followup_to_ops_gate,
+    route_pending_approved_proposal_followups_to_ops_gate,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
@@ -306,6 +307,8 @@ def test_approved_proposal_followups_project_state_without_execution_ticket(tmp_
     assert report["schema_version"] == "memory-os.approved_proposal_followups.v0"
     assert report["approved_proposal_count"] == 1
     assert report["pending_followup_count"] == 1
+    assert report["open_followup_count"] == 1
+    assert report["awaiting_explicit_execution_count"] == 0
     assert report["execution_ticket_count"] == 0
     assert report["actual_execute"] is False
     assert report["raw_body_included"] is False
@@ -371,6 +374,9 @@ def test_approved_proposal_followup_routes_to_ops_gate_without_execution(tmp_pat
     followups = approved_proposal_followups_report(store)
     assert followups["ops_gate_reviewed_count"] == 1
     assert followups["awaiting_ops_gate_count"] == 0
+    assert followups["pending_followup_count"] == 0
+    assert followups["open_followup_count"] == 1
+    assert followups["awaiting_explicit_execution_count"] == 1
     assert followups["execution_ticket_count"] == 0
     assert followups["actual_execute"] is False
     assert followups["items"][0]["followup_state"] == "ops_gate_reviewed_awaiting_explicit_execution"
@@ -389,6 +395,64 @@ def test_approved_proposal_followup_routes_to_ops_gate_without_execution(tmp_pat
     assert duplicate["execution_ticket_created"] is False
     assert duplicate["boundary"]["actual_execute"] is False
     assert len(reports_after_duplicate) == 1
+
+
+def test_approved_proposal_followup_batch_routes_pending_to_ops_gate_without_execution(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidates = [
+        proposal_queue.create_candidate(store=store, title=f"Run proposal {index}", body="PRIVATE RAW BODY")
+        for index in range(2)
+    ]
+    for candidate in candidates:
+        apply_owner_action(
+            store,
+            action_type="approve_proposal",
+            target=f"proposal:{candidate['candidate_id']}",
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+
+    dry_run = route_pending_approved_proposal_followups_to_ops_gate(
+        store,
+        owner_id="owner",
+        channel="cli",
+        apply=False,
+    )
+    applied = route_pending_approved_proposal_followups_to_ops_gate(
+        store,
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    duplicate = route_pending_approved_proposal_followups_to_ops_gate(
+        store,
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    followups = approved_proposal_followups_report(store)
+    reports = _jsonl(tmp_path / "system-modules" / "ops_gate" / "reports.jsonl")
+
+    assert dry_run["schema_version"] == "memory-os.approved_proposal_ops_gate_batch.v0"
+    assert dry_run["eligible_count"] == 2
+    assert dry_run["ops_gate_report_written_count"] == 0
+    assert applied["status"] == "ok"
+    assert applied["ops_gate_report_written_count"] == 2
+    assert applied["execution_ticket_created"] is False
+    assert applied["actual_execute"] is False
+    assert applied["boundary"]["actual_execute"] is False
+    assert duplicate["eligible_count"] == 0
+    assert duplicate["ops_gate_report_written_count"] == 0
+    assert len(reports) == 2
+    assert followups["pending_followup_count"] == 0
+    assert followups["awaiting_ops_gate_count"] == 0
+    assert followups["ops_gate_reviewed_count"] == 2
+    assert followups["awaiting_explicit_execution_count"] == 2
+    assert followups["execution_ticket_count"] == 0
+    assert followups["actual_execute"] is False
+    assert "PRIVATE RAW BODY" not in json.dumps(applied, ensure_ascii=False)
 
 
 def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops_gate(tmp_path):

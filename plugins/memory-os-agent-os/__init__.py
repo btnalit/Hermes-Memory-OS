@@ -157,6 +157,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_followups.add_argument("--limit", type=int, default=20)
     review_followups.add_argument("--proposal-id", default="")
     review_followups.add_argument("--ops-gate", action="store_true")
+    review_followups.add_argument("--all-pending", action="store_true")
     review_followups.add_argument("--execution-apply", action="store_true")
     review_followups.add_argument("--owner-approved", action="store_true")
     review_followups.add_argument("--owner", default="owner")

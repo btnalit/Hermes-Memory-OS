@@ -25,6 +25,8 @@ SOURCE_OWNER_REVIEW_CRON_HELPER = REPO_ROOT / "scripts" / "memory_os_owner_revie
 SOURCE_OWNER_REVIEW_CRON_GATE = REPO_ROOT / "scripts" / "memory_os_owner_review_cron_gate.py"
 SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_HELPER = REPO_ROOT / "scripts" / "memory_os_right_brain_expression.py"
 SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_GATE = REPO_ROOT / "scripts" / "memory_os_right_brain_expression_cron_gate.py"
+SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME = REPO_ROOT / "scripts" / "memory_os_right_brain_expression_outcome.py"
+SOURCE_MODULE_CADENCE_REPORT = REPO_ROOT / "scripts" / "memory_os_module_cadence_report.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -248,6 +250,9 @@ def install_plugin(
             hermes_home,
             dry_run=dry_run,
         )
+    module_cadence_report: Path | None = None
+    if install_system_modules:
+        module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
     enabled = False
     enable_command: list[str] = []
     if enable:
@@ -369,6 +374,8 @@ def install_plugin(
         "right_brain_expression_cron_helper_installed": bool(right_brain_expression_cron_helper.get("helper")) and not dry_run,
         "right_brain_expression_cron_helper_path": str(right_brain_expression_cron_helper.get("helper") or ""),
         "right_brain_expression_cron_gate_path": str(right_brain_expression_cron_helper.get("gate") or ""),
+        "right_brain_expression_outcome_path": str(right_brain_expression_cron_helper.get("outcome") or ""),
+        "module_cadence_report_path": str(module_cadence_report or ""),
         "deep_reflection_preset": deep_reflection_preset,
         "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
         "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
@@ -650,18 +657,34 @@ def _write_right_brain_expression_cron_helper(hermes_home: Path, *, dry_run: boo
         raise SystemExit(f"Right-brain expression cron helper source is missing: {SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}")
     if not SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_GATE.is_file():
         raise SystemExit(f"Right-brain expression cron gate source is missing: {SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_GATE}")
+    if not SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME.is_file():
+        raise SystemExit(f"Right-brain expression outcome source is missing: {SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME}")
     helper_target = hermes_home / "scripts" / SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_HELPER.name
     gate_target = hermes_home / "scripts" / SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_GATE.name
+    outcome_target = hermes_home / "scripts" / SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME.name
     if dry_run:
-        return {"helper": helper_target, "gate": gate_target}
+        return {"helper": helper_target, "gate": gate_target, "outcome": outcome_target}
     helper_target.parent.mkdir(parents=True, exist_ok=True)
     for source, target in (
         (SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_HELPER, helper_target),
         (SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_GATE, gate_target),
+        (SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME, outcome_target),
     ):
         shutil.copy2(source, target)
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
-    return {"helper": helper_target, "gate": gate_target}
+    return {"helper": helper_target, "gate": gate_target, "outcome": outcome_target}
+
+
+def _write_module_cadence_report_script(hermes_home: Path, *, dry_run: bool) -> Path:
+    if not SOURCE_MODULE_CADENCE_REPORT.is_file():
+        raise SystemExit(f"Module cadence report source is missing: {SOURCE_MODULE_CADENCE_REPORT}")
+    target = hermes_home / "scripts" / SOURCE_MODULE_CADENCE_REPORT.name
+    if dry_run:
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SOURCE_MODULE_CADENCE_REPORT, target)
+    target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return target
 
 
 def _write_deep_reflection_config(

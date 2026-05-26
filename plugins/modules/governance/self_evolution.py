@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -100,8 +101,17 @@ class SelfEvolutionGovernorModule:
 
         selected = scores[:3]
         score_refs = [_score_ref(score) for score in selected]
-        digest = self._write_digest(selected, evidence_scoring=evidence_scoring)
-        duplicate = _unresolved_self_evolution_duplicate(proposal_queue, score_refs)
+        proposal_shape = _proposal_shape(selected, evidence_scoring=evidence_scoring)
+        cadence_day = _utc_day()
+        cadence_input_fingerprint = _cadence_input_fingerprint(
+            score_refs,
+            proposal_shape=proposal_shape,
+        )
+        duplicate = _unresolved_self_evolution_duplicate(
+            proposal_queue,
+            score_refs,
+            proposal_shape=proposal_shape,
+        )
         if duplicate is not None:
             result = self._result(
                 status="ok",
@@ -109,10 +119,15 @@ class SelfEvolutionGovernorModule:
                 proposal_id="",
                 ops_gate_decision={},
                 score_refs=score_refs,
-                digest_ref=str(digest),
+                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
                 reason="duplicate_unresolved_proposal",
                 novelty_skipped=True,
                 existing_proposal_id=str(duplicate.get("candidate_id") or ""),
+                proposal_class=str(proposal_shape.get("proposal_class") or ""),
+                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+                skipped=True,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=cadence_input_fingerprint,
             )
             self._write_report(result)
             append_audit(
@@ -130,6 +145,82 @@ class SelfEvolutionGovernorModule:
                 },
             )
             return result
+        processed_proposal = _same_day_proposal_history_processed(
+            proposal_queue,
+            proposal_shape=proposal_shape,
+            cadence_day=cadence_day,
+        )
+        if processed_proposal is not None:
+            result = self._result(
+                status="ok",
+                proposal_created=False,
+                proposal_id="",
+                ops_gate_decision={},
+                score_refs=score_refs,
+                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
+                reason="cadence_same_day_same_signal",
+                proposal_class=str(proposal_shape.get("proposal_class") or ""),
+                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+                skipped=True,
+                cadence_skipped=True,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=cadence_input_fingerprint,
+                previous_proposal_id=str(processed_proposal.get("candidate_id") or ""),
+            )
+            self._write_report(result)
+            append_audit(
+                store.roots.audit_path,
+                action="self_evolution_dry_run_written",
+                status="ok",
+                target=str(self.reports_path),
+                details={
+                    "proposal_created": False,
+                    "reason": "cadence_same_day_same_signal",
+                    "previous_proposal_id": result.get("previous_proposal_id", ""),
+                    "score_ref_count": len(score_refs),
+                    "direct_self_modify": False,
+                    "actual_execute": False,
+                },
+            )
+            return result
+        processed = _same_day_same_signal_processed(
+            self.read_reports(),
+            cadence_day=cadence_day,
+            cadence_input_fingerprint=cadence_input_fingerprint,
+        )
+        if processed is not None:
+            result = self._result(
+                status="ok",
+                proposal_created=False,
+                proposal_id="",
+                ops_gate_decision={},
+                score_refs=score_refs,
+                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
+                reason="cadence_same_day_same_signal",
+                proposal_class=str(proposal_shape.get("proposal_class") or ""),
+                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+                skipped=True,
+                cadence_skipped=True,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=cadence_input_fingerprint,
+                previous_report_id=str(processed.get("report_id") or ""),
+            )
+            self._write_report(result)
+            append_audit(
+                store.roots.audit_path,
+                action="self_evolution_dry_run_written",
+                status="ok",
+                target=str(self.reports_path),
+                details={
+                    "proposal_created": False,
+                    "reason": "cadence_same_day_same_signal",
+                    "score_ref_count": len(score_refs),
+                    "direct_self_modify": False,
+                    "actual_execute": False,
+                },
+            )
+            return result
+        digest = self._write_digest(selected, evidence_scoring=evidence_scoring)
         gate_result = ops_gate.run_once(
             store=store,
             proposed_actions=[
@@ -144,13 +235,17 @@ class SelfEvolutionGovernorModule:
         proposal_created = gate_decision.get("decision") == "would_allow"
         proposal_id = ""
         if proposal_created:
-            proposal_shape = _proposal_shape(selected, evidence_scoring=evidence_scoring)
             proposal = proposal_queue.create_candidate(
                 store=store,
                 title=proposal_shape["title"],
                 body=proposal_shape["body"],
                 source_refs=score_refs,
                 kind=proposal_shape["kind"],
+                proposal_class=str(proposal_shape.get("proposal_class") or ""),
+                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+                proposal_quality=proposal_shape.get("proposal_quality")
+                if isinstance(proposal_shape.get("proposal_quality"), dict)
+                else None,
             )
             proposal_id = str(proposal["candidate_id"])
 
@@ -161,6 +256,10 @@ class SelfEvolutionGovernorModule:
             ops_gate_decision=gate_decision,
             score_refs=score_refs,
             digest_ref=str(digest),
+            proposal_class=str(proposal_shape.get("proposal_class") or ""),
+            dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+            cadence_day=cadence_day,
+            cadence_input_fingerprint=cadence_input_fingerprint,
         )
         self._write_report(result)
         append_audit(
@@ -192,6 +291,10 @@ class SelfEvolutionGovernorModule:
             "novelty_skipped_count": sum(1 for report in reports if report.get("novelty_skipped")),
             "duplicate_unresolved_proposal_count": sum(
                 1 for report in reports if report.get("reason") == "duplicate_unresolved_proposal"
+            ),
+            "cadence_skipped_count": sum(1 for report in reports if report.get("cadence_skipped")),
+            "same_signal_skipped_count": sum(
+                1 for report in reports if report.get("reason") == "cadence_same_day_same_signal"
             ),
             "last_status": str(last.get("status", "missing")),
             "direct_self_modify": False,
@@ -303,11 +406,22 @@ class SelfEvolutionGovernorModule:
         reason: str = "",
         novelty_skipped: bool = False,
         existing_proposal_id: str = "",
+        proposal_class: str = "",
+        dedupe_key: str = "",
+        skipped: bool = False,
+        cadence_skipped: bool = False,
+        cadence_day: str = "",
+        cadence_input_fingerprint: str = "",
+        previous_report_id: str = "",
+        previous_proposal_id: str = "",
     ) -> dict[str, Any]:
+        generated_at = datetime.now(timezone.utc).isoformat()
         result = {
             "schema_version": "hermes.self_evolution_result.v0",
+            "report_id": _stable_digest("|".join([self.profile, generated_at, ",".join(score_refs), reason])),
             "module": "self_evolution",
             "profile": self.profile,
+            "generated_at": generated_at,
             "status": status,
             "execution_mode": self.execution_mode,
             "proposal_created": proposal_created,
@@ -317,6 +431,14 @@ class SelfEvolutionGovernorModule:
             "ops_gate_decision": dict(ops_gate_decision),
             "novelty_skipped": bool(novelty_skipped),
             "existing_proposal_id": existing_proposal_id,
+            "proposal_class": proposal_class,
+            "dedupe_key": dedupe_key,
+            "skipped": bool(skipped),
+            "cadence_skipped": bool(cadence_skipped),
+            "cadence_day": cadence_day,
+            "cadence_input_fingerprint": cadence_input_fingerprint,
+            "previous_report_id": previous_report_id,
+            "previous_proposal_id": previous_proposal_id,
             "direct_self_modify": False,
             "actual_execute": False,
         }
@@ -325,19 +447,96 @@ class SelfEvolutionGovernorModule:
         return result
 
 
-def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[str]) -> dict[str, Any] | None:
-    unresolved_states = {"candidate", "owner_eligible", "owner_defer", "approved_for_proposal"}
+def _utc_day() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _cadence_input_fingerprint(score_refs: list[str], *, proposal_shape: dict[str, Any]) -> str:
+    payload = {
+        "score_refs": list(score_refs),
+        "kind": str(proposal_shape.get("kind") or ""),
+        "proposal_class": str(proposal_shape.get("proposal_class") or ""),
+        "dedupe_key": str(proposal_shape.get("dedupe_key") or ""),
+    }
+    return _stable_digest(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _same_day_same_signal_processed(
+    reports: list[dict[str, Any]],
+    *,
+    cadence_day: str,
+    cadence_input_fingerprint: str,
+) -> dict[str, Any] | None:
+    if not cadence_day or not cadence_input_fingerprint:
+        return None
+    for report in reversed(reports):
+        if str(report.get("cadence_day") or "") != cadence_day:
+            continue
+        if str(report.get("cadence_input_fingerprint") or "") != cadence_input_fingerprint:
+            continue
+        if report.get("proposal_created") is True:
+            return report
+        if report.get("novelty_skipped") is True:
+            return report
+        if report.get("cadence_skipped") is True:
+            return report
+    return None
+
+
+def _same_day_proposal_history_processed(
+    proposal_queue: Any,
+    *,
+    proposal_shape: dict[str, Any],
+    cadence_day: str,
+) -> dict[str, Any] | None:
+    target_dedupe_key = str(proposal_shape.get("dedupe_key") or "")
+    target_class = str(proposal_shape.get("proposal_class") or "")
+    target_kind = str(proposal_shape.get("kind") or "")
+    target_title = str(proposal_shape.get("title") or "")
+    queue = proposal_queue.read_queue()
+    for item in reversed(queue.get("items", [])):
+        if not isinstance(item, dict):
+            continue
+        if _proposal_still_unresolved(item):
+            continue
+        if str(item.get("kind") or "") != target_kind:
+            continue
+        created_day = str(item.get("created_at") or "")[:10]
+        updated_day = str(item.get("updated_at") or "")[:10]
+        if cadence_day not in {created_day, updated_day}:
+            continue
+        if target_dedupe_key and str(item.get("dedupe_key") or "") == target_dedupe_key:
+            return item
+        if target_class and str(item.get("proposal_class") or "") == target_class:
+            return item
+        if target_title and str(item.get("title") or "") == target_title:
+            return item
+    return None
+
+
+def _unresolved_self_evolution_duplicate(
+    proposal_queue: Any,
+    score_refs: list[str],
+    *,
+    proposal_shape: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     score_ref_set = set(score_refs)
+    target_dedupe_key = str((proposal_shape or {}).get("dedupe_key") or "")
+    target_class = str((proposal_shape or {}).get("proposal_class") or "")
     queue = proposal_queue.read_queue()
     for item in queue.get("items", []):
         if not isinstance(item, dict):
             continue
         if item.get("kind") not in {"self_evolution", "expression_policy"}:
             continue
-        if str(item.get("state") or "") not in unresolved_states:
+        if not _proposal_still_unresolved(item):
             continue
         if _legacy_template_proposal(item):
             continue
+        if target_dedupe_key and str(item.get("dedupe_key") or "") == target_dedupe_key:
+            return item
+        if target_class and str(item.get("proposal_class") or "") == target_class:
+            return item
         source_refs = {str(ref) for ref in item.get("source_refs") or []}
         if not source_refs or source_refs == score_ref_set:
             return item
@@ -345,6 +544,16 @@ def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[s
         if title in {"Self-Evolution dry-run proposal", "Tune right-brain expression policy"}:
             return item
     return None
+
+
+def _proposal_still_unresolved(item: dict[str, Any]) -> bool:
+    state = str(item.get("state") or "")
+    followup_state = str(item.get("followup_state") or "")
+    if state in {"owner_declined", "expired", "pressure_blocked"}:
+        return False
+    if followup_state in {"closed", "applied_expression_policy"}:
+        return False
+    return state in {"candidate", "owner_eligible", "owner_defer", "approved_for_proposal"}
 
 
 def _legacy_template_proposal(item: dict[str, Any]) -> bool:
@@ -375,7 +584,7 @@ def _score_ref(score: dict[str, Any]) -> str:
     return f"score:{score['score_id']}"
 
 
-def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> dict[str, str]:
+def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> dict[str, Any]:
     evidence_by_id = {
         str(record.get("evidence_id", "")): record
         for record in evidence_scoring.read_evidence()
@@ -395,13 +604,19 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
     top_score = scores[0] if scores else {}
     top_summary = _score_summary(top_score, evidence_by_id=evidence_by_id)
     top_subject = str(top_score.get("subject_ref") or "unknown_subject")
+    top_subject_kind = str(top_score.get("subject_kind") or "unknown")
     top_score_value = top_score.get("maturity_score", top_score.get("score", ""))
     evidence_line = _evidence_line(top_score, evidence_by_id=evidence_by_id)
+    quality = _proposal_quality(top_score, trigger_rule="feature_maturity_top_signal")
     if ratings:
         rating = ratings[0]
+        proposal_class = f"expression_policy:{_safe_key(rating)}"
         return {
             "kind": "expression_policy",
             "title": f"调整右脑表达策略：{rating} 反馈",
+            "proposal_class": proposal_class,
+            "dedupe_key": proposal_class,
+            "proposal_quality": _proposal_quality(top_score, trigger_rule="expression_feedback_policy"),
             "body": _proposal_body(
                 proposed_change=(
                     f"根据 owner 表达反馈 rating={rating}，形成一条右脑表达策略调整方案。"
@@ -420,9 +635,13 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
             ),
         }
     title = _governance_title(top_score, top_summary=top_summary)
+    proposal_class = f"self_evolution:{_safe_key(top_subject_kind)}"
     return {
         "kind": "self_evolution",
         "title": title,
+        "proposal_class": proposal_class,
+        "dedupe_key": f"{proposal_class}:{_stable_digest(top_subject)}",
+        "proposal_quality": quality,
         "body": _proposal_body(
             proposed_change=(
                 "基于最高成熟度信号创建一条有边界的治理 follow-up，替代泛化 dry-run item。"
@@ -492,3 +711,26 @@ def _bounded_line(value: str, limit: int) -> str:
     if len(clean) <= limit:
         return clean
     return clean[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _proposal_quality(score: dict[str, Any], *, trigger_rule: str) -> dict[str, Any]:
+    evidence_refs = [str(ref) for ref in score.get("evidence_refs", []) if str(ref)]
+    return {
+        "trigger_rule": trigger_rule,
+        "top_subject_ref": str(score.get("subject_ref") or ""),
+        "top_subject_kind": str(score.get("subject_kind") or ""),
+        "maturity_score": score.get("maturity_score", score.get("score", 0.0)),
+        "evidence_ref_count": len(evidence_refs),
+        "maturity_dimensions": score.get("maturity_dimensions")
+        if isinstance(score.get("maturity_dimensions"), dict)
+        else {},
+    }
+
+
+def _safe_key(value: str) -> str:
+    clean = "".join(ch if ch.isalnum() or ch in {"_", "-", ":"} else "_" for ch in str(value or "").strip().lower())
+    return clean.strip("_") or "unknown"
+
+
+def _stable_digest(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
