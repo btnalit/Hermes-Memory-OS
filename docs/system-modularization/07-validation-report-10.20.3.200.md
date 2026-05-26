@@ -12214,3 +12214,95 @@ content. Installed/live closure still requires deployment to 10.20.3.200 and
 monitor evidence that shown speak review items have
 speak_expression_preview_missing_count=0.
 ```
+
+## 2026-05-26 - P1-R Slice 2 10.20.3.200 Deployment Evidence
+
+Deployment:
+
+```text
+commit=92d75b1 Show right-brain expression previews in owner review
+follow-up monitor semantic fix=627d786 Use scoring-time working status in evidence monitor
+target=10.20.3.200
+repo=/tmp/hermes-memory-os-validation/repo
+hermes_home=/root/.hermes
+```
+
+Remote cognitive-loop smoke:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python \
+HERMES_HOME=/root/.hermes \
+python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply
+
+cycle_id=cloop_20260526T080358360704Z_69488224ec
+status=ok
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+
+wandering_mind:
+  speak_gate_evaluated=true
+  speak_gate_decision.decision=would_send
+  speak_gate_decision.actual_send=false
+  speak_gate_decision.payload_ref=local://wandering_mind/wout_20260526T080358915462Z_c5f900efe7
+
+EvidenceScoring:
+  score_count=479
+  working_active_subject_count=17
+  working_expired_skipped_count=151
+  working_unknown_status_count=0
+```
+
+Post-deploy monitor:
+
+```text
+python scripts/memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+
+OwnerRenderedDigest:
+  speak_item_count=2
+  speak_expression_preview_count=2
+  speak_expression_preview_missing_count=0
+  raw_body_included=false
+  text_has_internal_schema=false
+  text_has_transcript_marker=false
+
+ModuleArtifacts.evidence:
+  score_count=479
+  working_subject_count=17
+  expired_used_in_scoring_count=0
+
+PASS includes:
+  right_brain_review_speak_preview_visible
+  left_brain_expired_working_not_scored
+
+WARN:
+  right_brain_speak_gate_missing_evaluation
+  session_mirror_pending_sessions
+  owner_review_approved_proposals_pending_followup
+  rh31_eval_has_failures
+  rh26_casual_empty
+```
+
+Interpretation:
+
+```text
+LIVE PASS for P1-R slice 2 OwnerReview projection:
+  Shown speak review items now include bounded expression previews, so owner
+  review no longer depends on payload_ref/action-token-only display.
+
+LIVE PASS for P1-S monitor semantic correction:
+  expired_used_in_scoring_count now uses scoring-time source_status and is 0.
+
+WARN remains correct:
+  right_brain_speak_gate_missing_evaluation still reflects historical reports
+  created before P1-R slice 1.
+
+NOT CLOSED:
+  No RightBrainExpressionEngine.
+  No expression feedback taxonomy.
+  No expression outcome backflow into GovernanceFeedback/SelfEvolution.
+  No formal scheduled right-brain expression delivery.
+```

@@ -223,9 +223,11 @@ Current truth:
   output records a SpeakGate decision and monitor fields; historical missing
   decisions remain visible as WARN until old reports age out or are separately
   accounted for;
-- P1-R slice 2 is implemented locally: owner review resolves Wandering
+- P1-R slice 2 is deployed on `10.20.3.200`: owner review resolves Wandering
   `payload_ref` values into bounded expression previews so speak review items
   can be judged by content;
+- latest live monitor reports `speak_expression_preview_missing_count=0` and
+  PASS `right_brain_review_speak_preview_visible`;
 - expression feedback backflow is not implemented.
 
 Required before runtime:

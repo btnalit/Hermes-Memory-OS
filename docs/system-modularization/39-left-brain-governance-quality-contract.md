@@ -125,6 +125,23 @@ This is a live PASS for the EvidenceScoring expired-working hygiene slice only.
 It does not close DeepReflection expired-working handling or left-brain
 judgment quality.
 
+Follow-up correction:
+
+```text
+commit=627d786 Use scoring-time working status in evidence monitor
+
+Evidence records now store source_status for working subjects at scoring time.
+expired_used_in_scoring_count now means "scored while expired", not "the item
+expired after the score was written".
+
+post-correction monitor:
+  status=WARN
+  FAIL=[]
+  ModuleArtifacts.evidence.working_subject_count=17
+  ModuleArtifacts.evidence.expired_used_in_scoring_count=0
+  PASS includes left_brain_expired_working_not_scored
+```
+
 ## Left-Brain Chain
 
 ```text

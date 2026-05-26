@@ -1066,9 +1066,8 @@ Stop signal:
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
-Status: design gate added; P1-R slice 1 deployed on `10.20.3.200` with WARN-only
-monitor evidence; P1-R slice 2 implemented locally for bounded expression
-preview in owner review.
+Status: design gate added; P1-R slices 1 and 2 deployed on `10.20.3.200`
+with WARN-only monitor evidence.
 
 Source:
 
@@ -1088,9 +1087,12 @@ Reason:
   exposes evaluated/missing decision monitor fields;
 - P1-R slice 2 renders bounded Wandering expression previews in owner review
   instead of showing only `payload_ref`/action tokens;
-- live evidence shows the new cycle created one SpeakGate decision while older
+- live evidence shows new cycles create SpeakGate decisions while older
   reports still account for historical missing decisions;
-- live deployment evidence for slice 2 is still pending;
+- live monitor reports `speak_item_count=2`,
+  `speak_expression_preview_count=2`,
+  `speak_expression_preview_missing_count=0`, and PASS
+  `right_brain_review_speak_preview_visible`;
 - expression feedback and
   governance/self-evolution backflow are not closed.
 
@@ -1107,8 +1109,7 @@ Required design work:
    `exceptional_proactive_send`;
 4. require every non-silent expression draft to pass SpeakGate
    - local slice 1 covers current cognitive-loop Wandering output only;
-5. deploy owner review bounded expression preview, then verify live digest
-   `speak_expression_preview_missing_count=0` for shown speak items;
+5. owner review bounded expression preview is deployed for shown speak items;
 6. add expression feedback types: `like`, `too_mechanical`, `too_frequent`,
    `boundary_private`, `off_voice`, `mute_period`;
 7. route expression outcomes into GovernanceFeedback / SelfEvolution as
