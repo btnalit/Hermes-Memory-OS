@@ -59,6 +59,22 @@ def test_modules_status_inner_drive_includes_runtime_heartbeat_authority(tmp_pat
     assert runtime["last_processed_event_id"] == "event_221"
 
 
+def test_review_proposal_followups_ops_gate_error_returns_nonzero(tmp_path, monkeypatch, capsys):
+    _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = memory_os_command(
+        _parse_memory_os_args(
+            ["review", "proposal-followups", "--proposal-id", "does_not_exist", "--ops-gate"]
+        )
+    )
+
+    assert result == 1
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "error"
+    assert output["reason"] == "proposal_not_found"
+
+
 def test_memory_os_module_main_exposes_provider_cli_without_hermes_command(tmp_path, monkeypatch, capsys):
     _init_store(tmp_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

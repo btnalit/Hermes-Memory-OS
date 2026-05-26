@@ -17,6 +17,7 @@ class FakePluginContext:
     def __init__(self) -> None:
         self.cli_commands: list[dict[str, Any]] = []
         self.hooks: list[str] = []
+        self.hook_callbacks: dict[str, Any] = {}
         self.slash_commands: list[str] = []
 
     def register_cli_command(self, **kwargs: Any) -> None:
@@ -24,6 +25,7 @@ class FakePluginContext:
 
     def register_hook(self, name: str, callback: Any) -> None:
         self.hooks.append(name)
+        self.hook_callbacks[name] = callback
 
     def register_command(self, name: str, handler: Any, **kwargs: Any) -> None:
         self.slash_commands.append(name)
@@ -109,6 +111,13 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     review_followups_args = parser.parse_args(["review", "proposal-followups", "--limit", "4"])
     assert review_followups_args.review_command == "proposal-followups"
     assert review_followups_args.limit == 4
+    review_followups_gate_args = parser.parse_args(
+        ["review", "proposal-followups", "--proposal-id", "prop_1", "--ops-gate", "--apply"]
+    )
+    assert review_followups_gate_args.review_command == "proposal-followups"
+    assert review_followups_gate_args.proposal_id == "prop_1"
+    assert review_followups_gate_args.ops_gate is True
+    assert review_followups_gate_args.apply is True
     review_channel_args = parser.parse_args(["review", "channel"])
     assert review_channel_args.review_command == "channel"
     review_cron_status_args = parser.parse_args(["review", "cron-status"])
@@ -174,6 +183,25 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_render_args.format == "text"
     assert review_render_args.bounded is True
     assert review_render_args.record_active is True
+    review_surface_args = parser.parse_args(
+        [
+            "review",
+            "surface",
+            "--operation",
+            "detail",
+            "--anchor",
+            "R3",
+            "--limit",
+            "2",
+            "--channel",
+            "telegram",
+        ]
+    )
+    assert review_surface_args.review_command == "surface"
+    assert review_surface_args.operation == "detail"
+    assert review_surface_args.anchor == "R3"
+    assert review_surface_args.limit == 2
+    assert review_surface_args.channel == "telegram"
     review_reply_args = parser.parse_args(
         ["review", "reply", "approve", "A1", "--owner", "owner", "--digest-id", "odig_test", "--apply"]
     )
@@ -241,7 +269,14 @@ def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, cap
     monkeypatch.setattr(module, "_delegate_to_memory_os_cli", fake_delegate)
     args = argparse.Namespace(agent_os_command="status", passthrough="kept")
 
-    assert module.memory_os_agent_os_command(args) == 0
+    assert module._memory_os_agent_os_exit_code(args) == 0
+    assert json.loads(capsys.readouterr().out) == {"delegated": "status"}
+    try:
+        module.memory_os_agent_os_command(args)
+    except SystemExit as exc:
+        assert exc.code == 0
+    else:  # pragma: no cover - CLI handlers must terminate for Hermes to preserve exit codes.
+        raise AssertionError("memory_os_agent_os_command did not exit")
 
     assert calls[0].memory_os_command == "status"
     assert calls[0].passthrough == "kept"
@@ -260,7 +295,7 @@ def test_shell_memory_sources_alias_delegates_to_existing_memory_os_cli(monkeypa
     monkeypatch.setattr(module, "_delegate_to_memory_os_cli", fake_delegate)
     args = argparse.Namespace(agent_os_command="memory-sources", memory_sources_command="stats", hours=24)
 
-    assert module.memory_os_agent_os_command(args) == 0
+    assert module._memory_os_agent_os_exit_code(args) == 0
 
     assert calls[0].memory_os_command == "memory-sources"
     assert calls[0].memory_sources_command == "stats"
@@ -286,7 +321,7 @@ def test_shell_low_clue_recall_alias_delegates_to_existing_memory_os_cli(monkeyp
         query="继续昨天那个",
     )
 
-    assert module.memory_os_agent_os_command(args) == 0
+    assert module._memory_os_agent_os_exit_code(args) == 0
 
     assert calls[0].memory_os_command == "low-clue-recall"
     assert calls[0].low_clue_recall_command == "dry-run"
@@ -314,7 +349,7 @@ def test_shell_modules_alias_delegates_to_existing_memory_os_cli(monkeypatch, ca
         apply=False,
     )
 
-    assert module.memory_os_agent_os_command(args) == 0
+    assert module._memory_os_agent_os_exit_code(args) == 0
 
     assert calls[0].memory_os_command == "modules"
     assert calls[0].modules_command == "run-once"
@@ -343,7 +378,7 @@ def test_shell_eval_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsy
         adapter=["grep"],
     )
 
-    assert module.memory_os_agent_os_command(args) == 0
+    assert module._memory_os_agent_os_exit_code(args) == 0
 
     assert calls[0].memory_os_command == "eval"
     assert calls[0].eval_command == "rh31"
@@ -357,9 +392,22 @@ def test_shell_eval_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsy
 def test_shell_unknown_alias_fails_closed():
     module = load_shell_module()
 
-    result = module.memory_os_agent_os_command(argparse.Namespace(agent_os_command="heartbeat"))
+    result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="heartbeat"))
 
     assert result == 2
+
+
+def test_shell_handler_exits_with_delegate_code(monkeypatch):
+    module = load_shell_module()
+
+    monkeypatch.setattr(module, "_delegate_to_memory_os_cli", lambda args: 7)
+
+    try:
+        module.memory_os_agent_os_command(argparse.Namespace(agent_os_command="status"))
+    except SystemExit as exc:
+        assert exc.code == 7
+    else:  # pragma: no cover - Hermes ignores returned handler codes.
+        raise AssertionError("memory_os_agent_os_command did not exit")
 
 
 def test_shell_fails_closed_when_memory_os_runtime_is_missing(monkeypatch, capsys):
@@ -370,7 +418,7 @@ def test_shell_fails_closed_when_memory_os_runtime_is_missing(monkeypatch, capsy
 
     monkeypatch.setattr(module, "_load_memory_os_command", missing_runtime)
 
-    result = module.memory_os_agent_os_command(argparse.Namespace(agent_os_command="status"))
+    result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="status"))
 
     assert result == 1
     report = json.loads(capsys.readouterr().out)
@@ -472,7 +520,7 @@ def test_shell_alias_imports_provider_from_inferred_runtime_without_env(monkeypa
     try:
         module = load_shell_module_from(shell_init, name="memory_os_agent_os_shell_installed_runtime")
 
-        result = module.memory_os_agent_os_command(argparse.Namespace(agent_os_command="status"))
+        result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="status"))
 
         assert result == 0
         assert json.loads(capsys.readouterr().out) == {"delegated": "status", "status": "ok"}

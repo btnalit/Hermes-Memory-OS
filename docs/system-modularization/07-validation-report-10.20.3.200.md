@@ -15,6 +15,31 @@ Date: 2026-05-21
 This validation targets the `10.20.3.200` staging Hermes host only. It does not
 touch `10.20.2.88`.
 
+## Current Truth Note
+
+This file is an append-only validation and evidence log. It intentionally keeps
+historical findings, superseded command shapes, failed gateway-hook attempts,
+and older smoke-test transcripts.
+
+Do not infer the current owner-review architecture from an older section in
+this file. The current design authority is:
+
+- `29-memory-os-module-integration-contract.md` for the Hermes-agent versus
+  Memory-OS-plugin boundary;
+- `34-owner-review-digest-and-action-workflow.md` "Current Architecture Truth"
+  for owner review digest and action flow;
+- `36-module-closure-matrix.md` for module closure and backflow routing.
+
+Current owner-review truth:
+
+```text
+Hermes agent owns user-facing interaction and clarification.
+Memory-OS owns bounded payloads, stable action tokens, tools/state machines,
+OwnerActionProcessor, audit, and monitor evidence.
+Display anchors are UI labels; Memory-OS executes only stable oa_ tokens.
+Gateway hard interception is not the primary path.
+```
+
 ## Deployment Summary
 
 Memory-OS v0.1 modules were deployed to the existing main staging profile.
@@ -10268,3 +10293,1005 @@ Gate judgment:
 - The approved-proposal backlog is now observable instead of hidden.
 - No execution ticket was created by projection, so proposal execution remains a
   future explicit OpsGate/apply design item.
+
+## 2026-05-25 RH-35.7 Approved Proposal -> OpsGate Report-Only Path
+
+Purpose:
+
+- close the next owner-review loop after `approve_proposal`;
+- make approved proposals routable into OpsGate/manual execution review without
+  executing work;
+- prove the path does not create execution tickets, does not call tools, and
+  does not include private raw proposal bodies.
+
+Deployment:
+
+```text
+host=10.20.3.200
+install_command=scripts/install_memory_os.sh --yes --test-host --skip-verify
+gateway_restart=not requested
+owner_review_cron=already_configured (Hermes cron owns delivery)
+```
+
+Pre-apply follow-up surface:
+
+```text
+command:
+  hermes memory-os-agent-os review proposal-followups --limit 5
+
+pending_followup_count=2
+awaiting_ops_gate_count=2
+ops_gate_reviewed_count=0
+execution_ticket_count=0
+raw_body_included=false
+
+selected proposal:
+  proposal_id=prop_20260521T093627745201Z_aa81f796ec
+  title=Tune ordinary memory conversation tone
+  followup_state=awaiting_ops_gate_review
+```
+
+Dry-run OpsGate route:
+
+```text
+command:
+  hermes memory-os-agent-os review proposal-followups \
+    --proposal-id prop_20260521T093627745201Z_aa81f796ec \
+    --ops-gate
+
+schema_version=memory-os.approved_proposal_ops_gate.v0
+status=ok
+dry_run=true
+ops_gate_report_written=false
+execution_ticket_created=false
+actual_execute=false
+raw_body_included=false
+```
+
+Report-only apply:
+
+```text
+command:
+  hermes memory-os-agent-os review proposal-followups \
+    --proposal-id prop_20260521T093627745201Z_aa81f796ec \
+    --ops-gate --apply
+
+schema_version=memory-os.approved_proposal_ops_gate.v0
+status=ok
+dry_run=false
+ops_gate_report_written=true
+ops_gate_result.execution_mode=report-only
+ops_gate_result.decisions[0].decision=would_allow
+ops_gate_result.decisions[0].actual_execute=false
+execution_ticket_created=false
+actual_execute=false
+raw_body_included=false
+```
+
+Post-apply follow-up surface:
+
+```text
+pending_followup_count=2
+awaiting_ops_gate_count=1
+ops_gate_reviewed_count=1
+execution_ticket_count=0
+raw_body_included=false
+
+proposal_id=prop_20260521T093627745201Z_aa81f796ec
+followup_state=ops_gate_reviewed_awaiting_explicit_execution
+ops_gate_decision=would_allow
+ops_gate_report_id=opsr_20260525T165807816317Z_084b8dd1b6
+actual_execute=false
+execution_ticket_created=false
+```
+
+Monitor evidence:
+
+```text
+time=2026-05-25T16:58:34Z
+status=WARN
+FAIL=[]
+
+audit_per_new_event=4.2
+OwnerProposalFollowups={
+  pending: 2,
+  shown: 2,
+  overflow: 0,
+  awaiting_ops_gate: 1,
+  ops_gate_reviewed: 1,
+  execution_tickets: 0,
+  raw_body_included: false
+}
+OwnerReview.by_type={approve_proposal:1, reject_candidate:1}
+ModuleArtifacts.proposal_queue.state_counts={approved_for_proposal:2, candidate:15}
+OwnerDeliveryStatus.unapproved_send=0
+OwnerDeliveryStatus.raw_body_included=0
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+```
+
+Expected WARN:
+
+```text
+session_mirror_pending_sessions
+owner_review_approved_proposals_pending_followup
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+Gate judgment:
+
+- RH-35.7 closes the immediate approved-proposal follow-up gap by routing an
+  approved proposal into OpsGate report-only review.
+- It does not execute work and does not create execution tickets.
+- The remaining open item is a separate future explicit execution/apply path
+  for proposals that have already passed owner approval and OpsGate review.
+
+## 2026-05-26 Independent Mainline Review Follow-Up
+
+Source:
+
+- `INDEPENDENT_MAINLINE_REVIEW_2026-05-26.md`
+
+Scope:
+
+- close the report's two P1 findings and three actionable P2 findings against
+  the 29/36 contracts;
+- verify the installed 10.20.3.200 path, not only local tests;
+- keep owner-action, proposal follow-up, monitor, and shell alias behavior
+  aligned.
+
+Findings handled:
+
+```text
+P1 owner review token command could be captured as conversation memory
+P1 repeated approved proposal -> OpsGate apply could append duplicate reports
+P2 shell alias JSON status=error returned process exit 0
+P2 monitor did not classify owner-token promotion or duplicate proposal follow-up
+P2 CrystallizedCandidate(tags=None) round-trip failed
+```
+
+Contract mapping:
+
+```text
+Contract 8 OwnerAction:
+  processed owner-review token commands are control-plane commands only;
+  they must not become ordinary events, working items, or memory candidates.
+
+Contract 5/8 Scheduler + OwnerAction:
+  approved proposal -> OpsGate report-only apply is idempotent;
+  duplicate apply returns duplicate_ignored and does not append another report.
+
+Contract 6 MonitorEvidence:
+  monitor must expose token-command event/working/candidate counts and
+  duplicate proposal-followup counts.
+```
+
+Local verification:
+
+```text
+python -m pytest -q
+510 passed
+
+Realistic post-fix probe:
+  candidate_tags_none.tags=[]
+  duplicate_ops_gate_apply.first_status=ok
+  duplicate_ops_gate_apply.second_status=duplicate_ignored
+  duplicate_ops_gate_apply.report_count=1
+  owner_command_capture.event_count=0
+  owner_command_capture.working_created_count=0
+  owner_command_capture.candidate_created_count=0
+```
+
+Deployment:
+
+```text
+host=10.20.3.200
+install_command=scripts/install_memory_os.sh --yes --test-host --skip-verify
+gateway_restart=not requested
+owner_review_cron=already_configured
+copied_file_count=36
+```
+
+Installed shell alias exit-code evidence:
+
+```text
+command:
+  hermes memory-os-agent-os review proposal-followups \
+    --proposal-id does_not_exist --ops-gate
+
+json.status=error
+json.reason=proposal_not_found
+process_exit_code=1
+```
+
+Duplicate OpsGate apply evidence:
+
+```text
+proposal_id=prop_20260521T093627745201Z_aa81f796ec
+
+before:
+  proposal_followup:prop_20260521T093627745201Z_aa81f796ec=1
+
+command:
+  hermes memory-os-agent-os review proposal-followups \
+    --proposal-id prop_20260521T093627745201Z_aa81f796ec \
+    --ops-gate --apply
+
+result.status=duplicate_ignored
+ops_gate_report_written=false
+execution_ticket_created=false
+actual_execute=false
+
+after:
+  proposal_followup:prop_20260521T093627745201Z_aa81f796ec=1
+```
+
+Monitor evidence:
+
+```text
+time=2026-05-25T18:35:49Z
+status=WARN
+FAIL=[]
+
+owner_review_ingress_guard.token_command_accepted=true
+owner_review_ingress_guard.legacy_anchor_accepted=false
+owner_review_ingress_guard.owner_command_event_count=0
+owner_review_ingress_guard.owner_command_working_count=0
+owner_review_ingress_guard.owner_command_candidate_count=0
+owner_review_ingress_guard.owner_command_promoted_to_candidate=false
+
+module_artifacts.ops_gate.proposal_followup_action_count=1
+module_artifacts.ops_gate.duplicate_proposal_followup_count=0
+module_artifacts.ops_gate.duplicate_proposal_followup_extra_count=0
+
+owner_review.proposal_followups.pending_followup_count=2
+owner_review.proposal_followups.awaiting_ops_gate_count=1
+owner_review.proposal_followups.ops_gate_reviewed_count=1
+owner_review.proposal_followups.execution_ticket_count=0
+
+shell_alias_no_env.review_followups_ok=true
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+```
+
+Expected WARN:
+
+```text
+session_mirror_pending_sessions=25
+owner_review_approved_proposals_pending_followup=2
+rh31_eval_has_failures=3
+rh26_casual_empty
+```
+
+Gate judgment:
+
+- The installed code path closes the independent review's P1/P2 findings.
+- The remaining WARN items are tracked observation items, not regressions from
+  this fix.
+- Because `hermes-gateway.service` was not restarted during this gate, the
+  installed provider/runtime path is verified, but a live Telegram
+  `sync_turn` retest requires a separate gateway reload/restart gate.
+
+## RH-35.8 Agent-Mediated Owner Reply Tool Correction
+
+Date: 2026-05-26
+
+Finding source:
+
+```text
+Owner replied in Telegram:
+  memory approve oa_e9a4e734a07de7
+  memory approve oa_40b674ced068f7
+
+Observed response:
+  Memory-OS: 这条审批指令没有生效（gateway_ingress_error）。
+```
+
+Root cause:
+
+```text
+The Memory-OS shell plugin had registered a pre_gateway_dispatch owner-review
+hook. That hook intercepted the message before the Hermes agent saw it, skipped
+normal agent dispatch, and then failed inside the installed runtime import path.
+
+This was the wrong ownership seam:
+  Hermes is the agent that should interpret the owner command.
+  Memory-OS is the plugin/state machine that should expose a tool/API.
+  Gateway interception can only be a fail-open safety layer, not the primary
+  approval path.
+```
+
+Design correction:
+
+```text
+Hermes conversation
+  -> Hermes agent recognizes an owner-review task
+  -> agent calls Memory-OS provider tool memory_os_review_reply
+  -> parse_owner_review_reply(apply=true, require_recorded_digest=true)
+  -> OwnerActionProcessor
+  -> bounded assistant confirmation
+
+sync_turn:
+  if the tool already processed the command, skip ordinary conversation capture
+  if the tool was not called, skip ordinary capture and audit
+  owner_review_reply_tool_not_called
+```
+
+Local verification:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_lifecycle.py \
+  tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+96 passed
+```
+
+Deployment:
+
+```text
+host=10.20.3.200
+install_command=scripts/install_memory_os.sh --yes --test-host --skip-verify
+gateway_restart=performed
+gateway_pid_after_restart=503743
+owner_review_cron=already_configured
+```
+
+Installed seam check:
+
+```text
+provider_tools=["memory_os_status", "memory_os_review_reply"]
+system_prompt_has_owner_review_tool_rule=true
+memory-os-agent-os hooks=[
+  "on_session_start",
+  "on_session_reset",
+  "on_session_finalize"
+]
+pre_gateway_dispatch_registered=false
+```
+
+Monitor evidence after deployment:
+
+```text
+time=2026-05-26T03:09:29Z
+status=WARN
+FAIL=[]
+
+owner_review_ingress_guard.token_command_accepted=true
+owner_review_ingress_guard.slash_token_command_accepted=true
+owner_review_ingress_guard.feedback_token_command_accepted=true
+owner_review_ingress_guard.legacy_anchor_accepted=false
+owner_review_ingress_guard.legacy_reject_anchor_accepted=false
+owner_review_ingress_guard.ordinary_anchor_text_accepted=false
+owner_review_ingress_guard.gateway_hook_registered=false
+owner_review_ingress_guard.review_reply_tool_available=true
+owner_review_ingress_guard.review_reply_tool_status=ok
+owner_review_ingress_guard.owner_command_event_count=0
+owner_review_ingress_guard.owner_command_working_count=0
+owner_review_ingress_guard.owner_command_candidate_count=0
+
+MemorySources.boundary_true_count=0
+MemorySources.forbidden_field_count=0
+owner_review_cron_integration.status=ok
+owner_review_cron_integration.enabled=true
+owner_review_cron_integration.job_present=true
+owner_review_cron_integration.unapproved_send_count=0
+```
+
+Live delivery refresh:
+
+```text
+command:
+  hermes cron run 2af755464ca8
+  hermes cron tick
+
+result:
+  last_run=2026-05-25T23:10:27.342159-04:00 ok
+  delivered through Hermes cron --deliver telegram
+```
+
+Pending evidence:
+
+```text
+The new digest was delivered after the gateway restart. The final closure gate
+requires the owner to reply with one of the freshly delivered
+memory approve/reject/allow oa_<token> commands and verify that Hermes agent
+uses memory_os_review_reply without gateway_ingress_error.
+```
+
+## RH-35.8 Live Owner Reply Success And Bare-Token Pollution Follow-Up
+
+Date: 2026-05-26
+
+Live owner test:
+
+```text
+Digest delivered through Hermes cron:
+  memory approve oa_40b674ced068f7 / memory reject oa_9b53f82a9ab231
+
+Owner replied in Telegram:
+  approve oa_40b674ced068f7
+
+Visible agent behavior:
+  tool call displayed: memory_os_review_reply
+  response: Approved oa_40b674ced068f7.
+```
+
+State verification:
+
+```text
+owner_actions.count=4
+latest owner action:
+  action_type=approve_proposal
+  action_token=oa_40b674ced068f7
+  owner_action_id=oact_20260526T031149196991Z_bc724c72
+  target_id=prop_20260521T032500041194Z_2f96a933aa
+  result_ref.state=approved_for_proposal
+  channel=telegram
+  actual_send=false
+  actual_execute=false
+  actual_identity_write=false
+  actual_unapproved_crystallized_approval=false
+
+proposal_followups:
+  pending_followup_count=4
+  awaiting_ops_gate_count=3
+  ops_gate_reviewed_count=1
+  execution_ticket_count=0
+```
+
+Audit evidence:
+
+```text
+audit action=owner_review_reply_ingress
+phase=tool_call
+status=ok
+action_token=oa_40b674ced068f7
+action_type=approve_proposal
+channel=telegram
+```
+
+Follow-up finding:
+
+```text
+The owner used stable-token shorthand (`approve oa_<token>`) instead of the
+digest's safer prefixed form (`memory approve oa_<token>`). Hermes agent still
+called the correct tool and the state transition was correct.
+
+However, the provider control-plane skip detector only recognized the prefixed
+form, so one ordinary conversation event was captured:
+  evt_20260526T031153751349Z_9ad7d70697
+  summary="User: approve oa_40b674ced068f7 | Assistant: Approved ..."
+
+At discovery time, heartbeat_state.processed_event_count=249 while total
+events=250, so the captured event had not yet been processed into working
+memory or candidates.
+```
+
+Fix applied locally:
+
+```text
+_looks_like_owner_review_reply now accepts stable-token shorthand:
+  approve oa_<token>
+  reject oa_<token>
+  allow oa_<token>
+  feedback oa_<token> too_mechanistic
+
+The digest still prints `memory <verb> oa_<token>` as the recommended form.
+Display anchors remain invalid.
+```
+
+Local verification:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_lifecycle.py \
+  tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+96 passed
+
+python -m pytest -q
+511 passed
+```
+
+Pending deployment gate:
+
+```text
+Deploy the shorthand skip fix to 10.20.3.200, restart gateway, and rerun monitor.
+If the unprocessed conversation event is still unprocessed, remove or quarantine
+that single control-plane event before heartbeat can promote it.
+```
+
+## RH-35.9 Implementation And Test-Host Deploy - Interactive Agent Task Semantics
+
+Runtime implementation has been deployed to `10.20.3.200` at the provider
+tool-contract and monitor-probe level. The remaining gate is one real
+Hermes-agent tokenized owner phrase smoke after the owner replies to a visible
+digest.
+
+Reason:
+
+```text
+The previous correction still treated owner review as mostly an exact text
+command problem. That is the wrong product seam.
+
+Hermes is an agent. It should interpret the owner review task, ask a
+clarification when needed, then call a structured Memory-OS tool.
+
+Memory-OS is the deterministic state machine. It should receive action +
+stable action token, apply OwnerActionProcessor, write audit/monitor evidence,
+and prevent memory pollution.
+```
+
+Design update made:
+
+```text
+34-owner-review-digest-and-action-workflow.md:
+  RH-35.9 updated from design-only to structured-first implementation.
+  memory_os_review_reply primary contract becomes structured:
+    action + action_token + optional rating + optional owner_utterance
+  reply fallback remains accepted by provider handle_tool_call for CLI/legacy
+  callers, but it is not exposed in the model-facing schema.
+
+29-memory-os-module-integration-contract.md:
+  Contract 8 now says Hermes agent owns interactive interpretation and
+  clarification; Memory-OS tools/state machines receive only stable token
+  identity.
+
+36-module-closure-matrix.md:
+  Agent-Mediated Owner Reply Tool is reclassified as an interactive agent task
+  with structured tool execution, not an exact-command parser.
+
+32-active-roadmap-and-gates.md:
+  RH-35.9 is marked local implementation in progress with live deployment gate.
+```
+
+Local implementation evidence:
+
+```text
+provider tool schema:
+  action enum: approve / reject / allow / feedback
+  action_token: stable oa_<token>
+  rating: feedback-only
+  owner_utterance: optional control-plane sync skip/audit context
+  reply: hidden compatibility fallback, not model-facing
+
+monitor:
+  owner_review_ingress_guard now records review_reply_tool_input_mode
+  classification FAILs if the tool path is not structured
+
+targeted tests:
+  python -m pytest \
+    tests/plugins/memory/test_memory_os_lifecycle.py \
+    tests/plugins/memory/test_memory_os_owner_actions.py \
+    tests/system_modularization/test_memory_os_agent_os_shell.py \
+    tests/scripts/test_memory_os_3_200_monitor.py -q
+
+result:
+  99 passed
+```
+
+Full local verification:
+
+```text
+command:
+  python -m pytest -q
+
+result:
+  514 passed
+```
+
+Remote deployment:
+
+```text
+host: hermes-media / 10.20.3.200
+install:
+  HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --skip-verify
+
+gateway:
+  systemctl --user restart hermes-gateway.service
+  ActiveState=active
+  SubState=running
+  ExecMainStatus=0
+
+provider schema smoke:
+  tool_present=true
+  properties=[action, action_token, owner_utterance, rating]
+  required=[action, action_token]
+  has_reply=false
+  description_has_fallback=false
+  description_mentions_free_form=true
+```
+
+Remote monitor evidence:
+
+```text
+classification: WARN
+FAIL: []
+owner_review_ingress_guard.review_reply_tool_input_mode=structured
+owner_review_ingress_guard.review_reply_tool_status=ok
+owner_review_ingress_guard.gateway_hook_registered=false
+owner_review_ingress_guard.owner_command_event_count=0
+owner_review_ingress_guard.owner_command_working_count=0
+owner_review_ingress_guard.owner_command_candidate_count=0
+known WARN:
+  session_mirror_pending_sessions
+  owner_review_approved_proposals_pending_followup
+  rh31_eval_has_failures
+  rh26_casual_empty
+```
+
+Known residual from pre-RH-35.9 live test:
+
+```text
+event id:
+  evt_20260526T031153751349Z_9ad7d70697
+
+finding:
+  the old bare-token owner command path had already been processed before the
+  structured tool correction was deployed
+
+read-only lookup after RH-35.9 deploy:
+  event_found_in_top_level_events=false
+  working_refs=1
+  candidate_refs=1
+  audit_refs=0
+
+status:
+  RH-35.9 prevents new owner command pollution through structured
+  memory_os_review_reply + sync_turn skip
+  cleanup/quarantine of the historical working/candidate artifacts should be
+  handled as a separate bounded data repair, not silently inside this runtime
+  change
+```
+
+Real digest trigger:
+
+```text
+hermes cron run 2af755464ca8
+hermes cron tick
+
+job:
+  memory-os-owner-review-digest
+  Last run: 2026-05-25T23:51:11.154411-04:00 ok
+```
+
+Owner exact-token action after deploy:
+
+```text
+owner message:
+  memory approve oa_e9a4e734a07de7
+
+Hermes agent:
+  called memory_os_review_reply
+  response: Approved oa_e9a4e734a07de7
+
+Memory-OS result:
+  owner_action_count increased to 5
+  action_type_counts={approve_proposal: 4, reject_candidate: 1}
+  owner_review_reply_ingress status=ok
+  owner_review_reply_sync_turn_skipped status=ok
+  event/working/candidate pollution for this command=0
+  boundary actual_execute=false
+  boundary actual_send=false
+
+Important limitation:
+  the real Hermes tool call used the compatibility fallback:
+    {"reply":"memory approve oa_e9a4e734a07de7",
+     "owner_utterance":"memory approve oa_e9a4e734a07de7"}
+
+  This proves the agent-mediated exact-token path is healthy, but it does not
+  prove the RH-35.9 structured live path. The remaining live gate is the same
+  tokenized owner intent, e.g. "memory approve oa_<token>" or "批准
+  oa_<token>", resolved by Hermes into structured action/action_token
+  arguments rather than the fallback reply string.
+```
+
+Planned post-approval verification:
+
+```text
+live 10.20.3.200:
+  owner replies with a tokenized task phrase, e.g. "memory approve oa_<token>"
+  or "批准 oa_<token>"
+  Hermes agent calls tool and returns bounded result
+  monitor confirms gateway_hook_registered=false, unapproved boundary counts=0,
+  owner command event/working/candidate pollution=0
+```
+
+## RH-34g/RH-35.9 Follow-Up - Chinese Digest Header And Agent-Mode Cron
+
+Finding:
+
+```text
+The owner-review digest reached Telegram, but the recurring job was configured
+as Hermes cron no-agent mode. That caused Memory-OS helper stdout to be
+delivered verbatim, producing English/template-like text instead of a Chinese
+Hermes-agent-mediated review message.
+```
+
+10.20.2.88 reference check:
+
+```text
+Hermes production prototype uses two different patterns:
+  watchdog/direct alert: --script --no-agent --deliver
+  owner-facing review/reflection: --script or prompt with deliver=origin, so
+  script output becomes evidence for Hermes agent to read and summarize
+
+Examples observed read-only on 10.20.2.88:
+  Ops 门禁巡检日报: deliver=origin, prompt runs script then reports
+  Self-Evolution 每日深度反思: deliver=origin, script + skill + prompt
+  CW-019 owner review report: no-agent direct report, but not interactive
+  Memory-OS owner review should follow the agent-mediated owner-facing pattern.
+```
+
+Local implementation changes:
+
+```text
+renderer:
+  title changed to Memory-OS 审批摘要
+  adds 回复方式 header:
+    - copy full command such as memory approve oa_...
+    - or send oa_... and Hermes asks approve/reject/allow/feedback
+    - A1/R1/F1 are display labels, not approval ids
+  item labels and consequences are Chinese
+
+monitor:
+  owner_review_rendered_digest.response_header_present
+  FAIL when response header is missing
+
+cron gate:
+  creates/updates Hermes cron job in agent mode, not --no-agent
+  prompt instructs Hermes agent to read Script Output, write Chinese owner
+  digest, preserve oa_ tokens, and never auto-approve/execute
+  existing no-agent owner-review job is treated as needing update
+```
+
+Local verification:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/scripts/test_memory_os_owner_review_cron_gate.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+result: 77 passed
+
+python -m pytest tests/scripts/test_memory_os_plugin_install.py::test_installer_can_copy_owner_review_cron_helper_without_enabling_cron -q
+
+result: 1 passed
+```
+
+Live gate:
+
+```text
+Deploy to 10.20.3.200, apply the recurring gate, verify the job mode is agent
+mode, trigger one digest, and confirm Telegram receives a Chinese
+Hermes-agent-mediated message instead of raw helper stdout.
+```
+
+Live follow-up after strengthening the digest brief and Hermes agent prompt:
+
+```text
+cron job:
+  job_id=2af755464ca8
+  name=memory-os-owner-review-digest
+  mode=Hermes agent mode (not --no-agent)
+  deliver=telegram
+  script=memory_os_owner_review_digest.py
+
+owner-visible Telegram digest:
+  title=Memory-OS 审批摘要（给 owner）
+  includes_full_picture=true
+  pending_total=194
+  action_required_total=12
+  review_suggested_total=15
+  fyi_total=169
+  shown_total=13
+  omitted_action_required=9
+  omitted_review_suggested=10
+  omitted_fyi=164
+  explains_omitted_items=true
+  explains_A1_R1_are_display_labels=true
+  contains_stable_oa_token_commands=true
+  item_details_include_decision_and_consequence=true
+  command_only_digest=false
+```
+
+Owner action smoke from the same visible digest:
+
+```text
+owner message:
+  memory reject oa_1e9ca00f639ca2
+
+Hermes agent:
+  called memory_os_review_reply
+  response: Rejected oa_1e9ca00f639ca2
+
+Memory-OS status after action:
+  owner_action_count=8
+  action_type_counts={approve_proposal: 6, reject_candidate: 1, reject_proposal: 1}
+  proposal_rejected_count=1
+  unapproved_crystallized_write_count=0
+  owner_review.cron_integration.status=ok
+  owner_review.cron_integration.mode=hermes_cron_agent
+  owner_review.cron_integration.unapproved_send_count=0
+  owner_review.cron_integration.raw_body_included_count=0
+  owner_review_rendered_digest.response_header_present=true
+  owner_review_rendered_digest.overview_present=true
+  owner_review_rendered_digest.text_has_internal_schema=false
+  owner_review_rendered_digest.text_has_transcript_marker=false
+  owner_review_proposal_followups.pending_followup_count=7
+  owner_review_proposal_followups.execution_ticket_count=0
+  owner_review_proposal_followups.boundary.actual_execute=false
+```
+
+Interpretation:
+
+```text
+The owner-review loop is now agent-mediated and owner-readable:
+  Memory-OS produces bounded review data and stable action tokens.
+  Hermes agent produces the Chinese owner-facing digest and handles interaction.
+  Owner action routes to OwnerActionProcessor.
+  Approval/rejection changes review/proposal state only.
+  It does not execute work or write unapproved crystallized memory.
+
+Length limits are now treated as pagination/burden control, not silent
+truncation. The digest must show full-picture counts and omitted counts, and
+displayed items must be complete enough for a human decision.
+```
+
+## RH-34h/RH-35.10 Agent Review Surface And Proposal Follow-Up Projection
+
+Design update:
+
+```text
+RH-34h adds an agent-mediated review surface for owner questions such as:
+  - 还有哪些 / 下一页
+  - 展开 R3
+  - 这个 proposal 是什么
+
+Hermes owns the human interaction and wording. Memory-OS only returns bounded,
+read-only review surface data. The surface is not a send path, not an execution
+path, and not a state mutation path.
+
+RH-35.10 adds a report-only approved proposal follow-up projection:
+  approved_for_proposal items become visible for OpsGate/manual follow-up
+  actual execution still requires a separate future explicit apply gate
+```
+
+Local verification:
+
+```text
+python -m pytest tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/plugins/memory/test_memory_os_owner_actions.py \
+  tests/plugins/memory/test_memory_os_lifecycle.py \
+  tests/system_modularization/test_memory_os_agent_os_shell.py -q
+
+result: 103 passed
+
+python -m pytest -q
+
+result: 519 passed
+```
+
+Live deployment and schema check:
+
+```text
+target: 10.20.3.200
+install: scripts/install_memory_os.sh --yes --test-host --skip-verify
+gateway restart: systemctl --user restart hermes-gateway.service
+gateway status: active/running, ExecMainStatus=0
+
+provider tools:
+  memory_os_status
+  memory_os_review_reply
+  memory_os_review_surface
+
+memory_os_review_surface required args:
+  operation
+```
+
+Live surface smoke:
+
+```text
+hermes memory-os-agent-os review surface --operation next_page \
+  --section action_required --limit 2
+
+result:
+  schema_version=memory-os.owner_review_surface.v0
+  status=ok
+  source=latest_owner_home_digest
+  returned next action-required items
+  raw_body_included=false
+  boundary.actual_send=false
+  boundary.actual_execute=false
+  boundary.actual_identity_write=false
+  boundary.actual_unapproved_crystallized_approval=false
+
+hermes memory-os-agent-os review surface --operation detail \
+  --anchor R1 --channel telegram
+
+result:
+  schema_version=memory-os.owner_review_surface.v0
+  status=ok
+  binding_source=latest_recorded_digest
+  returned bounded detail for R1
+  raw_body_included=false
+  all boundary fields=false
+```
+
+Approved proposal follow-up dry-run:
+
+```text
+proposal_id=prop_20260523T085831319444Z_8c175467e9
+
+hermes memory-os-agent-os review proposal-followups \
+  --proposal-id "$proposal_id" --ops-gate
+
+result:
+  schema_version=memory-os.approved_proposal_ops_gate.v0
+  status=ok
+  dry_run=true
+  proposal_state=approved_for_proposal
+  execution_ticket_created=false
+  actual_execute=false
+  raw_body_included=false
+  all boundary fields=false
+```
+
+Monitor closure:
+
+```text
+python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
+
+result: WARN, no FAIL
+
+new pass:
+  owner_review_surface_ok
+
+owner_review_surface:
+  status=ok
+  raw_body_included_count=0
+  boundary_true_count=0
+  next_page.status=ok, item_count=2, source=latest_owner_home_digest
+  detail.status=ok, item_count=1
+  proposal_followups.status=ok
+
+owner_review_proposal_followups:
+  pending_followup_count=7
+  awaiting_ops_gate_count=6
+  ops_gate_reviewed_count=1
+  execution_ticket_count=0
+  raw_body_included=false
+
+known WARN:
+  session_mirror_pending_sessions=27
+  owner_review_approved_proposals_pending_followup=7
+  rh31_eval_has_failures=3
+  rh26_casual_empty
+
+boundary:
+  unapproved_send_count=0
+  raw_body_included_count=0
+  actual_execute=false
+```
+
+Self-review:
+
+```text
+PASS:
+  - Hermes remains the interaction owner.
+  - Memory-OS exposes a bounded review surface and action processor only.
+  - The new surface is read-only and monitorable.
+  - Approved proposals are visible for follow-up but still cannot execute.
+  - Local tests and live monitor both pass safety boundaries.
+
+NOT CLOSED:
+  - approved_for_proposal still needs the future explicit execution/apply RH
+    before any real work can run.
+  - SessionMirror pending sessions and RH-31 eval failures remain observation
+    items, not blockers for RH-34h/RH-35.10.
+```

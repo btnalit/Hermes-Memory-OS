@@ -49,10 +49,29 @@ if args[:2] == ["cron", "create"]:
         "deliver": value("--deliver"),
         "script": value("--script"),
         "no_agent": "--no-agent" in args,
+        "prompt": args[-1],
         "schedule": {"display": args[-1]},
     }
     jobs_path.write_text(json.dumps({"jobs": [job]}), encoding="utf-8")
     print("created job_owner_review")
+    raise SystemExit(0)
+
+if args[:2] == ["cron", "edit"]:
+    def value(flag):
+        return args[args.index(flag) + 1] if flag in args else ""
+    jobs_path = home / "cron" / "jobs.json"
+    jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
+    jobs[0].update(
+        {
+            "deliver": value("--deliver"),
+            "script": value("--script"),
+            "no_agent": "--no-agent" in args and "--agent" not in args,
+            "prompt": value("--prompt"),
+            "schedule": {"display": value("--schedule")},
+        }
+    )
+    jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    print("edited", args[2])
     raise SystemExit(0)
 
 print("unexpected command", args, file=sys.stderr)
@@ -99,7 +118,7 @@ def test_cron_gate_dry_run_redacts_delivery_target_and_does_not_write_config(tmp
     assert report["schema_version"] == "memory-os.owner_review_cron_enable_gate.v0"
     assert report["status"] == "dry_run"
     assert report["checks"]["helper_script_present"] is True
-    assert report["checks"]["hermes_cron_supports_script_no_agent_deliver"] is True
+    assert report["checks"]["hermes_cron_supports_agent_script_deliver"] is True
     assert report["checks"]["render_check"]["ok"] is True
     assert report["deliver_target_class"] == "explicit_target"
     assert "telegram:-100123" not in serialized
@@ -124,12 +143,52 @@ def test_cron_gate_apply_creates_hermes_cron_job_and_updates_recurring_config(tm
     jobs = json.loads((tmp_path / "home" / "cron" / "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert jobs[0]["name"] == "memory-os-owner-review-digest"
     assert jobs[0]["script"] == "memory_os_owner_review_digest.py"
-    assert jobs[0]["no_agent"] is True
+    assert jobs[0]["no_agent"] is False
+    assert "用中文" in jobs[0]["prompt"]
+    assert "Script Output" in jobs[0]["prompt"]
+    assert "全貌" in jobs[0]["prompt"]
+    assert "不要只列命令" in jobs[0]["prompt"]
     config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
     assert config["owner_review"]["recurring_delivery_enabled"] is True
-    assert config["owner_review"]["recurring_delivery_mode"] == "hermes_cron"
+    assert config["owner_review"]["recurring_delivery_mode"] == "hermes_cron_agent"
     assert config["owner_review"]["recurring_delivery_channel"] == "telegram"
     assert config["owner_review"]["recurring_delivery_target_class"] == "explicit_target"
+
+
+def test_cron_gate_apply_updates_existing_no_agent_job_to_agent_mode(tmp_path):
+    module = _load_gate_module()
+    args = _args(module, tmp_path, apply=True, owner_approved=True)
+    home = Path(args.hermes_home)
+    jobs_path = home / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job_owner_review",
+                        "name": "memory-os-owner-review-digest",
+                        "enabled": True,
+                        "deliver": "telegram:-100123",
+                        "script": "memory_os_owner_review_digest.py",
+                        "no_agent": True,
+                        "prompt": "",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = module.run_gate(args)
+
+    assert report["status"] == "updated"
+    assert report["checks"]["existing_job_needs_update"] is True
+    jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
+    assert jobs[0]["no_agent"] is False
+    assert "用中文" in jobs[0]["prompt"]
+    assert "全貌" in jobs[0]["prompt"]
+    assert "不要只列命令" in jobs[0]["prompt"]
 
 
 def test_cron_gate_recurring_channel_survives_provider_config_merge(tmp_path):

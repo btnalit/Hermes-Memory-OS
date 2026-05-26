@@ -215,7 +215,9 @@ The interactive installer:
   - DeepReflection preset
 - delegates writes to `scripts/install_memory_os_plugin.py`;
 - when enabled, creates the daily owner review job through Hermes cron
-  `--script --no-agent --deliver` rather than a Memory-OS transport path;
+  `--script --deliver` in agent mode rather than a Memory-OS transport path;
+  Hermes turns the bounded Memory-OS review brief into owner-facing wording and
+  handles interaction;
 - verifies provider and shell status after install;
 - does not restart `hermes-gateway.service`;
 - does not run cleanup apply or shadow-journal apply.

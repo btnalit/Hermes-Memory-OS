@@ -4,6 +4,8 @@ import time
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.status_tool_contract import (
+    MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
+    MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION,
     memory_os_status_tool_contract,
     validate_memory_os_status_tool_description,
 )
@@ -21,14 +23,19 @@ def test_memory_os_provider_is_discoverable_without_initializing_storage():
     assert provider is not None
     assert provider.name == "memory-os"
     assert provider.is_available() is True
-    assert [schema["name"] for schema in provider.get_tool_schemas()] == ["memory_os_status"]
+    assert [schema["name"] for schema in provider.get_tool_schemas()] == [
+        "memory_os_status",
+        "memory_os_review_reply",
+        "memory_os_review_surface",
+    ]
     assert provider.prefetch("hello") == ""
 
 
 def test_memory_os_status_tool_description_is_diagnostic_only():
     provider = load_memory_provider("memory_os")
 
-    description = provider.get_tool_schemas()[0]["description"]
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    description = schemas["memory_os_status"]["description"]
     contract = memory_os_status_tool_contract()
 
     assert description == contract["description"]
@@ -37,6 +44,42 @@ def test_memory_os_status_tool_description_is_diagnostic_only():
     assert "Do not use for ordinary chat" in description
     assert "opinions, feelings, design discussion" in description
     assert validate_memory_os_status_tool_description(description)["status"] == "ok"
+
+
+def test_memory_os_review_reply_tool_prefers_structured_action_token():
+    provider = load_memory_provider("memory_os")
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    schema = schemas["memory_os_review_reply"]
+
+    assert schema["description"] == MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION
+    assert "Use structured arguments only" in schema["description"]
+    assert "action=`approve|reject|allow|feedback`" in schema["description"]
+    assert "Do not send a free-form command string" in schema["description"]
+    assert "display anchors such as A1/R1 without resolving" in schema["description"]
+    assert "reply" not in schema["parameters"]["properties"]
+    assert "action" in schema["parameters"]["properties"]
+    assert "action_token" in schema["parameters"]["properties"]
+    assert "owner_utterance" in schema["parameters"]["properties"]
+    assert schema["parameters"]["required"] == ["action", "action_token"]
+
+
+def test_memory_os_review_surface_tool_is_read_only_agent_surface():
+    provider = load_memory_provider("memory_os")
+    schemas = {schema["name"]: schema for schema in provider.get_tool_schemas()}
+    schema = schemas["memory_os_review_surface"]
+
+    assert schema["description"] == MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION
+    assert "Read bounded Memory-OS owner-review surface data" in schema["description"]
+    assert "read-only" in schema["description"]
+    assert "Hermes agent owns" in schema["description"]
+    assert set(schema["parameters"]["properties"]["operation"]["enum"]) == {
+        "overview",
+        "page",
+        "next_page",
+        "detail",
+        "proposal_followups",
+    }
+    assert schema["parameters"]["required"] == ["operation"]
 
 
 def test_memory_os_status_tool_contract_has_chinese_and_mixed_fixtures():

@@ -72,7 +72,7 @@ Options:
                                 HERMES_HOME/scripts. Does not create or enable
                                 a cron job.
   --enable-owner-review-cron    Enable recurring owner review delivery through
-                                Hermes cron --script --no-agent --deliver.
+                                Hermes cron --script --deliver in agent mode.
   --no-enable-owner-review-cron Do not create/enable the Hermes owner review
                                 cron job.
   --owner-review-cron-schedule VALUE

@@ -32,12 +32,14 @@ OWNER_REVIEW_AGING_SCHEMA_VERSION = "memory-os.owner_review_aging.v0"
 OWNER_REVIEW_CHANNEL_SCHEMA_VERSION = "memory-os.owner_review_channel.v0"
 OWNER_REVIEW_DIGEST_PREVIEW_SCHEMA_VERSION = "memory-os.owner_review_digest_preview.v0"
 OWNER_REVIEW_RENDERED_DIGEST_SCHEMA_VERSION = "memory-os.owner_review_rendered_digest.v0"
+OWNER_REVIEW_SURFACE_SCHEMA_VERSION = "memory-os.owner_review_surface.v0"
 OWNER_REVIEW_REPLY_SCHEMA_VERSION = "memory-os.owner_review_reply.v0"
 OWNER_REVIEW_DELIVERY_GATE_SCHEMA_VERSION = "memory-os.owner_review_delivery_gate.v0"
 OWNER_REVIEW_DELIVERY_SCHEMA_VERSION = "memory-os.owner_review_delivery.v0"
 OWNER_REVIEW_DELIVERY_STATUS_SCHEMA_VERSION = "memory-os.owner_review_delivery_status.v0"
 OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_integration.v0"
 APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_followups.v0"
+APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
@@ -179,12 +181,19 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
 
     proposals = [item for item in _read_proposal_queue(store) if str(item.get("state") or "") == "approved_for_proposal"]
     approvals = _latest_proposal_approval_by_target(read_owner_action_records(store.roots))
+    ops_gate_reviews = _ops_gate_reviews_by_proposal(store)
     items: list[dict[str, Any]] = []
     for proposal in proposals:
         proposal_id = str(proposal.get("candidate_id") or "")
         if not proposal_id:
             continue
         approval = approvals.get(proposal_id, {})
+        ops_gate_review = ops_gate_reviews.get(proposal_id, {})
+        followup_state = (
+            "ops_gate_reviewed_awaiting_explicit_execution"
+            if ops_gate_review
+            else "awaiting_ops_gate_review"
+        )
         approved_at = str(approval.get("created_at") or proposal.get("updated_at") or "")
         items.append(
             {
@@ -195,10 +204,12 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "source_module": "proposal_queue",
                 "proposal_kind": str(proposal.get("kind") or "proposal"),
                 "state": "approved_for_proposal",
-                "followup_state": "awaiting_human_controlled_followup",
+                "followup_state": followup_state,
                 "approved_at": approved_at,
                 "owner_action_id": str(approval.get("owner_action_id") or ""),
                 "owner_id": str(approval.get("owner_id") or ""),
+                "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+                "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
                 "safe_source_ids": _safe_list(proposal.get("source_refs")),
                 "next_step": "inspect or route through OpsGate; actual execution requires a separate explicit apply command",
                 "execution_ticket_created": False,
@@ -216,6 +227,10 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         "pending_followup_count": len(items),
         "shown_count": len(shown),
         "overflow_count": max(len(items) - bounded_limit, 0),
+        "awaiting_ops_gate_count": sum(1 for item in items if item.get("followup_state") == "awaiting_ops_gate_review"),
+        "ops_gate_reviewed_count": sum(
+            1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
+        ),
         "execution_ticket_count": 0,
         "raw_body_included": False,
         "boundary": {
@@ -235,8 +250,186 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "pending_followup_count": report["pending_followup_count"],
         "shown_count": report["shown_count"],
         "overflow_count": report["overflow_count"],
+        "awaiting_ops_gate_count": report["awaiting_ops_gate_count"],
+        "ops_gate_reviewed_count": report["ops_gate_reviewed_count"],
         "execution_ticket_count": report["execution_ticket_count"],
         "raw_body_included": report["raw_body_included"],
+    }
+
+
+def owner_review_surface_report(
+    store: MemoryOSStore,
+    *,
+    owner_id: str = "",
+    channel: str = "agent",
+    operation: str = "overview",
+    section: str = "all",
+    anchor: str = "",
+    action_token: str = "",
+    offset: int = 0,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Read-only owner review surface for Hermes agent pagination/detail.
+
+    Hermes owns owner-facing conversation. This report gives Hermes bounded
+    data for "next page", "expand R3", and approved-proposal follow-up
+    questions without applying any owner action.
+    """
+
+    resolved_owner = str(owner_id or "owner")
+    safe_operation = str(operation or "overview").strip().lower()
+    if safe_operation not in {"overview", "page", "next_page", "detail", "proposal_followups"}:
+        safe_operation = "overview"
+    safe_section = _safe_review_section(section)
+    bounded_limit = max(min(int(limit or 5), 10), 1)
+    bounded_offset = max(int(offset or 0), 0)
+    if safe_operation == "detail":
+        return _owner_review_surface_detail(
+            store,
+            owner_id=resolved_owner,
+            channel=channel,
+            anchor=anchor,
+            action_token=action_token,
+        )
+    if safe_operation == "proposal_followups":
+        report = approved_proposal_followups_report(store, limit=bounded_limit)
+        return {
+            "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+            "profile": store.roots.profile or "default",
+            "owner_id": resolved_owner,
+            "status": "ok",
+            "operation": safe_operation,
+            "proposal_followups": report,
+            "raw_body_included": False,
+            "boundary": _owner_review_false_boundary(),
+        }
+
+    queue = owner_review_queue_report(store, limit=1000)
+    latest_record = _latest_owner_home_digest_record(store.roots, owner_id=resolved_owner)
+    latest_rendered = _rendered_digest_from_record(latest_record) if latest_record else {}
+    latest_counts = latest_rendered.get("counts") if isinstance(latest_rendered.get("counts"), dict) else {}
+    offsets = _surface_offsets(
+        operation=safe_operation,
+        section=safe_section,
+        explicit_offset=bounded_offset,
+        latest_counts=latest_counts,
+    )
+    sections: dict[str, list[dict[str, Any]]] = {}
+    next_offsets: dict[str, int] = {}
+    for priority in _selected_review_sections(safe_section):
+        raw_items = [item for item in queue.get("items", []) if item.get("priority") == priority]
+        start = offsets.get(priority, 0)
+        selected = raw_items[start : start + bounded_limit]
+        sections[priority] = [
+            _render_review_item(_digest_item(item), section=priority)
+            for item in selected
+            if isinstance(item, dict)
+        ]
+        next_offsets[priority] = min(start + len(selected), len(raw_items))
+    return {
+        "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "owner_id": resolved_owner,
+        "status": "ok",
+        "operation": safe_operation,
+        "section": safe_section,
+        "source": "latest_owner_home_digest" if latest_record else "current_queue",
+        "latest_digest_id": str((latest_record or {}).get("digest_id") or ""),
+        "counts": {
+            "pending": queue.get("pending_count"),
+            "action_required_total": queue.get("action_required_count"),
+            "review_suggested_total": queue.get("review_suggested_count"),
+            "fyi_total": queue.get("fyi_count"),
+        },
+        "offsets": offsets,
+        "next_offsets": next_offsets,
+        "sections": sections,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def route_approved_proposal_followup_to_ops_gate(
+    store: MemoryOSStore,
+    *,
+    proposal_id: str,
+    owner_id: str = "owner",
+    channel: str = "cli",
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Route an approved proposal follow-up through OpsGate report-only review.
+
+    This is an explicit owner/operator apply path into the execution gate. It
+    writes an OpsGate report only when ``apply`` is true. It never executes work
+    and never creates an execution ticket.
+    """
+
+    proposal = _find_proposal(store, proposal_id)
+    if not proposal:
+        return _approved_proposal_ops_gate_error(
+            store,
+            proposal_id=proposal_id,
+            owner_id=owner_id,
+            channel=channel,
+            reason="proposal_not_found",
+            apply=apply,
+        )
+    if str(proposal.get("state") or "") != "approved_for_proposal":
+        return _approved_proposal_ops_gate_error(
+            store,
+            proposal_id=proposal_id,
+            owner_id=owner_id,
+            channel=channel,
+            reason="proposal_not_approved_for_followup",
+            apply=apply,
+        )
+
+    proposed_action = _ops_gate_action_from_proposal(proposal)
+    existing_review = _ops_gate_reviews_by_proposal(store).get(proposal_id)
+    if apply and existing_review:
+        return {
+            "schema_version": APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION,
+            "profile": store.roots.profile or "default",
+            "status": "duplicate_ignored",
+            "dry_run": False,
+            "owner_id": owner_id,
+            "channel": channel,
+            "proposal_id": proposal_id,
+            "proposal_state": "approved_for_proposal",
+            "proposed_action": proposed_action,
+            "existing_ops_gate_review": existing_review,
+            "ops_gate_report_written": False,
+            "ops_gate_result": {},
+            "execution_ticket_created": False,
+            "actual_execute": False,
+            "raw_body_included": False,
+            "boundary": _owner_review_false_boundary(),
+        }
+    ops_gate_result: dict[str, Any] = {}
+    if apply:
+        from plugins.modules.governance.ops_gate import OpsGateModule
+
+        module = OpsGateModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+        ops_gate_result = module.run_once(store=store, proposed_actions=[proposed_action])
+    status = "ok" if not apply else str(ops_gate_result.get("status") or "error")
+
+    return {
+        "schema_version": APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "proposal_state": "approved_for_proposal",
+        "proposed_action": proposed_action,
+        "existing_ops_gate_review": existing_review or {},
+        "ops_gate_report_written": bool(apply and ops_gate_result.get("report_id")),
+        "ops_gate_result": ops_gate_result,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
     }
 
 
@@ -551,7 +744,7 @@ def render_owner_review_digest(
         "review_aging": preview.get("review_aging"),
         "overflow": preview.get("overflow"),
         "sections": rendered_sections,
-        "text": _rendered_digest_text(rendered_sections),
+        "text": _rendered_digest_text(rendered_sections, counts=preview.get("counts"), overflow=preview.get("overflow")),
         "boundary": {
             "actual_send": False,
             "actual_execute": False,
@@ -1940,18 +2133,18 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     if target_type == "candidate":
         proposed = _bounded_text(str(item.get("proposed_memory_text") or item.get("summary") or ""), 160)
         if proposed:
-            return f"Should this proposed memory become owner-approved long-term memory? {proposed}"
-        return "Should this proposed memory become owner-approved long-term memory?"
+            return f"这条候选记忆要批准为长期记忆吗？{proposed}"
+        return "这条候选记忆要批准为长期记忆吗？"
     if target_type == "candidate_cleanup":
-        return "This memory candidate needs consolidation before owner approval."
+        return "这条候选记忆还像原始对话片段，批准前需要先整理。"
     if target_type == "proposal":
         summary = str(item.get("summary") or "this proposal")
-        return _bounded_text(f"Should this proposal move forward for human-controlled follow-up? {summary}", 180)
+        return _bounded_text(f"这个 proposal 要进入人工后续处理吗？{summary}", 180)
     if target_type == "memory_source":
-        return "Was this injected memory/context source useful for the related answer?"
+        return "这次注入的记忆/上下文对回答有帮助吗？"
     if target_type == "speak":
-        return "Should this exceptional proactive-send payload receive one temporary permission ticket?"
-    return "Review this Memory-OS status signal."
+        return "这条例外主动发言内容要给一次性临时许可吗？"
+    return "请看一下这条 Memory-OS 状态信号。"
 
 
 def _review_suggested_action(actions: list[dict[str, str]], target_type: str) -> str:
@@ -1961,10 +2154,10 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
     if target_type == "memory_source" and commands:
         return commands[0]
     if target_type == "speak" and commands:
-        return f"{commands[0]} only if this out-of-policy proactive send is acceptable once"
+        return f"{commands[0]}，只在你接受这次例外主动发言时使用"
     if target_type == "candidate_cleanup":
-        return "no action in this digest; wait for consolidation or review queue cleanup"
-    return "no action required"
+        return "这次摘要里不需要操作；等待后续整理或 review queue 清理"
+    return "不需要操作"
 
 
 def _review_reason(target_type: str, item: dict[str, Any]) -> str:
@@ -1973,44 +2166,42 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
         source_count = len(item.get("safe_source_ids") or [])
         aging = str(item.get("aging_reason") or "pending_owner_review")
         return _bounded_text(
-            f"Source module {source_module} suggested a stable memory candidate from {source_count} safe refs; "
-            f"queue reason {aging}.",
+            f"{source_module} 从 {source_count} 个安全引用里提出了稳定记忆候选；队列原因：{aging}。",
             220,
         )
     if target_type == "candidate_cleanup":
         source_count = len(item.get("safe_source_ids") or [])
         return _bounded_text(
-            f"Source module {source_module} produced a candidate from {source_count} safe refs, "
-            "but it still looks like a transcript or event excerpt instead of a stable memory.",
+            f"{source_module} 从 {source_count} 个安全引用里提出了候选，但它仍像原始对话/事件摘录，不像稳定记忆。",
             220,
         )
     if target_type == "proposal":
         summary = str(item.get("summary") or "proposal candidate")
-        return _bounded_text(f"Source module {source_module} queued this proposal: {summary}.", 220)
+        return _bounded_text(f"{source_module} 排入了这个 proposal：{summary}。", 220)
     if target_type == "memory_source":
         route = str(item.get("route") or "unknown")
         query_class = str(item.get("query_class") or "unknown")
         return _bounded_text(
-            f"Source module {source_module} recorded context attribution for route {route} / query {query_class}.",
+            f"{source_module} 记录了上下文归因：route={route} / query={query_class}。",
             220,
         )
     if target_type == "speak":
-        return _bounded_text(f"Source module {source_module} produced a would-send artifact.", 220)
-    return _bounded_text(str(item.get("summary") or "Status trend only."), 220)
+        return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案。", 220)
+    return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
 
 
 def _review_consequence(target_type: str) -> str:
     if target_type == "candidate":
-        return "Approve writes one owner-approved crystallized memory; reject keeps audit evidence and closes the item."
+        return "批准会写入一条 owner-approved crystallized memory；拒绝会保留审计证据并关闭该项。"
     if target_type == "candidate_cleanup":
-        return "No memory is written. The item stays as review backlog until consolidation or explicit cleanup handles it."
+        return "不会写入长期记忆；该项会留在 review backlog，直到整理或显式清理处理。"
     if target_type == "proposal":
-        return "Approve only marks the proposal approved for follow-up; it does not execute work. Reject downranks/closes it."
+        return "批准只表示允许进入人工 follow-up；不会执行任何工作。拒绝会降权/关闭该 proposal。"
     if target_type == "memory_source":
-        return "Feedback is recorded as evidence first; it does not change live routing until a separate apply gate."
+        return "反馈先作为证据入 ledger；不会直接改变 live routing，除非之后经过单独 apply gate。"
     if target_type == "speak":
-        return "Allow creates one expiring permission ticket; default proactive-send policy remains unchanged."
-    return "FYI only; no state change is needed."
+        return "允许会创建一个会过期的一次性许可；默认主动发言策略不变。"
+    return "仅供了解；不需要状态变更。"
 
 
 def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
@@ -2066,19 +2257,34 @@ def _digest_text_preview(
     return _rendered_digest_text(rendered_sections)[:2000]
 
 
-def _rendered_digest_text(sections: dict[str, list[dict[str, Any]]]) -> str:
+def _rendered_digest_text(
+    sections: dict[str, list[dict[str, Any]]],
+    *,
+    counts: dict[str, Any] | None = None,
+    overflow: dict[str, Any] | None = None,
+) -> str:
     max_chars = OWNER_REVIEW_TEXT_LIMIT
-    lines = ["Memory-OS owner review preview", ""]
+    lines = [
+        "Memory-OS 审批摘要",
+        "",
+        *_rendered_overview_lines(counts or {}, overflow or {}),
+        "",
+        "回复方式：",
+        "- 直接复制完整命令，例如：memory approve oa_...",
+        "- 也可以只回复 oa_...，Hermes 会继续问你要 approve/reject/allow/feedback。",
+        "- A1/R1/F1 只是列表编号，不是审批 ID。",
+        "",
+    ]
     omitted = 0
     for title, key in (
-        ("Action Required", "action_required"),
-        ("Review Suggested", "review_suggested"),
-        ("FYI", "fyi"),
+        ("需要你决定", "action_required"),
+        ("建议你看", "review_suggested"),
+        ("仅供了解", "fyi"),
     ):
         section_lines = [f"{title}:"]
         items = sections.get(key, [])
         if not items:
-            section_lines.append("- none")
+            section_lines.append("- 无")
         for item in items:
             item_lines = _rendered_digest_item_lines(item)
             candidate = lines + section_lines + item_lines + [""]
@@ -2087,7 +2293,7 @@ def _rendered_digest_text(sections: dict[str, list[dict[str, Any]]]) -> str:
                 continue
             section_lines.extend(item_lines)
         if key == "fyi" and omitted:
-            summary_line = f"- {omitted} more item(s) omitted to keep this Telegram digest bounded."
+            summary_line = f"- 还有 {omitted} 项为了控制 Telegram 摘要长度被省略。"
             candidate = lines + section_lines + [summary_line, ""]
             if len("\n".join(candidate).rstrip()) <= max_chars:
                 section_lines.append(summary_line)
@@ -2096,17 +2302,40 @@ def _rendered_digest_text(sections: dict[str, list[dict[str, Any]]]) -> str:
     return "\n".join(lines).rstrip()
 
 
+def _rendered_overview_lines(counts: dict[str, Any], overflow: dict[str, Any]) -> list[str]:
+    if not counts:
+        return ["全貌：本条摘要只展示当前优先项；未展示项会在后续摘要或你主动要求时继续展开。"]
+    pending = int(counts.get("pending") or 0)
+    action_total = int(counts.get("action_required_total") or 0)
+    action_shown = int(counts.get("action_required_shown") or 0)
+    suggested_total = int(counts.get("review_suggested_total") or 0)
+    suggested_shown = int(counts.get("review_suggested_shown") or 0)
+    fyi_total = int(counts.get("fyi_total") or 0)
+    fyi_shown = int(counts.get("fyi_shown") or 0)
+    action_omitted = max(int(overflow.get("action_required") or 0), max(action_total - action_shown, 0))
+    suggested_omitted = max(int(overflow.get("review_suggested") or 0), max(suggested_total - suggested_shown, 0))
+    fyi_omitted = max(int(overflow.get("fyi") or 0), max(fyi_total - fyi_shown, 0))
+    return [
+        "全貌：",
+        f"- 待处理 {pending} 项；本条展示 {action_shown + suggested_shown + fyi_shown} 项。",
+        f"- 需要你决定 {action_total} 项：展示 {action_shown}，未展示 {action_omitted}。",
+        f"- 建议你看 {suggested_total} 项：展示 {suggested_shown}，未展示 {suggested_omitted}。",
+        f"- 仅供了解 {fyi_total} 项：展示 {fyi_shown}，未展示 {fyi_omitted}。",
+        "- 没展示的不是丢失；为避免刷屏，会在后续摘要或你要求展开时再列。",
+    ]
+
+
 def _delivery_message_from_preview(preview: dict[str, Any]) -> str:
     text = str(preview.get("text_preview") or "")
-    text = text.replace("Memory-OS owner review preview", "Memory-OS owner review digest", 1)
+    text = text.replace("Memory-OS owner review preview", "Memory-OS 审批摘要", 1)
     lines = [
-        "Memory-OS owner review digest",
+        "Memory-OS 审批摘要",
         "",
-        "This is an owner-triggered one-shot review smoke. No action was applied automatically.",
+        "这是 owner 触发的一次性 review smoke；不会自动审批或执行。",
         "",
     ]
     body = text
-    if body.startswith("Memory-OS owner review digest"):
+    if body.startswith("Memory-OS 审批摘要"):
         body = "\n".join(body.splitlines()[1:]).lstrip()
     lines.append(body)
     message = "\n".join(lines)
@@ -2134,11 +2363,11 @@ def _rendered_digest_item_lines(item: dict[str, Any]) -> list[str]:
     action_line = " / ".join(commands) if commands else str(item.get("suggested_action") or "no action required")
     return [
         f"- [{item.get('anchor')}] {item.get('question')}",
-        f"  Action: {action_line}",
-        f"  Ref: {target_ref}",
-        f"  Reason: {item.get('reason')}",
-        f"  Consequence: {item.get('consequence')}",
-        f"  Source: {item.get('source_module')}",
+        f"  操作: {action_line}",
+        f"  引用: {target_ref}",
+        f"  原因: {item.get('reason')}",
+        f"  结果: {item.get('consequence')}",
+        f"  来源: {item.get('source_module')}",
     ]
 
 
@@ -2432,6 +2661,214 @@ def _latest_proposal_approval_by_target(actions: list[dict[str, Any]]) -> dict[s
             continue
         approvals[target_id] = action
     return approvals
+
+
+def _ops_gate_reviews_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
+    path = store.roots.hermes_home / "system-modules" / "ops_gate" / "reports.jsonl"
+    reviews: dict[str, dict[str, Any]] = {}
+    if not path.exists():
+        return reviews
+    for report in _read_jsonl(path):
+        if not isinstance(report, dict):
+            continue
+        decisions = report.get("decisions")
+        if not isinstance(decisions, list):
+            continue
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            proposal_id = _proposal_id_from_ops_gate_action_id(str(decision.get("action_id") or ""))
+            if not proposal_id:
+                continue
+            reviews[proposal_id] = {
+                "report_id": str(report.get("report_id") or ""),
+                "decision": str(decision.get("decision") or ""),
+                "reason": str(decision.get("reason") or ""),
+            }
+    return reviews
+
+
+def _proposal_id_from_ops_gate_action_id(action_id: str) -> str:
+    prefix = "proposal_followup:"
+    if action_id.startswith(prefix):
+        return action_id[len(prefix) :]
+    return ""
+
+
+def _ops_gate_action_from_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    proposal_id = str(proposal.get("candidate_id") or "")
+    return {
+        "schema_version": "memory-os.ops_gate_proposed_action.v0",
+        "id": f"proposal_followup:{proposal_id}",
+        "kind": _bounded_text(str(proposal.get("kind") or "proposal"), 80),
+        "target": f"proposal:{proposal_id}",
+        "title": _bounded_text(str(proposal.get("title") or "Approved proposal"), 140),
+        "source_module": "proposal_queue",
+        "safe_source_ids": _safe_list(proposal.get("source_refs")),
+        "raw_body_included": False,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+    }
+
+
+def _approved_proposal_ops_gate_error(
+    store: MemoryOSStore,
+    *,
+    proposal_id: str,
+    owner_id: str,
+    channel: str,
+    reason: str,
+    apply: bool,
+) -> dict[str, Any]:
+    return {
+        "schema_version": APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": "error",
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "reason": reason,
+        "ops_gate_report_written": False,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _owner_review_false_boundary() -> dict[str, bool]:
+    return {
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+
+
+def _safe_review_section(section: str) -> str:
+    clean = str(section or "all").strip().lower()
+    if clean in {"action", "action_required", "required"}:
+        return "action_required"
+    if clean in {"suggested", "review_suggested", "review"}:
+        return "review_suggested"
+    if clean in {"fyi", "info"}:
+        return "fyi"
+    return "all"
+
+
+def _selected_review_sections(section: str) -> tuple[str, ...]:
+    if section in {"action_required", "review_suggested", "fyi"}:
+        return (section,)
+    return ("action_required", "review_suggested", "fyi")
+
+
+def _surface_offsets(
+    *,
+    operation: str,
+    section: str,
+    explicit_offset: int,
+    latest_counts: dict[str, Any],
+) -> dict[str, int]:
+    sections = _selected_review_sections(section)
+    if operation == "next_page":
+        return {
+            "action_required": int(latest_counts.get("action_required_shown") or 0),
+            "review_suggested": int(latest_counts.get("review_suggested_shown") or 0),
+            "fyi": int(latest_counts.get("fyi_shown") or 0),
+        }
+    return {priority: explicit_offset for priority in sections}
+
+
+def _owner_review_surface_detail(
+    store: MemoryOSStore,
+    *,
+    owner_id: str,
+    channel: str,
+    anchor: str,
+    action_token: str,
+) -> dict[str, Any]:
+    clean_anchor = str(anchor or "").strip().upper()
+    clean_token = str(action_token or "").strip().lower()
+    if not clean_anchor and not clean_token:
+        return _owner_review_surface_needs_clarification(
+            store,
+            owner_id=owner_id,
+            operation="detail",
+            reason="missing_anchor_or_action_token",
+        )
+    rendered, binding = _resolve_reply_digest(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        digest_id="",
+        require_recorded_digest=True,
+        anchor=clean_anchor,
+        action_token=clean_token,
+        max_action_required=None,
+        max_review_suggested=None,
+        max_fyi=None,
+    )
+    if binding == "digest_not_found":
+        return _owner_review_surface_needs_clarification(
+            store,
+            owner_id=owner_id,
+            operation="detail",
+            reason="digest_not_found_or_expired",
+        )
+    item: dict[str, Any] | None = None
+    match = ""
+    if clean_token:
+        match_record = _rendered_action_token_map(rendered).get(clean_token)
+        if match_record:
+            item = match_record.get("item") if isinstance(match_record.get("item"), dict) else None
+            match = "action_token"
+    if item is None and clean_anchor:
+        item = _rendered_anchor_map(rendered).get(clean_anchor)
+        match = "anchor" if item else ""
+    if item is None:
+        return _owner_review_surface_needs_clarification(
+            store,
+            owner_id=owner_id,
+            operation="detail",
+            reason="review_item_not_found_in_latest_digest",
+            digest_id=str(rendered.get("digest_id") or ""),
+        )
+    return {
+        "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "owner_id": owner_id,
+        "status": "ok",
+        "operation": "detail",
+        "binding": binding,
+        "match": match,
+        "digest_id": str(rendered.get("digest_id") or ""),
+        "item": item,
+        "text": "\n".join(_rendered_digest_item_lines(item)),
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _owner_review_surface_needs_clarification(
+    store: MemoryOSStore,
+    *,
+    owner_id: str,
+    operation: str,
+    reason: str,
+    digest_id: str = "",
+) -> dict[str, Any]:
+    return {
+        "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "owner_id": owner_id,
+        "status": "needs_clarification",
+        "operation": operation,
+        "reason": reason,
+        "digest_id": digest_id,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
 
 
 def _closed_targets(actions: list[dict[str, Any]]) -> set[str]:

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Explicit opt-in gate for Memory-OS owner review delivery via Hermes cron.
 
-This script does not send messages directly. In apply mode it creates a Hermes
-cron job that runs the Memory-OS bounded digest helper with --no-agent and lets
-Hermes own delivery through --deliver.
+This script does not send messages directly. In apply mode it creates or updates
+a Hermes cron job that runs the Memory-OS bounded digest helper in agent mode:
+the helper stdout is injected into Hermes' prompt, and Hermes owns judgment,
+wording, interaction, scheduling, and delivery.
 """
 
 from __future__ import annotations
@@ -21,6 +22,17 @@ SCHEMA_VERSION = "memory-os.owner_review_cron_enable_gate.v0"
 DEFAULT_JOB_NAME = "memory-os-owner-review-digest"
 HELPER_NAME = "memory_os_owner_review_digest.py"
 CONFIG_RELATIVE_PATH = Path("memory-os") / "config.json"
+OWNER_REVIEW_AGENT_PROMPT = (
+    "你正在处理 Memory-OS owner review digest。步骤：1) 读取 Script Output，它是 Memory-OS 生成的 bounded review brief，"
+    "不是最终用户文案。2) 如果 Script Output 为空，最终只回复 [SILENT]。3) 用中文给 owner 输出一份简洁审批摘要，"
+    "不要逐字照搬英文/内部字段。4) 必须先给出 Script Output 里的“全貌”数字：待处理总数、需要决定/建议查看/仅供了解各有多少、"
+    "本条展示多少、未展示多少。不要让 owner 误以为未展示项丢失。5) 每个可操作项必须写清楚：事项是什么、owner 要决定什么、"
+    "批准/拒绝/允许后的后果、完整 stable action token 命令。不要只列命令。6) 必须保留每个可操作项的 stable action token 和完整命令，例如 "
+    "memory approve oa_... / memory reject oa_...。7) 明确告诉 owner：A1/R1/F1 只是列表编号，不是审批 ID；"
+    "owner 可以复制完整命令，也可以只回复 oa_... 后由你继续追问 approve/reject/allow/feedback。"
+    "8) 不要自动审批、不要自动执行、不要改写 Memory-OS 状态；owner 回复后再调用 Memory-OS review tool。"
+    "9) 只使用 Script Output 里的事实；不要编造候选内容、原因、后果或执行结果。"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,7 +84,7 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
 
     cron_help = _cron_create_help(args.hermes_bin, env)
     checks["hermes_cron_create_available"] = cron_help["available"]
-    checks["hermes_cron_supports_script_no_agent_deliver"] = cron_help["supports"]
+    checks["hermes_cron_supports_agent_script_deliver"] = cron_help["supports"]
     if not cron_help["supports"]:
         findings.append(_finding("hermes_cron_create_missing_required_flags", "error"))
 
@@ -81,6 +93,8 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
     checks["existing_job_present"] = bool(matched_job)
     checks["existing_job_enabled"] = bool((matched_job or {}).get("enabled")) if matched_job else False
     checks["existing_job_id"] = str((matched_job or {}).get("id") or (matched_job or {}).get("job_id") or "")
+    checks["existing_job_no_agent"] = bool((matched_job or {}).get("no_agent")) if matched_job else False
+    checks["existing_job_needs_update"] = bool(matched_job) and _job_needs_update(matched_job, args)
     if matched_job:
         findings.append(_finding("cron_job_already_present", "warning"))
 
@@ -101,10 +115,22 @@ def run_gate(args: argparse.Namespace) -> dict[str, Any]:
         if _has_error(findings):
             status = "blocked"
         elif matched_job:
-            status = "already_configured"
-            _write_recurring_config(hermes_home, args)
-            config_updated = True
-            applied_job_id = checks["existing_job_id"]
+            if checks["existing_job_needs_update"]:
+                completed = subprocess.run(_cron_edit_command(args, checks["existing_job_id"]), check=False, text=True, capture_output=True, env=env)
+                if completed.returncode != 0:
+                    status = "error"
+                    findings.append(_finding("hermes_cron_edit_failed", "error"))
+                    checks["hermes_cron_edit_stderr"] = (completed.stderr or completed.stdout or "").strip()[:500]
+                else:
+                    status = "updated"
+                    _write_recurring_config(hermes_home, args)
+                    config_updated = True
+                    applied_job_id = checks["existing_job_id"]
+            else:
+                status = "already_configured"
+                _write_recurring_config(hermes_home, args)
+                config_updated = True
+                applied_job_id = checks["existing_job_id"]
         else:
             completed = subprocess.run(command, check=False, text=True, capture_output=True, env=env)
             if completed.returncode != 0:
@@ -158,7 +184,7 @@ def _cron_create_help(hermes_bin: str, env: dict[str, str]) -> dict[str, Any]:
     output = f"{completed.stdout}\n{completed.stderr}"
     return {
         "available": completed.returncode == 0,
-        "supports": all(flag in output for flag in ("--script", "--no-agent", "--deliver")),
+        "supports": all(flag in output for flag in ("--script", "--deliver")),
     }
 
 
@@ -202,12 +228,44 @@ def _cron_create_command(args: argparse.Namespace) -> list[str]:
         args.deliver,
         "--script",
         HELPER_NAME,
-        "--no-agent",
     ]
     if args.workdir:
         command.extend(["--workdir", args.workdir])
     command.append(args.schedule)
+    command.append(OWNER_REVIEW_AGENT_PROMPT)
     return command
+
+
+def _cron_edit_command(args: argparse.Namespace, job_id: str) -> list[str]:
+    command = [
+        args.hermes_bin,
+        "cron",
+        "edit",
+        job_id,
+        "--schedule",
+        args.schedule,
+        "--deliver",
+        args.deliver,
+        "--script",
+        HELPER_NAME,
+        "--agent",
+        "--prompt",
+        OWNER_REVIEW_AGENT_PROMPT,
+    ]
+    if args.workdir:
+        command.extend(["--workdir", args.workdir])
+    return command
+
+
+def _job_needs_update(job: dict[str, Any], args: argparse.Namespace) -> bool:
+    return any(
+        [
+            bool(job.get("no_agent")),
+            str(job.get("script") or "") != HELPER_NAME,
+            str(job.get("deliver") or "") != str(args.deliver),
+            str(job.get("prompt") or "") != OWNER_REVIEW_AGENT_PROMPT,
+        ]
+    )
 
 
 def _redacted_command_preview(args: argparse.Namespace) -> list[str]:
@@ -261,7 +319,7 @@ def _write_recurring_config(hermes_home: Path, args: argparse.Namespace) -> None
     owner_review.update(
         {
             "recurring_delivery_enabled": True,
-            "recurring_delivery_mode": "hermes_cron",
+            "recurring_delivery_mode": "hermes_cron_agent",
             "recurring_delivery_channel": _delivery_channel(args.deliver, configured_channel=args.channel),
             "recurring_delivery_target_class": _delivery_target_class(args.deliver),
             "cron_job_name": args.job_name,

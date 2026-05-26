@@ -4,15 +4,56 @@ Status: RH-35.1 OwnerActionProcessor, RH-34a metadata-only channel resolver
 and digest preview, RH-34b Memory-OS export eligibility gate, RH-34c review
 queue aging policy, RH-34d one-shot Hermes send compatibility smoke, RH-34e.1
 Review Digest Renderer, RH-35.2 Owner Reply Parser, RH-34e Hermes Cron Owner
-Review Integration, and RH-35.3 provider-level owner reply ingress are deployed
-on `10.20.3.200`. RH-34e is Hermes-owned recurring delivery, not a
-Memory-OS-owned transport. The test-host installer now enables the Hermes cron
-owner-review digest by default; Memory-OS only renders bounded review text,
-display anchors, stable action tokens, and parser/processor state transitions.
+Review Integration, RH-35.8 agent-mediated owner reply tool, and RH-35.9
+structured owner-review tool contract are deployed on `10.20.3.200`. RH-34e is
+Hermes-owned recurring delivery, not a Memory-OS-owned transport. The test-host
+installer now enables the Hermes cron owner-review digest by default in agent
+mode; Memory-OS only renders a bounded review brief, display anchors, stable
+action tokens, and parser/processor state transitions. Hermes owns the final
+Chinese wording and interactive owner conversation.
 Date: 2026-05-25
 Scope: RH-34 Daily Owner Review Digest, RH-35 Owner Action Processor, and the
 owner-facing governance loop needed to make Memory-OS usable without daily SSH
 operations.
+
+## Current Architecture Truth
+
+This section is the current owner-review design authority. Later sections
+preserve historical findings and superseded slices.
+
+Current flow:
+
+```text
+Memory-OS modules produce candidates / proposals / speak-permission items
+-> Owner review queue + aging projection
+-> Review Digest Renderer creates owner-readable bounded digest text
+-> Hermes cron delivers the digest through the owner/home channel
+-> Hermes agent handles the owner's interactive reply
+   - resolves natural phrasing from visible digest context when unambiguous
+   - asks a clarification when the target or action is ambiguous
+   - calls memory_os_review_reply with structured action + stable oa_ token
+-> Memory-OS OwnerActionProcessor applies the deterministic state transition
+-> audit / monitor / feedback surfaces record the result
+```
+
+Boundary:
+
+- Hermes owns user-facing interaction, clarification, acknowledgement, platform
+  delivery, retry/cooldown, and channel semantics.
+- Memory-OS owns bounded digest content, stable action tokens, review tools,
+  OwnerActionProcessor state changes, audit, monitor, and no-send/no-execute
+  boundaries.
+- Display anchors (`A1/R1/F1`) are UI labels. Hermes may use them as
+  context clues; Memory-OS tools/state machines execute only stable `oa_`
+  action tokens.
+- Gateway pre-dispatch or provider lifecycle hooks are safety nets only. They
+  may prevent memory pollution, but they must not be the primary owner-action
+  path or surface user-visible `gateway_ingress_error` for valid review tasks.
+- `memory_os_review_reply` is structured-first in RH-35.9:
+  `action + action_token + optional rating + optional owner_utterance` is the
+  only model-facing agent tool contract. The provider still accepts hidden
+  `reply` fallback inputs for CLI/legacy compatibility, but `reply` is not
+  exposed in the model-facing schema.
 
 ## Problem
 
@@ -203,9 +244,10 @@ inside Memory-OS until three missing pieces are completed:
 1. RH-34e.1 Review Digest Renderer - turn artifacts into owner-readable
    questions, suggested actions, reasons, consequences, display anchors, and
    stable action tokens.
-2. RH-35.2/RH-35.5 Owner Reply Parser - map explicit token commands such as
+2. RH-35.2/RH-35.5/RH-35.8 Owner Reply Parser and provider tool - map explicit token commands such as
    `memory approve oa_<token>` or `memory reject oa_<token>` to
-   OwnerActionProcessor without frontend mutation.
+   OwnerActionProcessor through the Hermes agent tool path, without frontend
+   mutation or gateway hard interception.
 3. RH-34e Hermes Cron Owner Review Integration - let Hermes schedule and
    deliver the bounded digest through the owner-configured channel.
 
@@ -413,7 +455,9 @@ Interaction v0:
 - anchors are display-only; they are not approval identity;
 - every executable item also gets stable action tokens, for example
   `memory approve oa_<token>` and `memory reject oa_<token>`;
-- provider live ingress only intercepts these explicit token commands;
+- Hermes agent should resolve interactive owner replies to a structured
+  `action + action_token` tool call; provider text parsing is compatibility
+  fallback and pollution guard, not the primary interaction path;
 - if a reply cannot be resolved against a recorded digest action token or a
   reviewed stable target id, the processor must ask for clarification and must
   not guess;
@@ -893,24 +937,29 @@ Correct integration shape:
 Hermes cron job:
   schedule: owner-selected daily window
   deliver: Hermes owner/home channel
-  command:
-    python3 $HERMES_HOME/scripts/memory_os_owner_review_digest.py
+  mode: agent mode, not --no-agent
+  script:
+    memory_os_owner_review_digest.py
+  prompt:
+    read Script Output, write the owner-facing digest in Chinese, preserve
+    stable oa_ action tokens, do not approve or execute automatically
 
 Memory-OS:
   helper calls review preview-digest and render-digest
-  returns bounded text and machine-readable anchors on stdout
+  returns a bounded review brief and machine-readable anchors on stdout
   returns empty stdout for no meaningful content
   does not call send_message_tool in the recurring path
 ```
 
-The integration must use Hermes cron `--script --no-agent --deliver`. This is
-the portable seam on the `10.20.3.200` test host; that host does not expose a
-standalone `hermes send` command, while `hermes cron create --script --no-agent
---deliver` is available. Memory-OS therefore installs a helper script and a
-  status command and a recurring enable gate. The interactive installer asks
-  before enabling the job. The test-host preset enables it by default because
-  `10.20.3.200` is the controlled integration host; `--no-enable-owner-review-cron`
-  is the explicit opt-out.
+The integration must use Hermes cron `--script --deliver` in agent mode. This
+matches the 10.20.2.88 pattern where scripts produce evidence and Hermes
+agent applies prompt/skill judgment before speaking to the owner. `--no-agent`
+is only appropriate for watchdog-style direct alerts, not owner-review
+governance. Memory-OS therefore installs a helper script, a status command, and
+a recurring enable gate. The interactive installer asks before enabling the
+job. The test-host preset enables it by default because `10.20.3.200` is the
+controlled integration host; `--no-enable-owner-review-cron` is the explicit
+opt-out.
 
 Delivery rules:
 
@@ -969,7 +1018,9 @@ Implementation checkpoint (2026-05-25 local + test host):
 - The helper does not send messages. It calls
   `hermes memory-os-agent-os review preview-digest` and then
   `review render-digest --format text --bounded --record-active`, writing only
-  the bounded digest text to stdout for Hermes cron delivery.
+  the bounded review brief to stdout for Hermes cron. Hermes injects that
+  stdout into the agent prompt and the agent writes the final owner-facing
+  Chinese digest.
 - If there is no action-required, review-suggested, or FYI content, the helper
   exits successfully with empty stdout so Hermes has nothing meaningful to
   deliver.
@@ -990,12 +1041,12 @@ Recurring enable gate rules:
   class;
 - `--apply` is rejected unless `--owner-approved` is also present;
 - `deliver=local` is rejected because it is not an owner-channel delivery;
-- the gate checks Hermes cron support for `--script`, `--no-agent`, and
-  `--deliver`;
+- the gate checks Hermes cron support for `--script` and `--deliver`;
 - the gate checks bounded renderer output before apply and blocks raw-body or
   internal-schema-primary text;
-- apply creates the Hermes cron job and updates Memory-OS recurring config,
-  but Memory-OS still does not call platform transport directly.
+- apply creates or updates the Hermes cron job in agent mode and updates
+  Memory-OS recurring config, but Memory-OS still does not call platform
+  transport directly.
 
 Remote evidence on `10.20.3.200`:
 
@@ -1033,7 +1084,8 @@ Hermes cron:
   job=2af755464ca8 [active]
   deliver=telegram
   script=memory_os_owner_review_digest.py
-  mode=no-agent
+  mode=no-agent (superseded by RH-34g/RH-35.9 follow-up; recurring owner
+  review now uses Hermes agent mode)
   last_run=2026-05-25T09:37:08.950764-04:00 ok
   output=/root/.hermes/cron/output/2af755464ca8/2026-05-25_09-37-04.md
   output_chars=2367
@@ -1063,7 +1115,7 @@ recurring enable gate dry-run:
   apply_requested=false
   helper_script_present=true
   hermes_cron_create_available=true
-  hermes_cron_supports_script_no_agent_deliver=true
+  hermes_cron_supports_agent_script_deliver=true
   existing_job_present=false
   deliver_target_class=platform_home
   render_check.ok=true
@@ -1250,7 +1302,7 @@ RH-35.5 below):
   `--digest-id` binds to `latest_recorded_digest`; both remained dry-run and
   created no owner action.
 
-### RH-35.3 - Provider Owner Reply Ingress
+### RH-35.3 - Provider Owner Reply Ingress (Superseded As Primary Path)
 
 Live finding on 2026-05-25:
 
@@ -1291,7 +1343,7 @@ Rules:
 - if the recorded digest or action token is missing, Memory-OS returns a
   clarification instruction instead of guessing.
 
-Implementation checkpoint:
+Implementation checkpoint (superseded by RH-35.8 as the primary live path):
 
 - `MemoryOSProvider.on_turn_start()` now performs the owner-reply ingress
   check before provider prefetch.
@@ -1299,9 +1351,93 @@ Implementation checkpoint:
   ingress safety while preserving CLI preview behavior.
 - The provider returns a short owner-review prefetch/system-prompt block so the
   assistant confirms the action instead of continuing ordinary conversation.
+- A successfully processed token command is a control-plane message. `sync_turn`
+  must skip ordinary conversation capture for that turn, so heartbeat cannot
+  promote the command text into working memory or a new candidate.
 - This display-anchor ingress model is superseded by RH-35.5. Current live
   ingress requires stable token commands and treats plain `reject R1` style
   text as ordinary conversation.
+
+Architecture correction on 2026-05-26:
+
+Hermes is an agent, not just a gateway transport. A valid owner command such as
+`memory approve oa_<token>` should be interpreted by the Hermes agent as a
+Memory-OS approval task, then completed by calling a Memory-OS provider tool.
+The gateway and provider lifecycle hooks are not the normal state-mutation
+surface.
+
+New rule:
+
+```text
+owner command in chat
+-> Hermes agent
+-> memory_os_review_reply provider tool
+-> parse_owner_review_reply(..., apply=true, require_recorded_digest=true)
+-> OwnerActionProcessor
+-> bounded assistant confirmation from the tool result
+```
+
+The provider may still guard against ordinary-memory pollution: if a token
+command reaches `sync_turn` without a successful tool result, Memory-OS skips
+conversation capture and records `owner_review_reply_tool_not_called`. It does
+not silently approve the action through lifecycle hooks.
+
+Gateway pre-dispatch owner-review interception is explicitly not the primary
+path. It must not skip normal agent dispatch, and any user-visible
+`gateway_ingress_error` for a valid review command is a P1 ingress regression.
+
+### RH-35.8 - Agent-Mediated Owner Reply Tool
+
+Purpose:
+
+Expose owner review application as a model-facing Memory-OS provider tool so
+Hermes can complete approval tasks through its normal agent loop.
+
+Tool:
+
+```text
+memory_os_review_reply({
+  "action": "approve" | "reject" | "allow" | "feedback",
+  "action_token": "oa_<token>",
+  "rating": "useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall",  # feedback only
+  "owner_utterance": "<latest owner message, optional audit/debug context>"
+})
+
+Compatibility fallback:
+memory_os_review_reply({ "reply": "memory approve oa_<token>" })
+memory_os_review_reply({ "reply": "approve oa_<token>" })
+```
+
+Rules:
+
+- Hermes is the interactive agent. It interprets owner intent, asks a short
+  clarification when the target is ambiguous, and calls this tool only after it
+  has a definite `action` and stable `oa_` token;
+- the digest should print stable token commands such as
+  `memory <verb> oa_<token>` for copy/paste safety; those token commands are
+  the primary owner-facing apply input;
+- display anchors such as `A1/R1/F1` are visual labels only. If the owner uses
+  one anyway, Hermes may clarify or resolve from visible context, but the
+  Memory-OS tool/state-machine layer still receives only the stable token;
+- reject ordinary chat, messages that merely mention a token, display anchors
+  with no unambiguous current digest mapping, or broad approval language without
+  a resolvable `oa_` token;
+- require a recorded digest binding and never render a fresh digest to apply a
+  live action;
+- call only `parse_owner_review_reply()` and OwnerActionProcessor;
+- never send, execute work, write identity, or approve crystallized memory
+  without the matching owner action token;
+- processed token commands are control-plane messages and must not become
+  conversation events, working-memory items, or candidates.
+
+Monitor evidence:
+
+- `owner_review_ingress_guard.review_reply_tool_available=true`;
+- `owner_review_ingress_guard.review_reply_tool_status=ok`;
+- `owner_review_ingress_guard.gateway_hook_registered=false`;
+- token commands accepted by the detector, legacy anchors rejected, and
+  ordinary token mentions rejected;
+- owner command event/working/candidate counts remain zero.
 
 Follow-up live finding on 2026-05-25:
 
@@ -1333,6 +1469,213 @@ Rule:
 
 - A reply action token must bind to the digest as delivered to the owner
   channel, not to the latest CLI/operator preview.
+
+### RH-35.9 - Interactive Agent Task Semantics
+
+Finding:
+
+The first RH-35.8 correction still leaned too heavily on exact text commands.
+That was a seam mistake. Hermes is an agent, not a passive command router.
+Owner review should behave like an interactive task:
+
+```text
+owner says: "memory approve oa_<token>" or "批准 oa_<token>"
+-> Hermes agent understands the task from the tokenized visible digest
+-> if ambiguous, Hermes asks a clarification
+-> if definite, Hermes calls memory_os_review_reply(action, action_token, ...)
+-> Memory-OS applies the deterministic OwnerActionProcessor state transition
+-> Hermes reports the bounded result back to the owner
+```
+
+Boundary:
+
+- Hermes owns natural-language interpretation, clarification, and user-facing
+  task execution.
+- Memory-OS owns durable state: digest bindings, action tokens, parser
+  compatibility, OwnerActionProcessor, audit, and monitor evidence.
+- Gateway hooks are safety-only and must not be the primary execution path.
+- Provider lifecycle hooks may prevent memory pollution but must not mutate live
+  owner state without a tool call or CLI/API command.
+
+Implementation:
+
+1. Change `memory_os_review_reply` from a text-first tool to a structured
+   action tool with `action`, `action_token`, optional `rating`, and optional
+   `owner_utterance`.
+2. Keep hidden `reply` handling inside `handle_tool_call()` as a compatibility
+   fallback for non-model callers, but do not expose it in the model-facing
+   tool schema.
+3. Update the provider system prompt block so Hermes knows when to call the
+   tool and when to ask a clarification.
+4. Keep display anchors (`A1/R1/F1`) as UI labels only. The owner-facing digest
+   prints stable token commands, and the tool receives only stable `oa_` tokens.
+5. Keep `sync_turn` pollution guard for token-like control-plane replies that
+   were not successfully processed; this is a safety net, not the main action
+   path.
+6. Add monitor evidence for structured tool availability and a live owner smoke
+   where a tokenized owner phrase resolves through the agent to a structured
+   tool call.
+
+Implementation checkpoint:
+
+- Local code implements the structured provider tool schema and compatibility
+  fallback.
+- The model-facing schema exposes only `action`, `action_token`, `rating`, and
+  `owner_utterance`; `reply` remains accepted by `handle_tool_call()` as a
+  non-model compatibility path.
+- The monitor owner-review ingress probe uses structured tool arguments and
+  records `review_reply_tool_input_mode=structured`.
+- Targeted local verification on 2026-05-26:
+  `python -m pytest tests/plugins/memory/test_memory_os_lifecycle.py
+  tests/plugins/memory/test_memory_os_owner_actions.py
+  tests/system_modularization/test_memory_os_agent_os_shell.py
+  tests/scripts/test_memory_os_3_200_monitor.py -q` -> `99 passed`.
+- Full local verification on 2026-05-26: `python -m pytest -q` -> `514
+  passed`.
+- Test-host deployment on 2026-05-26 refreshed the provider runtime and
+  restarted `hermes-gateway.service`.
+- Remote provider schema smoke on `10.20.3.200` reported
+  `properties=["action","action_token","owner_utterance","rating"]`,
+  `required=["action","action_token"]`, `has_reply=false`, and
+  `description_has_fallback=false`.
+- Remote monitor reported `owner_review_ingress_guard.review_reply_tool_input_mode=structured`,
+  `review_reply_tool_status=ok`, `gateway_hook_registered=false`, and
+  owner-command event/working/candidate counts all `0`.
+- A real Hermes cron digest was triggered with
+  `hermes cron run 2af755464ca8` followed by `hermes cron tick`; the job last
+  run was `ok`. The remaining smoke is the owner replying with a tokenized
+  phrase such as `memory approve oa_<token>` or `批准 oa_<token>` and Hermes
+  agent resolving it to the structured tool call.
+- The owner then replied with the exact token command
+  `memory approve oa_e9a4e734a07de7`. Hermes agent called
+  `memory_os_review_reply` successfully and Memory-OS applied
+  `approve_proposal` with no memory pollution and no boundary violation. The
+  session log shows this real call still used the compatibility `reply`
+  fallback, so it does not close the structured live-agent gate.
+
+Acceptance:
+
+- `approve oa_<token>` and `memory approve oa_<token>` still work.
+- Display anchors such as `A1/R1/F1` are not the recommended owner apply
+  input. If the owner sends an anchor-only phrase, Hermes must not pass the
+  anchor as identity; it should clarify unless it can resolve the current
+  visible digest to one stable `oa_` token.
+- ordinary chat that mentions a display anchor or an `oa_` token does not mutate
+  state and does not become memory pollution.
+- no gateway-level `gateway_ingress_error` is visible to the owner for valid
+  review tasks.
+- all state mutation still goes through OwnerActionProcessor.
+
+### RH-34g/RH-35.9 Follow-Up - Chinese Agent-Mediated Digest
+
+The recurring owner review digest is owner-facing, so it must not be a raw
+script/watchdog notification. The correct recurring job is Hermes agent mode:
+
+```text
+Hermes cron --script memory_os_owner_review_digest.py --deliver <owner-target>
+  prompt: read Script Output, write Chinese owner digest, preserve oa_ tokens,
+          ask/clarify interactively later, never auto-approve or execute
+```
+
+Memory-OS helper output is a bounded review brief, not the final user copy.
+The renderer still includes a Chinese fallback header so direct smoke output is
+understandable:
+
+```text
+回复方式：
+- 直接复制完整命令，例如：memory approve oa_...
+- 也可以只回复 oa_...，Hermes 会继续问你要 approve/reject/allow/feedback。
+- A1/R1/F1 只是列表编号，不是审批 ID。
+```
+
+The owner-facing digest is page one of a review surface, not a lossy dump.
+Length limits exist to prevent Telegram/owner-channel flooding and owner
+burden, but they must be expressed as pagination rather than truncation:
+
+- show full-picture counts before item details;
+- show `shown` and `omitted` counts by priority class;
+- never cut a displayed item mid-sentence;
+- each displayed action item must say what it is, what the owner is deciding,
+  and what approve/reject/allow changes;
+- omitted items are explicitly deferred to later digest pages or an
+  owner-requested expansion path, not silently hidden.
+
+Hermes agent-mode delivery must not collapse the digest into command-only
+lists. Stable `memory approve oa_...` / `memory reject oa_...` commands are
+required, but they are the action handles attached to an owner-readable item,
+not the whole item.
+
+Monitor treats this as a contract:
+
+- `owner_review_rendered_digest.response_header_present=true` is required;
+- `owner_review_rendered_digest.overview_present=true` is required;
+- missing response header is a FAIL;
+- missing full-picture overview is a FAIL;
+- recurring owner review jobs created by the gate must be agent mode, and
+  existing no-agent owner-review jobs are updated by the gate.
+
+### RH-34h - Agent Review Surface Pagination And Detail
+
+Owner review is conversational. Hermes agent owns the human interaction:
+
+- "还有哪些";
+- "下一页";
+- "展开 R3";
+- "这个 proposal 是什么";
+- "这条允许后会发生什么".
+
+Memory-OS must not become the conversational agent. It provides a bounded,
+read-only review surface that Hermes can call while continuing the
+conversation in the owner's language.
+
+Contract:
+
+```text
+owner asks for more/detail
+-> Hermes agent interprets intent
+-> Memory-OS review surface tool returns bounded page/detail data
+-> Hermes agent explains in owner language
+-> no state changes unless owner later gives a stable oa_ action token
+```
+
+Rules:
+
+- `next_page`, `page`, and `detail` are read-only;
+- no send, execute, identity write, or crystallized approval;
+- no raw private bodies;
+- display anchors (`A1/R1/F1`) may be used only as references to the latest
+  recorded digest context;
+- stable `oa_` tokens remain the only action identity;
+- omitted items are paginated, not lost;
+- Hermes asks clarifying questions if the requested anchor/detail is not in
+  the latest owner-home digest.
+
+Acceptance:
+
+- `memory_os_review_surface(operation=next_page)` returns omitted review items
+  from the latest owner-home digest offsets without mutating state;
+- `memory_os_review_surface(operation=detail, anchor=R3)` returns a bounded
+  explanation payload for that displayed item when present, or
+  `needs_clarification` when not present;
+- monitor observes the review surface through summary-only fields:
+  operation status, item count, source, boundary count, and raw-body count;
+  Hermes owns final wording and user clarification.
+
+Implementation checkpoint:
+
+- provider tool `memory_os_review_surface` is exposed alongside
+  `memory_os_review_reply`;
+- shell alias supports `review surface --operation ...`;
+- monitor records `owner_review_surface.status`,
+  `raw_body_included_count`, `boundary_true_count`, and operation summaries;
+- no monitor snapshot stores expanded item text.
+
+Stop signals:
+
+- a pagination/detail request applies an owner action;
+- Memory-OS sends a message directly;
+- detail output includes raw transcript/private body;
+- anchor-only text becomes state identity without resolving to a stable token.
 
 ### RH-35.4 - Delivered Digest Binding v2
 
@@ -1397,25 +1740,26 @@ Root cause:
 - The 10.20.2.88 Sannai prototype already solved this class of problem by
   requiring stable candidate ids or proposal hashes for state-changing apply.
 
-Corrected model:
+Stable identity model:
 
 ```text
 render digest item
 -> display anchor A1/R1/F1 for readability only
 -> action token oa_<hash(action_type,target_type,target_id)>
--> owner command such as "memory approve oa_<token>"
--> recorded digest token lookup
+-> owner asks Hermes to approve/reject/allow/feedback the item
+-> Hermes resolves the request to action + oa_<token>
+-> recorded digest token lookup inside Memory-OS
 -> OwnerActionProcessor
 ```
 
 Rules:
 
 - `A1/R1/F1` must never be the durable approval identity.
-- Live provider ingress only intercepts explicit prefixed commands:
-  `memory approve`, `memory reject`, `memory feedback`, `memory allow`, and
-  `/memory ...` equivalents.
-- `approve A1`, `reject R1`, or ordinary text containing anchors must fall
-  through as normal conversation or clarification, not mutate Memory-OS state.
+- The provider/tool layer executes only stable `oa_` action tokens.
+- Hermes should prefer the stable token commands printed in the digest. If an
+  owner sends anchor-only phrasing anyway, Hermes must clarify or resolve it to
+  exactly one current visible stable token before calling Memory-OS.
+- ordinary text containing anchors must not mutate Memory-OS state.
 - CLI/operator workflows may still inspect anchors in bounded JSON, but live
   owner actions use stable action tokens.
 - Tokens are bounded, non-secret references; they do not expose raw body.
@@ -1426,8 +1770,9 @@ Implementation checkpoint:
   item and shows stable commands in the owner-facing text.
 - Parser can resolve action tokens from recorded digests and maps them to the
   target id/action type before calling `OwnerActionProcessor`.
-- Provider ingress only recognizes the prefixed token command shape, reducing
-  false positives in ordinary chat.
+- Provider fallback parsing recognizes token command shapes only, reducing
+  false positives in ordinary chat. The primary product path after RH-35.9 is
+  structured agent tool execution, not lifecycle interception.
 - Monitor owner-reply dry-run now derives a real action command from the
   rendered digest before testing parser health.
 
@@ -1493,6 +1838,59 @@ Implementation checkpoint (RH-35.6):
 - Monitor exposes `OwnerProposalFollowups` and WARNs when approved proposals
   are pending follow-up, so approved items cannot silently disappear after the
   owner says yes.
+
+Implementation checkpoint (RH-35.7):
+
+- `review proposal-followups --proposal-id <proposal_id> --ops-gate` returns
+  `memory-os.approved_proposal_ops_gate.v0` and previews the exact bounded
+  OpsGate proposed action for an already `approved_for_proposal` item.
+- `review proposal-followups --proposal-id <proposal_id> --ops-gate --apply`
+  writes an OpsGate report-only record for that approved proposal. It is an
+  explicit owner/operator apply path into the execution gate, not execution.
+- The shell alias exposes the same path:
+
+```bash
+hermes memory-os-agent-os review proposal-followups --proposal-id <proposal_id> --ops-gate
+hermes memory-os-agent-os review proposal-followups --proposal-id <proposal_id> --ops-gate --apply
+```
+
+- The shell alias must preserve provider CLI exit semantics. A bounded JSON
+  error such as `proposal_not_found` must exit non-zero through
+  `hermes memory-os-agent-os ...`; the Hermes plugin handler therefore exits
+  explicitly instead of relying on Hermes core to inspect returned integers.
+- The applied result must keep `execution_ticket_created=false`,
+  `actual_execute=false`, and `raw_body_included=false`.
+- Follow-up projection then moves the item from `awaiting_ops_gate_review` to
+  `ops_gate_reviewed_awaiting_explicit_execution`. That state means "reviewed
+  by OpsGate report-only"; it still does not authorize any tool execution.
+- Repeating `--ops-gate --apply` for the same already reviewed proposal must be
+  idempotent: return duplicate/already-reviewed evidence and do not append a
+  second OpsGate report for the same `proposal_followup:<proposal_id>` action.
+
+Implementation checkpoint (RH-35.10):
+
+Hermes agent may help the owner inspect approved proposals and, after explicit
+owner/operator intent, route one proposal into OpsGate report-only review.
+This is still not execution.
+
+```text
+owner asks what to do with an approved proposal
+-> Hermes agent calls read-only proposal follow-up surface
+-> Hermes explains next step and asks whether to route to OpsGate
+-> owner explicitly asks to route that proposal
+-> Memory-OS writes one OpsGate report-only record
+-> proposal follow-up state becomes ops_gate_reviewed_awaiting_explicit_execution
+-> actual execution remains unavailable until a future explicit execution RH
+```
+
+Rules:
+
+- read-only inspection can be agent-mediated;
+- report-only OpsGate routing requires explicit owner/operator intent;
+- OpsGate routing keeps `actual_execute=false`;
+- OpsGate routing keeps `execution_ticket_created=false`;
+- future real execution must be a separate RH with a separate execution
+  contract, rollback path, monitor fields, and external review.
 
 Idempotency:
 

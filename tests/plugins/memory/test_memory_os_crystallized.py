@@ -11,6 +11,8 @@ from plugins.memory.memory_os.crystallized import (
     CrystallizedApprovalError,
     CrystallizedCandidate,
     CrystallizedMemoryService,
+    append_candidate_queue,
+    read_candidate_queue,
 )
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -52,6 +54,23 @@ def test_unapproved_candidate_cannot_write_crystallized_record(tmp_path):
         service.write_approved_record(candidate, decision, file_name="moments.md")
 
     assert list(service.store.roots.crystallized_root.glob("*.md")) == []
+
+
+def test_candidate_queue_round_trips_default_none_tags(tmp_path):
+    service = _service(tmp_path)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-tags-none-001",
+        kind="moment",
+        body="Candidate without explicit tags.",
+        source_event_ids=["evt-tags-none-001"],
+    )
+
+    append_candidate_queue(service.store, candidate)
+
+    records = read_candidate_queue(service.store)
+    assert len(records) == 1
+    assert records[0].candidate_id == "cand-tags-none-001"
+    assert records[0].tags == []
 
 
 def test_approved_record_frontmatter_contains_approval_metadata_and_source_events(tmp_path):

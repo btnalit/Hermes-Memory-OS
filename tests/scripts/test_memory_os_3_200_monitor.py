@@ -323,7 +323,10 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_delivery_gate_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_digest_preview_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_rendered_digest_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_rendered_digest_response_header_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_rendered_digest_overview_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_surface_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
     assert any(item["code"] == "owner_review_proposal_followups_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_cron_integration_status_ok" for item in classification["pass"])
@@ -333,6 +336,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert "OwnerDeliveryGate" in rendered
     assert "OwnerDeliveryStatus" in rendered
     assert "OwnerDigestPreview" in rendered
+    assert "OwnerReviewSurface" in rendered
 
     snapshot["owner_review_digest_preview"]["will_send"] = True
     classification = classify_snapshot(snapshot)
@@ -371,6 +375,20 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_rendered_digest_too_long" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["owner_review_rendered_digest"]["response_header_present"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_rendered_digest_missing_response_header" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_rendered_digest"]["overview_present"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_rendered_digest_missing_overview" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_reply_dry_run"]["dry_run"] = False
     classification = classify_snapshot(snapshot)
 
@@ -383,6 +401,20 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     classification = classify_snapshot(snapshot)
 
     assert not any(item["code"] == "owner_review_reply_owner_action_not_dry_run" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_surface"]["raw_body_included_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_surface_raw_body_included" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_surface"]["boundary_true_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_surface_boundary_true" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_ingress_guard"]["legacy_anchor_accepted"] = True
@@ -399,6 +431,24 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_token_command_not_accepted" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"]["owner_command_event_count"] = 1
+    snapshot["owner_review_ingress_guard"]["owner_command_working_count"] = 1
+    snapshot["owner_review_ingress_guard"]["owner_command_candidate_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_command_captured_as_event" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_command_promoted_to_working" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_command_promoted_to_candidate" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"]["review_reply_tool_input_mode"] = "reply_fallback"
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_agent_tool_not_structured" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_proposal_followups"]["boundary"]["actual_execute"] = True
     classification = classify_snapshot(snapshot)
 
@@ -406,11 +456,33 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_proposal_followups_actual_execute_true" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["items"] = [{"actual_execute": True}]
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_proposal_followups_item_actual_execute_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["items"] = [{"execution_ticket_created": True}]
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_proposal_followups_item_execution_ticket_created" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_proposal_followups"]["pending_followup_count"] = 1
     classification = classify_snapshot(snapshot)
 
     assert classification["status"] == "WARN"
     assert any(item["code"] == "owner_review_approved_proposals_pending_followup" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["ops_gate"]["duplicate_proposal_followup_count"] = 1
+    snapshot["module_artifacts"]["ops_gate"]["duplicate_proposal_followup_extra_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "ops_gate_duplicate_proposal_followup_report" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_delivery_gate"]["boundary"]["actual_send"] = True
@@ -1049,6 +1121,7 @@ def _healthy_snapshot() -> dict:
             "review_digest_ok": True,
             "review_render_ok": True,
             "review_reply_ok": True,
+            "review_surface_ok": True,
         },
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
@@ -1069,6 +1142,7 @@ def _healthy_snapshot() -> dict:
         "owner_review_digest_preview": _healthy_owner_digest_preview(),
         "owner_review_rendered_digest": _healthy_owner_rendered_digest(),
         "owner_review_reply_dry_run": _healthy_owner_reply_dry_run(),
+        "owner_review_surface": _healthy_owner_review_surface(),
         "owner_review_ingress_guard": _healthy_owner_ingress_guard(),
         "owner_review_proposal_followups": _healthy_owner_proposal_followups(),
     }
@@ -1192,6 +1266,8 @@ def _healthy_owner_rendered_digest() -> dict:
         "text_char_count": 120,
         "text_has_internal_schema": False,
         "text_has_transcript_marker": False,
+        "response_header_present": True,
+        "overview_present": True,
         "section_counts": {"action_required": 0, "review_suggested": 0, "fyi": 1},
         "anchors": {"action_required": [], "review_suggested": [], "fyi": ["F1"]},
         "boundary": {
@@ -1223,6 +1299,20 @@ def _healthy_owner_reply_dry_run() -> dict:
     }
 
 
+def _healthy_owner_review_surface() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_surface_monitor.v0",
+        "status": "ok",
+        "operations": {
+            "next_page": {"status": "ok", "item_count": 1, "source": "latest_owner_home_digest"},
+            "detail": {"status": "ok", "item_count": 1, "source": "latest_recorded_digest"},
+            "proposal_followups": {"status": "ok", "item_count": 1, "source": ""},
+        },
+        "raw_body_included_count": 0,
+        "boundary_true_count": 0,
+    }
+
+
 def _healthy_owner_ingress_guard() -> dict:
     return {
         "schema_version": "memory-os.owner_review_ingress_guard.v0",
@@ -1230,8 +1320,19 @@ def _healthy_owner_ingress_guard() -> dict:
         "legacy_reject_anchor_accepted": False,
         "ordinary_anchor_text_accepted": False,
         "token_command_accepted": True,
+        "bare_token_command_accepted": True,
         "slash_token_command_accepted": True,
         "feedback_token_command_accepted": True,
+        "bare_feedback_token_command_accepted": True,
+        "gateway_hook_plugin_present": True,
+        "gateway_hook_registered": False,
+        "review_reply_tool_available": True,
+        "review_reply_tool_status": "ok",
+        "review_reply_tool_input_mode": "structured",
+        "owner_command_event_count": 0,
+        "owner_command_working_count": 0,
+        "owner_command_candidate_count": 0,
+        "owner_command_promoted_to_candidate": False,
     }
 
 
@@ -1242,6 +1343,8 @@ def _healthy_owner_proposal_followups() -> dict:
         "pending_followup_count": 0,
         "shown_count": 0,
         "overflow_count": 0,
+        "awaiting_ops_gate_count": 0,
+        "ops_gate_reviewed_count": 0,
         "execution_ticket_count": 0,
         "raw_body_included": False,
         "boundary": {
@@ -1316,7 +1419,13 @@ def _healthy_module_artifacts() -> dict:
         "self_evolution": {"report_count": 0, "proposal_count": 0, "last_status": "missing"},
         "governance_feedback": {"emitted_event_count": 0},
         "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},
-        "ops_gate": {"report_count": 0, "blocked_decision_count": 0},
+        "ops_gate": {
+            "report_count": 0,
+            "blocked_decision_count": 0,
+            "proposal_followup_action_count": 0,
+            "duplicate_proposal_followup_count": 0,
+            "duplicate_proposal_followup_extra_count": 0,
+        },
         "speak_gate": {"would_send_count": 0, "actual_send": False},
         "mailbox": {"mailbox_exists": False, "would_send_count": 0},
     }

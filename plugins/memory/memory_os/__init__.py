@@ -6,9 +6,11 @@ import hashlib
 import json
 import queue
 import re
+import sys
 import threading
 from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from agent.memory_provider import MemoryProvider
@@ -20,11 +22,15 @@ from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
 from .low_clue_recall import low_clue_judge_availability
-from .owner_actions import parse_owner_review_reply
+from .owner_actions import ALLOWED_FEEDBACK_RATINGS, owner_review_surface_report, parse_owner_review_reply
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
-from .status_tool_contract import MEMORY_OS_STATUS_TOOL_DESCRIPTION
+from .status_tool_contract import (
+    MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
+    MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION,
+    MEMORY_OS_STATUS_TOOL_DESCRIPTION,
+)
 from .store import MemoryOSStore
 
 
@@ -58,6 +64,7 @@ class MemoryOSProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         self.session_id = session_id
         self.hermes_home = str(kwargs.get("hermes_home") or "")
+        _ensure_system_module_runtime_path(self.hermes_home)
         self.platform = str(kwargs.get("platform") or "")
         self.profile = str(kwargs.get("agent_identity") or kwargs.get("profile") or "memoryos-test")
         self._config = memory_os_config.load_config(self.hermes_home)
@@ -94,12 +101,26 @@ class MemoryOSProvider(MemoryProvider):
         )
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        if not (
-            self._last_owner_review_reply_query == user_content
-            and self._last_owner_review_reply_result
-            and self._last_owner_review_reply_result.get("status") == "ok"
-        ):
-            self._process_owner_review_reply_ingress(user_content, turn_number=None, phase="sync_turn")
+        if self._owner_review_reply_processed(user_content):
+            self._audit(
+                "owner_review_reply_sync_turn_skipped",
+                "ok",
+                {
+                    "reason": "owner_review_control_plane_command",
+                    "status": self._last_owner_review_reply_result.get("status"),
+                },
+            )
+            return
+        if _looks_like_owner_review_reply(user_content):
+            self._audit(
+                "owner_review_reply_tool_not_called",
+                "warning",
+                {
+                    "reason": "owner_review_control_plane_command_not_processed_by_tool",
+                    "session_id": session_id or self.session_id,
+                },
+            )
+            return
         event = self._build_event(
             kind="conversation_turn",
             summary=_turn_summary(user_content, assistant_content),
@@ -112,10 +133,36 @@ class MemoryOSProvider(MemoryProvider):
         )
         self._enqueue(event, drop_action="sync_turn_dropped")
 
+    def _owner_review_reply_processed(self, message: str) -> bool:
+        return bool(
+            self._last_owner_review_reply_query == message
+            and self._last_owner_review_reply_result
+            and self._last_owner_review_reply_result.get("status") != "ignored"
+        )
+
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
         lines = ["# Memory-OS", "Active. Conversation capture is summary-only by default."]
+        lines.extend(
+            [
+                "",
+                "## Owner Review Command Rule",
+                (
+                    "If the latest owner message is a Memory-OS review task, resolve it to a definite action "
+                    "and stable `oa_<token>` from the visible digest context, then call `memory_os_review_reply` "
+                    "with structured `action`, `action_token`, and `owner_utterance`. If the target is ambiguous, "
+                    "ask a short clarification before calling the tool. Do not pass A1/R1 display anchors as "
+                    "state identity, do not treat review actions as ordinary chat, and do not claim approval "
+                    "without the tool result."
+                ),
+                (
+                    "If the owner asks for review detail, next page, or expansion, call `memory_os_review_surface` "
+                    "and explain the returned bounded data conversationally. The surface tool is read-only; use "
+                    "`memory_os_review_reply` only for explicit owner action tokens."
+                ),
+            ]
+        )
         if self._last_owner_review_reply_result:
             lines.extend(["", _owner_review_reply_system_instruction(self._last_owner_review_reply_result)])
         if self._current_task_anchor:
@@ -132,13 +179,125 @@ class MemoryOSProvider(MemoryProvider):
                     "properties": {},
                     "additionalProperties": False,
                 },
-            }
+            },
+            {
+                "name": "memory_os_review_reply",
+                "description": MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["approve", "reject", "allow", "feedback"],
+                            "description": "The owner review action resolved by Hermes agent.",
+                        },
+                        "action_token": {
+                            "type": "string",
+                            "description": "Stable Memory-OS owner action token printed in the digest, e.g. oa_12345678.",
+                        },
+                        "rating": {
+                            "type": "string",
+                            "enum": sorted(ALLOWED_FEEDBACK_RATINGS),
+                            "description": "Required only when action is feedback.",
+                        },
+                        "owner_utterance": {
+                            "type": "string",
+                            "description": "Optional latest owner message for control-plane sync skip/audit context.",
+                        },
+                    },
+                    "required": ["action", "action_token"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "memory_os_review_surface",
+                "description": MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["overview", "page", "next_page", "detail", "proposal_followups"],
+                            "description": "Read-only review surface operation requested by the owner.",
+                        },
+                        "section": {
+                            "type": "string",
+                            "enum": ["all", "action_required", "review_suggested", "fyi"],
+                            "description": "Optional section for page/next_page operations.",
+                        },
+                        "anchor": {
+                            "type": "string",
+                            "description": "Optional display anchor such as R3 for detail lookup against the latest visible digest.",
+                        },
+                        "action_token": {
+                            "type": "string",
+                            "description": "Optional stable oa_<token> for detail lookup.",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "Optional zero-based page offset. For next_page, Memory-OS derives offsets from the latest digest.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10,
+                            "description": "Maximum items per requested section.",
+                        },
+                        "owner_utterance": {
+                            "type": "string",
+                            "description": "Optional owner request text for audit/debug context. This read-only tool does not apply actions.",
+                        },
+                    },
+                    "required": ["operation"],
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
-        if tool_name != "memory_os_status":
-            return super().handle_tool_call(tool_name, args, **kwargs)
-        return json.dumps(self._tool_status_report(), ensure_ascii=False, sort_keys=True)
+        if tool_name == "memory_os_status":
+            return json.dumps(self._tool_status_report(), ensure_ascii=False, sort_keys=True)
+        if tool_name == "memory_os_review_reply":
+            reply, tool_input = _owner_review_reply_tool_input(args)
+            if not reply:
+                result = _owner_review_reply_not_processed(
+                    str(tool_input.get("reason") or "invalid_owner_review_tool_input"),
+                    status="needs_clarification",
+                )
+                result["tool_input"] = tool_input
+                owner_utterance = str(tool_input.get("owner_utterance") or "").strip()
+                if owner_utterance:
+                    self._last_owner_review_reply_result = result
+                    self._last_owner_review_reply_query = owner_utterance
+                return json.dumps(result, ensure_ascii=False, sort_keys=True)
+            result = self._process_owner_review_reply_ingress(reply, turn_number=None, phase="tool_call")
+            if result is None:
+                result = _owner_review_reply_not_processed("not_owner_review_token_command")
+            result["tool_input"] = tool_input
+            owner_utterance = str(tool_input.get("owner_utterance") or "").strip()
+            if owner_utterance and result.get("status") != "ignored":
+                self._last_owner_review_reply_query = owner_utterance
+            return json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if tool_name == "memory_os_review_surface":
+            if self._store is None:
+                return json.dumps({"status": "error", "reason": "store_unavailable"}, ensure_ascii=False, sort_keys=True)
+            owner_review = self._config.get("owner_review")
+            if not isinstance(owner_review, dict):
+                owner_review = {}
+            result = owner_review_surface_report(
+                self._store,
+                owner_id=str(owner_review.get("owner_id") or "owner"),
+                channel=str(self.platform or owner_review.get("recurring_delivery_channel") or "agent"),
+                operation=str(args.get("operation") or "overview"),
+                section=str(args.get("section") or "all"),
+                anchor=str(args.get("anchor") or ""),
+                action_token=str(args.get("action_token") or ""),
+                offset=int(args.get("offset") or 0),
+                limit=int(args.get("limit") or 5),
+            )
+            return json.dumps(result, ensure_ascii=False, sort_keys=True)
+        return super().handle_tool_call(tool_name, args, **kwargs)
 
     def get_config_schema(self) -> list[dict[str, Any]]:
         return memory_os_config.get_config_schema()
@@ -152,16 +311,21 @@ class MemoryOSProvider(MemoryProvider):
     def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
         self._last_owner_review_reply_result = None
         self._last_owner_review_reply_query = ""
-        self._process_owner_review_reply_ingress(message, turn_number=turn_number, phase="turn_start")
 
-    def _process_owner_review_reply_ingress(self, message: str, *, turn_number: int | None, phase: str) -> None:
+    def _process_owner_review_reply_ingress(
+        self,
+        message: str,
+        *,
+        turn_number: int | None,
+        phase: str,
+    ) -> dict[str, Any] | None:
         if self._store is None or not _looks_like_owner_review_reply(message):
-            return
+            return None
         owner_review = self._config.get("owner_review")
         if not isinstance(owner_review, dict):
             owner_review = {}
         if owner_review.get("reply_ingress_enabled", True) is False:
-            return
+            return _owner_review_reply_not_processed("reply_ingress_disabled")
         owner_id = str(owner_review.get("owner_id") or "owner")
         channels = _owner_review_reply_channels(str(self.platform or ""), owner_review)
         result: dict[str, Any] | None = None
@@ -186,7 +350,7 @@ class MemoryOSProvider(MemoryProvider):
             }:
                 break
         if result is None:
-            return
+            return None
         self._last_owner_review_reply_result = result
         self._last_owner_review_reply_query = message
         self._audit(
@@ -204,6 +368,7 @@ class MemoryOSProvider(MemoryProvider):
                 "action_type": (result.get("parsed") or {}).get("action_type", ""),
             },
         )
+        return result
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         self._current_task_anchor = _build_current_task_anchor(messages, session_id=self.session_id)
@@ -500,6 +665,101 @@ def register_memory_provider() -> MemoryProvider:
     return MemoryOSProvider()
 
 
+def _ensure_system_module_runtime_path(hermes_home: str | Path) -> None:
+    if not str(hermes_home or "").strip():
+        return
+    runtime_python = Path(hermes_home).expanduser().resolve() / "memory-os" / "runtime" / "python"
+    if runtime_python.exists() and str(runtime_python) not in sys.path:
+        sys.path.insert(0, str(runtime_python))
+    _extend_loaded_package_path("plugins", runtime_python / "plugins")
+    _extend_loaded_package_path("plugins.memory", runtime_python / "plugins" / "memory")
+
+
+def _extend_loaded_package_path(package_name: str, package_path: Path) -> None:
+    loaded_package = sys.modules.get(package_name)
+    if package_path.exists() and loaded_package is not None and hasattr(loaded_package, "__path__"):
+        package_paths = loaded_package.__path__  # type: ignore[attr-defined]
+        if str(package_path) not in package_paths:
+            package_paths.append(str(package_path))
+
+
+def _owner_review_reply_tool_input(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    reply = str(args.get("reply") or "").strip()
+    owner_utterance = str(args.get("owner_utterance") or "").strip()
+    if reply:
+        return reply, {
+            "mode": "reply_fallback",
+            "owner_utterance": owner_utterance,
+            "reason": "",
+        }
+
+    action = str(args.get("action") or "").strip().lower()
+    action_token = str(args.get("action_token") or "").strip().lower()
+    rating = str(args.get("rating") or "").strip()
+    if action not in {"approve", "reject", "allow", "feedback"}:
+        return "", {
+            "mode": "structured",
+            "action": action,
+            "action_token": action_token,
+            "owner_utterance": owner_utterance,
+            "reason": "missing_or_invalid_action",
+        }
+    if not re.fullmatch(r"oa_[0-9a-f]{8,32}", action_token):
+        return "", {
+            "mode": "structured",
+            "action": action,
+            "action_token": action_token,
+            "owner_utterance": owner_utterance,
+            "reason": "missing_or_invalid_action_token",
+        }
+    if action == "feedback":
+        if rating not in ALLOWED_FEEDBACK_RATINGS:
+            return "", {
+                "mode": "structured",
+                "action": action,
+                "action_token": action_token,
+                "rating": rating,
+                "owner_utterance": owner_utterance,
+                "reason": "missing_or_invalid_feedback_rating",
+            }
+        command = f"memory feedback {action_token} {rating}"
+    else:
+        if rating:
+            return "", {
+                "mode": "structured",
+                "action": action,
+                "action_token": action_token,
+                "rating": rating,
+                "owner_utterance": owner_utterance,
+                "reason": "rating_only_allowed_for_feedback",
+            }
+        command = f"memory {action} {action_token}"
+    return command, {
+        "mode": "structured",
+        "action": action,
+        "action_token": action_token,
+        "rating": rating,
+        "owner_utterance": owner_utterance,
+        "reason": "",
+    }
+
+
+def _owner_review_reply_not_processed(reason: str, *, status: str = "ignored") -> dict[str, Any]:
+    return {
+        "schema_version": "memory-os.owner_review_reply.v0",
+        "status": status,
+        "reason": reason,
+        "parsed": {},
+        "owner_action_result": {},
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+    }
+
+
 def _turn_summary(user_content: str, assistant_content: str) -> str:
     return f"User: {_clip(user_content, 180)} | Assistant: {_clip(assistant_content, 180)}"
 
@@ -683,10 +943,15 @@ def _looks_like_owner_review_reply(text: str) -> bool:
         return False
     if normalized.startswith("/memory "):
         normalized = "memory " + normalized[len("/memory ") :]
+    prefix = r"(?:(?:memory|mos)\s+)?"
     return bool(
-        re.fullmatch(r"(?i)(memory|mos)\s+(approve|reject|allow|批准|通过|拒绝|允许)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?", normalized)
+        re.fullmatch(
+            prefix + r"(?i:approve|reject|allow|批准|通过|拒绝|允许)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?",
+            normalized,
+        )
         or re.fullmatch(
-            r"(?i)(memory|mos)\s+(feedback|mark|反馈)\s+oa_[0-9a-f]{8,32}\s+(useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall)[：:,.，。!！?？]?",
+            prefix
+            + r"(?i:feedback|mark|反馈)\s+oa_[0-9a-f]{8,32}\s+(useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall)[：:,.，。!！?？]?",
             normalized,
         )
     )

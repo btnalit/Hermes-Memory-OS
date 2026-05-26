@@ -79,10 +79,12 @@ from .owner_actions import (
     owner_review_delivery_status_report,
     owner_review_digest_preview,
     owner_review_queue_report,
+    owner_review_surface_report,
     owner_review_status_report,
     parse_owner_review_reply,
     render_owner_review_digest,
     resolve_owner_review_channel,
+    route_approved_proposal_followup_to_ops_gate,
 )
 from .prefetch import continuity_selector_report
 from .prefetch import build_context_router_report
@@ -416,8 +418,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_deliver_once.add_argument("--apply", action="store_true")
     review_queue = review_subs.add_parser("queue")
     review_queue.add_argument("--limit", type=int, default=20)
+    review_surface = review_subs.add_parser("surface")
+    review_surface.add_argument("--operation", choices=["overview", "page", "next_page", "detail", "proposal_followups"], default="overview")
+    review_surface.add_argument("--section", choices=["all", "action_required", "review_suggested", "fyi"], default="all")
+    review_surface.add_argument("--anchor", default="")
+    review_surface.add_argument("--action-token", default="")
+    review_surface.add_argument("--offset", type=int, default=0)
+    review_surface.add_argument("--limit", type=int, default=5)
+    review_surface.add_argument("--owner", default="owner")
+    review_surface.add_argument("--channel", default="agent")
     review_followups = review_subs.add_parser("proposal-followups")
     review_followups.add_argument("--limit", type=int, default=20)
+    review_followups.add_argument("--proposal-id", default="")
+    review_followups.add_argument("--ops-gate", action="store_true")
+    review_followups.add_argument("--owner", default="owner")
+    review_followups.add_argument("--channel", default="cli")
+    review_followups.add_argument("--apply", action="store_true")
     review_preview = review_subs.add_parser("preview-digest")
     review_preview.add_argument("--owner", default="")
     review_preview.add_argument("--max-action-required", type=int)
@@ -909,7 +925,44 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
             )
         )
         return 0
+    if command == "surface":
+        print(
+            json.dumps(
+                owner_review_surface_report(
+                    store,
+                    owner_id=str(args.owner),
+                    channel=str(args.channel),
+                    operation=str(args.operation),
+                    section=str(args.section),
+                    anchor=str(args.anchor),
+                    action_token=str(args.action_token),
+                    offset=int(args.offset),
+                    limit=int(args.limit),
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     if command == "proposal-followups":
+        if bool(getattr(args, "ops_gate", False)):
+            report = route_approved_proposal_followup_to_ops_gate(
+                store,
+                proposal_id=str(args.proposal_id),
+                owner_id=str(args.owner),
+                channel=str(args.channel),
+                apply=bool(args.apply),
+            )
+            print(
+                json.dumps(
+                    report,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0 if report.get("status") in {"ok", "duplicate_ignored"} else 1
         print(
             json.dumps(
                 approved_proposal_followups_report(store, limit=max(int(args.limit), 0)),

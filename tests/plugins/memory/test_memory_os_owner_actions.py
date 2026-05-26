@@ -4,7 +4,7 @@ import json
 import sqlite3
 
 from plugins.memory.memory_os.config import save_config
-from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue, read_candidate_queue
 from plugins.memory.memory_os import MemoryOSProvider
 from plugins.memory.memory_os.memory_sources import append_memory_source_record, memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import (
@@ -22,11 +22,14 @@ from plugins.memory.memory_os.owner_actions import (
     owner_review_digest_preview,
     owner_review_queue_report,
     owner_review_status_report,
+    owner_review_surface_report,
     parse_owner_review_reply,
     render_owner_review_digest,
     resolve_owner_review_channel,
+    route_approved_proposal_followup_to_ops_gate,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
@@ -240,12 +243,82 @@ def test_approved_proposal_followups_project_state_without_execution_ticket(tmp_
     assert report["raw_body_included"] is False
     assert report["boundary"]["actual_execute"] is False
     assert report["items"][0]["proposal_id"] == candidate["candidate_id"]
-    assert report["items"][0]["followup_state"] == "awaiting_human_controlled_followup"
+    assert report["items"][0]["followup_state"] == "awaiting_ops_gate_review"
     assert report["items"][0]["execution_ticket_created"] is False
     assert "PRIVATE RAW BODY" not in json.dumps(report, ensure_ascii=False)
 
     status = owner_review_status_report(store)
     assert status["approved_proposal_followups"]["pending_followup_count"] == 1
+
+
+def test_approved_proposal_followup_routes_to_ops_gate_without_execution(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(store=store, title="Run a proposal", body="PRIVATE RAW BODY")
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    dry_run = route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        apply=False,
+    )
+
+    assert dry_run["schema_version"] == "memory-os.approved_proposal_ops_gate.v0"
+    assert dry_run["status"] == "ok"
+    assert dry_run["dry_run"] is True
+    assert dry_run["ops_gate_report_written"] is False
+    assert dry_run["execution_ticket_created"] is False
+    assert dry_run["boundary"]["actual_execute"] is False
+    assert not (tmp_path / "system-modules" / "ops_gate" / "reports.jsonl").exists()
+    assert "PRIVATE RAW BODY" not in json.dumps(dry_run, ensure_ascii=False)
+
+    applied = route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    reports = _jsonl(tmp_path / "system-modules" / "ops_gate" / "reports.jsonl")
+    assert applied["status"] == "ok"
+    assert applied["dry_run"] is False
+    assert applied["ops_gate_report_written"] is True
+    assert applied["execution_ticket_created"] is False
+    assert applied["boundary"]["actual_execute"] is False
+    assert reports[0]["actual_execute"] is False
+    assert reports[0]["decisions"][0]["action_id"] == f"proposal_followup:{candidate['candidate_id']}"
+    assert "PRIVATE RAW BODY" not in json.dumps(applied, ensure_ascii=False)
+
+    followups = approved_proposal_followups_report(store)
+    assert followups["ops_gate_reviewed_count"] == 1
+    assert followups["awaiting_ops_gate_count"] == 0
+    assert followups["execution_ticket_count"] == 0
+    assert followups["items"][0]["followup_state"] == "ops_gate_reviewed_awaiting_explicit_execution"
+
+    duplicate = route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    reports_after_duplicate = _jsonl(tmp_path / "system-modules" / "ops_gate" / "reports.jsonl")
+    assert duplicate["status"] == "duplicate_ignored"
+    assert duplicate["ops_gate_report_written"] is False
+    assert duplicate["execution_ticket_created"] is False
+    assert duplicate["boundary"]["actual_execute"] is False
+    assert len(reports_after_duplicate) == 1
 
 
 def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):
@@ -407,6 +480,14 @@ def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_p
     item = rendered["sections"]["action_required"][0]
 
     assert rendered["schema_version"] == "memory-os.owner_review_rendered_digest.v0"
+    assert text.startswith("Memory-OS 审批摘要")
+    assert "全貌" in text
+    assert "待处理" in text
+    assert "未展示" in text
+    assert "没展示的不是丢失" in text
+    assert "回复方式" in text
+    assert "A1/R1/F1 只是列表编号" in text
+    assert "Hermes 会继续问你要 approve/reject/allow/feedback" in text
     assert item["anchor"] == "A1"
     assert item["source_module"] in {"proposal_queue", "crystallized_candidates"}
     assert item["question"]
@@ -445,7 +526,7 @@ def test_render_digest_downgrades_transcript_like_candidate_to_cleanup_fyi(tmp_p
 
     assert fyi["target_type"] == "candidate_cleanup"
     assert fyi["available_actions"] == []
-    assert "needs consolidation" in text
+    assert "需要先整理" in text
     assert "User:" not in text
     assert "Assistant:" not in text
 
@@ -460,9 +541,91 @@ def test_render_digest_keeps_telegram_text_bounded_without_partial_item(tmp_path
     text = rendered["text"]
 
     assert len(text) <= 2400
+    assert "全貌" in text
+    assert "未展示" in text
+    assert "回复方式" in text
     assert not text.endswith("owner-")
     assert rendered["counts"]["action_required_shown"] <= 3
     assert "RAW PROPOSAL BODY" not in text
+
+
+def test_review_surface_next_page_uses_latest_owner_home_digest_offsets(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "owner_id": "owner",
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": "origin",
+                "recurring_delivery_target_class": "origin",
+            }
+        },
+        str(tmp_path),
+    )
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    for index in range(5):
+        proposal.create_candidate(store=store, title=f"Proposal {index}", body="RAW PROPOSAL BODY")
+    delivered = render_owner_review_digest(
+        store,
+        channel="origin",
+        max_action_required=2,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    report = owner_review_surface_report(store, operation="next_page", section="action_required", limit=2)
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert delivered["counts"]["action_required_shown"] == 2
+    assert report["schema_version"] == "memory-os.owner_review_surface.v0"
+    assert report["status"] == "ok"
+    assert report["operation"] == "next_page"
+    assert report["source"] == "latest_owner_home_digest"
+    assert report["offsets"]["action_required"] == 2
+    assert [item["anchor"] for item in report["sections"]["action_required"]] == ["A3", "A4"]
+    assert report["boundary"]["actual_execute"] is False
+    assert report["raw_body_included"] is False
+    assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_review_surface_detail_expands_latest_digest_anchor_without_applying_action(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "owner_id": "owner",
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": "origin",
+                "recurring_delivery_target_class": "origin",
+            }
+        },
+        str(tmp_path),
+    )
+    append_candidate_queue(store, _candidate())
+    render_owner_review_digest(
+        store,
+        channel="origin",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    report = owner_review_surface_report(store, operation="detail", anchor="R1", channel="telegram")
+    missing = owner_review_surface_report(store, operation="detail", anchor="R9", channel="telegram")
+
+    assert report["status"] == "ok"
+    assert report["binding"] == "latest_owner_home_digest"
+    assert report["item"]["anchor"] == "R1"
+    assert report["item"]["action_tokens"]["approve_candidate"].startswith("oa_")
+    assert "这条候选记忆" in report["text"]
+    assert report["boundary"]["actual_send"] is False
+    assert not owner_actions_path(store.roots).exists()
+    assert missing["status"] == "needs_clarification"
+    assert missing["reason"] == "digest_not_found_or_expired"
 
 
 def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp_path):
@@ -544,7 +707,7 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
     assert result["parsed"]["target_id"] == "cand_owner_001"
 
 
-def test_provider_owner_review_reply_ingress_processes_recorded_digest_before_prefetch(tmp_path):
+def test_provider_owner_review_reply_tool_processes_recorded_digest_before_prefetch(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
     rendered = render_owner_review_digest(
@@ -565,10 +728,11 @@ def test_provider_owner_review_reply_ingress_processes_recorded_digest_before_pr
         worker_autostart=False,
     )
     command = _review_command(rendered, "R1", "reject_candidate")
-    provider.on_turn_start(1, command)
+    tool_result = json.loads(provider.handle_tool_call("memory_os_review_reply", {"reply": command}))
     context = provider.prefetch(command, session_id="session-owner-review")
     prompt_block = provider.system_prompt_block()
 
+    assert tool_result["status"] == "ok"
     records = _jsonl(owner_actions_path(store.roots))
     assert len(records) == 1
     assert records[0]["action_type"] == "reject_candidate"
@@ -579,7 +743,7 @@ def test_provider_owner_review_reply_ingress_processes_recorded_digest_before_pr
     assert "Do not ask the owner to choose another review anchor" in prompt_block
 
 
-def test_provider_owner_review_reply_sync_fallback_is_idempotent(tmp_path):
+def test_provider_owner_review_reply_tool_accepts_structured_action_token(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
     rendered = render_owner_review_digest(
@@ -600,18 +764,183 @@ def test_provider_owner_review_reply_sync_fallback_is_idempotent(tmp_path):
         worker_autostart=False,
     )
     command = _review_command(rendered, "R1", "reject_candidate")
-    provider.on_turn_start(1, command)
+    token = command.split()[2]
+    tool_result = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_reply",
+            {
+                "action": "reject",
+                "action_token": token,
+                "owner_utterance": "reject R1",
+            },
+        )
+    )
+    provider.sync_turn("reject R1", "Rejected.", session_id="session-owner-review")
+
+    assert tool_result["status"] == "ok"
+    assert tool_result["tool_input"]["mode"] == "structured"
+    assert tool_result["tool_input"]["owner_utterance"] == "reject R1"
+    records = _jsonl(owner_actions_path(store.roots))
+    assert len(records) == 1
+    assert records[0]["action_type"] == "reject_candidate"
+    assert records[0]["target_id"] == "cand_owner_001"
+    assert store.read_events() == []
+    heartbeat = MemoryOSRuntime(store).heartbeat()
+    assert heartbeat["processed_event_count"] == 0
+    assert heartbeat["working_created_count"] == 0
+    assert heartbeat["candidate_created_count"] == 0
+
+
+def test_provider_owner_review_surface_tool_is_read_only_for_next_page(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "owner_id": "owner",
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": "origin",
+                "recurring_delivery_target_class": "origin",
+            }
+        },
+        str(tmp_path),
+    )
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    for index in range(4):
+        proposal.create_candidate(store=store, title=f"Proposal {index}", body="RAW PROPOSAL BODY")
+    render_owner_review_digest(
+        store,
+        channel="origin",
+        max_action_required=1,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_surface",
+            {"operation": "next_page", "section": "action_required", "limit": 2},
+        )
+    )
+
+    assert result["status"] == "ok"
+    assert result["operation"] == "next_page"
+    assert [item["anchor"] for item in result["sections"]["action_required"]] == ["A2", "A3"]
+    assert result["boundary"]["actual_execute"] is False
+    assert not owner_actions_path(store.roots).exists()
+    assert "RAW PROPOSAL BODY" not in json.dumps(result, ensure_ascii=False)
+
+
+def test_provider_owner_review_reply_tool_rejects_incomplete_structured_input(tmp_path):
+    store = _store(tmp_path)
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_reply",
+            {
+                "action": "approve",
+                "owner_utterance": "approve A1",
+            },
+        )
+    )
+    provider.sync_turn("approve A1", "Which item?", session_id="session-owner-review")
+
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "missing_or_invalid_action_token"
+    assert result["tool_input"]["mode"] == "structured"
+    assert not owner_actions_path(store.roots).exists()
+    assert store.read_events() == []
+
+
+def test_provider_owner_review_reply_tool_makes_sync_turn_idempotent(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate")
+    provider.handle_tool_call("memory_os_review_reply", {"reply": command})
     provider.sync_turn(command, "ack", session_id="session-owner-review")
 
     records = _jsonl(owner_actions_path(store.roots))
     assert len(records) == 1
     assert records[0]["action_type"] == "reject_candidate"
+    assert store.read_events() == []
+    heartbeat = MemoryOSRuntime(store).heartbeat()
+    assert heartbeat["processed_event_count"] == 0
+    assert heartbeat["working_created_count"] == 0
+    assert heartbeat["candidate_created_count"] == 0
+    assert [item.candidate_id for item in read_candidate_queue(store)] == ["cand_owner_001"]
     audit = _jsonl(store.roots.audit_path)
     ingress = [item for item in audit if item.get("action") == "owner_review_reply_ingress"]
-    assert {item["details"]["phase"] for item in ingress} == {"turn_start"}
+    assert {item["details"]["phase"] for item in ingress} == {"tool_call"}
 
 
-def test_provider_owner_review_reply_sync_fallback_processes_when_turn_start_missed(tmp_path):
+def test_provider_owner_review_reply_tool_skips_unprefixed_token_sync_capture(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+    command = _review_command(rendered, "R1", "reject_candidate").removeprefix("memory ")
+    tool_result = json.loads(provider.handle_tool_call("memory_os_review_reply", {"reply": command}))
+    provider.sync_turn(command, "Approved.", session_id="session-owner-review")
+
+    assert tool_result["status"] == "ok"
+    assert len(_jsonl(owner_actions_path(store.roots))) == 1
+    assert store.read_events() == []
+    heartbeat = MemoryOSRuntime(store).heartbeat()
+    assert heartbeat["processed_event_count"] == 0
+    assert heartbeat["working_created_count"] == 0
+    assert heartbeat["candidate_created_count"] == 0
+
+
+def test_provider_owner_review_reply_sync_turn_warns_and_skips_when_tool_was_not_called(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
     rendered = render_owner_review_digest(
@@ -634,15 +963,19 @@ def test_provider_owner_review_reply_sync_fallback_processes_when_turn_start_mis
     command = _review_command(rendered, "R1", "reject_candidate")
     provider.sync_turn(command, "ack", session_id="session-owner-review")
 
-    records = _jsonl(owner_actions_path(store.roots))
-    assert len(records) == 1
-    assert records[0]["action_type"] == "reject_candidate"
+    assert not owner_actions_path(store.roots).exists()
+    assert store.read_events() == []
+    heartbeat = MemoryOSRuntime(store).heartbeat()
+    assert heartbeat["processed_event_count"] == 0
+    assert heartbeat["working_created_count"] == 0
+    assert heartbeat["candidate_created_count"] == 0
+    assert [item.candidate_id for item in read_candidate_queue(store)] == ["cand_owner_001"]
     audit = _jsonl(store.roots.audit_path)
-    ingress = [item for item in audit if item.get("action") == "owner_review_reply_ingress"]
-    assert {item["details"]["phase"] for item in ingress} == {"sync_turn"}
+    warnings = [item for item in audit if item.get("action") == "owner_review_reply_tool_not_called"]
+    assert len(warnings) == 1
 
 
-def test_provider_owner_review_reply_ingress_falls_back_to_recurring_delivery_channel(tmp_path):
+def test_provider_owner_review_reply_tool_falls_back_to_recurring_delivery_channel(tmp_path):
     store = _store(tmp_path)
     save_config(
         {
@@ -679,7 +1012,7 @@ def test_provider_owner_review_reply_ingress_falls_back_to_recurring_delivery_ch
         agent_identity="main",
         worker_autostart=False,
     )
-    provider.on_turn_start(1, _review_command(rendered, "R1", "reject_candidate"))
+    provider.handle_tool_call("memory_os_review_reply", {"reply": _review_command(rendered, "R1", "reject_candidate")})
 
     records = _jsonl(owner_actions_path(store.roots))
     assert len(records) == 1
@@ -688,7 +1021,7 @@ def test_provider_owner_review_reply_ingress_falls_back_to_recurring_delivery_ch
     assert records[0]["channel"] == "cli"
 
 
-def test_provider_owner_review_reply_ingress_uses_owner_home_binding_not_platform_label(tmp_path):
+def test_provider_owner_review_reply_tool_uses_owner_home_binding_not_platform_label(tmp_path):
     store = _store(tmp_path)
     save_config(
         {
@@ -729,7 +1062,7 @@ def test_provider_owner_review_reply_ingress_uses_owner_home_binding_not_platfor
         worker_autostart=False,
     )
     command = _review_command(rendered, "R1", "reject_candidate")
-    provider.on_turn_start(1, command)
+    provider.handle_tool_call("memory_os_review_reply", {"reply": command})
     context = provider.prefetch(command, session_id="session-owner-review")
 
     records = _jsonl(owner_actions_path(store.roots))
@@ -739,7 +1072,7 @@ def test_provider_owner_review_reply_ingress_uses_owner_home_binding_not_platfor
     assert "latest_owner_home_digest" in context
 
 
-def test_provider_owner_review_reply_ingress_requires_recorded_digest(tmp_path):
+def test_provider_owner_review_reply_tool_requires_recorded_digest(tmp_path):
     store = _store(tmp_path)
     provider = MemoryOSProvider()
     provider.initialize(
@@ -750,14 +1083,15 @@ def test_provider_owner_review_reply_ingress_requires_recorded_digest(tmp_path):
         worker_autostart=False,
     )
 
-    provider.on_turn_start(1, "memory reject oa_deadbeef")
+    result = json.loads(provider.handle_tool_call("memory_os_review_reply", {"reply": "memory reject oa_deadbeef"}))
     context = provider.prefetch("memory reject oa_deadbeef", session_id="session-owner-review")
 
+    assert result["status"] == "needs_clarification"
     assert "digest_not_found_or_expired" in context
     assert not owner_actions_path(store.roots).exists()
 
 
-def test_provider_owner_review_reply_ingress_accepts_punctuation_and_ignores_chatter(tmp_path):
+def test_provider_owner_review_reply_tool_accepts_punctuation_and_ignores_chatter(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
     rendered = render_owner_review_digest(
@@ -777,7 +1111,10 @@ def test_provider_owner_review_reply_ingress_accepts_punctuation_and_ignores_cha
         agent_identity="main",
         worker_autostart=False,
     )
-    chatter.on_turn_start(1, "普通聊天里提到 memory reject oa_deadbeef")
+    chatter_result = json.loads(
+        chatter.handle_tool_call("memory_os_review_reply", {"reply": "普通聊天里提到 memory reject oa_deadbeef"})
+    )
+    assert chatter_result["status"] == "ignored"
     assert not owner_actions_path(store.roots).exists()
 
     legacy = MemoryOSProvider()
@@ -788,7 +1125,8 @@ def test_provider_owner_review_reply_ingress_accepts_punctuation_and_ignores_cha
         agent_identity="main",
         worker_autostart=False,
     )
-    legacy.on_turn_start(2, "reject R1")
+    legacy_result = json.loads(legacy.handle_tool_call("memory_os_review_reply", {"reply": "reject R1"}))
+    assert legacy_result["status"] == "ignored"
     assert not owner_actions_path(store.roots).exists()
 
     provider = MemoryOSProvider()
@@ -800,7 +1138,7 @@ def test_provider_owner_review_reply_ingress_accepts_punctuation_and_ignores_cha
         worker_autostart=False,
     )
     command = _review_command(rendered, "R1", "reject_candidate") + "。"
-    provider.on_turn_start(3, command)
+    provider.handle_tool_call("memory_os_review_reply", {"reply": command})
     context = provider.prefetch(command, session_id="session-owner-review")
 
     records = _jsonl(owner_actions_path(store.roots))

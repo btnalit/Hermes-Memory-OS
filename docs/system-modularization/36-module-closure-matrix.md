@@ -120,7 +120,7 @@ Cadence rules:
 | Wandering Mind | household digest, safe recent state | wandering output, would-send artifacts | only exceptional proactive-send permission | possible, but not directly | SpeakGate, Hermes transport | useful/ignored expression trends feed speak policy and review burden |
 | Speak Gate | expression payloads, proposal queue | would-send / blocked-send decisions | `allow_speak_once` only for out-of-policy proactive sends | only via Hermes after permission/config | SpeakGate + Hermes delivery | blocked/allowed counts feed expression tuning |
 | DeepReflection | working, digest, governance, proposal/evidence summaries | carryover cards, analysis, optional proposals, optional wandering seeds | split by output type | only wandering seeds indirectly | ContextProjection, Proposal approval, SpeakGate | source-class distribution, selected/dropped classes, optional output outcomes |
-| Ops Gate | operational proposals / policies | allow/block reports | approve proposal may create follow-up ticket; never execution | no | OpsGate + explicit execution command | approved/rejected proposal classes influence future governance |
+| Ops Gate | operational proposals / policies | allow/block reports | approved proposals may be routed into report-only OpsGate review; never execution | no | OpsGate + explicit execution command | approved/rejected proposal classes influence future governance |
 | Proposal Queue | proposal candidates, legacy owner-review inputs | proposal queue state | approve/reject proposal | no | OwnerActionProcessor | approval creates follow-up state only; rejection downranks similar deterministic class |
 | Evidence Scoring | events, candidates, proposals, working items | evidence scores | no direct owner action | no | monitor/eval | score distribution informs candidate/proposal ranking, not direct approval |
 | Self-Evolution | evidence scores, proposal queue, runtime findings | self-evolution digest, proposal candidates | approve/reject proposal | no | Proposal approval + OpsGate | accepted proposals become human-controlled follow-up, not auto execution |
@@ -132,7 +132,8 @@ Cadence rules:
 | Metadata Retention | metadata ledgers/reports | archives/pruned metadata | no | no | retention policy | controls growth; never deletes canonical memory |
 | Owner Review Queue / Aging | candidates, proposals, speak items, owner actions | review projection, effective priority | no by itself | no | OwnerAction Contract | reduces burden; does not approve/reject/close canonical targets |
 | Review Digest Renderer | review queue, aging, bounded candidate/proposal text | owner-readable digest text and active digest binding | no by itself | configured digest delivery only | Export eligibility + Hermes cron | owner readability and response burden feed renderer limits |
-| Provider Owner Reply Ingress | live owner message, provider platform, recorded digest binding | OwnerActionProcessor request + one-turn confirmation context | yes, only for explicit `memory ... oa_<token>` commands | no | recorded digest + OwnerActionProcessor | prevents explicit owner commands from falling through to ordinary chat; stable action tokens feed durable owner-action state |
+| Agent-Mediated Review Surface | latest owner-home digest, review queue, proposal follow-ups | bounded read-only page/detail/follow-up reports | no | no | ContextProjection for owner review + no-write boundary | lets Hermes agent answer "下一页/展开/还有哪些" without Memory-OS owning conversation |
+| Agent-Mediated Owner Reply Tool | live owner message, visible digest context, provider platform, recorded digest binding | OwnerActionProcessor request + bounded tool result | yes, only after Hermes resolves a definite action + stable `oa_` token | no | recorded digest + OwnerActionProcessor | lets Hermes agent complete interactive owner review tasks through structured `memory_os_review_reply`; stable action tokens feed durable owner-action state |
 | Owner Reply Parser | owner command text, recorded digest action-token binding | parsed action request | yes, through processor only | no | OwnerActionProcessor | applies approve/reject/feedback/allow as auditable state transitions |
 | OwnerActionProcessor | parsed owner actions, target state | owner action ledger, approved crystallized records, proposal state, feedback ledger, speak ticket | yes | no | MemoryWriteSurface / Proposal / Feedback / Speak permission | durable owner choices feed candidates, proposals, RH-30 feedback, and monitor |
 | Owner Review Hermes Cron Helper | preview/render commands | bounded stdout for Hermes cron | no | configured digest delivery only | Hermes cron, export eligibility | delivery success/failure and text quality feed monitor and renderer improvements |
@@ -163,7 +164,8 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Metadata Retention | internal_local | retention_metadata | on_demand, later scheduled if approved | metadata archive/prune only |
 | Owner Review Queue / Aging | none | monitor_only | owner_daily preview + monitor_poll | priority projection only |
 | Review Digest Renderer | owner_origin through Hermes cron | monitor_only | owner_daily | renders bounded digest, display anchors, and stable action tokens |
-| Provider Owner Reply Ingress | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand per owner message | explicit token commands only; requires recorded digest; processor owns mutation |
+| Agent-Mediated Review Surface | none | context_projection / monitor_only | on_demand per owner request | read-only pagination/detail/follow-up data for Hermes agent |
+| Agent-Mediated Owner Reply Tool | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand per owner message | Hermes resolves natural owner intent to a structured action token; requires recorded digest; processor owns mutation |
 | Owner Reply Parser | none | none | on_demand per owner reply | parses only; processor owns mutation |
 | OwnerActionProcessor | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand per owner action | sole mutation path for owner actions |
 | Owner Review Hermes Cron Helper | owner_origin | monitor_only | owner_daily through Hermes cron | bounded stdout for Hermes cron |
@@ -237,22 +239,32 @@ and processor close the action loop.
 ### Owner Reply Ingress
 
 ```text
-owner command in primary platform ("memory reject oa_<token>")
--> MemoryProvider.on_turn_start
-   - exact command detector only
-   - requires a recorded digest for the owner/platform channel
+owner command in primary platform ("memory approve oa_<token>", "批准 oa_<token>")
+-> Hermes agent interprets it as a Memory-OS approval task
+   - uses stable action tokens from the visible digest
+   - treats display anchors as visual labels, not preferred commands
+   - asks a clarification when the requested target or action is ambiguous
+-> memory_os_review_reply provider tool
+   - receives structured action + stable action token
+   - requires a recorded digest for the owner/platform or owner-home channel
    - does not render a fresh digest for live binding
 -> Owner Reply Parser
 -> OwnerActionProcessor
--> one-turn prefetch/system-prompt confirmation
+-> bounded assistant confirmation from the tool result
+-> sync_turn control-plane skip
+   - processed token command is not appended as conversation event
+   - heartbeat must not promote it into working memory or candidates
 ```
 
 This is the live ingress counterpart to the CLI parser. Without it, Hermes
 delivers a correct digest but the owner's reply can fall through into ordinary
-chat. The provider may intercept only explicit tokenized review commands such
-as `memory approve oa_<token>`, `memory reject oa_<token>`,
-`memory allow oa_<token>`, or `memory feedback oa_<token> too_mechanistic`.
-Display anchors (`A1/R1/F1`) are not approval identity. This follows the
+chat. The provider tool must execute only stable action tokens. Exact tokenized
+commands such as `memory approve oa_<token>` or `approve oa_<token>` remain a
+compatibility fallback, but the primary product path is the Hermes agent
+resolving the owner's interactive request and calling a structured tool.
+Display anchors (`A1/R1/F1`) are not approval identity. They are only UI labels
+that the agent may map to a token when the visible digest context is definite.
+This follows the
 10.20.2.88 Sannai pattern where review apply is bound to stable candidate ids
 or proposal hashes, not shifting message positions. Anything else remains
 ordinary conversation or clarification.
@@ -282,7 +294,11 @@ module emits proposal
 -> owner approve/reject proposal
 -> approved_for_proposal state or downranked class
 -> approved-proposal follow-up projection
--> no execution until OpsGate plus explicit execution command
+-> explicit proposal-followups --ops-gate preview
+-> optional proposal-followups --ops-gate --apply writes OpsGate report only
+   - repeated apply returns duplicate/already-reviewed evidence
+   - no duplicate OpsGate report for the same proposal_followup action_id
+-> no execution until a separate explicit execution command
 ```
 
 `approved_for_proposal` is not execution and is not yet an execution ticket. It
@@ -290,7 +306,10 @@ must surface through a follow-up projection so accepted proposals do not become
 a hidden backlog, while actual execution remains a separate explicit command.
 The projection itself is monitor/review evidence: it reads proposal queue
 state, emits bounded follow-up items, and must keep `actual_execute=false` and
-`execution_ticket_count=0`.
+`execution_ticket_count=0`. The `--ops-gate --apply` path may add report-only
+OpsGate evidence and move the follow-up state to
+`ops_gate_reviewed_awaiting_explicit_execution`; it still must not create an
+execution ticket or run tools.
 
 ### Expression / Proactive Send
 

@@ -119,7 +119,7 @@ These are not the remaining queue, but future work depends on them.
 | RH-31.0-31.3 eval harness | implemented | first deterministic scorecard exists; P1-B projection miss attributed to fixture/adapter bug; warning findings remain lexical/FTS measurement signals |
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
-| RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.3 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, reply parser, provider owner-reply ingress, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text, Hermes owns delivery |
+| RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.5/35.8 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, stable action-token parser, agent-mediated `memory_os_review_reply` tool, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text and exposes tools/state, Hermes owns delivery and agent interaction |
 | RH-36 module closure matrix | documented | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
@@ -620,11 +620,10 @@ Status:
   style replies to OwnerActionProcessor without frontend state mutation;
   RH-35.5 supersedes this display-anchor command style with stable action
   tokens.
-- RH-35.3 deployed on `10.20.3.200`: provider owner-reply ingress catches exact
-  owner-review commands at turn start, requires a recorded digest for the
-  owner/platform channel, applies through OwnerActionProcessor, and injects a
-  one-turn confirmation instruction so explicit commands do not fall through to
-  ordinary chat;
+- RH-35.3 provider owner-reply ingress was deployed but is now superseded as
+  the primary live path. The 2026-05-26 live Telegram test exposed
+  `gateway_ingress_error` when a pre-gateway hook intercepted the owner command
+  before the Hermes agent could act. The corrected path is RH-35.8.
 - RH-34d `deliver-once` is reduced to legacy smoke-only in code; RH-34e must
   use Hermes cron/send for real recurring delivery;
 - RH-34e minimum Hermes Cron Owner Review Integration is deployed on
@@ -632,13 +631,15 @@ Status:
   `$HERMES_HOME/scripts`, `review cron-status` is available through provider
   CLI and shell alias, and monitor reports OwnerCronIntegration;
 - RH-34e recurring enable gate is implemented and installed with the helper:
-  it validates schedule/delivery target, Hermes cron `--script --no-agent
-  --deliver` support, duplicate job state, and bounded render output; apply is
+  it validates schedule/delivery target, Hermes cron `--script --deliver`
+  agent-mode support, duplicate job state, and bounded render output; apply is
   blocked unless explicitly owner/operator approved;
 - RH-34e recurring owner-channel daily review is enabled on the controlled
-  `10.20.3.200` test host by the test-host installer default. It uses Hermes
-  cron `--script --no-agent --deliver`; Memory-OS must not own the recurring
-  scheduler/transport.
+  `10.20.3.200` test host by the test-host installer default. RH-34g follow-up
+  changes the recurring job from direct `--no-agent` delivery to Hermes
+  agent-mode cron (`--script --deliver`) so Hermes can write Chinese
+  owner-facing text from the bounded Memory-OS review brief. Memory-OS must not
+  own the recurring scheduler/transport.
 - RH-34f deployed: the installer no longer hardcodes Telegram for ordinary
   installs. `--owner-review-cron-deliver auto` resolves to `telegram` only for
   `--test-host` and to Hermes cron `origin` otherwise; interactive installs can
@@ -646,6 +647,25 @@ Status:
 - RH-34g deployed: rendered owner-review digest text is whole-item bounded
   below the Telegram-safe budget and transcript-like candidates are downgraded
   to cleanup/FYI instead of approvable long-term memory.
+- RH-34g/RH-35.9 wording follow-up: rendered digest text now includes a
+  Chinese response header (`回复方式`) that explains stable `oa_` token usage and
+  says `A1/R1/F1` are display labels only. Monitor now fails if the rendered
+  digest lacks this response header.
+- RH-34g/RH-35.9 live follow-up: the recurring owner-review Telegram digest
+  now runs through Hermes agent mode and includes a Chinese full-picture
+  overview, shown/omitted counts, complete item meanings, consequences, and
+  stable `memory approve/reject/allow oa_...` commands. Monitor requires both
+  `response_header_present=true` and `overview_present=true`. A real owner
+  reply `memory reject oa_1e9ca00f639ca2` was processed by Hermes through
+  `memory_os_review_reply` as `reject_proposal`; `actual_execute=false`,
+  `unapproved_send_count=0`, and `raw_body_included_count=0`.
+- RH-34h/RH-35.10 deployed and monitor-observed: owner requests such as
+  "下一页", "还有哪些", and "展开 R3" belong to Hermes agent interaction and use
+  a bounded read-only Memory-OS review surface. Monitor reports
+  `owner_review_surface_ok`, `raw_body_included_count=0`, and
+  `boundary_true_count=0`. Approved proposals can be inspected and routed into
+  OpsGate report-only review after explicit owner/operator intent, but real
+  execution remains a separate future execution/apply RH.
 - RH-35.5 deployed and monitor-observed on `10.20.3.200`: owner-facing commands now use stable
   `memory <verb> oa_<token>` action tokens derived from target type, target id,
   and action type. `A1/R1/F1` are display anchors only, following the
@@ -659,6 +679,40 @@ Status:
 - RH-35.6 deployed and monitor-observed on `10.20.3.200`: `review proposal-followups` projects
   `approved_for_proposal` items into a bounded follow-up surface with
   `execution_ticket_count=0` and `actual_execute=false`.
+- RH-35.7 implements the next explicit apply path:
+  `review proposal-followups --proposal-id <proposal_id> --ops-gate --apply`
+  writes an OpsGate report-only record for an approved proposal. It keeps
+  `execution_ticket_created=false` and `actual_execute=false`; execution still
+  requires a separate future explicit execution/apply command.
+- 2026-05-26 independent mainline review follow-up: successfully processed
+  owner-review token commands are now control-plane only and must not be
+  captured/promoted as ordinary conversation events, working memory, or
+  candidates; repeated approved-proposal OpsGate apply must return
+  duplicate/already-reviewed evidence instead of appending duplicate OpsGate
+  reports.
+- RH-35.8 deployed on `10.20.3.200`: `memory_os_review_reply` is a model-facing
+  Memory-OS provider tool. Hermes agent should use it for owner review tasks.
+  The next correction, RH-35.9, changes the tool contract from text-first
+  command parsing to structured `action + action_token` calls so Hermes can
+  behave like an interactive agent: resolve unambiguous digest context, ask when
+  ambiguous, and call Memory-OS only with stable `oa_` token identity. Gateway
+  pre-dispatch owner-review interception is removed from the shell plugin and
+  monitor now expects `gateway_hook_registered=false`,
+  `review_reply_tool_available=true`, and `review_reply_tool_status=ok`.
+  `sync_turn` skips token commands that were processed by the tool; if the
+  tool was not called, it records `owner_review_reply_tool_not_called` and
+  still prevents ordinary memory pollution.
+- RH-35.9 is deployed on `10.20.3.200` at the provider/tool-contract level:
+  the provider tool schema is structured-first (`action + action_token +
+  optional rating + optional owner_utterance`). The hidden `reply` fallback is
+  kept in `handle_tool_call()` for CLI/legacy callers, but is not exposed in
+  the model-facing schema.
+  The monitor owner-review ingress probe now requires structured tool input
+  and reports `review_reply_tool_input_mode=structured`, gateway hook disabled,
+  and owner command pollution counts at `0`. One real Hermes-agent owner phrase
+  smoke using a tokenized digest command is still the remaining gate before
+  calling the interactive-agent path fully closed. Display anchors are not the
+  recommended apply input.
 - RH-36 documented: all currently known left/right brain and governance modules
   have a closure path that says whether they generate owner actions, speech
   requests, direct context feedback, proposals, candidates, or monitor-only
@@ -714,7 +768,7 @@ RH-34e enable gate dry-run:
   status=dry_run
   apply_requested=false
   helper_script_present=true
-  hermes_cron_supports_script_no_agent_deliver=true
+  hermes_cron_supports_agent_script_deliver=true
   existing_job_present=false
   deliver_target_class=platform_home
   render_check.raw_body_included=false
@@ -800,6 +854,12 @@ Promotion signal:
 - proposal approval does not execute;
 - approved proposal follow-up projection is visible and reports
   `execution_ticket_count=0`;
+- approved proposals can be routed through OpsGate report-only review with
+  `ops_gate_reviewed_count` visible and `execution_ticket_count=0`;
+- owner-review token commands show `event_count=0`, `working_count=0`, and
+  `candidate_count=0` in monitor/integration evidence;
+- OpsGate reports contain no duplicate `proposal_followup:<proposal_id>`
+  action ids after repeated apply attempts;
 - candidate approval creates crystallized records only through explicit owner
   action.
 - unapproved crystallized write count remains zero, while owner-approved
@@ -831,10 +891,14 @@ Stop signal:
 - proposal approval causes actual execution;
 - approved proposals disappear from monitor/review surfaces after approval;
 - approved proposal follow-up projection creates execution tickets;
+- approved proposal OpsGate routing creates execution tickets or sets
+  `actual_execute=true`;
 - feedback is treated as crystallized approval;
 - speak-once enables default sending.
-- live ingress accepts plain display-anchor commands such as `approve A1` as
-  state-changing input.
+- Memory-OS tool/state-machine layer accepts display anchors such as
+  `approve A1` as executable identity instead of requiring a resolved stable
+  `oa_` token. Hermes may resolve anchors from visible context before calling
+  the tool; Memory-OS itself must not execute anchors.
 
 ## Active P2 Queue
 

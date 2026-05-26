@@ -2,9 +2,9 @@
 """Render a bounded Memory-OS owner review digest for Hermes cron delivery.
 
 This script intentionally does not send messages. Hermes cron owns scheduling
-and delivery via `hermes cron create ... --no-agent --script ... --deliver ...`.
-The script prints a digest to stdout only when there is meaningful review
-content; empty stdout lets Hermes cron stay silent.
+and delivery via `hermes cron create ... --script ... --deliver ...` in agent
+mode. The script prints a bounded review brief only when there is meaningful
+review content; empty stdout lets Hermes cron stay silent.
 """
 
 from __future__ import annotations

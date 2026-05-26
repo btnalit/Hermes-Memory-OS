@@ -66,11 +66,14 @@ Owner review digest:
 ```
 
 The test-host preset enables the owner review digest through Hermes cron by
-default. Memory-OS renders bounded review text and stable action tokens; Hermes
-owns the scheduled delivery and platform transport. Production-safe installs
-keep this recurring delivery disabled unless explicitly enabled. The short
-digest anchors (`A1`, `R1`, `F1`) are display-only; owner actions must use the
-printed `memory approve oa_<token>` / `memory reject oa_<token>` command.
+default. Memory-OS renders a bounded review brief and stable action tokens;
+Hermes owns the scheduled delivery, final owner-facing wording, and interactive
+clarification in agent mode. Production-safe installs keep this recurring
+delivery disabled unless explicitly enabled. The short digest anchors (`A1`,
+`R1`, `F1`) are display-only. The stable state identity is the printed `oa_`
+token. Hermes agent may resolve an unambiguous owner reply from the current
+digest context and call the structured Memory-OS review tool with the resolved
+token; Memory-OS itself executes only stable `oa_` action tokens.
 
 `auto` resolves to `telegram` for the controlled `--test-host` preset and to
 `origin` otherwise. `origin` is the Hermes cron delivery target that asks Hermes

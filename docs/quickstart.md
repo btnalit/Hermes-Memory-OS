@@ -33,8 +33,9 @@ owner review digest through Hermes cron by default. Use
 `--no-enable-owner-review-cron` if you want the helper installed but no recurring
 delivery job. Outside `--test-host`, the installer resolves the default owner
 review delivery target to Hermes cron `origin` rather than hardcoding Telegram.
-Hermes owns the scheduled delivery and platform transport; Memory-OS only
-renders the bounded digest and processes owner actions.
+Hermes owns the scheduled delivery, platform transport, and final owner-facing
+wording in agent mode; Memory-OS only renders the bounded review brief and
+processes owner actions.
 
 Production-safe install:
 
@@ -95,7 +96,7 @@ executes, identity writes, or crystallized approvals.
 Owner review digests use short display anchors such as `A1`, `R1`, and `F1` to
 make the list readable. Those anchors are not durable approval identities.
 
-Use the stable token printed on the digest item:
+The safest reply is to use the stable token printed on the digest item:
 
 ```text
 memory approve oa_<token>
@@ -104,6 +105,12 @@ memory allow oa_<token>
 memory feedback oa_<token> too_mechanistic
 ```
 
-Plain text such as `approve A1` or `reject R1` is treated as ordinary chat and
-must not mutate Memory-OS state. A proposal approval only marks the proposal as
-approved for human-controlled follow-up; it does not execute work.
+Hermes is the interactive agent. If you reply with natural phrasing such as
+`approve A1`, Hermes may resolve `A1` from the current visible digest and call
+the Memory-OS review tool with the matching stable `oa_` token. If the target
+is not unambiguous, Hermes should ask you to clarify instead of guessing.
+
+Memory-OS itself does not execute display anchors. `A1/R1/F1` are UI labels
+only; the plugin/state-machine layer applies only stable `oa_` action tokens.
+A proposal approval only marks the proposal as approved for human-controlled
+follow-up; it does not execute work.

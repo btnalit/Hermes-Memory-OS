@@ -80,6 +80,27 @@ def _on_session_finalize(session_id: str = "", platform: str = "", **_: object) 
     )
 
 
+def _load_memory_os_audit_api() -> tuple[Any, Any]:
+    _ensure_memory_os_runtime_path()
+    importlib.invalidate_caches()
+    try:
+        from memory_os.audit import append_audit
+        from memory_os.roots import MemoryOSRoots
+    except ModuleNotFoundError:
+        from plugins.memory.memory_os.audit import append_audit
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+    return MemoryOSRoots, append_audit
+
+
+def _resolve_profile() -> str:
+    return (
+        os.environ.get("HERMES_PROFILE")
+        or os.environ.get("HERMES_AGENT_IDENTITY")
+        or os.environ.get("HERMES_AGENT_NAME")
+        or "default"
+    )
+
+
 def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="agent_os_command")
     subs.add_parser("status")
@@ -123,8 +144,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_deliver_once.add_argument("--apply", action="store_true")
     review_queue = review_subs.add_parser("queue")
     review_queue.add_argument("--limit", type=int, default=20)
+    review_surface = review_subs.add_parser("surface")
+    review_surface.add_argument("--operation", choices=["overview", "page", "next_page", "detail", "proposal_followups"], default="overview")
+    review_surface.add_argument("--section", choices=["all", "action_required", "review_suggested", "fyi"], default="all")
+    review_surface.add_argument("--anchor", default="")
+    review_surface.add_argument("--action-token", default="")
+    review_surface.add_argument("--offset", type=int, default=0)
+    review_surface.add_argument("--limit", type=int, default=5)
+    review_surface.add_argument("--owner", default="owner")
+    review_surface.add_argument("--channel", default="agent")
     review_followups = review_subs.add_parser("proposal-followups")
     review_followups.add_argument("--limit", type=int, default=20)
+    review_followups.add_argument("--proposal-id", default="")
+    review_followups.add_argument("--ops-gate", action="store_true")
+    review_followups.add_argument("--owner", default="owner")
+    review_followups.add_argument("--channel", default="cli")
+    review_followups.add_argument("--apply", action="store_true")
     review_preview = review_subs.add_parser("preview-digest")
     review_preview.add_argument("--owner", default="")
     review_preview.add_argument("--max-action-required", type=int)
@@ -212,7 +247,11 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     eval_rh31_failures.add_argument("--class", dest="failure_class", default="")
 
 
-def memory_os_agent_os_command(args: argparse.Namespace) -> int:
+def memory_os_agent_os_command(args: argparse.Namespace) -> None:
+    raise SystemExit(_memory_os_agent_os_exit_code(args))
+
+
+def _memory_os_agent_os_exit_code(args: argparse.Namespace) -> int:
     command = str(getattr(args, "agent_os_command", "") or "")
     if command not in _ALLOWED_ALIASES:
         return 2
@@ -284,18 +323,6 @@ def _append_session_marker(
         )
     except Exception as exc:
         _LOGGER.debug("Memory-OS Agent OS session marker skipped: %s", exc)
-
-
-def _load_memory_os_audit_api() -> tuple[Any, Any]:
-    _ensure_memory_os_runtime_path()
-    importlib.invalidate_caches()
-    try:
-        from plugins.memory.memory_os.audit import append_audit
-        from plugins.memory.memory_os.roots import MemoryOSRoots
-    except ModuleNotFoundError:
-        from memory_os.audit import append_audit
-        from memory_os.roots import MemoryOSRoots
-    return MemoryOSRoots, append_audit
 
 
 def _ensure_memory_os_runtime_path() -> None:

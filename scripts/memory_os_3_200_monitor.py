@@ -227,6 +227,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         and shell_alias.get("review_digest_ok", True) is True
         and shell_alias.get("review_render_ok", True) is True
         and shell_alias.get("review_reply_ok", True) is True
+        and shell_alias.get("review_surface_ok", True) is True
     ):
         passed.append({"code": "shell_alias_no_env_ok"})
     else:
@@ -257,6 +258,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         speak_gate = module_artifacts.get("speak_gate") if isinstance(module_artifacts.get("speak_gate"), dict) else {}
         if speak_gate.get("actual_send") is True:
             fail.append({"code": "module_artifact_speak_gate_actual_send_true", "value": speak_gate})
+        ops_gate = module_artifacts.get("ops_gate") if isinstance(module_artifacts.get("ops_gate"), dict) else {}
+        if int(ops_gate.get("duplicate_proposal_followup_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "ops_gate_duplicate_proposal_followup_report",
+                    "value": {
+                        "duplicate_count": ops_gate.get("duplicate_proposal_followup_count"),
+                        "duplicate_extra_count": ops_gate.get("duplicate_proposal_followup_extra_count"),
+                    },
+                }
+            )
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
@@ -368,6 +380,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_rendered_digest_transcript_marker"})
             if int(rendered_digest.get("text_char_count") or 0) > 2400:
                 fail.append({"code": "owner_review_rendered_digest_too_long", "value": rendered_digest.get("text_char_count")})
+            if rendered_digest.get("response_header_present") is False:
+                fail.append({"code": "owner_review_rendered_digest_missing_response_header"})
+            if rendered_digest.get("overview_present") is False:
+                fail.append({"code": "owner_review_rendered_digest_missing_overview"})
             for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
                 if (rendered_digest.get("boundary") or {}).get(key) is True:
                     fail.append({"code": f"owner_review_rendered_digest_{key}_true"})
@@ -377,8 +393,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 and rendered_digest.get("text_has_internal_schema") is not True
                 and rendered_digest.get("text_has_transcript_marker") is not True
                 and int(rendered_digest.get("text_char_count") or 0) <= 2400
+                and rendered_digest.get("response_header_present") is not False
+                and rendered_digest.get("overview_present") is not False
             ):
                 passed.append({"code": "owner_review_rendered_digest_ok"})
+                passed.append({"code": "owner_review_rendered_digest_response_header_ok"})
+                passed.append({"code": "owner_review_rendered_digest_overview_ok"})
         else:
             warn.append({"code": "owner_review_rendered_digest_unavailable", "value": rendered_digest})
 
@@ -397,6 +417,20 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             warn.append({"code": "owner_review_reply_dry_run_unavailable", "value": reply_dry_run})
 
+    review_surface = snapshot.get("owner_review_surface", {})
+    if review_surface:
+        if review_surface.get("schema_version") == "memory-os.owner_review_surface_monitor.v0":
+            if review_surface.get("status") == "ok":
+                passed.append({"code": "owner_review_surface_ok"})
+            else:
+                warn.append({"code": "owner_review_surface_not_ok", "value": review_surface.get("status")})
+            if int(review_surface.get("raw_body_included_count") or 0) > 0:
+                fail.append({"code": "owner_review_surface_raw_body_included"})
+            if int(review_surface.get("boundary_true_count") or 0) > 0:
+                fail.append({"code": "owner_review_surface_boundary_true"})
+        else:
+            warn.append({"code": "owner_review_surface_unavailable", "value": review_surface})
+
     ingress_guard = snapshot.get("owner_review_ingress_guard", {})
     if ingress_guard:
         if ingress_guard.get("schema_version") == "memory-os.owner_review_ingress_guard.v0":
@@ -408,17 +442,46 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_ordinary_anchor_text_accepted"})
             if ingress_guard.get("token_command_accepted") is not True:
                 fail.append({"code": "owner_review_token_command_not_accepted"})
+            if ingress_guard.get("bare_token_command_accepted") is not True:
+                fail.append({"code": "owner_review_bare_token_command_not_accepted"})
             if ingress_guard.get("slash_token_command_accepted") is not True:
                 fail.append({"code": "owner_review_slash_token_command_not_accepted"})
             if ingress_guard.get("feedback_token_command_accepted") is not True:
                 fail.append({"code": "owner_review_feedback_token_command_not_accepted"})
+            if ingress_guard.get("bare_feedback_token_command_accepted") is not True:
+                fail.append({"code": "owner_review_bare_feedback_token_command_not_accepted"})
+            if ingress_guard.get("gateway_hook_registered") is True:
+                fail.append({"code": "owner_review_gateway_hook_still_registered"})
+            if ingress_guard.get("review_reply_tool_available") is not True:
+                fail.append({"code": "owner_review_agent_tool_unavailable"})
+            if ingress_guard.get("review_reply_tool_status") != "ok":
+                fail.append({"code": "owner_review_agent_tool_not_ok", "value": ingress_guard})
+            if ingress_guard.get("review_reply_tool_input_mode") != "structured":
+                fail.append({"code": "owner_review_agent_tool_not_structured", "value": ingress_guard})
+            if int(ingress_guard.get("owner_command_event_count") or 0) > 0:
+                fail.append({"code": "owner_review_command_captured_as_event"})
+            if int(ingress_guard.get("owner_command_working_count") or 0) > 0:
+                fail.append({"code": "owner_review_command_promoted_to_working"})
+            if int(ingress_guard.get("owner_command_candidate_count") or 0) > 0:
+                fail.append({"code": "owner_review_command_promoted_to_candidate"})
+            if ingress_guard.get("owner_command_promoted_to_candidate") is True:
+                fail.append({"code": "owner_review_command_candidate_pollution"})
             if (
                 ingress_guard.get("legacy_anchor_accepted") is not True
                 and ingress_guard.get("legacy_reject_anchor_accepted") is not True
                 and ingress_guard.get("ordinary_anchor_text_accepted") is not True
                 and ingress_guard.get("token_command_accepted") is True
+                and ingress_guard.get("bare_token_command_accepted") is True
                 and ingress_guard.get("slash_token_command_accepted") is True
                 and ingress_guard.get("feedback_token_command_accepted") is True
+                and ingress_guard.get("bare_feedback_token_command_accepted") is True
+                and ingress_guard.get("gateway_hook_registered") is not True
+                and ingress_guard.get("review_reply_tool_available") is True
+                and ingress_guard.get("review_reply_tool_status") == "ok"
+                and ingress_guard.get("review_reply_tool_input_mode") == "structured"
+                and int(ingress_guard.get("owner_command_event_count") or 0) == 0
+                and int(ingress_guard.get("owner_command_working_count") or 0) == 0
+                and int(ingress_guard.get("owner_command_candidate_count") or 0) == 0
             ):
                 passed.append({"code": "owner_review_ingress_guard_token_only"})
         else:
@@ -467,6 +530,11 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
                 if boundary.get(key) is True:
                     fail.append({"code": f"owner_review_proposal_followups_{key}_true"})
+            items = proposal_followups.get("items") if isinstance(proposal_followups.get("items"), list) else []
+            if any(isinstance(item, dict) and item.get("actual_execute") is True for item in items):
+                fail.append({"code": "owner_review_proposal_followups_item_actual_execute_true"})
+            if any(isinstance(item, dict) and item.get("execution_ticket_created") is True for item in items):
+                fail.append({"code": "owner_review_proposal_followups_item_execution_ticket_created"})
             if int(proposal_followups.get("pending_followup_count") or 0) > 0:
                 warn.append(
                     {
@@ -750,6 +818,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerDigestPreview={_owner_digest_preview_summary(snapshot.get('owner_review_digest_preview') or {})}",
         f"- OwnerRenderedDigest={_owner_rendered_digest_summary(snapshot.get('owner_review_rendered_digest') or {})}",
         f"- OwnerReplyDryRun={_owner_reply_dry_run_summary(snapshot.get('owner_review_reply_dry_run') or {})}",
+        f"- OwnerReviewSurface={_owner_review_surface_summary(snapshot.get('owner_review_surface') or {})}",
         f"- OwnerIngressGuard={_owner_ingress_guard_summary(snapshot.get('owner_review_ingress_guard') or {})}",
         f"- OwnerProposalFollowups={_owner_proposal_followups_summary(snapshot.get('owner_review_proposal_followups') or {})}",
         f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
@@ -993,14 +1062,40 @@ def _owner_reply_dry_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _owner_review_surface_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    operations = summary.get("operations") if isinstance(summary.get("operations"), dict) else {}
+    return {
+        "status": summary.get("status"),
+        "raw_body_included_count": summary.get("raw_body_included_count"),
+        "boundary_true_count": summary.get("boundary_true_count"),
+        "operations": {
+            name: {
+                "status": op.get("status"),
+                "item_count": op.get("item_count"),
+                "source": op.get("source"),
+            }
+            for name, op in operations.items()
+            if isinstance(op, dict)
+        },
+    }
+
+
 def _owner_ingress_guard_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "legacy_anchor_accepted": summary.get("legacy_anchor_accepted"),
         "legacy_reject_anchor_accepted": summary.get("legacy_reject_anchor_accepted"),
         "ordinary_anchor_text_accepted": summary.get("ordinary_anchor_text_accepted"),
         "token_command_accepted": summary.get("token_command_accepted"),
+        "bare_token_command_accepted": summary.get("bare_token_command_accepted"),
         "slash_token_command_accepted": summary.get("slash_token_command_accepted"),
         "feedback_token_command_accepted": summary.get("feedback_token_command_accepted"),
+        "bare_feedback_token_command_accepted": summary.get("bare_feedback_token_command_accepted"),
+        "gateway_hook_registered": summary.get("gateway_hook_registered"),
+        "review_reply_tool_available": summary.get("review_reply_tool_available"),
+        "review_reply_tool_status": summary.get("review_reply_tool_status"),
+        "owner_command_event_count": summary.get("owner_command_event_count"),
+        "owner_command_working_count": summary.get("owner_command_working_count"),
+        "owner_command_candidate_count": summary.get("owner_command_candidate_count"),
     }
 
 
@@ -1009,6 +1104,8 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
         "pending": summary.get("pending_followup_count"),
         "shown": summary.get("shown_count"),
         "overflow": summary.get("overflow_count"),
+        "awaiting_ops_gate": summary.get("awaiting_ops_gate_count"),
+        "ops_gate_reviewed": summary.get("ops_gate_reviewed_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
         "raw_body_included": summary.get("raw_body_included"),
     }
@@ -1532,6 +1629,25 @@ def module_artifact_summary():
     ops_gate = status("ops_gate")
     speak_gate = status("speak_gate")
     mailbox = status("mailbox")
+    ops_gate_reports = _read_jsonl("/root/.hermes/system-modules/ops_gate/reports.jsonl")
+    proposal_followup_action_counts = {}
+    for report_item in ops_gate_reports:
+        if not isinstance(report_item, dict):
+            continue
+        decisions = report_item.get("decisions")
+        if not isinstance(decisions, list):
+            continue
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+            action_id = str(decision.get("action_id") or "")
+            if not action_id.startswith("proposal_followup:"):
+                continue
+            proposal_followup_action_counts[action_id] = proposal_followup_action_counts.get(action_id, 0) + 1
+    duplicate_proposal_followup_count = sum(1 for count in proposal_followup_action_counts.values() if count > 1)
+    duplicate_proposal_followup_extra_count = sum(
+        max(count - 1, 0) for count in proposal_followup_action_counts.values()
+    )
     return {
       "schema_version": "memory-os.module_artifact_summary.v0",
       "status": "ok",
@@ -1571,6 +1687,9 @@ def module_artifact_summary():
       "ops_gate": {
         "report_count": ops_gate.get("report_count"),
         "blocked_decision_count": ops_gate.get("blocked_decision_count"),
+        "proposal_followup_action_count": len(proposal_followup_action_counts),
+        "duplicate_proposal_followup_count": duplicate_proposal_followup_count,
+        "duplicate_proposal_followup_extra_count": duplicate_proposal_followup_extra_count,
       },
       "speak_gate": {
         "would_send_count": speak_gate.get("would_send_count"),
@@ -1657,6 +1776,18 @@ def shell_alias_no_env():
     review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
     review_render = load_json_cmd(["hermes", "memory-os-agent-os", "review", "render-digest"])
     review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "memory", "approve", "oa_deadbeef"])
+    review_surface = load_json_cmd([
+        "hermes",
+        "memory-os-agent-os",
+        "review",
+        "surface",
+        "--operation",
+        "next_page",
+        "--section",
+        "action_required",
+        "--limit",
+        "1",
+    ])
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",
@@ -1675,6 +1806,7 @@ def shell_alias_no_env():
       "review_digest_ok": isinstance(review_digest, dict) and review_digest.get("schema_version") == "memory-os.owner_review_digest_preview.v0",
       "review_render_ok": isinstance(review_render, dict) and review_render.get("schema_version") == "memory-os.owner_review_rendered_digest.v0",
       "review_reply_ok": isinstance(review_reply, dict) and review_reply.get("schema_version") == "memory-os.owner_review_reply.v0",
+      "review_surface_ok": isinstance(review_surface, dict) and review_surface.get("schema_version") == "memory-os.owner_review_surface.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
       "memory_sources_error": memory_sources.get("_error") if isinstance(memory_sources, dict) else None,
@@ -1692,6 +1824,7 @@ def shell_alias_no_env():
       "review_digest_error": review_digest.get("_error") if isinstance(review_digest, dict) else None,
       "review_render_error": review_render.get("_error") if isinstance(review_render, dict) else None,
       "review_reply_error": review_reply.get("_error") if isinstance(review_reply, dict) else None,
+      "review_surface_error": review_surface.get("_error") if isinstance(review_surface, dict) else None,
     }
 
 def owner_review_rendered_digest_summary():
@@ -1708,6 +1841,8 @@ def owner_review_rendered_digest_summary():
       "text_char_count": len(text),
       "text_has_internal_schema": any(token in text for token in ("Candidate kind=", "source_events=", "sensitivity=")),
       "text_has_transcript_marker": any(token in text for token in ("User:", "Assistant:", "用户:", "助手:", "用户：", "助手：", "| Assistant:", "| User:")),
+      "response_header_present": all(token in text for token in ("回复方式", "A1/R1/F1 只是列表编号", "oa_")),
+      "overview_present": all(token in text for token in ("全貌", "待处理", "未展示")),
       "section_counts": {key: len(value) for key, value in sections.items() if isinstance(value, list)},
       "anchors": {
         key: [str(item.get("anchor") or "") for item in value if isinstance(item, dict)]
@@ -1751,6 +1886,76 @@ def owner_review_reply_dry_run_summary():
       "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
     }
 
+def _surface_operation_summary(report):
+    if not isinstance(report, dict):
+        return {"status": "unavailable"}
+    boundary = report.get("boundary") if isinstance(report.get("boundary"), dict) else {}
+    sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
+    item = report.get("item") if isinstance(report.get("item"), dict) else {}
+    items = []
+    for value in sections.values():
+        if isinstance(value, list):
+            items.extend([entry for entry in value if isinstance(entry, dict)])
+    if item:
+        items.append(item)
+    return {
+      "schema_version": report.get("schema_version"),
+      "status": report.get("status"),
+      "operation": report.get("operation"),
+      "source": report.get("source") or report.get("binding_source"),
+      "item_count": len(items),
+      "raw_body_included": report.get("raw_body_included") is True or any(
+          entry.get("raw_body_included") is True for entry in items
+      ),
+      "boundary_true_count": sum(1 for value in boundary.values() if value is True),
+    }
+
+def owner_review_surface_summary():
+    next_page = memory_os_cli([
+        "review",
+        "surface",
+        "--operation",
+        "next_page",
+        "--section",
+        "action_required",
+        "--limit",
+        "2",
+    ])
+    detail = memory_os_cli([
+        "review",
+        "surface",
+        "--operation",
+        "detail",
+        "--anchor",
+        "R1",
+        "--channel",
+        "telegram",
+    ])
+    followups = memory_os_cli([
+        "review",
+        "surface",
+        "--operation",
+        "proposal_followups",
+        "--limit",
+        "2",
+    ])
+    operations = {
+      "next_page": _surface_operation_summary(next_page),
+      "detail": _surface_operation_summary(detail),
+      "proposal_followups": _surface_operation_summary(followups),
+    }
+    raw_body_count = sum(1 for item in operations.values() if item.get("raw_body_included") is True)
+    boundary_true_count = sum(int(item.get("boundary_true_count") or 0) for item in operations.values())
+    statuses = {str(item.get("status") or "") for item in operations.values()}
+    allowed_statuses = {"ok", "needs_clarification", "empty", "unavailable"}
+    return {
+      "schema_version": "memory-os.owner_review_surface_monitor.v0",
+      "status": "ok" if statuses <= allowed_statuses and "unavailable" not in statuses else "warning",
+      "operations": operations,
+      "raw_body_included_count": raw_body_count,
+      "boundary_true_count": boundary_true_count,
+    }
+
 def _first_rendered_action_command(rendered):
     for items in (rendered.get("sections") or {}).values():
         if not isinstance(items, list):
@@ -1791,16 +1996,122 @@ def owner_review_ingress_guard_summary():
     env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins:" + env.get("PYTHONPATH", "")
     code = """
 import json
+import importlib.util
+import tempfile
+from pathlib import Path
 from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply
+from plugins.memory.memory_os import MemoryOSProvider
+from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+from plugins.memory.memory_os.owner_actions import owner_actions_path, render_owner_review_digest
+from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.runtime import MemoryOSRuntime
+from plugins.memory.memory_os.store import MemoryOSStore
 cases = {
     "legacy_anchor_accepted": _looks_like_owner_review_reply("approve A2"),
     "legacy_reject_anchor_accepted": _looks_like_owner_review_reply("reject R1"),
     "ordinary_anchor_text_accepted": _looks_like_owner_review_reply("普通聊天里提到 approve A2"),
     "token_command_accepted": _looks_like_owner_review_reply("memory approve oa_12345678"),
+    "bare_token_command_accepted": _looks_like_owner_review_reply("approve oa_12345678"),
     "slash_token_command_accepted": _looks_like_owner_review_reply("/memory reject oa_12345678"),
     "feedback_token_command_accepted": _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanistic"),
+    "bare_feedback_token_command_accepted": _looks_like_owner_review_reply("feedback oa_12345678 too_mechanistic"),
 }
-print(json.dumps({"schema_version": "memory-os.owner_review_ingress_guard.v0", **cases}, ensure_ascii=False, sort_keys=True))
+control_plane = {
+    "owner_command_event_count": 0,
+    "owner_command_working_count": 0,
+    "owner_command_candidate_count": 0,
+    "owner_command_promoted_to_candidate": False,
+    "gateway_hook_plugin_present": False,
+    "gateway_hook_registered": False,
+    "review_reply_tool_available": False,
+    "review_reply_tool_status": "",
+}
+try:
+    plugin_path = Path("/root/.hermes/plugins/memory-os-agent-os/__init__.py")
+    if plugin_path.exists():
+        control_plane["gateway_hook_plugin_present"] = True
+        spec = importlib.util.spec_from_file_location("memory_os_agent_os_monitor_probe", plugin_path)
+        if spec is not None and spec.loader is not None:
+            shell = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(shell)
+            hooks = []
+            class Ctx:
+                def register_cli_command(self, **kwargs):
+                    return None
+                def register_hook(self, name, callback):
+                    hooks.append(name)
+                def register_command(self, *args, **kwargs):
+                    return None
+            shell.register(Ctx())
+            control_plane["gateway_hook_registered"] = "pre_gateway_dispatch" in hooks
+    with tempfile.TemporaryDirectory() as tmp:
+        roots = MemoryOSRoots.from_hermes_home(tmp, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        append_candidate_queue(
+            store,
+            CrystallizedCandidate(
+                candidate_id="cand_monitor_owner_ingress",
+                kind="preference",
+                body="Bounded monitor candidate for owner ingress guard.",
+                source_event_ids=["evt_monitor_owner_ingress"],
+                sensitivity="private",
+            ),
+        )
+        rendered = render_owner_review_digest(
+            store,
+            channel="telegram",
+            max_action_required=0,
+            max_review_suggested=1,
+            max_fyi=0,
+            record_active=True,
+        )
+        command = ""
+        for item in (rendered.get("sections") or {}).get("review_suggested", []):
+            if item.get("anchor") == "R1":
+                command = "memory reject " + str((item.get("action_tokens") or {}).get("reject_candidate") or "")
+                break
+        provider = MemoryOSProvider()
+        provider.initialize(
+            "session-monitor-owner-ingress",
+            hermes_home=tmp,
+            platform="telegram",
+            agent_identity="default",
+            worker_autostart=False,
+        )
+        control_plane["review_reply_tool_available"] = any(
+            schema.get("name") == "memory_os_review_reply" for schema in provider.get_tool_schemas()
+        )
+        if command.strip():
+            parts = command.split()
+            token = parts[2] if len(parts) >= 3 else ""
+            tool_result = json.loads(
+                provider.handle_tool_call(
+                    "memory_os_review_reply",
+                    {
+                        "action": "reject",
+                        "action_token": token,
+                        "owner_utterance": "reject R1",
+                    },
+                )
+            )
+            control_plane["review_reply_tool_status"] = str(tool_result.get("status") or "")
+            control_plane["review_reply_tool_input_mode"] = str((tool_result.get("tool_input") or {}).get("mode") or "")
+            provider.sync_turn("reject R1", "ack", session_id="session-monitor-owner-ingress")
+            provider.shutdown()
+            heartbeat = MemoryOSRuntime(store).heartbeat()
+            control_plane["owner_command_event_count"] = len(store.read_events())
+            control_plane["owner_command_working_count"] = int(heartbeat.get("working_created_count") or 0)
+            control_plane["owner_command_candidate_count"] = int(heartbeat.get("candidate_created_count") or 0)
+            control_plane["owner_command_promoted_to_candidate"] = bool(control_plane["owner_command_candidate_count"])
+            control_plane["owner_command_action_count"] = len(
+                [line for line in owner_actions_path(roots).read_text(encoding="utf-8").splitlines() if line.strip()]
+            ) if owner_actions_path(roots).exists() else 0
+        else:
+            control_plane["owner_command_probe_error"] = "missing_review_token"
+except Exception as exc:
+    control_plane["owner_command_probe_error"] = str(exc)
+print(json.dumps({"schema_version": "memory-os.owner_review_ingress_guard.v0", **cases, **control_plane}, ensure_ascii=False, sort_keys=True))
 """
     report = load_json_cmd(["python3", "-c", code], env=env)
     if isinstance(report, dict) and report.get("_error"):
@@ -1823,6 +2134,7 @@ owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups",
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
 owner_review_reply_dry_run = owner_review_reply_dry_run_summary()
+owner_review_surface = owner_review_surface_summary()
 owner_review_ingress_guard = owner_review_ingress_guard_summary()
 cfg_path = Path("/root/.hermes/memory-os/config.json")
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
@@ -1869,6 +2181,7 @@ print(json.dumps({
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,
   "owner_review_reply_dry_run": owner_review_reply_dry_run,
+  "owner_review_surface": owner_review_surface,
   "owner_review_ingress_guard": owner_review_ingress_guard,
   "module_artifacts": module_artifact_summary(),
   "expression_artifacts": expression_artifact_summary(),

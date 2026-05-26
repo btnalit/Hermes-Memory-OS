@@ -113,8 +113,10 @@ class CrystallizedMemoryService:
 def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidate) -> Path:
     path = store.roots.crystallized_root / "candidates.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    data = asdict(candidate)
+    data["tags"] = list(candidate.tags or [])
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(asdict(candidate), ensure_ascii=False, sort_keys=True))
+        handle.write(json.dumps(data, ensure_ascii=False, sort_keys=True))
         handle.write("\n")
     append_audit(
         store.roots.audit_path,
@@ -146,7 +148,7 @@ def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
                 body=str(raw["body"]),
                 source_event_ids=[str(item) for item in raw.get("source_event_ids", [])],
                 sensitivity=str(raw.get("sensitivity", "private")),
-                tags=[str(item) for item in raw.get("tags", [])],
+                tags=[str(item) for item in (raw.get("tags") or [])],
                 bridge_state=str(raw.get("bridge_state", "")),
             )
         )
