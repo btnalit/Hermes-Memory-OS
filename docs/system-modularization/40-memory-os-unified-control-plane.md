@@ -219,7 +219,10 @@ Current truth:
 - safe would-send observation exists;
 - formal expression engine does not exist;
 - Wandering output is deterministic;
-- SpeakGate is not the mandatory decision path for every non-silent draft;
+- local P1-R slice 1 wires cognitive loop Wandering output through SpeakGate
+  and records missing/evaluated decision monitor fields;
+- live deployment evidence is still required before claiming installed
+  SpeakGate closure;
 - expression feedback backflow is not implemented.
 
 Required before runtime:

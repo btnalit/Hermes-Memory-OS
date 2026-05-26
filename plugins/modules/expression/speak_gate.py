@@ -178,7 +178,13 @@ class SpeakGateModule:
         result["would_send_ref"] = record["id"]
         return result
 
-    def evaluate_wandering_output(self, output: str, *, channel: str) -> dict[str, Any]:
+    def evaluate_wandering_output(
+        self,
+        output: str,
+        *,
+        channel: str,
+        payload_ref: str | None = None,
+    ) -> dict[str, Any]:
         if not output.strip() or output.strip() == "[SILENT]":
             return self._delivery_result(
                 decision="no_send",
@@ -188,7 +194,7 @@ class SpeakGateModule:
                 reason="wandering_mind_silent",
             )
         return self.evaluate_delivery(
-            payload_ref=f"local://wandering_mind/output/{_stable_suffix(output)}",
+            payload_ref=payload_ref or f"local://wandering_mind/output/{_stable_suffix(output)}",
             source_module="wandering_mind",
             channel=channel,
             reason="wandering_mind_right_brain",

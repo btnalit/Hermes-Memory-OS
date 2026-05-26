@@ -278,6 +278,16 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             fail.append({"code": "expression_artifact_speak_gate_actual_send_true", "value": expression_artifacts})
         else:
             passed.append({"code": "expression_artifact_summary_ok"})
+        missing_eval_count = int(expression_artifacts.get("speak_gate_missing_evaluation_count") or 0)
+        if missing_eval_count > 0:
+            warn.append(
+                {
+                    "code": "right_brain_speak_gate_missing_evaluation",
+                    "missing_count": missing_eval_count,
+                }
+            )
+        else:
+            passed.append({"code": "right_brain_speak_gate_evaluation_complete"})
     elif expression_artifacts:
         warn.append({"code": "expression_artifact_summary_unavailable", "value": expression_artifacts})
 
@@ -972,6 +982,9 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "wandering_output_count": summary.get("wandering_output_count"),
         "wandering_would_send_count": summary.get("wandering_would_send_count"),
         "wandering_silent_count": summary.get("wandering_silent_count"),
+        "speak_gate_evaluated_count": summary.get("speak_gate_evaluated_count"),
+        "speak_gate_missing_evaluation_count": summary.get("speak_gate_missing_evaluation_count"),
+        "speak_gate_decision_distribution": summary.get("speak_gate_decision_distribution"),
         "speak_gate_would_send_count": summary.get("speak_gate_would_send_count"),
         "speak_gate_blocked_count": summary.get("speak_gate_blocked_count"),
         "speak_gate_actual_send": summary.get("speak_gate_actual_send"),
@@ -1759,6 +1772,9 @@ def expression_artifact_summary():
     wandering_result_count = 0
     wandering_would_send_result_count = 0
     wandering_silent_count = 0
+    speak_gate_evaluated_count = 0
+    speak_gate_missing_evaluation_count = 0
+    speak_gate_decision_distribution = {}
     for report in reports:
         steps = report.get("steps") if isinstance(report.get("steps"), list) else []
         for step in steps:
@@ -1768,8 +1784,15 @@ def expression_artifact_summary():
             wandering_result_count += 1
             if result.get("would_send") is True:
                 wandering_would_send_result_count += 1
+                if not isinstance(result.get("speak_gate_decision"), dict):
+                    speak_gate_missing_evaluation_count += 1
             if result.get("output") == "[SILENT]" or (result.get("would_send") is False and result.get("reason")):
                 wandering_silent_count += 1
+            decision = result.get("speak_gate_decision") if isinstance(result.get("speak_gate_decision"), dict) else {}
+            if decision:
+                speak_gate_evaluated_count += 1
+                decision_name = str(decision.get("decision") or "unknown")
+                speak_gate_decision_distribution[decision_name] = speak_gate_decision_distribution.get(decision_name, 0) + 1
     return {
       "schema_version": "memory-os.expression_artifact_summary.v0",
       "wandering_output_count": wandering.get("output_count"),
@@ -1777,6 +1800,9 @@ def expression_artifact_summary():
       "wandering_result_count": wandering_result_count,
       "wandering_would_send_result_count": wandering_would_send_result_count,
       "wandering_silent_count": wandering_silent_count,
+      "speak_gate_evaluated_count": speak_gate_evaluated_count,
+      "speak_gate_missing_evaluation_count": speak_gate_missing_evaluation_count,
+      "speak_gate_decision_distribution": speak_gate_decision_distribution,
       "speak_gate_would_send_count": speak_gate.get("would_send_count"),
       "speak_gate_blocked_count": speak_gate.get("blocked_send_count", 0),
       "speak_gate_actual_send": speak_gate.get("actual_send"),

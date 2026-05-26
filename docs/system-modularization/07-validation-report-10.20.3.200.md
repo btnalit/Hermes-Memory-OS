@@ -11783,3 +11783,85 @@ NOT CLOSED:
   - New roadmap item naming outside P1-* or P2-F will need an explicit parser
     update instead of silently relying on conversation history.
 ```
+
+## 2026-05-26 - P1-R Slice 1 Local Right-Brain SpeakGate Wiring
+
+Scope:
+
+```text
+P1-R / RH-38 first implementation slice only.
+No LLM expression engine.
+No Hermes transport.
+No scheduled right-brain delivery.
+No owner expression feedback.
+```
+
+Dynamic closure mapping:
+
+```text
+source_of_truth:
+  40-memory-os-unified-control-plane.md
+  38-right-brain-expression-closure-contract.md
+  live finding: wandering_would_send_count > 0 while speak_gate_would_send_count=0
+
+owning_seam:
+  right-brain expression closure / SpeakGate decision path / monitor evidence
+
+reverse_scope:
+  Hermes still owns conversation, NLU, cron, origin delivery, cooldown and
+  transport. Memory-OS only records bounded Wandering output, SpeakGate
+  decision evidence and monitor fields.
+```
+
+Implementation:
+
+```text
+plugins/memory/memory_os/cognitive_loop.py:
+  Wandering Mind result now routes through SpeakGateModule.evaluate_wandering_output().
+  The wandering step records:
+    speak_gate_evaluated
+    speak_gate_decision
+    speak_gate_actual_send
+
+plugins/modules/expression/speak_gate.py:
+  evaluate_wandering_output() accepts an optional payload_ref so the decision
+  can bind to the Wandering output ref instead of a separate text hash.
+
+scripts/memory_os_3_200_monitor.py:
+  expression_artifacts now includes:
+    speak_gate_evaluated_count
+    speak_gate_missing_evaluation_count
+    speak_gate_decision_distribution
+  Missing SpeakGate decisions become WARN:
+    right_brain_speak_gate_missing_evaluation
+```
+
+Local evidence:
+
+```text
+python -m pytest tests/plugins/memory/test_memory_os_cognitive_loop.py \
+  tests/system_modularization/test_integrated_module_traces.py \
+  tests/system_modularization/test_speak_gate_module.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+49 passed
+
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=28
+active_work_item_count=19
+active_work_mapping_count=19
+finding_count=0
+```
+
+Decision:
+
+```text
+LOCAL PASS.
+
+This closes only the local wiring defect for current cognitive-loop Wandering
+output. It does not close formal right-brain expression. Installed/live
+closure still requires deploy to 10.20.3.200, a new cognitive-loop cycle, and
+monitor evidence showing no new missing SpeakGate decision for the new cycle.
+```

@@ -1066,7 +1066,8 @@ Stop signal:
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
-Status: design gate added; runtime implementation not started.
+Status: design gate added; P1-R slice 1 implemented locally, live deployment
+evidence pending.
 
 Source:
 
@@ -1081,9 +1082,11 @@ Reason:
   and may produce free expression or `[SILENT]`;
 - the current v0.1 implementation closes only no-send / would-send
   observation, not formal right-brain expression;
-- `wandering_mind.would_send_count` exists, but SpeakGate formal evaluation,
-  expression content review, expression feedback, and governance/self-evolution
-  backflow are not closed.
+- `wandering_mind.would_send_count` exists;
+- local P1-R slice 1 routes cognitive-loop Wandering output through SpeakGate
+  and exposes evaluated/missing decision monitor fields;
+- expression content review, expression feedback, and
+  governance/self-evolution backflow are not closed.
 
 Required design work:
 
@@ -1096,7 +1099,8 @@ Required design work:
 3. define three expression tiers:
    `test_host_observation`, `scheduled_right_brain_expression`, and
    `exceptional_proactive_send`;
-4. require every non-silent expression draft to pass SpeakGate;
+4. require every non-silent expression draft to pass SpeakGate
+   - local slice 1 covers current cognitive-loop Wandering output only;
 5. make owner review show bounded expression content, not only payload refs;
 6. add expression feedback types: `like`, `too_mechanical`, `too_frequent`,
    `boundary_private`, `off_voice`, `mute_period`;

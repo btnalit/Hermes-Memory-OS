@@ -2,7 +2,19 @@
 
 Date: 2026-05-26
 
-Status: design gate; no runtime implementation in this document.
+Status: design gate plus first local wiring slice.
+
+Current implementation state:
+
+- P1-R slice 1 is implemented locally: cognitive loop Wandering output now
+  records a SpeakGate decision for every result that contains an output.
+- Monitor summary now exposes `speak_gate_evaluated_count`,
+  `speak_gate_missing_evaluation_count`, and
+  `speak_gate_decision_distribution`.
+- This does not implement a RightBrainExpressionEngine, scheduled expression
+  delivery, owner expression feedback, or governance backflow.
+- Live `10.20.3.200` deployment evidence is still required before claiming
+  installed expression observation closure.
 
 ## Why This Exists
 
@@ -61,9 +73,11 @@ The current code and monitor support a safe observation path only:
 
 - Wandering Mind currently emits deterministic text from recent event summaries.
 - The shell plugin deliberately does not register LLM-call hooks.
-- SpeakGate has `evaluate_wandering_output()`, but live monitor shows
-  Wandering would-send artifacts are not yet consistently evaluated by
-  SpeakGate as the formal expression decision path.
+- SpeakGate has `evaluate_wandering_output()`.
+- Local P1-R slice 1 wires cognitive loop Wandering output through SpeakGate
+  and records monitor fields for evaluated and missing decisions.
+- Existing live monitor evidence still includes historical missing SpeakGate
+  evaluations until the change is deployed and a new cycle runs.
 - Owner review can list speak/would-send items, but v0.1 mostly shows bounded
   references and action tokens, not enough expression content for owner quality
   judgment.

@@ -997,6 +997,9 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
         "wandering_output_count": 10,
         "wandering_would_send_count": 10,
         "wandering_silent_count": 2,
+        "speak_gate_evaluated_count": 8,
+        "speak_gate_missing_evaluation_count": 2,
+        "speak_gate_decision_distribution": {"would_send": 8},
         "speak_gate_would_send_count": 0,
         "speak_gate_blocked_count": 0,
         "speak_gate_actual_send": False,
@@ -1034,6 +1037,25 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "raw event" not in rendered.lower()
     assert "User:" not in rendered
     assert json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_classify_snapshot_warns_when_wandering_outputs_skip_speak_gate():
+    snapshot = _healthy_snapshot()
+    snapshot["expression_artifacts"] = {
+        "schema_version": "memory-os.expression_artifact_summary.v0",
+        "wandering_would_send_result_count": 3,
+        "speak_gate_evaluated_count": 1,
+        "speak_gate_missing_evaluation_count": 2,
+        "speak_gate_decision_distribution": {"would_send": 1},
+        "speak_gate_actual_send": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "right_brain_speak_gate_missing_evaluation" for item in classification["warn"])
+    assert "speak_gate_missing_evaluation_count" in rendered
 
 
 def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, capsys):

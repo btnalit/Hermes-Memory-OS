@@ -1074,6 +1074,8 @@ Required monitor evidence:
 - `right_brain_expression.draft_count`
 - `right_brain_expression.silent_count`
 - `right_brain_expression.speak_gate_evaluated_count`
+- `right_brain_expression.speak_gate_missing_evaluation_count`
+- `right_brain_expression.speak_gate_decision_distribution`
 - `right_brain_expression.scheduled_delivered_count`
 - `right_brain_expression.exceptional_permission_count`
 - `right_brain_expression.owner_feedback_by_type`

@@ -257,11 +257,27 @@ class CognitiveLoopRunner:
 
     def _wandering_mind(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.cognition.wandering_mind import WanderingMindModule
+        from plugins.modules.expression.speak_gate import SpeakGateModule
 
-        return WanderingMindModule(self.hermes_home, profile=self.profile).run_once(
+        result = WanderingMindModule(self.hermes_home, profile=self.profile).run_once(
             store=self.store,
             min_events=1,
         )
+        if "output" not in result:
+            return result
+
+        speak_gate = SpeakGateModule(self.hermes_home, profile=self.profile, delivery_mode="would-send")
+        decision = speak_gate.evaluate_wandering_output(
+            str(result.get("output") or ""),
+            channel="origin",
+            payload_ref=str(result.get("output_ref") or "") or None,
+        )
+        return {
+            **result,
+            "speak_gate_evaluated": True,
+            "speak_gate_decision": decision,
+            "speak_gate_actual_send": bool(decision.get("actual_send") is True),
+        }
 
     def _ops_gate(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.governance.ops_gate import OpsGateModule

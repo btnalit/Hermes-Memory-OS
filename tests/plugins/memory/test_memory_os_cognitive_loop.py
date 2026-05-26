@@ -53,9 +53,15 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert (tmp_path / "system-modules" / "cognitive_loop" / "reports.jsonl").is_file()
     assert (tmp_path / "system-modules" / "household_digest" / "household_digest.md").is_file()
     assert (tmp_path / "system-modules" / "wandering_mind" / "outputs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl").is_file()
     assert (tmp_path / "system-modules" / "evidence_scoring" / "scores.jsonl").is_file()
     assert (tmp_path / "system-modules" / "governance_feedback" / "state.json").is_file()
     assert (tmp_path / "system-modules" / "deep_reflection" / "injection" / "current.json").is_file()
+    steps = {step["step"]: step for step in result["steps"]}
+    wandering_result = steps["wandering_mind"]["result"]
+    assert wandering_result["speak_gate_evaluated"] is True
+    assert wandering_result["speak_gate_decision"]["decision"] == "would_send"
+    assert wandering_result["speak_gate_decision"]["actual_send"] is False
 
 
 def test_cognitive_loop_continues_after_step_failure(tmp_path, monkeypatch):

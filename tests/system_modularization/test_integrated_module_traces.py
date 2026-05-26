@@ -80,12 +80,17 @@ def test_integrated_wandering_mind_trace_routes_expression_through_speak_gate(tm
 
     digest.build_digest(store=store, min_events=1)
     wandering_result = wandering.run_once(store=store, min_events=1)
-    delivery = speak_gate.evaluate_wandering_output(wandering_result["output"], channel="origin")
+    delivery = speak_gate.evaluate_wandering_output(
+        wandering_result["output"],
+        channel="origin",
+        payload_ref=wandering_result["output_ref"],
+    )
     silent_delivery = speak_gate.evaluate_wandering_output("[SILENT]", channel="origin")
 
     assert wandering_result["would_send"] is True
     assert wandering_result["actual_send"] is False
     assert delivery["decision"] == "would_send"
+    assert delivery["payload_ref"] == wandering_result["output_ref"]
     assert delivery["actual_send"] is False
     assert silent_delivery["decision"] == "no_send"
     assert silent_delivery["actual_send"] is False
