@@ -12609,3 +12609,56 @@ NOT CLOSED:
   Replacing legacy hash scoring as a live input requires a separate reviewed
   apply gate.
 ```
+
+## 2026-05-26 - P1-S Slice 4 Local Prototype-Aligned Maturity Scoring
+
+Scope:
+
+```text
+Adapt the 10.20.2.88 self-evolution prototype scoring shape into Memory-OS
+EvidenceScoring report-only records.
+Do not replace legacy hash scoring.
+Do not let maturity scores drive SelfEvolution, proposals, routing, owner
+actions, execution, or delivery.
+```
+
+Local implementation:
+
+```text
+feature_scores.jsonl now includes:
+  prototype_alignment.source=10.20.2.88:self_evolution_daily_pipeline
+  prototype_alignment.mode=adapted_report_only
+  maturity_score
+  maturity_live_applied=false
+
+Maturity dimensions:
+  evidence_strength
+  recurrence
+  actionability
+  source_diversity
+  owner_feedback
+  risk
+  freshness_decay
+  duplicate_backlog
+  gate_state
+```
+
+Local tests:
+
+```text
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py \
+  tests\scripts\test_memory_os_3_200_monitor.py -q
+
+47 passed
+```
+
+Decision:
+
+```text
+LOCAL PASS only.
+
+This closes only the local prototype-aligned maturity-report implementation.
+Installed/live closure still requires deployment to 10.20.3.200, a
+cognitive-loop run, and monitor evidence that prototype_aligned_score_count
+matches feature_score_count while maturity_live_applied=false.
+```

@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed data-hygiene, duplicate-suppression, and feature-score report-only slices.
+Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score report-only, and locally implemented prototype-aligned maturity-report slices.
 
 Current implementation state:
 
@@ -13,6 +13,9 @@ Current implementation state:
 - P1-S slice 3 is implemented and deployed on `10.20.3.200`:
   EvidenceScoring writes a separate `feature_scores.jsonl` report-only
   comparator and keeps legacy hash `scores.jsonl` as the live baseline.
+- P1-S slice 4 is implemented locally: the report-only comparator now carries
+  nine prototype-aligned maturity dimensions adapted from the 10.20.2.88
+  self-evolution pipeline shape.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output and whether
   feature scoring remains report-only.
@@ -67,6 +70,9 @@ monitor_or_validation_fields:
   - left_brain_scoring.owner_feedback_signal_count
   - left_brain_scoring.feature_score_live_applied
   - left_brain_scoring.comparison_count
+  - left_brain_scoring.prototype_aligned_score_count
+  - left_brain_scoring.maturity_dimension_count
+  - left_brain_scoring.maturity_live_applied
   - self_evolution.novelty_skipped_count
   - self_evolution.duplicate_unresolved_proposal_count
   - feedback_backflow.consumed_count
@@ -258,6 +264,44 @@ Monitor:
   FAIL=[]
   PASS includes left_brain_feature_scoring_report_only_ok
   PASS includes left_brain_expired_working_not_scored
+```
+
+P1-S slice 4:
+
+```text
+The report-only feature score is now prototype-aligned with the 10.20.2.88
+self-evolution pipeline shape. It stays in feature_scores.jsonl and adds:
+
+  maturity_score
+  prototype_alignment.source=10.20.2.88:self_evolution_daily_pipeline
+  prototype_alignment.mode=adapted_report_only
+  maturity_live_applied=false
+
+Maturity dimensions:
+
+  evidence_strength
+  recurrence
+  actionability
+  source_diversity
+  owner_feedback
+  risk
+  freshness_decay
+  duplicate_backlog
+  gate_state
+
+This maps the prototype's maturity_score / evidence_strength /
+evidence_count / qualified_evidence_count / actionable_qualified_count /
+observation_days / trigger_rule / approved_pending_execution pattern into
+bounded Memory-OS evidence reports.
+```
+
+Local evidence:
+
+```text
+python -m pytest tests/system_modularization/test_evidence_scoring_module.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+47 passed
 ```
 
 ### 2. Self-Evolution Can Create Proposal Backlog

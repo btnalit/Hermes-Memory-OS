@@ -140,6 +140,44 @@ def test_evidence_scoring_writes_report_only_feature_scores_without_replacing_le
     assert {score["schema_version"] for score in legacy_scores} == {"hermes.evidence_score.v0"}
 
 
+def test_evidence_scoring_reports_prototype_aligned_maturity_dimensions(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = _seed_scoring_inputs(tmp_path, store)
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    result = module.score_all(store=store, proposal_queue=proposal_queue)
+
+    feature_scores = module.read_feature_scores()
+    required_dimensions = {
+        "evidence_strength",
+        "recurrence",
+        "actionability",
+        "source_diversity",
+        "owner_feedback",
+        "risk",
+        "freshness_decay",
+        "duplicate_backlog",
+        "gate_state",
+    }
+    assert result["prototype_aligned_score_count"] == len(feature_scores) == 4
+    assert result["maturity_dimension_keys"] == sorted(required_dimensions)
+    assert result["maturity_live_applied"] is False
+    for record in feature_scores:
+        assert record["prototype_alignment"]["source"] == "10.20.2.88:self_evolution_daily_pipeline"
+        assert record["prototype_alignment"]["mode"] == "adapted_report_only"
+        assert set(record["maturity_dimensions"]) == required_dimensions
+        assert 0.0 <= record["maturity_score"] <= 1.0
+        assert record["feature_score"] == record["maturity_score"]
+        assert record["maturity_live_applied"] is False
+        for dimension in record["maturity_dimensions"].values():
+            assert set(dimension) >= {"score", "signals"}
+            assert 0.0 <= dimension["score"] <= 1.0
+            assert isinstance(dimension["signals"], dict)
+        rendered = json.dumps(record, ensure_ascii=False)
+        assert "Create a dry-run evidence scoring report" not in rendered
+        assert "Candidate body should not be auto-approved" not in rendered
+
+
 def test_evidence_scoring_skips_expired_working_items(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

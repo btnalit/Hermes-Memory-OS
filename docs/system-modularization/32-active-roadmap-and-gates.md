@@ -1135,7 +1135,9 @@ Stop signal:
 ### P1-S - RH-39 Left-Brain Governance Quality
 
 Status: design gate added; P1-S slices 1, 2, and 3 are deployed on
-`10.20.3.200` with WARN-only monitor evidence and no hard failures.
+`10.20.3.200` with WARN-only monitor evidence and no hard failures. P1-S
+slice 4 is locally implemented as a 10.20.2.88 prototype-aligned maturity
+dimension report and is pending live deployment evidence.
 
 Source:
 
@@ -1151,6 +1153,9 @@ Reason:
   replayable but not meaningful importance/risk/feedback scores;
 - feature-based EvidenceScoring v2 now writes report-only comparison records
   without replacing legacy hash scores or driving proposals;
+- prototype-aligned maturity dimensions are locally implemented for direct
+  report-only deployment/testing, mapping the 10.20.2.88 maturity/evidence/
+  recurrence/gate pattern into bounded Memory-OS score records;
 - deployed P1-S slice 2 adds a SelfEvolution novelty/idempotency gate for
   duplicate unresolved proposals before OpsGate/proposal creation;
 - feedback ledgers exist, but feedback is not yet consumed as first-class
@@ -1164,6 +1169,8 @@ Reason:
   `hash_score_legacy_count=484`, `comparison_count=484`,
   `feature_score_live_applied=false`, and PASS
   `left_brain_feature_scoring_report_only_ok`;
+- local tests report P1-S.4 `maturity_dimension_count=9` and
+  `maturity_live_applied=false`; live monitor evidence is pending;
 - expired working handling in DeepReflection is still not fixed;
 - approved proposals are visible and safe, but execution-decision state remains
   future work.
@@ -1184,6 +1191,8 @@ Latest slice-1 evidence:
 Required design work:
 
 1. feature-based EvidenceScoring v2 report-only is deployed and monitored;
+1a. prototype-aligned maturity dimensions are locally implemented and pending
+    live deployment/monitor evidence;
 2. SelfEvolution novelty/idempotency gates are deployed for unresolved
    proposals and repeated score refs;
 3. route MemorySources / owner / expression feedback into GovernanceFeedback as

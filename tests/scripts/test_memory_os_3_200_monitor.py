@@ -632,6 +632,48 @@ def test_classify_snapshot_tracks_report_only_feature_scoring_and_blocks_live_ap
     assert any(item["code"] == "left_brain_feature_scoring_live_applied" for item in classification["fail"])
 
 
+def test_classify_snapshot_tracks_prototype_aligned_maturity_scoring_report_only():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["evidence"] = {
+        "evidence_count": 4,
+        "score_count": 4,
+        "expired_used_in_scoring_count": 0,
+        "feature_score_mode": "report_only",
+        "feature_score_count": 4,
+        "hash_score_legacy_count": 4,
+        "comparison_count": 4,
+        "feature_score_live_applied": False,
+        "feature_score_report_count": 1,
+        "prototype_aligned_score_count": 4,
+        "maturity_dimension_count": 9,
+        "maturity_dimension_keys": [
+            "actionability",
+            "duplicate_backlog",
+            "evidence_strength",
+            "freshness_decay",
+            "gate_state",
+            "owner_feedback",
+            "recurrence",
+            "risk",
+            "source_diversity",
+        ],
+        "maturity_live_applied": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "left_brain_maturity_scoring_report_only_ok" for item in classification["pass"])
+    assert "prototype_aligned_score_count" in rendered
+    assert "maturity_dimension_count" in rendered
+
+    snapshot["module_artifacts"]["evidence"]["maturity_live_applied"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "left_brain_maturity_scoring_live_applied" for item in classification["fail"])
+
+
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
     snapshot = _healthy_snapshot()
     snapshot["session_activity"] = {"total_session_events": 12}

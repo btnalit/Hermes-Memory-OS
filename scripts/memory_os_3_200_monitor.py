@@ -299,6 +299,22 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 warn.append({"code": "left_brain_feature_scoring_report_only_incomplete", "value": evidence})
         elif legacy_count > 0:
             warn.append({"code": "left_brain_feature_scoring_missing", "hash_score_legacy_count": legacy_count})
+        maturity_live_applied = evidence.get("maturity_live_applied") is True
+        prototype_aligned_count = int(evidence.get("prototype_aligned_score_count") or 0)
+        maturity_dimension_count = int(evidence.get("maturity_dimension_count") or 0)
+        if maturity_live_applied:
+            fail.append({"code": "left_brain_maturity_scoring_live_applied", "value": evidence})
+        elif prototype_aligned_count > 0:
+            if evidence.get("feature_score_mode") == "report_only" and maturity_dimension_count >= 9:
+                passed.append(
+                    {
+                        "code": "left_brain_maturity_scoring_report_only_ok",
+                        "prototype_aligned_score_count": prototype_aligned_count,
+                        "maturity_dimension_count": maturity_dimension_count,
+                    }
+                )
+            else:
+                warn.append({"code": "left_brain_maturity_scoring_report_only_incomplete", "value": evidence})
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
@@ -1775,6 +1791,10 @@ def module_artifact_summary():
         "comparison_count": evidence.get("comparison_count"),
         "feature_score_report_count": evidence.get("feature_score_report_count"),
         "feature_score_live_applied": evidence.get("feature_score_live_applied"),
+        "prototype_aligned_score_count": evidence.get("prototype_aligned_score_count"),
+        "maturity_dimension_count": evidence.get("maturity_dimension_count"),
+        "maturity_dimension_keys": evidence.get("maturity_dimension_keys"),
+        "maturity_live_applied": evidence.get("maturity_live_applied"),
         "owner_feedback_signal_count": evidence.get("owner_feedback_signal_count"),
         "subject_counts": evidence.get("subject_counts"),
         "working_subject_count": evidence.get("working_subject_count"),
