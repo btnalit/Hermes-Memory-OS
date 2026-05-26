@@ -223,13 +223,16 @@ Current truth:
   output records a SpeakGate decision and monitor fields; historical missing
   decisions remain visible as WARN until old reports age out or are separately
   accounted for;
+- P1-R slice 2 is implemented locally: owner review resolves Wandering
+  `payload_ref` values into bounded expression previews so speak review items
+  can be judged by content;
 - expression feedback backflow is not implemented.
 
 Required before runtime:
 
 - RightBrainExpressionEngine / Hermes-agent expression adapter contract;
 - every non-silent draft passes SpeakGate;
-- owner can see bounded expression content;
+- deploy owner-visible bounded expression content and monitor preview coverage;
 - expression feedback labels exist;
 - GovernanceFeedback/SelfEvolution consume outcomes only as proposal evidence;
 - monitor fields exist.

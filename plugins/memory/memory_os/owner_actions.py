@@ -1896,6 +1896,8 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
             target_id = str(record.get("id") or record.get("payload_ref") or "")
             if not target_id or f"speak:{target_id}" in closed:
                 continue
+            payload_ref = str(record.get("payload_ref") or "")
+            expression_preview = _expression_preview_for_payload_ref(store, payload_ref)
             items.append(
                 {
                     "schema_version": "memory-os.review_item.v0",
@@ -1906,7 +1908,9 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
                     "priority": "review_suggested",
                     "created_at": str(record.get("created_at") or record.get("ts") or ""),
                     "status": "pending",
-                    "summary": f"{module_name} would-send artifact; payload_ref={record.get('payload_ref', '')}",
+                    "summary": "右脑 would-send 主动发言草案",
+                    "payload_ref": payload_ref,
+                    "expression_preview": expression_preview,
                     "safe_source_ids": [],
                     "raw_body_included": False,
                 }
@@ -1947,6 +1951,19 @@ def _memory_source_fyi_items(store: MemoryOSStore, *, limit: int, start: int = 1
         if len(selected) >= limit:
             break
     return selected
+
+
+def _expression_preview_for_payload_ref(store: MemoryOSStore, payload_ref: str) -> str:
+    prefix = "local://wandering_mind/"
+    if not payload_ref.startswith(prefix):
+        return ""
+    output_id = payload_ref.removeprefix(prefix).strip("/")
+    if not output_id or output_id == "silent":
+        return ""
+    for record in _read_jsonl(store.roots.hermes_home / "system-modules" / "wandering_mind" / "outputs.jsonl"):
+        if str(record.get("id") or "") == output_id:
+            return _bounded_text(str(record.get("output") or ""), 360)
+    return ""
 
 
 def _channel_report(
@@ -2081,6 +2098,8 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         "age_days": item.get("age_days"),
         "summary": _bounded_text(str(item.get("summary") or ""), 180),
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360),
+        "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
+        "payload_ref": _bounded_text(str(item.get("payload_ref") or ""), 220),
         "safe_source_ids": item.get("safe_source_ids") or [],
         "raw_body_included": False,
     }
@@ -2140,6 +2159,9 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "consequence": _review_consequence(target_type),
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360)
         if target_type == "candidate"
+        else "",
+        "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360)
+        if target_type == "speak"
         else "",
         "available_actions": [action["command"] for action in actions],
         "action_tokens": {action["action_type"]: action["token"] for action in actions},
@@ -2206,7 +2228,9 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             220,
         )
     if target_type == "speak":
-        return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案。", 220)
+        if item.get("expression_preview"):
+            return _bounded_text(f"{source_module} 产生了一条可审阅的 would-send 主动发言草案。", 220)
+        return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案，但当前只能看到安全引用。", 220)
     return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
 
 
@@ -2381,7 +2405,7 @@ def _rendered_digest_item_lines(item: dict[str, Any]) -> list[str]:
     target_ref = f"{item.get('target_type')}:{item.get('target_id')}"
     commands = [str(command) for command in item.get("action_commands") or []]
     action_line = " / ".join(commands) if commands else str(item.get("suggested_action") or "no action required")
-    return [
+    lines = [
         f"- [{item.get('anchor')}] {item.get('question')}",
         f"  操作: {action_line}",
         f"  引用: {target_ref}",
@@ -2389,6 +2413,10 @@ def _rendered_digest_item_lines(item: dict[str, Any]) -> list[str]:
         f"  结果: {item.get('consequence')}",
         f"  来源: {item.get('source_module')}",
     ]
+    expression_preview = str(item.get("expression_preview") or "")
+    if expression_preview:
+        lines.insert(1, f"  内容: {expression_preview}")
+    return lines
 
 
 def _rendered_anchor_map(rendered: dict[str, Any]) -> dict[str, dict[str, Any]]:

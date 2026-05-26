@@ -389,6 +389,15 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_rendered_digest_missing_overview" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["owner_review_rendered_digest"]["speak_item_count"] = 2
+    snapshot["owner_review_rendered_digest"]["speak_expression_preview_count"] = 1
+    snapshot["owner_review_rendered_digest"]["speak_expression_preview_missing_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "right_brain_review_speak_preview_missing" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_reply_dry_run"]["dry_run"] = False
     classification = classify_snapshot(snapshot)
 
@@ -1329,6 +1338,9 @@ def _healthy_owner_rendered_digest() -> dict:
         "text_has_transcript_marker": False,
         "response_header_present": True,
         "overview_present": True,
+        "speak_item_count": 0,
+        "speak_expression_preview_count": 0,
+        "speak_expression_preview_missing_count": 0,
         "section_counts": {"action_required": 0, "review_suggested": 0, "fyi": 1},
         "anchors": {"action_required": [], "review_suggested": [], "fyi": ["F1"]},
         "boundary": {

@@ -2,16 +2,22 @@
 
 Date: 2026-05-26
 
-Status: design gate plus first local wiring slice.
+Status: design gate plus first deployed wiring slice and local owner-preview slice.
 
 Current implementation state:
 
 - P1-R slice 1 is deployed on the `10.20.3.200` test host: cognitive loop
   Wandering output now records a SpeakGate decision for every result that
   contains an output.
+- P1-R slice 2 is implemented locally: OwnerReview resolves Wandering
+  `payload_ref` values into bounded `expression_preview` text so the owner can
+  judge a would-send draft by content, not only by token/reference.
 - Monitor summary now exposes `speak_gate_evaluated_count`,
   `speak_gate_missing_evaluation_count`, and
   `speak_gate_decision_distribution`.
+- Monitor summary now also exposes speak review preview coverage:
+  `speak_item_count`, `speak_expression_preview_count`, and
+  `speak_expression_preview_missing_count`.
 - This does not implement a RightBrainExpressionEngine, scheduled expression
   delivery, owner expression feedback, or governance backflow.
 - Current live monitor still reports historical missing SpeakGate evaluations
@@ -82,9 +88,9 @@ The current code and monitor support a safe observation path only:
   boundaries false.
 - Existing live monitor evidence still includes historical missing SpeakGate
   evaluations from older reports.
-- Owner review can list speak/would-send items, but v0.1 mostly shows bounded
-  references and action tokens, not enough expression content for owner quality
-  judgment.
+- Owner review can list speak/would-send items and P1-R slice 2 locally renders
+  bounded expression previews for Wandering payload refs. This is not yet
+  deployed on `10.20.3.200`.
 - Governance feedback currently consumes evidence / ops / proposal /
   self-evolution outcomes, not full wandering/speak feedback outcomes.
 

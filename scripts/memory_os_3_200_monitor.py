@@ -405,6 +405,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_rendered_digest_missing_response_header"})
             if rendered_digest.get("overview_present") is False:
                 fail.append({"code": "owner_review_rendered_digest_missing_overview"})
+            if int(rendered_digest.get("speak_expression_preview_missing_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "right_brain_review_speak_preview_missing",
+                        "value": rendered_digest.get("speak_expression_preview_missing_count"),
+                    }
+                )
             for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
                 if (rendered_digest.get("boundary") or {}).get(key) is True:
                     fail.append({"code": f"owner_review_rendered_digest_{key}_true"})
@@ -420,6 +427,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 passed.append({"code": "owner_review_rendered_digest_ok"})
                 passed.append({"code": "owner_review_rendered_digest_response_header_ok"})
                 passed.append({"code": "owner_review_rendered_digest_overview_ok"})
+                if int(rendered_digest.get("speak_item_count") or 0) > 0:
+                    passed.append({"code": "right_brain_review_speak_preview_visible"})
         else:
             warn.append({"code": "owner_review_rendered_digest_unavailable", "value": rendered_digest})
 
@@ -1084,6 +1093,9 @@ def _owner_rendered_digest_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "text_char_count": summary.get("text_char_count"),
         "text_has_internal_schema": summary.get("text_has_internal_schema"),
         "text_has_transcript_marker": summary.get("text_has_transcript_marker"),
+        "speak_item_count": summary.get("speak_item_count"),
+        "speak_expression_preview_count": summary.get("speak_expression_preview_count"),
+        "speak_expression_preview_missing_count": summary.get("speak_expression_preview_missing_count"),
         "section_counts": summary.get("section_counts"),
     }
 
@@ -1922,6 +1934,15 @@ def owner_review_rendered_digest_summary():
         return report
     text = str(report.get("text") or "")
     sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
+    rendered_items = [
+      item
+      for value in sections.values()
+      if isinstance(value, list)
+      for item in value
+      if isinstance(item, dict)
+    ]
+    speak_items = [item for item in rendered_items if item.get("target_type") == "speak"]
+    speak_preview_count = sum(1 for item in speak_items if str(item.get("expression_preview") or "").strip())
     return {
       "schema_version": report.get("schema_version"),
       "status": report.get("status"),
@@ -1932,6 +1953,9 @@ def owner_review_rendered_digest_summary():
       "text_has_transcript_marker": any(token in text for token in ("User:", "Assistant:", "用户:", "助手:", "用户：", "助手：", "| Assistant:", "| User:")),
       "response_header_present": all(token in text for token in ("回复方式", "A1/R1/F1 只是列表编号", "oa_")),
       "overview_present": all(token in text for token in ("全貌", "待处理", "未展示")),
+      "speak_item_count": len(speak_items),
+      "speak_expression_preview_count": speak_preview_count,
+      "speak_expression_preview_missing_count": max(len(speak_items) - speak_preview_count, 0),
       "section_counts": {key: len(value) for key, value in sections.items() if isinstance(value, list)},
       "anchors": {
         key: [str(item.get("anchor") or "") for item in value if isinstance(item, dict)]

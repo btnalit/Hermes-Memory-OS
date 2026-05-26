@@ -12125,3 +12125,92 @@ NOT CLOSED:
   SelfEvolution novelty/idempotency gates are still future P1-S slices.
   Feedback backflow and production cadence are still not closed.
 ```
+
+## 2026-05-26 - P1-R Slice 2 Local Owner-Visible Expression Preview
+
+Scope:
+
+```text
+P1-R / RH-38 second implementation slice only.
+OwnerReview bounded expression preview for speak/would-send items.
+No RightBrainExpressionEngine.
+No scheduled expression delivery.
+No expression feedback labels.
+No GovernanceFeedback/SelfEvolution backflow.
+```
+
+Dynamic closure mapping:
+
+```text
+source_of_truth:
+  40-memory-os-unified-control-plane.md
+  38-right-brain-expression-closure-contract.md
+  live finding: OwnerReview speak items previously exposed only refs/actions
+
+owning_seam:
+  right-brain expression review projection / OwnerReview rendered digest /
+  monitor evidence
+
+reverse_scope:
+  Hermes owns owner conversation and delivery. Memory-OS owns bounded review
+  projection, action tokens, audit, and monitor evidence. This slice does not
+  add transport, scheduling, send behavior, or expression generation.
+```
+
+Implementation:
+
+```text
+plugins/memory/memory_os/owner_actions.py:
+  _speak_review_items() resolves local://wandering_mind/<output_id> refs
+  against system-modules/wandering_mind/outputs.jsonl.
+
+  speak review items now carry:
+    expression_preview
+    payload_ref
+
+  render_owner_review_digest() includes expression_preview in rendered sections
+  and the digest text prints:
+    内容: <bounded expression preview>
+
+scripts/memory_os_3_200_monitor.py:
+  owner_review_rendered_digest now reports:
+    speak_item_count
+    speak_expression_preview_count
+    speak_expression_preview_missing_count
+
+  missing speak preview becomes WARN:
+    right_brain_review_speak_preview_missing
+```
+
+Local evidence:
+
+```text
+python -m pytest \
+  tests/plugins/memory/test_memory_os_owner_actions.py::test_render_digest_shows_bounded_speak_expression_preview \
+  tests/plugins/memory/test_memory_os_owner_actions.py::test_render_digest_turns_schema_items_into_owner_readable_review_items \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+37 passed
+
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=28
+active_work_item_count=19
+active_work_mapping_count=19
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Decision:
+
+```text
+LOCAL PASS.
+
+This closes only local OwnerReview projection of bounded Wandering expression
+content. Installed/live closure still requires deployment to 10.20.3.200 and
+monitor evidence that shown speak review items have
+speak_expression_preview_missing_count=0.
+```

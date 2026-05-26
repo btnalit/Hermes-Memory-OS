@@ -602,6 +602,48 @@ def test_render_digest_keeps_telegram_text_bounded_without_partial_item(tmp_path
     assert "RAW PROPOSAL BODY" not in text
 
 
+def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
+    store = _store(tmp_path)
+    module_root = tmp_path / "system-modules" / "wandering_mind"
+    module_root.mkdir(parents=True)
+    output_record = {
+        "schema_version": "hermes.wandering_mind_output.v0",
+        "id": "wout_owner_preview_001",
+        "ts": "2026-05-26T00:00:00+00:00",
+        "profile": "main",
+        "module": "wandering_mind",
+        "source_event_id": "evt_preview_001",
+        "output": "今天我想轻轻提醒你：这条右脑表达需要你看过内容后再决定是否允许一次。",
+        "output_ref": "local://wandering_mind/wout_owner_preview_001",
+    }
+    would_send = {
+        "schema_version": "hermes.delivery_would_send.v0",
+        "id": "wsend_owner_preview_001",
+        "ts": "2026-05-26T00:00:01+00:00",
+        "profile": "main",
+        "module": "wandering_mind",
+        "mode": "would_send",
+        "actual_send": False,
+        "channel": "origin",
+        "payload_ref": "local://wandering_mind/wout_owner_preview_001",
+        "reason": "wandering_mind_no_send",
+    }
+    (module_root / "outputs.jsonl").write_text(json.dumps(output_record, ensure_ascii=False) + "\n", encoding="utf-8")
+    (module_root / "would_send.jsonl").write_text(json.dumps(would_send, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    rendered = render_owner_review_digest(store, max_action_required=0, max_review_suggested=1, max_fyi=0)
+    item = rendered["sections"]["review_suggested"][0]
+    text = rendered["text"]
+
+    assert item["target_type"] == "speak"
+    assert item["expression_preview"] == output_record["output"]
+    assert item["raw_body_included"] is False
+    assert "内容: 今天我想轻轻提醒你" in text
+    assert "payload_ref=" not in text
+    assert "memory allow oa_" in text
+    assert "actual_send" not in text
+
+
 def test_review_surface_next_page_uses_latest_owner_home_digest_offsets(tmp_path):
     store = _store(tmp_path)
     save_config(
