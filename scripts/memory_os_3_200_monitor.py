@@ -269,6 +269,16 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     },
                 }
             )
+        if int(ops_gate.get("skipped_run_count") or 0) > 0 and ops_gate.get("latest_cadence_skipped") is True:
+            passed.append(
+                {
+                    "code": "ops_gate_no_pending_skip_visible",
+                    "value": {
+                        "skipped_run_count": ops_gate.get("skipped_run_count"),
+                        "latest_skip_reason": ops_gate.get("latest_skip_reason"),
+                    },
+                }
+            )
         evidence = module_artifacts.get("evidence") if isinstance(module_artifacts.get("evidence"), dict) else {}
         pipeline_check = (
             module_artifacts.get("left_brain_pipeline_check")
@@ -2145,6 +2155,10 @@ def module_artifact_summary():
       },
       "ops_gate": {
         "report_count": ops_gate.get("report_count"),
+        "run_report_count": ops_gate.get("run_report_count"),
+        "skipped_run_count": ops_gate.get("skipped_run_count"),
+        "latest_cadence_skipped": ops_gate.get("latest_cadence_skipped"),
+        "latest_skip_reason": ops_gate.get("latest_skip_reason"),
         "blocked_decision_count": ops_gate.get("blocked_decision_count"),
         "proposal_followup_action_count": len(proposal_followup_action_counts),
         "duplicate_proposal_followup_count": duplicate_proposal_followup_count,

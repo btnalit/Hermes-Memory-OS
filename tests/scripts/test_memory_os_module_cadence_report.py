@@ -123,6 +123,22 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
         + "\n",
         encoding="utf-8",
     )
+    ops_root = home / "system-modules" / "ops_gate"
+    ops_root.mkdir(parents=True)
+    (ops_root / "runs.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.ops_gate_run.v0",
+                "status": "ok",
+                "skipped": True,
+                "cadence_skipped": True,
+                "reason": "no_pending_proposed_actions",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     report = module.build_cadence_report(hermes_home=home, profile="main", apply=True)
 
@@ -164,8 +180,9 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
     assert by_module["digest_consolidation"]["cadence_counters"]["generated_count"] == 1
     assert by_module["evidence_scoring"]["cadence_counters"]["error_count"] == 1
     assert by_module["evidence_scoring"]["cadence_counters"]["skipped_count"] == 1
+    assert by_module["ops_gate"]["cadence_counters"]["skipped_count"] == 1
     assert report["generated_count"] >= 2
-    assert report["skipped_count"] >= 1
+    assert report["skipped_count"] >= 2
     assert report["error_count"] >= 1
     assert report["duplicate_count"] >= 1
 

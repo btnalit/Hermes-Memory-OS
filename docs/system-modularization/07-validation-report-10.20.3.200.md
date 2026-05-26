@@ -14819,3 +14819,154 @@ Conclusion:
 - LIVE PASS / MONITOR PASS for EvidenceScoring module-local cadence split.
 - This is not production cadence maturity yet; it is the second safe local skip
   gate after SelfEvolution.
+
+## 2026-05-27 - P1-T OpsGate No-Pending Skip Gate Runtime Evidence
+
+Scope:
+
+- P1-T third module-local cadence split.
+- Target module: `OpsGate`.
+- Do not change Hermes cron/systemd timers.
+- Do not change approved-proposal explicit follow-up behavior when proposed
+  actions exist.
+- Prevent the test-host cognitive loop from appending empty OpsGate reports when
+  there are no pending proposed actions.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth: 32/40/41 P1-T roadmap plus live module_cadence counters
+finding_type: module cadence noise / empty report generation
+owning_seam: OpsGateModule.run_once report-only gate
+reverse_scope: Hermes remains scheduler/cron/transport owner; Memory-OS only adds module-local no-pending skip evidence
+equivalent_contract_or_project_contract: 36 cadence classification; 39 left-brain governance quality; 40 control plane
+evidence_loop: failing unit tests -> implementation -> cadence-report test -> live no-pending run -> live cadence report -> monitor
+monitor_or_validation_fields: ops_gate.skipped_run_count,latest_cadence_skipped,latest_skip_reason,ops_gate_no_pending_skip_visible
+promotion_signal: proposed_actions=[] returns skipped=true/cadence_skipped=true and report_count does not increase
+stop_or_rollback_signal: pending proposed action is skipped; OpsGate report-only follow-up stops writing reports; actual_execute/send true
+external_review: not required for this no-transport/no-execution skip gate
+```
+
+Local TDD:
+
+```text
+python -m pytest tests\system_modularization\test_ops_gate_module.py -q
+before implementation: FAILED, KeyError: 'skipped'
+after implementation: 7 passed
+
+python -m pytest tests\scripts\test_memory_os_module_cadence_report.py tests\scripts\test_memory_os_3_200_monitor.py -q
+before implementation:
+  cadence report did not count ops_gate skipped runs
+  monitor did not emit ops_gate_no_pending_skip_visible
+after implementation: 49 passed
+```
+
+Implementation:
+
+```text
+OpsGateModule.run_once(proposed_actions=[]):
+  status=ok
+  skipped=true
+  cadence_skipped=true
+  reason=no_pending_proposed_actions
+  actual_execute=false
+  writes system-modules/ops_gate/runs.jsonl
+  does not write system-modules/ops_gate/reports.jsonl
+
+OpsGateModule.run_once(proposed_actions=[...]):
+  unchanged; still writes report-only decisions
+  actual_execute=false
+```
+
+Remote deployment:
+
+```text
+scp plugins/modules/governance/ops_gate.py \
+  hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/governance/ops_gate.py
+
+scp scripts/memory_os_module_cadence_report.py \
+  hermes-media:/root/.hermes/scripts/memory_os_module_cadence_report.py
+```
+
+Live no-pending smoke:
+
+```text
+before_reports=58
+after_reports=58
+before_runs=0
+after_runs=1
+result_status=ok
+skipped=True
+cadence_skipped=True
+reason=no_pending_proposed_actions
+decision_count=0
+actual_execute=False
+status_skipped_run_count=1
+status_latest_cadence_skipped=True
+status_latest_skip_reason=no_pending_proposed_actions
+```
+
+Live cadence report:
+
+```text
+ops_gate.cadence_counters:
+  run_count=59
+  generated_count=58
+  skipped_count=1
+  error_count=0
+  duplicate_count=0
+  last_status=ok
+
+boundary.cron_modified=false
+actual_send=false
+actual_execute=false
+```
+
+Monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+```
+
+Result:
+
+```text
+status=WARN
+FAIL=[]
+PASS includes:
+- ops_gate_no_pending_skip_visible
+- module_cadence_report_visible
+- owner_review_proposal_followups_ok
+
+OwnerProposalFollowups:
+  awaiting_ops_gate=0
+  ops_gate_reviewed=7
+  execution_tickets=0
+  actual_execute=false
+
+ModuleArtifacts.ops_gate:
+  report_count=58
+  run_report_count=1
+  skipped_run_count=1
+  latest_cadence_skipped=true
+  latest_skip_reason=no_pending_proposed_actions
+  duplicate_proposal_followup_count=0
+```
+
+Remaining WARN items are outside this slice:
+
+```text
+module_cadence_split_pending
+session_mirror_pending_sessions
+rh31_eval_has_failures
+rh26_casual_empty
+```
+
+Conclusion:
+
+- LIVE PASS / MONITOR PASS for OpsGate no-pending skip gate.
+- OpsGate no longer writes empty reports when there are no proposed actions.
+- Explicit approved-proposal report-only follow-up is unchanged and remains the
+  only path that writes OpsGate proposal decisions.
+- This is the third safe P1-T module-local split after SelfEvolution and
+  EvidenceScoring; production cadence maturity remains open for other modules.

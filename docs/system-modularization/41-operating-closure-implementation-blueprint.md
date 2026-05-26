@@ -277,7 +277,7 @@ Not closed until all are true:
 | EvidenceScoring | `plugins/modules/evidence/scoring.py` | Feature-maturity v2 is the primary score path; legacy hash is comparison only. | Keep score dimensions visible; do not let scores directly execute, route, or mutate policy. | `tests/system_modularization/test_evidence_scoring_module.py` |
 | SelfEvolution | `plugins/modules/governance/self_evolution.py` | Uses primary feature scores, duplicate unresolved skip exists, expression feedback can produce expression-policy proposals. | Add remaining cadence gates; consume governance feedback only as proposal input. | `tests/system_modularization/test_self_evolution_module.py` |
 | ProposalQueue | `plugins/modules/governance/proposal_queue.py` | `approve` moves to `approved_for_proposal`; no execution. | Add lifecycle fields: followup_state, ops_reviewed_at, execution_decision_state, verification_refs. | `tests/system_modularization/test_proposal_queue_module.py` |
-| OpsGate | `plugins/modules/governance/ops_gate.py` | Report-only gate. | Review approved proposals and expose follow-up status; do not create execution tickets. | `tests/system_modularization/test_ops_gate_module.py` |
+| OpsGate | `plugins/modules/governance/ops_gate.py` | Report-only gate with no-pending skip records. | Review approved proposals when proposed actions exist; skip without writing empty reports when no actions are pending; do not create execution tickets. | `tests/system_modularization/test_ops_gate_module.py` |
 | LeftBrainPipelineCheck | new `plugins/modules/governance/pipeline_checker.py` | Missing. | Read-only checker for proposal lifecycle, duplicate classes, cadence, boundary invariants. | new `tests/system_modularization/test_left_brain_pipeline_checker.py` |
 | Owner Review Renderer | `plugins/memory/memory_os/owner_actions.py::render_owner_review_digest` | Human-readable digest exists. | Add expression preview and proposal follow-up rendering; keep tokenized actions. | `tests/plugins/memory/test_memory_os_owner_actions.py` |
 | Review Surface | `plugins/memory/memory_os/status_tool_contract.py`, provider tool surface | Agent can inspect bounded state. | Add expandable review context and approved proposal follow-up context. | provider/tool tests |
@@ -923,7 +923,7 @@ Runtime status:
 - `memory_os_module_cadence_report.py --apply` writes
   `system-modules/module_cadence/reports.jsonl`;
 - latest monitor reports `module_count=18`, `counter_coverage_count=18`,
-  `generated_count=874`, `skipped_count=12`, `error_count=15`,
+  `generated_count=882`, `skipped_count=15`, `error_count=15`,
   `duplicate_count=11`, `expected_hermes_cron_missing_count=0`, and
   `cron_modified=false`;
 - `module_cadence_split_pending` remains WARN because cadence timers have not
@@ -1201,18 +1201,21 @@ Completed baseline:
     fingerprint, skips unchanged reruns with `cadence_skipped=true`, and
     exposes skipped run counts through module status, cadence report, and
     monitor.
+13. P1-T third split is deployed: OpsGate records no-pending skip runs with
+    `cadence_skipped=true`, does not append empty reports when
+    `proposed_actions=[]`, and keeps explicit approved-proposal report-only
+    review unchanged.
 
 Next runtime order:
 
 1. P1-S feedback backflow quality checks for proposal usefulness, without
    direct policy/prompt/cadence mutation.
-2. P1-T choose the next module split from refreshed generated/skipped/error/
-   duplicate counters after SelfEvolution and EvidenceScoring evidence is
-   stable.
-3. P1-Q extend explicit apply only for one concrete proposal kind with
+2. P1-Q extend explicit apply only for one concrete proposal kind with
    owner/OpsGate evidence, bounded runtime target, rollback, and monitor
    fields.
-4. P1-P timestamp / aging quality.
+3. P1-P timestamp / aging quality.
+4. P1-T choose any further module split from refreshed generated/skipped/error/
+   duplicate counters after SelfEvolution, EvidenceScoring, and OpsGate.
 5. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
    bounded-live gate.
 

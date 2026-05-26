@@ -598,13 +598,21 @@ def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_se
         "self_evolution": {"report_count": 11, "proposal_count": 11, "last_status": "ok"},
         "governance_feedback": {"emitted_event_count": 57},
         "deep_reflection": {"report_count": 17, "current_injection_exists": True},
-        "ops_gate": {"report_count": 22, "blocked_decision_count": 0},
+        "ops_gate": {
+            "report_count": 22,
+            "blocked_decision_count": 0,
+            "run_report_count": 23,
+            "skipped_run_count": 1,
+            "latest_cadence_skipped": True,
+            "latest_skip_reason": "no_pending_proposed_actions",
+        },
         "speak_gate": {"would_send_count": 0, "actual_send": False},
     }
 
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "module_artifact_summary_ok" for item in classification["pass"])
+    assert any(item["code"] == "ops_gate_no_pending_skip_visible" for item in classification["pass"])
 
     snapshot["module_artifacts"]["speak_gate"]["actual_send"] = True
     classification = classify_snapshot(snapshot)

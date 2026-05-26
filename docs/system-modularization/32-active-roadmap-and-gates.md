@@ -1360,8 +1360,9 @@ Stop signal:
 ### P1-T - Prototype-Informed Module Cadence Split
 
 Status: report-only runtime baseline deployed on `10.20.3.200`; runtime
-splits are deployed for `SelfEvolution` and `EvidenceScoring` as module-local
-skip gates; no Hermes cron/systemd scheduling changes have been made.
+splits are deployed for `SelfEvolution`, `EvidenceScoring`, and `OpsGate` as
+module-local skip gates; no Hermes cron/systemd scheduling changes have been
+made.
 
 Implementation blueprint:
 
@@ -1447,6 +1448,8 @@ Stop signal:
 - SelfEvolution still creates a new proposal for a same-day same-signal rerun;
 - SelfEvolution cadence skip hides an error, suppresses new distinct evidence,
   or changes `actual_execute` / `actual_send`.
+- OpsGate skips a non-empty proposed action set, stops writing report-only
+  follow-up reports for approved proposals, or sets `actual_execute=true`.
 
 Second split decision:
 
@@ -1468,6 +1471,27 @@ Second split decision:
 - cadence report evidence: latest report shows
   `evidence_scoring.generated_count=514`, `skipped_count=1`,
   `run_count=515`, `error_count=0`.
+
+Third split decision:
+
+- target module: `OpsGate`;
+- reason: live cadence counters showed `ops_gate.generated_count=58` while
+  `OwnerProposalFollowups.awaiting_ops_gate=0`; the module was still writing
+  empty reports from the cognitive-loop harness when there were no proposed
+  actions to review;
+- prototype reference: `10.20.2.88` treats Ops-style gate work as demand/report
+  driven, not as a report to rewrite on every harness tick;
+- implementation: `OpsGateModule.run_once(proposed_actions=[])` now records a
+  bounded `runs.jsonl` skip with `skipped=true`, `cadence_skipped=true`, and
+  `reason=no_pending_proposed_actions` without appending `reports.jsonl`;
+- unchanged path: explicit approved-proposal follow-up still passes a concrete
+  proposed action and writes the report-only OpsGate decision;
+- live evidence: on `10.20.3.200`, `before_reports=58`,
+  `after_reports=58`, `before_runs=0`, `after_runs=1`, `actual_execute=false`;
+- monitor evidence: PASS `ops_gate_no_pending_skip_visible`,
+  `ModuleArtifacts.ops_gate.skipped_run_count=1`,
+  `latest_cadence_skipped=true`, and
+  `latest_skip_reason=no_pending_proposed_actions`.
 
 ## Active P2 Queue
 

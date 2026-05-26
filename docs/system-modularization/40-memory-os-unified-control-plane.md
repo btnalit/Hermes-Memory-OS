@@ -268,9 +268,9 @@ outcome-feedback baseline:
 1. **P1-S feedback backflow quality**: left-brain pipeline check is currently
    ok and DR expired-working hygiene is live; the remaining P1-S work is
    improving proposal quality from feedback signals without direct mutation.
-2. **P1-T next cadence split**: cadence report is live and SelfEvolution plus
-   EvidenceScoring now have module-local skip gates; choose the next module
-   from refreshed counters, not a timer guess.
+2. **P1-T next cadence split**: cadence report is live and SelfEvolution,
+   EvidenceScoring, and OpsGate now have module-local skip gates; choose any
+   further module from refreshed counters, not a timer guess.
 3. **P1-Q extension only for concrete proposal kinds**: extend explicit apply
    only when a proposal kind has owner approval, OpsGate report-only evidence,
    bounded runtime target, rollback, and monitor fields.
@@ -409,8 +409,8 @@ Current truth:
 - P1-T cadence report is deployed on `10.20.3.200`; live monitor reports
   `module_cadence_report_visible`, `module_count=18`, `cron_job_count=2`,
   `integration_harness_member_count=11`, `split_recommended_count=11`,
-  `expected_hermes_cron_missing_count=0`, `generated_count=874`,
-  `skipped_count=12`, `error_count=15`, `duplicate_count=11`, and
+  `expected_hermes_cron_missing_count=0`, `generated_count=882`,
+  `skipped_count=15`, `error_count=15`, `duplicate_count=11`, and
   `counter_coverage_count=18`;
 - production cadence is not mature because the report intentionally shows 11
   modules still needing cadence split work. The counters now make that split
@@ -426,6 +426,11 @@ Current truth:
   `10.20.3.200` smoke produced `generated_score_count=514` on the first run
   and `generated_score_count=0`, `reason=unchanged_input_fingerprint` on the
   second run; monitor PASS includes `evidence_scoring_cadence_skip_visible`.
+- P1-T third split is live: OpsGate now returns a no-pending skip when called
+  with `proposed_actions=[]`, records `runs.jsonl`, and does not append an empty
+  report. Latest `10.20.3.200` smoke kept `report_count=58` unchanged,
+  increased `run_report_count` to `1`, and monitor PASS includes
+  `ops_gate_no_pending_skip_visible`.
 
 Implementation order:
 
@@ -437,9 +442,9 @@ Implementation order:
 6. proposal lifecycle / approved-follow-up state;
 7. feedback backflow report-only/proposal-only;
 8. approved-proposal execution-decision state design;
-9. production cadence split after report-specific counters; SelfEvolution and
-   EvidenceScoring module-local skip gates are deployed, and the next module
-   must still be chosen from refreshed counter evidence;
+9. production cadence split after report-specific counters; SelfEvolution,
+   EvidenceScoring, and OpsGate module-local skip gates are deployed, and any
+   next module must still be chosen from refreshed counter evidence;
 10. ContextRouter / Ingress de-duplication with parity tests.
 
 ### P1-O - Owner Review Fallback / Gateway Boundary

@@ -384,6 +384,11 @@ def _observed_module_counters(hermes_home: Path, cognitive_reports: list[dict[st
         counters,
         "ops_gate",
         generated_count=len(_read_jsonl(hermes_home / "system-modules" / "ops_gate" / "reports.jsonl")),
+        skipped_count=sum(
+            1
+            for item in _read_jsonl(hermes_home / "system-modules" / "ops_gate" / "runs.jsonl")
+            if isinstance(item, dict) and (item.get("skipped") is True or item.get("cadence_skipped") is True)
+        ),
         duplicate_count=_duplicate_ops_gate_followup_count(
             _read_jsonl(hermes_home / "system-modules" / "ops_gate" / "reports.jsonl")
         ),

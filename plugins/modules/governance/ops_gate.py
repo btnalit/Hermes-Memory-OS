@@ -80,12 +80,18 @@ class OpsGateModule:
         return self.module_root / "reports.jsonl"
 
     @property
+    def runs_path(self) -> Path:
+        return self.module_root / "runs.jsonl"
+
+    @property
     def lock_root(self) -> Path:
         return self.hermes_home / "system-modules" / "locks"
 
     def status(self) -> dict[str, Any]:
         reports = self.read_reports()
+        runs = self.read_runs()
         last_report = reports[-1] if reports else {}
+        last_run = runs[-1] if runs else {}
         decisions = list(last_report.get("decisions", [])) if isinstance(last_report.get("decisions", []), list) else []
         blocked_count = sum(1 for decision in decisions if decision.get("decision") == "blocked")
         return {
@@ -94,6 +100,14 @@ class OpsGateModule:
             "profile": self.profile,
             "execution_mode": self.execution_mode,
             "report_count": len(reports),
+            "run_report_count": len(runs),
+            "skipped_run_count": sum(
+                1
+                for run in runs
+                if isinstance(run, dict) and (run.get("skipped") is True or run.get("cadence_skipped") is True)
+            ),
+            "latest_cadence_skipped": bool(last_run.get("cadence_skipped") is True),
+            "latest_skip_reason": str(last_run.get("reason") or ""),
             "last_report_status": str(last_report.get("status", "missing")),
             "blocked_decision_count": blocked_count,
             "actual_execute": False,
@@ -118,7 +132,7 @@ class OpsGateModule:
                     "message": f"{status['blocked_decision_count']} blocked action(s) in the latest report",
                 }
             )
-        if status["report_count"] == 0:
+        if status["report_count"] == 0 and status["run_report_count"] == 0:
             findings.append(
                 {
                     "severity": "warning",
@@ -186,6 +200,17 @@ class OpsGateModule:
                     reports.append(parsed)
         return reports
 
+    def read_runs(self) -> list[dict[str, Any]]:
+        if not self.runs_path.exists():
+            return []
+        runs: list[dict[str, Any]] = []
+        for line in self.runs_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    runs.append(parsed)
+        return runs
+
     def _run_locked(
         self,
         *,
@@ -194,6 +219,50 @@ class OpsGateModule:
         now: datetime | None,
     ) -> dict[str, Any]:
         store.initialize()
+        if not proposed_actions:
+            run = {
+                "schema_version": "hermes.ops_gate_run.v0",
+                "run_id": _new_run_id(now),
+                "ts": _timestamp(now),
+                "module": "ops_gate",
+                "profile": self.profile,
+                "status": "ok",
+                "skipped": True,
+                "cadence_skipped": True,
+                "reason": "no_pending_proposed_actions",
+                "decision_count": 0,
+                "execution_mode": self.execution_mode,
+                "actual_execute": False,
+            }
+            self._append_run(run)
+            append_audit(
+                store.roots.audit_path,
+                action="ops_gate_run_skipped",
+                status="ok",
+                target=str(self.runs_path),
+                details={
+                    "run_id": run["run_id"],
+                    "reason": run["reason"],
+                    "decision_count": 0,
+                    "execution_mode": self.execution_mode,
+                    "actual_execute": False,
+                },
+            )
+            return {
+                "schema_version": "hermes.ops_gate_result.v0",
+                "module": "ops_gate",
+                "profile": self.profile,
+                "status": "ok",
+                "skipped": True,
+                "cadence_skipped": True,
+                "reason": "no_pending_proposed_actions",
+                "run_id": run["run_id"],
+                "execution_mode": self.execution_mode,
+                "actual_execute": False,
+                "decision_count": 0,
+                "decisions": [],
+                "run_path": str(self.runs_path),
+            }
         decisions = [self._evaluate_action(action) for action in proposed_actions]
         status = "warning" if any(decision["decision"] == "blocked" for decision in decisions) else "ok"
         report = {
@@ -257,6 +326,12 @@ class OpsGateModule:
             handle.write(json.dumps(report, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
 
+    def _append_run(self, run: dict[str, Any]) -> None:
+        self.runs_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.runs_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(run, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
 
 def _looks_like_production_target(target: str) -> bool:
     lowered = target.lower()
@@ -270,3 +345,8 @@ def _timestamp(value: datetime | None) -> str:
 def _new_report_id(value: datetime | None) -> str:
     now = (value or datetime.now(timezone.utc)).astimezone(timezone.utc)
     return f"opsr_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}"
+
+
+def _new_run_id(value: datetime | None) -> str:
+    now = (value or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return f"opsrun_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}"

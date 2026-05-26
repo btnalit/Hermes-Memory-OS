@@ -58,6 +58,31 @@ def test_ops_gate_report_only_run_writes_decision_report_and_audit(tmp_path):
     assert any("ops_gate_report_written" in line for line in audit_lines)
 
 
+def test_ops_gate_skips_without_report_when_no_proposed_actions(tmp_path):
+    store = _store(tmp_path)
+    module = OpsGateModule(tmp_path, profile="main")
+
+    result = module.run_once(store=store, proposed_actions=[])
+
+    assert result["status"] == "ok"
+    assert result["skipped"] is True
+    assert result["cadence_skipped"] is True
+    assert result["reason"] == "no_pending_proposed_actions"
+    assert result["decision_count"] == 0
+    assert result["actual_execute"] is False
+    assert "report_id" not in result
+    assert module.read_reports() == []
+    assert module.read_runs()[0]["cadence_skipped"] is True
+    status = module.status()
+    assert status["report_count"] == 0
+    assert status["run_report_count"] == 1
+    assert status["skipped_run_count"] == 1
+    assert status["latest_cadence_skipped"] is True
+    assert status["latest_skip_reason"] == "no_pending_proposed_actions"
+    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
+    assert any("ops_gate_run_skipped" in line for line in audit_lines)
+
+
 def test_ops_gate_never_executes_even_would_allowed_actions(tmp_path):
     store = _store(tmp_path)
     module = OpsGateModule(tmp_path, profile="main")
