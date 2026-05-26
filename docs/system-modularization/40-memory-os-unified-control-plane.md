@@ -219,10 +219,10 @@ Current truth:
 - safe would-send observation exists;
 - formal expression engine does not exist;
 - Wandering output is deterministic;
-- local P1-R slice 1 wires cognitive loop Wandering output through SpeakGate
-  and records missing/evaluated decision monitor fields;
-- live deployment evidence is still required before claiming installed
-  SpeakGate closure;
+- P1-R slice 1 is deployed on `10.20.3.200`: new cognitive-loop Wandering
+  output records a SpeakGate decision and monitor fields; historical missing
+  decisions remain visible as WARN until old reports age out or are separately
+  accounted for;
 - expression feedback backflow is not implemented.
 
 Required before runtime:

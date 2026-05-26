@@ -1066,8 +1066,8 @@ Stop signal:
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
-Status: design gate added; P1-R slice 1 implemented locally, live deployment
-evidence pending.
+Status: design gate added; P1-R slice 1 deployed on `10.20.3.200` with WARN-only
+monitor evidence.
 
 Source:
 
@@ -1083,8 +1083,10 @@ Reason:
 - the current v0.1 implementation closes only no-send / would-send
   observation, not formal right-brain expression;
 - `wandering_mind.would_send_count` exists;
-- local P1-R slice 1 routes cognitive-loop Wandering output through SpeakGate
-  and exposes evaluated/missing decision monitor fields;
+- P1-R slice 1 routes cognitive-loop Wandering output through SpeakGate and
+  exposes evaluated/missing decision monitor fields;
+- live evidence shows the new cycle created one SpeakGate decision while older
+  reports still account for historical missing decisions;
 - expression content review, expression feedback, and
   governance/self-evolution backflow are not closed.
 

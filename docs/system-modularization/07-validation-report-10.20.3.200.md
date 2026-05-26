@@ -11865,3 +11865,85 @@ output. It does not close formal right-brain expression. Installed/live
 closure still requires deploy to 10.20.3.200, a new cognitive-loop cycle, and
 monitor evidence showing no new missing SpeakGate decision for the new cycle.
 ```
+
+## 2026-05-26 - P1-R Slice 1 10.20.3.200 Deployment Evidence
+
+Deployment:
+
+```text
+commit: 0b1799d Wire wandering output through SpeakGate
+host: 10.20.3.200 / hermes-media
+repo: /tmp/hermes-memory-os-validation/repo
+installer:
+  HERMES_HOME=/root/.hermes
+  python3 scripts/install_memory_os_plugin.py \
+    --hermes-home /root/.hermes \
+    --install-runtime \
+    --install-system-modules \
+    --install-cognitive-loop \
+    --install-owner-review-cron-helper \
+    --deep-reflection-preset test-host \
+    --memory-sources-preset test-host \
+    --llm-judge-preset report-only
+```
+
+Remote cognitive-loop smoke:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python \
+HERMES_HOME=/root/.hermes \
+python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply
+
+cycle_id=cloop_20260526T073436353146Z_7ac026ab46
+status=ok
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+wandering_mind.speak_gate_evaluated=true
+wandering_mind.speak_gate_decision.decision=would_send
+wandering_mind.speak_gate_decision.actual_send=false
+wandering_mind.speak_gate_decision.payload_ref=local://wandering_mind/wout_20260526T073436922506Z_d4055c60bf
+```
+
+Post-deploy monitor:
+
+```text
+python scripts/memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+
+ExpressionArtifacts:
+  wandering_output_count=16
+  wandering_would_send_count=16
+  speak_gate_evaluated_count=1
+  speak_gate_missing_evaluation_count=15
+  speak_gate_decision_distribution={"would_send": 1}
+  speak_gate_would_send_count=1
+  speak_gate_actual_send=false
+
+WARN:
+  right_brain_speak_gate_missing_evaluation
+  session_mirror_pending_sessions
+  owner_review_approved_proposals_pending_followup
+  rh31_eval_has_failures
+  rh26_casual_empty
+```
+
+Interpretation:
+
+```text
+LIVE PASS for P1-R slice 1 wiring:
+  The new cognitive-loop cycle routed Wandering output through SpeakGate and
+  kept send/execute/identity/crystallized boundaries false.
+
+WARN remains correct:
+  speak_gate_missing_evaluation_count=15 comes from historical cognitive-loop
+  reports created before this deployment. It is not evidence of a new-cycle
+  missing SpeakGate decision.
+
+NOT CLOSED:
+  This still is not formal right-brain expression closure. RH-38 still requires
+  RightBrainExpressionEngine / Hermes-agent expression adapter, bounded owner
+  expression preview, expression feedback labels, and governance backflow.
+```

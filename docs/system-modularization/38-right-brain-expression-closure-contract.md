@@ -6,15 +6,16 @@ Status: design gate plus first local wiring slice.
 
 Current implementation state:
 
-- P1-R slice 1 is implemented locally: cognitive loop Wandering output now
-  records a SpeakGate decision for every result that contains an output.
+- P1-R slice 1 is deployed on the `10.20.3.200` test host: cognitive loop
+  Wandering output now records a SpeakGate decision for every result that
+  contains an output.
 - Monitor summary now exposes `speak_gate_evaluated_count`,
   `speak_gate_missing_evaluation_count`, and
   `speak_gate_decision_distribution`.
 - This does not implement a RightBrainExpressionEngine, scheduled expression
   delivery, owner expression feedback, or governance backflow.
-- Live `10.20.3.200` deployment evidence is still required before claiming
-  installed expression observation closure.
+- Current live monitor still reports historical missing SpeakGate evaluations
+  from older cognitive-loop reports; new-cycle evidence shows the wiring works.
 
 ## Why This Exists
 
@@ -74,10 +75,13 @@ The current code and monitor support a safe observation path only:
 - Wandering Mind currently emits deterministic text from recent event summaries.
 - The shell plugin deliberately does not register LLM-call hooks.
 - SpeakGate has `evaluate_wandering_output()`.
-- Local P1-R slice 1 wires cognitive loop Wandering output through SpeakGate
-  and records monitor fields for evaluated and missing decisions.
+- P1-R slice 1 wires cognitive loop Wandering output through SpeakGate and
+  records monitor fields for evaluated and missing decisions.
+- Live test-host evidence after deployment: one new cognitive-loop cycle
+  produced a `speak_gate_decision.decision=would_send` with all hard
+  boundaries false.
 - Existing live monitor evidence still includes historical missing SpeakGate
-  evaluations until the change is deployed and a new cycle runs.
+  evaluations from older reports.
 - Owner review can list speak/would-send items, but v0.1 mostly shows bounded
   references and action tokens, not enough expression content for owner quality
   judgment.
