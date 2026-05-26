@@ -138,6 +138,34 @@ def test_evidence_scoring_skips_expired_working_items(tmp_path):
     assert status["expired_used_in_scoring_count"] == 0
 
 
+def test_evidence_scoring_status_uses_status_at_scoring_time(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {**build_event(seed=3, profile="main"), "summary": "Owner discussed status at scoring time."}
+    )
+    store.append_event(event)
+    active = WorkingMemoryService(store).add_item(
+        "lingering",
+        "This item was active when scoring ran.",
+        source_event_id=event.id,
+        tags=["test"],
+    )
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    module.score_all(store=store)
+    document = store.read_working_document("lingering")
+    for item in document["items"]:
+        if item["id"] == active.id:
+            item["status"] = "expired"
+    store.write_working_document("lingering", document, audit=False)
+    status = module.status()
+    evidence = [record for record in module.read_evidence() if record["subject_ref"] == f"working:{active.id}"][0]
+
+    assert evidence["source_status"] == "active"
+    assert status["working_subject_count"] == 1
+    assert status["expired_used_in_scoring_count"] == 0
+
+
 def test_evidence_scoring_rejects_scores_without_evidence_or_explanation(tmp_path):
     module = EvidenceScoringModule(tmp_path, profile="main")
 

@@ -266,6 +266,7 @@ class EvidenceScoringModule:
                         "subject_kind": "working",
                         "evidence_summary": str(item.get("text", "")),
                         "source_ref": f"memory_os:working:{path.stem}:{item_id}",
+                        "source_status": status or "unknown",
                     }
                 )
         if proposal_queue is not None:
@@ -305,6 +306,7 @@ class EvidenceScoringModule:
             "subject_ref": subject["subject_ref"],
             "subject_kind": subject["subject_kind"],
             "source_ref": subject["source_ref"],
+            "source_status": subject.get("source_status", ""),
             "summary": subject["evidence_summary"],
         }
 
@@ -330,27 +332,11 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _expired_working_subject_count(evidence: list[dict[str, Any]], hermes_home: Path) -> int:
-    statuses: dict[tuple[str, str], str] = {}
-    working_root = hermes_home / "memory-os" / "working"
-    for path in sorted(working_root.glob("*.json")):
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for item in document.get("items", []):
-            if not isinstance(item, dict):
-                continue
-            item_id = str(item.get("id") or "")
-            if item_id:
-                statuses[(path.stem, item_id)] = str(item.get("status") or "")
-
     expired_count = 0
     for record in evidence:
         if record.get("subject_kind") != "working":
             continue
-        source_ref = str(record.get("source_ref") or "")
-        parts = source_ref.split(":")
-        if len(parts) >= 4 and statuses.get((parts[2], parts[3])) == "expired":
+        if str(record.get("source_status") or "") == "expired":
             expired_count += 1
     return expired_count
 
