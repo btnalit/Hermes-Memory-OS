@@ -72,6 +72,7 @@ two fields before implementation:
 | `state_change_class` | `candidate_review` | Produces memory candidates that require owner review before crystallized write. |
 | `state_change_class` | `proposal_review` | Produces proposals that require owner approval before follow-up and never execute by approval alone. |
 | `state_change_class` | `feedback_ledger` | Records owner/model feedback as evidence; live tuning requires a later bounded apply gate. |
+| `state_change_class` | `expression_feedback` | Records owner feedback and delivery outcomes about right-brain expression quality; prompt/cadence/policy changes require later proposal/apply gates. |
 | `state_change_class` | `speak_permission` | Produces or consumes one-shot speech permission; does not enable default sending. |
 | `state_change_class` | `retention_metadata` | Archives/prunes metadata only; canonical memory is out of scope. |
 
@@ -117,8 +118,8 @@ Cadence rules:
 | Heartbeat / Inner Drive | events, index, working state | working items, crystallized candidates, audit | candidate approval only when candidate is owner-readable | no | MemoryWriteSurface, OwnerActionProcessor | approved/rejected candidates feed candidate scoring and future consolidation |
 | Household Digest | recent events / working summaries | household digest artifact | no direct action | no | scheduler + monitor | feeds Wandering Mind and DeepReflection inputs |
 | Digest Consolidation | events, candidates, proposal state | daily/weekly digest artifacts, candidate/proposal hints | candidate/proposal only if emitted into review queue | no | OwnerActionProcessor for emitted items | recurring stable facts can become better candidates; stale signals feed retention |
-| Wandering Mind | household digest, safe recent state | wandering output, would-send artifacts | only exceptional proactive-send permission | possible, but not directly | SpeakGate, Hermes transport | useful/ignored expression trends feed speak policy and review burden |
-| Speak Gate | expression payloads, proposal queue | would-send / blocked-send decisions | `allow_speak_once` only for out-of-policy proactive sends | only via Hermes after permission/config | SpeakGate + Hermes delivery | blocked/allowed counts feed expression tuning |
+| Wandering Mind | household digest, safe recent state | wandering output, expression drafts, would-send artifacts | no owner action for ordinary scheduled expression; exceptional proactive-send permission only | possible through Hermes origin after SpeakGate and owner-configured cadence | SpeakGate, RH-38, Hermes transport | expression feedback and ignored/delivered trends feed speak policy and review burden |
+| Speak Gate | expression payloads, proposal queue, expression policy | scheduled-expression / would-send / blocked-send / silent decisions | `allow_speak_once` only for out-of-policy proactive sends | only via Hermes after scheduled config or one-shot permission | SpeakGate + RH-38 + Hermes delivery | blocked/allowed/delivered/feedback counts feed expression tuning |
 | DeepReflection | working, digest, governance, proposal/evidence summaries | carryover cards, analysis, optional proposals, optional wandering seeds | split by output type | only wandering seeds indirectly | ContextProjection, Proposal approval, SpeakGate | source-class distribution, selected/dropped classes, optional output outcomes |
 | Ops Gate | operational proposals / policies | allow/block reports | approved proposals may be routed into report-only OpsGate review; never execution | no | OpsGate + explicit execution command | approved/rejected proposal classes influence future governance |
 | Proposal Queue | proposal candidates, legacy owner-review inputs | proposal queue state | approve/reject proposal | no | OwnerActionProcessor | approval creates follow-up state only; rejection downranks similar deterministic class |
@@ -134,6 +135,8 @@ Cadence rules:
 | Review Digest Renderer | review queue, aging, bounded candidate/proposal text | owner-readable digest text and active digest binding | no by itself | configured digest delivery only | Export eligibility + Hermes cron | owner readability and response burden feed renderer limits |
 | Agent-Mediated Review Surface | latest owner-home digest, review queue, proposal follow-ups | bounded read-only page/detail/follow-up reports | no | no | ContextProjection for owner review + no-write boundary | lets Hermes agent answer "下一页/展开/还有哪些" without Memory-OS owning conversation |
 | Agent / Memory-OS Collaboration Contract | 29-series contract, owner-review surfaces, Hermes agent interaction findings | design contract only | no | no | RH-37 + Host-Agent Boundary Principle | defines how Hermes reads/explains/suggests/asks/calls structured tools without transferring owner decision authority to Memory-OS |
+| Right-Brain Expression Closure Contract | architecture right-brain principles, Wandering/SpeakGate evidence, Hermes origin delivery constraints | design contract only | no | no | RH-38 + SpeakGate + Hermes origin delivery | separates test-host observation from formal scheduled expression and defines expression feedback backflow |
+| Left-Brain Governance Quality Contract | evidence scoring, self-evolution, feedback, working expiry, proposal follow-up, cadence evidence | design contract only | no | no | RH-39 + FeedbackSignal + SchedulerStep + OwnerAction | separates safety governance from judgment quality, feedback learning, and production cadence maturity |
 | Agent-Mediated Owner Reply Tool | live owner message, visible digest context, provider platform, recorded digest binding | OwnerActionProcessor request + bounded tool result | yes, only after Hermes resolves a definite action + stable `oa_` token | no | recorded digest + OwnerActionProcessor | lets Hermes agent complete interactive owner review tasks through structured `memory_os_review_reply`; stable action tokens feed durable owner-action state |
 | Owner Reply Parser | owner command text, recorded digest action-token binding | parsed action request | yes, through processor only | no | OwnerActionProcessor | applies approve/reject/feedback/allow as auditable state transitions |
 | OwnerActionProcessor | parsed owner actions, target state | owner action ledger, approved crystallized records, proposal state, feedback ledger, speak ticket | yes | no | MemoryWriteSurface / Proposal / Feedback / Speak permission | durable owner choices feed candidates, proposals, RH-30 feedback, and monitor |
@@ -150,8 +153,8 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Heartbeat / Inner Drive | none | candidate_review | event_driven_fast | candidates must become owner-readable before approval |
 | Household Digest | internal_local | monitor_only | cycle_each | feeds other modules; no owner action |
 | Digest Consolidation | internal_local | candidate_review / proposal_review | daily_once + weekly_once | emitted candidates/proposals enter review queue |
-| Wandering Mind | owner_origin / none | speak_permission / monitor_only | daily_once / cycle_each | normal configured expression uses Hermes; exceptional proactive send needs speak permission |
-| Speak Gate | none | speak_permission / monitor_only | on_demand / cycle_each | records would-send/blocked-send; one-shot allow only through owner action |
+| Wandering Mind | owner_origin / none | expression_feedback / speak_permission / monitor_only | disabled_until_opt_in / daily_once / cycle_each | Tier 1 test-host observation is would-send only; Tier 2 scheduled expression needs RH-38; exceptional proactive send needs speak permission |
+| Speak Gate | owner_origin / none | expression_feedback / speak_permission / monitor_only | on_demand / cycle_each | every non-silent expression draft must receive a SpeakGate decision; one-shot allow only through owner action |
 | DeepReflection | none | context_projection / proposal_review / speak_permission / monitor_only | cycle_each | output type determines route; TTL/minimum-signal gates live in the action path |
 | Ops Gate | none | proposal_review / monitor_only | cycle_each | approval creates follow-up state, never execution |
 | Proposal Queue | none | proposal_review | on_demand + cycle_each | approve/reject through OwnerActionProcessor; cycle status is monitor-only |
@@ -167,6 +170,8 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Review Digest Renderer | owner_origin | monitor_only | owner_daily | renders bounded digest, display anchors, and stable action tokens through Hermes cron |
 | Agent-Mediated Review Surface | none | context_projection / monitor_only | on_demand | read-only pagination/detail/follow-up data for Hermes agent |
 | Agent / Memory-OS Collaboration Contract | none | none | on_demand | design gate only; no runtime mutation |
+| Right-Brain Expression Closure Contract | none | none | on_demand | design gate only; no runtime mutation; blocks formal expression claims until Tier 2 path exists |
+| Left-Brain Governance Quality Contract | none | none | on_demand | design gate only; no runtime mutation; blocks intelligent-governance claims until scoring, feedback, novelty, expiry, proposal follow-up, and cadence gates exist |
 | Agent-Mediated Owner Reply Tool | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand | Hermes resolves natural owner intent to a structured action token; requires recorded digest; processor owns mutation |
 | Owner Reply Parser | none | none | on_demand | parses only; processor owns mutation |
 | OwnerActionProcessor | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand | sole mutation path for owner actions |
@@ -316,15 +321,33 @@ execution ticket or run tools.
 ### Expression / Proactive Send
 
 ```text
-wandering/DR seed proposes expression
--> speak_gate decision
--> default: would-send / blocked artifact
--> optional owner allow_speak_once for exceptional payloads
--> Hermes owns actual transport
+Tier 1 test-host observation:
+  wandering/DR seed proposes expression
+  -> would-send / blocked / silent artifact
+  -> no actual send
+
+Tier 2 scheduled right-brain expression:
+  bounded memory view
+  -> RightBrainExpressionEngine / Hermes agent expression adapter
+  -> expression draft
+  -> SpeakGate scheduled-expression decision
+  -> owner-configured low-frequency Hermes origin delivery
+  -> owner feedback ledger
+
+Tier 3 exceptional proactive send:
+  expression draft outside scheduled policy
+  -> owner allow_speak_once
+  -> one expiring permission ticket
+  -> Hermes owns actual transport
 ```
 
-Ordinary conversation and configured daily digest do not require per-message
-approval.
+Ordinary conversation, configured daily digest, and owner-configured scheduled
+right-brain expression do not require per-message approval. Exceptional
+proactive sends still require one-shot permission.
+
+The current v0.1 test-host implementation closes Tier 1 only. It must not be
+described as formal right-brain expression closure until RH-38's draft,
+SpeakGate, delivery, feedback, and monitor contracts are implemented.
 
 ### Mailbox Internal Communication
 
@@ -463,9 +486,9 @@ Current live reconciliation:
 closure matrix check:
   status=ok
   live_module_count=16
-  matrix_module_count=26
-  active_work_item_count=17
-  active_work_mapping_count=17
+  matrix_module_count=27
+  active_work_item_count=18
+  active_work_mapping_count=18
   finding_count=0
 ```
 
@@ -515,6 +538,8 @@ development gate, not a progress claim.
 | P1-O | Agent-Mediated Owner Reply Tool; Owner Reply Parser; OwnerActionProcessor | | Fallback and gateway-hook closure protects the structured owner-action path. |
 | P1-P | Heartbeat / Inner Drive; Proposal Queue; Wandering Mind; Owner Review Queue / Aging | | Producers and review projections must carry bounded timestamps for aging. |
 | P1-Q | Ops Gate; Proposal Queue; Agent-Mediated Review Surface; OwnerActionProcessor | | Approved proposal follow-up stays visible and report-only until explicit execution apply exists. |
+| P1-R | Wandering Mind; Speak Gate; DeepReflection; Governance Feedback; Self-Evolution; Right-Brain Expression Closure Contract | | Formal right-brain expression is not closed by test-host would-send observation; RH-38 must define draft, gate, delivery, feedback, and proposal backflow before runtime expression delivery. |
+| P1-S | Evidence Scoring; Self-Evolution; Governance Feedback; Proposal Queue; Ops Gate; Heartbeat / Inner Drive; Left-Brain Governance Quality Contract | | Left-brain safety governance is closed, but judgment quality, feedback learning, expired-working hygiene, proposal novelty, approved-proposal execution decision, and production cadence are not mature. |
 | P2-F | Review Digest Renderer; Agent-Mediated Review Surface; Agent-Mediated Owner Reply Tool; OwnerActionProcessor; Owner Review Hermes Cron Helper; Agent / Memory-OS Collaboration Contract | | Public material must explain the owner-governance subsystem without expanding Memory-OS transport or execution ownership. |
 
 The local check validates this table against

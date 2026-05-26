@@ -28,6 +28,7 @@ VALID_STATE_CHANGE_CLASSES = {
     "candidate_review",
     "proposal_review",
     "feedback_ledger",
+    "expression_feedback",
     "speak_permission",
     "retention_metadata",
 }
@@ -71,6 +72,8 @@ REQUIRED_CONTRACT_LABELS = {
     "Owner Review Queue / Aging",
     "Review Digest Renderer",
     "Agent / Memory-OS Collaboration Contract",
+    "Right-Brain Expression Closure Contract",
+    "Left-Brain Governance Quality Contract",
     "Agent-Mediated Review Surface",
     "Agent-Mediated Owner Reply Tool",
     "Owner Reply Parser",

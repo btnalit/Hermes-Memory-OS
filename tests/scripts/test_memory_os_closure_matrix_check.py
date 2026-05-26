@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from scripts.memory_os_closure_matrix_check import build_report
+from scripts.memory_os_closure_matrix_check import build_report, parse_classification_overlay
 
 
 def test_closure_matrix_check_passes_for_current_repo() -> None:
@@ -14,9 +14,9 @@ def test_closure_matrix_check_passes_for_current_repo() -> None:
     assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
     assert report["status"] == "ok"
     assert report["live_module_count"] == 16
-    assert report["matrix_module_count"] == 26
-    assert report["active_work_item_count"] == 17
-    assert report["active_work_mapping_count"] == 17
+    assert report["matrix_module_count"] == 28
+    assert report["active_work_item_count"] == 19
+    assert report["active_work_mapping_count"] == 19
     assert report["missing_live_modules"] == []
     assert report["missing_contract_labels"] == []
     assert report["invalid_row_count"] == 0
@@ -74,6 +74,22 @@ def test_closure_matrix_check_rejects_freeform_classification_text(tmp_path: Pat
         finding["code"] == "invalid_closure_classification"
         and finding["module"] == "Mailbox"
         and finding["errors"] == ["cadence_class"]
+        for finding in report["findings"]
+    )
+
+
+def test_closure_matrix_check_accepts_expression_feedback_class() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    report = build_report(repo_root)
+
+    matrix_path = repo_root / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    rows = {row["module"]: row for row in parse_classification_overlay(matrix_path.read_text(encoding="utf-8"))}
+    assert "expression_feedback" in rows["Wandering Mind"]["state_change_class"]
+    assert "expression_feedback" in rows["Speak Gate"]["state_change_class"]
+    assert not any(
+        finding["code"] == "invalid_closure_classification"
+        and finding["module"] in {"Wandering Mind", "Speak Gate"}
         for finding in report["findings"]
     )
 

@@ -11571,6 +11571,160 @@ rh31_eval_has_failures
 rh26_casual_empty
 ```
 
+## 2026-05-26 - RH-38 Right-Brain Expression Closure Gap
+
+Finding:
+
+```text
+The right-brain expression path was incorrectly treated as closed because
+Wandering Mind produced no-send / would-send artifacts and hard send boundaries
+remained false. That evidence proves safe test-host observation, not formal
+right-brain expression.
+```
+
+Source evidence:
+
+```text
+architecture.md:
+  Wandering Mind should express feeling/free association and may produce free
+  expression or [SILENT] -> optional deliver=origin.
+
+current implementation:
+  Wandering Mind deterministic summary-based text only;
+  shell plugin registers no LLM-call hooks;
+  OwnerReview speak items expose bounded refs/actions but not enough expression
+  content for voice-quality feedback;
+  GovernanceFeedback does not consume the full wandering/speak outcome set.
+
+latest 10.20.3.200 monitor:
+  wandering_output_count=15
+  wandering_would_send_count=15
+  speak_gate_would_send_count=0
+  speak_gate_actual_send=false
+```
+
+Decision:
+
+```text
+P1-E remains only "safe expression observation".
+Formal right-brain expression closure is split into P1-R / RH-38.
+No runtime expression engine or scheduled expression delivery is implemented in
+this correction.
+```
+
+Contract updates:
+
+```text
+new doc: docs/system-modularization/38-right-brain-expression-closure-contract.md
+29 contract: expression tiers and monitor fields added
+36 matrix: Wandering/SpeakGate rows and expression pattern corrected
+  32 roadmap: P1-R active item added
+```
+
+Follow-up audit expansion:
+
+```text
+RH-38 was expanded from a Wandering/SpeakGate-only correction into a full
+right-brain subsystem audit.
+
+Included surfaces:
+  Household Digest
+  DeepReflection analysis
+  DeepReflection injection / carryover cards
+  DeepReflection optional proposals
+  DeepReflection wandering seeds
+  Conversation Carryover
+  Wandering Mind
+  SpeakGate
+  Owner Review for expression
+  Expression feedback
+  GovernanceFeedback / SelfEvolution backflow
+
+Finding:
+  v0.1 closes context continuity, proposal governance, and safe test-host
+  expression observation, but it does not close formal scheduled right-brain
+  expression or expression feedback backflow.
+```
+
+Closure check:
+
+```text
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=27
+active_work_item_count=18
+active_work_mapping_count=18
+finding_count=0
+
+python -m pytest tests/scripts/test_memory_os_closure_matrix_check.py -q
+5 passed
+```
+
+Required future monitor fields include:
+
+```text
+right_brain_expression.engine_available
+expression_draft_count
+speak_gate_evaluated_count
+scheduled_delivered_count
+exceptional_permission_count
+owner_feedback_by_type
+policy_update_pending_count
+prompt_version
+raw_body_included_count
+task_language_count
+boundary_true_count
+```
+
+## 2026-05-26 - RH-39 Left-Brain Governance Quality Gap
+
+Finding:
+
+```text
+The left-brain path was previously treated as mature because hard boundaries,
+owner actions, audit, monitor, and OpsGate report-only follow-up were safe.
+That proves safety governance. It does not prove intelligent judgment,
+feedback learning, proposal novelty, production cadence, or execution-decision
+closure.
+```
+
+Latest live evidence:
+
+```text
+working_items=168
+expired_working=147
+evidence.score_count=606
+evidence.subject_counts.working=168
+self_evolution.report_count=16
+self_evolution.proposal_count=16
+proposal_queue.approved_for_proposal=7
+proposal_queue.candidate=11
+owner_review.feedback_backflow.apply_ready_count=0
+MemorySources.feedback_count=0
+approved_proposal_followups.awaiting_ops_gate=6
+approved_proposal_followups.execution_tickets=0
+```
+
+Decision:
+
+```text
+Left-brain safety governance remains implemented.
+Left-brain judgment quality and feedback adaptation are not mature.
+Formal left-brain governance quality work is split into P1-S / RH-39.
+No runtime scoring, cadence, proposal, or execution behavior is changed in this
+correction.
+```
+
+Contract updates:
+
+```text
+new doc: docs/system-modularization/39-left-brain-governance-quality-contract.md
+29 contract: feedback backflow limits expanded for RH-39
+36 matrix: Left-Brain Governance Quality Contract row and P1-S mapping added
+32 roadmap: P1-S active item added
+```
+
 ## RH-36c Active Work Closure Mapping
 
 Purpose:

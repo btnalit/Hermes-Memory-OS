@@ -5,6 +5,16 @@ Date: 2026-05-25
 Scope: Memory-OS v0.1 test-host roadmap, remaining development queue, and
 promotion gates
 
+Current entrypoint:
+
+```text
+docs/system-modularization/40-memory-os-unified-control-plane.md
+```
+
+Use `40` as the first human-readable control document for current truth,
+priority order, and hard gates. This `32` document remains the detailed active
+roadmap and long-form backlog notes.
+
 ## Purpose
 
 This document is the visible task queue for Memory-OS after RH-31. It does not
@@ -121,7 +131,7 @@ These are not the remaining queue, but future work depends on them.
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
 | RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.5/35.8 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, stable action-token parser, agent-mediated `memory_os_review_reply` tool, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text and exposes tools/state, Hermes owns delivery and agent interaction |
-| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=16`, `matrix_module_count=26`, `active_work_item_count=17`, `active_work_mapping_count=17`, `finding_count=0` |
+| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, RH-38 right-brain expression closure, RH-39 left-brain governance quality, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=16`, `matrix_module_count=28`, `active_work_item_count=19`, `active_work_mapping_count=19`, `finding_count=0` |
 | RH-37 Agent / Memory-OS collaboration contract | design contract active; no new execution capability | defines how Hermes agent reads bounded Memory-OS review context, explains owner questions, suggests without deciding, asks when ambiguous, and calls structured tools only after definite owner intent; follow-up implementation remains split into P1 items below |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
@@ -301,9 +311,17 @@ Status:
 
 Why it matters:
 
-- this is the planned "automatic speech" line, but v0.1 must stay at
-  `would_send` only. It should produce candidate expression evidence without
-  actually sending messages.
+- this is the test-host safety observation line for expression artifacts. It
+  proves bounded no-send / would-send evidence, not the full right-brain
+  expression product.
+
+Current limitation:
+
+- P1-E does not close formal right-brain expression. It does not provide a real
+  RightBrainExpressionEngine, does not guarantee every non-silent Wandering
+  output is evaluated by SpeakGate, does not show enough expression content for
+  owner voice-quality feedback, and does not feed expression feedback into
+  governance/self-evolution. That work is split into P1-R / RH-38.
 
 Next action:
 
@@ -315,6 +333,11 @@ Promotion signal:
 - would-send artifacts are bounded, explainable, and sparse;
 - Wandering Mind remains non-task and no-send;
 - Speak Gate distinguishes no-send, would-send, and blocked send.
+
+Do not promote:
+
+- P1-E must not be promoted to "formal expression closure". It can only
+  promote to "safe expression observation" until RH-38 is implemented.
 
 Stop signal:
 
@@ -1040,6 +1063,121 @@ Stop signal:
 
 - proposal approval creates execution tickets or sets `actual_execute=true`;
 - approved proposals disappear from review/monitor surfaces after approval.
+
+### P1-R - RH-38 Right-Brain Expression Closure
+
+Status: design gate added; runtime implementation not started.
+
+Source:
+
+- `docs/memory-os/architecture.md`
+- `docs/system-modularization/36-module-closure-matrix.md`
+- `docs/system-modularization/38-right-brain-expression-closure-contract.md`
+- live `10.20.3.200` monitor expression evidence
+
+Reason:
+
+- the architecture says Wandering Mind should express feeling/free association
+  and may produce free expression or `[SILENT]`;
+- the current v0.1 implementation closes only no-send / would-send
+  observation, not formal right-brain expression;
+- `wandering_mind.would_send_count` exists, but SpeakGate formal evaluation,
+  expression content review, expression feedback, and governance/self-evolution
+  backflow are not closed.
+
+Required design work:
+
+1. define `RightBrainExpressionEngine` as a bounded expression adapter or
+   Hermes-agent-mediated path, with no execution tools and no raw private body;
+2. keep the right-brain subsystem split by route: Household Digest input,
+   DeepReflection analysis/injection/proposal/seed, Conversation Carryover,
+   Wandering expression draft, SpeakGate decision, OwnerReview feedback, and
+   GovernanceFeedback/SelfEvolution backflow;
+3. define three expression tiers:
+   `test_host_observation`, `scheduled_right_brain_expression`, and
+   `exceptional_proactive_send`;
+4. require every non-silent expression draft to pass SpeakGate;
+5. make owner review show bounded expression content, not only payload refs;
+6. add expression feedback types: `like`, `too_mechanical`, `too_frequent`,
+   `boundary_private`, `off_voice`, `mute_period`;
+7. route expression outcomes into GovernanceFeedback / SelfEvolution as
+   proposals, not direct prompt/cadence mutation;
+8. add monitor fields listed in RH-38 before claiming observation or closure.
+
+Promotion signal:
+
+- expression drafts are bounded and non-task;
+- every non-silent draft has a SpeakGate decision;
+- owner can see and feedback expression content;
+- expression feedback can produce owner-reviewed prompt/policy/frequency
+  proposals;
+- Hermes owns delivery and all hard boundaries remain false.
+
+Stop signal:
+
+- actual send happens without owner-configured scheduled expression;
+- raw private body appears in expression draft/review;
+- right-brain text becomes task/proposal/agenda language;
+- feedback directly mutates prompts, cadence, routing, or delivery.
+
+### P1-S - RH-39 Left-Brain Governance Quality
+
+Status: design gate added; runtime implementation not started.
+
+Source:
+
+- `docs/system-modularization/39-left-brain-governance-quality-contract.md`
+- `docs/system-modularization/36-module-closure-matrix.md`
+- latest 10.20.3.200 monitor evidence
+
+Reason:
+
+- left-brain safety governance is implemented, but intelligent judgment is not
+  mature;
+- EvidenceScoring currently uses deterministic hash-derived scores, which are
+  replayable but not meaningful importance/risk/feedback scores;
+- SelfEvolution can create proposal backlog from recurring scores without a
+  novelty/idempotency/cadence gate;
+- feedback ledgers exist, but feedback is not yet consumed as first-class
+  GovernanceFeedback / scoring / reflection input;
+- expired working items are still counted as evidence subjects;
+- approved proposals are visible and safe, but execution-decision state remains
+  future work.
+
+Required design work:
+
+1. define feature-based EvidenceScoring v2 in report-only mode before replacing
+   legacy hash scoring;
+2. add SelfEvolution novelty/idempotency gates for unresolved proposals and
+   repeated score refs;
+3. route MemorySources / owner / expression feedback into GovernanceFeedback as
+   bounded evidence only;
+4. filter or explicitly downweight expired working in scoring and reflection;
+5. keep approved proposal follow-up visible while designing a separate
+   execution-decision gate;
+6. split production cadence from the test-host cognitive-loop integration
+   harness;
+7. reduce ContextRouter/Ingress classification duplication through parity tests
+   and a deprecation path.
+
+Promotion signal:
+
+- feature scoring reports compare against legacy scores without changing live
+  behavior;
+- duplicate/unresolved SelfEvolution proposals are skipped and counted;
+- expired working usage is visible and no longer treated as active evidence;
+- feedback backflow can produce owner-reviewed proposals without direct live
+  mutation;
+- approved proposals reach explicit execution-decision visibility without
+  creating execution tickets.
+
+Stop signal:
+
+- scoring starts driving live action before owner review;
+- proposal approval creates execution tickets or `actual_execute=true`;
+- feedback directly mutates routing, prompt, cadence, or delivery;
+- expired working dominates scoring/reflection;
+- repeated unresolved proposals continue to be created.
 
 ## Active P2 Queue
 

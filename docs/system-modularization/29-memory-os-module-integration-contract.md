@@ -471,6 +471,8 @@ Current feedback sources:
 - RH-30 MemorySources feedback ledger
 - low-clue clarification selected/rejected/missing-candidate records
 - owner approval or rejection of candidate/crystallized memory
+- owner expression-quality feedback from RH-38
+- left-brain governance-quality feedback backflow from RH-39
 - monitor findings
 
 Allowed feedback effects:
@@ -479,6 +481,8 @@ Allowed feedback effects:
 - candidate title/cluster quality diagnostics
 - route/source relevance reporting
 - future bounded scoring after explicit apply gate
+- bounded governance evidence and proposal input after RH-39 feedback backflow
+  is implemented
 
 Forbidden feedback effects:
 
@@ -487,6 +491,8 @@ Forbidden feedback effects:
 - hidden prompt injection
 - self-reinforcing "selected once means successful forever"
 - LLM judge changing hard ingress decisions
+- feedback directly mutating routing, prompt text, cadence, delivery policy, or
+  scoring weights without a separate apply gate
 
 LLM judge modes:
 
@@ -877,6 +883,27 @@ Hard rules:
   send and never makes ordinary replies require owner approval. It creates at
   most one bounded permission ticket with TTL and payload matching for an
   out-of-policy proactive-send item.
+- Right-brain expression has three separate tiers:
+  `test_host_observation` (no-send / would-send artifacts),
+  `scheduled_right_brain_expression` (owner-configured low-frequency Hermes
+  origin delivery), and `exceptional_proactive_send` (one-shot permission).
+  The current v0.1 test-host would-send path closes only the first tier. It
+  must not be described as formal right-brain expression closure.
+- Scheduled right-brain expression does not require per-message owner
+  approval, but it does require explicit owner/operator opt-in for cadence and
+  delivery. Hermes owns cron, origin delivery, cooldowns, and platform
+  transport; Memory-OS owns bounded expression drafts, SpeakGate evidence,
+  feedback ledgers, and policy/proposal backflow.
+- Every non-silent right-brain expression draft must have a SpeakGate decision.
+  Missing SpeakGate decisions are a P1 closure gap.
+- Owner review for expression quality must show a bounded expression preview,
+  reason, tier, source module, and consequence. A bare `payload_ref` is not
+  enough for judging voice quality.
+- Expression feedback types such as `like`, `too_mechanical`,
+  `too_frequent`, `boundary_private`, `off_voice`, and `mute_period` are
+  FeedbackSignals. They must not directly mutate prompts, cadence, routing, or
+  delivery. Any policy or prompt change must become an owner-reviewed proposal
+  or explicit apply gate.
 - No LLM judge may create an owner action, approve an owner action, or convert
   feedback into live state changes.
 - Owner action feedback may influence future entrance behavior only through
@@ -1043,6 +1070,18 @@ Required monitor evidence:
 - `digest_sent_count`
 - `digest_boundary_true_count`
 - `digest_burden.owner_active_period`
+- `right_brain_expression.engine_available`
+- `right_brain_expression.draft_count`
+- `right_brain_expression.silent_count`
+- `right_brain_expression.speak_gate_evaluated_count`
+- `right_brain_expression.scheduled_delivered_count`
+- `right_brain_expression.exceptional_permission_count`
+- `right_brain_expression.owner_feedback_by_type`
+- `right_brain_expression.policy_update_pending_count`
+- `right_brain_expression.prompt_version`
+- `right_brain_expression.raw_body_included_count`
+- `right_brain_expression.task_language_count`
+- `right_brain_expression.boundary_true_count`
 - `feedback_backflow.by_action_type`
 - `feedback_backflow.apply_ready_count`
 
