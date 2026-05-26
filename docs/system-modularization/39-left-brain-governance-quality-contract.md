@@ -8,10 +8,12 @@ Current implementation state:
 
 - P1-S slice 1 is implemented and deployed on `10.20.3.200`:
   EvidenceScoring skips expired working items by default.
+- P1-S slice 2 is implemented locally: SelfEvolution skips duplicate
+  unresolved self-evolution proposals and reports novelty skip counts.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output.
 - This does not implement feature-based scoring v2, feedback backflow,
-  SelfEvolution novelty gates, production cadence, or execution apply.
+  production cadence, or execution apply.
 - Live `10.20.3.200` deployment evidence shows the installed scoring path no
   longer uses expired working as active scoring subjects.
 
@@ -197,6 +199,25 @@ Contract rule:
 Self-Evolution must not create a new proposal when the same proposal class,
 same score refs, or same unresolved target already exists.
 ```
+
+P1-S slice 2:
+
+```text
+SelfEvolution now checks proposal_queue before calling OpsGate.
+If an unresolved self_evolution proposal already exists for the same class or
+score refs, it writes a report with:
+
+  proposal_created=false
+  novelty_skipped=true
+  reason=duplicate_unresolved_proposal
+  existing_proposal_id=<existing proposal>
+
+status() reports:
+  novelty_skipped_count
+  duplicate_unresolved_proposal_count
+```
+
+This is a local PASS only until deployed and observed on `10.20.3.200`.
 
 ### 3. Feedback Backflow Is Not Closed
 

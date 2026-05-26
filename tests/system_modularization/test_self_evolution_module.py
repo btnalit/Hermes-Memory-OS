@@ -114,6 +114,39 @@ def test_self_evolution_routes_action_through_ops_gate_report_only(tmp_path):
     assert ops_gate.read_reports()[0]["actual_execute"] is False
 
 
+def test_self_evolution_skips_duplicate_unresolved_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue, evidence = _seed_evidence(tmp_path, store)
+    ops_gate = OpsGateModule(tmp_path, profile="main")
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    first = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+    second = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+    status = module.status()
+    queue = proposal_queue.read_queue()
+
+    assert first["proposal_created"] is True
+    assert second["proposal_created"] is False
+    assert second["novelty_skipped"] is True
+    assert second["reason"] == "duplicate_unresolved_proposal"
+    assert second["existing_proposal_id"] == first["proposal_id"]
+    assert len(queue["items"]) == 1
+    assert status["proposal_count"] == 1
+    assert status["novelty_skipped_count"] == 1
+    assert status["duplicate_unresolved_proposal_count"] == 1
+    assert len(ops_gate.read_reports()) == 1
+
+
 def test_self_evolution_doctor_reports_missing_dependencies_and_stale_digest(tmp_path):
     module = SelfEvolutionGovernorModule(tmp_path, profile="main")
 

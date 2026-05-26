@@ -1761,6 +1761,8 @@ def module_artifact_summary():
       "self_evolution": {
         "report_count": self_evolution.get("report_count"),
         "proposal_count": self_evolution.get("proposal_count"),
+        "novelty_skipped_count": self_evolution.get("novelty_skipped_count"),
+        "duplicate_unresolved_proposal_count": self_evolution.get("duplicate_unresolved_proposal_count"),
         "last_status": self_evolution.get("last_status"),
       },
       "governance_feedback": {

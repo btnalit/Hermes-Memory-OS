@@ -251,7 +251,8 @@ Current truth:
 
 - safety governance is implemented;
 - evidence scoring is hash-derived;
-- SelfEvolution can produce proposal backlog;
+- local P1-S slice 2 adds a SelfEvolution duplicate unresolved proposal gate
+  with novelty skip counters; live deployment evidence is still pending;
 - feedback backflow is not closed;
 - deployed P1-S slice 1 filters expired working out of EvidenceScoring and
   adds monitor visibility for expired scoring contamination;

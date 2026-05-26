@@ -98,6 +98,35 @@ class SelfEvolutionGovernorModule:
         selected = scores[:3]
         score_refs = [f"score:{score['score_id']}" for score in selected]
         digest = self._write_digest(selected, evidence_scoring=evidence_scoring)
+        duplicate = _unresolved_self_evolution_duplicate(proposal_queue, score_refs)
+        if duplicate is not None:
+            result = self._result(
+                status="ok",
+                proposal_created=False,
+                proposal_id="",
+                ops_gate_decision={},
+                score_refs=score_refs,
+                digest_ref=str(digest),
+                reason="duplicate_unresolved_proposal",
+                novelty_skipped=True,
+                existing_proposal_id=str(duplicate.get("candidate_id") or ""),
+            )
+            self._write_report(result)
+            append_audit(
+                store.roots.audit_path,
+                action="self_evolution_dry_run_written",
+                status="ok",
+                target=str(self.reports_path),
+                details={
+                    "proposal_created": False,
+                    "reason": "duplicate_unresolved_proposal",
+                    "existing_proposal_id": result.get("existing_proposal_id", ""),
+                    "score_ref_count": len(score_refs),
+                    "direct_self_modify": False,
+                    "actual_execute": False,
+                },
+            )
+            return result
         gate_result = ops_gate.run_once(
             store=store,
             proposed_actions=[
@@ -156,6 +185,10 @@ class SelfEvolutionGovernorModule:
             "digest_exists": self.digest_path.exists(),
             "report_count": len(reports),
             "proposal_count": sum(1 for report in reports if report.get("proposal_created")),
+            "novelty_skipped_count": sum(1 for report in reports if report.get("novelty_skipped")),
+            "duplicate_unresolved_proposal_count": sum(
+                1 for report in reports if report.get("reason") == "duplicate_unresolved_proposal"
+            ),
             "last_status": str(last.get("status", "missing")),
             "direct_self_modify": False,
             "actual_execute": False,
@@ -263,6 +296,8 @@ class SelfEvolutionGovernorModule:
         score_refs: list[str],
         digest_ref: str = "",
         reason: str = "",
+        novelty_skipped: bool = False,
+        existing_proposal_id: str = "",
     ) -> dict[str, Any]:
         result = {
             "schema_version": "hermes.self_evolution_result.v0",
@@ -275,9 +310,31 @@ class SelfEvolutionGovernorModule:
             "score_refs": list(score_refs),
             "digest_ref": digest_ref,
             "ops_gate_decision": dict(ops_gate_decision),
+            "novelty_skipped": bool(novelty_skipped),
+            "existing_proposal_id": existing_proposal_id,
             "direct_self_modify": False,
             "actual_execute": False,
         }
         if reason:
             result["reason"] = reason
         return result
+
+
+def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[str]) -> dict[str, Any] | None:
+    unresolved_states = {"candidate", "owner_eligible", "owner_defer", "approved_for_proposal"}
+    score_ref_set = set(score_refs)
+    queue = proposal_queue.read_queue()
+    for item in queue.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") != "self_evolution":
+            continue
+        if str(item.get("state") or "") not in unresolved_states:
+            continue
+        source_refs = {str(ref) for ref in item.get("source_refs") or []}
+        if not source_refs or source_refs == score_ref_set:
+            return item
+        title = str(item.get("title") or "")
+        if title == "Self-Evolution dry-run proposal":
+            return item
+    return None

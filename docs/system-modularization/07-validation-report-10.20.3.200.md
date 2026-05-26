@@ -12306,3 +12306,85 @@ NOT CLOSED:
   No expression outcome backflow into GovernanceFeedback/SelfEvolution.
   No formal scheduled right-brain expression delivery.
 ```
+
+## 2026-05-26 - P1-S Slice 2 Local SelfEvolution Novelty Gate
+
+Scope:
+
+```text
+P1-S / RH-39 second implementation slice only.
+SelfEvolution duplicate unresolved proposal gate.
+No feature-based scoring v2.
+No feedback backflow apply.
+No execution/apply capability.
+```
+
+Dynamic closure mapping:
+
+```text
+source_of_truth:
+  40-memory-os-unified-control-plane.md
+  39-left-brain-governance-quality-contract.md
+  live finding: SelfEvolution proposal_count kept increasing from recurring
+  scores while approved/pending follow-up proposals remained unresolved
+
+owning_seam:
+  left-brain governance quality / self_evolution -> proposal_queue
+
+reverse_scope:
+  Memory-OS may suppress duplicate proposals and report counters. It must not
+  execute proposals, approve proposals, or mutate prompts/cadence directly.
+```
+
+Implementation:
+
+```text
+plugins/modules/governance/self_evolution.py:
+  run_once() checks proposal_queue before OpsGate.
+  unresolved self_evolution proposal with same class/score refs skips proposal
+  creation.
+
+  skipped report fields:
+    proposal_created=false
+    novelty_skipped=true
+    reason=duplicate_unresolved_proposal
+    existing_proposal_id=<existing proposal>
+
+  status() reports:
+    novelty_skipped_count
+    duplicate_unresolved_proposal_count
+
+scripts/memory_os_3_200_monitor.py:
+  ModuleArtifacts.self_evolution now exposes novelty/duplicate skip counts.
+```
+
+Local evidence:
+
+```text
+python -m pytest tests/system_modularization/test_self_evolution_module.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+43 passed
+
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=28
+active_work_item_count=19
+active_work_mapping_count=19
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Decision:
+
+```text
+LOCAL PASS.
+
+This closes only local duplicate unresolved proposal suppression. Installed/live
+closure still requires deployment to 10.20.3.200, a new cognitive-loop run, and
+monitor evidence that novelty_skipped_count increments while proposal_count does
+not grow from another duplicate self-evolution run.
+```
