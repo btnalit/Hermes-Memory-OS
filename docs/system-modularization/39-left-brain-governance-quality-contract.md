@@ -2,18 +2,18 @@
 
 Date: 2026-05-26
 
-Status: design gate plus first local data-hygiene slice.
+Status: design gate plus first deployed data-hygiene slice.
 
 Current implementation state:
 
-- P1-S slice 1 is implemented locally: EvidenceScoring skips expired working
-  items by default.
+- P1-S slice 1 is implemented and deployed on `10.20.3.200`:
+  EvidenceScoring skips expired working items by default.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output.
 - This does not implement feature-based scoring v2, feedback backflow,
   SelfEvolution novelty gates, production cadence, or execution apply.
-- Live `10.20.3.200` deployment evidence is still required before claiming the
-  installed scoring path no longer uses expired working.
+- Live `10.20.3.200` deployment evidence shows the installed scoring path no
+  longer uses expired working as active scoring subjects.
 
 ## Why This Exists
 
@@ -75,7 +75,8 @@ external_review: "required before replacing legacy scoring as live input or befo
 
 ## Current Evidence
 
-The latest 10.20.3.200 monitor shows no hard failure but exposes quality gaps:
+The earlier 10.20.3.200 monitor exposed the data-quality gap that motivated
+P1-S slice 1:
 
 ```text
 working_items=168
@@ -100,6 +101,29 @@ This means:
 - feedback has not become a real governance input;
 - approved proposals are visible, but many still need follow-up;
 - execution remains correctly blocked.
+
+P1-S slice 1 deployment evidence on `10.20.3.200`:
+
+```text
+commit=1f56294 Filter expired working from evidence scoring
+cycle_id=cloop_20260526T074331475537Z_51164c286d
+cycle_status=ok
+evidence.score_count=477
+evidence.evidence_count=477
+evidence.working_active_subject_count=21
+evidence.working_expired_skipped_count=147
+evidence.working_unknown_status_count=0
+
+monitor_status=WARN
+monitor_FAIL=[]
+monitor.ModuleArtifacts.evidence.working_subject_count=21
+monitor.ModuleArtifacts.evidence.expired_used_in_scoring_count=0
+monitor.PASS includes left_brain_expired_working_not_scored
+```
+
+This is a live PASS for the EvidenceScoring expired-working hygiene slice only.
+It does not close DeepReflection expired-working handling or left-brain
+judgment quality.
 
 ## Left-Brain Chain
 

@@ -12026,3 +12026,102 @@ judgment quality. Installed/live closure still requires deployment to
 10.20.3.200, a new scoring run, and monitor evidence that
 expired_used_in_scoring_count=0.
 ```
+
+## 2026-05-26 - P1-S Slice 1 10.20.3.200 Deployment Evidence
+
+Scope:
+
+```text
+P1-S / RH-39 first live deployment slice only.
+EvidenceScoring expired-working input hygiene.
+No feature-based scoring v2.
+No SelfEvolution novelty gate.
+No feedback backflow apply.
+No execution/apply capability.
+```
+
+Deployment:
+
+```text
+commit=1f56294 Filter expired working from evidence scoring
+target=10.20.3.200
+repo=/tmp/hermes-memory-os-validation/repo
+hermes_home=/root/.hermes
+
+HERMES_HOME=/root/.hermes python3 scripts/install_memory_os_plugin.py \
+  --hermes-home /root/.hermes \
+  --install-runtime \
+  --install-system-modules \
+  --install-cognitive-loop \
+  --install-owner-review-cron-helper \
+  --deep-reflection-preset test-host \
+  --memory-sources-preset test-host \
+  --llm-judge-preset report-only
+```
+
+Remote cognitive-loop smoke:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python \
+HERMES_HOME=/root/.hermes \
+python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply
+
+cycle_id=cloop_20260526T074331475537Z_51164c286d
+status=ok
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+
+EvidenceScoring:
+  score_count=477
+  evidence_count=477
+  working_active_subject_count=21
+  working_expired_skipped_count=147
+  working_unknown_status_count=0
+```
+
+Post-deploy monitor:
+
+```text
+python scripts/memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+
+ModuleArtifacts.evidence:
+  evidence_count=477
+  score_count=477
+  subject_counts.working=21
+  working_subject_count=21
+  expired_used_in_scoring_count=0
+
+PASS includes:
+  left_brain_expired_working_not_scored
+
+WARN:
+  right_brain_speak_gate_missing_evaluation
+  session_mirror_pending_sessions
+  owner_review_approved_proposals_pending_followup
+  rh31_eval_has_failures
+  rh26_casual_empty
+```
+
+Interpretation:
+
+```text
+LIVE PASS for P1-S slice 1 EvidenceScoring input hygiene:
+  Expired working items are now skipped by the installed scoring path.
+  The score count dropped from the pre-slice 617/606 range to 477 because
+  expired working subjects are no longer included as active evidence.
+  The hard boundaries remain false.
+
+WARN remains correct:
+  The remaining warnings are unrelated/open work items, not EvidenceScoring
+  expired-working contamination.
+
+NOT CLOSED:
+  DeepReflection expired-working handling is still not fixed.
+  EvidenceScoring is still hash-derived and not a mature judgment scorer.
+  SelfEvolution novelty/idempotency gates are still future P1-S slices.
+  Feedback backflow and production cadence are still not closed.
+```

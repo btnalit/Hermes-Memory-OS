@@ -1128,8 +1128,8 @@ Stop signal:
 
 ### P1-S - RH-39 Left-Brain Governance Quality
 
-Status: design gate added; P1-S slice 1 implemented locally, live deployment
-evidence pending.
+Status: design gate added; P1-S slice 1 deployed on `10.20.3.200` with
+WARN-only monitor evidence and no hard failures.
 
 Source:
 
@@ -1147,11 +1147,24 @@ Reason:
   novelty/idempotency/cadence gate;
 - feedback ledgers exist, but feedback is not yet consumed as first-class
   GovernanceFeedback / scoring / reflection input;
-- local P1-S slice 1 filters expired working from EvidenceScoring and adds
+- deployed P1-S slice 1 filters expired working from EvidenceScoring and adds
   monitor visibility for expired scoring contamination;
 - expired working handling in DeepReflection is still not fixed;
 - approved proposals are visible and safe, but execution-decision state remains
   future work.
+
+Latest slice-1 evidence:
+
+- commit: `1f56294 Filter expired working from evidence scoring`;
+- remote cognitive loop: `cloop_20260526T074331475537Z_51164c286d`,
+  status `ok`;
+- EvidenceScoring now reports `working_active_subject_count=21`,
+  `working_expired_skipped_count=147`, `working_unknown_status_count=0`;
+- monitor reports `expired_used_in_scoring_count=0` and PASS
+  `left_brain_expired_working_not_scored`;
+- monitor remains WARN because of unrelated/open observation items:
+  right-brain historical SpeakGate gaps, SessionMirror pending sessions,
+  approved proposal follow-up, RH-31 eval warnings, and RH-26 casual-empty.
 
 Required design work:
 
