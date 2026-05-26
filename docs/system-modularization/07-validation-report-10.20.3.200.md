@@ -12610,7 +12610,7 @@ NOT CLOSED:
   apply gate.
 ```
 
-## 2026-05-26 - P1-S Slice 4 Local Prototype-Aligned Maturity Scoring
+## 2026-05-26 - P1-S Slice 4 Prototype-Aligned Maturity Scoring
 
 Scope:
 
@@ -12655,10 +12655,68 @@ python -m pytest tests\system_modularization\test_evidence_scoring_module.py \
 Decision:
 
 ```text
-LOCAL PASS only.
+LIVE PASS for report-only observation.
 
-This closes only the local prototype-aligned maturity-report implementation.
-Installed/live closure still requires deployment to 10.20.3.200, a
-cognitive-loop run, and monitor evidence that prototype_aligned_score_count
-matches feature_score_count while maturity_live_applied=false.
+This closes only the prototype-aligned maturity-report implementation and live
+report-only deployment.
+
+It does not promote maturity_score to live scoring, routing, proposal creation,
+owner action, execution, delivery, prompt, cadence, or policy changes.
+Replacing legacy hash scoring as a live input still requires a separate
+reviewed apply gate.
+```
+
+Deployment evidence:
+
+```text
+commit=38112c8 Add prototype-aligned maturity scoring report
+host=10.20.3.200
+install=ok
+cycle_id=cloop_20260526T094239150751Z_136e98a908
+cycle_status=ok
+
+EvidenceScoring:
+  score_count=487
+  evidence_count=487
+  feature_score_mode=report_only
+  feature_score_count=487
+  hash_score_legacy_count=487
+  comparison_count=487
+  prototype_aligned_score_count=487
+  maturity_dimension_count=9
+  maturity_dimension_keys=[
+    actionability,
+    duplicate_backlog,
+    evidence_strength,
+    freshness_decay,
+    gate_state,
+    owner_feedback,
+    recurrence,
+    risk,
+    source_diversity
+  ]
+  maturity_live_applied=false
+  feature_score_live_applied=false
+  working_active_subject_count=10
+  working_expired_skipped_count=158
+
+Monitor:
+  status=WARN
+  FAIL=[]
+  PASS includes left_brain_maturity_scoring_report_only_ok
+  PASS includes left_brain_feature_scoring_report_only_ok
+  PASS includes left_brain_expired_working_not_scored
+  ModuleArtifacts.evidence.prototype_aligned_score_count=487
+  ModuleArtifacts.evidence.maturity_dimension_count=9
+  ModuleArtifacts.evidence.maturity_live_applied=false
+```
+
+Warnings remain open but are outside P1-S.4:
+
+```text
+right_brain_speak_gate_missing_evaluation
+session_mirror_pending_sessions
+owner_review_approved_proposals_pending_followup
+rh31_eval_has_failures
+rh26_casual_empty
 ```

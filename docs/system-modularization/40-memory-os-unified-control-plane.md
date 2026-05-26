@@ -252,8 +252,8 @@ Current truth:
 - safety governance is implemented;
 - evidence scoring still uses legacy hash scores for live consumers, but P1-S
   slice 3 is deployed as a report-only feature-score comparator and P1-S
-  slice 4 is locally implemented as a 10.20.2.88 prototype-aligned maturity
-  dimension report;
+  slice 4 is deployed as a 10.20.2.88 prototype-aligned maturity dimension
+  report;
 - deployed P1-S slice 2 adds a SelfEvolution duplicate unresolved proposal
   gate with novelty skip counters; latest live monitor reports
   `novelty_skipped_count=1` and `duplicate_unresolved_proposal_count=1`;
@@ -262,14 +262,13 @@ Current truth:
   adds monitor visibility for expired scoring contamination;
 - latest live monitor reports `expired_used_in_scoring_count=0` and PASS
   `left_brain_expired_working_not_scored`;
-- latest live monitor reports `feature_score_count=484`,
-  `hash_score_legacy_count=484`, `comparison_count=484`,
+- latest live monitor reports `feature_score_count=487`,
+  `hash_score_legacy_count=487`, `comparison_count=487`,
   `feature_score_live_applied=false`, and PASS
   `left_brain_feature_scoring_report_only_ok`;
-- local P1-S.4 tests cover `prototype_aligned_score_count`,
-  `maturity_dimension_count=9`, `maturity_live_applied=false`, and monitor
-  PASS `left_brain_maturity_scoring_report_only_ok`; live deployment evidence
-  is still pending for this slice;
+- latest live monitor reports P1-S.4 `prototype_aligned_score_count=487`,
+  `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
+  `left_brain_maturity_scoring_report_only_ok`;
 - DeepReflection expired-working handling is still not fixed;
 - production cadence is not mature.
 
@@ -278,10 +277,11 @@ Implementation order:
 1. expired working filter / monitor;
 2. SelfEvolution novelty and idempotency gate;
 3. feature-based EvidenceScoring v2 report-only;
-4. feedback backflow report-only/proposal-only;
-5. approved-proposal execution-decision state design;
-6. production cadence split;
-7. ContextRouter / Ingress de-duplication with parity tests.
+4. prototype-aligned maturity dimensions report-only;
+5. feedback backflow report-only/proposal-only;
+6. approved-proposal execution-decision state design;
+7. production cadence split;
+8. ContextRouter / Ingress de-duplication with parity tests.
 
 ### P1-O - Owner Review Fallback / Gateway Boundary
 

@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score report-only, and locally implemented prototype-aligned maturity-report slices.
+Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score report-only, and prototype-aligned maturity-report slices.
 
 Current implementation state:
 
@@ -13,9 +13,9 @@ Current implementation state:
 - P1-S slice 3 is implemented and deployed on `10.20.3.200`:
   EvidenceScoring writes a separate `feature_scores.jsonl` report-only
   comparator and keeps legacy hash `scores.jsonl` as the live baseline.
-- P1-S slice 4 is implemented locally: the report-only comparator now carries
-  nine prototype-aligned maturity dimensions adapted from the 10.20.2.88
-  self-evolution pipeline shape.
+- P1-S slice 4 is implemented and deployed on `10.20.3.200`: the report-only
+  comparator now carries nine prototype-aligned maturity dimensions adapted
+  from the 10.20.2.88 self-evolution pipeline shape.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output and whether
   feature scoring remains report-only.
@@ -303,6 +303,38 @@ python -m pytest tests/system_modularization/test_evidence_scoring_module.py \
 
 47 passed
 ```
+
+Live deployment evidence:
+
+```text
+commit=38112c8 Add prototype-aligned maturity scoring report
+cycle_id=cloop_20260526T094239150751Z_136e98a908
+cycle_status=ok
+
+EvidenceScoring:
+  score_count=487
+  evidence_count=487
+  feature_score_mode=report_only
+  feature_score_count=487
+  hash_score_legacy_count=487
+  comparison_count=487
+  prototype_aligned_score_count=487
+  maturity_dimension_count=9
+  maturity_live_applied=false
+  feature_score_live_applied=false
+  working_active_subject_count=10
+  working_expired_skipped_count=158
+
+Monitor:
+  status=WARN
+  FAIL=[]
+  PASS includes left_brain_maturity_scoring_report_only_ok
+  PASS includes left_brain_feature_scoring_report_only_ok
+  PASS includes left_brain_expired_working_not_scored
+```
+
+This is a live PASS for report-only prototype-aligned maturity reporting only.
+It does not replace legacy hash scoring as a live input.
 
 ### 2. Self-Evolution Can Create Proposal Backlog
 
