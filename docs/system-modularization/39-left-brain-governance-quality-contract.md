@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed data-hygiene / duplicate-suppression slices; feature scoring v2 report-only slice is implemented locally and pending live deployment evidence.
+Status: design gate plus deployed data-hygiene, duplicate-suppression, and feature-score report-only slices.
 
 Current implementation state:
 
@@ -10,9 +10,9 @@ Current implementation state:
   EvidenceScoring skips expired working items by default.
 - P1-S slice 2 is implemented and deployed on `10.20.3.200`: SelfEvolution skips duplicate
   unresolved self-evolution proposals and reports novelty skip counts.
-- P1-S slice 3 is implemented locally: EvidenceScoring writes a separate
-  `feature_scores.jsonl` report-only comparator and keeps legacy hash
-  `scores.jsonl` as the live baseline.
+- P1-S slice 3 is implemented and deployed on `10.20.3.200`:
+  EvidenceScoring writes a separate `feature_scores.jsonl` report-only
+  comparator and keeps legacy hash `scores.jsonl` as the live baseline.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output and whether
   feature scoring remains report-only.
@@ -232,6 +232,32 @@ finding_count=0
 
 git diff --check
 PASS
+```
+
+Live deployment evidence:
+
+```text
+commit=b334091 Add report-only feature evidence scoring
+cycle_id=cloop_20260526T092633913253Z_eded9ce0e5
+cycle_status=ok
+
+EvidenceScoring:
+  score_count=484
+  evidence_count=484
+  feature_score_mode=report_only
+  feature_score_count=484
+  hash_score_legacy_count=484
+  comparison_count=484
+  feature_score_report_count=1
+  feature_score_live_applied=false
+  working_active_subject_count=13
+  working_expired_skipped_count=155
+
+Monitor:
+  status=WARN
+  FAIL=[]
+  PASS includes left_brain_feature_scoring_report_only_ok
+  PASS includes left_brain_expired_working_not_scored
 ```
 
 ### 2. Self-Evolution Can Create Proposal Backlog

@@ -12532,3 +12532,80 @@ closure still requires deployment to 10.20.3.200, a cognitive-loop run, and
 monitor evidence that feature_score_count matches legacy score count while
 feature_score_live_applied=false.
 ```
+
+## 2026-05-26 - P1-S Slice 3 10.20.3.200 Deployment Evidence
+
+Deployment:
+
+```text
+commit=b334091 Add report-only feature evidence scoring
+target=10.20.3.200
+repo=/tmp/hermes-memory-os-validation/repo
+hermes_home=/root/.hermes
+```
+
+Remote cognitive-loop smoke:
+
+```text
+PYTHONPATH=/root/.hermes/memory-os/runtime/python \
+HERMES_HOME=/root/.hermes \
+python3 -m plugins.memory.memory_os cognitive-loop run-once --test-host --apply
+
+cycle_id=cloop_20260526T092633913253Z_eded9ce0e5
+status=ok
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+
+EvidenceScoring:
+  score_count=484
+  evidence_count=484
+  feature_score_mode=report_only
+  feature_score_count=484
+  hash_score_legacy_count=484
+  comparison_count=484
+  feature_score_report_count=1
+  feature_score_live_applied=false
+  working_active_subject_count=13
+  working_expired_skipped_count=155
+```
+
+Post-deploy monitor:
+
+```text
+python scripts/memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+
+ModuleArtifacts.evidence:
+  score_count=484
+  evidence_count=484
+  feature_score_mode=report_only
+  feature_score_count=484
+  hash_score_legacy_count=484
+  comparison_count=484
+  feature_score_report_count=1
+  feature_score_live_applied=false
+  expired_used_in_scoring_count=0
+
+PASS includes:
+  left_brain_feature_scoring_report_only_ok
+  left_brain_expired_working_not_scored
+```
+
+Interpretation:
+
+```text
+LIVE PASS for P1-S slice 3 feature-based EvidenceScoring v2 report-only:
+  Feature scores are written as bounded comparison artifacts.
+  Legacy hash scores remain the live baseline.
+  Feature scores are not applied to live scoring, proposals, routing,
+  execution, delivery, or owner actions.
+
+NOT CLOSED:
+  Feedback backflow remains report/proposal future work.
+  Production cadence split remains future work.
+  Replacing legacy hash scoring as a live input requires a separate reviewed
+  apply gate.
+```

@@ -251,7 +251,7 @@ Current truth:
 
 - safety governance is implemented;
 - evidence scoring still uses legacy hash scores for live consumers, but P1-S
-  slice 3 adds a report-only feature-score comparator;
+  slice 3 is deployed as a report-only feature-score comparator;
 - deployed P1-S slice 2 adds a SelfEvolution duplicate unresolved proposal
   gate with novelty skip counters; latest live monitor reports
   `novelty_skipped_count=1` and `duplicate_unresolved_proposal_count=1`;
@@ -260,9 +260,10 @@ Current truth:
   adds monitor visibility for expired scoring contamination;
 - latest live monitor reports `expired_used_in_scoring_count=0` and PASS
   `left_brain_expired_working_not_scored`;
-- local tests now cover `feature_score_mode=report_only`,
-  `feature_score_live_applied=false`, and feature/legacy comparison counts;
-  live deployment evidence is still pending for this slice;
+- latest live monitor reports `feature_score_count=484`,
+  `hash_score_legacy_count=484`, `comparison_count=484`,
+  `feature_score_live_applied=false`, and PASS
+  `left_brain_feature_scoring_report_only_ok`;
 - DeepReflection expired-working handling is still not fixed;
 - production cadence is not mature.
 

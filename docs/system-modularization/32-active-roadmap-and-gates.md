@@ -1134,10 +1134,8 @@ Stop signal:
 
 ### P1-S - RH-39 Left-Brain Governance Quality
 
-Status: design gate added; P1-S slices 1 and 2 deployed on `10.20.3.200`
-with WARN-only monitor evidence and no hard failures. P1-S slice 3 is
-implemented locally as a report-only feature-score comparator and is pending
-live deployment evidence.
+Status: design gate added; P1-S slices 1, 2, and 3 are deployed on
+`10.20.3.200` with WARN-only monitor evidence and no hard failures.
 
 Source:
 
@@ -1152,7 +1150,7 @@ Reason:
 - EvidenceScoring currently uses deterministic hash-derived scores, which are
   replayable but not meaningful importance/risk/feedback scores;
 - feature-based EvidenceScoring v2 now writes report-only comparison records
-  locally without replacing legacy hash scores or driving proposals;
+  without replacing legacy hash scores or driving proposals;
 - deployed P1-S slice 2 adds a SelfEvolution novelty/idempotency gate for
   duplicate unresolved proposals before OpsGate/proposal creation;
 - feedback ledgers exist, but feedback is not yet consumed as first-class
@@ -1162,6 +1160,10 @@ Reason:
 - live monitor reports `novelty_skipped_count=1` and
   `duplicate_unresolved_proposal_count=1` after the first deployed duplicate
   skip;
+- live monitor reports `feature_score_count=484`,
+  `hash_score_legacy_count=484`, `comparison_count=484`,
+  `feature_score_live_applied=false`, and PASS
+  `left_brain_feature_scoring_report_only_ok`;
 - expired working handling in DeepReflection is still not fixed;
 - approved proposals are visible and safe, but execution-decision state remains
   future work.
@@ -1181,8 +1183,7 @@ Latest slice-1 evidence:
 
 Required design work:
 
-1. feature-based EvidenceScoring v2 report-only is locally implemented and
-   needs live deployment evidence before it can be marked deployed;
+1. feature-based EvidenceScoring v2 report-only is deployed and monitored;
 2. SelfEvolution novelty/idempotency gates are deployed for unresolved
    proposals and repeated score refs;
 3. route MemorySources / owner / expression feedback into GovernanceFeedback as
