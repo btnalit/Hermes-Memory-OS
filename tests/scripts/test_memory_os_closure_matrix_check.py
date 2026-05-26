@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from scripts.memory_os_closure_matrix_check import build_report
+
+
+def test_closure_matrix_check_passes_for_current_repo() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+
+    report = build_report(repo_root)
+
+    assert report["schema_version"] == "memory-os.closure_matrix_check.v0"
+    assert report["status"] == "ok"
+    assert report["live_module_count"] == 16
+    assert report["matrix_module_count"] == 26
+    assert report["missing_live_modules"] == []
+    assert report["missing_contract_labels"] == []
+    assert report["invalid_row_count"] == 0
+    assert report["findings"] == []
+
+
+def test_closure_matrix_check_fails_when_live_module_row_is_missing(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    shadow_repo = tmp_path / "repo"
+    shutil.copytree(repo_root / "docs", shadow_repo / "docs")
+    matrix_path = shadow_repo / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    text = matrix_path.read_text(encoding="utf-8")
+    matrix_path.write_text(
+        "\n".join(
+            line
+            for line in text.splitlines()
+            if not line.startswith("| DeepReflection |")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = build_report(shadow_repo)
+
+    assert report["status"] == "fail"
+    assert "DeepReflection" in report["missing_live_modules"]
+    assert any(
+        finding["code"] == "live_module_missing_matrix_row"
+        and finding["module"] == "DeepReflection"
+        for finding in report["findings"]
+    )
+
+
+def test_closure_matrix_check_rejects_freeform_classification_text(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    shadow_repo = tmp_path / "repo"
+    shutil.copytree(repo_root / "docs", shadow_repo / "docs")
+    matrix_path = shadow_repo / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    text = matrix_path.read_text(encoding="utf-8")
+    matrix_path.write_text(
+        text.replace(
+            "| Mailbox | hermes_mailbox_internal | monitor_only | event_driven_fast |",
+            "| Mailbox | hermes_mailbox_internal | monitor_only | event_driven_fast with cooldown |",
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_report(shadow_repo)
+
+    assert report["status"] == "fail"
+    assert any(
+        finding["code"] == "invalid_closure_classification"
+        and finding["module"] == "Mailbox"
+        and finding["errors"] == ["cadence_class"]
+        for finding in report["findings"]
+    )

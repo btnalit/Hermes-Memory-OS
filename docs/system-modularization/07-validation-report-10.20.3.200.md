@@ -11295,3 +11295,173 @@ NOT CLOSED:
   - SessionMirror pending sessions and RH-31 eval failures remain observation
     items, not blockers for RH-34h/RH-35.10.
 ```
+
+## RH-36b Closure Matrix Live Reconciliation
+
+Purpose:
+
+```text
+RH-36 is not treated as documentation-only. The closure matrix now has a local
+check that reconciles code-defined live modules and contract-critical non-live
+surfaces against the module closure table.
+```
+
+10.20.3.200 live module inventory:
+
+```text
+source: hermes memory-os-agent-os modules status
+live_module_count=16
+modules:
+  cron_mirror
+  session_mirror
+  state_source_mirror
+  shadow_journal
+  deep_reflection
+  governance_feedback
+  digest_consolidation
+  inner_drive
+  mailbox
+  household_digest
+  wandering_mind
+  evidence_scoring
+  ops_gate
+  proposal_queue
+  self_evolution
+  speak_gate
+```
+
+10.20.3.200 owner-review delivery evidence:
+
+```text
+source: hermes memory-os-agent-os review cron-status
+schema_version=memory-os.owner_review_cron_integration.v0
+enabled=true
+status=ok
+mode=hermes_cron_agent
+job_id=2af755464ca8
+delivery_target_class=platform_home
+recurring_channel=telegram
+raw_body_included_count=0
+unapproved_send_count=0
+boundary fields=false
+```
+
+10.20.2.88 / Sannai reference prototype recheck:
+
+```text
+source: hermes cron list on 10.20.2.88
+owner-facing scheduled reports use Hermes cron delivery classes such as origin.
+current origin-delivery scheduled job count: 13.
+Sannai report jobs use no-agent direct stdout for report-style output, not for
+interactive Memory-OS state mutation.
+
+source: Hermes mailbox adapter grep on 10.20.2.88
+mailbox contains final_only, proactive_send_enabled, auto_wake_cooldown,
+reply-depth controls, and [NO_REPLY] semantics.
+current mailbox-control grep hit count: 13.
+mailbox remains an internal AI-agent mailroom, not the owner approval path.
+```
+
+Local enforcement:
+
+```text
+python scripts/memory_os_closure_matrix_check.py --format summary
+
+status=ok
+live_module_count=16
+matrix_module_count=26
+finding_count=0
+```
+
+Regression coverage:
+
+```text
+python -m pytest tests/scripts/test_memory_os_closure_matrix_check.py -q
+
+result: 3 passed
+coverage:
+  - current RH-36 matrix reconciles live code-defined modules
+  - missing live module matrix row fails
+  - freeform classification prose such as "event_driven_fast with cooldown"
+    fails instead of being accepted as a class
+
+python -m pytest tests/scripts/test_memory_os_3_200_monitor.py \
+  tests/scripts/test_memory_os_closure_matrix_check.py -q
+
+result: 36 passed
+```
+
+Self-review:
+
+```text
+PASS:
+  - RH-36 now has an executable local check.
+  - The check is grounded in 10.20.3.200 live module inventory.
+  - The Hermes transport/scheduler reference is grounded in 10.20.2.88 main and
+    Sannai cron/mailbox patterns.
+  - 29-series contract and 32-roadmap now treat the check as a gate.
+
+NOT CLOSED:
+  - This is still a local/staged-content enforcement check, not yet CI.
+  - Future new module/RH work must run the check before claiming implemented.
+```
+
+## RH-37 Agent / Memory-OS Collaboration Contract
+
+Purpose:
+
+```text
+Define how Hermes agent should use Memory-OS review context and structured tools
+without making Memory-OS the owner of owner conversation, clarification,
+recovery guidance, scheduling, or transport.
+```
+
+Contract status:
+
+```text
+file: docs/system-modularization/37-agent-memoryos-collaboration-contract.md
+runtime_change=false
+execution_capability_added=false
+architecture_boundary=Hermes owns owner interaction; Memory-OS owns bounded
+  tools, stable tokens, state machines, audit, and monitor evidence
+```
+
+Roadmap follow-ups created:
+
+```text
+P1-N: RH-37 Agent / Memory-OS Collaboration Contract
+P1-O: reply fallback and gateway hook boundary closure
+P1-P: candidate/proposal timestamp schema repair
+P1-Q: approved proposal follow-up to OpsGate/manual apply
+P2-F: RH-34/RH-35 owner-governance family map before public productization
+```
+
+Closure matrix:
+
+```text
+Agent / Memory-OS Collaboration Contract is now a non-runtime governed surface
+in RH-36.
+
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=26
+finding_count=0
+```
+
+Self-review:
+
+```text
+PASS:
+  - RH-37 is design-only and does not add execution capability.
+  - The contract prevents another gateway/parser/transport drift by keeping
+    Hermes as the interaction owner.
+  - Concrete code follow-ups are split into P1-O/P1-P/P1-Q rather than hidden
+    inside the contract.
+
+NOT CLOSED:
+  - reply_fallback_used_count is not implemented yet.
+  - timestamp producer repair is not implemented yet.
+  - future explicit execution/apply path remains separate and must not be
+    inferred from proposal approval.
+```

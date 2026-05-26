@@ -52,6 +52,8 @@ first, with evidence and review, before the code is changed.
 Hermes is the interactive agent. Memory-OS is a plugin/runtime substrate.
 
 This is a governing boundary, not an implementation preference.
+The detailed collaboration contract is
+`37-agent-memoryos-collaboration-contract.md`.
 
 Hermes owns:
 
@@ -1406,6 +1408,9 @@ decision feature must answer these questions before design review can pass:
    - If the design says Memory-OS will directly interpret user language,
      intercept before the agent, or generate platform-facing recovery UX, it
      must be rewritten or explicitly justified as a boundary expansion.
+   - If the design changes how Hermes reads review context, explains owner
+     questions, suggests actions, asks clarifications, or calls Memory-OS tools,
+     it must satisfy `37-agent-memoryos-collaboration-contract.md`.
 2. Does Hermes already own this capability?
    - Examples include transport, platform delivery, AI-agent mailroom/mailbox cooldowns, cron
      scheduling, gateway delivery, profile/session surfaces, provider hooks,
@@ -1451,12 +1456,21 @@ Closure matrix gate:
   blocked from promotion beyond monitor-only status.
 - Cadence changes require generated/skipped/error monitor fields before they
   can be called an observation period.
+- `scripts/memory_os_closure_matrix_check.py` is the local enforcement check
+  for this gate. It must pass before a module/RH is called implemented when the
+  change touches module behavior, owner review, scheduling, delivery, context
+  projection, persistence, feedback, or monitor evidence.
+- A failing closure-matrix check is a P1 contract gap. Do not paper over it by
+  adding prose to the RH-36 table; either map the module to an existing
+  machine-readable class or update RH-36 with a new explicit class first.
 
 Before local merge:
 
 1. Unit tests for the module's public seam.
 2. Integrated test for the full call path when ingress or prefetch is touched.
-3. `git diff --check`.
+3. `python scripts/memory_os_closure_matrix_check.py --format summary` when
+   the change touches any RH-36-governed surface.
+4. `git diff --check`.
 
 Before 10.20.3.200 deployment:
 

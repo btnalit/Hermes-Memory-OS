@@ -133,6 +133,7 @@ Cadence rules:
 | Owner Review Queue / Aging | candidates, proposals, speak items, owner actions | review projection, effective priority | no by itself | no | OwnerAction Contract | reduces burden; does not approve/reject/close canonical targets |
 | Review Digest Renderer | review queue, aging, bounded candidate/proposal text | owner-readable digest text and active digest binding | no by itself | configured digest delivery only | Export eligibility + Hermes cron | owner readability and response burden feed renderer limits |
 | Agent-Mediated Review Surface | latest owner-home digest, review queue, proposal follow-ups | bounded read-only page/detail/follow-up reports | no | no | ContextProjection for owner review + no-write boundary | lets Hermes agent answer "下一页/展开/还有哪些" without Memory-OS owning conversation |
+| Agent / Memory-OS Collaboration Contract | 29-series contract, owner-review surfaces, Hermes agent interaction findings | design contract only | no | no | RH-37 + Host-Agent Boundary Principle | defines how Hermes reads/explains/suggests/asks/calls structured tools without transferring owner decision authority to Memory-OS |
 | Agent-Mediated Owner Reply Tool | live owner message, visible digest context, provider platform, recorded digest binding | OwnerActionProcessor request + bounded tool result | yes, only after Hermes resolves a definite action + stable `oa_` token | no | recorded digest + OwnerActionProcessor | lets Hermes agent complete interactive owner review tasks through structured `memory_os_review_reply`; stable action tokens feed durable owner-action state |
 | Owner Reply Parser | owner command text, recorded digest action-token binding | parsed action request | yes, through processor only | no | OwnerActionProcessor | applies approve/reject/feedback/allow as auditable state transitions |
 | OwnerActionProcessor | parsed owner actions, target state | owner action ledger, approved crystallized records, proposal state, feedback ledger, speak ticket | yes | no | MemoryWriteSurface / Proposal / Feedback / Speak permission | durable owner choices feed candidates, proposals, RH-30 feedback, and monitor |
@@ -149,28 +150,29 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Heartbeat / Inner Drive | none | candidate_review | event_driven_fast | candidates must become owner-readable before approval |
 | Household Digest | internal_local | monitor_only | cycle_each | feeds other modules; no owner action |
 | Digest Consolidation | internal_local | candidate_review / proposal_review | daily_once + weekly_once | emitted candidates/proposals enter review queue |
-| Wandering Mind | owner_origin when configured, otherwise none | speak_permission / monitor_only | daily_once or cycle_each in test mode | normal configured expression uses Hermes; exceptional proactive send needs speak permission |
-| Speak Gate | none | speak_permission / monitor_only | on_demand / cycle_each when expression exists | records would-send/blocked-send; one-shot allow only through owner action |
-| DeepReflection | none | context_projection / proposal_review / speak_permission / monitor_only | cycle_each with TTL | output type determines route |
+| Wandering Mind | owner_origin / none | speak_permission / monitor_only | daily_once / cycle_each | normal configured expression uses Hermes; exceptional proactive send needs speak permission |
+| Speak Gate | none | speak_permission / monitor_only | on_demand / cycle_each | records would-send/blocked-send; one-shot allow only through owner action |
+| DeepReflection | none | context_projection / proposal_review / speak_permission / monitor_only | cycle_each | output type determines route; TTL/minimum-signal gates live in the action path |
 | Ops Gate | none | proposal_review / monitor_only | cycle_each | approval creates follow-up state, never execution |
-| Proposal Queue | none | proposal_review | on_demand + cycle_each status | approve/reject through OwnerActionProcessor |
-| Evidence Scoring | none | monitor_only | cycle_each, skip/no-op when unchanged | score evidence only |
-| Self-Evolution | none | proposal_review | daily_once preferred; cycle_each dry-run on test host | emits proposals only |
+| Proposal Queue | none | proposal_review | on_demand + cycle_each | approve/reject through OwnerActionProcessor; cycle status is monitor-only |
+| Evidence Scoring | none | monitor_only | cycle_each | score evidence only; skip/no-op when unchanged |
+| Self-Evolution | none | proposal_review | daily_once / cycle_each | emits proposals only; production prefers daily/weekly while test host may dry-run per cycle |
 | Governance Feedback | none | feedback_ledger / monitor_only | cycle_each | feeds later reflection/scoring |
-| Conversation Carryover | none | context_projection | on_demand per prefetch | attribution + feedback only |
-| Context Router / Low-Clue Recall | none | context_projection | on_demand per turn | owner correction feeds feedback ledger before apply |
-| MemorySources Attribution | none | feedback_ledger | on_demand per live prefetch | feedback evidence only |
+| Conversation Carryover | none | context_projection | on_demand | attribution + feedback only; runs per prefetch |
+| Context Router / Low-Clue Recall | none | context_projection | on_demand | owner correction feeds feedback ledger before apply |
+| MemorySources Attribution | none | feedback_ledger | on_demand | feedback evidence only; live prefetch attribution |
 | RH-31 Eval Harness | internal_local | monitor_only | on_demand / monitor_poll | scorecard/finding only |
-| Metadata Retention | internal_local | retention_metadata | on_demand, later scheduled if approved | metadata archive/prune only |
-| Owner Review Queue / Aging | none | monitor_only | owner_daily preview + monitor_poll | priority projection only |
-| Review Digest Renderer | owner_origin through Hermes cron | monitor_only | owner_daily | renders bounded digest, display anchors, and stable action tokens |
-| Agent-Mediated Review Surface | none | context_projection / monitor_only | on_demand per owner request | read-only pagination/detail/follow-up data for Hermes agent |
-| Agent-Mediated Owner Reply Tool | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand per owner message | Hermes resolves natural owner intent to a structured action token; requires recorded digest; processor owns mutation |
-| Owner Reply Parser | none | none | on_demand per owner reply | parses only; processor owns mutation |
-| OwnerActionProcessor | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand per owner action | sole mutation path for owner actions |
-| Owner Review Hermes Cron Helper | owner_origin | monitor_only | owner_daily through Hermes cron | bounded stdout for Hermes cron |
-| Cron / Session / State Mirrors | internal_local / no_agent_script | monitor_only | on_demand or scheduled local | run-once/apply gates only |
-| Mailbox | hermes_mailbox_internal | monitor_only | event_driven_fast with cooldown/backpressure | internal AI-agent anti-loop evidence only |
+| Metadata Retention | internal_local | retention_metadata | on_demand | metadata archive/prune only; scheduling requires a separate gate |
+| Owner Review Queue / Aging | none | monitor_only | owner_daily / monitor_poll | priority projection only |
+| Review Digest Renderer | owner_origin | monitor_only | owner_daily | renders bounded digest, display anchors, and stable action tokens through Hermes cron |
+| Agent-Mediated Review Surface | none | context_projection / monitor_only | on_demand | read-only pagination/detail/follow-up data for Hermes agent |
+| Agent / Memory-OS Collaboration Contract | none | none | on_demand | design gate only; no runtime mutation |
+| Agent-Mediated Owner Reply Tool | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand | Hermes resolves natural owner intent to a structured action token; requires recorded digest; processor owns mutation |
+| Owner Reply Parser | none | none | on_demand | parses only; processor owns mutation |
+| OwnerActionProcessor | none | candidate_review / proposal_review / feedback_ledger / speak_permission | on_demand | sole mutation path for owner actions |
+| Owner Review Hermes Cron Helper | owner_origin | monitor_only | owner_daily | bounded stdout for Hermes cron |
+| Cron / Session / State Mirrors | internal_local / no_agent_script | monitor_only | on_demand / monitor_poll | run-once/apply gates only |
+| Mailbox | hermes_mailbox_internal | monitor_only | event_driven_fast | internal AI-agent anti-loop evidence only with Hermes cooldown/backpressure |
 
 ## Current Test-Host Cadence Snapshot
 
@@ -411,10 +413,77 @@ Use this severity guide during design review, code review, and release review:
 | Cadence changes without generated/skipped/error monitor fields | P1 | Add monitor/evidence before observation claims. |
 | Wrong class but no live boundary violation | P2 | Correct docs/tests before next related feature. |
 
-Enforcement is currently design-review and staged-content review, backed by
-the 29-series integration contract. A future CI lint can check for new module
-registry rows, but the authoritative review remains this document plus the
-29-series contract.
+Enforcement is design-review and staged-content review, backed by the
+29-series integration contract and the RH-36b local check below.
+
+## RH-36b Closure Matrix Enforcement
+
+The local enforcement check is:
+
+```text
+scripts/memory_os_closure_matrix_check.py
+```
+
+What it checks:
+
+- all code-defined live modules from `memory_os.cli._module_definitions()` map
+  to a row in the RH-36 Classification Overlay;
+- non-live but contract-critical surfaces such as MemorySources, RH-31 eval,
+  OwnerActionProcessor, review renderer, review surface, owner reply tool, and
+  Hermes cron helper also have rows;
+- `delivery_class`, `state_change_class`, and `cadence_class` contain known
+  machine-readable class values, not freeform prose;
+- failures return a non-zero exit code.
+
+Current live reconciliation:
+
+```text
+10.20.3.200 modules status:
+  live_module_count=16
+  modules:
+    cron_mirror
+    session_mirror
+    state_source_mirror
+    shadow_journal
+    deep_reflection
+    governance_feedback
+    digest_consolidation
+    inner_drive
+    mailbox
+    household_digest
+    wandering_mind
+    evidence_scoring
+    ops_gate
+    proposal_queue
+    self_evolution
+    speak_gate
+
+closure matrix check:
+  status=ok
+  live_module_count=16
+  matrix_module_count=26
+  finding_count=0
+```
+
+Reference prototype recheck:
+
+```text
+10.20.2.88 Hermes main / Sannai:
+  owner-facing scheduled reports use Hermes cron delivery such as origin;
+  Sannai owner review reports use no-agent direct stdout only for report-style
+  output, not interactive Memory-OS state mutation;
+  mailbox adapter contains final_only, proactive_send_enabled,
+  auto_wake_cooldown, reply_depth controls, and [NO_REPLY] semantics;
+  mailbox remains an internal AI-agent mailroom, not the owner approval path.
+```
+
+Enforcement rule:
+
+- any new module/RH that changes module behavior, owner review, scheduling,
+  delivery, context projection, persistence, feedback, or monitor evidence must
+  pass this check before it is called implemented;
+- if the check fails because a new module does not fit an existing class, RH-36
+  must be updated first, then the check and tests must pass.
 
 ## Stop Signals
 

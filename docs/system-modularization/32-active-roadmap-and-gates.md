@@ -26,6 +26,7 @@ It exists because the work is now spread across many documents:
 - Hermes upgrade gate: `30`
 - recall eval harness: `31`
 - live evidence: `07`
+- agent/Memory-OS collaboration contract: `37`
 
 The queue below must stay consistent with those source documents and with live
 `10.20.3.200` monitor evidence.
@@ -120,7 +121,8 @@ These are not the remaining queue, but future work depends on them.
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
 | RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.5/35.8 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, stable action-token parser, agent-mediated `memory_os_review_reply` tool, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text and exposes tools/state, Hermes owns delivery and agent interaction |
-| RH-36 module closure matrix | documented | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns |
+| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules and contract-critical non-live surfaces against RH-36 and currently reports `status=ok`, `live_module_count=16`, `matrix_module_count=26`, `finding_count=0` |
+| RH-37 Agent / Memory-OS collaboration contract | design contract active; no new execution capability | defines how Hermes agent reads bounded Memory-OS review context, explains owner questions, suggests without deciding, asks when ambiguous, and calls structured tools only after definite owner intent; follow-up implementation remains split into P1 items below |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
 
@@ -900,6 +902,118 @@ Stop signal:
   `oa_` token. Hermes may resolve anchors from visible context before calling
   the tool; Memory-OS itself must not execute anchors.
 
+### P1-N - RH-37 Agent / Memory-OS Collaboration Contract
+
+Source:
+
+- `37-agent-memoryos-collaboration-contract.md`
+- `29-memory-os-module-integration-contract.md`
+- `36-module-closure-matrix.md`
+
+Status:
+
+- design contract active;
+- no new execution capability;
+- RH-36 classifies the collaboration contract as a governed non-runtime
+  surface.
+
+Reason:
+
+- owner-review flow now works, but Hermes agent must be treated as an
+  interactive partner rather than a rigid tool consumer;
+- Memory-OS should expose bounded context, stable tokens, and structured tools,
+  while Hermes owns explanation, clarification, recovery guidance, and owner
+  conversation.
+
+Next action:
+
+1. use RH-37 as the preflight contract for every owner-review / review-surface /
+   `memory_os_review_reply` change;
+2. do not add execution capability from RH-37 itself;
+3. implement the concrete P1 follow-ups below as separate slices.
+
+Promotion signal:
+
+- Hermes can read bounded review context, explain owner-visible consequences,
+  suggest without deciding, ask when ambiguous, and call structured tools only
+  after definite owner intent.
+
+Stop signal:
+
+- Memory-OS replaces Hermes agent with gateway interception, rigid language
+  parsing, platform-facing recovery UX, or automatic decisions.
+
+### P1-O - Reply Fallback And Gateway Hook Boundary Closure
+
+Status: planned.
+
+Reason:
+
+- `reply` fallback exists for CLI/legacy paths, but the model-facing path should
+  be structured `action + action_token + rating`;
+- gateway hooks must be safety-only pollution guards, not the normal owner
+  approval path.
+
+Next action:
+
+1. add monitor fields such as `reply_fallback_used_count`,
+   `structured_review_reply_count`, and gateway safety/pollution counts;
+2. document fallback deprecation conditions;
+3. verify live owner-review tasks use structured tool calls through Hermes
+   agent, while fallback remains non-primary compatibility.
+
+Stop signal:
+
+- a valid owner-review action requires gateway pre-dispatch interception to
+  succeed;
+- fallback use is invisible to monitor.
+
+### P1-P - Candidate / Proposal Timestamp Schema Repair
+
+Status: planned.
+
+Reason:
+
+- RH-34c aging found `unknown_timestamp=161`, which means much of the first
+  aging reduction came from missing producer metadata rather than true age.
+
+Next action:
+
+1. require producers of candidates, proposals, speak review items, and review
+   queue entries to write bounded `created_at`;
+2. keep unknown timestamp handling conservative but visible;
+3. add monitor fields such as `unknown_timestamp_count` and timestamp coverage
+   by review item type.
+
+Stop signal:
+
+- aging maturity is claimed while unknown timestamp remains the dominant review
+  queue reason.
+
+### P1-Q - Approved Proposal Follow-Up To OpsGate / Manual Apply
+
+Status: partly implemented as report-only projection; execution apply remains
+future work.
+
+Reason:
+
+- approving a proposal creates `approved_for_proposal`;
+- approved proposals must stay visible to the owner/Hermes agent and may enter
+  OpsGate report-only review, but execution still requires a separate explicit
+  apply gate.
+
+Next action:
+
+1. keep the current report-only OpsGate follow-up visible and idempotent;
+2. design the future manual execution/apply path separately;
+3. require explicit owner/operator intent, monitor fields, and rollback before
+   any execution ticket can be created.
+
+Stop signal:
+
+- proposal approval creates execution tickets or sets `actual_execute=true`;
+- approved proposals disappear from review/monitor surfaces after approval.
+
 ## Active P2 Queue
 
 ### P2-A - RH-17 Physical Retention Apply
@@ -957,6 +1071,9 @@ Remaining work:
 
 - clean-machine install validation;
 - short user-facing configuration guide;
+- RH-34/RH-35 owner-governance family map that groups the sub-RH history into
+  digest, action processor, renderer, reply tool, review surface, Hermes cron,
+  aging, and proposal-follow-up responsibilities;
 - public material drafts explaining the problem Memory-OS solves;
 - avoid turning research logs into the first user entry point.
 
