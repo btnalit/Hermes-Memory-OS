@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus first deployed data-hygiene slice.
+Status: design gate plus deployed data-hygiene / duplicate-suppression slices; feature scoring v2 report-only slice is implemented locally and pending live deployment evidence.
 
 Current implementation state:
 
@@ -10,9 +10,13 @@ Current implementation state:
   EvidenceScoring skips expired working items by default.
 - P1-S slice 2 is implemented and deployed on `10.20.3.200`: SelfEvolution skips duplicate
   unresolved self-evolution proposals and reports novelty skip counts.
+- P1-S slice 3 is implemented locally: EvidenceScoring writes a separate
+  `feature_scores.jsonl` report-only comparator and keeps legacy hash
+  `scores.jsonl` as the live baseline.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
-  expired working evidence still appears in scoring output.
-- This does not implement feature-based scoring v2, feedback backflow,
+  expired working evidence still appears in scoring output and whether
+  feature scoring remains report-only.
+- This does not replace legacy scoring, implement feedback backflow,
   production cadence, or execution apply.
 - Live `10.20.3.200` deployment evidence shows the installed scoring path no
   longer uses expired working as active scoring subjects.
@@ -61,6 +65,8 @@ monitor_or_validation_fields:
   - left_brain_scoring.hash_score_legacy_count
   - left_brain_scoring.expired_used_in_scoring_count
   - left_brain_scoring.owner_feedback_signal_count
+  - left_brain_scoring.feature_score_live_applied
+  - left_brain_scoring.comparison_count
   - self_evolution.novelty_skipped_count
   - self_evolution.duplicate_unresolved_proposal_count
   - feedback_backflow.consumed_count
@@ -185,6 +191,47 @@ Contract rule:
 Legacy hash scoring may remain as deterministic baseline.
 Any claim of intelligent evidence scoring requires feature-based score reports
 and a comparison against the legacy baseline before live use.
+```
+
+P1-S slice 3:
+
+```text
+EvidenceScoring now writes a separate report-only feature score artifact:
+
+  system-modules/evidence_scoring/feature_scores.jsonl
+
+Feature records use schema hermes.evidence_feature_score.v0 and include:
+
+  mode=report_only
+  live_applied=false
+  feature_score
+  legacy_score
+  score_delta
+  evidence_refs
+  bounded numeric features
+
+Legacy scores remain in scores.jsonl with schema hermes.evidence_score.v0.
+SelfEvolution still reads legacy scores; feature scores are not a live input.
+```
+
+Local evidence:
+
+```text
+python -m pytest tests/system_modularization/test_evidence_scoring_module.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+45 passed
+
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=28
+active_work_item_count=19
+active_work_mapping_count=19
+finding_count=0
+
+git diff --check
+PASS
 ```
 
 ### 2. Self-Evolution Can Create Proposal Backlog
@@ -330,7 +377,7 @@ OpsGate report-only follow-up: implemented
 Forbidden claims today:
 
 ```text
-left-brain intelligent scoring: not implemented
+left-brain intelligent scoring: report-only comparator implemented, not live
 left-brain feedback learning: not closed
 self-evolution quality loop: not mature
 production cadence: not mature

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,26 +73,32 @@ class EvidenceScoringModule:
     def scores_path(self) -> Path:
         return self.module_root / "scores.jsonl"
 
+    @property
+    def feature_scores_path(self) -> Path:
+        return self.module_root / "feature_scores.jsonl"
+
     def score_all(self, *, store: MemoryOSStore, proposal_queue: Any | None = None) -> dict[str, Any]:
         store.initialize()
         subjects, collection_stats = self._collect_subjects(store=store, proposal_queue=proposal_queue)
         evidence_records: list[dict[str, Any]] = []
         score_records: list[dict[str, Any]] = []
+        feature_score_records: list[dict[str, Any]] = []
         for subject in subjects:
             evidence = self._build_evidence_record(subject)
             evidence_records.append(evidence)
-            score_records.append(
-                self.build_score_record(
-                    subject_ref=subject["subject_ref"],
-                    subject_kind=subject["subject_kind"],
-                    score=_deterministic_score(subject["subject_ref"], subject["evidence_summary"]),
-                    evidence_refs=[evidence["evidence_id"]],
-                    explanation=f"Score derived from {subject['subject_kind']} evidence summary and 1 evidence ref.",
-                )
+            score = self.build_score_record(
+                subject_ref=subject["subject_ref"],
+                subject_kind=subject["subject_kind"],
+                score=_deterministic_score(subject["subject_ref"], subject["evidence_summary"]),
+                evidence_refs=[evidence["evidence_id"]],
+                explanation=f"Score derived from {subject['subject_kind']} evidence summary and 1 evidence ref.",
             )
+            score_records.append(score)
+            feature_score_records.append(self.build_feature_score_record(subject=subject, legacy_score=score))
 
         self._write_jsonl(self.evidence_path, evidence_records)
         self._write_jsonl(self.scores_path, score_records)
+        self._write_jsonl(self.feature_scores_path, feature_score_records)
         result = {
             "schema_version": "hermes.evidence_scoring_result.v0",
             "module": "evidence_scoring",
@@ -99,10 +106,18 @@ class EvidenceScoringModule:
             "status": "ok",
             "score_count": len(score_records),
             "evidence_count": len(evidence_records),
+            "feature_score_mode": "report_only",
+            "feature_score_count": len(feature_score_records),
+            "hash_score_legacy_count": len(score_records),
+            "comparison_count": min(len(feature_score_records), len(score_records)),
+            "feature_score_report_count": 1 if feature_score_records else 0,
+            "feature_score_live_applied": False,
             "score_fingerprints": _fingerprints(score_records),
             "actual_approve": False,
+            "actual_execute": False,
             "self_evolution_triggered": False,
             "scores_path": str(self.scores_path),
+            "feature_scores_path": str(self.feature_scores_path),
             "evidence_path": str(self.evidence_path),
             **collection_stats,
         }
@@ -114,7 +129,13 @@ class EvidenceScoringModule:
             details={
                 "score_count": len(score_records),
                 "evidence_count": len(evidence_records),
+                "feature_score_mode": "report_only",
+                "feature_score_count": len(feature_score_records),
+                "hash_score_legacy_count": len(score_records),
+                "comparison_count": min(len(feature_score_records), len(score_records)),
+                "feature_score_live_applied": False,
                 "actual_approve": False,
+                "actual_execute": False,
                 "self_evolution_triggered": False,
                 **collection_stats,
             },
@@ -152,31 +173,83 @@ class EvidenceScoringModule:
             "self_evolution_triggered": False,
         }
 
+    def build_feature_score_record(
+        self,
+        *,
+        subject: dict[str, str],
+        legacy_score: dict[str, Any],
+    ) -> dict[str, Any]:
+        features = _feature_inputs(subject)
+        feature_score = _feature_based_score(features)
+        legacy_score_value = round(float(legacy_score.get("score", 0.0)), 3)
+        evidence_refs = [str(ref) for ref in legacy_score.get("evidence_refs", [])]
+        feature_score_id = _stable_id(
+            "feature_score",
+            subject["subject_ref"],
+            str(legacy_score.get("score_id") or ""),
+            *evidence_refs,
+        )
+        return {
+            "schema_version": "hermes.evidence_feature_score.v0",
+            "feature_score_id": feature_score_id,
+            "profile": self.profile,
+            "subject_ref": subject["subject_ref"],
+            "subject_kind": subject["subject_kind"],
+            "legacy_score_id": legacy_score.get("score_id"),
+            "legacy_score": legacy_score_value,
+            "feature_score": feature_score,
+            "score_delta": round(feature_score - legacy_score_value, 3),
+            "evidence_refs": evidence_refs,
+            "features": features,
+            "feature_explanation": (
+                "Report-only feature score derived from bounded subject kind, source status, "
+                "summary length bucket, and proposal state metadata."
+            ),
+            "mode": "report_only",
+            "live_applied": False,
+            "actual_approve": False,
+            "actual_execute": False,
+            "self_evolution_triggered": False,
+        }
+
     def read_scores(self) -> list[dict[str, Any]]:
         return _read_jsonl(self.scores_path)
+
+    def read_feature_scores(self) -> list[dict[str, Any]]:
+        return _read_jsonl(self.feature_scores_path)
 
     def read_evidence(self) -> list[dict[str, Any]]:
         return _read_jsonl(self.evidence_path)
 
     def status(self) -> dict[str, Any]:
         scores = self.read_scores()
+        feature_scores = self.read_feature_scores()
         evidence = self.read_evidence()
         subject_counts: dict[str, int] = {}
         for score in scores:
             subject_kind = str(score.get("subject_kind", ""))
             subject_counts[subject_kind] = subject_counts.get(subject_kind, 0) + 1
         expired_used = _expired_working_subject_count(evidence, self.hermes_home)
+        feature_score_live_applied = any(record.get("live_applied") is True for record in feature_scores)
         return {
             "schema_version": "hermes.evidence_scoring_status.v0",
             "module": "evidence_scoring",
             "profile": self.profile,
             "score_count": len(scores),
             "evidence_count": len(evidence),
+            "feature_score_mode": "report_only",
+            "feature_score_count": len(feature_scores),
+            "hash_score_legacy_count": len(scores),
+            "comparison_count": min(len(feature_scores), len(scores)),
+            "feature_score_report_count": 1 if feature_scores else 0,
+            "feature_score_live_applied": feature_score_live_applied,
+            "owner_feedback_signal_count": 0,
             "subject_counts": dict(sorted(subject_counts.items())),
             "working_subject_count": subject_counts.get("working", 0),
             "expired_used_in_scoring_count": expired_used,
             "delivery_mode": "no-send",
             "actual_approve": False,
+            "actual_execute": False,
             "self_evolution_triggered": False,
         }
 
@@ -344,6 +417,75 @@ def _expired_working_subject_count(evidence: list[dict[str, Any]], hermes_home: 
 def _stable_id(prefix: str, *parts: str) -> str:
     digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def _feature_inputs(subject: dict[str, str]) -> dict[str, float | int]:
+    summary_length = len(subject.get("evidence_summary", ""))
+    subject_kind = subject.get("subject_kind", "")
+    source_status = subject.get("source_status", "")
+    proposal_state = _proposal_state(subject.get("evidence_summary", "")) if subject_kind == "proposal" else ""
+    return {
+        "subject_kind_weight": _subject_kind_weight(subject_kind),
+        "source_status_weight": _source_status_weight(source_status),
+        "summary_length_bucket": _summary_length_bucket(summary_length),
+        "summary_length_weight": _summary_length_weight(summary_length),
+        "proposal_state_weight": _proposal_state_weight(proposal_state),
+    }
+
+
+def _feature_based_score(features: dict[str, float | int]) -> float:
+    score = (
+        float(features["subject_kind_weight"])
+        + float(features["source_status_weight"])
+        + float(features["summary_length_weight"])
+        + float(features["proposal_state_weight"])
+    )
+    return round(min(max(score, 0.0), 1.0), 3)
+
+
+def _subject_kind_weight(subject_kind: str) -> float:
+    weights = {
+        "event": 0.55,
+        "working": 0.62,
+        "proposal": 0.58,
+        "crystallized_candidate": 0.50,
+    }
+    return weights.get(subject_kind, 0.45)
+
+
+def _source_status_weight(source_status: str) -> float:
+    if source_status == "active":
+        return 0.08
+    if source_status == "expired":
+        return -0.20
+    return 0.0
+
+
+def _summary_length_bucket(summary_length: int) -> int:
+    if summary_length >= 160:
+        return 2
+    if summary_length >= 60:
+        return 1
+    return 0
+
+
+def _summary_length_weight(summary_length: int) -> float:
+    return {0: 0.0, 1: 0.03, 2: 0.06}[_summary_length_bucket(summary_length)]
+
+
+def _proposal_state(summary: str) -> str:
+    match = re.search(r"\[([^\]]+)\]\s*$", summary)
+    return match.group(1) if match else ""
+
+
+def _proposal_state_weight(state: str) -> float:
+    weights = {
+        "candidate": 0.02,
+        "approved_for_proposal": 0.05,
+        "rejected": -0.08,
+        "closed": -0.08,
+    }
+    return weights.get(state, 0.0)
 
 
 def _deterministic_score(subject_ref: str, summary: str) -> float:

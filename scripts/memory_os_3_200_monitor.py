@@ -280,6 +280,25 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             passed.append({"code": "left_brain_expired_working_not_scored"})
+        feature_live_applied = evidence.get("feature_score_live_applied") is True
+        feature_count = int(evidence.get("feature_score_count") or 0)
+        legacy_count = int(evidence.get("hash_score_legacy_count") or evidence.get("score_count") or 0)
+        comparison_count = int(evidence.get("comparison_count") or 0)
+        if feature_live_applied:
+            fail.append({"code": "left_brain_feature_scoring_live_applied", "value": evidence})
+        elif feature_count > 0 and legacy_count > 0:
+            if evidence.get("feature_score_mode") == "report_only" and comparison_count == min(feature_count, legacy_count):
+                passed.append(
+                    {
+                        "code": "left_brain_feature_scoring_report_only_ok",
+                        "feature_score_count": feature_count,
+                        "hash_score_legacy_count": legacy_count,
+                    }
+                )
+            else:
+                warn.append({"code": "left_brain_feature_scoring_report_only_incomplete", "value": evidence})
+        elif legacy_count > 0:
+            warn.append({"code": "left_brain_feature_scoring_missing", "hash_score_legacy_count": legacy_count})
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
@@ -1750,6 +1769,13 @@ def module_artifact_summary():
       "evidence": {
         "evidence_count": evidence.get("evidence_count"),
         "score_count": evidence.get("score_count"),
+        "feature_score_mode": evidence.get("feature_score_mode"),
+        "feature_score_count": evidence.get("feature_score_count"),
+        "hash_score_legacy_count": evidence.get("hash_score_legacy_count"),
+        "comparison_count": evidence.get("comparison_count"),
+        "feature_score_report_count": evidence.get("feature_score_report_count"),
+        "feature_score_live_applied": evidence.get("feature_score_live_applied"),
+        "owner_feedback_signal_count": evidence.get("owner_feedback_signal_count"),
         "subject_counts": evidence.get("subject_counts"),
         "working_subject_count": evidence.get("working_subject_count"),
         "expired_used_in_scoring_count": evidence.get("expired_used_in_scoring_count"),

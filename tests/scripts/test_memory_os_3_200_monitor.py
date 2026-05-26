@@ -601,6 +601,37 @@ def test_classify_snapshot_warns_when_expired_working_is_scored():
     assert any(item["code"] == "left_brain_expired_working_used_in_scoring" for item in classification["warn"])
 
 
+def test_classify_snapshot_tracks_report_only_feature_scoring_and_blocks_live_apply():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["evidence"] = {
+        "evidence_count": 4,
+        "score_count": 4,
+        "subject_counts": {"event": 1, "working": 1, "proposal": 1, "crystallized_candidate": 1},
+        "working_subject_count": 1,
+        "expired_used_in_scoring_count": 0,
+        "feature_score_mode": "report_only",
+        "feature_score_count": 4,
+        "hash_score_legacy_count": 4,
+        "comparison_count": 4,
+        "feature_score_live_applied": False,
+        "feature_score_report_count": 1,
+        "owner_feedback_signal_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "left_brain_feature_scoring_report_only_ok" for item in classification["pass"])
+    assert "feature_score_count" in rendered
+    assert "feature_score_live_applied" in rendered
+
+    snapshot["module_artifacts"]["evidence"]["feature_score_live_applied"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "left_brain_feature_scoring_live_applied" for item in classification["fail"])
+
+
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
     snapshot = _healthy_snapshot()
     snapshot["session_activity"] = {"total_session_events": 12}

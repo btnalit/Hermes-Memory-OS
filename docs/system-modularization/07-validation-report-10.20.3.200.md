@@ -12456,3 +12456,79 @@ NOT CLOSED:
   Feedback backflow remains report/proposal future work.
   Production cadence split remains future work.
 ```
+
+## 2026-05-26 - P1-S Slice 3 Local EvidenceScoring Feature Comparator
+
+Scope:
+
+```text
+Implement feature-based EvidenceScoring v2 in report-only mode.
+Do not replace legacy hash scoring.
+Do not let feature scores drive SelfEvolution, proposals, routing, owner
+actions, execution, or delivery.
+```
+
+Local implementation:
+
+```text
+EvidenceScoring writes:
+  system-modules/evidence_scoring/scores.jsonl
+    schema=hermes.evidence_score.v0
+    live legacy baseline
+
+  system-modules/evidence_scoring/feature_scores.jsonl
+    schema=hermes.evidence_feature_score.v0
+    mode=report_only
+    live_applied=false
+    feature_score / legacy_score / score_delta comparison
+    bounded numeric features only
+```
+
+Local tests:
+
+```text
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py \
+  tests\scripts\test_memory_os_3_200_monitor.py -q
+
+45 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=28
+active_work_item_count=19
+active_work_mapping_count=19
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Monitor contract added:
+
+```text
+ModuleArtifacts.evidence.feature_score_mode
+ModuleArtifacts.evidence.feature_score_count
+ModuleArtifacts.evidence.hash_score_legacy_count
+ModuleArtifacts.evidence.comparison_count
+ModuleArtifacts.evidence.feature_score_report_count
+ModuleArtifacts.evidence.feature_score_live_applied
+ModuleArtifacts.evidence.owner_feedback_signal_count
+
+PASS code:
+  left_brain_feature_scoring_report_only_ok
+
+FAIL code:
+  left_brain_feature_scoring_live_applied
+```
+
+Decision:
+
+```text
+LOCAL PASS only.
+
+This closes the local report-only comparator implementation. Installed/live
+closure still requires deployment to 10.20.3.200, a cognitive-loop run, and
+monitor evidence that feature_score_count matches legacy score count while
+feature_score_live_applied=false.
+```
