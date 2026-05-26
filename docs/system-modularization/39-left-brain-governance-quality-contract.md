@@ -19,6 +19,12 @@ Current implementation state:
   records become scoring subjects, and SelfEvolution can create an
   `expression_policy` proposal. This still does not directly change prompt,
   cadence, policy, delivery, or execution.
+- 2026-05-26 live smoke on `10.20.3.200` proved the owner/Hermes interaction
+  path, not only SSH/CLI: a rendered speak item exposed
+  `memory feedback oa_<token> too_mechanical`, a structured
+  `memory_os_review_reply` call recorded `too_mechanical` feedback for
+  `target_type=expression`, and the next cognitive-loop run exposed it in
+  EvidenceScoring/GovernanceFeedback monitor fields.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output and whether
   feature scoring is the primary scoring path.
@@ -31,6 +37,13 @@ Current implementation state:
   execution apply.
 - Live `10.20.3.200` deployment evidence shows the installed scoring path no
   longer uses expired working as active scoring subjects.
+- Latest live monitor after that smoke reports
+  `expression_feedback_subject_count=2`, `expression_feedback.feedback_count=2`,
+  `governance_feedback.emitted_event_count=135`, `structured_review_reply_count=1`,
+  and `reply_fallback_used_count=0`.
+- The follow-up EvidenceScoring rating propagation fix is live on
+  `10.20.3.200`: expression feedback evidence and maturity dimensions now carry
+  `feedback_rating=too_mechanical` instead of `unknown`.
 
 ## Why This Exists
 
@@ -394,6 +407,43 @@ monitor.ModuleArtifacts.self_evolution:
 This is a live PASS for duplicate unresolved proposal suppression only. It does
 not close feature-based scoring, feedback backflow, or production cadence.
 
+P1-S slice 3:
+
+```text
+SelfEvolution no longer creates owner-facing template proposals such as
+"Self-Evolution dry-run proposal".
+
+New proposals must render bounded owner-readable content:
+
+  具体改动
+  证据
+  验收标准
+  后续状态
+  边界
+
+Legacy generic proposals do not block new concrete proposals. They remain
+visible only as review/maturation artifacts and must not ask the owner for
+blind approval.
+```
+
+Live deployment evidence:
+
+```text
+new_proposal.kind=expression_policy
+new_proposal.title=调整右脑表达策略：too_mechanical 反馈
+new_proposal.actual_execute=false
+owner_agenda.action_required=1
+owner_agenda.text_char_count=988
+owner_agenda.review_suggested_suppressed=true
+owner_agenda.fyi_suppressed=true
+owner_agenda.raw_body_included=false
+monitor.FAIL=[]
+```
+
+This is a live PASS for concrete proposal generation and agenda eligibility.
+It still does not mean the proposal is executed; approval only moves it to
+OpsGate/manual follow-up.
+
 ### 3. Feedback Backflow Is Not Closed
 
 Feedback ledgers exist, but feedback is not yet a first-class input to
@@ -482,6 +532,7 @@ left-brain safety governance: implemented
 owner-action mutation path: implemented
 proposal approval safety: implemented
 OpsGate report-only follow-up: implemented
+bounded expression-policy apply: implemented for owner-approved + OpsGate-reviewed proposals
 ```
 
 Forbidden claims today:
@@ -491,8 +542,19 @@ left-brain intelligent scoring: v2 primary scoring implemented, not yet proven m
 left-brain feedback learning: expression feedback can create proposal input, not direct adaptation
 self-evolution quality loop: not mature
 production cadence: not mature
-proposal-to-execution operations: not implemented
+generic proposal-to-execution operations: not implemented
 ```
+
+Current explicit apply boundary:
+
+- `expression_policy` proposals can be applied after owner approval and OpsGate
+  `would_allow` into
+  `system-modules/right_brain_expression_adapter/policy.json`;
+- this is a bounded policy write consumed by the right-brain expression helper,
+  not shell/service execution;
+- apply records are appended to `policy_applies.jsonl` with rollback evidence;
+- `actual_execute`, `actual_send`, identity write, and unapproved
+  crystallized approval remain false.
 
 ## Prototype-Informed Runtime Plan
 

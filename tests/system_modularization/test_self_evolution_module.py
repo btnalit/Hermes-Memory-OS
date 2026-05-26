@@ -4,6 +4,7 @@ from plugins.memory.memory_os.fixtures import build_event, build_sannai_multi_ro
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.owner_actions import render_owner_review_digest
 from plugins.modules.evidence.scoring import EvidenceScoringModule
 from plugins.modules.governance.ops_gate import OpsGateModule
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
@@ -69,6 +70,12 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert proposal["kind"] == "self_evolution"
     assert proposal["state"] == "candidate"
     assert proposal["crystallized_approved"] is False
+    assert proposal["title"] != "Self-Evolution dry-run proposal"
+    assert "具体改动:" in proposal["body"]
+    assert "证据:" in proposal["body"]
+    assert "验收标准:" in proposal["body"]
+    assert "后续状态:" in proposal["body"]
+    assert "Use the highest feature-maturity evidence signal" not in proposal["body"]
     assert all(ref.startswith("feature_score:") for ref in proposal["source_refs"])
     digest = module.digest_path.read_text(encoding="utf-8")
     assert "The test host needs a safer dry-run workflow." in digest
@@ -148,6 +155,33 @@ def test_self_evolution_skips_duplicate_unresolved_proposal(tmp_path):
     assert len(ops_gate.read_reports()) == 1
 
 
+def test_self_evolution_legacy_template_proposal_does_not_block_concrete_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue, evidence = _seed_evidence(tmp_path, store)
+    proposal_queue.create_candidate(
+        store=store,
+        title="Self-Evolution dry-run proposal",
+        body="Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+        source_refs=["feature_score:legacy"],
+        kind="self_evolution",
+    )
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is True
+    queue = proposal_queue.read_queue()
+    assert len(queue["items"]) == 2
+    new_proposal = queue["items"][-1]
+    assert new_proposal["title"] != "Self-Evolution dry-run proposal"
+    assert "具体改动:" in new_proposal["body"]
+
+
 def test_self_evolution_creates_expression_policy_proposal_from_expression_feedback(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")
@@ -186,9 +220,35 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     assert result["proposal_created"] is True
     proposal = proposal_queue.read_queue()["items"][0]
     assert proposal["kind"] == "expression_policy"
-    assert "right-brain expression policy" in proposal["title"]
-    assert "prompt/cadence/policy proposal" in proposal["body"]
+    assert "调整右脑表达策略" in proposal["title"]
+    assert "具体改动:" in proposal["body"]
+    assert "证据:" in proposal["body"]
+    assert "owner 标记右脑表达 too_mechanical" in proposal["body"]
+    assert "验收标准:" in proposal["body"]
+    assert "后续状态:" in proposal["body"]
     assert proposal["actual_execute"] is False
+
+
+def test_self_evolution_concrete_proposal_is_owner_agenda_eligible(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue, evidence = _seed_evidence(tmp_path, store)
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+
+    assert len(rendered["sections"]["action_required"]) == 1
+    assert rendered["counts"]["action_required_shown"] == 1
+    assert "具体改动:" in rendered["text"]
+    assert "验收标准:" in rendered["text"]
+    assert "memory approve oa_" in rendered["text"]
+    assert "Self-Evolution dry-run proposal" not in rendered["text"]
 
 
 def test_self_evolution_doctor_reports_missing_dependencies_and_stale_digest(tmp_path):

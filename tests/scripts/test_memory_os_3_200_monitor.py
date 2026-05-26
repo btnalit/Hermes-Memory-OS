@@ -325,6 +325,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_rendered_digest_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_rendered_digest_response_header_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_rendered_digest_overview_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_agenda_digest_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_surface_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
@@ -336,6 +337,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert "OwnerDeliveryGate" in rendered
     assert "OwnerDeliveryStatus" in rendered
     assert "OwnerDigestPreview" in rendered
+    assert "OwnerAgendaDigest" in rendered
     assert "OwnerReviewSurface" in rendered
 
     snapshot["owner_review_digest_preview"]["will_send"] = True
@@ -396,6 +398,20 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
 
     assert classification["status"] == "WARN"
     assert any(item["code"] == "right_brain_review_speak_preview_missing" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_agenda_digest"]["review_suggested_suppressed"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_agenda_digest_review_suggested_not_suppressed" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_agenda_digest"]["backlog_totals_suppressed"] = False
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_agenda_digest_backlog_totals_visible" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_reply_dry_run"]["dry_run"] = False
@@ -1369,6 +1385,7 @@ def _healthy_snapshot() -> dict:
         "owner_review_delivery_gate": _healthy_owner_delivery_gate(),
         "owner_review_digest_preview": _healthy_owner_digest_preview(),
         "owner_review_rendered_digest": _healthy_owner_rendered_digest(),
+        "owner_review_agenda_digest": _healthy_owner_agenda_digest(),
         "owner_review_reply_dry_run": _healthy_owner_reply_dry_run(),
         "owner_review_surface": _healthy_owner_review_surface(),
         "owner_review_ingress_guard": _healthy_owner_ingress_guard(),
@@ -1505,6 +1522,30 @@ def _healthy_owner_rendered_digest() -> dict:
         "speak_expression_preview_missing_count": 0,
         "section_counts": {"action_required": 0, "review_suggested": 0, "fyi": 1},
         "anchors": {"action_required": [], "review_suggested": [], "fyi": ["F1"]},
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+    }
+
+
+def _healthy_owner_agenda_digest() -> dict:
+    return {
+        "schema_version": "memory-os.owner_review_rendered_digest.v0",
+        "status": "ok",
+        "digest_mode": "agenda",
+        "raw_body_included": False,
+        "text_char_count": 900,
+        "text_has_internal_schema": False,
+        "text_has_transcript_marker": False,
+        "decision_summary_present": True,
+        "review_suggested_suppressed": True,
+        "fyi_suppressed": True,
+        "backlog_totals_suppressed": True,
+        "section_counts": {"action_required": 2, "review_suggested": 0, "fyi": 0},
+        "counts": {"action_required_total": 2, "action_required_shown": 2},
         "boundary": {
             "actual_send": False,
             "actual_execute": False,

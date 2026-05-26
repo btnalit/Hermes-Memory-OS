@@ -447,8 +447,8 @@ class EvidenceScoringModule:
             if not feedback_id:
                 continue
             expression_feedback_count += 1
-            rating = str(feedback.get("rating") or "unknown")
-            target_id = str(feedback.get("target_id") or "")
+            rating = str(feedback.get("rating") or feedback.get("action_type") or "unknown")
+            target_id = str(feedback.get("draft_id") or feedback.get("target_id") or "")
             subjects.append(
                 {
                     "subject_ref": f"expression_feedback:{feedback_id}",
@@ -468,7 +468,7 @@ class EvidenceScoringModule:
 
     def _build_evidence_record(self, subject: dict[str, str]) -> dict[str, Any]:
         evidence_id = _stable_id("evidence", subject["subject_ref"], subject["evidence_summary"])
-        return {
+        record = {
             "schema_version": "hermes.evidence_record.v0",
             "evidence_id": evidence_id,
             "profile": self.profile,
@@ -478,6 +478,9 @@ class EvidenceScoringModule:
             "source_status": subject.get("source_status", ""),
             "summary": subject["evidence_summary"],
         }
+        if subject.get("feedback_rating"):
+            record["feedback_rating"] = subject["feedback_rating"]
+        return record
 
     @staticmethod
     def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:

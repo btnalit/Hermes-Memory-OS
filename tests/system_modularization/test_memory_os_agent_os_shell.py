@@ -118,6 +118,22 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_followups_gate_args.proposal_id == "prop_1"
     assert review_followups_gate_args.ops_gate is True
     assert review_followups_gate_args.apply is True
+    review_followups_apply_args = parser.parse_args(
+        [
+            "review",
+            "proposal-followups",
+            "--proposal-id",
+            "prop_1",
+            "--execution-apply",
+            "--owner-approved",
+            "--apply",
+        ]
+    )
+    assert review_followups_apply_args.review_command == "proposal-followups"
+    assert review_followups_apply_args.proposal_id == "prop_1"
+    assert review_followups_apply_args.execution_apply is True
+    assert review_followups_apply_args.owner_approved is True
+    assert review_followups_apply_args.apply is True
     review_channel_args = parser.parse_args(["review", "channel"])
     assert review_channel_args.review_command == "channel"
     review_cron_status_args = parser.parse_args(["review", "cron-status"])
@@ -156,6 +172,8 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
             "3",
             "--max-fyi",
             "4",
+            "--mode",
+            "agenda",
         ]
     )
     assert review_preview_args.review_command == "preview-digest"
@@ -163,6 +181,7 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_preview_args.max_action_required == 2
     assert review_preview_args.max_review_suggested == 3
     assert review_preview_args.max_fyi == 4
+    assert review_preview_args.mode == "agenda"
     review_render_args = parser.parse_args(
         [
             "review",
@@ -175,6 +194,8 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
             "text",
             "--bounded",
             "--record-active",
+            "--mode",
+            "agenda",
         ]
     )
     assert review_render_args.review_command == "render-digest"
@@ -183,6 +204,7 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_render_args.format == "text"
     assert review_render_args.bounded is True
     assert review_render_args.record_active is True
+    assert review_render_args.mode == "agenda"
     review_surface_args = parser.parse_args(
         [
             "review",

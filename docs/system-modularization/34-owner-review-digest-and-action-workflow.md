@@ -312,6 +312,10 @@ Decision:
 
 - Default digest limits are tightened to `3` Action Required, `2` Review
   Suggested, and `2` FYI items unless overridden.
+- RH-34i supersedes this for recurring owner push delivery: the default Hermes
+  cron helper uses `agenda` mode and pushes only Action Required decisions plus
+  true alerts. Review Suggested and FYI remain available through pull-based
+  review/debug surfaces, not daily Telegram noise.
 - Rendered owner-review text has a smaller Telegram-safe budget and must omit
   whole items rather than cut an item in the middle.
 - Transcript-like crystallized candidates are downgraded to FYI
@@ -329,6 +333,76 @@ Stop signal:
   snippets;
 - `text_has_internal_schema=true`, `raw_body_included=true`, or
   `unapproved_send_count>0`.
+
+### RH-34i - Owner Agenda Push Mode
+
+Finding:
+
+The 2026-05-26 Telegram digest showed `pending=218`,
+`review_suggested=37`, and `fyi=169` in the recurring owner message. That was
+correct for an operator/debug review surface, but wrong for a mature daily
+owner agenda. It made the push channel carry backlog anxiety instead of the few
+items that actually need owner action.
+
+Prototype reference:
+
+10.20.2.88 uses Hermes cron `deliver=origin` for owner-facing reports and
+keeps bulk intake/generation/local maintenance in `deliver=local` or no-agent
+pipelines. Memory-OS should follow the separation, not push all queue classes
+to the owner every day.
+
+Decision:
+
+- The recurring Hermes cron helper defaults to `agenda` mode.
+- `agenda` mode renders Action Required decisions and future true alerts only.
+- Review Suggested and FYI are pull surfaces: owner/Hermes can ask
+  `还有哪些`, `下一页`, `查看建议项`, or use the review surface tool.
+- Ops/debug summaries may still show pending/review/FYI totals, but they must
+  not be the default recurring owner push.
+- If agenda mode has no Action Required or true alert content, helper stdout is
+  empty so Hermes cron stays silent.
+
+Stop signal:
+
+- recurring owner digest includes bulk pending/review/FYI totals as the primary
+  message;
+- recurring owner digest sends only suggested/FYI content with no decision or
+  true alert;
+- helper uses test/debug limits as the default product agenda.
+
+### RH-34j - Proposal Agenda Eligibility
+
+Finding:
+
+The first RH-34i Telegram agenda became shorter but still showed three
+`Self-Evolution dry-run proposal` items. The owner could see commands but could
+not see what was being approved. Live inspection showed these were historical
+template proposals with generic bodies such as "Use the highest evidence signal
+to prepare a reviewed governance improvement." They are not mature approval
+items.
+
+Decision:
+
+- A proposal can enter the recurring owner agenda only when it has bounded,
+  owner-readable content: what changes, why it changes, and what follow-up
+  means.
+- Generic/template SelfEvolution proposals are downgraded to Review Suggested
+  maturation items and have no approve/reject action commands in the rendered
+  review item.
+- Concrete proposals render a bounded `proposal_detail` line so Hermes can
+  explain the actual proposal, not just its title.
+- Hermes cron agent delivery must preserve the proposal detail as approval
+  content. If Script Output includes `内容:` with `具体改动`, `证据`,
+  `验收标准`, `后续状态`, or `边界`, the delivery prompt must not summarize it
+  down to only a title and action token.
+- Raw/private/transcript-looking proposal bodies are not shown as details.
+
+Stop signal:
+
+- recurring owner agenda asks owner to approve a proposal whose visible content
+  is only a generic title;
+- template SelfEvolution proposals remain `Action Required`;
+- proposal details include raw transcript/private body text.
 
 ### RH-34a - Owner Review Channel Resolver
 
@@ -422,19 +496,20 @@ Implementation note:
 - If no safe metadata channel is found, it falls back to CLI preview and
   reports `status=dry_run_only`.
 
-Daily digest sections:
+Daily owner surfaces:
 
-| Section | Contents | Owner burden rule |
+| Surface | Contents | Owner burden rule |
 | --- | --- | --- |
-| Action Required | candidate approvals, proposal approvals, out-of-policy proactive-send exceptions, monitor WARN needing owner judgment | target <= 3 items/day |
-| Review Suggested | high-scoring candidates, repeated stable facts, feedback opportunities, eval finding candidates | target <= 5 items/day |
-| FYI / Trends | module output counts, would-send trends, source-class skew, stale counts, audit density | no action required |
+| Recurring agenda push | Action Required approvals/rejections and true alert items only | target <= 3 items/day; no backlog totals unless they are themselves an alert |
+| Pull review surface | Review Suggested, additional Action Required pages, item detail, and expansion commands | owner/Hermes asks for it explicitly |
+| Ops/debug summary | FYI trends, backlog counts, monitor totals, source skew, audit density | manual/weekly operator surface, not the default owner push |
 
 Overflow strategy:
 
 - rank Action Required by urgency and age;
 - show the top `max_action_required`;
-- include `overflow_count`;
+- include action-required overflow in agenda wording only when there are more
+  decisions to process;
 - do not silently drop overflow;
 - stale overflow becomes monitor WARN, not more digest spam.
 
@@ -946,7 +1021,7 @@ Hermes cron job:
 
 Memory-OS:
   helper calls review preview-digest and render-digest
-  returns a bounded review brief and machine-readable anchors on stdout
+  returns a bounded agenda brief and machine-readable anchors on stdout
   returns empty stdout for no meaningful content
   does not call send_message_tool in the recurring path
 ```
@@ -964,8 +1039,9 @@ opt-out.
 Delivery rules:
 
 - Hermes cron sends at most one digest per owner per schedule window;
-- Memory-OS returns an empty/silent result when no action-required,
-  review-suggested, or meaningful FYI content exists;
+- Memory-OS returns an empty/silent result when no action-required or true
+  alert content exists. Review Suggested and FYI content are pull/ops surfaces,
+  not the default recurring owner push;
 - Memory-OS returns blocked/skipped when the export eligibility gate is not
   ready;
 - Memory-OS returns blocked/skipped if RH-34c aging reports an unsafe or

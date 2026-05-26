@@ -31,3 +31,34 @@ def test_digest_helper_falls_back_to_channel_report_when_config_missing(tmp_path
     monkeypatch.setattr(module, "_run_json", lambda command: {"channel": "matrix"})
 
     assert module._resolve_channel() == "matrix"
+
+
+def test_digest_helper_agenda_mode_only_treats_decisions_as_meaningful():
+    module = _load_helper_module()
+
+    assert (
+        module._has_meaningful_content(
+            {"counts": {"action_required_shown": 0, "review_suggested_shown": 2, "fyi_shown": 2}},
+            digest_mode="agenda",
+        )
+        is False
+    )
+    assert (
+        module._has_meaningful_content(
+            {"counts": {"action_required_shown": 1, "review_suggested_shown": 0, "fyi_shown": 0}},
+            digest_mode="agenda",
+        )
+        is True
+    )
+
+
+def test_digest_helper_review_mode_can_render_pull_review_content():
+    module = _load_helper_module()
+
+    assert (
+        module._has_meaningful_content(
+            {"counts": {"action_required_shown": 0, "review_suggested_shown": 1, "fyi_shown": 0}},
+            digest_mode="review",
+        )
+        is True
+    )

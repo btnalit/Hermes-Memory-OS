@@ -186,6 +186,40 @@ def test_evidence_scoring_reports_prototype_aligned_maturity_dimensions(tmp_path
         assert "Candidate body should not be auto-approved" not in rendered
 
 
+def test_evidence_scoring_preserves_expression_feedback_rating(tmp_path):
+    store = _store(tmp_path)
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.expression_feedback.v0",
+                "feedback_id": "efb_rating_001",
+                "created_at": "2026-05-26T00:00:00Z",
+                "draft_id": "expr_rating_001",
+                "action_type": "too_mechanical",
+                "raw_body_included": False,
+                "live_policy_changed": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    result = module.score_all(store=store)
+
+    assert result["expression_feedback_subject_count"] == 1
+    evidence = [record for record in module.read_evidence() if record["subject_kind"] == "expression_feedback"][0]
+    feature = [record for record in module.read_feature_scores() if record["subject_kind"] == "expression_feedback"][0]
+    assert evidence["feedback_rating"] == "too_mechanical"
+    assert "rating=too_mechanical" in evidence["summary"]
+    assert "target=expr_rating_001" in evidence["summary"]
+    assert feature["maturity_dimensions"]["owner_feedback"]["signals"]["feedback_rating"] == "too_mechanical"
+    assert feature["maturity_dimensions"]["risk"]["signals"]["risk_level"] > 0.2
+
+
 def test_evidence_scoring_skips_expired_working_items(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

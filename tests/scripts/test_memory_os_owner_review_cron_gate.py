@@ -146,8 +146,11 @@ def test_cron_gate_apply_creates_hermes_cron_job_and_updates_recurring_config(tm
     assert jobs[0]["no_agent"] is False
     assert "用中文" in jobs[0]["prompt"]
     assert "Script Output" in jobs[0]["prompt"]
-    assert "全貌" in jobs[0]["prompt"]
+    assert "今日议程" in jobs[0]["prompt"]
+    assert "Review Suggested/FYI/backlog" in jobs[0]["prompt"]
     assert "不要只列命令" in jobs[0]["prompt"]
+    assert "审批内容" in jobs[0]["prompt"]
+    assert "具体改动" in jobs[0]["prompt"]
     config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
     assert config["owner_review"]["recurring_delivery_enabled"] is True
     assert config["owner_review"]["recurring_delivery_mode"] == "hermes_cron_agent"
@@ -187,8 +190,11 @@ def test_cron_gate_apply_updates_existing_no_agent_job_to_agent_mode(tmp_path):
     jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
     assert jobs[0]["no_agent"] is False
     assert "用中文" in jobs[0]["prompt"]
-    assert "全貌" in jobs[0]["prompt"]
+    assert "今日议程" in jobs[0]["prompt"]
+    assert "Review Suggested/FYI/backlog" in jobs[0]["prompt"]
     assert "不要只列命令" in jobs[0]["prompt"]
+    assert "审批内容" in jobs[0]["prompt"]
+    assert "具体改动" in jobs[0]["prompt"]
 
 
 def test_cron_gate_recurring_channel_survives_provider_config_merge(tmp_path):

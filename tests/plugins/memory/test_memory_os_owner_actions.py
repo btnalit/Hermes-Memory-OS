@@ -27,6 +27,7 @@ from plugins.memory.memory_os.owner_actions import (
     parse_owner_review_reply,
     render_owner_review_digest,
     resolve_owner_review_channel,
+    apply_approved_proposal_execution_decision,
     route_approved_proposal_followup_to_ops_gate,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -71,9 +72,24 @@ def _review_command(rendered, anchor: str, action_type: str) -> str:
                     "reject_proposal": "reject",
                     "mark_feedback": "feedback",
                     "allow_speak_once": "allow",
+                    "like_expression": "feedback",
+                    "too_mechanical": "feedback",
+                    "too_frequent": "feedback",
+                    "boundary_private": "feedback",
+                    "off_voice": "feedback",
+                    "mute_period": "feedback",
                 }[action_type]
                 if action_type == "mark_feedback":
                     return f"memory {verb} {token} too_mechanistic"
+                if action_type in {
+                    "like_expression",
+                    "too_mechanical",
+                    "too_frequent",
+                    "boundary_private",
+                    "off_voice",
+                    "mute_period",
+                }:
+                    return f"memory {verb} {token} {action_type}"
                 return f"memory {verb} {token}"
     raise AssertionError(f"missing anchor {anchor}")
 
@@ -375,6 +391,103 @@ def test_approved_proposal_followup_routes_to_ops_gate_without_execution(tmp_pat
     assert len(reports_after_duplicate) == 1
 
 
+def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops_gate(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body=(
+            "具体改动：降低报告腔，增加自然陪伴式表达。\n"
+            "证据：owner 标记 too_mechanical。\n"
+            "验收标准：下一次右脑表达提示词包含自然表达约束。\n"
+            "后续状态：approved_for_proposal -> OpsGate report-only -> owner manual apply decision。\n"
+            "边界：不自动发送，不自动改身份。"
+        ),
+        kind="expression_policy",
+        source_refs=["expression_feedback:too_mechanical"],
+    )
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    dry_run = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=False,
+    )
+
+    assert dry_run["schema_version"] == "memory-os.approved_proposal_execution_apply.v0"
+    assert dry_run["status"] == "ready"
+    assert dry_run["dry_run"] is True
+    assert dry_run["apply_kind"] == "expression_policy"
+    assert dry_run["policy_write_planned"] is True
+    assert dry_run["actual_execute"] is False
+    assert dry_run["boundary"]["actual_execute"] is False
+    assert not (tmp_path / "system-modules" / "right_brain_expression_adapter" / "policy.json").exists()
+
+    applied = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=True,
+    )
+
+    policy_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "policy.json"
+    apply_log_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "policy_applies.jsonl"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    apply_records = _jsonl(apply_log_path)
+    followups = approved_proposal_followups_report(store)
+
+    assert applied["status"] == "applied"
+    assert applied["dry_run"] is False
+    assert applied["policy_written"] is True
+    assert applied["actual_policy_write"] is True
+    assert applied["actual_execute"] is False
+    assert applied["execution_ticket_created"] is False
+    assert applied["boundary"]["actual_execute"] is False
+    assert policy["schema_version"] == "memory-os.right_brain_expression_policy.v0"
+    assert policy["applied_from_proposal_id"] == candidate["candidate_id"]
+    assert policy["active"] is True
+    assert any("少报告腔" in item or "自然" in item for item in policy["tone_guidance"])
+    assert apply_records[0]["proposal_id"] == candidate["candidate_id"]
+    assert apply_records[0]["actual_policy_write"] is True
+    assert apply_records[0]["actual_execute"] is False
+    assert followups["policy_apply_count"] == 1
+    assert followups["pending_followup_count"] == 0
+    assert followups["items"][0]["followup_state"] == "applied_expression_policy"
+
+    duplicate = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=True,
+    )
+
+    assert duplicate["status"] == "duplicate_ignored"
+    assert duplicate["policy_written"] is False
+    assert len(_jsonl(apply_log_path)) == 1
+
+
 def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):
     store = _store(tmp_path)
     append_memory_source_record(
@@ -583,6 +696,85 @@ def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_p
     assert "RAW PROPOSAL BODY" not in serialized
 
 
+def test_render_digest_agenda_mode_pushes_only_decisions_not_backlog(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand_cleanup_001",
+            kind="moment",
+            body="User: 旧聊天记录 | Assistant: 旧回复内容",
+            source_event_ids=["evt_cleanup_001"],
+            sensitivity="private",
+            tags=["owner-review"],
+        ),
+    )
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(store=store, title="Agenda proposal", body="RAW PROPOSAL BODY")
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    text = rendered["text"]
+
+    assert rendered["digest_mode"] == "agenda"
+    assert rendered["counts"]["action_required_shown"] <= 3
+    assert rendered["counts"]["review_suggested_shown"] == 0
+    assert rendered["counts"]["fyi_shown"] == 0
+    assert text.startswith("Memory-OS 今日审批议程")
+    assert "待处理" not in text
+    assert "建议你看:" not in text
+    assert "仅供了解:" not in text
+    assert "本推送只包含审批项和真实告警" in text
+    assert "memory approve oa_" in text or "memory reject oa_" in text
+
+
+def test_agenda_suppresses_generic_self_evolution_template_proposals(tmp_path):
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(
+        store=store,
+        title="Self-Evolution dry-run proposal",
+        body="Use the highest evidence signal to prepare a reviewed governance improvement.",
+        source_refs=["score:one", "score:two", "score:three"],
+        kind="self_evolution",
+    )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    review = render_owner_review_digest(store, max_action_required=0, max_review_suggested=1, max_fyi=0)
+
+    assert rendered["counts"]["action_required_shown"] == 0
+    assert rendered["counts"]["review_suggested_shown"] == 0
+    assert "Self-Evolution dry-run proposal" not in rendered["text"]
+    item = review["sections"]["review_suggested"][0]
+    assert item["requires_maturation"] is True
+    assert item["action_commands"] == []
+    assert "缺少具体要调整什么" in item["proposal_detail"]
+    assert "不会进入今日审批" in review["text"]
+
+
+def test_concrete_proposal_agenda_shows_bounded_detail(tmp_path):
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(
+        store=store,
+        title="Tune right-brain expression policy",
+        body=(
+            "基于 owner 标记 too_mechanical，准备一份右脑表达 prompt/cadence 调整方案；"
+            "只进入人工 follow-up，不直接修改策略。"
+        ),
+        source_refs=["feedback:efb_001"],
+        kind="expression_policy",
+    )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    item = rendered["sections"]["action_required"][0]
+
+    assert item["requires_maturation"] is False
+    assert "too_mechanical" in item["proposal_detail"]
+    assert "内容:" in rendered["text"]
+    assert "memory approve oa_" in rendered["text"]
+
+
 def test_render_digest_downgrades_transcript_like_candidate_to_cleanup_fyi(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(
@@ -665,7 +857,31 @@ def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
     assert "内容: 今天我想轻轻提醒你" in text
     assert "payload_ref=" not in text
     assert "memory allow oa_" in text
+    assert "memory feedback oa_" in text
+    assert "too_mechanical" in text
     assert "actual_send" not in text
+
+    command = _review_command(rendered, "R1", "too_mechanical")
+    result = parse_owner_review_reply(
+        store,
+        command,
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+        max_action_required=0,
+        max_review_suggested=1,
+        max_fyi=0,
+    )
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
+
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "too_mechanical"
+    assert result["parsed"]["target_type"] == "expression"
+    assert result["parsed"]["target_id"] == "wsend_owner_preview_001"
+    assert feedback["draft_id"] == "wsend_owner_preview_001"
+    assert feedback["action_type"] == "too_mechanical"
+    assert feedback["live_policy_changed"] is False
+    assert feedback["raw_body_included"] is False
 
 
 def test_review_surface_next_page_uses_latest_owner_home_digest_offsets(tmp_path):

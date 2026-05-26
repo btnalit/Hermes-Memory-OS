@@ -40,6 +40,376 @@ Display anchors are UI labels; Memory-OS executes only stable oa_ tokens.
 Gateway hard interception is not the primary path.
 ```
 
+## 2026-05-26 RH-34i Owner Agenda Push Live Evidence
+
+Scope: `10.20.3.200` staging host only.
+
+Evidence level: `live PASS` for recurring owner-review agenda rendering and
+`monitor PASS` for the new agenda-specific probe. Overall monitor remains
+`WARN` because unrelated observation items remain open.
+
+Finding:
+
+The 2026-05-26 Telegram digest showed global backlog counts such as
+`pending=218`, `review_suggested=37`, and `fyi=169`. That was useful as a
+debug/review surface, but it was too much for a mature daily owner agenda. A
+daily push should contain decisions and true alerts, not every backlog class.
+
+Actions performed:
+
+- Added `agenda` mode to `review preview-digest` and `review render-digest`.
+- Changed `memory_os_owner_review_digest.py` to default to agenda mode for
+  Hermes cron delivery.
+- Fixed `_digest_items(limit=0)` so suppressed sections stay empty instead of
+  leaking one FYI/review item.
+- Updated the recurring Hermes cron prompt through
+  `memory_os_owner_review_cron_gate.py --owner-approved --apply` so Hermes
+  treats Script Output as today's decision agenda and does not expand
+  Review Suggested/FYI/backlog totals.
+- Triggered the existing `memory-os-owner-review-digest` cron job
+  (`2af755464ca8`) through Hermes cron.
+- Ran `python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary`.
+
+Key evidence:
+
+```text
+cron_job=memory-os-owner-review-digest
+prompt_has_today_agenda=true
+prompt_has_old_full_picture_rule=false
+helper_output_title=Memory-OS 今日审批议程
+agenda.section_counts={'action_required': 3, 'review_suggested': 0, 'fyi': 0}
+agenda.review_suggested_suppressed=true
+agenda.fyi_suppressed=true
+agenda.backlog_totals_suppressed=true
+agenda.text_char_count=1266
+agenda.raw_body_included=false
+agenda.text_has_internal_schema=false
+monitor_pass=owner_review_agenda_digest_ok
+FAIL=[]
+```
+
+Residual state:
+
+- The pull/debug review surface still reports full counts
+  (`pending=222`, `review_suggested=41`, `fyi=169`) by design. Those counts are
+  no longer part of the recurring owner agenda push.
+- Current monitor status remains `WARN` for existing non-blocking items:
+  left-brain pipeline warning, SessionMirror pending sessions, approved
+  proposal follow-up, RH-31 eval failures, and RH-26 casual empty warning.
+
+## 2026-05-26 RH-34j Proposal Agenda Eligibility Live Evidence
+
+Scope: `10.20.3.200` staging host only.
+
+Evidence level: `live PASS` for suppressing blind/generic proposal approvals
+from the recurring agenda and `monitor PASS` for the agenda digest probe.
+Overall monitor remains `WARN` because unrelated observation items remain open.
+
+Finding:
+
+After RH-34i, the recurring Telegram agenda became short enough, but it still
+asked the owner to approve items titled `Self-Evolution dry-run proposal`.
+The owner could see action tokens but not the concrete content being approved.
+Live inspection showed those proposals were historical template proposals with
+generic bodies such as `Use the highest evidence signal to prepare a reviewed
+governance improvement.` They are not mature owner-approvable agenda items.
+
+Actions performed:
+
+- Added proposal agenda eligibility checks in `OwnerReview`.
+- Generic/template Self-Evolution proposals are now downgraded to
+  `Review Suggested` maturation items and render no approve/reject commands.
+- Concrete proposals keep agenda eligibility only when they expose bounded
+  owner-readable `proposal_detail`.
+- Deployed the runtime patch to `10.20.3.200`.
+- Ran the owner-review agenda helper and the live monitor summary.
+
+Key evidence:
+
+```text
+owner_review_queue.action_required_total=0
+owner_review_queue.review_suggested_total=55
+generic_self_evolution_requires_maturation=true
+generic_self_evolution_action_commands=[]
+agenda.helper_stdout_empty=true
+agenda.section_counts={'action_required': 0, 'review_suggested': 0, 'fyi': 0}
+agenda.review_suggested_suppressed=true
+agenda.fyi_suppressed=true
+agenda.backlog_totals_suppressed=true
+agenda.raw_body_included=false
+agenda.text_has_internal_schema=false
+monitor_pass=owner_review_agenda_digest_ok
+FAIL=[]
+```
+
+Current behavior:
+
+- The recurring owner agenda is silent when there is no mature Action Required
+  item or true alert.
+- Generic Self-Evolution templates remain discoverable through pull/debug
+  review surfaces for maturation analysis, but they cannot ask the owner for
+  blind approval.
+- The next runtime quality task is to make Self-Evolution produce concrete
+  proposals with a specific change, evidence, acceptance criteria, and
+  follow-up state instead of generic dry-run templates.
+
+## 2026-05-26 P1-S Slice 3 SelfEvolution Proposal Quality Live Evidence
+
+Scope: `10.20.3.200` staging host only.
+
+Evidence level: `live PASS` for concrete SelfEvolution proposal generation and
+`monitor PASS` for agenda visibility. Overall monitor remains `WARN` because
+unrelated observation items remain open.
+
+Finding:
+
+RH-34j correctly suppressed historical generic template proposals, but the
+producer still needed to create mature proposal content. Without that, the
+daily owner agenda would either be silent forever or eventually reintroduce
+blind approvals.
+
+Actions performed:
+
+- Changed SelfEvolution proposal generation to create bounded owner-readable
+  proposal bodies with `具体改动`, `证据`, `验收标准`, `后续状态`, and `边界`.
+- Added a migration rule so legacy generic template proposals do not block a
+  new concrete proposal.
+- Kept execution separated: proposal creation still goes through OpsGate
+  report-only, and `actual_execute=false`.
+- Deployed the producer and owner-agenda renderer to `10.20.3.200`.
+- Ran SelfEvolution once against live evidence and inspected the agenda helper
+  output without triggering a Telegram send.
+- Localized the one English proposal generated during this test slice before it
+  could be pushed.
+
+Key live evidence:
+
+```text
+self_evolution.result.proposal_created=true
+self_evolution.result.proposal_id=prop_20260526T130854189767Z_de39e32be1
+new_proposal.kind=expression_policy
+new_proposal.title=调整右脑表达策略：too_mechanical 反馈
+new_proposal.body contains 具体改动/证据/验收标准/后续状态/边界
+new_proposal.actual_execute=false
+agenda.action_required_total=1
+agenda.action_required_shown=1
+agenda.text_char_count=988
+agenda.review_suggested_suppressed=true
+agenda.fyi_suppressed=true
+agenda.raw_body_included=false
+monitor_pass=owner_review_agenda_digest_ok
+FAIL=[]
+```
+
+Current behavior:
+
+- The next daily agenda can show one concrete proposal about right-brain
+  expression policy, with enough content for the owner to understand the
+  approval target.
+- Approval still means `approved_for_proposal` only. It does not change prompt,
+  cadence, SpeakGate policy, route, schedule, send behavior, or execution.
+- The next quality gate is to make the follow-up proposal/opsgate path turn
+  this approved idea into a concrete manual-apply decision without creating an
+  execution ticket automatically.
+
+## 2026-05-26 Owner Approval Smoke For Concrete SelfEvolution Proposal
+
+Scope: `10.20.3.200` staging host only.
+
+Evidence level: `live PASS` for the owner action path and `monitor PASS` for
+post-approval follow-up visibility. Overall monitor remains `WARN` because
+unrelated observation items remain open.
+
+Live interaction:
+
+```text
+Cronjob Response: memory-os-owner-review-digest
+owner command: memory approve oa_8ede56a11b98d8
+Hermes agent: memory_os_review_reply...
+Hermes agent: 已批准 oa_8ede56a11b98d8。
+```
+
+Verified state:
+
+```text
+proposal_id=prop_20260526T130854189767Z_de39e32be1
+proposal.kind=expression_policy
+proposal.title=调整右脑表达策略：too_mechanical 反馈
+proposal.state=approved_for_proposal
+proposal.followup_state=awaiting_ops_gate
+proposal.execution_decision_state=not_requested
+proposal.execution_ticket_count=0
+proposal.actual_execute=false
+owner_action.action_type=approve_proposal
+owner_action.channel=telegram
+owner_action.result=applied
+owner_action.boundary.actual_execute=false
+owner_action.boundary.actual_send=false
+owner_action.boundary.actual_identity_write=false
+owner_action.boundary.actual_unapproved_crystallized_approval=false
+followup_surface.awaiting_ops_gate_count=7
+followup_surface.execution_ticket_count=0
+followup_surface.actual_execute=false
+monitor.FAIL=[]
+```
+
+Additional delivery finding:
+
+The real Telegram digest preserved the proposal title, consequence, and token,
+but Hermes agent delivery summarized away the proposal detail (`具体改动`,
+`证据`, `验收标准`, `后续状态`, `边界`). The underlying helper output was correct;
+the loss happened in the Hermes cron agent wording layer. The cron gate prompt
+was updated in place to require preserving Script Output `内容:` as
+`审批内容:` and to keep the concrete proposal detail fields instead of
+summarizing them to a title.
+
+Prompt update evidence:
+
+```text
+cron_job=memory-os-owner-review-digest
+job_id=2af755464ca8
+cron_gate.status=updated
+prompt contains 审批内容
+prompt contains 具体改动/证据/验收标准/后续状态/边界
+render_check.raw_body_included=false
+render_check.internal_schema_primary=false
+monitor.OwnerProposalFollowups.approved=8
+monitor.OwnerProposalFollowups.execution_tickets=0
+monitor.OwnerProposalFollowups.actual_execute=false
+monitor.FAIL=[]
+```
+
+## 2026-05-26 Approved Proposal OpsGate Follow-Up Live Evidence
+
+Scope: `10.20.3.200` staging host only.
+
+Evidence level: `live PASS` for routing one owner-approved proposal into
+OpsGate report-only follow-up and `monitor PASS` for follow-up visibility.
+Overall monitor remains `WARN` because unrelated observation items remain open.
+
+Action:
+
+```text
+hermes memory-os-agent-os review proposal-followups \
+  --proposal-id prop_20260526T130854189767Z_de39e32be1 \
+  --ops-gate --owner owner --channel telegram --apply
+```
+
+Result:
+
+```text
+status=ok
+proposal_id=prop_20260526T130854189767Z_de39e32be1
+proposal_state=approved_for_proposal
+ops_gate_report_written=true
+ops_gate_result.status=ok
+ops_gate_result.execution_mode=report-only
+ops_gate_result.report_id=opsr_20260526T133309722377Z_1f07092f4c
+ops_gate_result.decisions[0].decision=would_allow
+execution_ticket_created=false
+actual_execute=false
+raw_body_included=false
+```
+
+Idempotency check:
+
+```text
+second_apply.status=duplicate_ignored
+second_apply.existing_ops_gate_review.report_id=opsr_20260526T133309722377Z_1f07092f4c
+second_apply.ops_gate_report_written=false
+second_apply.execution_ticket_created=false
+second_apply.actual_execute=false
+```
+
+Follow-up surface after apply:
+
+```text
+followup_state=ops_gate_reviewed_awaiting_explicit_execution
+ops_gate_decision=would_allow
+ops_gate_report_id=opsr_20260526T133309722377Z_1f07092f4c
+OwnerProposalFollowups.approved=8
+OwnerProposalFollowups.awaiting_ops_gate=6
+OwnerProposalFollowups.ops_gate_reviewed=2
+OwnerProposalFollowups.execution_tickets=0
+OwnerProposalFollowups.actual_execute=false
+monitor.FAIL=[]
+```
+
+Current boundary:
+
+- The approved proposal is now ready for a separate explicit execution/apply
+  design or owner decision.
+- No execution ticket exists.
+- No prompt, route, send, schedule, or runtime behavior changed.
+
+## 2026-05-26 Runtime Closure Live Evidence
+
+Scope: `10.20.3.200` staging host only.
+
+Evidence level: `live PASS` for the right-brain expression feedback path and
+`monitor PASS` for the bounded scoring/governance visibility. Overall monitor
+classification remains `WARN` because unrelated long-running observation items
+remain open.
+
+Actions performed:
+
+- Deployed runtime patch for owner-review speak items to expose expression
+  feedback commands in the owner digest, for example
+  `memory feedback oa_<token> too_mechanical`.
+- Restarted `hermes-gateway.service` on `10.20.3.200` so Hermes agent sees the
+  updated structured tool schema and guard.
+- Triggered the existing `memory-os-owner-review-digest` cron job. The rendered
+  Telegram digest showed bounded right-brain expression content plus feedback
+  tokens for `like_expression`, `too_mechanical`, `too_frequent`,
+  `boundary_private`, and `off_voice`.
+- Applied one structured Hermes-agent tool smoke:
+  `action=feedback`, `rating=too_mechanical`,
+  `action_token=oa_5f5b13773e0f0a`. Result: `status=ok`,
+  `target_type=expression`, `feedback_id=efb_20260526T120942975704Z_b7c95cd5`.
+- Ran `hermes-memory-os-cognitive-loop.service` manually. Result:
+  `status=0/SUCCESS`.
+- Ran `python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary`.
+
+Key monitor values after the live smoke and the follow-up EvidenceScoring
+rating propagation fix:
+
+```text
+classification=WARN
+FAIL=[]
+structured_review_reply_count=1
+reply_fallback_used_count=0
+expression_feedback.feedback_count=2
+expression_feedback.raw_body_included_count=0
+expression_feedback.live_policy_changed_count=0
+evidence.expression_feedback_subject_count=2
+evidence.score_count=508
+evidence.score_mode=feature_maturity_v2
+evidence.feature_score_mode=primary
+evidence.hash_score_legacy_count=0
+evidence.expired_used_in_scoring_count=0
+governance_feedback.emitted_event_count=132
+speak_gate.actual_send=false
+right_brain_expression_adapter.latest_delivery_mode=hermes_cron_agent
+OwnerReview.by_type.too_mechanical=2
+```
+
+EvidenceScoring check:
+
+```text
+expression_feedback:efb_20260526T115723492542Z_fcce47d5 feedback_rating=too_mechanical
+expression_feedback:efb_20260526T120942975704Z_b7c95cd5 feedback_rating=too_mechanical
+```
+
+Boundary result:
+
+```text
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_unapproved_crystallized_approval=false
+raw_body_included=false
+```
+
 ## Deployment Summary
 
 Memory-OS v0.1 modules were deployed to the existing main staging profile.
@@ -13213,3 +13583,166 @@ Interpretation:
   SelfEvolution, but it still cannot directly mutate prompt, policy, cadence,
   delivery, routing, identity, memory, or execution.
 - Remaining WARN items are known follow-up work; no hard boundary failed.
+
+## 2026-05-26 P1-Q Explicit Expression Policy Apply Live Evidence
+
+Evidence level: `local PASS` + `live PASS` + `monitor PASS` for the explicit
+owner-approved apply path from an approved proposal into a bounded right-brain
+expression policy write.
+
+Source proposal:
+
+```text
+proposal_id=prop_20260526T130854189767Z_de39e32be1
+title=调整右脑表达策略：too_mechanical 反馈
+state=approved_for_proposal
+owner approval token=oa_8ede56a11b98d8
+ops_gate_report_id=opsr_20260526T133309722377Z_1f07092f4c
+ops_gate_decision=would_allow
+```
+
+Local verification:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py \
+  tests\scripts\test_memory_os_right_brain_expression_helper.py \
+  tests\scripts\test_memory_os_3_200_monitor.py \
+  tests\system_modularization\test_memory_os_agent_os_shell.py -q
+
+107 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=30
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+```
+
+Live apply command:
+
+```text
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os review proposal-followups \
+  --proposal-id prop_20260526T130854189767Z_de39e32be1 \
+  --execution-apply --owner-approved --owner owner --channel telegram --apply
+```
+
+Live apply result:
+
+```text
+schema_version=memory-os.approved_proposal_execution_apply.v0
+status=applied
+policy_apply_id=rbapply_20260526T134819097932Z_c79cc6ff
+policy_version=1
+policy_path=/root/.hermes/system-modules/right_brain_expression_adapter/policy.json
+policy_written=true
+actual_policy_write=true
+actual_send=false
+actual_execute=false
+execution_ticket_created=false
+raw_body_included=false
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+```
+
+Idempotency evidence:
+
+```text
+repeated execution-apply status=duplicate_ignored
+policy_written=false
+policy_apply_id=rbapply_20260526T134819097932Z_c79cc6ff
+```
+
+Follow-up projection after apply:
+
+```text
+followup_state=applied_expression_policy
+policy_written=true
+policy_version=1
+policy_apply_count=1
+pending_followup_count=7
+execution_ticket_count=0
+actual_execute=false
+```
+
+Right-brain adapter consumption evidence:
+
+```text
+memory_os_right_brain_expression.py output contains:
+  已应用的右脑表达策略
+  policy_version: 1
+  针对 too_mechanical 反馈：降低机械感，多一点自然陪伴感。
+  少报告腔、少流程腔，优先像 Hermes agent 对 owner 自然说话。
+```
+
+Hermes cron trigger evidence:
+
+```text
+hermes cron run 5c0b7a27abae
+hermes cron tick
+job=memory-os-right-brain-expression
+last_run=2026-05-26T09:53:45.375791-04:00 ok
+deliver=origin
+latest_adapter_request.policy_id=rbpol_e182e0f77bb6
+latest_adapter_request.policy_version=1
+latest_adapter_request.actual_send=false
+latest_adapter_request.actual_execute=false
+latest_adapter_request.raw_body_included=false
+```
+
+Owner-visible Telegram result:
+
+```text
+Cronjob Response: memory-os-right-brain-expression
+(job_id: 5c0b7a27abae)
+
+今天这边很安静，我就轻轻在场。
+你如果刚好路过，我也在。
+```
+
+Product interpretation:
+
+- The owner-visible text is Chinese, short, low-frequency, and non-task-like.
+- It does not ask for approval, present agenda items, expose internal schema, or
+  claim that Memory-OS changed state.
+- This is the first live evidence that the applied `too_mechanical` expression
+  policy improved the actual Hermes-origin right-brain output style.
+
+Live monitor summary:
+
+```text
+classification=WARN
+FAIL=[]
+
+ModuleArtifacts.right_brain_expression_adapter:
+  policy_present=true
+  policy_version=1
+  policy_apply_count=1
+  latest_policy_apply_id=rbapply_20260526T134819097932Z_c79cc6ff
+  request_count=4
+  policy_actual_execute_count=0
+  policy_raw_body_included_count=0
+  latest_actual_send=false
+  raw_body_included_count=0
+
+ExpressionArtifacts:
+  right_brain_adapter_policy_present=true
+  right_brain_adapter_policy_version=1
+  right_brain_adapter_policy_apply_count=1
+```
+
+Interpretation:
+
+- This closes the first real explicit apply path for a bounded
+  `expression_policy` proposal.
+- The apply is not a shell execution and does not create an external execution
+  ticket; it is a real runtime policy write consumed by the Hermes-agent
+  right-brain expression helper.
+- The rollback reference is recorded in `policy_applies.jsonl` via the previous
+  policy snapshot/digest.
+- Remaining WARN items are unrelated observation work: left-brain pipeline
+  warning, SessionMirror pending sessions, RH-31 eval failures, and RH-26
+  casual-empty.

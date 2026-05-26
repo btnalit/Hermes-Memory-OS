@@ -22,7 +22,12 @@ from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
 from .low_clue_recall import low_clue_judge_availability
-from .owner_actions import ALLOWED_FEEDBACK_RATINGS, owner_review_surface_report, parse_owner_review_reply
+from .owner_actions import (
+    ALLOWED_FEEDBACK_RATINGS,
+    EXPRESSION_FEEDBACK_ACTION_TYPES,
+    owner_review_surface_report,
+    parse_owner_review_reply,
+)
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -197,8 +202,8 @@ class MemoryOSProvider(MemoryProvider):
                         },
                         "rating": {
                             "type": "string",
-                            "enum": sorted(ALLOWED_FEEDBACK_RATINGS),
-                            "description": "Required only when action is feedback.",
+                            "enum": sorted(ALLOWED_FEEDBACK_RATINGS | EXPRESSION_FEEDBACK_ACTION_TYPES),
+                            "description": "Required only when action is feedback. Supports MemorySources and expression feedback ratings.",
                         },
                         "owner_utterance": {
                             "type": "string",
@@ -720,7 +725,7 @@ def _owner_review_reply_tool_input(args: dict[str, Any]) -> tuple[str, dict[str,
             "reason": "missing_or_invalid_action_token",
         }
     if action == "feedback":
-        if rating not in ALLOWED_FEEDBACK_RATINGS:
+        if rating not in ALLOWED_FEEDBACK_RATINGS and rating not in EXPRESSION_FEEDBACK_ACTION_TYPES:
             return "", {
                 "mode": "structured",
                 "action": action,
@@ -958,7 +963,10 @@ def _looks_like_owner_review_reply(text: str) -> bool:
         )
         or re.fullmatch(
             prefix
-            + r"(?i:feedback|mark|反馈)\s+oa_[0-9a-f]{8,32}\s+(useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall)[：:,.，。!！?？]?",
+            + r"(?i:feedback|mark|反馈)\s+oa_[0-9a-f]{8,32}\s+"
+            + r"(useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall|"
+            + r"like_expression|too_mechanical|too_frequent|boundary_private|off_voice|mute_period)"
+            + r"[：:,.，。!！?？]?",
             normalized,
         )
     )

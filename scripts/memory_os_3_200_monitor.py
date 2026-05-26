@@ -356,6 +356,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "right_brain_expression_adapter_actual_send_true", "value": right_brain_adapter})
             elif int(right_brain_adapter.get("raw_body_included_count") or 0) > 0:
                 fail.append({"code": "right_brain_expression_adapter_raw_body_included", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("policy_actual_execute_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_policy_actual_execute_true", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("policy_raw_body_included_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_policy_raw_body_included", "value": right_brain_adapter})
             elif int(right_brain_adapter.get("request_count") or 0) > 0:
                 passed.append(
                     {
@@ -535,6 +539,32 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     passed.append({"code": "right_brain_review_speak_preview_visible"})
         else:
             warn.append({"code": "owner_review_rendered_digest_unavailable", "value": rendered_digest})
+
+    agenda_digest = snapshot.get("owner_review_agenda_digest", {})
+    if agenda_digest:
+        if agenda_digest.get("schema_version") == "memory-os.owner_review_rendered_digest.v0":
+            if agenda_digest.get("raw_body_included") is True:
+                fail.append({"code": "owner_review_agenda_digest_raw_body_included"})
+            if agenda_digest.get("text_has_internal_schema") is True:
+                fail.append({"code": "owner_review_agenda_digest_internal_schema_text"})
+            if agenda_digest.get("text_has_transcript_marker") is True:
+                fail.append({"code": "owner_review_agenda_digest_transcript_marker"})
+            if int(agenda_digest.get("text_char_count") or 0) > 2400:
+                fail.append({"code": "owner_review_agenda_digest_too_long", "value": agenda_digest.get("text_char_count")})
+            if agenda_digest.get("digest_mode") != "agenda":
+                fail.append({"code": "owner_review_agenda_digest_wrong_mode", "value": agenda_digest.get("digest_mode")})
+            if agenda_digest.get("review_suggested_suppressed") is False:
+                fail.append({"code": "owner_review_agenda_digest_review_suggested_not_suppressed"})
+            if agenda_digest.get("fyi_suppressed") is False:
+                fail.append({"code": "owner_review_agenda_digest_fyi_not_suppressed"})
+            if agenda_digest.get("backlog_totals_suppressed") is False:
+                fail.append({"code": "owner_review_agenda_digest_backlog_totals_visible"})
+            if agenda_digest.get("decision_summary_present") is False:
+                fail.append({"code": "owner_review_agenda_digest_missing_decision_summary"})
+            if not any(str(item.get("code", "")).startswith("owner_review_agenda_digest_") for item in fail):
+                passed.append({"code": "owner_review_agenda_digest_ok"})
+        else:
+            warn.append({"code": "owner_review_agenda_digest_unavailable", "value": agenda_digest})
 
     reply_dry_run = snapshot.get("owner_review_reply_dry_run", {})
     if reply_dry_run:
@@ -962,6 +992,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerReviewChannel={_owner_review_channel_summary(snapshot.get('owner_review_channel') or {})}",
         f"- OwnerDigestPreview={_owner_digest_preview_summary(snapshot.get('owner_review_digest_preview') or {})}",
         f"- OwnerRenderedDigest={_owner_rendered_digest_summary(snapshot.get('owner_review_rendered_digest') or {})}",
+        f"- OwnerAgendaDigest={_owner_agenda_digest_summary(snapshot.get('owner_review_agenda_digest') or {})}",
         f"- OwnerReplyDryRun={_owner_reply_dry_run_summary(snapshot.get('owner_review_reply_dry_run') or {})}",
         f"- OwnerReviewSurface={_owner_review_surface_summary(snapshot.get('owner_review_surface') or {})}",
         f"- OwnerIngressGuard={_owner_ingress_guard_summary(snapshot.get('owner_review_ingress_guard') or {})}",
@@ -1128,6 +1159,9 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "right_brain_adapter_latest_delivery_mode": summary.get("right_brain_adapter_latest_delivery_mode"),
         "right_brain_adapter_latest_actual_send": summary.get("right_brain_adapter_latest_actual_send"),
         "right_brain_adapter_raw_body_included_count": summary.get("right_brain_adapter_raw_body_included_count"),
+        "right_brain_adapter_policy_present": summary.get("right_brain_adapter_policy_present"),
+        "right_brain_adapter_policy_version": summary.get("right_brain_adapter_policy_version"),
+        "right_brain_adapter_policy_apply_count": summary.get("right_brain_adapter_policy_apply_count"),
     }
 
 
@@ -1220,6 +1254,21 @@ def _owner_rendered_digest_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _owner_agenda_digest_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": summary.get("status"),
+        "digest_mode": summary.get("digest_mode"),
+        "raw_body_included": summary.get("raw_body_included"),
+        "text_char_count": summary.get("text_char_count"),
+        "decision_summary_present": summary.get("decision_summary_present"),
+        "review_suggested_suppressed": summary.get("review_suggested_suppressed"),
+        "fyi_suppressed": summary.get("fyi_suppressed"),
+        "backlog_totals_suppressed": summary.get("backlog_totals_suppressed"),
+        "section_counts": summary.get("section_counts"),
+        "counts": summary.get("counts"),
+    }
+
+
 def _owner_reply_dry_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": summary.get("status"),
@@ -1282,6 +1331,7 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
         "overflow": summary.get("overflow_count"),
         "awaiting_ops_gate": summary.get("awaiting_ops_gate_count"),
         "ops_gate_reviewed": summary.get("ops_gate_reviewed_count"),
+        "policy_apply_count": summary.get("policy_apply_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
         "actual_execute": summary.get("actual_execute"),
         "raw_body_included": summary.get("raw_body_included"),
@@ -1504,6 +1554,16 @@ def _read_jsonl(path):
         except Exception:
             records.append({"_parse_error": True})
     return records
+
+def _read_json(path):
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        parsed = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"_parse_error": True}
+    return parsed if isinstance(parsed, dict) else {}
 
 def session_activity_stats(recent_window=250):
     root = Path("/root/.hermes/memory-os/events")
@@ -1841,6 +1901,12 @@ def module_artifact_summary():
     right_brain_expression_requests = _read_jsonl(
         "/root/.hermes/system-modules/right_brain_expression_adapter/requests.jsonl"
     )
+    right_brain_expression_policy = _read_json(
+        "/root/.hermes/system-modules/right_brain_expression_adapter/policy.json"
+    )
+    right_brain_expression_policy_applies = _read_jsonl(
+        "/root/.hermes/system-modules/right_brain_expression_adapter/policy_applies.jsonl"
+    )
     latest_right_brain_expression_request = (
         right_brain_expression_requests[-1]
         if right_brain_expression_requests and isinstance(right_brain_expression_requests[-1], dict)
@@ -1948,6 +2014,24 @@ def module_artifact_summary():
       },
       "right_brain_expression_adapter": {
         "request_count": len(right_brain_expression_requests),
+        "policy_present": bool(right_brain_expression_policy),
+        "policy_version": right_brain_expression_policy.get("policy_version") if isinstance(right_brain_expression_policy, dict) else None,
+        "policy_apply_count": len(right_brain_expression_policy_applies),
+        "latest_policy_apply_id": (
+            right_brain_expression_policy_applies[-1].get("apply_id")
+            if right_brain_expression_policy_applies and isinstance(right_brain_expression_policy_applies[-1], dict)
+            else ""
+        ),
+        "policy_actual_execute_count": sum(
+            1
+            for item in right_brain_expression_policy_applies
+            if isinstance(item, dict) and item.get("actual_execute") is True
+        ),
+        "policy_raw_body_included_count": sum(
+            1
+            for item in right_brain_expression_policy_applies
+            if isinstance(item, dict) and item.get("raw_body_included") is True
+        ),
         "silent_request_count": sum(
             1
             for item in right_brain_expression_requests
@@ -2053,6 +2137,9 @@ def expression_artifact_summary():
       "right_brain_adapter_latest_delivery_mode": right_brain_adapter.get("latest_delivery_mode"),
       "right_brain_adapter_latest_actual_send": right_brain_adapter.get("latest_actual_send"),
       "right_brain_adapter_raw_body_included_count": right_brain_adapter.get("raw_body_included_count"),
+      "right_brain_adapter_policy_present": right_brain_adapter.get("policy_present"),
+      "right_brain_adapter_policy_version": right_brain_adapter.get("policy_version"),
+      "right_brain_adapter_policy_apply_count": right_brain_adapter.get("policy_apply_count"),
     }
 
 def session_mirror_summary():
@@ -2184,6 +2271,30 @@ def owner_review_rendered_digest_summary():
         for key, value in sections.items()
         if isinstance(value, list)
       },
+      "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
+    }
+
+def owner_review_agenda_digest_summary():
+    report = memory_os_cli(["review", "render-digest", "--mode", "agenda", "--max-action-required", "3"])
+    if not isinstance(report, dict) or report.get("_error"):
+        return report
+    text = str(report.get("text") or "")
+    sections = report.get("sections") if isinstance(report.get("sections"), dict) else {}
+    section_counts = {key: len(value) for key, value in sections.items() if isinstance(value, list)}
+    return {
+      "schema_version": report.get("schema_version"),
+      "status": report.get("status"),
+      "digest_mode": report.get("digest_mode"),
+      "raw_body_included": report.get("raw_body_included"),
+      "text_char_count": len(text),
+      "text_has_internal_schema": any(token in text for token in ("Candidate kind=", "source_events=", "sensitivity=")),
+      "text_has_transcript_marker": any(token in text for token in ("User:", "Assistant:", "用户:", "助手:", "用户：", "助手：", "| Assistant:", "| User:")),
+      "decision_summary_present": all(token in text for token in ("今日议程", "需要你决定", "本推送只包含审批项和真实告警")),
+      "review_suggested_suppressed": section_counts.get("review_suggested", 0) == 0 and "建议你看:" not in text,
+      "fyi_suppressed": section_counts.get("fyi", 0) == 0 and "仅供了解:" not in text,
+      "backlog_totals_suppressed": "待处理" not in text and "仅供了解:" not in text and "建议你看:" not in text,
+      "section_counts": section_counts,
+      "counts": report.get("counts") if isinstance(report.get("counts"), dict) else {},
       "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
     }
 
@@ -2481,6 +2592,7 @@ owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups", "--limit", "10"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
+owner_review_agenda_digest = owner_review_agenda_digest_summary()
 owner_review_reply_dry_run = owner_review_reply_dry_run_summary()
 owner_review_surface = owner_review_surface_summary()
 owner_review_ingress_guard = owner_review_ingress_guard_summary()
@@ -2528,6 +2640,7 @@ print(json.dumps({
   "owner_review_proposal_followups": owner_review_proposal_followups,
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,
+  "owner_review_agenda_digest": owner_review_agenda_digest,
   "owner_review_reply_dry_run": owner_review_reply_dry_run,
   "owner_review_surface": owner_review_surface,
   "owner_review_ingress_guard": owner_review_ingress_guard,

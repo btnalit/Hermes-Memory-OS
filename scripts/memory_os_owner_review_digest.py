@@ -19,10 +19,13 @@ from pathlib import Path
 def main() -> int:
     owner = os.environ.get("MEMORY_OS_OWNER_REVIEW_OWNER", "owner")
     channel = os.environ.get("MEMORY_OS_OWNER_REVIEW_CHANNEL", "")
+    digest_mode = os.environ.get("MEMORY_OS_OWNER_REVIEW_DIGEST_MODE", "agenda").strip() or "agenda"
     limits = _limit_args()
 
-    preview = _run_json(["hermes", "memory-os-agent-os", "review", "preview-digest", "--owner", owner, *limits])
-    if not _has_meaningful_content(preview):
+    preview = _run_json(
+        ["hermes", "memory-os-agent-os", "review", "preview-digest", "--owner", owner, "--mode", digest_mode, *limits]
+    )
+    if not _has_meaningful_content(preview, digest_mode=digest_mode):
         return 0
 
     if not channel:
@@ -42,6 +45,8 @@ def main() -> int:
             "text",
             "--bounded",
             "--record-active",
+            "--mode",
+            digest_mode,
             *limits,
         ]
     )
@@ -64,10 +69,15 @@ def _limit_args() -> list[str]:
     return args
 
 
-def _has_meaningful_content(preview: dict[str, object]) -> bool:
+def _has_meaningful_content(preview: dict[str, object], *, digest_mode: str = "review") -> bool:
     counts = preview.get("counts")
     if not isinstance(counts, dict):
         return False
+    if str(digest_mode).strip().lower().replace("-", "_") == "agenda":
+        # The recurring owner agenda should push only explicit decisions or
+        # real alerts. Review-suggested and FYI items remain available through
+        # the pull-based review surface, not daily Telegram noise.
+        return int(counts.get("action_required_shown") or 0) > 0
     shown = (
         int(counts.get("action_required_shown") or 0)
         + int(counts.get("review_suggested_shown") or 0)

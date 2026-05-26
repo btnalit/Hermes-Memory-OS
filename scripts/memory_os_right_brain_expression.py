@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     summaries = [str(item).strip() for item in context.get("summaries", []) if str(item).strip()]
     if not summaries:
         return 0
+    policy = _read_expression_policy(hermes_home)
 
     request = _record_request(
         hermes_home=hermes_home,
@@ -53,8 +54,9 @@ def main(argv: list[str] | None = None) -> int:
         channel=args.channel,
         source_refs=[str(ref) for ref in context.get("source_refs", [])],
         summary_count=len(summaries),
+        policy=policy,
     )
-    print(_render_prompt(profile=args.profile, channel=args.channel, request=request, summaries=summaries))
+    print(_render_prompt(profile=args.profile, channel=args.channel, request=request, summaries=summaries, policy=policy))
     return 0
 
 
@@ -78,6 +80,7 @@ def _record_request(
     channel: str,
     source_refs: list[str],
     summary_count: int,
+    policy: dict[str, Any],
 ) -> dict[str, Any]:
     created_at = datetime.now(timezone.utc).isoformat()
     request = {
@@ -89,6 +92,8 @@ def _record_request(
         "delivery_mode": "hermes_cron_agent",
         "source_refs": source_refs[:12],
         "summary_count": summary_count,
+        "policy_version": int(policy.get("policy_version") or 0) if policy else 0,
+        "policy_id": str(policy.get("policy_id") or "") if policy else "",
         "raw_body_included": False,
         "actual_send": False,
         "actual_execute": False,
@@ -103,7 +108,47 @@ def _record_request(
     return request
 
 
-def _render_prompt(*, profile: str, channel: str, request: dict[str, Any], summaries: list[str]) -> str:
+def _read_expression_policy(hermes_home: Path) -> dict[str, Any]:
+    path = hermes_home / "system-modules" / "right_brain_expression_adapter" / "policy.json"
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict) or parsed.get("active") is not True:
+        return {}
+    if parsed.get("schema_version") != "memory-os.right_brain_expression_policy.v0":
+        return {}
+    return parsed
+
+
+def _render_policy(policy: dict[str, Any]) -> str:
+    if not policy:
+        return ""
+    guidance = [str(item).strip() for item in policy.get("tone_guidance", []) if str(item).strip()]
+    constraints = [str(item).strip() for item in policy.get("safety_constraints", []) if str(item).strip()]
+    lines = [
+        "已应用的右脑表达策略：",
+        f"policy_version: {int(policy.get('policy_version') or 0)}",
+    ]
+    if guidance:
+        lines.append("语气策略：")
+        lines.extend(f"- {item}" for item in guidance[:6])
+    if constraints:
+        lines.append("安全约束：")
+        lines.extend(f"- {item}" for item in constraints[:5])
+    return "\n".join(lines) + "\n\n"
+
+
+def _render_prompt(
+    *,
+    profile: str,
+    channel: str,
+    request: dict[str, Any],
+    summaries: list[str],
+    policy: dict[str, Any],
+) -> str:
     bullets = "\n".join(f"- {summary}" for summary in summaries[:8])
     return (
         "Hermes agent 右脑低频表达任务。\n\n"
@@ -118,6 +163,7 @@ def _render_prompt(*, profile: str, channel: str, request: dict[str, Any], summa
         f"adapter_request_id: {request['request_id']}\n"
         f"profile: {profile}\n"
         f"delivery_channel: {channel}\n\n"
+        f"{_render_policy(policy)}"
         "Bounded context summaries:\n"
         f"{bullets}\n"
     )

@@ -71,6 +71,7 @@ from .migrator import (
 )
 from .owner_actions import (
     approved_proposal_followups_report,
+    apply_approved_proposal_execution_decision,
     apply_owner_action,
     deliver_owner_review_digest_once,
     owner_review_aging_report,
@@ -431,6 +432,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_followups.add_argument("--limit", type=int, default=20)
     review_followups.add_argument("--proposal-id", default="")
     review_followups.add_argument("--ops-gate", action="store_true")
+    review_followups.add_argument("--execution-apply", action="store_true")
+    review_followups.add_argument("--owner-approved", action="store_true")
     review_followups.add_argument("--owner", default="owner")
     review_followups.add_argument("--channel", default="cli")
     review_followups.add_argument("--apply", action="store_true")
@@ -439,12 +442,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_preview.add_argument("--max-action-required", type=int)
     review_preview.add_argument("--max-review-suggested", type=int)
     review_preview.add_argument("--max-fyi", type=int)
+    review_preview.add_argument("--mode", choices=["review", "agenda", "debug"], default="review")
     review_render = review_subs.add_parser("render-digest")
     review_render.add_argument("--owner", default="")
     review_render.add_argument("--channel", default="cli")
     review_render.add_argument("--max-action-required", type=int)
     review_render.add_argument("--max-review-suggested", type=int)
     review_render.add_argument("--max-fyi", type=int)
+    review_render.add_argument("--mode", choices=["review", "agenda", "debug"], default="review")
     review_render.add_argument("--format", choices=["json", "text"], default="json")
     review_render.add_argument("--bounded", action="store_true")
     review_render.add_argument("--record-active", action="store_true")
@@ -952,6 +957,24 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
         )
         return 0
     if command == "proposal-followups":
+        if bool(getattr(args, "execution_apply", False)):
+            report = apply_approved_proposal_execution_decision(
+                store,
+                proposal_id=str(args.proposal_id),
+                owner_id=str(args.owner),
+                channel=str(args.channel),
+                owner_approved=bool(args.owner_approved),
+                apply=bool(args.apply),
+            )
+            print(
+                json.dumps(
+                    report,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0 if report.get("status") in {"ready", "applied", "duplicate_ignored"} else 1
         if bool(getattr(args, "ops_gate", False)):
             report = route_approved_proposal_followup_to_ops_gate(
                 store,
@@ -987,6 +1010,7 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
                     max_action_required=args.max_action_required,
                     max_review_suggested=args.max_review_suggested,
                     max_fyi=args.max_fyi,
+                    digest_mode=args.mode,
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -1002,6 +1026,7 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
             max_action_required=args.max_action_required,
             max_review_suggested=args.max_review_suggested,
             max_fyi=args.max_fyi,
+            digest_mode=args.mode,
             record_active=bool(args.record_active),
         )
         if args.format == "text":

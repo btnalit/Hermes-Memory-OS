@@ -144,7 +144,7 @@ class SelfEvolutionGovernorModule:
         proposal_created = gate_decision.get("decision") == "would_allow"
         proposal_id = ""
         if proposal_created:
-            proposal_shape = _proposal_shape(selected)
+            proposal_shape = _proposal_shape(selected, evidence_scoring=evidence_scoring)
             proposal = proposal_queue.create_candidate(
                 store=store,
                 title=proposal_shape["title"],
@@ -336,6 +336,8 @@ def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[s
             continue
         if str(item.get("state") or "") not in unresolved_states:
             continue
+        if _legacy_template_proposal(item):
+            continue
         source_refs = {str(ref) for ref in item.get("source_refs") or []}
         if not source_refs or source_refs == score_ref_set:
             return item
@@ -343,6 +345,20 @@ def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[s
         if title in {"Self-Evolution dry-run proposal", "Tune right-brain expression policy"}:
             return item
     return None
+
+
+def _legacy_template_proposal(item: dict[str, Any]) -> bool:
+    title = str(item.get("title") or "")
+    body = " ".join(str(item.get("body") or "").split())
+    if "Proposed change:" in body and "Acceptance criteria:" in body:
+        return False
+    if "具体改动:" in body and "验收标准:" in body:
+        return False
+    if title == "Self-Evolution dry-run proposal":
+        return True
+    if title == "Tune right-brain expression policy" and "prompt/cadence/policy proposal" in body:
+        return True
+    return False
 
 
 def _primary_governance_scores(evidence_scoring: Any) -> list[dict[str, Any]]:
@@ -359,7 +375,12 @@ def _score_ref(score: dict[str, Any]) -> str:
     return f"score:{score['score_id']}"
 
 
-def _proposal_shape(scores: list[dict[str, Any]]) -> dict[str, str]:
+def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> dict[str, str]:
+    evidence_by_id = {
+        str(record.get("evidence_id", "")): record
+        for record in evidence_scoring.read_evidence()
+        if isinstance(record, dict)
+    }
     ratings = [
         str(
             score.get("maturity_dimensions", {})
@@ -371,19 +392,103 @@ def _proposal_shape(scores: list[dict[str, Any]]) -> dict[str, str]:
         if str(score.get("subject_kind") or "") == "expression_feedback"
     ]
     ratings = [rating for rating in ratings if rating and rating != "none"]
+    top_score = scores[0] if scores else {}
+    top_summary = _score_summary(top_score, evidence_by_id=evidence_by_id)
+    top_subject = str(top_score.get("subject_ref") or "unknown_subject")
+    top_score_value = top_score.get("maturity_score", top_score.get("score", ""))
+    evidence_line = _evidence_line(top_score, evidence_by_id=evidence_by_id)
     if ratings:
         rating = ratings[0]
         return {
             "kind": "expression_policy",
-            "title": "Tune right-brain expression policy",
-            "body": (
-                "Create a prompt/cadence/policy proposal for right-brain expression based on "
-                f"owner expression feedback rating={rating}. This is proposal-only: do not "
-                "change prompts, cadence, SpeakGate policy, or delivery behavior without a later apply gate."
+            "title": f"调整右脑表达策略：{rating} 反馈",
+            "body": _proposal_body(
+                proposed_change=(
+                    f"根据 owner 表达反馈 rating={rating}，形成一条右脑表达策略调整方案。"
+                ),
+                evidence=(
+                    f"owner 标记右脑表达 {rating}; maturity_score={top_score_value}; summary={top_summary}"
+                ),
+                acceptance=(
+                    "必须写清要改 prompt、cadence 还是 SpeakGate policy，owner 可见效果，"
+                    "monitor 检查字段，以及 rollback/stop signal。"
+                ),
+                follow_up=(
+                    "approved_for_proposal -> OpsGate report-only -> owner manual apply decision；"
+                    "actual_execute=false."
+                ),
             ),
         }
+    title = _governance_title(top_score, top_summary=top_summary)
     return {
         "kind": "self_evolution",
-        "title": "Self-Evolution dry-run proposal",
-        "body": "Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+        "title": title,
+        "body": _proposal_body(
+            proposed_change=(
+                "基于最高成熟度信号创建一条有边界的治理 follow-up，替代泛化 dry-run item。"
+            ),
+            evidence=(
+                f"subject={top_subject}; maturity_score={top_score_value}; summary={top_summary}"
+            ),
+            acceptance=(
+                "必须写清具体模块或合同、monitor/test 证明、rollback/stop signal；"
+                "不能直接应用运行时行为。"
+            ),
+            follow_up=(
+                "approved_for_proposal -> OpsGate report-only -> owner/manual apply design；"
+                "actual_execute=false."
+            ),
+        ),
     }
+
+
+def _proposal_body(*, proposed_change: str, evidence: str, acceptance: str, follow_up: str) -> str:
+    return "\n".join(
+        [
+            f"具体改动: {_bounded_line(proposed_change, 420)}",
+            f"证据: {_bounded_line(evidence, 520)}",
+            f"验收标准: {_bounded_line(acceptance, 520)}",
+            f"后续状态: {_bounded_line(follow_up, 360)}",
+            "边界: 这只是 proposal，不会直接改 prompt、route、send、schedule 或执行行为；后续必须另走显式 apply gate。",
+        ]
+    )
+
+
+def _score_summary(score: dict[str, Any], *, evidence_by_id: dict[str, dict[str, Any]]) -> str:
+    for evidence_ref in score.get("evidence_refs", []):
+        evidence = evidence_by_id.get(str(evidence_ref), {})
+        summary = _bounded_line(str(evidence.get("summary") or ""), 260)
+        if summary:
+            return summary
+    return _bounded_line(str(score.get("feature_explanation") or score.get("explanation") or ""), 260)
+
+
+def _evidence_line(score: dict[str, Any], *, evidence_by_id: dict[str, dict[str, Any]]) -> str:
+    evidence_refs = [str(ref) for ref in score.get("evidence_refs", []) if str(ref)]
+    source_refs: list[str] = []
+    for evidence_ref in evidence_refs[:3]:
+        record = evidence_by_id.get(evidence_ref, {})
+        source_ref = str(record.get("source_ref") or "")
+        if source_ref:
+            source_refs.append(source_ref)
+    parts = [f"score_ref={_score_ref(score)}"]
+    if evidence_refs:
+        parts.append("evidence_refs=" + ",".join(evidence_refs[:3]))
+    if source_refs:
+        parts.append("source_refs=" + ",".join(source_refs[:3]))
+    return _bounded_line("; ".join(parts), 420)
+
+
+def _governance_title(score: dict[str, Any], *, top_summary: str) -> str:
+    subject_kind = str(score.get("subject_kind") or "governance")
+    if top_summary:
+        return _bounded_line(f"复核 {subject_kind} 治理信号：{top_summary}", 96)
+    subject_ref = str(score.get("subject_ref") or "governance signal")
+    return _bounded_line(f"复核 {subject_kind} 治理信号：{subject_ref}", 96)
+
+
+def _bounded_line(value: str, limit: int) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip() + "..."

@@ -398,19 +398,27 @@ Current truth:
 - `approved_for_proposal` is visible;
 - OpsGate report-only follow-up exists;
 - execution tickets remain zero;
-- final owner execution decision state is not implemented.
+- the first bounded `expression_policy` proposal has a live explicit apply path
+  after owner approval and OpsGate `would_allow`;
+- generic external execution remains unimplemented.
 
-Allowed next step:
+Implemented path:
 
 ```text
 approved_for_proposal
 -> ops_gate_reviewed_awaiting_explicit_execution
--> awaiting_owner_execution_decision
--> applied / rejected / snoozed
+-> explicit owner/operator apply
+-> right_brain_expression_adapter/policy.json
+-> right-brain expression helper consumes policy on next run
 ```
 
-No execution capability without a separate owner/operator apply gate and
-external review.
+Hard rule:
+
+- bounded policy/config apply is allowed only for proposal kinds with an owned
+  runtime target, rollback record, monitor field, owner approval, and OpsGate
+  review;
+- shell/service/filesystem execution still needs a separate owner/operator
+  apply design and external review.
 
 ### P1-P - Timestamp / Aging Data Quality
 
@@ -459,6 +467,11 @@ Stop and redesign if any of these happen:
 - Memory-OS implements platform transport or cron semantics instead of Hermes;
 - feedback directly mutates prompt/routing/cadence/scoring;
 - right-brain text becomes task/proposal/agenda language;
+- recurring owner agenda pushes bulk Review Suggested/FYI/backlog totals
+  instead of only decisions and true alerts;
+- recurring owner agenda asks for approval of a proposal whose visible content
+  is only a generic/template title rather than a bounded concrete change,
+  reason, and follow-up effect;
 - scoring begins driving live behavior before report-only comparison;
 - SelfEvolution creates repeated unresolved proposals;
 - expired working dominates scoring/reflection;

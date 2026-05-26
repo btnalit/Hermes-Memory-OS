@@ -23,6 +23,12 @@ Current implementation state:
   expression feedback actions such as `too_mechanical` write
   `expression_feedback_ledger.jsonl`; GovernanceFeedback consumes these as
   summary-only governance events without changing live policy.
+- P1-R owner/Hermes interaction slice is deployed on `10.20.3.200`: speak
+  review items render bounded expression content plus stable expression
+  feedback tokens. A live structured `memory_os_review_reply` tool call with
+  `action=feedback`, `rating=too_mechanical`, and token
+  `oa_5f5b13773e0f0a` recorded
+  `efb_20260526T120942975704Z_b7c95cd5` for `target_type=expression`.
 - P1-R Hermes-agent expression adapter is deployed on `10.20.3.200`: Memory-OS
   emits bounded context through `memory_os_right_brain_expression.py`, Hermes
   cron runs it in agent mode, and Hermes owns final wording, silence judgment,
@@ -36,6 +42,13 @@ Current implementation state:
   from older cognitive-loop reports, but latest-cycle evidence reports
   `latest_expression_draft_missing_count=0` and
   `latest_speak_gate_missing_evaluation_count=0`.
+- Latest live monitor after the feedback smoke reports
+  `expression_feedback_count=2`, `expression_feedback_subject_count=2`,
+  `structured_review_reply_count=1`, `reply_fallback_used_count=0`, and no
+  FAIL findings.
+- EvidenceScoring now preserves expression feedback labels in the left-brain
+  maturity dimensions; the live feedback records show
+  `feedback_rating=too_mechanical` rather than `unknown`.
 
 ## Why This Exists
 
@@ -140,7 +153,7 @@ route and must not be flattened into `would-send`.
 | Wandering Mind | Generate non-task free association / feeling expression or silence. | `WanderingMindModule.run_once()` currently builds deterministic text from the latest event summary and records would-send artifacts with `actual_send=false`. | RightBrainExpressionEngine output draft; every non-silent draft must pass SpeakGate. | Current module is a safe deterministic draft shell, not a real right-brain expression engine. |
 | SpeakGate | Decide whether an expression draft is silent, scheduled-allowed, blocked, would-send observation, or exceptional permission-required. | P1-R slice 1 routes new cognitive-loop Wandering output through `SpeakGateModule.evaluate_wandering_output()` and records evaluated/missing decision monitor fields. Historical reports can still contain Wandering artifacts without SpeakGate decisions. | Mandatory decision for every non-silent expression draft. | The current gap is no `ExpressionDraft` object and no formal RightBrainExpressionEngine / feedback / scheduled-expression route; historical missing evaluations remain evidence of the old wiring, not the current new-cycle path. |
 | Owner Review for expression | Let the owner judge expression quality and exceptional send permission. | Owner review can surface speak/would-send items and action tokens. | Show bounded expression preview, why it appeared, delivery tier, and stable token if action is needed. | Payload refs / action tokens alone are not enough to judge "voice"; expression content feedback is missing. |
-| Expression feedback | Convert owner judgment into bounded evidence. | `allow_speak_once` exists; expression quality labels do not. | `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period` into expression feedback ledger. | No real expression feedback ledger or feedback-to-policy proposal path exists. |
+| Expression feedback | Convert owner judgment into bounded evidence. | Expression quality labels and owner/Hermes feedback tokens are deployed for shown speak items; records are written to `expression_feedback_ledger.jsonl` and consumed as scoring/governance inputs. | `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period` into expression feedback ledger. | Live policy/prompt/cadence still does not change directly; feedback-to-policy remains proposal-only. |
 | GovernanceFeedback / SelfEvolution backflow | Turn expression outcomes into policy/prompt/frequency proposals. | GovernanceFeedback consumes evidence, ops, proposal, and self-evolution outcomes; it does not currently consume full wandering/speak outcomes. | Bounded governance events and owner-reviewed proposals only. | Expression outcomes cannot yet improve prompt, cadence, or SpeakGate policy. |
 
 The current right-brain chain is therefore:

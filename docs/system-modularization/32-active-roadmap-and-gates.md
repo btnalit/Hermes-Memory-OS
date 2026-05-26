@@ -43,11 +43,11 @@ The queue below must stay consistent with those source documents and with live
 
 ## Current Live Baseline
 
-Latest read-only monitor evidence used for this roadmap refresh:
+Latest live monitor evidence used for this roadmap refresh:
 
 ```text
 host: 10.20.3.200
-date_utc: 2026-05-25T04:36:45Z
+date_utc: 2026-05-26T12:10:26Z
 classification: WARN
 FAIL: none
 
@@ -64,17 +64,28 @@ low_clue_llm_judge: disabled, deterministic fallback active
 low_clue_ingress_matrix: expected routes/headings matched
 MemorySources: boundary_true_count=0, forbidden_field_findings=[]
 DeepReflection: enabled, auto_bounded, boundaries false
-DeepReflection optional outputs: self_evolution_proposals_enabled=true,
-  wandering_seed_enabled=true, working_updates_enabled=false
-module status inventory: 16 modules visible
-wandering_mind: would_send_count=11
-proposal_queue: candidate_count=15, pending candidate state count=14
-evidence_scoring: score_count=560
+module status inventory: 18 modules visible
+wandering_mind: would_send_count=27
+expression_draft: draft_count=4, latest_expression_draft_missing_count=0
+speak_gate: would_send_count=12, latest_speak_gate_missing_evaluation_count=0
+right_brain_expression_adapter: request_count=2, delivery_mode=hermes_cron_agent
+expression_feedback: feedback_count=2, raw_body_included_count=0,
+  live_policy_changed_count=0
+proposal_queue: candidate_count=22
+evidence_scoring: score_count=508, score_mode=feature_maturity_v2,
+  feature_score_mode=primary, hash_score_legacy_count=0,
+  expression_feedback_subject_count=2, expired_used_in_scoring_count=0
+governance_feedback: emitted_event_count=135
 crystallized_records: 0
 RH-31 eval: warning, failure_count=3 after P1-B attribution fix
-OwnerReviewChannel: dry_run_only, cli preview fallback, raw_body=false
-OwnerDigestPreview: ok, will_send=false, raw_body=false
-OwnerDeliveryGate: disabled, ready_for_delivery=false, actual_send=false
+OwnerReview: owner_actions=10, by_type.too_mechanical=2
+OwnerReviewIngressGuard: structured_review_reply_count=1,
+  reply_fallback_used_count=0
+OwnerRenderedDigest: speak_expression_preview_missing_count=0,
+  text_has_internal_schema=false
+OwnerCronIntegration: enabled=true, job_present=true, raw_body_included=0
+OwnerDeliveryGate: disabled for Memory-OS internal delivery; Hermes cron owns
+  owner-facing transport
 ```
 
 This means the system is healthy enough to continue development, but not all
@@ -684,6 +695,17 @@ Status:
   reply `memory reject oa_1e9ca00f639ca2` was processed by Hermes through
   `memory_os_review_reply` as `reject_proposal`; `actual_execute=false`,
   `unapproved_send_count=0`, and `raw_body_included_count=0`.
+- RH-34i corrects the product default for recurring owner push: the Hermes cron
+  helper now defaults to `agenda` mode, which pushes only Action Required
+  decisions and true alerts. Review Suggested, FYI, and global backlog totals
+  remain available through pull-based review surface / ops-debug mode, not the
+  daily owner agenda.
+- RH-34j corrects the proposal eligibility boundary for recurring owner
+  agendas: generic/template Self-Evolution proposals are not mature approval
+  items. They are downgraded to Review Suggested maturation items with no
+  approve/reject commands. A proposal may enter the daily agenda only when it
+  renders bounded owner-readable detail about the concrete change, reason, and
+  follow-up effect.
 - RH-34h/RH-35.10 deployed and monitor-observed: owner requests such as
   "下一页", "还有哪些", and "展开 R3" belong to Hermes agent interaction and use
   a bounded read-only Memory-OS review surface. Monitor reports
@@ -1035,9 +1057,11 @@ Stop signal:
 
 ### P1-Q - Approved Proposal Follow-Up To OpsGate / Manual Apply
 
-Status: deployed on `10.20.3.200`; monitor reports approved proposal follow-up
-visibility with `execution_tickets=0` and `actual_execute=false`. Real
-execution apply remains future work.
+Status: deployed on `10.20.3.200`; approved proposals are visible, can be
+routed through OpsGate report-only review, and the first bounded
+`expression_policy` proposal has passed an explicit owner-approved apply into
+the right-brain expression adapter policy. Generic external execution remains
+future work.
 
 Reason:
 
@@ -1046,29 +1070,41 @@ Reason:
   OpsGate report-only review, but execution still requires a separate explicit
   apply gate.
 
-Implemented local slice:
+Implemented runtime slice:
 
 - approved proposal follow-up summaries expose approved counts and
   `actual_execute=false`;
 - monitor fails if top-level, boundary, or item-level proposal follow-up sets
   `actual_execute=true`;
 - OpsGate follow-up remains report-only and idempotent.
+- `expression_policy` proposals that are owner-approved and OpsGate
+  `would_allow` can be explicitly applied with
+  `review proposal-followups --execution-apply --owner-approved --apply`;
+- explicit apply writes
+  `system-modules/right_brain_expression_adapter/policy.json` and appends
+  `policy_applies.jsonl`; the right-brain expression helper reads this policy on
+  the next run.
 
 Next action:
 
-1. design future manual execution/apply separately with explicit owner/operator
-   intent, monitor fields, rollback, and external review.
+1. extend the same explicit apply pattern only for concrete proposal kinds with
+   a bounded runtime target, rollback evidence, and monitor fields;
+2. keep external shell/service/file-system execution behind a separate apply
+   design and owner/operator decision.
 
 Stop signal:
 
 - proposal approval creates execution tickets or sets `actual_execute=true`;
 - approved proposals disappear from review/monitor surfaces after approval.
+- a proposal kind is applied without prior owner approval and OpsGate review;
+- right-brain policy apply writes raw bodies or causes actual send/execution.
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
 Status: runtime baseline deployed on `10.20.3.200`: P1-R draft/SpeakGate,
-owner preview, expression feedback ledger, and Hermes-agent expression adapter
-are live with WARN-only monitor evidence and no hard failures.
+owner preview, expression feedback ledger, Hermes-agent expression adapter, and
+owner/Hermes expression feedback action tokens are live with WARN-only monitor
+evidence and no hard failures.
 
 Implementation blueprint:
 
@@ -1101,6 +1137,10 @@ Reason:
   `speak_expression_preview_missing_count=0`, and PASS
   `right_brain_review_speak_preview_visible`;
 - expression feedback and GovernanceFeedback summary backflow are deployed;
+- the 2026-05-26 live smoke rendered speak items with bounded content plus
+  `memory feedback oa_<token> too_mechanical|too_frequent|boundary_private|off_voice`
+  commands, and a structured `memory_os_review_reply` tool call successfully
+  recorded `too_mechanical` feedback for `target_type=expression`;
 - Hermes-agent expression adapter is deployed as
   `memory-os-right-brain-expression`, deliver target `origin`, agent mode
   (`--script`, no `--no-agent`), last run `ok`;
@@ -1127,7 +1167,9 @@ Implemented runtime slices:
    `boundary_private`, `off_voice`, `mute_period`;
 7. expression outcomes can enter GovernanceFeedback / SelfEvolution as
    proposals, not direct prompt/cadence mutation;
-8. monitor fields listed in RH-38 are present for the deployed slices.
+8. monitor fields listed in RH-38 are present for the deployed slices;
+9. owner/Hermes expression feedback tokens are visible in the digest and are
+   accepted through the structured review-reply tool, not only through SSH/CLI.
 
 Prototype-informed runtime slices:
 
@@ -1190,15 +1232,23 @@ Reason:
 - expression feedback ledgers can now become EvidenceScoring subjects and
   SelfEvolution expression-policy proposal inputs; no direct prompt/policy/
   cadence mutation occurs;
+- deployed P1-S slice 3 makes SelfEvolution proposals owner-readable before
+  they can become daily agenda items: generated proposals now include bounded
+  Chinese `具体改动`, `证据`, `验收标准`, `后续状态`, and `边界`; legacy generic
+  templates do not block creation of concrete proposals;
+- the 2026-05-26 live structured expression-feedback smoke increased
+  `expression_feedback_subject_count` to `2` and `OwnerReview.by_type.too_mechanical`
+  to `2`, proving feedback is visible to scoring/governance instead of staying
+  only in an owner-action ledger;
 - deployed P1-S slice 1 filters expired working from EvidenceScoring and adds
   monitor visibility for expired scoring contamination;
 - live monitor reports `novelty_skipped_count=1` and
   `duplicate_unresolved_proposal_count=1` after the first deployed duplicate
   skip;
-- latest monitor evidence reports `feature_score_count=496`,
-  `hash_score_legacy_count=0`, `legacy_hash_comparison_count=496`, and PASS
+- latest monitor evidence reports `feature_score_count=508`,
+  `hash_score_legacy_count=0`, `legacy_hash_comparison_count=508`, and PASS
   `left_brain_feature_scoring_primary_ok`;
-- live monitor reports `prototype_aligned_score_count=496`,
+- live monitor reports `prototype_aligned_score_count=508`,
   `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
   `left_brain_maturity_scoring_primary_ok`;
 - expired working handling in DeepReflection is still not fixed;

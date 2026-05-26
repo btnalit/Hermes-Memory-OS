@@ -1017,9 +1017,15 @@ Required before:
 
 - scheduled right-brain owner-origin expression delivery;
 - feature scoring influences live proposal ranking;
-- explicit execution/apply ability;
+- generic shell/service/filesystem execution/apply ability;
 - any prompt/policy/cadence update is applied automatically;
 - public product claims.
+
+Bounded policy/config apply may be implemented on the test host without a
+separate external review only when all are true: owner approval exists, OpsGate
+has report-only `would_allow`, the proposal kind owns the runtime target, the
+apply writes rollback evidence, and monitor proves no actual send/execute/raw
+body exposure.
 
 ## Stop Signals
 
@@ -1047,7 +1053,8 @@ Stop implementation and return to design if any appears:
 
 - feature score becomes live input without external review;
 - approved proposal creates execution ticket;
-- feedback directly changes routing/prompt/cadence;
+- feedback directly changes routing/prompt/cadence without an owner-approved
+  proposal and explicit apply record;
 - duplicate unresolved proposal class keeps growing;
 - expired working dominates scoring again.
 

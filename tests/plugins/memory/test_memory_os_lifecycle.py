@@ -10,6 +10,7 @@ from plugins.memory.memory_os.status_tool_contract import (
     validate_memory_os_status_tool_description,
 )
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply
 
 
 def _events(hermes_home):
@@ -59,8 +60,15 @@ def test_memory_os_review_reply_tool_prefers_structured_action_token():
     assert "reply" not in schema["parameters"]["properties"]
     assert "action" in schema["parameters"]["properties"]
     assert "action_token" in schema["parameters"]["properties"]
+    assert "too_mechanical" in schema["parameters"]["properties"]["rating"]["enum"]
+    assert "off_voice" in schema["parameters"]["properties"]["rating"]["enum"]
     assert "owner_utterance" in schema["parameters"]["properties"]
     assert schema["parameters"]["required"] == ["action", "action_token"]
+
+
+def test_owner_review_reply_guard_accepts_expression_feedback_rating():
+    assert _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanical")
+    assert _looks_like_owner_review_reply("反馈 oa_12345678 off_voice")
 
 
 def test_memory_os_review_surface_tool_is_read_only_agent_surface():
