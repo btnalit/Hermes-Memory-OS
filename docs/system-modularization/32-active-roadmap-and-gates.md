@@ -131,7 +131,7 @@ These are not the remaining queue, but future work depends on them.
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
 | RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.5/35.8 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, stable action-token parser, agent-mediated `memory_os_review_reply` tool, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text and exposes tools/state, Hermes owns delivery and agent interaction |
-| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, RH-38 right-brain expression closure, RH-39 left-brain governance quality, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=16`, `matrix_module_count=28`, `active_work_item_count=19`, `active_work_mapping_count=19`, `finding_count=0` |
+| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, RH-38 right-brain expression closure, RH-39 left-brain governance quality, ExpressionDraft, LeftBrainPipelineCheck, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=18`, `matrix_module_count=30`, `active_work_item_count=20`, `active_work_mapping_count=20`, `finding_count=0` |
 | RH-37 Agent / Memory-OS collaboration contract | design contract active; no new execution capability | defines how Hermes agent reads bounded Memory-OS review context, explains owner questions, suggests without deciding, asks when ambiguous, and calls structured tools only after definite owner intent; follow-up implementation remains split into P1 items below |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
@@ -145,7 +145,7 @@ to disappear if the roadmap only tracks recent RH work.
 | v0.1 portable modules | `03` and `06` define mailbox, household_digest, wandering_mind, inner_drive, ops_gate, proposal_queue, evidence_scoring, self_evolution, speak_gate | all are importable and visible through `modules status` | most run through cognitive loop or expose status only | keep them as individual contract rows, not only as "cognitive loop" aggregate |
 | Mirror family | `09`, `10`, and RH-18 define cron/session/state/shadow coverage | cron/session/state/shadow commands and tests exist | status ok; session_mirror has 24 pending sessions; dry-run would generate 24 bounded events and write none | verify whether pending sessions correlate with RH-28 candidate omissions before deciding on one-time SessionMirror apply |
 | DeepReflection optional outputs | `17` allows working updates, self-evolution proposal, and wandering seed as secondary outputs | implemented and tested | proposals/seeds enabled; working updates disabled | monitor optional output counts explicitly before promoting analysis behavior |
-| Automatic expression | `03`, `06`, and `23` require Wandering Mind through Speak Gate, no-send/would-send only | implemented and tested | `wandering_mind.would_send_count=10`; `speak_gate.would_send_count=0` | add monitor trend for would-send/silent artifacts if expression becomes an evaluation focus |
+| Automatic expression | `03`, `06`, `23`, and RH-38 require Wandering Mind through ExpressionDraft and SpeakGate, no-send/would-send only on the test host | implemented and tested | latest cycle creates ExpressionDraft and SpeakGate decisions; monitor reports `latest_expression_draft_missing_count=0`, `latest_speak_gate_missing_evaluation_count=0`, `speak_gate.actual_send=false` | RightBrainExpressionEngine and scheduled expression delivery remain future gates; historical pre-fix missing counts remain visible |
 | Per-module monitor evidence | `23` asks for deltas for evidence scores, proposal states, digest counts, DR counts, wandering artifacts, governance events | data exists in module artifacts/status | monitor now reports `module_artifacts` summary with digest/wandering/evidence/proposal/self-evolution/governance/DR/ops/speak/mailbox fields | continue trend observation through scheduled monitor |
 | Module status parity | P1 closure made module CLI visible | `modules status/doctor` exists | inner_drive now shows runtime heartbeat source-of-truth; self_evolution doctor injects dependencies and reports ok | keep module-local versus runtime-authoritative fields explicit |
 | LLM judge | `28` supports deterministic-first with report-only/bounded future modes | adapter path exists | current config has judge disabled (`mode=none`) | do not claim report-only judge data exists for the current live config until it is explicitly enabled and monitored |
@@ -495,9 +495,9 @@ Source:
 Status:
 
 - `session_mirror` is implemented and commandized;
-- latest live monitor reports `session_count=54`, `covered_session_count=29`,
+- last recorded 07 monitor evidence reports `session_count=54`, `covered_session_count=29`,
   and `pending_session_count=25`;
-- latest dry-run monitor summary reports `dry_run_new_event_count=25`,
+- last recorded dry-run monitor evidence reports `dry_run_new_event_count=25`,
   `dry_run_written_event_ids_count=0`, and `dry_run_findings_count=0`;
 - read-only topic-signature correlation found:
   - pending sessions: `automation_orchestration=1`, `memory_os=8`;
@@ -1069,6 +1069,12 @@ Stop signal:
 Status: design gate added; P1-R slices 1 and 2 deployed on `10.20.3.200`
 with WARN-only monitor evidence.
 
+Implementation blueprint:
+
+- `docs/system-modularization/41-operating-closure-implementation-blueprint.md`
+  Slices 1-5 define the concrete code seams, tests, monitor fields, and stop
+  signals for the next right-brain runtime work.
+
 Source:
 
 - `docs/memory-os/architecture.md`
@@ -1100,6 +1106,8 @@ Required design work:
 
 1. define `RightBrainExpressionEngine` as a bounded expression adapter or
    Hermes-agent-mediated path, with no execution tools and no raw private body;
+   align it to the `10.20.2.88` Sannai free-time / afterglow pattern where
+   Hermes owns the agent turn and `deliver=origin`;
 2. keep the right-brain subsystem split by route: Household Digest input,
    DeepReflection analysis/injection/proposal/seed, Conversation Carryover,
    Wandering expression draft, SpeakGate decision, OwnerReview feedback, and
@@ -1115,6 +1123,16 @@ Required design work:
 7. route expression outcomes into GovernanceFeedback / SelfEvolution as
    proposals, not direct prompt/cadence mutation;
 8. add monitor fields listed in RH-38 before claiming observation or closure.
+
+Prototype-informed runtime slices:
+
+1. `P1-R.3` bounded `ExpressionDraft` artifacts with `[SILENT]` as a first
+   class outcome;
+2. `P1-R.4` Hermes-agent expression adapter; Memory-OS provides bounded
+   context/draft state and does not become the conversation agent;
+3. `P1-R.5` mandatory SpeakGate decision for every non-silent draft;
+4. `P1-R.6` expression feedback ledger and proposal-only backflow;
+5. `P1-R.7` owner-configured low-frequency Hermes origin delivery.
 
 Promotion signal:
 
@@ -1138,6 +1156,13 @@ Status: design gate added; P1-S slices 1, 2, 3, and 4 are deployed on
 `10.20.3.200` with WARN-only monitor evidence and no hard failures. P1-S
 slice 4 is a 10.20.2.88 prototype-aligned maturity dimension report in
 report-only mode.
+
+Implementation blueprint:
+
+- `docs/system-modularization/41-operating-closure-implementation-blueprint.md`
+  Slices 6-8 define the concrete pipeline checker, proposal lifecycle, cadence
+  report, tests, monitor fields, and stop signals for the next left-brain
+  runtime work.
 
 Source:
 
@@ -1165,7 +1190,7 @@ Reason:
 - live monitor reports `novelty_skipped_count=1` and
   `duplicate_unresolved_proposal_count=1` after the first deployed duplicate
   skip;
-- latest live monitor reports `feature_score_count=487`,
+- last recorded 07 monitor evidence reports `feature_score_count=487`,
   `hash_score_legacy_count=487`, `comparison_count=487`,
   `feature_score_live_applied=false`, and PASS
   `left_brain_feature_scoring_report_only_ok`;
@@ -1194,16 +1219,21 @@ Required design work:
 1. feature-based EvidenceScoring v2 report-only is deployed and monitored;
 1a. prototype-aligned maturity dimensions are deployed and monitored as
     report-only evidence;
-2. SelfEvolution novelty/idempotency gates are deployed for unresolved
+2. left-brain pipeline checker aligned to the `10.20.2.88`
+   self-evolution-governor read-only contract checker;
+3. SelfEvolution novelty/idempotency gates are deployed for unresolved
    proposals and repeated score refs;
-3. route MemorySources / owner / expression feedback into GovernanceFeedback as
+4. proposal lifecycle/follow-up fields aligned to the prototype proposal queue:
+   approval block, execution/follow-up block, timestamps, verification method,
+   stale/terminal state;
+5. route MemorySources / owner / expression feedback into GovernanceFeedback as
    bounded evidence only;
-4. filter or explicitly downweight expired working in scoring and reflection;
-5. keep approved proposal follow-up visible while designing a separate
+6. filter or explicitly downweight expired working in scoring and reflection;
+7. keep approved proposal follow-up visible while designing a separate
    execution-decision gate;
-6. split production cadence from the test-host cognitive-loop integration
+8. split production cadence from the test-host cognitive-loop integration
    harness;
-7. reduce ContextRouter/Ingress classification duplication through parity tests
+9. reduce ContextRouter/Ingress classification duplication through parity tests
    and a deprecation path.
 
 Promotion signal:
@@ -1224,6 +1254,60 @@ Stop signal:
 - feedback directly mutates routing, prompt, cadence, or delivery;
 - expired working dominates scoring/reflection;
 - repeated unresolved proposals continue to be created.
+
+### P1-T - Prototype-Informed Module Cadence Split
+
+Status: design required before production scheduling changes.
+
+Implementation blueprint:
+
+- `docs/system-modularization/41-operating-closure-implementation-blueprint.md`
+  Slice 8 defines the first cadence report implementation. It does not permit
+  Memory-OS-owned scheduling or platform delivery.
+
+Source:
+
+- `docs/system-modularization/36-module-closure-matrix.md`
+- `docs/system-modularization/38-right-brain-expression-closure-contract.md`
+- `docs/system-modularization/39-left-brain-governance-quality-contract.md`
+- read-only `10.20.2.88` Hermes/Sannai cron evidence
+
+Reason:
+
+- `10.20.2.88` shows useful module cadence separation:
+  owner-facing reports and expression use Hermes `deliver=origin`, background
+  maintenance uses `deliver=local` or no-agent scripts, and profile-local
+  right-brain expression lives in the Hermes profile;
+- this is reference evidence, not a script-by-script blueprint;
+- Memory-OS test host still relies on a 6-hour cognitive-loop integration
+  harness for many modules;
+- changing timer intervals alone would not create production cadence because
+  modules also need skip/no-new-signal/error counters, idempotency gates,
+  monitor fields, and rollback.
+
+Required design work:
+
+1. classify each active module as one of:
+   `integration_harness`, `owner_origin`, `local_no_agent`, `monitor_poll`,
+   or `on_demand_manual`;
+2. define generated/skipped/error/duplicate counters per module;
+3. keep Hermes as the scheduler/delivery owner;
+4. keep Memory-OS as bounded state/draft/gate/monitor owner;
+5. update installer defaults so production does not silently enable
+   owner-origin expression without explicit owner configuration.
+
+Promotion signal:
+
+- module-local cadence report exists;
+- no module uses production cadence without generated/skipped/error counters;
+- owner-origin jobs are all Hermes cron jobs;
+- Memory-OS cognitive loop remains available as a test-host harness.
+
+Stop signal:
+
+- Memory-OS creates its own scheduler or platform delivery layer;
+- a module runs owner-visible origin delivery without owner-configured cadence;
+- production cadence hides skipped/error/duplicate outcomes.
 
 ## Active P2 Queue
 

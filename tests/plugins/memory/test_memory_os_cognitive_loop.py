@@ -37,6 +37,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "ops_gate",
         "evidence_scoring",
         "self_evolution",
+        "left_brain_pipeline_check",
         "governance_feedback",
         "deep_reflection",
         "heartbeat_post",

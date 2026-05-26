@@ -51,6 +51,7 @@ LIVE_MODULE_TO_CLOSURE_LABEL = {
     "shadow_journal": "Cron / Session / State Mirrors",
     "deep_reflection": "DeepReflection",
     "governance_feedback": "Governance Feedback",
+    "left_brain_pipeline_check": "Left-Brain Pipeline Check",
     "digest_consolidation": "Digest Consolidation",
     "inner_drive": "Heartbeat / Inner Drive",
     "mailbox": "Mailbox",
@@ -61,6 +62,7 @@ LIVE_MODULE_TO_CLOSURE_LABEL = {
     "proposal_queue": "Proposal Queue",
     "self_evolution": "Self-Evolution",
     "speak_gate": "Speak Gate",
+    "expression_draft": "Expression Draft",
 }
 
 REQUIRED_CONTRACT_LABELS = {

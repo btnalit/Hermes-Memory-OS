@@ -110,6 +110,32 @@ def test_speak_gate_keeps_wandering_mind_non_task(tmp_path):
     assert "task" not in records[0]
 
 
+def test_speak_gate_evaluates_expression_draft_with_silent_and_error_counts(tmp_path):
+    module = SpeakGateModule(tmp_path, profile="main")
+    silent = {
+        "draft_id": "expr_silent",
+        "text_preview": "[SILENT]",
+        "source_module": "wandering_mind",
+        "raw_body_included": False,
+    }
+    spoken = {
+        "draft_id": "expr_spoken",
+        "text_preview": "今天我想把这个瞬间轻轻放下。",
+        "source_module": "wandering_mind",
+        "raw_body_included": False,
+    }
+
+    silent_decision = module.evaluate_expression_draft(silent, channel="origin")
+    spoken_decision = module.evaluate_expression_draft(spoken, channel="origin")
+
+    assert silent_decision["decision"] == "silent"
+    assert silent_decision["actual_send"] is False
+    assert spoken_decision["decision"] == "would_send"
+    assert spoken_decision["draft_id"] == "expr_spoken"
+    assert spoken_decision["payload_ref"] == "local://expression_draft/expr_spoken"
+    assert len(module.read_would_send_records()) == 1
+
+
 def test_speak_gate_requires_proposal_queue_approval_before_would_send(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")

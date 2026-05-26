@@ -94,6 +94,10 @@ class ProposalQueueModule:
             "crystallized_approved": False,
             "created_at": _timestamp(),
             "updated_at": _timestamp(),
+            "followup_state": "none",
+            "execution_decision_state": "not_requested",
+            "execution_ticket_count": 0,
+            "actual_execute": False,
             "reviews": [],
         }
         queue = self.read_queue()
@@ -136,6 +140,10 @@ class ProposalQueueModule:
             "crystallized_approved": False,
             "created_at": _timestamp(),
             "updated_at": _timestamp(),
+            "followup_state": _initial_followup_state(_map_legacy_state(legacy_state)),
+            "execution_decision_state": "not_requested",
+            "execution_ticket_count": 0,
+            "actual_execute": False,
             "reviews": [],
         }
         queue["items"].append(candidate)
@@ -162,6 +170,15 @@ class ProposalQueueModule:
             item["approval_purpose"] = "proposal_queue_only"
             item["crystallized_approved"] = False
             item["updated_at"] = _timestamp()
+            item.setdefault("execution_decision_state", "not_requested")
+            item.setdefault("execution_ticket_count", 0)
+            item["actual_execute"] = False
+            if decision == "approve":
+                item["followup_state"] = "awaiting_ops_gate"
+            elif decision == "reject":
+                item["followup_state"] = "closed"
+            else:
+                item["followup_state"] = "deferred"
             item.setdefault("reviews", []).append(
                 {
                     "reviewer": reviewer,
@@ -191,12 +208,17 @@ class ProposalQueueModule:
     def status(self) -> dict[str, Any]:
         items = list(self.read_queue().get("items", []))
         state_counts = Counter(str(item.get("state", "")) for item in items)
+        followup_counts = Counter(str(item.get("followup_state", "none")) for item in items)
+        execution_ticket_count = sum(int(item.get("execution_ticket_count") or 0) for item in items)
         return {
             "schema_version": "hermes.proposal_queue_status.v0",
             "module": "proposal_queue",
             "profile": self.profile,
             "candidate_count": len(items),
             "state_counts": dict(sorted(state_counts.items())),
+            "followup_state_counts": dict(sorted(followup_counts.items())),
+            "execution_ticket_count": execution_ticket_count,
+            "actual_execute": any(bool(item.get("actual_execute", False)) for item in items),
             "queue_path": str(self.queue_path),
             "delivery_mode": "no-send",
             "crystallized_approval_granted": False,
@@ -250,6 +272,16 @@ def _map_legacy_state(state: str) -> str:
     if state in {"candidate", "owner_eligible", "owner_declined", "owner_defer", "pressure_blocked", "expired"}:
         return state
     return "candidate"
+
+
+def _initial_followup_state(state: str) -> str:
+    if state == "approved_for_proposal":
+        return "awaiting_ops_gate"
+    if state in {"owner_declined", "expired", "pressure_blocked"}:
+        return "closed"
+    if state == "owner_defer":
+        return "deferred"
+    return "none"
 
 
 def _new_candidate_id() -> str:

@@ -10153,6 +10153,138 @@ rh31_eval_has_failures
 rh26_casual_empty
 ```
 
+## 2026-05-26 - Prototype Alignment Review From 10.20.2.88
+
+Scope:
+
+```text
+Read-only inspect 10.20.2.88 Hermes main/Sannai runtime before continuing
+RH-38/RH-39/P1-T work.
+
+Do not edit 10.20.2.88.
+Do not restart gateways.
+Do not read or print secrets.
+Use the prototype only to derive Memory-OS ownership/cadence/closure shape.
+```
+
+Commands / evidence:
+
+```text
+ssh hermes-lan "hostname; whoami; date; uptime; readlink -f /root/.hermes; hermes version; hermes gateway status"
+
+host=YC-NAS
+hermes_version=0.14.0
+main_gateway=active
+sannai_profile_gateway=active
+main_home=/vol1/.hermes
+sannai_home=/root/.hermes/profiles/sannai
+
+ssh hermes-lan "hermes cron list"
+ssh hermes-lan "HERMES_HOME=/root/.hermes/profiles/sannai hermes cron list"
+```
+
+Prototype observations:
+
+```text
+Main Hermes:
+  Self-Evolution 每日深度反思 (pipeline)
+    schedule=0 4 * * *
+    deliver=origin
+    script=self_evolution_daily_pipeline.py
+    skills=self-evolution-governor
+
+  Self-Evolution 周度战略复盘
+    schedule=0 7 * * 1
+    deliver=origin
+    skills=self-evolution-governor
+
+  Wandering Mind 每周自由漫游
+    schedule=30 4 * * 0
+    deliver=origin
+
+  Wandering Mind 家庭语境摘要刷新
+    schedule=0 22 * * 6
+    deliver=local
+    mode=no-agent
+
+Sannai:
+  三奶的自由时间
+    schedule=0 9,13,17,21 * * *
+    deliver=origin
+
+  三奶的余温检查
+    schedule=12:00 / 16:00 / 20:00
+    deliver=origin
+
+  三奶的随机心跳调度
+    schedule=0:05 daily
+    deliver=local
+    mode=no-agent
+    creates one-shot deliver=origin jobs
+    supports [SILENT]
+
+  treasure index / daily digest / weekly consolidation / memory journal
+    deliver=local
+    mode=no-agent
+```
+
+Self-evolution pipeline shape:
+
+```text
+collect_signals
+proposal_cleanup
+proposal_verify
+agenda_maturation
+unmatched_signal_review
+unmatched_cluster_ledger
+new_agenda_preview
+speak_gate
+new_agenda_apply_ready
+build_runtime_digest
+build_console
+restart_console_server
+pipeline_contract_check
+```
+
+Contract checker shape:
+
+```text
+read_only=true
+checks step order
+checks proposal queue parseability
+checks approved proposals have execution blocks
+checks delivery/silent reason
+checks duplicate scheduler surface
+reports no_route_executed / no_ops_gate_task_created / no_sannai_state_write
+```
+
+Memory-OS decision:
+
+```text
+ARCHITECTURE PASS with runtime gaps.
+
+The prototype confirms:
+  Hermes owns cron, origin/local delivery, profile isolation, transport,
+  mailbox cooldown, and agent conversation.
+
+  Memory-OS must own bounded state, expression drafts, gates, proposal state,
+  owner action state, monitor evidence, and contract checks.
+
+  P1-R must align to Sannai free-time/afterglow, not deterministic report text.
+  P1-S must align to staged self-evolution pipeline and read-only checker.
+  P1-T must split production cadence from the 6h test-host cognitive loop.
+```
+
+Docs updated:
+
+```text
+40-memory-os-unified-control-plane.md
+38-right-brain-expression-closure-contract.md
+39-left-brain-governance-quality-contract.md
+32-active-roadmap-and-gates.md
+36-module-closure-matrix.md
+```
+
 Interpretation:
 
 - Legacy display-anchor commands such as `approve A2` and `reject R1` are no
@@ -12720,3 +12852,203 @@ owner_review_approved_proposals_pending_followup
 rh31_eval_has_failures
 rh26_casual_empty
 ```
+
+## 2026-05-26 - RH-41 Independent Review Fixes
+
+Scope:
+
+```text
+Documentation-only correction after independent review of the RH-38/RH-39/RH-40/RH-41
+operating-closure plan.
+
+No runtime code changed.
+No live deployment performed.
+No monitor success claim was added.
+```
+
+Findings fixed:
+
+```text
+1. RH-38 described SpeakGate as both wired and unwired.
+   Fix: clarify that new cognitive-loop Wandering output is routed through
+   SpeakGate, while historical reports can still contain missing evaluations.
+
+2. RH-41 near-term order skipped the Hermes-agent expression adapter.
+   Fix: place Slice 2 before SpeakGate / feedback work.
+
+3. RH-41 put expression feedback backflow before left-brain checker/lifecycle.
+   Fix: require LeftBrainPipelineCheck and proposal lifecycle/follow-up before
+   feedback backflow can create proposal pressure.
+
+4. RH-41 used the wrong monitor argument.
+   Fix: use `python scripts\memory_os_3_200_monitor.py --host 10.20.3.200 --output summary`.
+
+5. RH-38 and RH-41 used different expression draft invariants.
+   Fix: RH-41 now includes `draft_error_count`, matching RH-38.
+```
+
+Local verification:
+
+```text
+python scripts\memory_os_3_200_monitor.py --help
+  confirms --output {summary,json}
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+  status=ok
+  live_module_count=16
+  matrix_module_count=28
+  active_work_item_count=20
+  active_work_mapping_count=20
+  finding_count=0
+
+python -m pytest tests\scripts\test_memory_os_closure_matrix_check.py -q
+  5 passed
+
+git diff --check
+  PASS
+```
+
+Evidence level:
+
+```text
+documentation PASS
+contract PASS
+local PASS
+
+No live PASS claimed for this correction.
+```
+## RH-38 / RH-39 Runtime Closure Deployment
+
+Date:
+
+```text
+2026-05-26T11:09:27Z
+```
+
+Scope:
+
+- P1-R runtime slice: ExpressionDraft artifacts and latest-cycle SpeakGate
+  closure for Wandering output.
+- P1-R feedback slice: expression feedback action ledger and GovernanceFeedback
+  summary-only consumption.
+- P1-S runtime slice: LeftBrainPipelineCheck report-only checker in the
+  cognitive loop.
+- RH-36 enforcement update for the two new live modules.
+
+Local verification before deployment:
+
+```text
+python -m pytest -q
+544 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=30
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Deployment:
+
+```text
+target: 10.20.3.200 only
+method: current working tree bundled to /tmp/memory-os-runtime-closure-20260526
+install command:
+  HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+installer_result: success
+gateway_restart: no
+cognitive_loop_trigger: systemctl --user start hermes-memory-os-cognitive-loop.service
+cognitive_loop_result: success
+```
+
+Remote module visibility after deployment:
+
+```text
+module_count=18
+expression_draft.present=true
+expression_draft.draft_count=2
+left_brain_pipeline_check.present=true
+left_brain_pipeline_check.status=warn
+left_brain_pipeline_check.finding_count=1
+speak_gate.would_send_count=10
+```
+
+Post-deploy monitor:
+
+```text
+classification=WARN
+FAIL=[]
+
+PASS includes:
+  left_brain_pipeline_check_visible
+  expression_feedback_report_only
+  left_brain_expired_working_not_scored
+  left_brain_feature_scoring_report_only_ok
+  left_brain_maturity_scoring_report_only_ok
+  expression_artifact_summary_ok
+  right_brain_expression_draft_created
+  right_brain_speak_gate_evaluation_complete
+  right_brain_review_speak_preview_visible
+
+WARN:
+  left_brain_pipeline_check_warn
+  session_mirror_pending_sessions
+  owner_review_approved_proposals_pending_followup
+  rh31_eval_has_failures
+  rh26_casual_empty
+```
+
+Important monitor fields:
+
+```text
+ExpressionArtifacts:
+  expression_draft_count=2
+  expression_draft_created_count=2
+  expression_draft_missing_count=23       # historical pre-fix reports
+  latest_expression_draft_missing_count=0
+  speak_gate_evaluated_count=10
+  speak_gate_missing_evaluation_count=15  # historical pre-fix reports
+  latest_speak_gate_missing_evaluation_count=0
+  latest_speak_gate_evaluated_count=1
+  speak_gate_actual_send=false
+
+ModuleArtifacts.expression_draft:
+  draft_count=2
+  draft_error_count=0
+  raw_body_included=false
+  silent_count=0
+
+ModuleArtifacts.expression_feedback:
+  feedback_count=0
+  live_policy_changed_count=0
+  raw_body_included_count=0
+
+LeftBrainPipelineCheck:
+  status=warn
+  finding_codes=["duplicate_unresolved_proposals"]
+  feature_scoring.report_only=true
+  feature_scoring.live_applied_count=0
+  approved_followup.approved_for_proposal_count=6
+  approved_followup.awaiting_ops_gate_count=6
+  execution_boundary.execution_ticket_count=0
+  execution_boundary.actual_execute=false
+```
+
+Interpretation:
+
+- The right-brain test-host path is no longer only a deterministic Wandering
+  output file. The current cognitive-loop path creates bounded ExpressionDraft
+  records and sends the latest non-silent draft through SpeakGate.
+- Historical missing draft/SpeakGate counts remain visible so the old gap is
+  not erased. The latest-cycle fields are the current closure signal.
+- Expression feedback now has a no-send ledger and GovernanceFeedback summary
+  ingestion path, but no prompt/policy/cadence adaptation is applied.
+- LeftBrainPipelineCheck is now a runtime report, not only a document claim.
+  Its current WARN is a real operating signal: duplicate unresolved proposals.
+- Hard boundaries remain intact: no send, no execute, no identity write, no
+  unapproved crystallized write, no raw body leakage.

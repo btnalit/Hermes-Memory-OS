@@ -67,6 +67,10 @@ def test_proposal_queue_transitions_defer_reject_and_approve_without_crystallize
     assert approved["state"] == "approved_for_proposal"
     assert approved["crystallized_approved"] is False
     assert approved["approval_purpose"] == "proposal_queue_only"
+    assert approved["followup_state"] == "awaiting_ops_gate"
+    assert approved["execution_decision_state"] == "not_requested"
+    assert approved["execution_ticket_count"] == 0
+    assert approved["actual_execute"] is False
 
 
 def test_proposal_queue_maps_cw019_states_without_crystallized_approval(tmp_path):

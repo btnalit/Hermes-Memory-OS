@@ -586,6 +586,28 @@ def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_se
     assert any(item["code"] == "module_artifact_speak_gate_actual_send_true" for item in classification["fail"])
 
 
+def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
+    snapshot = _healthy_snapshot()
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "left_brain_pipeline_check_visible" for item in classification["pass"])
+    assert any(item["code"] == "expression_feedback_report_only" for item in classification["pass"])
+
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["status"] = "fail"
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "left_brain_pipeline_check_failed" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["expression_feedback"]["live_policy_changed_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "expression_feedback_live_policy_changed" for item in classification["fail"])
+
+
 def test_classify_snapshot_warns_when_expired_working_is_scored():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"] = {
@@ -1155,6 +1177,40 @@ def test_classify_snapshot_warns_when_wandering_outputs_skip_speak_gate():
     assert "speak_gate_missing_evaluation_count" in rendered
 
 
+def test_classify_snapshot_warns_when_expression_draft_is_missing():
+    snapshot = _healthy_snapshot()
+    snapshot["expression_artifacts"] = {
+        "schema_version": "memory-os.expression_artifact_summary.v0",
+        "expression_draft_missing_count": 2,
+        "speak_gate_missing_evaluation_count": 0,
+        "speak_gate_actual_send": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "right_brain_expression_draft_missing" for item in classification["warn"])
+
+
+def test_classify_snapshot_uses_latest_expression_cycle_for_current_closure():
+    snapshot = _healthy_snapshot()
+    snapshot["expression_artifacts"] = {
+        "schema_version": "memory-os.expression_artifact_summary.v0",
+        "expression_draft_missing_count": 23,
+        "latest_expression_draft_missing_count": 0,
+        "speak_gate_missing_evaluation_count": 15,
+        "latest_speak_gate_missing_evaluation_count": 0,
+        "speak_gate_actual_send": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "right_brain_expression_draft_missing" for item in classification["warn"])
+    assert not any(item["code"] == "right_brain_speak_gate_missing_evaluation" for item in classification["warn"])
+    assert any(item["code"] == "right_brain_expression_draft_created" for item in classification["pass"])
+    assert any(item["code"] == "right_brain_speak_gate_evaluation_complete" for item in classification["pass"])
+
+
 def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, capsys):
     previous = tmp_path / "previous.json"
     output = tmp_path / "current.json"
@@ -1570,6 +1626,7 @@ def _healthy_module_artifacts() -> dict:
         "proposal_queue": {"candidate_count": 0, "state_counts": {}},
         "self_evolution": {"report_count": 0, "proposal_count": 0, "last_status": "missing"},
         "governance_feedback": {"emitted_event_count": 0},
+        "left_brain_pipeline_check": {"status": "ok", "finding_count": 0, "actual_execute": False},
         "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},
         "ops_gate": {
             "report_count": 0,
@@ -1579,5 +1636,16 @@ def _healthy_module_artifacts() -> dict:
             "duplicate_proposal_followup_extra_count": 0,
         },
         "speak_gate": {"would_send_count": 0, "actual_send": False},
+        "expression_draft": {
+            "draft_count": 0,
+            "silent_count": 0,
+            "draft_error_count": 0,
+            "raw_body_included": False,
+        },
+        "expression_feedback": {
+            "feedback_count": 0,
+            "live_policy_changed_count": 0,
+            "raw_body_included_count": 0,
+        },
         "mailbox": {"mailbox_exists": False, "would_send_count": 0},
     }

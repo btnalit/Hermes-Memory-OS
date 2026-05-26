@@ -200,6 +200,56 @@ class SpeakGateModule:
             reason="wandering_mind_right_brain",
         )
 
+    def evaluate_expression_draft(
+        self,
+        draft: dict[str, Any],
+        *,
+        channel: str,
+        delivery_tier: str = "test_host_observation",
+    ) -> dict[str, Any]:
+        draft_id = str(draft.get("draft_id") or "")
+        text_preview = str(draft.get("text_preview") or "").strip()
+        source_module = str(draft.get("source_module") or "expression_draft")
+        if not draft_id:
+            return self._expression_result(
+                decision="draft_error",
+                draft_id="",
+                payload_ref="local://expression_draft/missing",
+                source_module=source_module,
+                channel=channel,
+                delivery_tier=delivery_tier,
+                reason="missing_draft_id",
+            )
+        if draft.get("raw_body_included") is True:
+            return self._expression_result(
+                decision="blocked_private",
+                draft_id=draft_id,
+                payload_ref=f"local://expression_draft/{draft_id}",
+                source_module=source_module,
+                channel=channel,
+                delivery_tier=delivery_tier,
+                reason="raw_body_not_allowed",
+            )
+        if not text_preview or text_preview == "[SILENT]":
+            return self._expression_result(
+                decision="silent",
+                draft_id=draft_id,
+                payload_ref=f"local://expression_draft/{draft_id}",
+                source_module=source_module,
+                channel=channel,
+                delivery_tier=delivery_tier,
+                reason=str(draft.get("silence_reason") or "expression_silent"),
+            )
+        delivery = self.evaluate_delivery(
+            payload_ref=f"local://expression_draft/{draft_id}",
+            source_module=source_module,
+            channel=channel,
+            reason=f"expression_draft_{delivery_tier}",
+        )
+        delivery["draft_id"] = draft_id
+        delivery["delivery_tier"] = delivery_tier
+        return delivery
+
     def evaluate_proposal(self, candidate_id: str, *, proposal_queue: Any, channel: str = "origin") -> dict[str, Any]:
         candidate = _find_candidate(proposal_queue.read_queue(), candidate_id)
         if not candidate or candidate.get("state") != "approved_for_proposal":
@@ -277,6 +327,28 @@ class SpeakGateModule:
             "payload_ref": payload_ref,
             "reason": reason,
         }
+
+    def _expression_result(
+        self,
+        *,
+        decision: str,
+        draft_id: str,
+        payload_ref: str,
+        source_module: str,
+        channel: str,
+        delivery_tier: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        result = self._delivery_result(
+            decision=decision,
+            payload_ref=payload_ref,
+            source_module=source_module,
+            channel=channel,
+            reason=reason,
+        )
+        result["draft_id"] = draft_id
+        result["delivery_tier"] = delivery_tier
+        return result
 
 
 def _prompt_decision(

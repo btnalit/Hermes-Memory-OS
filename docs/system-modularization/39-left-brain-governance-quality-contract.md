@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score report-only, and prototype-aligned maturity-report slices.
+Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score report-only, prototype-aligned maturity-report, and report-only pipeline-check slices.
 
 Current implementation state:
 
@@ -19,6 +19,10 @@ Current implementation state:
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output and whether
   feature scoring remains report-only.
+- P1-S pipeline-check slice is implemented and deployed on `10.20.3.200`:
+  cognitive loop writes `left_brain_pipeline_check/latest.json`; monitor reports
+  `left_brain_pipeline_check.status`, `finding_count`, and `actual_execute`.
+  The current live finding is `duplicate_unresolved_proposals` as a WARN.
 - This does not replace legacy scoring, implement feedback backflow,
   production cadence, or execution apply.
 - Live `10.20.3.200` deployment evidence shows the installed scoring path no
@@ -486,6 +490,92 @@ production cadence: not mature
 proposal-to-execution operations: not implemented
 ```
 
+## Prototype-Informed Runtime Plan
+
+Read-only inspection of `10.20.2.88` shows the mature left-brain pattern is a
+staged Hermes cron pipeline, not one permanent all-module loop.
+
+Observed self-evolution pipeline:
+
+```text
+collect_signals
+-> proposal_cleanup
+-> proposal_verify
+-> agenda_maturation
+-> unmatched_signal_review
+-> unmatched_cluster_ledger
+-> new_agenda_preview
+-> speak_gate
+-> new_agenda_apply_ready
+-> build_runtime_digest
+-> build_console
+-> restart_console_server
+-> pipeline_contract_check
+```
+
+Observed contract checker properties:
+
+- read-only checker;
+- validates required step order;
+- validates proposal queue parseability;
+- checks approved proposals have execution blocks;
+- checks forced delivery is not silent when reportable reasons exist;
+- detects approved-pending-execution, stale pending, duplicate scheduler
+  surface, and digest/proposal count mismatch;
+- reports hard boundaries such as no route executed, no ops-gate task created,
+  and no Sannai state write.
+
+Observed proposal state properties:
+
+- proposal records carry `maturity_score`, evidence counts, observation days,
+  trigger rule, approval block, execution block, timestamps, and verification
+  method;
+- approved proposals are not execution by themselves;
+- stale / deferred / approved-pending-execution are visible states, not hidden
+  text in a report.
+
+Memory-OS must not copy the prototype pipeline step-for-step. The prototype is
+a single self-evolution governor. Memory-OS has multiple interacting modules
+and needs a generalized governance pipeline:
+
+```text
+signals / events / working / candidates
+-> feature evidence and maturity reports
+-> module-local skip / novelty / duplicate gates
+-> proposal lifecycle and follow-up state
+-> read-only OpsGate / contract checker
+-> owner-reviewed proposal or manual apply gate
+-> feedback backflow as evidence
+```
+
+Memory-OS implementation synthesis:
+
+1. `P1-S.5` - Left-brain pipeline checker:
+   - add a read-only Memory-OS pipeline consistency report for evidence,
+     proposal, governance feedback, OpsGate, owner review, and cadence;
+   - classify hard failure vs warning like the prototype checker;
+   - do not execute or create tickets.
+2. `P1-S.6` - Proposal lifecycle fields:
+   - ensure proposals have approval block, execution/follow-up block,
+     timestamps, verification method, and terminal/stale state;
+   - make approved-pending-follow-up visible in monitor and review surface.
+3. `P1-S.7` - Module-local cadence counters:
+   - each left-brain module reports generated/skipped/error/duplicate counts;
+   - skip/no-new-signal is a valid result, not a failure.
+4. `P1-S.8` - Feedback backflow:
+   - MemorySources, owner-review, expression feedback, and delivery outcomes
+     become bounded governance evidence;
+   - they may only produce owner-reviewed proposals, not direct prompt/routing
+     or cadence changes.
+5. `P1-T` - Production cadence split:
+   - keep the 6-hour cognitive loop as test-host integration harness;
+   - define Hermes cron classes for owner-origin, local/no-agent, monitor-poll,
+     and on-demand/manual apply.
+
+Do not promote P1-S from report-only to live scoring or live execution until
+the pipeline checker is green, proposal lifecycle fields are complete, and an
+external review approves the apply boundary.
+
 ## Implementation Order
 
 Do not replace live behavior in one step. The safe path is:
@@ -493,10 +583,13 @@ Do not replace live behavior in one step. The safe path is:
 1. expired working filter / monitor;
 2. SelfEvolution novelty and idempotency gate;
 3. feature-based EvidenceScoring v2 in report-only mode;
-4. feedback backflow into GovernanceFeedback in report-only/proposal-only mode;
-5. approved proposal execution-decision state design;
-6. production cadence split with generated/skipped/error fields;
-7. ContextRouter/Ingress de-duplication with parity tests.
+4. prototype-aligned maturity dimensions in report-only mode;
+5. left-brain pipeline checker in report-only mode;
+6. proposal lifecycle/follow-up fields;
+7. feedback backflow into GovernanceFeedback in report-only/proposal-only mode;
+8. approved proposal execution-decision state design;
+9. production cadence split with generated/skipped/error fields;
+10. ContextRouter/Ingress de-duplication with parity tests.
 
 Each step must update RH-36 mapping, monitor fields, and 07 evidence before it
 can be called closed.

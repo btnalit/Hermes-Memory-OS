@@ -42,7 +42,17 @@ APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_follow
 APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
+EXPRESSION_FEEDBACK_SCHEMA_VERSION = "memory-os.expression_feedback.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
+
+EXPRESSION_FEEDBACK_ACTION_TYPES = {
+    "like_expression",
+    "too_mechanical",
+    "too_frequent",
+    "boundary_private",
+    "off_voice",
+    "mute_period",
+}
 
 ACTION_TYPES = {
     "approve_candidate",
@@ -51,6 +61,7 @@ ACTION_TYPES = {
     "approve_proposal",
     "reject_proposal",
     "allow_speak_once",
+    *EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
@@ -58,6 +69,7 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "proposal": {"approve_proposal", "reject_proposal"},
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
+    "expression": EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
 
@@ -79,6 +91,10 @@ def proposal_action_ledger_path(roots: MemoryOSRoots) -> Path:
 
 def speak_permission_tickets_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "speak_permission_tickets.jsonl"
+
+
+def expression_feedback_ledger_path(roots: MemoryOSRoots) -> Path:
+    return roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
 
 
 def owner_review_deliveries_path(roots: MemoryOSRoots) -> Path:
@@ -1492,6 +1508,9 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
     if action_type == "allow_speak_once":
         ticket = _append_speak_ticket(store, record)
         return {"ticket_id": ticket["ticket_id"], "target_id": target_id}
+    if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
+        feedback = _append_expression_feedback(store, record, note=note)
+        return {"feedback_id": feedback["feedback_id"], "draft_id": target_id}
     return {}
 
 
@@ -1518,6 +1537,8 @@ def _validate_action_target(
             return "memory_source_not_found"
     if action_type == "allow_speak_once" and target_type != "speak":
         return "invalid_speak_target"
+    if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES and target_type != "expression":
+        return "invalid_expression_target"
     return ""
 
 
@@ -1571,6 +1592,43 @@ def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[s
     }
     _append_jsonl(speak_permission_tickets_path(store.roots), ticket)
     return ticket
+
+
+def _append_expression_feedback(store: MemoryOSStore, record: dict[str, Any], *, note: str) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc)
+    feedback = {
+        "schema_version": EXPRESSION_FEEDBACK_SCHEMA_VERSION,
+        "feedback_id": f"efb_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
+        "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        "profile": store.roots.profile or "default",
+        "owner_id": str(record["owner_id"]),
+        "channel": str(record.get("channel") or "unknown"),
+        "owner_action_id": str(record["owner_action_id"]),
+        "draft_id": str(record["target_id"]),
+        "action_type": str(record["action_type"]),
+        "note": _bounded_text(note, 240),
+        "source": "owner_action",
+        "raw_body_included": False,
+        "live_policy_changed": False,
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+    }
+    _append_jsonl(expression_feedback_ledger_path(store.roots), feedback)
+    append_audit(
+        store.roots.audit_path,
+        action="owner_action_expression_feedback_recorded",
+        status="ok",
+        target=str(expression_feedback_ledger_path(store.roots)),
+        details={
+            "feedback_id": feedback["feedback_id"],
+            "draft_id": feedback["draft_id"],
+            "action_type": feedback["action_type"],
+            "owner_action_id": record["owner_action_id"],
+            "live_policy_changed": False,
+        },
+    )
+    return feedback
 
 
 def _append_action_specific_ledger(store: MemoryOSStore, record: dict[str, Any]) -> None:
@@ -2955,6 +3013,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return "memory_source", value
     if action_type == "allow_speak_once":
         return "speak", value
+    if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
+        return "expression", value
     return "unknown", value
 
 

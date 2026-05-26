@@ -13,10 +13,10 @@ def test_closure_matrix_check_passes_for_current_repo() -> None:
 
     assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
     assert report["status"] == "ok"
-    assert report["live_module_count"] == 16
-    assert report["matrix_module_count"] == 28
-    assert report["active_work_item_count"] == 19
-    assert report["active_work_mapping_count"] == 19
+    assert report["live_module_count"] == 18
+    assert report["matrix_module_count"] == 30
+    assert report["active_work_item_count"] == 20
+    assert report["active_work_mapping_count"] == 20
     assert report["missing_live_modules"] == []
     assert report["missing_contract_labels"] == []
     assert report["invalid_row_count"] == 0

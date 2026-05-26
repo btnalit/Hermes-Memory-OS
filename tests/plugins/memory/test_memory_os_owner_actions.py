@@ -11,6 +11,7 @@ from plugins.memory.memory_os.owner_actions import (
     approved_proposal_followups_report,
     apply_owner_action,
     deliver_owner_review_digest_once,
+    expression_feedback_ledger_path,
     owner_actions_path,
     owner_review_deliveries_path,
     owner_review_rendered_digests_path,
@@ -403,6 +404,29 @@ def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp
     assert feedback["memory_source_record_id"] == "msrc_test_001"
     assert feedback["rating"] == "too_mechanistic"
     assert feedback["source"] == "owner_action"
+    assert result["record"]["boundary"]["actual_send"] is False
+
+
+def test_expression_feedback_records_quality_signal_without_policy_mutation(tmp_path):
+    store = _store(tmp_path)
+
+    result = apply_owner_action(
+        store,
+        action_type="too_mechanical",
+        target="expression:expr_test_001",
+        owner_id="owner",
+        channel="cli",
+        note="This sounded like a report.",
+        apply=True,
+    )
+
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert result["record"]["target_type"] == "expression"
+    assert feedback["draft_id"] == "expr_test_001"
+    assert feedback["action_type"] == "too_mechanical"
+    assert feedback["live_policy_changed"] is False
+    assert feedback["raw_body_included"] is False
     assert result["record"]["boundary"]["actual_send"] is False
 
 

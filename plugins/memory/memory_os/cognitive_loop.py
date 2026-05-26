@@ -185,6 +185,7 @@ class CognitiveLoopRunner:
             ("ops_gate", self._ops_gate),
             ("evidence_scoring", self._evidence_scoring),
             ("self_evolution", self._self_evolution),
+            ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("governance_feedback", lambda context: self._governance_feedback(context, apply=apply)),
             ("deep_reflection", lambda context: self._deep_reflection(context, apply=apply)),
             ("heartbeat_post", lambda context: self._heartbeat(max_events=max_events)),
@@ -257,6 +258,7 @@ class CognitiveLoopRunner:
 
     def _wandering_mind(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.cognition.wandering_mind import WanderingMindModule
+        from plugins.modules.expression.expression_draft import ExpressionDraftModule
         from plugins.modules.expression.speak_gate import SpeakGateModule
 
         result = WanderingMindModule(self.hermes_home, profile=self.profile).run_once(
@@ -266,14 +268,28 @@ class CognitiveLoopRunner:
         if "output" not in result:
             return result
 
+        draft_module = ExpressionDraftModule(self.hermes_home, profile=self.profile)
+        output_text = str(result.get("output") or "")
+        source_refs = [str(result.get("output_ref") or "wandering_mind")] if result.get("output_ref") else []
+        draft = draft_module.create_draft(
+            store=self.store,
+            source_module="wandering_mind",
+            text_preview=output_text,
+            source_refs=source_refs,
+            feeling_tags=["wandering"],
+            risk_flags=[],
+            silence_reason=str(result.get("reason") or "") if output_text.strip() == "[SILENT]" else None,
+        )
         speak_gate = SpeakGateModule(self.hermes_home, profile=self.profile, delivery_mode="would-send")
-        decision = speak_gate.evaluate_wandering_output(
-            str(result.get("output") or ""),
+        decision = speak_gate.evaluate_expression_draft(
+            draft,
             channel="origin",
-            payload_ref=str(result.get("output_ref") or "") or None,
+            delivery_tier="test_host_observation",
         )
         return {
             **result,
+            "expression_draft_created": True,
+            "expression_draft": _bounded(draft),
             "speak_gate_evaluated": True,
             "speak_gate_decision": decision,
             "speak_gate_actual_send": bool(decision.get("actual_send") is True),
@@ -322,6 +338,14 @@ class CognitiveLoopRunner:
             ops_gate=ops_gate,
             proposal_queue=proposal_queue,
             evidence_scoring=evidence,
+        )
+
+    def _left_brain_pipeline_check(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.pipeline_checker import LeftBrainPipelineCheckModule
+
+        return LeftBrainPipelineCheckModule(self.hermes_home, profile=self.profile).run_once(
+            store=self.store,
+            write=True,
         )
 
     def _governance_feedback(self, context: dict[str, Any], *, apply: bool) -> dict[str, Any]:

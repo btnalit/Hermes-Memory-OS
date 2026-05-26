@@ -119,6 +119,7 @@ Cadence rules:
 | Household Digest | recent events / working summaries | household digest artifact | no direct action | no | scheduler + monitor | feeds Wandering Mind and DeepReflection inputs |
 | Digest Consolidation | events, candidates, proposal state | daily/weekly digest artifacts, candidate/proposal hints | candidate/proposal only if emitted into review queue | no | OwnerActionProcessor for emitted items | recurring stable facts can become better candidates; stale signals feed retention |
 | Wandering Mind | household digest, safe recent state | wandering output, expression drafts, would-send artifacts | no owner action for ordinary scheduled expression; exceptional proactive-send permission only | possible through Hermes origin after SpeakGate and owner-configured cadence | SpeakGate, RH-38, Hermes transport | expression feedback and ignored/delivered trends feed speak policy and review burden |
+| Expression Draft | bounded memory view, Wandering/DR/household seeds | expression draft artifacts with preview, source refs, risk flags | no direct owner action | no direct delivery; downstream SpeakGate decides | RH-38 + SpeakGate | drafts become visible through review/speak surfaces and expression feedback ledger |
 | Speak Gate | expression payloads, proposal queue, expression policy | scheduled-expression / would-send / blocked-send / silent decisions | `allow_speak_once` only for out-of-policy proactive sends | only via Hermes after scheduled config or one-shot permission | SpeakGate + RH-38 + Hermes delivery | blocked/allowed/delivered/feedback counts feed expression tuning |
 | DeepReflection | working, digest, governance, proposal/evidence summaries | carryover cards, analysis, optional proposals, optional wandering seeds | split by output type | only wandering seeds indirectly | ContextProjection, Proposal approval, SpeakGate | source-class distribution, selected/dropped classes, optional output outcomes |
 | Ops Gate | operational proposals / policies | allow/block reports | approved proposals may be routed into report-only OpsGate review; never execution | no | OpsGate + explicit execution command | approved/rejected proposal classes influence future governance |
@@ -126,6 +127,7 @@ Cadence rules:
 | Evidence Scoring | events, candidates, proposals, working items | evidence scores | no direct owner action | no | monitor/eval | score distribution informs candidate/proposal ranking, not direct approval |
 | Self-Evolution | evidence scores, proposal queue, runtime findings | self-evolution digest, proposal candidates | approve/reject proposal | no | Proposal approval + OpsGate | accepted proposals become human-controlled follow-up, not auto execution |
 | Governance Feedback | module reports, proposal/evidence/speak state | governance events / feedback bridge records | no direct action | no | monitor + feedback ledger | turns module outcomes into bounded events for future reflection and scoring |
+| Left-Brain Pipeline Check | proposal queue, feature scores, approved follow-ups | report-only pipeline check artifact | no | no | RH-39 + monitor | flags live-applied scoring, duplicate unresolved proposals, execution-boundary violations, and pending follow-up counts |
 | Conversation Carryover | current conversation / DR cards | projected context section | no | no | RH-26/RH-28 ContextProjection | MemorySources attribution and RH-30 feedback tune relevance later |
 | Context Router / Low-Clue Recall | query, ingress decision, memory/index/source metadata | context sections and recall clarification guard | no | no | IngressDecision + ContextProjection | owner correction/feedback feeds RH-30/RH-28 guards after apply gate |
 | MemorySources Attribution | live prefetch metadata | attribution JSONL | feedback only | no | FeedbackSignal | useful/irrelevant/too_mechanistic feedback informs later bounded routing changes |
@@ -154,6 +156,7 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Household Digest | internal_local | monitor_only | cycle_each | feeds other modules; no owner action |
 | Digest Consolidation | internal_local | candidate_review / proposal_review | daily_once + weekly_once | emitted candidates/proposals enter review queue |
 | Wandering Mind | owner_origin / none | expression_feedback / speak_permission / monitor_only | disabled_until_opt_in / daily_once / cycle_each | Tier 1 test-host observation is would-send only; Tier 2 scheduled expression needs RH-38; exceptional proactive send needs speak permission |
+| Expression Draft | none | monitor_only | on_demand / cycle_each | creates bounded expression drafts only; downstream SpeakGate and Hermes own gate/delivery |
 | Speak Gate | owner_origin / none | expression_feedback / speak_permission / monitor_only | on_demand / cycle_each | every non-silent expression draft must receive a SpeakGate decision; one-shot allow only through owner action |
 | DeepReflection | none | context_projection / proposal_review / speak_permission / monitor_only | cycle_each | output type determines route; TTL/minimum-signal gates live in the action path |
 | Ops Gate | none | proposal_review / monitor_only | cycle_each | approval creates follow-up state, never execution |
@@ -161,6 +164,7 @@ This overlay makes the closure expectation easier to audit than the full matrix:
 | Evidence Scoring | none | monitor_only | cycle_each | score evidence only; skip/no-op when unchanged |
 | Self-Evolution | none | proposal_review | daily_once / cycle_each | emits proposals only; production prefers daily/weekly while test host may dry-run per cycle |
 | Governance Feedback | none | feedback_ledger / monitor_only | cycle_each | feeds later reflection/scoring |
+| Left-Brain Pipeline Check | internal_local | monitor_only | cycle_each / monitor_poll | report-only checker; never creates execution tickets or applies scoring |
 | Conversation Carryover | none | context_projection | on_demand | attribution + feedback only; runs per prefetch |
 | Context Router / Low-Clue Recall | none | context_projection | on_demand | owner correction feeds feedback ledger before apply |
 | MemorySources Attribution | none | feedback_ledger | on_demand | feedback evidence only; live prefetch attribution |
@@ -194,6 +198,7 @@ cognitive-loop step order:
   ops_gate
   evidence_scoring
   self_evolution
+  left_brain_pipeline_check
   governance_feedback
   deep_reflection
   heartbeat_post
@@ -464,7 +469,7 @@ Current live reconciliation:
 
 ```text
 10.20.3.200 modules status:
-  live_module_count=16
+  live_module_count=18
   modules:
     cron_mirror
     session_mirror
@@ -472,6 +477,7 @@ Current live reconciliation:
     shadow_journal
     deep_reflection
     governance_feedback
+    left_brain_pipeline_check
     digest_consolidation
     inner_drive
     mailbox
@@ -482,11 +488,12 @@ Current live reconciliation:
     proposal_queue
     self_evolution
     speak_gate
+    expression_draft
 
 closure matrix check:
   status=ok
-  live_module_count=16
-  matrix_module_count=27
+  live_module_count=18
+  matrix_module_count=30
   active_work_item_count=18
   active_work_mapping_count=18
   finding_count=0
@@ -538,8 +545,9 @@ development gate, not a progress claim.
 | P1-O | Agent-Mediated Owner Reply Tool; Owner Reply Parser; OwnerActionProcessor | | Fallback and gateway-hook closure protects the structured owner-action path. |
 | P1-P | Heartbeat / Inner Drive; Proposal Queue; Wandering Mind; Owner Review Queue / Aging | | Producers and review projections must carry bounded timestamps for aging. |
 | P1-Q | Ops Gate; Proposal Queue; Agent-Mediated Review Surface; OwnerActionProcessor | | Approved proposal follow-up stays visible and report-only until explicit execution apply exists. |
-| P1-R | Wandering Mind; Speak Gate; DeepReflection; Governance Feedback; Self-Evolution; Right-Brain Expression Closure Contract | | Formal right-brain expression is not closed by test-host would-send observation; RH-38 must define draft, gate, delivery, feedback, and proposal backflow before runtime expression delivery. |
-| P1-S | Evidence Scoring; Self-Evolution; Governance Feedback; Proposal Queue; Ops Gate; Heartbeat / Inner Drive; Left-Brain Governance Quality Contract | | Left-brain safety governance is closed, but judgment quality, feedback learning, expired-working hygiene, proposal novelty, approved-proposal execution decision, and production cadence are not mature. |
+| P1-R | Wandering Mind; Expression Draft; Speak Gate; DeepReflection; Governance Feedback; Self-Evolution; Right-Brain Expression Closure Contract | | Formal right-brain expression is not closed by test-host would-send observation; RH-38 must define draft, gate, delivery, feedback, and proposal backflow before runtime expression delivery. |
+| P1-S | Evidence Scoring; Self-Evolution; Governance Feedback; Left-Brain Pipeline Check; Proposal Queue; Ops Gate; Heartbeat / Inner Drive; Left-Brain Governance Quality Contract | | Left-brain safety governance is closed, but judgment quality, feedback learning, expired-working hygiene, proposal novelty, approved-proposal execution decision, and production cadence are not mature. |
+| P1-T | Cron / Session / State Mirrors; Household Digest; Wandering Mind; Speak Gate; Evidence Scoring; Self-Evolution; Governance Feedback; DeepReflection; Owner Review Hermes Cron Helper | | Prototype-aligned cadence split must keep Hermes as scheduler/delivery owner while Memory-OS exposes bounded module generated/skipped/error/duplicate evidence. |
 | P2-F | Review Digest Renderer; Agent-Mediated Review Surface; Agent-Mediated Owner Reply Tool; OwnerActionProcessor; Owner Review Hermes Cron Helper; Agent / Memory-OS Collaboration Contract | | Public material must explain the owner-governance subsystem without expanding Memory-OS transport or execution ownership. |
 
 The local check validates this table against

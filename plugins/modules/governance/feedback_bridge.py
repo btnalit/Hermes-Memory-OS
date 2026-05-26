@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
+from plugins.memory.memory_os.owner_actions import expression_feedback_ledger_path
+from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -18,6 +20,7 @@ GOVERNANCE_EVENT_KINDS = {
     "governance_ops_gate_decision",
     "governance_proposal_created",
     "governance_proposal_transitioned",
+    "governance_expression_feedback",
     "governance_self_evolution_reported",
 }
 
@@ -41,6 +44,7 @@ def governance_feedback_manifest() -> dict[str, Any]:
                 "local_artifact.evidence_scoring",
                 "local_artifact.ops_gate_report",
                 "local_artifact.proposal_queue_state",
+                "memory_os.expression_feedback_ledger",
                 "local_artifact.self_evolution_report",
             ],
             "writes": ["memory_os.events.summary", "memory_os.audit", "local_artifact.governance_feedback_state"],
@@ -201,6 +205,7 @@ class GovernanceFeedbackBridgeModule:
             records.extend(self._ops_gate_events(ops_gate))
         if proposal_queue is not None:
             records.extend(self._proposal_events(proposal_queue))
+        records.extend(self._expression_feedback_events())
         if self_evolution is not None:
             records.extend(self._self_evolution_events(self_evolution))
         return [self._to_event(record) for record in records]
@@ -293,6 +298,44 @@ class GovernanceFeedbackBridgeModule:
                     "evidence_refs": [str(ref) for ref in item.get("source_refs", [])[:8]],
                     "proposal_id": candidate_id,
                     "proposal_state": state,
+                }
+            )
+        return records
+
+    def _expression_feedback_events(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        for feedback in _read_jsonl(expression_feedback_ledger_path(roots)):
+            if str(feedback.get("profile", self.profile)) != self.profile:
+                continue
+            if not str(feedback.get("schema_version", "")).endswith("expression_feedback.v0"):
+                continue
+            feedback_id = str(feedback.get("feedback_id", ""))
+            draft_id = str(feedback.get("draft_id", ""))
+            action_type = str(feedback.get("action_type", "unknown"))
+            state_hash = _hash_json(
+                {
+                    "feedback_id": feedback_id,
+                    "draft_id": draft_id,
+                    "action_type": action_type,
+                    "live_policy_changed": bool(feedback.get("live_policy_changed", False)),
+                }
+            )
+            records.append(
+                {
+                    "kind": "governance_expression_feedback",
+                    "source_module": "expression_feedback",
+                    "source_key": f"expression_feedback:{feedback_id}:{action_type}",
+                    "state_hash": state_hash,
+                    "artifact_ref": f"local://expression_feedback/{feedback_id}",
+                    "summary": (
+                        f"Expression feedback {action_type} recorded for {draft_id}; "
+                        "live_policy_changed=false."
+                    ),
+                    "evidence_refs": [f"expression_feedback:{feedback_id}"],
+                    "expression_feedback_id": feedback_id,
+                    "expression_draft_id": draft_id,
+                    "expression_feedback_type": action_type,
                 }
             )
         return records
@@ -390,7 +433,7 @@ def _state_record(event: EventEnvelope) -> dict[str, Any]:
 
 def _optional_refs(record: dict[str, Any]) -> dict[str, Any]:
     output: dict[str, Any] = {}
-    for key in ("proposal_id", "proposal_state"):
+    for key in ("proposal_id", "proposal_state", "expression_feedback_id", "expression_draft_id", "expression_feedback_type"):
         if record.get(key):
             output[key] = record[key]
     return output
@@ -412,6 +455,23 @@ def _kind_counts(events: list[EventEnvelope]) -> dict[str, int]:
     for event in events:
         counts[event.kind] = counts.get(event.kind, 0) + 1
     return counts
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records
 
 
 def _hash_json(value: Any) -> str:

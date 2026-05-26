@@ -1407,6 +1407,13 @@ def _module_definitions() -> list[dict[str, Any]]:
             "runner": "run_once",
         },
         {
+            "module": "left_brain_pipeline_check",
+            "kind": "governance",
+            "package": "plugins.modules.governance.pipeline_checker",
+            "factory": _left_brain_pipeline_check_module,
+            "runner": "run_once",
+        },
+        {
             "module": "digest_consolidation",
             "kind": "context",
             "package": "plugins.modules.context.digest_consolidation",
@@ -1486,6 +1493,14 @@ def _module_definitions() -> list[dict[str, Any]]:
             "runner": "",
             "unavailable_reason": "speak_gate run_once requires outbound payload input and is not exposed through generic dry-run",
         },
+        {
+            "module": "expression_draft",
+            "kind": "expression",
+            "package": "plugins.modules.expression.expression_draft",
+            "factory": _expression_draft_module,
+            "runner": "",
+            "unavailable_reason": "expression_draft creates drafts only from bounded module inputs",
+        },
     ]
 
 
@@ -1520,6 +1535,8 @@ def _run_module_dry_run(store: MemoryOSStore, module_id: str, instance: Any) -> 
         return instance.run_once(store=store, dry_run=True)
     if module_id == "governance_feedback":
         return instance.run_once(store=store, dry_run=True)
+    if module_id == "left_brain_pipeline_check":
+        return instance.run_once(store=store, write=False)
     raise ValueError(f"Module is not commandized: {module_id}")
 
 
@@ -1556,6 +1573,12 @@ def _governance_feedback_module(store: MemoryOSStore) -> Any:
     from plugins.modules.governance.feedback_bridge import GovernanceFeedbackBridgeModule
 
     return GovernanceFeedbackBridgeModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _left_brain_pipeline_check_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.pipeline_checker import LeftBrainPipelineCheckModule
+
+    return LeftBrainPipelineCheckModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
 def _digest_consolidation_module(store: MemoryOSStore) -> Any:
@@ -1616,6 +1639,12 @@ def _speak_gate_module(store: MemoryOSStore) -> Any:
     from plugins.modules.expression.speak_gate import SpeakGateModule
 
     return SpeakGateModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _expression_draft_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.expression.expression_draft import ExpressionDraftModule
+
+    return ExpressionDraftModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
 def _shadow_journal_command(args: argparse.Namespace, store: MemoryOSStore) -> int:

@@ -270,6 +270,32 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 }
             )
         evidence = module_artifacts.get("evidence") if isinstance(module_artifacts.get("evidence"), dict) else {}
+        pipeline_check = (
+            module_artifacts.get("left_brain_pipeline_check")
+            if isinstance(module_artifacts.get("left_brain_pipeline_check"), dict)
+            else {}
+        )
+        if pipeline_check:
+            if pipeline_check.get("actual_execute") is True:
+                fail.append({"code": "left_brain_pipeline_check_actual_execute_true", "value": pipeline_check})
+            elif pipeline_check.get("status") in {"ok", "warn", "fail"}:
+                passed.append({"code": "left_brain_pipeline_check_visible"})
+            if pipeline_check.get("status") == "fail":
+                fail.append({"code": "left_brain_pipeline_check_failed", "value": pipeline_check})
+            elif pipeline_check.get("status") == "warn":
+                warn.append({"code": "left_brain_pipeline_check_warn", "value": pipeline_check})
+        expression_feedback = (
+            module_artifacts.get("expression_feedback")
+            if isinstance(module_artifacts.get("expression_feedback"), dict)
+            else {}
+        )
+        if expression_feedback:
+            if int(expression_feedback.get("raw_body_included_count") or 0) > 0:
+                fail.append({"code": "expression_feedback_raw_body_included"})
+            if int(expression_feedback.get("live_policy_changed_count") or 0) > 0:
+                fail.append({"code": "expression_feedback_live_policy_changed"})
+            else:
+                passed.append({"code": "expression_feedback_report_only"})
         expired_used = int(evidence.get("expired_used_in_scoring_count") or 0)
         if expired_used > 0:
             warn.append(
@@ -324,7 +350,27 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             fail.append({"code": "expression_artifact_speak_gate_actual_send_true", "value": expression_artifacts})
         else:
             passed.append({"code": "expression_artifact_summary_ok"})
-        missing_eval_count = int(expression_artifacts.get("speak_gate_missing_evaluation_count") or 0)
+        missing_eval_count = int(
+            expression_artifacts.get("latest_speak_gate_missing_evaluation_count")
+            if expression_artifacts.get("latest_speak_gate_missing_evaluation_count") is not None
+            else expression_artifacts.get("speak_gate_missing_evaluation_count")
+            or 0
+        )
+        missing_draft_count = int(
+            expression_artifacts.get("latest_expression_draft_missing_count")
+            if expression_artifacts.get("latest_expression_draft_missing_count") is not None
+            else expression_artifacts.get("expression_draft_missing_count")
+            or 0
+        )
+        if missing_draft_count > 0:
+            warn.append(
+                {
+                    "code": "right_brain_expression_draft_missing",
+                    "missing_count": missing_draft_count,
+                }
+            )
+        else:
+            passed.append({"code": "right_brain_expression_draft_created"})
         if missing_eval_count > 0:
             warn.append(
                 {
@@ -1026,9 +1072,12 @@ def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "proposal_queue": summary.get("proposal_queue"),
         "self_evolution": summary.get("self_evolution"),
         "governance_feedback": summary.get("governance_feedback"),
+        "left_brain_pipeline_check": summary.get("left_brain_pipeline_check"),
         "deep_reflection": summary.get("deep_reflection"),
         "ops_gate": summary.get("ops_gate"),
         "speak_gate": summary.get("speak_gate"),
+        "expression_draft": summary.get("expression_draft"),
+        "expression_feedback": summary.get("expression_feedback"),
     }
 
 
@@ -1037,8 +1086,15 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "wandering_output_count": summary.get("wandering_output_count"),
         "wandering_would_send_count": summary.get("wandering_would_send_count"),
         "wandering_silent_count": summary.get("wandering_silent_count"),
+        "expression_draft_count": summary.get("expression_draft_count"),
+        "expression_draft_created_count": summary.get("expression_draft_created_count"),
+        "expression_draft_missing_count": summary.get("expression_draft_missing_count"),
+        "latest_expression_draft_missing_count": summary.get("latest_expression_draft_missing_count"),
+        "expression_feedback_count": summary.get("expression_feedback_count"),
         "speak_gate_evaluated_count": summary.get("speak_gate_evaluated_count"),
         "speak_gate_missing_evaluation_count": summary.get("speak_gate_missing_evaluation_count"),
+        "latest_speak_gate_missing_evaluation_count": summary.get("latest_speak_gate_missing_evaluation_count"),
+        "latest_speak_gate_evaluated_count": summary.get("latest_speak_gate_evaluated_count"),
         "speak_gate_decision_distribution": summary.get("speak_gate_decision_distribution"),
         "speak_gate_would_send_count": summary.get("speak_gate_would_send_count"),
         "speak_gate_blocked_count": summary.get("speak_gate_blocked_count"),
@@ -1746,10 +1802,13 @@ def module_artifact_summary():
     proposal = status("proposal_queue")
     self_evolution = status("self_evolution")
     governance = status("governance_feedback")
+    left_brain_pipeline = status("left_brain_pipeline_check")
     deep_reflection = status("deep_reflection")
     ops_gate = status("ops_gate")
     speak_gate = status("speak_gate")
+    expression_draft = status("expression_draft")
     mailbox = status("mailbox")
+    expression_feedback = _read_jsonl("/root/.hermes/memory-os/system/expression_feedback_ledger.jsonl")
     ops_gate_reports = _read_jsonl("/root/.hermes/system-modules/ops_gate/reports.jsonl")
     proposal_followup_action_counts = {}
     for report_item in ops_gate_reports:
@@ -1814,6 +1873,11 @@ def module_artifact_summary():
       "governance_feedback": {
         "emitted_event_count": governance.get("emitted_event_count"),
       },
+      "left_brain_pipeline_check": {
+        "status": left_brain_pipeline.get("status"),
+        "finding_count": left_brain_pipeline.get("finding_count"),
+        "actual_execute": left_brain_pipeline.get("actual_execute"),
+      },
       "deep_reflection": {
         "report_count": deep_reflection.get("report_count"),
         "analysis_artifact_count": deep_reflection.get("analysis_artifact_count"),
@@ -1831,6 +1895,17 @@ def module_artifact_summary():
         "would_send_count": speak_gate.get("would_send_count"),
         "actual_send": speak_gate.get("actual_send"),
       },
+      "expression_draft": {
+        "draft_count": expression_draft.get("draft_count"),
+        "silent_count": expression_draft.get("silent_count"),
+        "draft_error_count": expression_draft.get("draft_error_count"),
+        "raw_body_included": expression_draft.get("body_included"),
+      },
+      "expression_feedback": {
+        "feedback_count": len(expression_feedback),
+        "live_policy_changed_count": sum(1 for item in expression_feedback if isinstance(item, dict) and item.get("live_policy_changed") is True),
+        "raw_body_included_count": sum(1 for item in expression_feedback if isinstance(item, dict) and item.get("raw_body_included") is True),
+      },
       "mailbox": {
         "mailbox_exists": mailbox.get("mailbox_exists"),
         "would_send_count": mailbox.get("would_send_count"),
@@ -1841,31 +1916,55 @@ def expression_artifact_summary():
     modules = module_artifact_summary()
     wandering = modules.get("wandering") if isinstance(modules.get("wandering"), dict) else {}
     speak_gate = modules.get("speak_gate") if isinstance(modules.get("speak_gate"), dict) else {}
+    expression_draft = modules.get("expression_draft") if isinstance(modules.get("expression_draft"), dict) else {}
     reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
     wandering_result_count = 0
     wandering_would_send_result_count = 0
     wandering_silent_count = 0
+    expression_draft_created_count = 0
+    expression_draft_missing_count = 0
     speak_gate_evaluated_count = 0
     speak_gate_missing_evaluation_count = 0
     speak_gate_decision_distribution = {}
+    latest_expression_draft_missing_count = 0
+    latest_speak_gate_missing_evaluation_count = 0
+    latest_speak_gate_evaluated_count = 0
+    latest_wandering_result_count = 0
     for report in reports:
+        report_expression_missing = 0
+        report_speak_gate_missing = 0
+        report_speak_gate_evaluated = 0
+        report_wandering_result_count = 0
         steps = report.get("steps") if isinstance(report.get("steps"), list) else []
         for step in steps:
             if not isinstance(step, dict) or step.get("step") != "wandering_mind":
                 continue
             result = step.get("result") if isinstance(step.get("result"), dict) else {}
             wandering_result_count += 1
+            report_wandering_result_count += 1
             if result.get("would_send") is True:
                 wandering_would_send_result_count += 1
                 if not isinstance(result.get("speak_gate_decision"), dict):
                     speak_gate_missing_evaluation_count += 1
+                    report_speak_gate_missing += 1
             if result.get("output") == "[SILENT]" or (result.get("would_send") is False and result.get("reason")):
                 wandering_silent_count += 1
+            if result.get("expression_draft_created") is True or isinstance(result.get("expression_draft"), dict):
+                expression_draft_created_count += 1
+            elif result.get("output") not in {None, ""}:
+                expression_draft_missing_count += 1
+                report_expression_missing += 1
             decision = result.get("speak_gate_decision") if isinstance(result.get("speak_gate_decision"), dict) else {}
             if decision:
                 speak_gate_evaluated_count += 1
+                report_speak_gate_evaluated += 1
                 decision_name = str(decision.get("decision") or "unknown")
                 speak_gate_decision_distribution[decision_name] = speak_gate_decision_distribution.get(decision_name, 0) + 1
+        if report_wandering_result_count:
+            latest_expression_draft_missing_count = report_expression_missing
+            latest_speak_gate_missing_evaluation_count = report_speak_gate_missing
+            latest_speak_gate_evaluated_count = report_speak_gate_evaluated
+            latest_wandering_result_count = report_wandering_result_count
     return {
       "schema_version": "memory-os.expression_artifact_summary.v0",
       "wandering_output_count": wandering.get("output_count"),
@@ -1873,8 +1972,16 @@ def expression_artifact_summary():
       "wandering_result_count": wandering_result_count,
       "wandering_would_send_result_count": wandering_would_send_result_count,
       "wandering_silent_count": wandering_silent_count,
+      "expression_draft_count": expression_draft.get("draft_count"),
+      "expression_draft_created_count": expression_draft_created_count,
+      "expression_draft_missing_count": expression_draft_missing_count,
+      "latest_expression_draft_missing_count": latest_expression_draft_missing_count,
+      "expression_feedback_count": modules.get("expression_feedback", {}).get("feedback_count") if isinstance(modules.get("expression_feedback"), dict) else None,
       "speak_gate_evaluated_count": speak_gate_evaluated_count,
       "speak_gate_missing_evaluation_count": speak_gate_missing_evaluation_count,
+      "latest_speak_gate_missing_evaluation_count": latest_speak_gate_missing_evaluation_count,
+      "latest_speak_gate_evaluated_count": latest_speak_gate_evaluated_count,
+      "latest_wandering_result_count": latest_wandering_result_count,
       "speak_gate_decision_distribution": speak_gate_decision_distribution,
       "speak_gate_would_send_count": speak_gate.get("would_send_count"),
       "speak_gate_blocked_count": speak_gate.get("blocked_send_count", 0),

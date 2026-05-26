@@ -2,26 +2,33 @@
 
 Date: 2026-05-26
 
-Status: design gate plus first deployed wiring and owner-preview slices.
+Status: design gate plus deployed ExpressionDraft, SpeakGate wiring, owner-preview, and expression-feedback ledger slices.
 
 Current implementation state:
 
 - P1-R slice 1 is deployed on the `10.20.3.200` test host: cognitive loop
-  Wandering output now records a SpeakGate decision for every result that
-  contains an output.
+  Wandering output now creates bounded `ExpressionDraft` records and routes the
+  latest non-silent draft through SpeakGate.
 - P1-R slice 2 is deployed on `10.20.3.200`: OwnerReview resolves Wandering
   `payload_ref` values into bounded `expression_preview` text so the owner can
   judge a would-send draft by content, not only by token/reference.
-- Monitor summary now exposes `speak_gate_evaluated_count`,
-  `speak_gate_missing_evaluation_count`, and
+- Monitor summary now exposes `expression_draft_count`,
+  `latest_expression_draft_missing_count`, `speak_gate_evaluated_count`,
+  `latest_speak_gate_missing_evaluation_count`, and
   `speak_gate_decision_distribution`.
 - Monitor summary now also exposes speak review preview coverage:
   `speak_item_count`, `speak_expression_preview_count`, and
   `speak_expression_preview_missing_count`.
+- P1-R feedback slice is deployed as a no-send ledger path:
+  expression feedback actions such as `too_mechanical` write
+  `expression_feedback_ledger.jsonl`; GovernanceFeedback consumes these as
+  summary-only governance events without changing live policy.
 - This does not implement a RightBrainExpressionEngine, scheduled expression
-  delivery, owner expression feedback, or governance backflow.
-- Current live monitor still reports historical missing SpeakGate evaluations
-  from older cognitive-loop reports; new-cycle evidence shows the wiring works.
+  delivery, or policy/prompt adaptation.
+- Current live monitor still reports historical missing draft/SpeakGate counts
+  from older cognitive-loop reports, but latest-cycle evidence reports
+  `latest_expression_draft_missing_count=0` and
+  `latest_speak_gate_missing_evaluation_count=0`.
 
 ## Why This Exists
 
@@ -117,7 +124,7 @@ route and must not be flattened into `would-send`.
 | DeepReflection wandering seed | Seed future associative expression without sending. | `emit_optional_outputs()` can append `deep_reflection.wandering_seed.v0`; live evidence shows seed counts, but seeds are not consumed by a formal expression engine. | Input to RightBrainExpressionEngine, then SpeakGate, then scheduled/exceptional expression route. | Seed production exists, but seed consumption is not wired into Wandering/SpeakGate formal expression closure. |
 | Conversation Carryover | Preserve bounded conversational continuity. | Prefetch projects carryover / DR cards into context and RH-29 records sources. | ContextProjection plus MemorySources and RH-30 feedback. | Carryover is not owner-visible expression and must not be counted as right-brain delivery. |
 | Wandering Mind | Generate non-task free association / feeling expression or silence. | `WanderingMindModule.run_once()` currently builds deterministic text from the latest event summary and records would-send artifacts with `actual_send=false`. | RightBrainExpressionEngine output draft; every non-silent draft must pass SpeakGate. | Current module is a safe deterministic draft shell, not a real right-brain expression engine. |
-| SpeakGate | Decide whether an expression draft is silent, scheduled-allowed, blocked, would-send observation, or exceptional permission-required. | `SpeakGateModule.evaluate_wandering_output()` exists, but the cognitive loop currently calls Wandering Mind directly and does not route every Wandering output through SpeakGate. | Mandatory decision for every non-silent expression draft. | Live monitor shows Wandering would-send artifacts while SpeakGate would-send remains zero, proving the formal decision path is not closed. |
+| SpeakGate | Decide whether an expression draft is silent, scheduled-allowed, blocked, would-send observation, or exceptional permission-required. | P1-R slice 1 routes new cognitive-loop Wandering output through `SpeakGateModule.evaluate_wandering_output()` and records evaluated/missing decision monitor fields. Historical reports can still contain Wandering artifacts without SpeakGate decisions. | Mandatory decision for every non-silent expression draft. | The current gap is no `ExpressionDraft` object and no formal RightBrainExpressionEngine / feedback / scheduled-expression route; historical missing evaluations remain evidence of the old wiring, not the current new-cycle path. |
 | Owner Review for expression | Let the owner judge expression quality and exceptional send permission. | Owner review can surface speak/would-send items and action tokens. | Show bounded expression preview, why it appeared, delivery tier, and stable token if action is needed. | Payload refs / action tokens alone are not enough to judge "voice"; expression content feedback is missing. |
 | Expression feedback | Convert owner judgment into bounded evidence. | `allow_speak_once` exists; expression quality labels do not. | `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period` into expression feedback ledger. | No real expression feedback ledger or feedback-to-policy proposal path exists. |
 | GovernanceFeedback / SelfEvolution backflow | Turn expression outcomes into policy/prompt/frequency proposals. | GovernanceFeedback consumes evidence, ops, proposal, and self-evolution outcomes; it does not currently consume full wandering/speak outcomes. | Bounded governance events and owner-reviewed proposals only. | Expression outcomes cannot yet improve prompt, cadence, or SpeakGate policy. |
@@ -128,7 +135,8 @@ The current right-brain chain is therefore:
 event summaries
 -> household digest
 -> deterministic Wandering output
--> wandering would-send artifact
+-> SpeakGate decision for new cognitive-loop output
+-> would-send / blocked / silent observation artifact
 -> no actual send
 ```
 
@@ -378,6 +386,65 @@ Do not claim formal right-brain expression closure without these fields:
 
 Test-host would-send observation remains useful, but it is not a substitute
 for this monitor contract.
+
+## Prototype-Informed Runtime Plan
+
+Read-only inspection of `10.20.2.88` shows the production-like right-brain
+shape already exists in Hermes/Sannai:
+
+- Sannai fixed free-time jobs run at `09:00`, `13:00`, `17:00`, and `21:00`
+  with `deliver=origin`.
+- Sannai afterglow checks run at `12:00`, `16:00`, and `20:00` with
+  `deliver=origin`.
+- Sannai random heartbeat is generated by a profile-local no-agent script,
+  creates one-shot `deliver=origin` jobs, and treats `[SILENT]` as a valid
+  outcome.
+- Profile-local background maintenance uses `deliver=local` / no-agent scripts
+  for treasure index, daily digest, weekly consolidation proposal, and memory
+  journal.
+
+Memory-OS must not copy this profile-specific behavior directly. Sannai is a
+companion profile with its own voice, cadence, and relationship contract.
+Memory-OS needs a profile-agnostic right-brain expression substrate:
+
+```text
+bounded memory view
+-> Hermes-agent expression prompt or bounded expression adapter
+-> ExpressionDraft(text_preview, source_refs, feeling_tags, risk_flags, silence_reason)
+-> SpeakGate decision
+-> Hermes origin delivery only when scheduled/owner-configured
+-> ExpressionFeedbackLedger
+-> GovernanceFeedback / SelfEvolution proposal
+-> owner approve/apply gate
+```
+
+Implementation slices:
+
+1. `P1-R.3` - Expression draft surface:
+   - create a bounded `ExpressionDraft` artifact;
+   - support `[SILENT]` as first-class output;
+   - no execution tools, no raw private body, no owner-visible send.
+2. `P1-R.4` - Hermes-agent expression adapter:
+   - use Hermes as the interaction/LLM owner;
+   - Memory-OS supplies bounded context and stores the draft;
+   - Memory-OS does not become the conversation agent.
+3. `P1-R.5` - SpeakGate mandatory decision:
+   - every non-silent draft gets `scheduled_allowed`,
+     `scheduled_blocked`, `would_send`, or `permission_requested`;
+   - monitor reports missing decisions as P1.
+4. `P1-R.6` - Owner feedback and backflow:
+   - `like`, `too_mechanical`, `too_frequent`, `boundary_private`,
+     `off_voice`, and `mute_period` become expression feedback records;
+   - feedback may only produce prompt/policy/frequency proposals.
+5. `P1-R.7` - Scheduled expression opt-in:
+   - borrow Sannai's ownership boundary, not its exact schedule or voice;
+   - Hermes cron/origin owns schedule and delivery;
+   - Memory-OS provides bounded stdout/draft state and monitor evidence.
+
+Do not call Tier 2 formal right-brain expression closed until at least one
+owner-configured scheduled expression path has produced a bounded draft,
+SpeakGate decision, Hermes-origin delivery or `[SILENT]`, and feedback/monitor
+evidence without boundary violations.
 
 ## Roadmap Placement
 
