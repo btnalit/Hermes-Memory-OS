@@ -265,9 +265,9 @@ Design synthesis for Memory-OS:
 Near-term work order after synthesis and the 2026-05-27 runtime
 outcome-feedback baseline:
 
-1. **P1-S feedback backflow quality**: left-brain pipeline check is currently
-   ok and DR expired-working hygiene is live; the remaining P1-S work is
-   improving proposal quality from feedback signals without direct mutation.
+1. **P1-S feedback backflow quality**: linked-outcome quality gating is now
+   live for expression feedback. Remaining P1-S work should focus on feedback
+   proposal usefulness and maturity, not direct prompt/policy/cadence mutation.
 2. **P1-T next cadence split**: cadence report is live and SelfEvolution,
    EvidenceScoring, and OpsGate now have module-local skip gates; choose any
    further module from refreshed counters, not a timer guess.
@@ -384,6 +384,13 @@ Current truth:
   `novelty_skipped_count=11` and `duplicate_unresolved_proposal_count=11`;
 - expression feedback can enter EvidenceScoring/SelfEvolution as proposal
   evidence; direct policy/prompt/cadence mutation remains blocked;
+- P1-S feedback-quality gate is live: expression feedback now carries bounded
+  `outcome_id`/`request_id`/`policy_version` context into EvidenceScoring, and
+  SelfEvolution requires at least one linked outcome before creating a new
+  owner-facing `expression_policy` proposal. The latest targeted smoke reports
+  `expression_feedback_subject_count=3`, linked `1`, unlinked `2`,
+  `proposal_created=false` due same-day same-signal cadence, and
+  `actual_execute=false`.
 - deployed P1-S slice 1 filters expired working out of EvidenceScoring and
   adds monitor visibility for expired scoring contamination;
 - last recorded 07 monitor evidence reports `expired_used_in_scoring_count=0` and PASS
@@ -484,6 +491,10 @@ Current truth:
 - execution tickets remain zero;
 - the first bounded `expression_policy` proposal has a live explicit apply path
   after owner approval and OpsGate `would_allow`;
+- the second concrete class, `proposal_queue_legacy_template_cleanup`, has a
+  live explicit apply path. Latest test-host smoke closed 18 legacy template
+  proposals, reported `non_legacy_touched_count=0`, and kept
+  `execution_ticket_count=0` / `actual_execute=false`;
 - generic external execution remains unimplemented.
 
 Implemented path:
@@ -496,6 +507,16 @@ approved_for_proposal
 -> right-brain expression helper consumes policy on next run
 ```
 
+Next explicit cleanup path:
+
+```text
+approved proposal_queue_legacy_template_cleanup proposal
+-> OpsGate would_allow
+-> owner/operator explicit apply
+-> pressure_block matched legacy template proposals only
+-> legacy_template_cleanup_applies.jsonl evidence
+```
+
 Hard rule:
 
 - bounded policy/config apply is allowed only for proposal kinds with an owned
@@ -503,6 +524,8 @@ Hard rule:
   review;
 - shell/service/filesystem execution still needs a separate owner/operator
   apply design and external review.
+- cleanup apply must prove `non_legacy_touched_count=0`,
+  `execution_ticket_created=false`, and `actual_execute=false`.
 
 ### P1-P - Timestamp / Aging Data Quality
 

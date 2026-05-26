@@ -14970,3 +14970,303 @@ Conclusion:
   only path that writes OpsGate proposal decisions.
 - This is the third safe P1-T module-local split after SelfEvolution and
   EvidenceScoring; production cadence maturity remains open for other modules.
+
+## 2026-05-27 - P1-S Feedback Backflow Quality Gate Runtime Evidence
+
+Scope:
+
+- P1-S feedback backflow quality.
+- Convert expression feedback into higher-quality proposal input only when it is
+  linked to a recorded right-brain expression outcome.
+- Do not directly mutate prompt, policy, cadence, routing, delivery, or
+  execution.
+- Do not add a generic executor.
+
+Preflight:
+
+```text
+source_of_truth=32/39/40/41 plus live expression-feedback monitor evidence
+finding_type=feedback backflow quality gap
+owning_seam=EvidenceScoring expression-feedback subject metadata + SelfEvolution expression-policy proposal generation
+reverse_scope=Hermes owns interaction/LLM/transport; Memory-OS owns bounded evidence, proposal, audit, monitor
+evidence_loop=RED tests -> local full tests -> 10.20.3.200 module smoke/status
+monitor_or_validation_fields=expression_feedback_linked_subject_count,expression_feedback_unlinked_subject_count,proposal_quality_gate_failed_count,last_quality_gate_reason
+promotion_signal=linked expression feedback can produce a bounded expression_policy proposal; unlinked-only feedback cannot become owner-facing proposal pressure
+stop_or_rollback_signal=direct policy/prompt/cadence write, actual_execute/send true, raw body, generic executor
+external_review=not required for proposal-only quality gate; required before new apply kinds
+```
+
+Implementation:
+
+- `EvidenceScoring` now preserves bounded expression feedback context:
+  `outcome_id`, `request_id`, `policy_version`, and linked/unlinked subject
+  counts.
+- `SelfEvolution` now applies an expression-feedback quality gate:
+  unlinked-only expression feedback returns `proposal_quality_gate_failed`
+  instead of creating an owner-facing proposal.
+- Linked expression feedback proposals carry bounded quality metadata:
+  `quality_gate=linked_expression_feedback`, feedback counts, linked outcome
+  refs, policy versions, `direct_apply_allowed=false`, and
+  `generic_executor_allowed=false`.
+- `ProposalQueue` stores these bounded proposal-quality fields.
+- Monitor artifact summary exposes the new linked/unlinked scoring subject
+  counts and SelfEvolution quality-gate counters.
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py tests\system_modularization\test_self_evolution_module.py tests\system_modularization\test_left_brain_pipeline_checker.py tests\system_modularization\test_proposal_queue_module.py tests\scripts\test_memory_os_3_200_monitor.py -q
+86 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+python -m pytest -q
+592 passed
+
+git diff --check
+PASS
+```
+
+Deployment:
+
+```text
+scp plugins/modules/evidence/scoring.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/evidence/scoring.py
+scp plugins/modules/governance/self_evolution.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/governance/self_evolution.py
+scp plugins/modules/governance/proposal_queue.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/governance/proposal_queue.py
+scp scripts/memory_os_3_200_monitor.py hermes-media:/root/.hermes/scripts/memory_os_3_200_monitor.py
+```
+
+Live smoke:
+
+```text
+score_status=ok
+score_skipped=False
+expression_feedback_subject_count=3
+expression_feedback_linked_subject_count=1
+expression_feedback_unlinked_subject_count=2
+self_evolution_status=ok
+self_evolution_reason=cadence_same_day_same_signal
+proposal_created=False
+proposal_quality_gate_failed=False
+actual_execute=False
+```
+
+Live module status:
+
+```text
+EvidenceScoring:
+  score_mode=feature_maturity_v2
+  feature_score_mode=primary
+  score_count=513
+  expression_feedback_subject_count=3
+  expression_feedback_linked_subject_count=1
+  expression_feedback_unlinked_subject_count=2
+  expired_used_in_scoring_count=0
+  actual_execute=false
+
+SelfEvolution:
+  report_count=35
+  proposal_count=21
+  novelty_skipped_count=11
+  duplicate_unresolved_proposal_count=11
+  cadence_skipped_count=3
+  same_signal_skipped_count=3
+  proposal_quality_gate_failed_count=0
+  actual_execute=false
+```
+
+Live module doctor:
+
+```text
+status=warning
+findings:
+- mailbox_root_missing (existing warning)
+- pending_candidates_present (existing warning)
+EvidenceScoring doctor=ok
+SelfEvolution doctor=ok
+```
+
+Cadence report:
+
+```text
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=11
+generated_count=882
+skipped_count=16
+error_count=15
+duplicate_count=11
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Full monitor note:
+
+```text
+python scripts\memory_os_3_200_monitor.py --host 10.20.3.200 --output summary
+timed out after 180s in this run.
+```
+
+Conclusion:
+
+- LIVE PASS for the targeted P1-S feedback quality smoke.
+- LOCAL PASS for full test and contract checks.
+- MONITOR FIELD PASS for module status / artifact fields that expose linked
+  feedback context and quality-gate counters.
+- Full consolidated monitor did not complete in this run; treat that as a
+  residual monitor-runtime risk, not as evidence of behavior failure.
+
+## 2026-05-27 - P1-Q proposal_queue_legacy_template_cleanup Local Baseline
+
+Scope:
+
+- second concrete approved-proposal explicit apply class;
+- only `proposal_queue_legacy_template_cleanup`;
+- no generic executor, no execution ticket, no raw body, no Hermes transport or
+  scheduler changes.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=32/39/40/41 + proposal queue runtime state
+finding_type=approved proposal explicit apply gap / legacy backlog cleanup
+owning_seam=OwnerActionProcessor approved proposal explicit apply path + ProposalQueue
+reverse_scope=Memory-OS may update proposal_queue state; Hermes remains owner of conversation/transport/schedule
+evidence_loop=RED tests -> local owner_actions/monitor tests -> live dry-run/apply smoke
+monitor_or_validation_fields=legacy_template_cleanup_apply_count, legacy_template_cleanup_closed_count, legacy_template_cleanup_non_legacy_touched_count, legacy_template_cleanup_actual_execute_count
+promotion_signal=legacy templates can be pressure-blocked after owner approval and OpsGate would_allow with non_legacy_touched_count=0
+stop_or_rollback_signal=non-legacy proposal touched; execution_ticket_created=true; actual_execute=true
+external_review=not required for test-host bounded cleanup apply; required before any generic executor or filesystem/service action
+```
+
+Local RED/PASS:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py -k "legacy_template_cleanup or generic_self_evolution" -q
+
+RED before implementation:
+  cleanup dry-run returned status=error (unsupported apply kind)
+
+PASS after implementation:
+  3 passed, 48 deselected
+```
+
+Targeted local PASS:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py -k "legacy_template_cleanup or generic_self_evolution or expression_policy" -q
+4 passed, 47 deselected
+
+python -m pytest tests\scripts\test_memory_os_3_200_monitor.py -k "owner_review or legacy_template_cleanup" -q
+3 passed, 43 deselected
+```
+
+Behavior proven locally:
+
+```text
+apply_kind=proposal_queue_legacy_template_cleanup
+legacy_template_candidate_count=2
+legacy_template_closed_count=2
+non_legacy_touched_count=0
+closed_state=pressure_blocked
+closed_followup_state=closed
+cleanup_followup_state=applied_legacy_template_cleanup
+execution_ticket_created=False
+actual_execute=False
+generic_self_evolution_apply=unsupported_apply_kind
+```
+
+Live deployment and apply smoke:
+
+```text
+deployed:
+  plugins/memory/memory_os/owner_actions.py
+  scripts/memory_os_3_200_monitor.py
+
+cleanup_proposal_id=prop_20260526T183206541581Z_3b442584b8
+ops_status=ok
+ops_gate_report_written=True
+dry_status=ready
+dry_target_count=18
+apply_status=applied
+apply_kind=proposal_queue_legacy_template_cleanup
+closed_count=18
+non_legacy_touched_count=0
+execution_ticket_created=False
+actual_execute=False
+cleanup_apply_count=1
+```
+
+Post-apply read-only verification:
+
+```text
+legacy_unresolved_count=0
+legacy_cleanup_apply_count=1
+latest_closed_count=18
+latest_non_legacy_touched_count=0
+latest_actual_execute=False
+pressure_blocked_count=18
+execution_ticket_count=0
+actual_execute=False
+
+review proposal-followups:
+approved_proposal_count=5
+pending_followup_count=0
+open_followup_count=3
+awaiting_ops_gate_count=0
+ops_gate_reviewed_count=3
+policy_apply_count=1
+legacy_template_cleanup_apply_count=1
+execution_ticket_count=0
+actual_execute=false
+raw_body_included=false
+```
+
+Live module status:
+
+```text
+ProposalQueue:
+  candidate_count=25
+  state_counts.approved_for_proposal=5
+  state_counts.owner_declined=2
+  state_counts.pressure_blocked=18
+  followup_state_counts.applied_expression_policy=1
+  followup_state_counts.applied_legacy_template_cleanup=1
+  followup_state_counts.closed=19
+  execution_ticket_count=0
+  actual_execute=false
+
+OpsGate:
+  report_count=59
+  skipped_run_count=2
+  actual_execute=false
+```
+
+Full consolidated monitor note:
+
+```text
+python scripts\memory_os_3_200_monitor.py --host 10.20.3.200 --output summary
+timed out after 240s in this run.
+```
+
+Conclusion:
+
+- LIVE PASS for the bounded `proposal_queue_legacy_template_cleanup` explicit
+  apply path on test host.
+- LIVE PASS that historical legacy template backlog is now closed
+  (`legacy_unresolved_count=0`) without touching non-legacy proposals.
+- LIVE PASS for hard boundaries: `actual_execute=false`,
+  `execution_ticket_count=0`, `raw_body_included=false`.
+- Full consolidated monitor still has runtime timeout risk; this does not
+  invalidate the targeted live evidence but remains a monitor performance gap.

@@ -1091,12 +1091,21 @@ Implemented runtime slice:
   `system-modules/right_brain_expression_adapter/policy.json` and appends
   `policy_applies.jsonl`; the right-brain expression helper reads this policy on
   the next run.
+- next concrete apply class is `proposal_queue_legacy_template_cleanup`: it can
+  close only historical legacy template proposals after owner approval and
+  OpsGate `would_allow`, writes
+  `system-modules/proposal_queue/legacy_template_cleanup_applies.jsonl`, sets
+  closed legacy templates to `pressure_blocked`, and leaves
+  `execution_ticket_created=false` / `actual_execute=false`.
 
 Next action:
 
-1. extend the same explicit apply pattern only for concrete proposal kinds with
+1. continue monitoring `proposal_queue_legacy_template_cleanup` evidence:
+   latest live smoke closed 18 legacy templates, left
+   `non_legacy_touched_count=0`, and kept `actual_execute=false`;
+2. extend the same explicit apply pattern only for concrete proposal kinds with
    a bounded runtime target, rollback evidence, and monitor fields;
-2. keep external shell/service/file-system execution behind a separate apply
+3. keep external shell/service/file-system execution behind a separate apply
    design and owner/operator decision.
 
 Stop signal:
@@ -1105,6 +1114,8 @@ Stop signal:
 - approved proposals disappear from review/monitor surfaces after approval.
 - a proposal kind is applied without prior owner approval and OpsGate review;
 - right-brain policy apply writes raw bodies or causes actual send/execution.
+- legacy cleanup touches a non-legacy proposal, or closes a proposal that is not
+  matched by the explicit legacy-template predicate.
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
@@ -1264,6 +1275,17 @@ Reason:
 - expression feedback ledgers can now become EvidenceScoring subjects and
   SelfEvolution expression-policy proposal inputs; no direct prompt/policy/
   cadence mutation occurs;
+- deployed P1-S feedback-quality gate requires expression feedback to carry a
+  linked right-brain outcome before it can create owner-facing
+  `expression_policy` proposal pressure; unlinked-only feedback is kept as
+  evidence and returns `proposal_quality_gate_failed` instead of creating a
+  proposal;
+- latest 10.20.3.200 targeted smoke reports
+  `expression_feedback_subject_count=3`,
+  `expression_feedback_linked_subject_count=1`,
+  `expression_feedback_unlinked_subject_count=2`,
+  `proposal_created=false`, `self_evolution_reason=cadence_same_day_same_signal`,
+  and `actual_execute=false`;
 - deployed P1-S slice 3 makes SelfEvolution proposals owner-readable before
   they can become daily agenda items: generated proposals now include bounded
   Chinese `具体改动`, `证据`, `验收标准`, `后续状态`, and `边界`; legacy generic
@@ -1345,7 +1367,8 @@ Promotion signal:
 - duplicate/unresolved SelfEvolution proposals are skipped and counted;
 - expired working usage is visible and no longer treated as active evidence;
 - feedback backflow can produce owner-reviewed proposals without direct live
-  mutation;
+  mutation, and linked outcome context is required before expression feedback
+  can produce new owner-facing proposal pressure;
 - approved proposals reach explicit execution-decision visibility without
   creating execution tickets.
 

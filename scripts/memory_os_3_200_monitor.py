@@ -279,6 +279,41 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     },
                 }
             )
+        proposal_queue = (
+            module_artifacts.get("proposal_queue")
+            if isinstance(module_artifacts.get("proposal_queue"), dict)
+            else {}
+        )
+        if proposal_queue:
+            if int(proposal_queue.get("legacy_template_cleanup_actual_execute_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "proposal_queue_legacy_template_cleanup_actual_execute_true",
+                        "value": proposal_queue,
+                    }
+                )
+            elif int(proposal_queue.get("legacy_template_cleanup_non_legacy_touched_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "proposal_queue_legacy_template_cleanup_non_legacy_touched",
+                        "value": proposal_queue,
+                    }
+                )
+            elif int(proposal_queue.get("legacy_template_cleanup_raw_body_included_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "proposal_queue_legacy_template_cleanup_raw_body_included",
+                        "value": proposal_queue,
+                    }
+                )
+            elif int(proposal_queue.get("legacy_template_cleanup_apply_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "proposal_queue_legacy_template_cleanup_visible",
+                        "apply_count": proposal_queue.get("legacy_template_cleanup_apply_count"),
+                        "closed_count": proposal_queue.get("legacy_template_cleanup_closed_count"),
+                    }
+                )
         evidence = module_artifacts.get("evidence") if isinstance(module_artifacts.get("evidence"), dict) else {}
         pipeline_check = (
             module_artifacts.get("left_brain_pipeline_check")
@@ -365,6 +400,29 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "latest_skip_reason": evidence.get("latest_skip_reason"),
                 }
             )
+        expression_feedback_subject_count = int(evidence.get("expression_feedback_subject_count") or 0)
+        expression_feedback_linked_subject_count = int(
+            evidence.get("expression_feedback_linked_subject_count") or 0
+        )
+        if expression_feedback_subject_count > 0:
+            if expression_feedback_linked_subject_count > 0:
+                passed.append(
+                    {
+                        "code": "left_brain_expression_feedback_context_linked",
+                        "expression_feedback_subject_count": expression_feedback_subject_count,
+                        "expression_feedback_linked_subject_count": expression_feedback_linked_subject_count,
+                        "expression_feedback_unlinked_subject_count": evidence.get(
+                            "expression_feedback_unlinked_subject_count"
+                        ),
+                    }
+                )
+            else:
+                warn.append(
+                    {
+                        "code": "left_brain_expression_feedback_unlinked_only",
+                        "expression_feedback_subject_count": expression_feedback_subject_count,
+                    }
+                )
         maturity_live_applied = evidence.get("maturity_live_applied") is True
         prototype_aligned_count = int(evidence.get("prototype_aligned_score_count") or 0)
         maturity_dimension_count = int(evidence.get("maturity_dimension_count") or 0)
@@ -2022,6 +2080,9 @@ def module_artifact_summary():
     right_brain_expression_policy_applies = _read_jsonl(
         "/root/.hermes/system-modules/right_brain_expression_adapter/policy_applies.jsonl"
     )
+    proposal_queue_legacy_template_cleanup_applies = _read_jsonl(
+        "/root/.hermes/system-modules/proposal_queue/legacy_template_cleanup_applies.jsonl"
+    )
     right_brain_expression_outcomes = _read_jsonl(
         "/root/.hermes/system-modules/right_brain_expression_adapter/outcomes.jsonl"
     )
@@ -2108,11 +2169,13 @@ def module_artifact_summary():
         "maturity_dimension_count": evidence.get("maturity_dimension_count"),
         "maturity_dimension_keys": evidence.get("maturity_dimension_keys"),
         "maturity_live_applied": evidence.get("maturity_live_applied"),
-        "owner_feedback_signal_count": evidence.get("owner_feedback_signal_count"),
-        "expression_feedback_subject_count": evidence.get("expression_feedback_subject_count"),
-        "subject_counts": evidence.get("subject_counts"),
-        "working_subject_count": evidence.get("working_subject_count"),
-        "expired_used_in_scoring_count": evidence.get("expired_used_in_scoring_count"),
+            "owner_feedback_signal_count": evidence.get("owner_feedback_signal_count"),
+            "expression_feedback_subject_count": evidence.get("expression_feedback_subject_count"),
+            "expression_feedback_linked_subject_count": evidence.get("expression_feedback_linked_subject_count"),
+            "expression_feedback_unlinked_subject_count": evidence.get("expression_feedback_unlinked_subject_count"),
+            "subject_counts": evidence.get("subject_counts"),
+            "working_subject_count": evidence.get("working_subject_count"),
+            "expired_used_in_scoring_count": evidence.get("expired_used_in_scoring_count"),
         "run_report_count": evidence.get("run_report_count"),
         "skipped_run_count": evidence.get("skipped_run_count"),
         "latest_cadence_skipped": evidence.get("latest_cadence_skipped"),
@@ -2121,16 +2184,39 @@ def module_artifact_summary():
       "proposal_queue": {
         "candidate_count": proposal.get("candidate_count"),
         "state_counts": proposal.get("state_counts"),
+        "legacy_template_cleanup_apply_count": len(proposal_queue_legacy_template_cleanup_applies),
+        "legacy_template_cleanup_closed_count": sum(
+            int(item.get("closed_count") or 0)
+            for item in proposal_queue_legacy_template_cleanup_applies
+            if isinstance(item, dict)
+        ),
+        "legacy_template_cleanup_non_legacy_touched_count": sum(
+            int(item.get("non_legacy_touched_count") or 0)
+            for item in proposal_queue_legacy_template_cleanup_applies
+            if isinstance(item, dict)
+        ),
+        "legacy_template_cleanup_actual_execute_count": sum(
+            1
+            for item in proposal_queue_legacy_template_cleanup_applies
+            if isinstance(item, dict) and item.get("actual_execute") is True
+        ),
+        "legacy_template_cleanup_raw_body_included_count": sum(
+            1
+            for item in proposal_queue_legacy_template_cleanup_applies
+            if isinstance(item, dict) and item.get("raw_body_included") is True
+        ),
       },
       "self_evolution": {
         "report_count": self_evolution.get("report_count"),
-        "proposal_count": self_evolution.get("proposal_count"),
-        "novelty_skipped_count": self_evolution.get("novelty_skipped_count"),
-        "duplicate_unresolved_proposal_count": self_evolution.get("duplicate_unresolved_proposal_count"),
-        "cadence_skipped_count": self_evolution.get("cadence_skipped_count"),
-        "same_signal_skipped_count": self_evolution.get("same_signal_skipped_count"),
-        "last_status": self_evolution.get("last_status"),
-      },
+            "proposal_count": self_evolution.get("proposal_count"),
+            "novelty_skipped_count": self_evolution.get("novelty_skipped_count"),
+            "proposal_quality_gate_failed_count": self_evolution.get("proposal_quality_gate_failed_count"),
+            "duplicate_unresolved_proposal_count": self_evolution.get("duplicate_unresolved_proposal_count"),
+            "cadence_skipped_count": self_evolution.get("cadence_skipped_count"),
+            "same_signal_skipped_count": self_evolution.get("same_signal_skipped_count"),
+            "last_quality_gate_reason": self_evolution.get("last_quality_gate_reason"),
+            "last_status": self_evolution.get("last_status"),
+          },
       "governance_feedback": {
         "emitted_event_count": governance.get("emitted_event_count"),
       },

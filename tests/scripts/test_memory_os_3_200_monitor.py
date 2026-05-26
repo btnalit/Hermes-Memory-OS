@@ -541,6 +541,27 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "ops_gate_duplicate_proposal_followup_report" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["proposal_queue"]["legacy_template_cleanup_apply_count"] = 1
+    snapshot["module_artifacts"]["proposal_queue"]["legacy_template_cleanup_closed_count"] = 2
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "proposal_queue_legacy_template_cleanup_visible" for item in classification["pass"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["proposal_queue"]["legacy_template_cleanup_actual_execute_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "proposal_queue_legacy_template_cleanup_actual_execute_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["proposal_queue"]["legacy_template_cleanup_non_legacy_touched_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "proposal_queue_legacy_template_cleanup_non_legacy_touched" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["owner_review_delivery_gate"]["boundary"]["actual_send"] = True
     classification = classify_snapshot(snapshot)
 
@@ -623,11 +644,18 @@ def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_se
 
 def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
     snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["evidence"] = {
+        "expression_feedback_subject_count": 3,
+        "expression_feedback_linked_subject_count": 1,
+        "expression_feedback_unlinked_subject_count": 2,
+        "expired_used_in_scoring_count": 0,
+    }
 
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "left_brain_pipeline_check_visible" for item in classification["pass"])
     assert any(item["code"] == "expression_feedback_report_only" for item in classification["pass"])
+    assert any(item["code"] == "left_brain_expression_feedback_context_linked" for item in classification["pass"])
 
     snapshot["module_artifacts"]["left_brain_pipeline_check"]["status"] = "fail"
     classification = classify_snapshot(snapshot)
@@ -641,6 +669,18 @@ def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "expression_feedback_live_policy_changed" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["evidence"] = {
+        "expression_feedback_subject_count": 2,
+        "expression_feedback_linked_subject_count": 0,
+        "expression_feedback_unlinked_subject_count": 2,
+        "expired_used_in_scoring_count": 0,
+    }
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "left_brain_expression_feedback_unlinked_only" for item in classification["warn"])
 
 
 def test_classify_snapshot_warns_when_expired_working_is_scored():
@@ -1936,7 +1976,15 @@ def _healthy_module_artifacts() -> dict:
         "digest": {"daily_artifact_count": 0, "weekly_artifact_count": 0, "household_artifact_exists": False},
         "wandering": {"output_count": 0, "would_send_count": 0},
         "evidence": {"evidence_count": 0, "score_count": 0, "subject_counts": {}},
-        "proposal_queue": {"candidate_count": 0, "state_counts": {}},
+        "proposal_queue": {
+            "candidate_count": 0,
+            "state_counts": {},
+            "legacy_template_cleanup_apply_count": 0,
+            "legacy_template_cleanup_closed_count": 0,
+            "legacy_template_cleanup_non_legacy_touched_count": 0,
+            "legacy_template_cleanup_actual_execute_count": 0,
+            "legacy_template_cleanup_raw_body_included_count": 0,
+        },
         "self_evolution": {"report_count": 0, "proposal_count": 0, "last_status": "missing"},
         "governance_feedback": {"emitted_event_count": 0},
         "left_brain_pipeline_check": {

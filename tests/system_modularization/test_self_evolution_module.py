@@ -294,6 +294,9 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
                 "profile": "main",
                 "target_type": "expression",
                 "target_id": "expr_1",
+                "outcome_id": "rbout_1",
+                "request_id": "rbreq_1",
+                "policy_version": 1,
                 "rating": "too_mechanical",
                 "source_module": "owner_action",
                 "live_policy_changed": False,
@@ -322,13 +325,71 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     assert proposal["proposal_class"] == "expression_policy:too_mechanical"
     assert proposal["dedupe_key"] == "expression_policy:too_mechanical"
     assert proposal["proposal_quality"]["trigger_rule"] == "expression_feedback_policy"
+    assert proposal["proposal_quality"]["quality_gate"] == "linked_expression_feedback"
+    assert proposal["proposal_quality"]["feedback_rating"] == "too_mechanical"
+    assert proposal["proposal_quality"]["feedback_count"] == 1
+    assert proposal["proposal_quality"]["linked_outcome_count"] == 1
+    assert proposal["proposal_quality"]["unlinked_feedback_count"] == 0
+    assert proposal["proposal_quality"]["outcome_refs"] == ["rbout_1"]
+    assert proposal["proposal_quality"]["policy_versions"] == ["1"]
+    assert proposal["proposal_quality"]["direct_apply_allowed"] is False
+    assert proposal["proposal_quality"]["generic_executor_allowed"] is False
     assert "调整右脑表达策略" in proposal["title"]
     assert "具体改动:" in proposal["body"]
     assert "证据:" in proposal["body"]
     assert "owner 标记右脑表达 too_mechanical" in proposal["body"]
+    assert "linked_outcome_count=1" in proposal["body"]
+    assert "outcomes=rbout_1" in proposal["body"]
+    assert "policy_versions=1" in proposal["body"]
     assert "验收标准:" in proposal["body"]
     assert "后续状态:" in proposal["body"]
     assert proposal["actual_execute"] is False
+
+
+def test_self_evolution_rejects_unlinked_expression_feedback_as_low_quality_proposal_input(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.memory_os.expression_feedback.v0",
+                "feedback_id": "efb_unlinked",
+                "profile": "main",
+                "target_type": "expression",
+                "target_id": "expr_unlinked",
+                "rating": "too_mechanical",
+                "source_module": "owner_action",
+                "live_policy_changed": False,
+                "raw_body_included": False,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evidence = EvidenceScoringModule(tmp_path, profile="main")
+    evidence.score_all(store=store, proposal_queue=proposal_queue)
+    ops_gate = OpsGateModule(tmp_path, profile="main")
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is False
+    assert result["skipped"] is True
+    assert result["proposal_quality_gate_failed"] is True
+    assert result["reason"] == "proposal_quality_gate_failed"
+    assert result["quality_gate_reason"] == "expression_feedback_requires_linked_outcome"
+    assert result["proposal_class"] == "expression_policy:too_mechanical"
+    assert proposal_queue.read_queue()["items"] == []
+    assert ops_gate.read_reports() == []
 
 
 def test_self_evolution_skips_unresolved_expression_policy_by_class(tmp_path):
@@ -353,6 +414,9 @@ def test_self_evolution_skips_unresolved_expression_policy_by_class(tmp_path):
                 "profile": "main",
                 "target_type": "expression",
                 "target_id": "expr_2",
+                "outcome_id": "rbout_2",
+                "request_id": "rbreq_2",
+                "policy_version": 1,
                 "rating": "too_mechanical",
                 "source_module": "owner_action",
                 "live_policy_changed": False,

@@ -1205,18 +1205,20 @@ Completed baseline:
     `cadence_skipped=true`, does not append empty reports when
     `proposed_actions=[]`, and keeps explicit approved-proposal report-only
     review unchanged.
+14. P1-Q next concrete explicit apply class is
+    `proposal_queue_legacy_template_cleanup`: it can close only historical
+    legacy template proposals, writes
+    `proposal_queue/legacy_template_cleanup_applies.jsonl`, and keeps
+    `execution_ticket_created=false` / `actual_execute=false`.
 
 Next runtime order:
 
-1. P1-S feedback backflow quality checks for proposal usefulness, without
-   direct policy/prompt/cadence mutation.
-2. P1-Q extend explicit apply only for one concrete proposal kind with
-   owner/OpsGate evidence, bounded runtime target, rollback, and monitor
-   fields.
-3. P1-P timestamp / aging quality.
-4. P1-T choose any further module split from refreshed generated/skipped/error/
+1. P1-P timestamp / aging quality.
+2. P1-T choose any further module split from refreshed generated/skipped/error/
    duplicate counters after SelfEvolution, EvidenceScoring, and OpsGate.
-5. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
+3. P1-S remaining work narrows to feedback proposal usefulness/maturity after
+   the linked-outcome quality gate; no direct policy/prompt/cadence mutation.
+4. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
    bounded-live gate.
 
 This order is deliberate:

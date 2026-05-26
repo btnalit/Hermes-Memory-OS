@@ -552,6 +552,167 @@ def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops
     assert len(_jsonl(apply_log_path)) == 1
 
 
+def test_approved_legacy_template_cleanup_only_closes_legacy_templates_after_ops_gate(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    legacy_one = proposal_queue.create_candidate(
+        store=store,
+        title="Self-Evolution dry-run proposal",
+        body="Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+        source_refs=["feature_score:legacy_001"],
+        kind="self_evolution",
+    )
+    legacy_two = proposal_queue.create_candidate(
+        store=store,
+        title="Self-Evolution dry-run proposal",
+        body="Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+        source_refs=["feature_score:legacy_002"],
+        kind="self_evolution",
+    )
+    concrete = proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body="具体改动: tune policy\n证据: linked feedback\n验收标准: policy visible\n后续状态: report-only",
+        source_refs=["feature_score:concrete"],
+        kind="expression_policy",
+        proposal_class="expression_policy:too_mechanical",
+        dedupe_key="expression_policy:too_mechanical",
+    )
+    cleanup = proposal_queue.create_candidate(
+        store=store,
+        title="清理旧 Self-Evolution 模板 proposal",
+        body=(
+            "具体改动: close only legacy Self-Evolution dry-run proposal backlog.\n"
+            "证据: pipeline checker classifies these as legacy template duplicates.\n"
+            "验收标准: legacy templates are pressure_blocked; concrete proposals remain open.\n"
+            "后续状态: approved_for_proposal -> OpsGate report-only -> owner manual apply decision.\n"
+            "边界: no execution ticket and no generic executor."
+        ),
+        source_refs=["left_brain_pipeline:legacy_template_duplicate_group"],
+        kind="proposal_queue_cleanup",
+        proposal_class="proposal_queue_legacy_template_cleanup",
+        dedupe_key="proposal_queue_legacy_template_cleanup",
+    )
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{cleanup['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=cleanup["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    dry_run = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=cleanup["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=False,
+    )
+
+    queue_after_dry_run = {item["candidate_id"]: item for item in proposal_queue.read_queue()["items"]}
+    assert dry_run["status"] == "ready"
+    assert dry_run["apply_kind"] == "proposal_queue_legacy_template_cleanup"
+    assert dry_run["legacy_template_candidate_count"] == 2
+    assert dry_run["legacy_template_closed_count"] == 0
+    assert queue_after_dry_run[legacy_one["candidate_id"]]["state"] == "candidate"
+    assert queue_after_dry_run[legacy_two["candidate_id"]]["state"] == "candidate"
+
+    applied = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=cleanup["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=True,
+    )
+
+    queue = {item["candidate_id"]: item for item in proposal_queue.read_queue()["items"]}
+    apply_log_path = tmp_path / "system-modules" / "proposal_queue" / "legacy_template_cleanup_applies.jsonl"
+    apply_records = _jsonl(apply_log_path)
+    followups = approved_proposal_followups_report(store)
+
+    assert applied["status"] == "applied"
+    assert applied["apply_kind"] == "proposal_queue_legacy_template_cleanup"
+    assert applied["legacy_template_closed_count"] == 2
+    assert applied["non_legacy_touched_count"] == 0
+    assert applied["execution_ticket_created"] is False
+    assert applied["actual_execute"] is False
+    assert applied["boundary"]["actual_execute"] is False
+    assert queue[legacy_one["candidate_id"]]["state"] == "pressure_blocked"
+    assert queue[legacy_one["candidate_id"]]["followup_state"] == "closed"
+    assert queue[legacy_two["candidate_id"]]["state"] == "pressure_blocked"
+    assert queue[concrete["candidate_id"]]["state"] == "candidate"
+    assert queue[cleanup["candidate_id"]]["followup_state"] == "applied_legacy_template_cleanup"
+    assert followups["legacy_template_cleanup_apply_count"] == 1
+    assert followups["open_followup_count"] == 0
+    assert apply_records[0]["closed_count"] == 2
+    assert apply_records[0]["actual_execute"] is False
+
+    duplicate = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=cleanup["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=True,
+    )
+
+    assert duplicate["status"] == "duplicate_ignored"
+    assert duplicate["legacy_template_closed_count"] == 0
+    assert len(_jsonl(apply_log_path)) == 1
+
+
+def test_generic_self_evolution_proposal_still_cannot_be_execution_applied(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(
+        store=store,
+        title="Self-Evolution dry-run proposal",
+        body="Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+        source_refs=["feature_score:legacy"],
+        kind="self_evolution",
+    )
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+
+    result = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="cli",
+        owner_approved=True,
+        apply=True,
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "unsupported_apply_kind"
+    assert result["apply_kind"] == ""
+    assert result["actual_execute"] is False
+    assert result["execution_ticket_created"] is False
+
+
 def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):
     store = _store(tmp_path)
     append_memory_source_record(

@@ -213,6 +213,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     approvals = _latest_proposal_approval_by_target(read_owner_action_records(store.roots))
     ops_gate_reviews = _ops_gate_reviews_by_proposal(store)
     policy_applies = _policy_applies_by_proposal(store)
+    legacy_cleanup_applies = _legacy_template_cleanup_applies_by_proposal(store)
     items: list[dict[str, Any]] = []
     for proposal in proposals:
         proposal_id = str(proposal.get("candidate_id") or "")
@@ -221,8 +222,11 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         approval = approvals.get(proposal_id, {})
         ops_gate_review = ops_gate_reviews.get(proposal_id, {})
         policy_apply = policy_applies.get(proposal_id, {})
+        legacy_cleanup_apply = legacy_cleanup_applies.get(proposal_id, {})
         if policy_apply:
             followup_state = "applied_expression_policy"
+        elif legacy_cleanup_apply:
+            followup_state = "applied_legacy_template_cleanup"
         elif ops_gate_review:
             followup_state = "ops_gate_reviewed_awaiting_explicit_execution"
         else:
@@ -246,6 +250,8 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "policy_apply_id": str(policy_apply.get("apply_id") or ""),
                 "policy_version": int(policy_apply.get("policy_version") or 0),
                 "policy_written": bool(policy_apply),
+                "legacy_template_cleanup_apply_id": str(legacy_cleanup_apply.get("apply_id") or ""),
+                "legacy_template_closed_count": int(legacy_cleanup_apply.get("closed_count") or 0),
                 "safe_source_ids": _safe_list(proposal.get("source_refs")),
                 "next_step": "inspect or route through OpsGate; actual execution requires a separate explicit apply command",
                 "execution_ticket_created": False,
@@ -261,19 +267,27 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
     )
     policy_apply_count = sum(1 for item in items if item.get("followup_state") == "applied_expression_policy")
+    legacy_cleanup_apply_count = sum(
+        1 for item in items if item.get("followup_state") == "applied_legacy_template_cleanup"
+    )
     return {
         "schema_version": APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
         "status": "ok",
         "approved_proposal_count": len(proposals),
         "pending_followup_count": awaiting_ops_gate_count,
-        "open_followup_count": sum(1 for item in items if item.get("followup_state") != "applied_expression_policy"),
+        "open_followup_count": sum(
+            1
+            for item in items
+            if item.get("followup_state") not in {"applied_expression_policy", "applied_legacy_template_cleanup"}
+        ),
         "shown_count": len(shown),
         "overflow_count": max(len(items) - bounded_limit, 0),
         "awaiting_ops_gate_count": awaiting_ops_gate_count,
         "ops_gate_reviewed_count": ops_gate_reviewed_count,
         "awaiting_explicit_execution_count": ops_gate_reviewed_count,
         "policy_apply_count": policy_apply_count,
+        "legacy_template_cleanup_apply_count": legacy_cleanup_apply_count,
         "execution_ticket_count": 0,
         "actual_execute": False,
         "raw_body_included": False,
@@ -300,6 +314,7 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "ops_gate_reviewed_count": report["ops_gate_reviewed_count"],
         "awaiting_explicit_execution_count": report["awaiting_explicit_execution_count"],
         "policy_apply_count": report["policy_apply_count"],
+        "legacy_template_cleanup_apply_count": report["legacy_template_cleanup_apply_count"],
         "execution_ticket_count": report["execution_ticket_count"],
         "actual_execute": report["actual_execute"],
         "raw_body_included": report["raw_body_included"],
@@ -577,8 +592,8 @@ def apply_approved_proposal_execution_decision(
             reason="proposal_not_approved_for_followup",
             apply=apply,
         )
-    kind = str(proposal.get("kind") or "").strip().lower()
-    if kind != "expression_policy":
+    apply_kind = _explicit_proposal_apply_kind(proposal)
+    if apply_kind not in {"expression_policy", "proposal_queue_legacy_template_cleanup"}:
         return _approved_proposal_execution_apply_error(
             store,
             proposal_id=proposal_id,
@@ -615,6 +630,49 @@ def apply_approved_proposal_execution_decision(
             reason="owner_explicit_apply_required",
             apply=apply,
         )
+    if apply_kind == "proposal_queue_legacy_template_cleanup":
+        existing_cleanup = _legacy_template_cleanup_applies_by_proposal(store).get(proposal_id, {})
+        if apply and existing_cleanup:
+            return _approved_proposal_legacy_template_cleanup_apply_result(
+                store,
+                status="duplicate_ignored",
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                ops_gate_review=ops_gate_review,
+                apply_record=existing_cleanup,
+                target_ids=[],
+                closed_count=0,
+                cleanup_written=False,
+            )
+        targets = _legacy_template_cleanup_targets(store, exclude_proposal_id=proposal_id)
+        apply_record: dict[str, Any] = {}
+        closed_count = 0
+        if apply:
+            apply_record = _write_proposal_queue_legacy_template_cleanup(
+                store,
+                proposal=proposal,
+                targets=targets,
+                owner_id=owner_id,
+                channel=channel,
+                ops_gate_review=ops_gate_review,
+            )
+            closed_count = int(apply_record.get("closed_count") or 0)
+        return _approved_proposal_legacy_template_cleanup_apply_result(
+            store,
+            status="applied" if apply else "ready",
+            proposal=proposal,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            ops_gate_review=ops_gate_review,
+            apply_record=apply_record,
+            target_ids=[str(item.get("candidate_id") or "") for item in targets],
+            closed_count=closed_count,
+            cleanup_written=bool(apply_record),
+        )
+
     existing_apply = _policy_applies_by_proposal(store).get(proposal_id, {})
     if apply and existing_apply:
         return _approved_proposal_execution_apply_result(
@@ -3269,6 +3327,69 @@ def _approved_proposal_ops_gate_error(
     }
 
 
+def _explicit_proposal_apply_kind(proposal: dict[str, Any]) -> str:
+    kind = str(proposal.get("kind") or "").strip().lower()
+    proposal_class = str(proposal.get("proposal_class") or "").strip().lower()
+    dedupe_key = str(proposal.get("dedupe_key") or "").strip().lower()
+    if kind == "expression_policy":
+        return "expression_policy"
+    if kind == "proposal_queue_cleanup" and (
+        proposal_class == "proposal_queue_legacy_template_cleanup"
+        or dedupe_key == "proposal_queue_legacy_template_cleanup"
+    ):
+        return "proposal_queue_legacy_template_cleanup"
+    return ""
+
+
+def _approved_proposal_legacy_template_cleanup_apply_result(
+    store: MemoryOSStore,
+    *,
+    status: str,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    apply: bool,
+    ops_gate_review: dict[str, Any],
+    apply_record: dict[str, Any],
+    target_ids: list[str],
+    closed_count: int,
+    cleanup_written: bool,
+) -> dict[str, Any]:
+    proposal_id = str(proposal.get("candidate_id") or "")
+    apply_id = str(apply_record.get("apply_id") or "")
+    candidate_count = int(apply_record.get("matched_count") or len([item for item in target_ids if item]))
+    return {
+        "schema_version": APPROVED_PROPOSAL_EXECUTION_APPLY_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "proposal_state": str(proposal.get("state") or ""),
+        "apply_kind": "proposal_queue_legacy_template_cleanup",
+        "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+        "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
+        "policy_write_planned": False,
+        "policy_written": False,
+        "cleanup_write_planned": True,
+        "cleanup_written": cleanup_written,
+        "legacy_template_candidate_count": candidate_count,
+        "legacy_template_close_planned_count": candidate_count,
+        "legacy_template_closed_count": closed_count,
+        "legacy_template_candidate_ids": [item for item in target_ids if item][:50],
+        "legacy_template_cleanup_apply_id": apply_id,
+        "non_legacy_touched_count": 0,
+        "execution_ticket_created": False,
+        "actual_policy_write": False,
+        "actual_execute": False,
+        "actual_send": False,
+        "raw_body_included": False,
+        "rollback": "reopen pressure_blocked legacy template entries listed in legacy_template_cleanup_applies.jsonl if owner reverses the cleanup",
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
 def _approved_proposal_execution_apply_result(
     store: MemoryOSStore,
     *,
@@ -3348,6 +3469,10 @@ def _right_brain_expression_policy_applies_path(store: MemoryOSStore) -> Path:
     return store.roots.hermes_home / "system-modules" / "right_brain_expression_adapter" / "policy_applies.jsonl"
 
 
+def _proposal_queue_legacy_template_cleanup_applies_path(store: MemoryOSStore) -> Path:
+    return store.roots.hermes_home / "system-modules" / "proposal_queue" / "legacy_template_cleanup_applies.jsonl"
+
+
 def _policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
     applies: dict[str, dict[str, Any]] = {}
     for record in _read_jsonl(_right_brain_expression_policy_applies_path(store)):
@@ -3355,6 +3480,51 @@ def _policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any
         if proposal_id:
             applies[proposal_id] = record
     return applies
+
+
+def _legacy_template_cleanup_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
+    applies: dict[str, dict[str, Any]] = {}
+    for record in _read_jsonl(_proposal_queue_legacy_template_cleanup_applies_path(store)):
+        proposal_id = str(record.get("proposal_id") or "")
+        if proposal_id:
+            applies[proposal_id] = record
+    return applies
+
+
+def _legacy_template_cleanup_targets(store: MemoryOSStore, *, exclude_proposal_id: str) -> list[dict[str, Any]]:
+    targets: list[dict[str, Any]] = []
+    for item in _read_proposal_queue(store):
+        candidate_id = str(item.get("candidate_id") or "")
+        if not candidate_id or candidate_id == exclude_proposal_id:
+            continue
+        if not _legacy_template_proposal(item):
+            continue
+        if _proposal_queue_item_terminal_for_cleanup(item):
+            continue
+        targets.append(item)
+    return targets
+
+
+def _proposal_queue_item_terminal_for_cleanup(item: dict[str, Any]) -> bool:
+    state = str(item.get("state") or "")
+    followup_state = str(item.get("followup_state") or "")
+    if state in {"owner_declined", "expired", "pressure_blocked"}:
+        return True
+    return followup_state in {"closed", "applied_expression_policy", "applied_legacy_template_cleanup"}
+
+
+def _legacy_template_proposal(item: dict[str, Any]) -> bool:
+    title = str(item.get("title") or "")
+    body = " ".join(str(item.get("body") or "").split())
+    if "Proposed change:" in body and "Acceptance criteria:" in body:
+        return False
+    if "具体改动:" in body and "验收标准:" in body:
+        return False
+    if title == "Self-Evolution dry-run proposal":
+        return True
+    if title == "Tune right-brain expression policy" and "prompt/cadence/policy proposal" in body:
+        return True
+    return False
 
 
 def _right_brain_expression_policy_from_proposal(
@@ -3454,6 +3624,103 @@ def _write_right_brain_expression_policy(
             "proposal_id": record["proposal_id"],
             "policy_version": policy["policy_version"],
             "actual_policy_write": True,
+            "actual_execute": False,
+        },
+    )
+    return record
+
+
+def _write_proposal_queue_legacy_template_cleanup(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    targets: list[dict[str, Any]],
+    owner_id: str,
+    channel: str,
+    ops_gate_review: dict[str, Any],
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    proposal_id = str(proposal.get("candidate_id") or "")
+    target_ids = {str(item.get("candidate_id") or "") for item in targets if str(item.get("candidate_id") or "")}
+    apply_id = f"pqclean_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}"
+    path = _proposal_queue_path(store)
+    queue = _read_proposal_queue_document(path)
+    closed_ids: list[str] = []
+    archived_items: list[dict[str, Any]] = []
+    non_legacy_touched_count = 0
+    for item in queue.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "")
+        if candidate_id in target_ids:
+            if not _legacy_template_proposal(item) or _proposal_queue_item_terminal_for_cleanup(item):
+                non_legacy_touched_count += 1
+                continue
+            archived_items.append(
+                {
+                    "candidate_id": candidate_id,
+                    "kind": str(item.get("kind") or ""),
+                    "title": _bounded_text(str(item.get("title") or ""), 180),
+                    "state": str(item.get("state") or ""),
+                    "followup_state": str(item.get("followup_state") or ""),
+                    "source_refs": _safe_list(item.get("source_refs"))[:12],
+                }
+            )
+            item["state"] = "pressure_blocked"
+            item["followup_state"] = "closed"
+            item["execution_decision_state"] = "owner_applied_legacy_template_cleanup"
+            item["legacy_template_cleanup_apply_id"] = apply_id
+            item["actual_execute"] = False
+            item["updated_at"] = now
+            item.setdefault("reviews", []).append(
+                {
+                    "reviewer": owner_id,
+                    "decision": "apply_legacy_template_cleanup",
+                    "note": "Closed by explicit proposal_queue_legacy_template_cleanup apply.",
+                    "reviewed_at": now,
+                }
+            )
+            closed_ids.append(candidate_id)
+        elif candidate_id == proposal_id:
+            item["followup_state"] = "applied_legacy_template_cleanup"
+            item["execution_decision_state"] = "owner_applied_legacy_template_cleanup"
+            item["legacy_template_cleanup_apply_id"] = apply_id
+            item["legacy_template_closed_count"] = len(target_ids)
+            item["actual_execute"] = False
+            item["updated_at"] = now
+    _write_proposal_queue_document(path, queue)
+    record = {
+        "schema_version": "memory-os.proposal_queue_legacy_template_cleanup_apply.v0",
+        "apply_id": apply_id,
+        "created_at": now,
+        "profile": store.roots.profile or "default",
+        "proposal_id": proposal_id,
+        "proposal_title": _bounded_text(str(proposal.get("title") or ""), 180),
+        "owner_id": owner_id,
+        "channel": channel,
+        "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+        "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
+        "matched_count": len(target_ids),
+        "closed_count": len(closed_ids),
+        "closed_candidate_ids": closed_ids[:100],
+        "archived_items": archived_items[:100],
+        "non_legacy_touched_count": non_legacy_touched_count,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "actual_send": False,
+        "raw_body_included": False,
+    }
+    _append_jsonl(_proposal_queue_legacy_template_cleanup_applies_path(store), record)
+    append_audit(
+        store.roots.audit_path,
+        action="proposal_queue_legacy_template_cleanup_applied",
+        status="ok",
+        target=str(path),
+        details={
+            "apply_id": apply_id,
+            "proposal_id": proposal_id,
+            "closed_count": len(closed_ids),
+            "non_legacy_touched_count": non_legacy_touched_count,
             "actual_execute": False,
         },
     )

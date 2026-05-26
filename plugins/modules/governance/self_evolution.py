@@ -220,6 +220,42 @@ class SelfEvolutionGovernorModule:
                 },
             )
             return result
+        if proposal_shape.get("quality_gate_failed") is True:
+            result = self._result(
+                status="ok",
+                proposal_created=False,
+                proposal_id="",
+                ops_gate_decision={},
+                score_refs=score_refs,
+                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
+                reason="proposal_quality_gate_failed",
+                proposal_class=str(proposal_shape.get("proposal_class") or ""),
+                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+                skipped=True,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=cadence_input_fingerprint,
+                proposal_quality_gate_failed=True,
+                quality_gate_reason=str(proposal_shape.get("quality_gate_reason") or ""),
+                proposal_quality=proposal_shape.get("proposal_quality")
+                if isinstance(proposal_shape.get("proposal_quality"), dict)
+                else None,
+            )
+            self._write_report(result)
+            append_audit(
+                store.roots.audit_path,
+                action="self_evolution_dry_run_written",
+                status="ok",
+                target=str(self.reports_path),
+                details={
+                    "proposal_created": False,
+                    "reason": "proposal_quality_gate_failed",
+                    "quality_gate_reason": result.get("quality_gate_reason", ""),
+                    "score_ref_count": len(score_refs),
+                    "direct_self_modify": False,
+                    "actual_execute": False,
+                },
+            )
+            return result
         digest = self._write_digest(selected, evidence_scoring=evidence_scoring)
         gate_result = ops_gate.run_once(
             store=store,
@@ -289,6 +325,9 @@ class SelfEvolutionGovernorModule:
             "report_count": len(reports),
             "proposal_count": sum(1 for report in reports if report.get("proposal_created")),
             "novelty_skipped_count": sum(1 for report in reports if report.get("novelty_skipped")),
+            "proposal_quality_gate_failed_count": sum(
+                1 for report in reports if report.get("proposal_quality_gate_failed") is True
+            ),
             "duplicate_unresolved_proposal_count": sum(
                 1 for report in reports if report.get("reason") == "duplicate_unresolved_proposal"
             ),
@@ -296,6 +335,7 @@ class SelfEvolutionGovernorModule:
             "same_signal_skipped_count": sum(
                 1 for report in reports if report.get("reason") == "cadence_same_day_same_signal"
             ),
+            "last_quality_gate_reason": str(last.get("quality_gate_reason") or ""),
             "last_status": str(last.get("status", "missing")),
             "direct_self_modify": False,
             "actual_execute": False,
@@ -414,6 +454,9 @@ class SelfEvolutionGovernorModule:
         cadence_input_fingerprint: str = "",
         previous_report_id: str = "",
         previous_proposal_id: str = "",
+        proposal_quality_gate_failed: bool = False,
+        quality_gate_reason: str = "",
+        proposal_quality: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
         result = {
@@ -439,9 +482,13 @@ class SelfEvolutionGovernorModule:
             "cadence_input_fingerprint": cadence_input_fingerprint,
             "previous_report_id": previous_report_id,
             "previous_proposal_id": previous_proposal_id,
+            "proposal_quality_gate_failed": bool(proposal_quality_gate_failed),
+            "quality_gate_reason": quality_gate_reason,
             "direct_self_modify": False,
             "actual_execute": False,
         }
+        if proposal_quality is not None:
+            result["proposal_quality"] = dict(proposal_quality)
         if reason:
             result["reason"] = reason
         return result
@@ -590,17 +637,8 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
         for record in evidence_scoring.read_evidence()
         if isinstance(record, dict)
     }
-    ratings = [
-        str(
-            score.get("maturity_dimensions", {})
-            .get("owner_feedback", {})
-            .get("signals", {})
-            .get("feedback_rating", "")
-        )
-        for score in scores
-        if str(score.get("subject_kind") or "") == "expression_feedback"
-    ]
-    ratings = [rating for rating in ratings if rating and rating != "none"]
+    expression_feedback = _expression_feedback_signals(scores, evidence_by_id=evidence_by_id)
+    rating = str(expression_feedback.get("feedback_rating") or "")
     top_score = scores[0] if scores else {}
     top_summary = _score_summary(top_score, evidence_by_id=evidence_by_id)
     top_subject = str(top_score.get("subject_ref") or "unknown_subject")
@@ -608,25 +646,49 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
     top_score_value = top_score.get("maturity_score", top_score.get("score", ""))
     evidence_line = _evidence_line(top_score, evidence_by_id=evidence_by_id)
     quality = _proposal_quality(top_score, trigger_rule="feature_maturity_top_signal")
-    if ratings:
-        rating = ratings[0]
+    if rating:
         proposal_class = f"expression_policy:{_safe_key(rating)}"
+        proposal_quality = _expression_feedback_proposal_quality(
+            top_score,
+            trigger_rule="expression_feedback_policy",
+            signals=expression_feedback,
+        )
+        evidence_bits = [
+            f"owner 标记右脑表达 {rating}",
+            f"feedback_count={expression_feedback.get('feedback_count', 0)}",
+            f"linked_outcome_count={expression_feedback.get('linked_outcome_count', 0)}",
+            f"unlinked_feedback_count={expression_feedback.get('unlinked_feedback_count', 0)}",
+            f"maturity_score={top_score_value}",
+            f"summary={top_summary}",
+        ]
+        outcome_refs = expression_feedback.get("outcome_refs") if isinstance(expression_feedback.get("outcome_refs"), list) else []
+        policy_versions = (
+            expression_feedback.get("policy_versions")
+            if isinstance(expression_feedback.get("policy_versions"), list)
+            else []
+        )
+        if outcome_refs:
+            evidence_bits.append("outcomes=" + ",".join(str(ref) for ref in outcome_refs[:3]))
+        if policy_versions:
+            evidence_bits.append("policy_versions=" + ",".join(str(version) for version in policy_versions[:3]))
+        quality_gate_failed = int(expression_feedback.get("linked_outcome_count") or 0) <= 0
         return {
             "kind": "expression_policy",
             "title": f"调整右脑表达策略：{rating} 反馈",
             "proposal_class": proposal_class,
             "dedupe_key": proposal_class,
-            "proposal_quality": _proposal_quality(top_score, trigger_rule="expression_feedback_policy"),
+            "proposal_quality": proposal_quality,
+            "quality_gate_failed": quality_gate_failed,
+            "quality_gate_reason": "expression_feedback_requires_linked_outcome" if quality_gate_failed else "",
             "body": _proposal_body(
                 proposed_change=(
-                    f"根据 owner 表达反馈 rating={rating}，形成一条右脑表达策略调整方案。"
+                    f"根据 owner 表达反馈 rating={rating}，形成一条右脑表达策略调整 proposal；"
+                    "只说明要调整的 prompt/policy/cadence 候选，不直接写入运行时。"
                 ),
-                evidence=(
-                    f"owner 标记右脑表达 {rating}; maturity_score={top_score_value}; summary={top_summary}"
-                ),
+                evidence="; ".join(evidence_bits),
                 acceptance=(
                     "必须写清要改 prompt、cadence 还是 SpeakGate policy，owner 可见效果，"
-                    "monitor 检查字段，以及 rollback/stop signal。"
+                    "monitor 检查字段、对照样例、rollback/stop signal；至少引用一个 linked expression outcome。"
                 ),
                 follow_up=(
                     "approved_for_proposal -> OpsGate report-only -> owner manual apply decision；"
@@ -725,6 +787,85 @@ def _proposal_quality(score: dict[str, Any], *, trigger_rule: str) -> dict[str, 
         if isinstance(score.get("maturity_dimensions"), dict)
         else {},
     }
+
+
+def _expression_feedback_signals(
+    scores: list[dict[str, Any]],
+    *,
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    selected_records: list[dict[str, Any]] = []
+    for score in scores:
+        if str(score.get("subject_kind") or "") != "expression_feedback":
+            continue
+        for evidence_ref in score.get("evidence_refs", []):
+            record = evidence_by_id.get(str(evidence_ref), {})
+            if str(record.get("subject_kind") or "") == "expression_feedback":
+                selected_records.append(record)
+    selected_ratings = [str(record.get("feedback_rating") or "") for record in selected_records]
+    selected_ratings = [rating for rating in selected_ratings if rating and rating != "none"]
+    if not selected_ratings:
+        return {}
+    rating = selected_ratings[0]
+    records = [
+        record
+        for record in evidence_by_id.values()
+        if str(record.get("subject_kind") or "") == "expression_feedback"
+        and str(record.get("feedback_rating") or "") == rating
+    ]
+    outcome_refs = _unique_bounded([str(record.get("outcome_id") or "") for record in records])
+    request_refs = _unique_bounded([str(record.get("request_id") or "") for record in records])
+    policy_versions = _unique_bounded([str(record.get("policy_version") or "") for record in records])
+    feedback_count = len(records)
+    linked_count = len([record for record in records if str(record.get("outcome_id") or "")])
+    return {
+        "feedback_rating": rating,
+        "feedback_count": feedback_count,
+        "linked_outcome_count": linked_count,
+        "unlinked_feedback_count": max(feedback_count - linked_count, 0),
+        "outcome_refs": outcome_refs,
+        "request_refs": request_refs,
+        "policy_versions": policy_versions,
+    }
+
+
+def _expression_feedback_proposal_quality(
+    score: dict[str, Any],
+    *,
+    trigger_rule: str,
+    signals: dict[str, Any],
+) -> dict[str, Any]:
+    quality = _proposal_quality(score, trigger_rule=trigger_rule)
+    quality.update(
+        {
+            "quality_gate": "linked_expression_feedback",
+            "feedback_rating": str(signals.get("feedback_rating") or ""),
+            "feedback_count": int(signals.get("feedback_count") or 0),
+            "linked_outcome_count": int(signals.get("linked_outcome_count") or 0),
+            "unlinked_feedback_count": int(signals.get("unlinked_feedback_count") or 0),
+            "outcome_refs": list(signals.get("outcome_refs") or []),
+            "request_refs": list(signals.get("request_refs") or []),
+            "policy_versions": list(signals.get("policy_versions") or []),
+            "runtime_target": "expression_policy",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+        }
+    )
+    return quality
+
+
+def _unique_bounded(values: list[str], *, limit: int = 5) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = _bounded_line(value, 96)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+        if len(result) >= limit:
+            break
+    return result
 
 
 def _safe_key(value: str) -> str:

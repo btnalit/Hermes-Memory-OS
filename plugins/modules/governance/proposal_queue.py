@@ -327,13 +327,27 @@ def _bounded_token(value: str, limit: int) -> str:
 
 def _bounded_proposal_quality(value: dict[str, Any]) -> dict[str, Any]:
     allowed = {
+        "direct_apply_allowed",
         "trigger_rule",
+        "feedback_count",
+        "feedback_rating",
+        "generic_executor_allowed",
+        "linked_outcome_count",
+        "outcome_refs",
+        "policy_versions",
+        "quality_gate",
+        "request_refs",
+        "runtime_target",
         "top_subject_ref",
         "top_subject_kind",
         "maturity_score",
         "evidence_ref_count",
         "maturity_dimensions",
+        "unlinked_feedback_count",
     }
+    bool_keys = {"direct_apply_allowed", "generic_executor_allowed"}
+    int_keys = {"evidence_ref_count", "feedback_count", "linked_outcome_count", "unlinked_feedback_count"}
+    list_keys = {"outcome_refs", "request_refs", "policy_versions"}
     result: dict[str, Any] = {}
     for key in allowed:
         if key not in value:
@@ -346,11 +360,15 @@ def _bounded_proposal_quality(value: dict[str, Any]) -> dict[str, Any]:
                 result[key] = round(float(item), 3)
             except (TypeError, ValueError):
                 continue
-        elif key == "evidence_ref_count":
+        elif key in int_keys:
             try:
                 result[key] = max(int(item), 0)
             except (TypeError, ValueError):
                 continue
+        elif key in bool_keys:
+            result[key] = bool(item)
+        elif key in list_keys and isinstance(item, list):
+            result[key] = [_bounded_token(str(entry), 96) for entry in item[:5] if str(entry)]
         else:
             result[key] = _bounded_token(str(item), 240)
     return result

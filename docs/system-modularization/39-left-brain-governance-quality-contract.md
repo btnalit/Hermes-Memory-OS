@@ -17,7 +17,8 @@ Current implementation state:
   comparison fields (`legacy_hash_score`, `legacy_hash_comparison_count`).
 - P1-S expression-feedback input is implemented: expression feedback ledger
   records become scoring subjects, and SelfEvolution can create an
-  `expression_policy` proposal. This still does not directly change prompt,
+  `expression_policy` proposal when the feedback is linked to a recorded
+  right-brain expression outcome. This still does not directly change prompt,
   cadence, policy, delivery, or execution.
 - 2026-05-26 live smoke on `10.20.3.200` proved the owner/Hermes interaction
   path, not only SSH/CLI: a rendered speak item exposed
@@ -50,6 +51,13 @@ Current implementation state:
 - The follow-up EvidenceScoring rating propagation fix is live on
   `10.20.3.200`: expression feedback evidence and maturity dimensions now carry
   `feedback_rating=too_mechanical` instead of `unknown`.
+- The 2026-05-27 feedback-quality gate is live on `10.20.3.200`:
+  EvidenceScoring exposes `expression_feedback_linked_subject_count` and
+  `expression_feedback_unlinked_subject_count`; SelfEvolution rejects
+  unlinked-only feedback as `proposal_quality_gate_failed` instead of creating
+  owner-facing proposal pressure. Targeted live smoke reports
+  `expression_feedback_subject_count=3`, linked `1`, unlinked `2`,
+  same-day same-signal skip, and `actual_execute=false`.
 
 ## Why This Exists
 
@@ -590,6 +598,15 @@ Current explicit apply boundary:
 - apply records are appended to `policy_applies.jsonl` with rollback evidence;
 - `actual_execute`, `actual_send`, identity write, and unapproved
   crystallized approval remain false.
+- `proposal_queue_legacy_template_cleanup` is the second explicit apply class:
+  it is allowed only for `kind=proposal_queue_cleanup` plus
+  `proposal_class` or `dedupe_key=proposal_queue_legacy_template_cleanup`;
+  after owner approval and OpsGate `would_allow`, it may close matched legacy
+  template proposals by setting them to `pressure_blocked` and appending
+  `legacy_template_cleanup_applies.jsonl`.
+- Legacy cleanup is not a generic proposal executor. It must not touch
+  concrete proposals with quality fields/classes, must not create execution
+  tickets, and must report `non_legacy_touched_count=0`.
 
 ## Prototype-Informed Runtime Plan
 

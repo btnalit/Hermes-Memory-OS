@@ -220,6 +220,48 @@ def test_evidence_scoring_preserves_expression_feedback_rating(tmp_path):
     assert feature["maturity_dimensions"]["risk"]["signals"]["risk_level"] > 0.2
 
 
+def test_evidence_scoring_preserves_expression_feedback_outcome_context(tmp_path):
+    store = _store(tmp_path)
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.expression_feedback.v0",
+                "feedback_id": "efb_linked_001",
+                "created_at": "2026-05-26T00:00:00Z",
+                "target_id": "expr_linked_001",
+                "outcome_id": "rbout_linked_001",
+                "request_id": "rbreq_linked_001",
+                "policy_version": 3,
+                "rating": "off_voice",
+                "raw_body_included": False,
+                "live_policy_changed": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    result = module.score_all(store=store)
+
+    assert result["expression_feedback_subject_count"] == 1
+    assert result["expression_feedback_linked_subject_count"] == 1
+    assert result["expression_feedback_unlinked_subject_count"] == 0
+    evidence = [record for record in module.read_evidence() if record["subject_kind"] == "expression_feedback"][0]
+    feature = [record for record in module.read_feature_scores() if record["subject_kind"] == "expression_feedback"][0]
+    assert evidence["feedback_rating"] == "off_voice"
+    assert evidence["outcome_id"] == "rbout_linked_001"
+    assert evidence["request_id"] == "rbreq_linked_001"
+    assert evidence["policy_version"] == "3"
+    signals = feature["maturity_dimensions"]["owner_feedback"]["signals"]
+    assert signals["linked_outcome"] is True
+    assert signals["outcome_id"] == "rbout_linked_001"
+    assert signals["policy_version"] == "3"
+
+
 def test_evidence_scoring_skips_expired_working_items(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

@@ -373,6 +373,9 @@ class EvidenceScoringModule:
             subject_counts[subject_kind] = subject_counts.get(subject_kind, 0) + 1
         expired_used = _expired_working_subject_count(evidence, self.hermes_home)
         feature_score_live_applied = any(record.get("live_applied") is True for record in feature_scores)
+        expression_feedback_evidence = [
+            record for record in evidence if str(record.get("subject_kind") or "") == "expression_feedback"
+        ]
         return {
             "schema_version": "hermes.evidence_scoring_status.v0",
             "module": "evidence_scoring",
@@ -395,6 +398,12 @@ class EvidenceScoringModule:
             "maturity_live_applied": any(record.get("maturity_live_applied") is True for record in feature_scores),
             "owner_feedback_signal_count": 0,
             "expression_feedback_subject_count": subject_counts.get("expression_feedback", 0),
+            "expression_feedback_linked_subject_count": sum(
+                1 for record in expression_feedback_evidence if str(record.get("outcome_id") or "")
+            ),
+            "expression_feedback_unlinked_subject_count": sum(
+                1 for record in expression_feedback_evidence if not str(record.get("outcome_id") or "")
+            ),
             "subject_counts": dict(sorted(subject_counts.items())),
             "working_subject_count": subject_counts.get("working", 0),
             "expired_used_in_scoring_count": expired_used,
@@ -522,6 +531,8 @@ class EvidenceScoringModule:
                 }
             )
         expression_feedback_count = 0
+        expression_feedback_linked_subject_count = 0
+        expression_feedback_unlinked_subject_count = 0
         for feedback in _read_jsonl(store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"):
             feedback_id = str(feedback.get("feedback_id", ""))
             if not feedback_id:
@@ -529,14 +540,31 @@ class EvidenceScoringModule:
             expression_feedback_count += 1
             rating = str(feedback.get("rating") or feedback.get("action_type") or "unknown")
             target_id = str(feedback.get("draft_id") or feedback.get("target_id") or "")
+            outcome_id = str(feedback.get("outcome_id") or "")
+            request_id = str(feedback.get("request_id") or "")
+            policy_version = str(feedback.get("policy_version") or "")
+            if outcome_id:
+                expression_feedback_linked_subject_count += 1
+            else:
+                expression_feedback_unlinked_subject_count += 1
+            summary_parts = [f"expression_feedback rating={rating}", f"target={target_id}"]
+            if outcome_id:
+                summary_parts.append(f"outcome={outcome_id}")
+            if policy_version:
+                summary_parts.append(f"policy_version={policy_version}")
             subjects.append(
                 {
                     "subject_ref": f"expression_feedback:{feedback_id}",
                     "subject_kind": "expression_feedback",
-                    "evidence_summary": f"expression_feedback rating={rating} target={target_id}",
+                    "evidence_summary": " ".join(summary_parts),
                     "source_ref": f"memory_os:expression_feedback:{feedback_id}",
                     "source_status": "active",
                     "feedback_rating": rating,
+                    "target_id": target_id,
+                    "outcome_id": outcome_id,
+                    "request_id": request_id,
+                    "policy_version": policy_version,
+                    "linked_outcome": "true" if outcome_id else "false",
                 }
             )
         return sorted(subjects, key=lambda item: item["subject_ref"]), {
@@ -544,6 +572,8 @@ class EvidenceScoringModule:
             "working_expired_skipped_count": working_expired_skipped_count,
             "working_unknown_status_count": working_unknown_status_count,
             "expression_feedback_subject_count": expression_feedback_count,
+            "expression_feedback_linked_subject_count": expression_feedback_linked_subject_count,
+            "expression_feedback_unlinked_subject_count": expression_feedback_unlinked_subject_count,
         }
 
     def _build_evidence_record(self, subject: dict[str, str]) -> dict[str, Any]:
@@ -560,6 +590,9 @@ class EvidenceScoringModule:
         }
         if subject.get("feedback_rating"):
             record["feedback_rating"] = subject["feedback_rating"]
+        for key in ("target_id", "outcome_id", "request_id", "policy_version", "linked_outcome"):
+            if subject.get(key):
+                record[key] = subject[key]
         return record
 
     @staticmethod
@@ -649,6 +682,10 @@ def _maturity_dimensions(
     source_status = subject.get("source_status", "")
     proposal_state = _proposal_state(subject.get("evidence_summary", "")) if subject_kind == "proposal" else ""
     feedback_rating = subject.get("feedback_rating", "")
+    linked_outcome = subject.get("linked_outcome", "") == "true"
+    outcome_id = subject.get("outcome_id", "")
+    request_id = subject.get("request_id", "")
+    policy_version = subject.get("policy_version", "")
     signal_key = _signal_key(subject)
     key_counts = subject_stats.get("key_counts") if isinstance(subject_stats.get("key_counts"), dict) else {}
     source_classes = subject_stats.get("source_classes") if isinstance(subject_stats.get("source_classes"), dict) else {}
@@ -690,6 +727,10 @@ def _maturity_dimensions(
             proposal_state=proposal_state or "none",
             feedback_rating=feedback_rating or "none",
             explicit_feedback_signal_count=1 if feedback_rating else 0,
+            linked_outcome=linked_outcome,
+            outcome_id=outcome_id,
+            request_id=request_id,
+            policy_version=policy_version,
         ),
         "risk": _dimension(
             round(1.0 - risk_level, 3),
@@ -750,6 +791,8 @@ def _source_class(source_ref: str) -> str:
         return "crystallized_candidate"
     if source_ref.startswith("memory_os:event"):
         return "event"
+    if source_ref.startswith("memory_os:expression_feedback"):
+        return "expression_feedback"
     return "unknown"
 
 
