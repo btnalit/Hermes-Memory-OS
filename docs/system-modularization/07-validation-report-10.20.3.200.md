@@ -11947,3 +11947,82 @@ NOT CLOSED:
   RightBrainExpressionEngine / Hermes-agent expression adapter, bounded owner
   expression preview, expression feedback labels, and governance backflow.
 ```
+
+## 2026-05-26 - P1-S Slice 1 Local Expired-Working Scoring Filter
+
+Scope:
+
+```text
+P1-S / RH-39 first implementation slice only.
+No feature-based scoring v2.
+No SelfEvolution novelty gate.
+No feedback backflow apply.
+No execution/apply capability.
+```
+
+Dynamic closure mapping:
+
+```text
+source_of_truth:
+  40-memory-os-unified-control-plane.md
+  39-left-brain-governance-quality-contract.md
+  live finding: working expired=147 while evidence.subject_counts.working=168
+
+owning_seam:
+  left-brain governance quality / EvidenceScoring input hygiene / monitor evidence
+
+reverse_scope:
+  Hermes owns conversation and execution UX. Memory-OS owns bounded evidence
+  scoring artifacts, audit and monitor evidence. This slice does not add
+  execution or transport behavior.
+```
+
+Implementation:
+
+```text
+plugins/modules/evidence/scoring.py:
+  EvidenceScoring skips working items whose status is expired.
+  score_all() reports:
+    working_active_subject_count
+    working_expired_skipped_count
+    working_unknown_status_count
+  status() reports:
+    working_subject_count
+    expired_used_in_scoring_count
+
+scripts/memory_os_3_200_monitor.py:
+  module_artifacts.evidence now includes:
+    working_subject_count
+    expired_used_in_scoring_count
+  expired_used_in_scoring_count > 0 becomes WARN:
+    left_brain_expired_working_used_in_scoring
+```
+
+Local evidence:
+
+```text
+python -m pytest tests/system_modularization/test_evidence_scoring_module.py \
+  tests/scripts/test_memory_os_3_200_monitor.py -q
+
+42 passed
+
+python scripts/memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=16
+matrix_module_count=28
+active_work_item_count=19
+active_work_mapping_count=19
+finding_count=0
+```
+
+Decision:
+
+```text
+LOCAL PASS.
+
+This closes only EvidenceScoring's local expired-working input hygiene.
+It does not close DeepReflection expired-working handling or left-brain
+judgment quality. Installed/live closure still requires deployment to
+10.20.3.200, a new scoring run, and monitor evidence that
+expired_used_in_scoring_count=0.
+```

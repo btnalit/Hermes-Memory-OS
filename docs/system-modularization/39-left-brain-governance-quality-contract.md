@@ -2,7 +2,18 @@
 
 Date: 2026-05-26
 
-Status: design gate; no runtime implementation in this document.
+Status: design gate plus first local data-hygiene slice.
+
+Current implementation state:
+
+- P1-S slice 1 is implemented locally: EvidenceScoring skips expired working
+  items by default.
+- EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
+  expired working evidence still appears in scoring output.
+- This does not implement feature-based scoring v2, feedback backflow,
+  SelfEvolution novelty gates, production cadence, or execution apply.
+- Live `10.20.3.200` deployment evidence is still required before claiming the
+  installed scoring path no longer uses expired working.
 
 ## Why This Exists
 
@@ -71,6 +82,7 @@ working_items=168
 expired=147
 evidence.score_count=606
 evidence.subject_counts.working=168
+evidence.expired_used_in_scoring_count=not available before P1-S slice 1
 self_evolution.report_count=16
 self_evolution.proposal_count=16
 proposal_queue.approved_for_proposal=7
@@ -162,6 +174,15 @@ It must not directly mutate routing, prompt text, cadence, or delivery policy.
 Expired working items are expected as retention/decay state. They should not
 carry the same weight as active working memory in evidence scoring or
 reflection.
+
+P1-S slice 1:
+
+```text
+EvidenceScoring now skips working items whose status is expired.
+It reports working_active_subject_count, working_expired_skipped_count,
+working_unknown_status_count, working_subject_count, and
+expired_used_in_scoring_count.
+```
 
 Contract rule:
 

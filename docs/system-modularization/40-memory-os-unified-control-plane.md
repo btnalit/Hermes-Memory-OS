@@ -248,7 +248,9 @@ Current truth:
 - evidence scoring is hash-derived;
 - SelfEvolution can produce proposal backlog;
 - feedback backflow is not closed;
-- expired working can influence scoring/reflection;
+- local P1-S slice 1 filters expired working out of EvidenceScoring and adds
+  monitor visibility for expired scoring contamination;
+- DeepReflection expired-working handling is still not fixed;
 - production cadence is not mature.
 
 Implementation order:

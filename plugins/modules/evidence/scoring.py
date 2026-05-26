@@ -74,7 +74,7 @@ class EvidenceScoringModule:
 
     def score_all(self, *, store: MemoryOSStore, proposal_queue: Any | None = None) -> dict[str, Any]:
         store.initialize()
-        subjects = self._collect_subjects(store=store, proposal_queue=proposal_queue)
+        subjects, collection_stats = self._collect_subjects(store=store, proposal_queue=proposal_queue)
         evidence_records: list[dict[str, Any]] = []
         score_records: list[dict[str, Any]] = []
         for subject in subjects:
@@ -104,6 +104,7 @@ class EvidenceScoringModule:
             "self_evolution_triggered": False,
             "scores_path": str(self.scores_path),
             "evidence_path": str(self.evidence_path),
+            **collection_stats,
         }
         append_audit(
             store.roots.audit_path,
@@ -115,6 +116,7 @@ class EvidenceScoringModule:
                 "evidence_count": len(evidence_records),
                 "actual_approve": False,
                 "self_evolution_triggered": False,
+                **collection_stats,
             },
         )
         return result
@@ -163,6 +165,7 @@ class EvidenceScoringModule:
         for score in scores:
             subject_kind = str(score.get("subject_kind", ""))
             subject_counts[subject_kind] = subject_counts.get(subject_kind, 0) + 1
+        expired_used = _expired_working_subject_count(evidence, self.hermes_home)
         return {
             "schema_version": "hermes.evidence_scoring_status.v0",
             "module": "evidence_scoring",
@@ -170,6 +173,8 @@ class EvidenceScoringModule:
             "score_count": len(scores),
             "evidence_count": len(evidence),
             "subject_counts": dict(sorted(subject_counts.items())),
+            "working_subject_count": subject_counts.get("working", 0),
+            "expired_used_in_scoring_count": expired_used,
             "delivery_mode": "no-send",
             "actual_approve": False,
             "self_evolution_triggered": False,
@@ -220,8 +225,16 @@ class EvidenceScoringModule:
             "findings": findings,
         }
 
-    def _collect_subjects(self, *, store: MemoryOSStore, proposal_queue: Any | None) -> list[dict[str, str]]:
+    def _collect_subjects(
+        self,
+        *,
+        store: MemoryOSStore,
+        proposal_queue: Any | None,
+    ) -> tuple[list[dict[str, str]], dict[str, int]]:
         subjects: list[dict[str, str]] = []
+        working_active_subject_count = 0
+        working_expired_skipped_count = 0
+        working_unknown_status_count = 0
         for event in sorted(store.read_events(), key=lambda item: item.id):
             if event.profile != self.profile:
                 continue
@@ -239,6 +252,14 @@ class EvidenceScoringModule:
                 item_id = str(item.get("id", ""))
                 if not item_id:
                     continue
+                status = str(item.get("status") or "")
+                if status == "expired":
+                    working_expired_skipped_count += 1
+                    continue
+                if status == "active":
+                    working_active_subject_count += 1
+                else:
+                    working_unknown_status_count += 1
                 subjects.append(
                     {
                         "subject_ref": f"working:{item_id}",
@@ -269,7 +290,11 @@ class EvidenceScoringModule:
                     "source_ref": f"memory_os:crystallized_candidate:{candidate.candidate_id}",
                 }
             )
-        return sorted(subjects, key=lambda item: item["subject_ref"])
+        return sorted(subjects, key=lambda item: item["subject_ref"]), {
+            "working_active_subject_count": working_active_subject_count,
+            "working_expired_skipped_count": working_expired_skipped_count,
+            "working_unknown_status_count": working_unknown_status_count,
+        }
 
     def _build_evidence_record(self, subject: dict[str, str]) -> dict[str, Any]:
         evidence_id = _stable_id("evidence", subject["subject_ref"], subject["evidence_summary"])
@@ -302,6 +327,32 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _expired_working_subject_count(evidence: list[dict[str, Any]], hermes_home: Path) -> int:
+    statuses: dict[tuple[str, str], str] = {}
+    working_root = hermes_home / "memory-os" / "working"
+    for path in sorted(working_root.glob("*.json")):
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for item in document.get("items", []):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "")
+            if item_id:
+                statuses[(path.stem, item_id)] = str(item.get("status") or "")
+
+    expired_count = 0
+    for record in evidence:
+        if record.get("subject_kind") != "working":
+            continue
+        source_ref = str(record.get("source_ref") or "")
+        parts = source_ref.split(":")
+        if len(parts) >= 4 and statuses.get((parts[2], parts[3])) == "expired":
+            expired_count += 1
+    return expired_count
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

@@ -1128,7 +1128,8 @@ Stop signal:
 
 ### P1-S - RH-39 Left-Brain Governance Quality
 
-Status: design gate added; runtime implementation not started.
+Status: design gate added; P1-S slice 1 implemented locally, live deployment
+evidence pending.
 
 Source:
 
@@ -1146,7 +1147,9 @@ Reason:
   novelty/idempotency/cadence gate;
 - feedback ledgers exist, but feedback is not yet consumed as first-class
   GovernanceFeedback / scoring / reflection input;
-- expired working items are still counted as evidence subjects;
+- local P1-S slice 1 filters expired working from EvidenceScoring and adds
+  monitor visibility for expired scoring contamination;
+- expired working handling in DeepReflection is still not fixed;
 - approved proposals are visible and safe, but execution-decision state remains
   future work.
 

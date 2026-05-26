@@ -577,6 +577,21 @@ def test_classify_snapshot_passes_module_artifact_summary_and_fails_on_actual_se
     assert any(item["code"] == "module_artifact_speak_gate_actual_send_true" for item in classification["fail"])
 
 
+def test_classify_snapshot_warns_when_expired_working_is_scored():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"] = {
+        "schema_version": "memory-os.module_artifact_summary.v0",
+        "status": "ok",
+        "speak_gate": {"would_send_count": 0, "actual_send": False},
+        "evidence": {"expired_used_in_scoring_count": 3},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "left_brain_expired_working_used_in_scoring" for item in classification["warn"])
+
+
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
     snapshot = _healthy_snapshot()
     snapshot["session_activity"] = {"total_session_events": 12}

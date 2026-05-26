@@ -1084,6 +1084,9 @@ Required monitor evidence:
 - `right_brain_expression.raw_body_included_count`
 - `right_brain_expression.task_language_count`
 - `right_brain_expression.boundary_true_count`
+- `left_brain_scoring.working_subject_count`
+- `left_brain_scoring.expired_used_in_scoring_count`
+- `left_brain_scoring.working_expired_skipped_count`
 - `feedback_backflow.by_action_type`
 - `feedback_backflow.apply_ready_count`
 

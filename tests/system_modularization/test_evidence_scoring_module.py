@@ -77,6 +77,8 @@ def test_evidence_scoring_writes_explainable_scores_for_all_supported_subjects(t
 
     assert result["status"] == "ok"
     assert result["score_count"] == 4
+    assert result["working_active_subject_count"] == 1
+    assert result["working_expired_skipped_count"] == 0
     assert result["actual_approve"] is False
     assert result["self_evolution_triggered"] is False
     scores = module.read_scores()
@@ -97,6 +99,43 @@ def test_evidence_scoring_writes_explainable_scores_for_all_supported_subjects(t
     assert all(ref in evidence_ids for score in scores for ref in score["evidence_refs"])
     audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
     assert any("evidence_scoring_run_written" in line for line in audit_lines)
+
+
+def test_evidence_scoring_skips_expired_working_items(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {**build_event(seed=2, profile="main"), "summary": "Owner discussed stale working cleanup."}
+    )
+    store.append_event(event)
+    active = WorkingMemoryService(store).add_item(
+        "lingering",
+        "Active working evidence should remain scoreable.",
+        source_event_id=event.id,
+        tags=["test"],
+    )
+    expired = WorkingMemoryService(store).add_item(
+        "lingering",
+        "Expired working evidence should not drive scoring.",
+        source_event_id=event.id,
+        tags=["test"],
+    )
+    document = store.read_working_document("lingering")
+    for item in document["items"]:
+        if item["id"] == expired.id:
+            item["status"] = "expired"
+    store.write_working_document("lingering", document, audit=False)
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    result = module.score_all(store=store)
+    status = module.status()
+    subject_refs = {score["subject_ref"] for score in module.read_scores()}
+
+    assert result["working_active_subject_count"] == 1
+    assert result["working_expired_skipped_count"] == 1
+    assert f"working:{active.id}" in subject_refs
+    assert f"working:{expired.id}" not in subject_refs
+    assert status["working_subject_count"] == 1
+    assert status["expired_used_in_scoring_count"] == 0
 
 
 def test_evidence_scoring_rejects_scores_without_evidence_or_explanation(tmp_path):

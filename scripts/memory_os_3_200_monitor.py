@@ -269,6 +269,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     },
                 }
             )
+        evidence = module_artifacts.get("evidence") if isinstance(module_artifacts.get("evidence"), dict) else {}
+        expired_used = int(evidence.get("expired_used_in_scoring_count") or 0)
+        if expired_used > 0:
+            warn.append(
+                {
+                    "code": "left_brain_expired_working_used_in_scoring",
+                    "expired_used_in_scoring_count": expired_used,
+                }
+            )
+        else:
+            passed.append({"code": "left_brain_expired_working_not_scored"})
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
@@ -1728,6 +1739,8 @@ def module_artifact_summary():
         "evidence_count": evidence.get("evidence_count"),
         "score_count": evidence.get("score_count"),
         "subject_counts": evidence.get("subject_counts"),
+        "working_subject_count": evidence.get("working_subject_count"),
+        "expired_used_in_scoring_count": evidence.get("expired_used_in_scoring_count"),
       },
       "proposal_queue": {
         "candidate_count": proposal.get("candidate_count"),
