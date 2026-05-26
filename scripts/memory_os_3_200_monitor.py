@@ -306,41 +306,64 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             passed.append({"code": "left_brain_expired_working_not_scored"})
-        feature_live_applied = evidence.get("feature_score_live_applied") is True
+        score_mode = evidence.get("score_mode")
         feature_count = int(evidence.get("feature_score_count") or 0)
-        legacy_count = int(evidence.get("hash_score_legacy_count") or evidence.get("score_count") or 0)
+        legacy_count = int(evidence.get("hash_score_legacy_count") or 0)
+        legacy_comparison_count = int(evidence.get("legacy_hash_comparison_count") or evidence.get("comparison_count") or 0)
         comparison_count = int(evidence.get("comparison_count") or 0)
-        if feature_live_applied:
-            fail.append({"code": "left_brain_feature_scoring_live_applied", "value": evidence})
-        elif feature_count > 0 and legacy_count > 0:
-            if evidence.get("feature_score_mode") == "report_only" and comparison_count == min(feature_count, legacy_count):
+        if legacy_count > 0:
+            fail.append({"code": "left_brain_legacy_hash_scores_still_primary", "value": evidence})
+        elif feature_count > 0:
+            if (
+                score_mode == "feature_maturity_v2"
+                and evidence.get("feature_score_mode") == "primary"
+                and legacy_comparison_count >= feature_count
+            ):
                 passed.append(
                     {
-                        "code": "left_brain_feature_scoring_report_only_ok",
+                        "code": "left_brain_feature_scoring_primary_ok",
                         "feature_score_count": feature_count,
-                        "hash_score_legacy_count": legacy_count,
+                        "legacy_hash_comparison_count": legacy_comparison_count,
                     }
                 )
             else:
-                warn.append({"code": "left_brain_feature_scoring_report_only_incomplete", "value": evidence})
-        elif legacy_count > 0:
-            warn.append({"code": "left_brain_feature_scoring_missing", "hash_score_legacy_count": legacy_count})
+                warn.append({"code": "left_brain_feature_scoring_primary_incomplete", "value": evidence})
+        elif int(evidence.get("score_count") or 0) > 0:
+            warn.append({"code": "left_brain_feature_scoring_missing", "score_count": evidence.get("score_count")})
         maturity_live_applied = evidence.get("maturity_live_applied") is True
         prototype_aligned_count = int(evidence.get("prototype_aligned_score_count") or 0)
         maturity_dimension_count = int(evidence.get("maturity_dimension_count") or 0)
         if maturity_live_applied:
             fail.append({"code": "left_brain_maturity_scoring_live_applied", "value": evidence})
         elif prototype_aligned_count > 0:
-            if evidence.get("feature_score_mode") == "report_only" and maturity_dimension_count >= 9:
+            if evidence.get("feature_score_mode") == "primary" and maturity_dimension_count >= 9:
                 passed.append(
                     {
-                        "code": "left_brain_maturity_scoring_report_only_ok",
+                        "code": "left_brain_maturity_scoring_primary_ok",
                         "prototype_aligned_score_count": prototype_aligned_count,
                         "maturity_dimension_count": maturity_dimension_count,
                     }
                 )
             else:
-                warn.append({"code": "left_brain_maturity_scoring_report_only_incomplete", "value": evidence})
+                warn.append({"code": "left_brain_maturity_scoring_primary_incomplete", "value": evidence})
+        right_brain_adapter = (
+            module_artifacts.get("right_brain_expression_adapter")
+            if isinstance(module_artifacts.get("right_brain_expression_adapter"), dict)
+            else {}
+        )
+        if right_brain_adapter:
+            if right_brain_adapter.get("latest_actual_send") is True:
+                fail.append({"code": "right_brain_expression_adapter_actual_send_true", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("raw_body_included_count") or 0) > 0:
+                fail.append({"code": "right_brain_expression_adapter_raw_body_included", "value": right_brain_adapter})
+            elif int(right_brain_adapter.get("request_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "right_brain_expression_adapter_visible",
+                        "request_count": right_brain_adapter.get("request_count"),
+                        "delivery_mode": right_brain_adapter.get("latest_delivery_mode"),
+                    }
+                )
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
@@ -1078,6 +1101,7 @@ def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "speak_gate": summary.get("speak_gate"),
         "expression_draft": summary.get("expression_draft"),
         "expression_feedback": summary.get("expression_feedback"),
+        "right_brain_expression_adapter": summary.get("right_brain_expression_adapter"),
     }
 
 
@@ -1099,6 +1123,11 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "speak_gate_would_send_count": summary.get("speak_gate_would_send_count"),
         "speak_gate_blocked_count": summary.get("speak_gate_blocked_count"),
         "speak_gate_actual_send": summary.get("speak_gate_actual_send"),
+        "right_brain_adapter_request_count": summary.get("right_brain_adapter_request_count"),
+        "right_brain_adapter_latest_channel": summary.get("right_brain_adapter_latest_channel"),
+        "right_brain_adapter_latest_delivery_mode": summary.get("right_brain_adapter_latest_delivery_mode"),
+        "right_brain_adapter_latest_actual_send": summary.get("right_brain_adapter_latest_actual_send"),
+        "right_brain_adapter_raw_body_included_count": summary.get("right_brain_adapter_raw_body_included_count"),
     }
 
 
@@ -1809,6 +1838,14 @@ def module_artifact_summary():
     expression_draft = status("expression_draft")
     mailbox = status("mailbox")
     expression_feedback = _read_jsonl("/root/.hermes/memory-os/system/expression_feedback_ledger.jsonl")
+    right_brain_expression_requests = _read_jsonl(
+        "/root/.hermes/system-modules/right_brain_expression_adapter/requests.jsonl"
+    )
+    latest_right_brain_expression_request = (
+        right_brain_expression_requests[-1]
+        if right_brain_expression_requests and isinstance(right_brain_expression_requests[-1], dict)
+        else {}
+    )
     ops_gate_reports = _read_jsonl("/root/.hermes/system-modules/ops_gate/reports.jsonl")
     proposal_followup_action_counts = {}
     for report_item in ops_gate_reports:
@@ -1844,9 +1881,11 @@ def module_artifact_summary():
       "evidence": {
         "evidence_count": evidence.get("evidence_count"),
         "score_count": evidence.get("score_count"),
+        "score_mode": evidence.get("score_mode"),
         "feature_score_mode": evidence.get("feature_score_mode"),
         "feature_score_count": evidence.get("feature_score_count"),
         "hash_score_legacy_count": evidence.get("hash_score_legacy_count"),
+        "legacy_hash_comparison_count": evidence.get("legacy_hash_comparison_count"),
         "comparison_count": evidence.get("comparison_count"),
         "feature_score_report_count": evidence.get("feature_score_report_count"),
         "feature_score_live_applied": evidence.get("feature_score_live_applied"),
@@ -1855,6 +1894,7 @@ def module_artifact_summary():
         "maturity_dimension_keys": evidence.get("maturity_dimension_keys"),
         "maturity_live_applied": evidence.get("maturity_live_applied"),
         "owner_feedback_signal_count": evidence.get("owner_feedback_signal_count"),
+        "expression_feedback_subject_count": evidence.get("expression_feedback_subject_count"),
         "subject_counts": evidence.get("subject_counts"),
         "working_subject_count": evidence.get("working_subject_count"),
         "expired_used_in_scoring_count": evidence.get("expired_used_in_scoring_count"),
@@ -1906,6 +1946,23 @@ def module_artifact_summary():
         "live_policy_changed_count": sum(1 for item in expression_feedback if isinstance(item, dict) and item.get("live_policy_changed") is True),
         "raw_body_included_count": sum(1 for item in expression_feedback if isinstance(item, dict) and item.get("raw_body_included") is True),
       },
+      "right_brain_expression_adapter": {
+        "request_count": len(right_brain_expression_requests),
+        "silent_request_count": sum(
+            1
+            for item in right_brain_expression_requests
+            if isinstance(item, dict) and item.get("silent") is True
+        ),
+        "latest_channel": latest_right_brain_expression_request.get("channel"),
+        "latest_delivery_mode": latest_right_brain_expression_request.get("delivery_mode"),
+        "latest_actual_send": latest_right_brain_expression_request.get("actual_send"),
+        "latest_raw_body_included": latest_right_brain_expression_request.get("raw_body_included"),
+        "raw_body_included_count": sum(
+            1
+            for item in right_brain_expression_requests
+            if isinstance(item, dict) and item.get("raw_body_included") is True
+        ),
+      },
       "mailbox": {
         "mailbox_exists": mailbox.get("mailbox_exists"),
         "would_send_count": mailbox.get("would_send_count"),
@@ -1917,6 +1974,11 @@ def expression_artifact_summary():
     wandering = modules.get("wandering") if isinstance(modules.get("wandering"), dict) else {}
     speak_gate = modules.get("speak_gate") if isinstance(modules.get("speak_gate"), dict) else {}
     expression_draft = modules.get("expression_draft") if isinstance(modules.get("expression_draft"), dict) else {}
+    right_brain_adapter = (
+        modules.get("right_brain_expression_adapter")
+        if isinstance(modules.get("right_brain_expression_adapter"), dict)
+        else {}
+    )
     reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
     wandering_result_count = 0
     wandering_would_send_result_count = 0
@@ -1986,6 +2048,11 @@ def expression_artifact_summary():
       "speak_gate_would_send_count": speak_gate.get("would_send_count"),
       "speak_gate_blocked_count": speak_gate.get("blocked_send_count", 0),
       "speak_gate_actual_send": speak_gate.get("actual_send"),
+      "right_brain_adapter_request_count": right_brain_adapter.get("request_count"),
+      "right_brain_adapter_latest_channel": right_brain_adapter.get("latest_channel"),
+      "right_brain_adapter_latest_delivery_mode": right_brain_adapter.get("latest_delivery_mode"),
+      "right_brain_adapter_latest_actual_send": right_brain_adapter.get("latest_actual_send"),
+      "right_brain_adapter_raw_body_included_count": right_brain_adapter.get("raw_body_included_count"),
     }
 
 def session_mirror_summary():

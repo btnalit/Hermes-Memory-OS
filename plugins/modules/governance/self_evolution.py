@@ -75,7 +75,10 @@ class SelfEvolutionGovernorModule:
         evidence_scoring: Any,
     ) -> dict[str, Any]:
         store.initialize()
-        scores = sorted(evidence_scoring.read_scores(), key=lambda item: (-float(item.get("score", 0.0)), str(item.get("subject_ref", ""))))
+        scores = sorted(
+            _primary_governance_scores(evidence_scoring),
+            key=lambda item: (-float(item.get("maturity_score", item.get("score", 0.0))), str(item.get("subject_ref", ""))),
+        )
         if not scores:
             result = self._result(
                 status="warning",
@@ -96,7 +99,7 @@ class SelfEvolutionGovernorModule:
             return result
 
         selected = scores[:3]
-        score_refs = [f"score:{score['score_id']}" for score in selected]
+        score_refs = [_score_ref(score) for score in selected]
         digest = self._write_digest(selected, evidence_scoring=evidence_scoring)
         duplicate = _unresolved_self_evolution_duplicate(proposal_queue, score_refs)
         if duplicate is not None:
@@ -141,12 +144,13 @@ class SelfEvolutionGovernorModule:
         proposal_created = gate_decision.get("decision") == "would_allow"
         proposal_id = ""
         if proposal_created:
+            proposal_shape = _proposal_shape(selected)
             proposal = proposal_queue.create_candidate(
                 store=store,
-                title="Self-Evolution dry-run proposal",
-                body="Use the highest evidence signal to prepare a reviewed governance improvement.",
+                title=proposal_shape["title"],
+                body=proposal_shape["body"],
                 source_refs=score_refs,
-                kind="self_evolution",
+                kind=proposal_shape["kind"],
             )
             proposal_id = str(proposal["candidate_id"])
 
@@ -268,8 +272,9 @@ class SelfEvolutionGovernorModule:
             "",
         ]
         for score in scores:
+            score_value = score.get("maturity_score", score.get("score", ""))
             lines.append(
-                f"- {score['subject_ref']} score={score['score']}: {score.get('explanation', '')}"
+                f"- {score['subject_ref']} maturity_score={score_value}: {score.get('feature_explanation') or score.get('explanation', '')}"
             )
             for evidence_ref in score.get("evidence_refs", []):
                 lines.append(f"  - evidence_ref: {evidence_ref}")
@@ -327,7 +332,7 @@ def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[s
     for item in queue.get("items", []):
         if not isinstance(item, dict):
             continue
-        if item.get("kind") != "self_evolution":
+        if item.get("kind") not in {"self_evolution", "expression_policy"}:
             continue
         if str(item.get("state") or "") not in unresolved_states:
             continue
@@ -335,6 +340,50 @@ def _unresolved_self_evolution_duplicate(proposal_queue: Any, score_refs: list[s
         if not source_refs or source_refs == score_ref_set:
             return item
         title = str(item.get("title") or "")
-        if title == "Self-Evolution dry-run proposal":
+        if title in {"Self-Evolution dry-run proposal", "Tune right-brain expression policy"}:
             return item
     return None
+
+
+def _primary_governance_scores(evidence_scoring: Any) -> list[dict[str, Any]]:
+    feature_scores = list(evidence_scoring.read_feature_scores())
+    if feature_scores:
+        return feature_scores
+    return list(evidence_scoring.read_scores())
+
+
+def _score_ref(score: dict[str, Any]) -> str:
+    feature_id = str(score.get("feature_score_id") or "")
+    if feature_id:
+        return f"feature_score:{feature_id}"
+    return f"score:{score['score_id']}"
+
+
+def _proposal_shape(scores: list[dict[str, Any]]) -> dict[str, str]:
+    ratings = [
+        str(
+            score.get("maturity_dimensions", {})
+            .get("owner_feedback", {})
+            .get("signals", {})
+            .get("feedback_rating", "")
+        )
+        for score in scores
+        if str(score.get("subject_kind") or "") == "expression_feedback"
+    ]
+    ratings = [rating for rating in ratings if rating and rating != "none"]
+    if ratings:
+        rating = ratings[0]
+        return {
+            "kind": "expression_policy",
+            "title": "Tune right-brain expression policy",
+            "body": (
+                "Create a prompt/cadence/policy proposal for right-brain expression based on "
+                f"owner expression feedback rating={rating}. This is proposal-only: do not "
+                "change prompts, cadence, SpeakGate policy, or delivery behavior without a later apply gate."
+            ),
+        }
+    return {
+        "kind": "self_evolution",
+        "title": "Self-Evolution dry-run proposal",
+        "body": "Use the highest feature-maturity evidence signal to prepare a reviewed governance improvement.",
+    }

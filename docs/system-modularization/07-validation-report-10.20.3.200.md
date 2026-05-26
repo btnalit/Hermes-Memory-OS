@@ -13052,3 +13052,164 @@ Interpretation:
   Its current WARN is a real operating signal: duplicate unresolved proposals.
 - Hard boundaries remain intact: no send, no execute, no identity write, no
   unapproved crystallized write, no raw body leakage.
+
+## 2026-05-26 - Runtime Closure Baseline: Hermes-Agent Right-Brain Adapter and EvidenceScoring v2 Primary
+
+Scope:
+
+- Land higher-level runtime intelligence slices instead of leaving RH-38/RH-39 as document-only gates.
+- Deploy on `10.20.3.200` test host.
+- Keep Hermes as owner of agent conversation, cron, origin delivery, and transport.
+- Keep Memory-OS as owner of bounded context, action state, scoring artifacts, proposals, audit, and monitor evidence.
+
+Runtime changes deployed:
+
+- `EvidenceScoring` now uses feature-maturity v2 as the primary `scores.jsonl` path.
+  Legacy hash scores are retained only as bounded comparison fields.
+- `SelfEvolution` now consumes primary feature scores and can create an
+  `expression_policy` proposal from expression feedback evidence.
+- `memory_os_right_brain_expression.py` is installed on the test host as a
+  Hermes-agent expression adapter helper. It emits bounded Chinese prompt
+  context for Hermes agent; it does not send, execute, or expose raw body.
+- `memory_os_right_brain_expression_cron_gate.py` is installed and enabled one
+  low-frequency Hermes cron job in agent mode:
+  `memory-os-right-brain-expression` / job_id `5c0b7a27abae` / deliver `origin`.
+- Expression feedback action types are exposed through the shell/CLI apply path.
+- Monitor now reports primary scoring mode and right-brain adapter request
+  evidence.
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py \
+  tests\system_modularization\test_self_evolution_module.py \
+  tests\system_modularization\test_memory_os_agent_os_shell.py \
+  tests\scripts\test_memory_os_3_200_monitor.py \
+  tests\scripts\test_memory_os_right_brain_expression_helper.py \
+  tests\scripts\test_memory_os_right_brain_expression_cron_gate.py \
+  tests\scripts\test_memory_os_plugin_install.py -q
+
+115 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=30
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Deploy evidence:
+
+```text
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host --hermes-home /root/.hermes
+
+right_brain_expression_cron_helper_installed=true
+right_brain_expression_cron_helper_path=/root/.hermes/scripts/memory_os_right_brain_expression.py
+right_brain_expression_cron_gate_path=/root/.hermes/scripts/memory_os_right_brain_expression_cron_gate.py
+right-brain cron gate status=applied
+right-brain job_id=5c0b7a27abae
+right-brain deliver_target_class=origin
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+```
+
+Live trigger evidence:
+
+```text
+hermes cron run 5c0b7a27abae
+hermes cron tick
+
+Triggered job: memory-os-right-brain-expression (5c0b7a27abae)
+Last run: 2026-05-26T07:44:24.939150-04:00 ok
+Deliver: origin
+Script: memory_os_right_brain_expression.py
+no_agent=false
+```
+
+Adapter request evidence:
+
+```text
+schema_version=memory-os.right_brain_expression_adapter_request.v0
+request_count=2
+latest_channel=origin
+latest_delivery_mode=hermes_cron_agent
+latest_actual_send=false
+raw_body_included_count=0
+actual_execute=false
+actual_identity_write=false
+actual_unapproved_crystallized_approval=false
+```
+
+Live monitor summary:
+
+```text
+classification=WARN
+FAIL=[]
+
+PASS includes:
+  left_brain_feature_scoring_primary_ok
+  left_brain_maturity_scoring_primary_ok
+  right_brain_expression_adapter_visible
+  right_brain_expression_draft_created
+  right_brain_speak_gate_evaluation_complete
+  expression_feedback_report_only
+  left_brain_expired_working_not_scored
+  owner_review_ingress_guard_token_only
+  owner_review_proposal_followups_ok
+
+WARN remains:
+  left_brain_pipeline_check_warn
+  session_mirror_pending_sessions
+  owner_review_approved_proposals_pending_followup
+  rh31_eval_has_failures
+  rh26_casual_empty
+```
+
+Key monitor fields:
+
+```text
+ModuleArtifacts.evidence:
+  score_mode=feature_maturity_v2
+  feature_score_mode=primary
+  feature_score_count=496
+  hash_score_legacy_count=0
+  legacy_hash_comparison_count=496
+  prototype_aligned_score_count=496
+  maturity_dimension_count=9
+  expired_used_in_scoring_count=0
+  expression_feedback_subject_count=0
+
+ModuleArtifacts.right_brain_expression_adapter:
+  request_count=2
+  latest_channel=origin
+  latest_delivery_mode=hermes_cron_agent
+  latest_actual_send=false
+  raw_body_included_count=0
+
+ExpressionArtifacts:
+  right_brain_adapter_request_count=2
+  right_brain_adapter_latest_delivery_mode=hermes_cron_agent
+  right_brain_adapter_raw_body_included_count=0
+  latest_expression_draft_missing_count=0
+  latest_speak_gate_missing_evaluation_count=0
+  speak_gate_actual_send=false
+```
+
+Interpretation:
+
+- This is a live runtime closure baseline, not only a document gate.
+- Right-brain formal low-frequency expression now has a Hermes-agent adapter and
+  active Hermes cron/origin path on the test host.
+- EvidenceScoring v2 now replaces the old hash score as the primary score path;
+  hash remains only as comparison evidence.
+- Expression feedback can now drive proposal input through scoring and
+  SelfEvolution, but it still cannot directly mutate prompt, policy, cadence,
+  delivery, routing, identity, memory, or execution.
+- Remaining WARN items are known follow-up work; no hard boundary failed.

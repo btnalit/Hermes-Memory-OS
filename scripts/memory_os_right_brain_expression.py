@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Prepare a bounded right-brain expression prompt for Hermes cron.
+
+Hermes agent owns the final expression, conversation judgment, and delivery.
+Memory-OS only supplies bounded context and records that an adapter request was
+made. Empty stdout means Hermes cron stays silent.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA_VERSION = "memory-os.right_brain_expression_adapter_request.v0"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+    parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE", "main"))
+    parser.add_argument("--channel", default=os.environ.get("MEMORY_OS_RIGHT_BRAIN_CHANNEL", "origin"))
+    parser.add_argument("--max-refs", type=int, default=int(os.environ.get("MEMORY_OS_RIGHT_BRAIN_MAX_REFS", "6")))
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    hermes_home = Path(args.hermes_home).expanduser().resolve()
+    _ensure_runtime_path(hermes_home)
+
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.modules.expression.expression_draft import ExpressionDraftModule
+
+    roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=args.profile)
+    store = MemoryOSStore(roots)
+    store.initialize()
+    module = ExpressionDraftModule(hermes_home, profile=args.profile)
+    context = module.build_context(store=store, max_refs=max(int(args.max_refs), 1))
+    summaries = [str(item).strip() for item in context.get("summaries", []) if str(item).strip()]
+    if not summaries:
+        return 0
+
+    request = _record_request(
+        hermes_home=hermes_home,
+        profile=args.profile,
+        channel=args.channel,
+        source_refs=[str(ref) for ref in context.get("source_refs", [])],
+        summary_count=len(summaries),
+    )
+    print(_render_prompt(profile=args.profile, channel=args.channel, request=request, summaries=summaries))
+    return 0
+
+
+def _ensure_runtime_path(hermes_home: Path) -> None:
+    runtime = hermes_home / "memory-os" / "runtime" / "python"
+    if runtime.exists():
+        text = str(runtime)
+        if text not in sys.path:
+            sys.path.insert(0, text)
+    repo_root = Path(__file__).resolve().parents[1]
+    if (repo_root / "plugins").exists():
+        text = str(repo_root)
+        if text not in sys.path:
+            sys.path.insert(0, text)
+
+
+def _record_request(
+    *,
+    hermes_home: Path,
+    profile: str,
+    channel: str,
+    source_refs: list[str],
+    summary_count: int,
+) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc).isoformat()
+    request = {
+        "schema_version": SCHEMA_VERSION,
+        "request_id": f"rbexpr_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}",
+        "created_at": created_at,
+        "profile": profile,
+        "channel": channel,
+        "delivery_mode": "hermes_cron_agent",
+        "source_refs": source_refs[:12],
+        "summary_count": summary_count,
+        "raw_body_included": False,
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+    path = hermes_home / "system-modules" / "right_brain_expression_adapter" / "requests.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(request, ensure_ascii=False, sort_keys=True))
+        handle.write("\n")
+    return request
+
+
+def _render_prompt(*, profile: str, channel: str, request: dict[str, Any], summaries: list[str]) -> str:
+    bullets = "\n".join(f"- {summary}" for summary in summaries[:8])
+    return (
+        "Hermes agent 右脑低频表达任务。\n\n"
+        "Memory-OS 只提供 bounded context；你负责理解、取舍、表达和保持沉默判断。\n"
+        "请用中文输出给 owner。不要执行任务，不要创建计划，不要调用工具，不要自称在改系统。\n"
+        "如果这些上下文不足以产生自然、真诚、非任务化的一句话，请只回复 [SILENT]。\n\n"
+        "表达要求：\n"
+        "- 像一个有记忆的 Hermes agent 自然说话，不要写系统报告。\n"
+        "- 只写 1 到 3 句，低频、轻、不打扰。\n"
+        "- 不要泄露内部 schema、id、source_ref、审计字段。\n"
+        "- 不要承诺已经执行、审批、写入记忆或改变策略。\n\n"
+        f"adapter_request_id: {request['request_id']}\n"
+        f"profile: {profile}\n"
+        f"delivery_channel: {channel}\n\n"
+        "Bounded context summaries:\n"
+        f"{bullets}\n"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

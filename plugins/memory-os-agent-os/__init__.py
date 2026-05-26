@@ -194,6 +194,12 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
             "approve_proposal",
             "reject_proposal",
             "allow_speak_once",
+            "like_expression",
+            "too_mechanical",
+            "too_frequent",
+            "boundary_private",
+            "off_voice",
+            "mute_period",
         ],
     )
     review_apply.add_argument("--target", required=True)

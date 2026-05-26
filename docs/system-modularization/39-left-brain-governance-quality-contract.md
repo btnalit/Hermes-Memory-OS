@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score report-only, prototype-aligned maturity-report, and report-only pipeline-check slices.
+Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score primary scoring v2, prototype-aligned maturity scoring, expression-feedback proposal input, and report-only pipeline-check slices.
 
 Current implementation state:
 
@@ -10,21 +10,25 @@ Current implementation state:
   EvidenceScoring skips expired working items by default.
 - P1-S slice 2 is implemented and deployed on `10.20.3.200`: SelfEvolution skips duplicate
   unresolved self-evolution proposals and reports novelty skip counts.
-- P1-S slice 3 is implemented and deployed on `10.20.3.200`:
-  EvidenceScoring writes a separate `feature_scores.jsonl` report-only
-  comparator and keeps legacy hash `scores.jsonl` as the live baseline.
-- P1-S slice 4 is implemented and deployed on `10.20.3.200`: the report-only
-  comparator now carries nine prototype-aligned maturity dimensions adapted
-  from the 10.20.2.88 self-evolution pipeline shape.
+- P1-S slice 3/4 are superseded by the 2026-05-26 runtime closure baseline:
+  EvidenceScoring v2 now writes `scores.jsonl` with
+  `score_source=feature_maturity_v2`, `feature_score_mode=primary`, and
+  `hash_score_legacy_count=0`. Legacy hash scores remain only as bounded
+  comparison fields (`legacy_hash_score`, `legacy_hash_comparison_count`).
+- P1-S expression-feedback input is implemented: expression feedback ledger
+  records become scoring subjects, and SelfEvolution can create an
+  `expression_policy` proposal. This still does not directly change prompt,
+  cadence, policy, delivery, or execution.
 - EvidenceScoring status and the 10.20.3.200 monitor can now expose whether
   expired working evidence still appears in scoring output and whether
-  feature scoring remains report-only.
+  feature scoring is the primary scoring path.
 - P1-S pipeline-check slice is implemented and deployed on `10.20.3.200`:
   cognitive loop writes `left_brain_pipeline_check/latest.json`; monitor reports
   `left_brain_pipeline_check.status`, `finding_count`, and `actual_execute`.
   The current live finding is `duplicate_unresolved_proposals` as a WARN.
-- This does not replace legacy scoring, implement feedback backflow,
-  production cadence, or execution apply.
+- This replaces legacy hash scoring as the primary scoring path. It does not
+  implement automatic prompt/policy/cadence apply, production cadence, or
+  execution apply.
 - Live `10.20.3.200` deployment evidence shows the installed scoring path no
   longer uses expired working as active scoring subjects.
 
@@ -483,8 +487,8 @@ OpsGate report-only follow-up: implemented
 Forbidden claims today:
 
 ```text
-left-brain intelligent scoring: report-only comparator implemented, not live
-left-brain feedback learning: not closed
+left-brain intelligent scoring: v2 primary scoring implemented, not yet proven mature
+left-brain feedback learning: expression feedback can create proposal input, not direct adaptation
 self-evolution quality loop: not mature
 production cadence: not mature
 proposal-to-execution operations: not implemented
@@ -572,9 +576,10 @@ Memory-OS implementation synthesis:
    - define Hermes cron classes for owner-origin, local/no-agent, monitor-poll,
      and on-demand/manual apply.
 
-Do not promote P1-S from report-only to live scoring or live execution until
-the pipeline checker is green, proposal lifecycle fields are complete, and an
-external review approves the apply boundary.
+Do not promote P1-S from primary scoring to direct live execution, routing, or
+policy/prompt/cadence apply until the pipeline checker is green, proposal
+lifecycle fields are complete, and an external review approves the apply
+boundary.
 
 ## Implementation Order
 
@@ -582,8 +587,8 @@ Do not replace live behavior in one step. The safe path is:
 
 1. expired working filter / monitor;
 2. SelfEvolution novelty and idempotency gate;
-3. feature-based EvidenceScoring v2 in report-only mode;
-4. prototype-aligned maturity dimensions in report-only mode;
+3. feature-based EvidenceScoring v2 as the primary scoring path;
+4. prototype-aligned maturity dimensions as the primary score explanation;
 5. left-brain pipeline checker in report-only mode;
 6. proposal lifecycle/follow-up fields;
 7. feedback backflow into GovernanceFeedback in report-only/proposal-only mode;

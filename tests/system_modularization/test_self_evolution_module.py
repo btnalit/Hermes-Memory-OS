@@ -69,9 +69,10 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert proposal["kind"] == "self_evolution"
     assert proposal["state"] == "candidate"
     assert proposal["crystallized_approved"] is False
-    assert all(ref.startswith("score:") for ref in proposal["source_refs"])
+    assert all(ref.startswith("feature_score:") for ref in proposal["source_refs"])
     digest = module.digest_path.read_text(encoding="utf-8")
     assert "The test host needs a safer dry-run workflow." in digest
+    assert "maturity_score=" in digest
     assert "hard-coded focus" not in digest
     audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
     assert any("self_evolution_dry_run_written" in line for line in audit_lines)
@@ -145,6 +146,49 @@ def test_self_evolution_skips_duplicate_unresolved_proposal(tmp_path):
     assert status["novelty_skipped_count"] == 1
     assert status["duplicate_unresolved_proposal_count"] == 1
     assert len(ops_gate.read_reports()) == 1
+
+
+def test_self_evolution_creates_expression_policy_proposal_from_expression_feedback(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.memory_os.expression_feedback.v0",
+                "feedback_id": "efb_1",
+                "profile": "main",
+                "target_type": "expression",
+                "target_id": "expr_1",
+                "rating": "too_mechanical",
+                "source_module": "owner_action",
+                "live_policy_changed": False,
+                "raw_body_included": False,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evidence = EvidenceScoringModule(tmp_path, profile="main")
+    evidence.score_all(store=store, proposal_queue=proposal_queue)
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is True
+    proposal = proposal_queue.read_queue()["items"][0]
+    assert proposal["kind"] == "expression_policy"
+    assert "right-brain expression policy" in proposal["title"]
+    assert "prompt/cadence/policy proposal" in proposal["body"]
+    assert proposal["actual_execute"] is False
 
 
 def test_self_evolution_doctor_reports_missing_dependencies_and_stale_digest(tmp_path):

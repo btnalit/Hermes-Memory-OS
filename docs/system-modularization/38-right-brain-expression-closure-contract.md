@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed ExpressionDraft, SpeakGate wiring, owner-preview, and expression-feedback ledger slices.
+Status: design gate plus deployed ExpressionDraft, SpeakGate wiring, owner-preview, expression-feedback ledger, and Hermes-agent expression adapter slices.
 
 Current implementation state:
 
@@ -23,8 +23,15 @@ Current implementation state:
   expression feedback actions such as `too_mechanical` write
   `expression_feedback_ledger.jsonl`; GovernanceFeedback consumes these as
   summary-only governance events without changing live policy.
-- This does not implement a RightBrainExpressionEngine, scheduled expression
-  delivery, or policy/prompt adaptation.
+- P1-R Hermes-agent expression adapter is deployed on `10.20.3.200`: Memory-OS
+  emits bounded context through `memory_os_right_brain_expression.py`, Hermes
+  cron runs it in agent mode, and Hermes owns final wording, silence judgment,
+  origin delivery, and interaction. The adapter records
+  `memory-os.right_brain_expression_adapter_request.v0` with all hard boundary
+  fields false.
+- This does not apply policy/prompt/cadence changes automatically. Such changes
+  still require expression feedback -> governance/SelfEvolution proposal ->
+  owner/OpsGate apply.
 - Current live monitor still reports historical missing draft/SpeakGate counts
   from older cognitive-loop reports, but latest-cycle evidence reports
   `latest_expression_draft_missing_count=0` and
@@ -68,6 +75,8 @@ equivalent_contract_or_project_contract: "29-series contract + RH-36 closure mat
 evidence_loop: "contract check, unit/integration tests, 10.20.3.200 monitor, owner-visible expression smoke only after explicit opt-in"
 monitor_or_validation_fields:
   - right_brain_expression.engine_available
+  - right_brain_expression.adapter_request_count
+  - right_brain_expression.adapter_delivery_mode
   - right_brain_expression.draft_count
   - right_brain_expression.silent_count
   - right_brain_expression.speak_gate_evaluated_count
@@ -101,12 +110,17 @@ The current code and monitor support a safe observation path only:
   `speak_expression_preview_missing_count=0`.
 - Governance feedback currently consumes evidence / ops / proposal /
   self-evolution outcomes, not full wandering/speak feedback outcomes.
+- The Hermes-agent adapter is now a real runtime path, not only a contract:
+  `hermes cron run memory-os-right-brain-expression` executes the helper in
+  agent mode (`--script`, no `--no-agent`), deliver target `origin`, and writes
+  adapter request evidence without raw body or direct send from Memory-OS.
 
 Therefore v0.1 should be described as:
 
 ```text
 right-brain observation shell: implemented
-formal right-brain expression closure: not implemented
+formal low-frequency Hermes-agent expression path: implemented on test host
+expression feedback driven policy/prompt/cadence apply: not implemented
 ```
 
 ## Right-Brain Subsystem Audit

@@ -1066,8 +1066,9 @@ Stop signal:
 
 ### P1-R - RH-38 Right-Brain Expression Closure
 
-Status: design gate added; P1-R slices 1 and 2 deployed on `10.20.3.200`
-with WARN-only monitor evidence.
+Status: runtime baseline deployed on `10.20.3.200`: P1-R draft/SpeakGate,
+owner preview, expression feedback ledger, and Hermes-agent expression adapter
+are live with WARN-only monitor evidence and no hard failures.
 
 Implementation blueprint:
 
@@ -1099,30 +1100,34 @@ Reason:
   `speak_expression_preview_count=2`,
   `speak_expression_preview_missing_count=0`, and PASS
   `right_brain_review_speak_preview_visible`;
-- expression feedback and
-  governance/self-evolution backflow are not closed.
+- expression feedback and GovernanceFeedback summary backflow are deployed;
+- Hermes-agent expression adapter is deployed as
+  `memory-os-right-brain-expression`, deliver target `origin`, agent mode
+  (`--script`, no `--no-agent`), last run `ok`;
+- latest monitor reports `right_brain_adapter_request_count=2`,
+  `right_brain_adapter_latest_delivery_mode=hermes_cron_agent`,
+  `right_brain_adapter_raw_body_included_count=0`, and PASS
+  `right_brain_expression_adapter_visible`.
 
-Required design work:
+Implemented runtime slices:
 
-1. define `RightBrainExpressionEngine` as a bounded expression adapter or
-   Hermes-agent-mediated path, with no execution tools and no raw private body;
-   align it to the `10.20.2.88` Sannai free-time / afterglow pattern where
-   Hermes owns the agent turn and `deliver=origin`;
-2. keep the right-brain subsystem split by route: Household Digest input,
+1. Hermes-agent-mediated expression adapter with no execution tools and no raw
+   private body; aligned to the `10.20.2.88` pattern where Hermes owns the
+   agent turn and `deliver=origin`;
+2. right-brain subsystem split by route: Household Digest input,
    DeepReflection analysis/injection/proposal/seed, Conversation Carryover,
    Wandering expression draft, SpeakGate decision, OwnerReview feedback, and
    GovernanceFeedback/SelfEvolution backflow;
-3. define three expression tiers:
+3. three expression tiers:
    `test_host_observation`, `scheduled_right_brain_expression`, and
    `exceptional_proactive_send`;
-4. require every non-silent expression draft to pass SpeakGate
-   - local slice 1 covers current cognitive-loop Wandering output only;
+4. every current-cycle non-silent expression draft passes SpeakGate;
 5. owner review bounded expression preview is deployed for shown speak items;
-6. add expression feedback types: `like`, `too_mechanical`, `too_frequent`,
+6. expression feedback types: `like`, `too_mechanical`, `too_frequent`,
    `boundary_private`, `off_voice`, `mute_period`;
-7. route expression outcomes into GovernanceFeedback / SelfEvolution as
+7. expression outcomes can enter GovernanceFeedback / SelfEvolution as
    proposals, not direct prompt/cadence mutation;
-8. add monitor fields listed in RH-38 before claiming observation or closure.
+8. monitor fields listed in RH-38 are present for the deployed slices.
 
 Prototype-informed runtime slices:
 
@@ -1153,9 +1158,9 @@ Stop signal:
 ### P1-S - RH-39 Left-Brain Governance Quality
 
 Status: design gate added; P1-S slices 1, 2, 3, and 4 are deployed on
-`10.20.3.200` with WARN-only monitor evidence and no hard failures. P1-S
-slice 4 is a 10.20.2.88 prototype-aligned maturity dimension report in
-report-only mode.
+`10.20.3.200` with WARN-only monitor evidence and no hard failures. The runtime
+closure baseline promotes EvidenceScoring v2 to the primary score path while
+retaining legacy hash only as comparison evidence.
 
 Implementation blueprint:
 
@@ -1174,29 +1179,28 @@ Reason:
 
 - left-brain safety governance is implemented, but intelligent judgment is not
   mature;
-- EvidenceScoring currently uses deterministic hash-derived scores, which are
-  replayable but not meaningful importance/risk/feedback scores;
-- feature-based EvidenceScoring v2 now writes report-only comparison records
-  without replacing legacy hash scores or driving proposals;
-- prototype-aligned maturity dimensions are deployed for direct report-only
-  observation, mapping the 10.20.2.88 maturity/evidence/
-  recurrence/gate pattern into bounded Memory-OS score records;
+- EvidenceScoring no longer uses deterministic hash as the primary score;
+- feature-based EvidenceScoring v2 now writes primary `scores.jsonl` records
+  with `score_source=feature_maturity_v2`;
+- prototype-aligned maturity dimensions are deployed as the primary scoring
+  explanation, mapping the 10.20.2.88 maturity/evidence/recurrence/gate pattern
+  into bounded Memory-OS score records;
 - deployed P1-S slice 2 adds a SelfEvolution novelty/idempotency gate for
   duplicate unresolved proposals before OpsGate/proposal creation;
-- feedback ledgers exist, but feedback is not yet consumed as first-class
-  GovernanceFeedback / scoring / reflection input;
+- expression feedback ledgers can now become EvidenceScoring subjects and
+  SelfEvolution expression-policy proposal inputs; no direct prompt/policy/
+  cadence mutation occurs;
 - deployed P1-S slice 1 filters expired working from EvidenceScoring and adds
   monitor visibility for expired scoring contamination;
 - live monitor reports `novelty_skipped_count=1` and
   `duplicate_unresolved_proposal_count=1` after the first deployed duplicate
   skip;
-- last recorded 07 monitor evidence reports `feature_score_count=487`,
-  `hash_score_legacy_count=487`, `comparison_count=487`,
-  `feature_score_live_applied=false`, and PASS
-  `left_brain_feature_scoring_report_only_ok`;
-- live monitor reports P1-S.4 `prototype_aligned_score_count=487`,
+- latest monitor evidence reports `feature_score_count=496`,
+  `hash_score_legacy_count=0`, `legacy_hash_comparison_count=496`, and PASS
+  `left_brain_feature_scoring_primary_ok`;
+- live monitor reports `prototype_aligned_score_count=496`,
   `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
-  `left_brain_maturity_scoring_report_only_ok`;
+  `left_brain_maturity_scoring_primary_ok`;
 - expired working handling in DeepReflection is still not fixed;
 - approved proposals are visible and safe, but execution-decision state remains
   future work.
@@ -1216,9 +1220,9 @@ Latest slice-1 evidence:
 
 Required design work:
 
-1. feature-based EvidenceScoring v2 report-only is deployed and monitored;
+1. feature-based EvidenceScoring v2 primary scoring is deployed and monitored;
 1a. prototype-aligned maturity dimensions are deployed and monitored as
-    report-only evidence;
+    primary scoring evidence;
 2. left-brain pipeline checker aligned to the `10.20.2.88`
    self-evolution-governor read-only contract checker;
 3. SelfEvolution novelty/idempotency gates are deployed for unresolved

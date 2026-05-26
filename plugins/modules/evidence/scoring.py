@@ -100,21 +100,33 @@ class EvidenceScoringModule:
         for subject in subjects:
             evidence = self._build_evidence_record(subject)
             evidence_records.append(evidence)
+            legacy_hash_score = _deterministic_score(subject["subject_ref"], subject["evidence_summary"])
+            legacy_comparison = {
+                "score_id": _stable_id("legacy_hash_score", subject["subject_ref"], evidence["evidence_id"]),
+                "score": legacy_hash_score,
+                "evidence_refs": [evidence["evidence_id"]],
+            }
+            feature_score = self.build_feature_score_record(
+                subject=subject,
+                legacy_score=legacy_comparison,
+                subject_stats=subject_stats,
+            )
             score = self.build_score_record(
                 subject_ref=subject["subject_ref"],
                 subject_kind=subject["subject_kind"],
-                score=_deterministic_score(subject["subject_ref"], subject["evidence_summary"]),
+                score=float(feature_score["maturity_score"]),
                 evidence_refs=[evidence["evidence_id"]],
-                explanation=f"Score derived from {subject['subject_kind']} evidence summary and 1 evidence ref.",
+                explanation=(
+                    f"Feature maturity v2 score derived from {subject['subject_kind']} evidence "
+                    "using bounded evidence strength, recurrence, actionability, diversity, "
+                    "feedback, risk, freshness, duplicate backlog, and gate-state dimensions."
+                ),
+                score_source="feature_maturity_v2",
+                legacy_hash_score=legacy_hash_score,
             )
             score_records.append(score)
-            feature_score_records.append(
-                self.build_feature_score_record(
-                    subject=subject,
-                    legacy_score=score,
-                    subject_stats=subject_stats,
-                )
-            )
+            feature_score["primary_score_id"] = score["score_id"]
+            feature_score_records.append(feature_score)
 
         self._write_jsonl(self.evidence_path, evidence_records)
         self._write_jsonl(self.scores_path, score_records)
@@ -124,11 +136,13 @@ class EvidenceScoringModule:
             "module": "evidence_scoring",
             "profile": self.profile,
             "status": "ok",
+            "score_mode": "feature_maturity_v2",
             "score_count": len(score_records),
             "evidence_count": len(evidence_records),
-            "feature_score_mode": "report_only",
+            "feature_score_mode": "primary",
             "feature_score_count": len(feature_score_records),
-            "hash_score_legacy_count": len(score_records),
+            "hash_score_legacy_count": 0,
+            "legacy_hash_comparison_count": len(feature_score_records),
             "comparison_count": min(len(feature_score_records), len(score_records)),
             "feature_score_report_count": 1 if feature_score_records else 0,
             "feature_score_live_applied": False,
@@ -153,9 +167,11 @@ class EvidenceScoringModule:
             details={
                 "score_count": len(score_records),
                 "evidence_count": len(evidence_records),
-                "feature_score_mode": "report_only",
+                "score_mode": "feature_maturity_v2",
+                "feature_score_mode": "primary",
                 "feature_score_count": len(feature_score_records),
-                "hash_score_legacy_count": len(score_records),
+                "hash_score_legacy_count": 0,
+                "legacy_hash_comparison_count": len(feature_score_records),
                 "comparison_count": min(len(feature_score_records), len(score_records)),
                 "feature_score_live_applied": False,
                 "prototype_aligned_score_count": len(feature_score_records),
@@ -177,6 +193,8 @@ class EvidenceScoringModule:
         score: float,
         evidence_refs: list[str],
         explanation: str,
+        score_source: str = "feature_maturity_v2",
+        legacy_hash_score: float | None = None,
     ) -> dict[str, Any]:
         if not evidence_refs:
             raise ValueError("score requires evidence_refs")
@@ -192,6 +210,8 @@ class EvidenceScoringModule:
             "subject_ref": subject_ref,
             "subject_kind": subject_kind,
             "score": round(float(score), 3),
+            "score_source": score_source,
+            "legacy_hash_score": None if legacy_hash_score is None else round(float(legacy_hash_score), 3),
             "evidence_refs": list(evidence_refs),
             "explanation_ref": f"local://evidence_scoring/explanations/{score_id}",
             "explanation": explanation,
@@ -224,7 +244,8 @@ class EvidenceScoringModule:
             "profile": self.profile,
             "subject_ref": subject["subject_ref"],
             "subject_kind": subject["subject_kind"],
-            "legacy_score_id": legacy_score.get("score_id"),
+            "legacy_hash_score_id": legacy_score.get("score_id"),
+            "legacy_hash_score": legacy_score_value,
             "legacy_score": legacy_score_value,
             "feature_score": feature_score,
             "maturity_score": feature_score,
@@ -234,7 +255,7 @@ class EvidenceScoringModule:
             "maturity_dimensions": maturity_dimensions,
             "prototype_alignment": {
                 "source": "10.20.2.88:self_evolution_daily_pipeline",
-                "mode": "adapted_report_only",
+                "mode": "adapted_primary",
                 "mapped_fields": [
                     "maturity_score",
                     "evidence_strength",
@@ -251,7 +272,7 @@ class EvidenceScoringModule:
                 "pipeline shape using bounded evidence strength, recurrence, actionability, "
                 "source diversity, owner feedback, risk, freshness, duplicate backlog, and gate-state dimensions."
             ),
-            "mode": "report_only",
+            "mode": "primary",
             "live_applied": False,
             "maturity_live_applied": False,
             "actual_approve": False,
@@ -282,11 +303,13 @@ class EvidenceScoringModule:
             "schema_version": "hermes.evidence_scoring_status.v0",
             "module": "evidence_scoring",
             "profile": self.profile,
+            "score_mode": "feature_maturity_v2",
             "score_count": len(scores),
             "evidence_count": len(evidence),
-            "feature_score_mode": "report_only",
+            "feature_score_mode": "primary",
             "feature_score_count": len(feature_scores),
-            "hash_score_legacy_count": len(scores),
+            "hash_score_legacy_count": 0,
+            "legacy_hash_comparison_count": len(feature_scores),
             "comparison_count": min(len(feature_scores), len(scores)),
             "feature_score_report_count": 1 if feature_scores else 0,
             "feature_score_live_applied": feature_score_live_applied,
@@ -297,6 +320,7 @@ class EvidenceScoringModule:
             "maturity_dimension_keys": list(MATURITY_DIMENSION_KEYS),
             "maturity_live_applied": any(record.get("maturity_live_applied") is True for record in feature_scores),
             "owner_feedback_signal_count": 0,
+            "expression_feedback_subject_count": subject_counts.get("expression_feedback", 0),
             "subject_counts": dict(sorted(subject_counts.items())),
             "working_subject_count": subject_counts.get("working", 0),
             "expired_used_in_scoring_count": expired_used,
@@ -417,10 +441,29 @@ class EvidenceScoringModule:
                     "source_ref": f"memory_os:crystallized_candidate:{candidate.candidate_id}",
                 }
             )
+        expression_feedback_count = 0
+        for feedback in _read_jsonl(store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"):
+            feedback_id = str(feedback.get("feedback_id", ""))
+            if not feedback_id:
+                continue
+            expression_feedback_count += 1
+            rating = str(feedback.get("rating") or "unknown")
+            target_id = str(feedback.get("target_id") or "")
+            subjects.append(
+                {
+                    "subject_ref": f"expression_feedback:{feedback_id}",
+                    "subject_kind": "expression_feedback",
+                    "evidence_summary": f"expression_feedback rating={rating} target={target_id}",
+                    "source_ref": f"memory_os:expression_feedback:{feedback_id}",
+                    "source_status": "active",
+                    "feedback_rating": rating,
+                }
+            )
         return sorted(subjects, key=lambda item: item["subject_ref"]), {
             "working_active_subject_count": working_active_subject_count,
             "working_expired_skipped_count": working_expired_skipped_count,
             "working_unknown_status_count": working_unknown_status_count,
+            "expression_feedback_subject_count": expression_feedback_count,
         }
 
     def _build_evidence_record(self, subject: dict[str, str]) -> dict[str, Any]:
@@ -494,6 +537,7 @@ def _maturity_dimensions(
     subject_kind = subject.get("subject_kind", "")
     source_status = subject.get("source_status", "")
     proposal_state = _proposal_state(subject.get("evidence_summary", "")) if subject_kind == "proposal" else ""
+    feedback_rating = subject.get("feedback_rating", "")
     signal_key = _signal_key(subject)
     key_counts = subject_stats.get("key_counts") if isinstance(subject_stats.get("key_counts"), dict) else {}
     source_classes = subject_stats.get("source_classes") if isinstance(subject_stats.get("source_classes"), dict) else {}
@@ -501,8 +545,13 @@ def _maturity_dimensions(
     source_class_count = len(source_classes.get(signal_key) or [])
     evidence_count = len(legacy_score.get("evidence_refs") or [])
     summary_bucket = _summary_length_bucket(summary_length)
-    risk_level = _risk_level(subject_kind=subject_kind, proposal_state=proposal_state, source_status=source_status)
-    owner_signal = _owner_feedback_signal(proposal_state)
+    risk_level = _risk_level(
+        subject_kind=subject_kind,
+        proposal_state=proposal_state,
+        source_status=source_status,
+        feedback_rating=feedback_rating,
+    )
+    owner_signal = _owner_feedback_signal(proposal_state, feedback_rating=feedback_rating)
     duplicate_backlog = _duplicate_backlog_signal(subject_kind=subject_kind, proposal_state=proposal_state)
     return {
         "evidence_strength": _dimension(
@@ -519,6 +568,7 @@ def _maturity_dimensions(
             _actionability_score(subject_kind=subject_kind, proposal_state=proposal_state),
             subject_kind=subject_kind,
             proposal_state=proposal_state or "none",
+            feedback_rating=feedback_rating or "none",
         ),
         "source_diversity": _dimension(
             min(1.0, source_class_count / 3.0),
@@ -527,7 +577,8 @@ def _maturity_dimensions(
         "owner_feedback": _dimension(
             owner_signal,
             proposal_state=proposal_state or "none",
-            explicit_feedback_signal_count=0,
+            feedback_rating=feedback_rating or "none",
+            explicit_feedback_signal_count=1 if feedback_rating else 0,
         ),
         "risk": _dimension(
             round(1.0 - risk_level, 3),
@@ -621,6 +672,7 @@ def _subject_kind_weight(subject_kind: str) -> float:
         "working": 0.62,
         "proposal": 0.58,
         "crystallized_candidate": 0.50,
+        "expression_feedback": 0.72,
     }
     return weights.get(subject_kind, 0.45)
 
@@ -650,7 +702,9 @@ def _proposal_state(summary: str) -> str:
     return match.group(1) if match else ""
 
 
-def _actionability_score(*, subject_kind: str, proposal_state: str) -> float:
+def _actionability_score(*, subject_kind: str, proposal_state: str, feedback_rating: str = "") -> float:
+    if subject_kind == "expression_feedback":
+        return 0.85
     if subject_kind == "proposal":
         if proposal_state == "approved_for_proposal":
             return 0.9
@@ -668,7 +722,13 @@ def _actionability_score(*, subject_kind: str, proposal_state: str) -> float:
     return 0.25
 
 
-def _owner_feedback_signal(proposal_state: str) -> float:
+def _owner_feedback_signal(proposal_state: str, *, feedback_rating: str = "") -> float:
+    if feedback_rating:
+        if feedback_rating in {"like_expression"}:
+            return 0.7
+        if feedback_rating in {"too_mechanical", "too_frequent", "boundary_private", "off_voice", "mute_period"}:
+            return 0.9
+        return 0.65
     if proposal_state == "approved_for_proposal":
         return 0.85
     if proposal_state in {"owner_declined", "rejected", "closed"}:
@@ -676,10 +736,16 @@ def _owner_feedback_signal(proposal_state: str) -> float:
     return 0.5
 
 
-def _risk_level(*, subject_kind: str, proposal_state: str, source_status: str) -> float:
+def _risk_level(*, subject_kind: str, proposal_state: str, source_status: str, feedback_rating: str = "") -> float:
     risk = 0.20
     if subject_kind == "proposal":
         risk += 0.20
+    if subject_kind == "expression_feedback":
+        risk += 0.10
+    if feedback_rating == "boundary_private":
+        risk += 0.35
+    elif feedback_rating in {"too_frequent", "off_voice"}:
+        risk += 0.15
     if proposal_state == "approved_for_proposal":
         risk += 0.10
     if source_status == "expired":

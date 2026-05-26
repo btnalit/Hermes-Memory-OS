@@ -228,6 +228,12 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_apply_args.target == "candidate:cand_1"
     assert review_apply_args.owner == "owner"
     assert review_apply_args.apply is True
+    expression_feedback_args = parser.parse_args(
+        ["review", "apply", "--action", "too_mechanical", "--target", "expr_123"]
+    )
+    assert expression_feedback_args.review_command == "apply"
+    assert expression_feedback_args.action == "too_mechanical"
+    assert expression_feedback_args.target == "expr_123"
     metadata_retention_args = parser.parse_args(
         ["metadata-retention", "--memory-sources-days", "30", "--eval-report-root", "eval/reports/memory-os-rh31"]
     )

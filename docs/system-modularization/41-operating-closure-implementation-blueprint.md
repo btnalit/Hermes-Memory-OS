@@ -117,7 +117,7 @@ flowchart TD
 
   subgraph L["Left Brain Governance"]
     L1["Digest Consolidation"]
-    L2["EvidenceScoring v2 report-only"]
+    L2["EvidenceScoring v2 primary"]
     L3["ProposalQueue lifecycle"]
     L4["SelfEvolution novelty gate"]
     L5["GovernanceFeedback"]
@@ -224,7 +224,7 @@ Already established on the test host:
 
 Not closed until all are true:
 
-- EvidenceScoring v2 uses feature dimensions in report-only mode;
+- EvidenceScoring v2 uses feature dimensions as the primary score path;
 - SelfEvolution has novelty / duplicate / cadence gates;
 - approved proposals have visible follow-up state;
 - OpsGate can report on follow-up without creating execution tickets;
@@ -268,12 +268,13 @@ Not closed until all are true:
 | Household Digest | `plugins/modules/context/household_digest.py` | Builds bounded local digest. | Feed ExpressionDraft and DeepReflection; no owner action by itself. | `tests/system_modularization/test_household_digest_module.py` |
 | DeepReflection | `plugins/modules/cognition/deep_reflection.py` | Deterministic reflection / carryover / optional outputs. | Split outputs: carryover to ContextProjection, proposal to ProposalQueue, seed to ExpressionDraft; no identity/write/apply. | `tests/system_modularization/test_deep_reflection_module.py` |
 | Wandering Mind | `plugins/modules/cognition/wandering_mind.py` | Deterministic text + would-send artifact. | Become seed/draft producer; formal expression goes through ExpressionDraft + SpeakGate. | `tests/system_modularization/test_wandering_mind_module.py` plus new expression tests |
-| ExpressionDraft | new `plugins/modules/expression/expression_draft.py` | Missing. | Structured bounded draft object: text preview, source refs, feeling tags, risk flags, silence reason. | new `tests/system_modularization/test_expression_draft_module.py` |
+| ExpressionDraft | `plugins/modules/expression/expression_draft.py` | Implemented and deployed on test host. | Continue as structured bounded draft object: text preview, source refs, feeling tags, risk flags, silence reason. | `tests/system_modularization/test_expression_draft_module.py` |
 | SpeakGate | `plugins/modules/expression/speak_gate.py` | Can evaluate wandering output, no full draft policy. | Evaluate every non-silent ExpressionDraft; count silent / allowed / blocked / would-send / permission-required. | `tests/system_modularization/test_speak_gate_module.py` |
-| ExpressionFeedbackLedger | new or in `plugins/memory/memory_os/owner_actions.py` | Missing. | Store `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period`; no direct live mutation. | `tests/plugins/memory/test_memory_os_owner_actions.py` |
+| Hermes-Agent Expression Adapter | `scripts/memory_os_right_brain_expression.py` + `scripts/memory_os_right_brain_expression_cron_gate.py` | Implemented and deployed on test host. | Memory-OS emits bounded context; Hermes agent owns final wording, silence judgment, and origin delivery. | `tests/scripts/test_memory_os_right_brain_expression_helper.py`, `tests/scripts/test_memory_os_right_brain_expression_cron_gate.py` |
+| ExpressionFeedbackLedger | `plugins/memory/memory_os/owner_actions.py` | Implemented as no-send ledger. | Store `like`, `too_mechanical`, `too_frequent`, `boundary_private`, `off_voice`, `mute_period`; no direct live mutation. | `tests/plugins/memory/test_memory_os_owner_actions.py` |
 | GovernanceFeedback | `plugins/modules/governance/feedback_bridge.py` | Consumes evidence / ops / proposal / self-evolution. | Consume expression feedback and delivery outcomes as bounded governance events. | `tests/system_modularization/test_governance_feedback_bridge_module.py` |
-| EvidenceScoring | `plugins/modules/evidence/scoring.py` | Feature-score report-only exists; legacy live baseline remains. | Keep feature scoring report-only; expose comparisons and maturity dimensions; do not drive live action. | `tests/system_modularization/test_evidence_scoring_module.py` |
-| SelfEvolution | `plugins/modules/governance/self_evolution.py` | Uses legacy scores, duplicate unresolved skip exists. | Add cadence / novelty / unresolved class gates; consume governance feedback only as proposal input. | `tests/system_modularization/test_self_evolution_module.py` |
+| EvidenceScoring | `plugins/modules/evidence/scoring.py` | Feature-maturity v2 is the primary score path; legacy hash is comparison only. | Keep score dimensions visible; do not let scores directly execute, route, or mutate policy. | `tests/system_modularization/test_evidence_scoring_module.py` |
+| SelfEvolution | `plugins/modules/governance/self_evolution.py` | Uses primary feature scores, duplicate unresolved skip exists, expression feedback can produce expression-policy proposals. | Add remaining cadence gates; consume governance feedback only as proposal input. | `tests/system_modularization/test_self_evolution_module.py` |
 | ProposalQueue | `plugins/modules/governance/proposal_queue.py` | `approve` moves to `approved_for_proposal`; no execution. | Add lifecycle fields: followup_state, ops_reviewed_at, execution_decision_state, verification_refs. | `tests/system_modularization/test_proposal_queue_module.py` |
 | OpsGate | `plugins/modules/governance/ops_gate.py` | Report-only gate. | Review approved proposals and expose follow-up status; do not create execution tickets. | `tests/system_modularization/test_ops_gate_module.py` |
 | LeftBrainPipelineCheck | new `plugins/modules/governance/pipeline_checker.py` | Missing. | Read-only checker for proposal lifecycle, duplicate classes, cadence, boundary invariants. | new `tests/system_modularization/test_left_brain_pipeline_checker.py` |
@@ -521,7 +522,8 @@ Checks:
 - approved proposal has follow-up state;
 - approved proposal did not create execution ticket;
 - duplicate unresolved proposal classes are counted;
-- feature scoring remains report-only;
+- feature scoring is the primary score path, while execution/routing/policy
+  apply remains gated;
 - expired working is not scored;
 - owner feedback is visible to scoring/governance as evidence, not live apply;
 - hard boundaries remain false.
@@ -1072,11 +1074,11 @@ All required:
 - no actual send outside Hermes owner-origin path;
 - external review accepted.
 
-### Promote Feature Scoring Toward Live Use
+### Promote Feature Scoring Toward Direct Apply Use
 
 All required:
 
-- report-only feature scores have stable comparison history;
+- primary feature scores have stable comparison history against legacy hashes;
 - owner feedback and source diversity are included as features;
 - duplicate unresolved proposals are suppressed;
 - expired working not scored;

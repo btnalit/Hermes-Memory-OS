@@ -293,8 +293,10 @@ Owning docs:
 Current truth:
 
 - safe would-send observation exists;
-- formal expression engine does not exist;
-- Wandering output is deterministic;
+- low-frequency Hermes-agent expression adapter is deployed on the test host;
+- Wandering output remains deterministic inside Memory-OS, but formal
+  expression wording/silence judgment can now be delegated to Hermes agent
+  through the adapter;
 - P1-R slice 1 is deployed on `10.20.3.200`: new cognitive-loop Wandering
   output creates bounded ExpressionDraft records and records SpeakGate
   decisions; monitor distinguishes historical missing counts from
@@ -305,16 +307,14 @@ Current truth:
 - last recorded 07 monitor evidence reports `speak_expression_preview_missing_count=0` and
   PASS `right_brain_review_speak_preview_visible`;
 - expression feedback ledger and GovernanceFeedback summary backflow are
-  implemented; policy/prompt adaptation is not.
+  implemented; SelfEvolution can create expression-policy proposals from
+  expression feedback; policy/prompt/cadence apply is not automatic.
 
-Required before runtime:
+Still required before claiming mature product closure:
 
-- RightBrainExpressionEngine / Hermes-agent expression adapter contract;
-- every non-silent draft passes SpeakGate;
-- deploy owner-visible bounded expression content and monitor preview coverage;
-- expression feedback labels exist;
-- GovernanceFeedback/SelfEvolution consume outcomes only as proposal evidence;
-- monitor fields exist.
+- owner/user feedback volume on real expression output;
+- expression-policy proposals reviewed through owner/OpsGate apply;
+- production cadence tuning separate from the test-host harness.
 
 ### P1-S - RH-39 Left-Brain Governance Quality
 
@@ -327,25 +327,24 @@ Owning docs:
 Current truth:
 
 - safety governance is implemented;
-- evidence scoring still uses legacy hash scores for live consumers, but P1-S
-  slice 3 is deployed as a report-only feature-score comparator and P1-S
-  slice 4 is deployed as a 10.20.2.88 prototype-aligned maturity dimension
-  report;
+- EvidenceScoring v2 is now the primary scoring path: live status reports
+  `score_mode=feature_maturity_v2`, `feature_score_mode=primary`,
+  `hash_score_legacy_count=0`, and legacy hash only as comparison evidence;
 - deployed P1-S slice 2 adds a SelfEvolution duplicate unresolved proposal
   gate with novelty skip counters; last recorded 07 monitor evidence reports
   `novelty_skipped_count=1` and `duplicate_unresolved_proposal_count=1`;
-- feedback backflow is not closed;
+- expression feedback can enter EvidenceScoring/SelfEvolution as proposal
+  evidence; direct policy/prompt/cadence mutation remains blocked;
 - deployed P1-S slice 1 filters expired working out of EvidenceScoring and
   adds monitor visibility for expired scoring contamination;
 - last recorded 07 monitor evidence reports `expired_used_in_scoring_count=0` and PASS
   `left_brain_expired_working_not_scored`;
-- last recorded 07 monitor evidence reports `feature_score_count=487`,
-  `hash_score_legacy_count=487`, `comparison_count=487`,
-  `feature_score_live_applied=false`, and PASS
-  `left_brain_feature_scoring_report_only_ok`;
-- last recorded 07 monitor evidence reports P1-S.4 `prototype_aligned_score_count=487`,
+- latest 10.20.3.200 monitor evidence reports `feature_score_count=496`,
+  `hash_score_legacy_count=0`, `legacy_hash_comparison_count=496`,
+  and PASS `left_brain_feature_scoring_primary_ok`;
+- latest monitor evidence reports `prototype_aligned_score_count=496`,
   `maturity_dimension_count=9`, `maturity_live_applied=false`, and PASS
-  `left_brain_maturity_scoring_report_only_ok`;
+  `left_brain_maturity_scoring_primary_ok`;
 - latest live evidence reports `left_brain_pipeline_check.status=warn`,
   `finding_count=1`, `feature_scoring.report_only=true`,
   `execution_ticket_count=0`, and `actual_execute=false`; the WARN finding is
@@ -357,8 +356,8 @@ Implementation order:
 
 1. expired working filter / monitor;
 2. SelfEvolution novelty and idempotency gate;
-3. feature-based EvidenceScoring v2 report-only;
-4. prototype-aligned maturity dimensions report-only;
+3. feature-based EvidenceScoring v2 primary scoring;
+4. prototype-aligned maturity dimensions primary scoring;
 5. left-brain pipeline checker;
 6. proposal lifecycle / approved-follow-up state;
 7. feedback backflow report-only/proposal-only;

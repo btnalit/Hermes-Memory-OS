@@ -38,6 +38,10 @@ INSTALL_COGNITIVE_LOOP=""
 ENABLE_COGNITIVE_LOOP=""
 INSTALL_OWNER_REVIEW_CRON_HELPER=""
 ENABLE_OWNER_REVIEW_CRON=""
+INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=""
+ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=""
+RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE="${RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE:-30 4 * * 0}"
+RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER:-auto}"
 
 usage() {
   cat <<'USAGE'
@@ -71,10 +75,24 @@ Options:
                                 explicit recurring-enable gate to
                                 HERMES_HOME/scripts. Does not create or enable
                                 a cron job.
+  --install-right-brain-expression-cron-helper
+                                Copy the Memory-OS right-brain expression helper
+                                and explicit recurring-enable gate to
+                                HERMES_HOME/scripts. Does not create or enable
+                                a cron job.
   --enable-owner-review-cron    Enable recurring owner review delivery through
                                 Hermes cron --script --deliver in agent mode.
   --no-enable-owner-review-cron Do not create/enable the Hermes owner review
                                 cron job.
+  --enable-right-brain-expression-cron
+                                Enable low-frequency right-brain expression
+                                through Hermes cron in agent mode.
+  --no-enable-right-brain-expression-cron
+                                Do not create/enable right-brain expression cron.
+  --right-brain-expression-cron-schedule VALUE
+                                Hermes cron schedule. Default: 30 4 * * 0
+  --right-brain-expression-cron-deliver VALUE
+                                Hermes cron --deliver target. Default: auto.
   --owner-review-cron-schedule VALUE
                                 Hermes cron schedule. Default: 0 9 * * *
   --owner-review-cron-deliver VALUE
@@ -174,6 +192,10 @@ while [[ $# -gt 0 ]]; do
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
       shift
       ;;
+    --install-right-brain-expression-cron-helper)
+      INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
+      shift
+      ;;
     --enable-owner-review-cron)
       ENABLE_OWNER_REVIEW_CRON=1
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
@@ -182,6 +204,23 @@ while [[ $# -gt 0 ]]; do
     --no-enable-owner-review-cron)
       ENABLE_OWNER_REVIEW_CRON=0
       shift
+      ;;
+    --enable-right-brain-expression-cron)
+      ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1
+      INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
+      shift
+      ;;
+    --no-enable-right-brain-expression-cron)
+      ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=0
+      shift
+      ;;
+    --right-brain-expression-cron-schedule)
+      RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE="${2:?missing --right-brain-expression-cron-schedule value}"
+      shift 2
+      ;;
+    --right-brain-expression-cron-deliver)
+      RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="${2:?missing --right-brain-expression-cron-deliver value}"
+      shift 2
       ;;
     --owner-review-cron-schedule)
       OWNER_REVIEW_CRON_SCHEDULE="${2:?missing --owner-review-cron-schedule value}"
@@ -446,6 +485,8 @@ select_options() {
   local default_enable_cognitive_loop="no"
   local default_owner_review_cron_helper="yes"
   local default_enable_owner_review_cron="yes"
+  local default_right_brain_expression_cron_helper="yes"
+  local default_enable_right_brain_expression_cron="yes"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
   local default_llm_judge_preset="none"
@@ -458,6 +499,7 @@ select_options() {
   fi
   if [[ "${MODE}" == "production-safe" ]]; then
     default_enable_owner_review_cron="no"
+    default_enable_right_brain_expression_cron="no"
   fi
 
   [[ -n "${INSTALL_SHELL}" ]] || { ask_yes_no "Install/update memory-os-agent-os shell plugin?" "${default_shell}" && INSTALL_SHELL=1 || INSTALL_SHELL=0; }
@@ -484,6 +526,12 @@ select_options() {
     INSTALL_OWNER_REVIEW_CRON_HELPER=1
     resolve_owner_review_cron_deliver
     resolve_owner_review_cron_channel
+  fi
+  [[ -n "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" ]] || { ask_yes_no "Install right-brain expression Hermes cron helper/gate scripts?" "${default_right_brain_expression_cron_helper}" && INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1 || INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=0; }
+  [[ -n "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" ]] || { ask_yes_no "Enable low-frequency right-brain expression through Hermes cron?" "${default_enable_right_brain_expression_cron}" && ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1 || ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=0; }
+  if [[ "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" == "1" ]]; then
+    INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
+    resolve_right_brain_expression_cron_deliver
   fi
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
@@ -531,11 +579,30 @@ resolve_owner_review_cron_channel() {
   esac
 }
 
+resolve_right_brain_expression_cron_deliver() {
+  if [[ "${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER}" != "auto" ]]; then
+    return 0
+  fi
+  if [[ "${MODE}" == "test-host" ]]; then
+    RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="origin"
+    echo "Right-brain expression cron deliver target [auto] -> origin (--test-host)"
+    return 0
+  fi
+  if [[ "${YES}" == "1" ]]; then
+    RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="origin"
+    echo "Right-brain expression cron deliver target [auto] -> origin (non-interactive default)"
+    return 0
+  fi
+  local answer
+  read -r -p "Right-brain expression cron deliver target [origin]: " answer
+  RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="${answer:-origin}"
+}
+
 require_hermes_for_selected_actions() {
   [[ "${DRY_RUN}" == "1" ]] && return 0
   command_exists hermes && return 0
 
-  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${ENABLE_OWNER_REVIEW_CRON}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
+  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${ENABLE_OWNER_REVIEW_CRON}" == "1" || "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
     echo "ERROR: hermes command not found in PATH." >&2
     echo "Install Hermes or rerun with --skip-verify and without provider/shell enablement for file-copy-only installs." >&2
     exit 1
@@ -576,12 +643,33 @@ run_installer() {
   [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]] && args+=("--enable-cognitive-loop")
   args+=("--cognitive-loop-interval" "${COGNITIVE_LOOP_INTERVAL}")
   [[ "${INSTALL_OWNER_REVIEW_CRON_HELPER}" == "1" ]] && args+=("--install-owner-review-cron-helper")
+  [[ "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" == "1" ]] && args+=("--install-right-brain-expression-cron-helper")
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
   [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
   [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
   echo "Running installer:"
+  printf '  %q' "${args[@]}"
+  echo
+  "${args[@]}"
+}
+
+enable_right_brain_expression_cron() {
+  [[ "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" == "1" ]] || return 0
+  local gate="${HERMES_HOME}/scripts/memory_os_right_brain_expression_cron_gate.py"
+  local args=("${PYTHON_BIN}" "${gate}" "--hermes-home" "${HERMES_HOME}" "--schedule" "${RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE}" "--deliver" "${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER}")
+  if [[ "${DRY_RUN}" == "1" ]]; then
+    echo
+    echo "Dry-run right-brain expression Hermes cron enable plan:"
+    printf '  %q' "${args[@]}" "--apply" "--owner-approved"
+    echo
+    return 0
+  fi
+  args+=("--apply" "--owner-approved")
+
+  echo
+  echo "Configuring right-brain expression Hermes cron:"
   printf '  %q' "${args[@]}"
   echo
   "${args[@]}"
@@ -629,6 +717,7 @@ select_options
 require_hermes_for_selected_actions
 run_installer
 enable_owner_review_cron
+enable_right_brain_expression_cron
 verify_install
 
 echo

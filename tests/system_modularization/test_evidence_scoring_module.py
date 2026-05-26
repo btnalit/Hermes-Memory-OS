@@ -101,32 +101,35 @@ def test_evidence_scoring_writes_explainable_scores_for_all_supported_subjects(t
     assert any("evidence_scoring_run_written" in line for line in audit_lines)
 
 
-def test_evidence_scoring_writes_report_only_feature_scores_without_replacing_legacy_scores(tmp_path):
+def test_evidence_scoring_v2_replaces_hash_scores_as_primary_signal(tmp_path):
     store = _store(tmp_path)
     proposal_queue = _seed_scoring_inputs(tmp_path, store)
     module = EvidenceScoringModule(tmp_path, profile="main")
 
     result = module.score_all(store=store, proposal_queue=proposal_queue)
 
-    legacy_scores = module.read_scores()
+    primary_scores = module.read_scores()
     feature_scores = module.read_feature_scores()
-    assert result["feature_score_mode"] == "report_only"
+    assert result["score_mode"] == "feature_maturity_v2"
+    assert result["feature_score_mode"] == "primary"
     assert result["feature_score_count"] == result["score_count"] == 4
-    assert result["hash_score_legacy_count"] == 4
+    assert result["hash_score_legacy_count"] == 0
+    assert result["legacy_hash_comparison_count"] == 4
     assert result["feature_score_live_applied"] is False
     assert module.feature_scores_path.exists()
-    assert len(feature_scores) == len(legacy_scores)
+    assert len(feature_scores) == len(primary_scores)
     assert {record["subject_ref"] for record in feature_scores} == {
-        record["subject_ref"] for record in legacy_scores
+        record["subject_ref"] for record in primary_scores
     }
     assert {record["schema_version"] for record in feature_scores} == {"hermes.evidence_feature_score.v0"}
+    feature_by_ref = {record["subject_ref"]: record for record in feature_scores}
     for record in feature_scores:
-        assert record["mode"] == "report_only"
+        assert record["mode"] == "primary"
         assert record["live_applied"] is False
         assert record["actual_approve"] is False
         assert record["actual_execute"] is False
         assert 0.0 <= record["feature_score"] <= 1.0
-        assert 0.0 <= record["legacy_score"] <= 1.0
+        assert 0.0 <= record["legacy_hash_score"] <= 1.0
         assert isinstance(record["score_delta"], float)
         assert set(record["features"]) >= {
             "subject_kind_weight",
@@ -137,7 +140,12 @@ def test_evidence_scoring_writes_report_only_feature_scores_without_replacing_le
         rendered = json.dumps(record, ensure_ascii=False)
         assert "Create a dry-run evidence scoring report" not in rendered
         assert "Candidate body should not be auto-approved" not in rendered
-    assert {score["schema_version"] for score in legacy_scores} == {"hermes.evidence_score.v0"}
+    assert {score["schema_version"] for score in primary_scores} == {"hermes.evidence_score.v0"}
+    for score in primary_scores:
+        feature = feature_by_ref[score["subject_ref"]]
+        assert score["score_source"] == "feature_maturity_v2"
+        assert score["score"] == feature["maturity_score"]
+        assert score["legacy_hash_score"] == feature["legacy_hash_score"]
 
 
 def test_evidence_scoring_reports_prototype_aligned_maturity_dimensions(tmp_path):
@@ -164,7 +172,7 @@ def test_evidence_scoring_reports_prototype_aligned_maturity_dimensions(tmp_path
     assert result["maturity_live_applied"] is False
     for record in feature_scores:
         assert record["prototype_alignment"]["source"] == "10.20.2.88:self_evolution_daily_pipeline"
-        assert record["prototype_alignment"]["mode"] == "adapted_report_only"
+        assert record["prototype_alignment"]["mode"] == "adapted_primary"
         assert set(record["maturity_dimensions"]) == required_dimensions
         assert 0.0 <= record["maturity_score"] <= 1.0
         assert record["feature_score"] == record["maturity_score"]

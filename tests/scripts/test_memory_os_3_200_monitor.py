@@ -623,49 +623,52 @@ def test_classify_snapshot_warns_when_expired_working_is_scored():
     assert any(item["code"] == "left_brain_expired_working_used_in_scoring" for item in classification["warn"])
 
 
-def test_classify_snapshot_tracks_report_only_feature_scoring_and_blocks_live_apply():
+def test_classify_snapshot_tracks_primary_feature_scoring_and_legacy_comparison():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
         "evidence_count": 4,
         "score_count": 4,
+        "score_mode": "feature_maturity_v2",
         "subject_counts": {"event": 1, "working": 1, "proposal": 1, "crystallized_candidate": 1},
         "working_subject_count": 1,
         "expired_used_in_scoring_count": 0,
-        "feature_score_mode": "report_only",
+        "feature_score_mode": "primary",
         "feature_score_count": 4,
-        "hash_score_legacy_count": 4,
+        "hash_score_legacy_count": 0,
+        "legacy_hash_comparison_count": 4,
         "comparison_count": 4,
         "feature_score_live_applied": False,
-        "feature_score_report_count": 1,
         "owner_feedback_signal_count": 0,
+        "expression_feedback_subject_count": 0,
     }
 
     classification = classify_snapshot(snapshot)
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
-    assert any(item["code"] == "left_brain_feature_scoring_report_only_ok" for item in classification["pass"])
+    assert any(item["code"] == "left_brain_feature_scoring_primary_ok" for item in classification["pass"])
     assert "feature_score_count" in rendered
-    assert "feature_score_live_applied" in rendered
+    assert "legacy_hash_comparison_count" in rendered
 
-    snapshot["module_artifacts"]["evidence"]["feature_score_live_applied"] = True
+    snapshot["module_artifacts"]["evidence"]["hash_score_legacy_count"] = 4
     classification = classify_snapshot(snapshot)
 
     assert classification["status"] == "FAIL"
-    assert any(item["code"] == "left_brain_feature_scoring_live_applied" for item in classification["fail"])
+    assert any(item["code"] == "left_brain_legacy_hash_scores_still_primary" for item in classification["fail"])
 
 
-def test_classify_snapshot_tracks_prototype_aligned_maturity_scoring_report_only():
+def test_classify_snapshot_tracks_prototype_aligned_maturity_scoring_primary():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
         "evidence_count": 4,
         "score_count": 4,
         "expired_used_in_scoring_count": 0,
-        "feature_score_mode": "report_only",
+        "score_mode": "feature_maturity_v2",
+        "feature_score_mode": "primary",
         "feature_score_count": 4,
-        "hash_score_legacy_count": 4,
+        "hash_score_legacy_count": 0,
+        "legacy_hash_comparison_count": 4,
         "comparison_count": 4,
         "feature_score_live_applied": False,
-        "feature_score_report_count": 1,
         "prototype_aligned_score_count": 4,
         "maturity_dimension_count": 9,
         "maturity_dimension_keys": [
@@ -685,7 +688,7 @@ def test_classify_snapshot_tracks_prototype_aligned_maturity_scoring_report_only
     classification = classify_snapshot(snapshot)
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
-    assert any(item["code"] == "left_brain_maturity_scoring_report_only_ok" for item in classification["pass"])
+    assert any(item["code"] == "left_brain_maturity_scoring_primary_ok" for item in classification["pass"])
     assert "prototype_aligned_score_count" in rendered
     assert "maturity_dimension_count" in rendered
 
@@ -694,6 +697,35 @@ def test_classify_snapshot_tracks_prototype_aligned_maturity_scoring_report_only
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "left_brain_maturity_scoring_live_applied" for item in classification["fail"])
+
+
+def test_classify_snapshot_tracks_right_brain_expression_adapter_requests():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["right_brain_expression_adapter"] = {
+        "request_count": 2,
+        "latest_channel": "origin",
+        "latest_delivery_mode": "hermes_cron_agent",
+        "latest_actual_send": False,
+        "raw_body_included_count": 0,
+        "silent_request_count": 0,
+    }
+    snapshot["expression_artifacts"]["right_brain_adapter_request_count"] = 2
+    snapshot["expression_artifacts"]["right_brain_adapter_latest_channel"] = "origin"
+    snapshot["expression_artifacts"]["right_brain_adapter_latest_delivery_mode"] = "hermes_cron_agent"
+    snapshot["expression_artifacts"]["right_brain_adapter_raw_body_included_count"] = 0
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "right_brain_expression_adapter_visible" for item in classification["pass"])
+    assert "right_brain_adapter_request_count" in rendered
+
+    snapshot["module_artifacts"]["right_brain_expression_adapter"]["latest_actual_send"] = True
+    snapshot["expression_artifacts"]["right_brain_adapter_latest_actual_send"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "right_brain_expression_adapter_actual_send_true" for item in classification["fail"])
 
 
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
@@ -1328,6 +1360,7 @@ def _healthy_snapshot() -> dict:
         },
         "compaction": {},
         "module_artifacts": _healthy_module_artifacts(),
+        "expression_artifacts": _healthy_expression_artifacts(),
         "owner_review": _healthy_owner_review(),
         "owner_review_aging": _healthy_owner_review_aging(),
         "owner_review_channel": _healthy_owner_review_channel(),
@@ -1647,5 +1680,40 @@ def _healthy_module_artifacts() -> dict:
             "live_policy_changed_count": 0,
             "raw_body_included_count": 0,
         },
+        "right_brain_expression_adapter": {
+            "request_count": 0,
+            "silent_request_count": 0,
+            "latest_channel": None,
+            "latest_delivery_mode": None,
+            "latest_actual_send": False,
+            "raw_body_included_count": 0,
+        },
         "mailbox": {"mailbox_exists": False, "would_send_count": 0},
+    }
+
+
+def _healthy_expression_artifacts() -> dict:
+    return {
+        "schema_version": "memory-os.expression_artifact_summary.v0",
+        "wandering_output_count": 0,
+        "wandering_would_send_count": 0,
+        "wandering_silent_count": 0,
+        "expression_draft_count": 0,
+        "expression_draft_created_count": 0,
+        "expression_draft_missing_count": 0,
+        "latest_expression_draft_missing_count": 0,
+        "expression_feedback_count": 0,
+        "speak_gate_evaluated_count": 0,
+        "speak_gate_missing_evaluation_count": 0,
+        "latest_speak_gate_missing_evaluation_count": 0,
+        "latest_speak_gate_evaluated_count": 0,
+        "speak_gate_decision_distribution": {},
+        "speak_gate_would_send_count": 0,
+        "speak_gate_blocked_count": 0,
+        "speak_gate_actual_send": False,
+        "right_brain_adapter_request_count": 0,
+        "right_brain_adapter_latest_channel": None,
+        "right_brain_adapter_latest_delivery_mode": None,
+        "right_brain_adapter_latest_actual_send": False,
+        "right_brain_adapter_raw_body_included_count": 0,
     }
