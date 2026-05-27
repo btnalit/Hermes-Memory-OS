@@ -419,6 +419,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "proposal_quality_missing_count": pipeline_check.get("proposal_quality_missing_count"),
                     }
                 )
+            if int(pipeline_check.get("agenda_trace_missing_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "left_brain_proposal_agenda_trace_missing",
+                        "agenda_trace_missing_count": pipeline_check.get("agenda_trace_missing_count"),
+                    }
+                )
         expression_feedback = (
             module_artifacts.get("expression_feedback")
             if isinstance(module_artifacts.get("expression_feedback"), dict)
@@ -843,6 +850,24 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_surface_raw_body_included"})
             if int(review_surface.get("boundary_true_count") or 0) > 0:
                 fail.append({"code": "owner_review_surface_boundary_true"})
+            operations = review_surface.get("operations") if isinstance(review_surface.get("operations"), dict) else {}
+            expression_context = (
+                operations.get("expression_feedback_context")
+                if isinstance(operations.get("expression_feedback_context"), dict)
+                else {}
+            )
+            if expression_context.get("status") == "ok" and int(expression_context.get("feedback_action_count") or 0) > 0:
+                passed.append({"code": "owner_review_surface_expression_feedback_context_visible"})
+            memory_sources_context = (
+                operations.get("memory_sources_feedback_context")
+                if isinstance(operations.get("memory_sources_feedback_context"), dict)
+                else {}
+            )
+            if (
+                memory_sources_context.get("status") == "ok"
+                and int(memory_sources_context.get("feedback_action_count") or 0) > 0
+            ):
+                passed.append({"code": "owner_review_surface_memory_sources_feedback_context_visible"})
         else:
             warn.append({"code": "owner_review_surface_unavailable", "value": review_surface})
 
@@ -1049,6 +1074,31 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             passed.append({"code": "memory_sources_stats_ok"})
         else:
             warn.append({"code": "memory_sources_no_records_yet", "value": memory_sources})
+        memory_sources_surface = (
+            snapshot.get("owner_review_surface", {})
+            .get("operations", {})
+            .get("memory_sources_feedback_context", {})
+        )
+        if (
+            int(memory_sources.get("feedback_count") or 0) == 0
+            and isinstance(memory_sources_surface, dict)
+            and memory_sources_surface.get("status") == "ok"
+            and int(memory_sources_surface.get("feedback_action_count") or 0) > 0
+        ):
+            warn.append(
+                {
+                    "code": "memory_sources_feedback_volume_missing",
+                    "latest_memory_source_id": memory_sources_surface.get("latest_memory_source_id"),
+                    "feedback_action_count": memory_sources_surface.get("feedback_action_count"),
+                }
+            )
+        elif int(memory_sources.get("feedback_count") or 0) > 0:
+            passed.append(
+                {
+                    "code": "memory_sources_feedback_volume_present",
+                    "feedback_count": memory_sources.get("feedback_count"),
+                }
+            )
     else:
         warn.append({"code": "memory_sources_stats_unavailable", "value": memory_sources})
 
@@ -1612,6 +1662,9 @@ def _owner_review_surface_summary(summary: dict[str, Any]) -> dict[str, Any]:
             name: {
                 "status": op.get("status"),
                 "item_count": op.get("item_count"),
+                "feedback_action_count": op.get("feedback_action_count"),
+                "latest_outcome_id": op.get("latest_outcome_id"),
+                "latest_memory_source_id": op.get("latest_memory_source_id"),
                 "source": op.get("source"),
             }
             for name, op in operations.items()
@@ -2396,6 +2449,7 @@ def module_artifact_summary():
         "memory_sources_policy_unlinked_quality_count": left_brain_pipeline.get(
             "memory_sources_policy_unlinked_quality_count"
         ),
+        "agenda_trace_missing_count": left_brain_pipeline.get("agenda_trace_missing_count"),
         "actual_execute": left_brain_pipeline.get("actual_execute"),
       },
       "deep_reflection": {
@@ -3002,12 +3056,24 @@ def _surface_operation_summary(report):
             items.extend([entry for entry in value if isinstance(entry, dict)])
     if item:
         items.append(item)
+    latest_outcome = report.get("latest_outcome") if isinstance(report.get("latest_outcome"), dict) else {}
+    latest_memory_source = (
+        report.get("latest_memory_source") if isinstance(report.get("latest_memory_source"), dict) else {}
+    )
+    feedback_actions = report.get("feedback_actions") if isinstance(report.get("feedback_actions"), dict) else {}
+    if latest_outcome:
+        items.append(latest_outcome)
+    if latest_memory_source:
+        items.append(latest_memory_source)
     return {
       "schema_version": report.get("schema_version"),
       "status": report.get("status"),
       "operation": report.get("operation"),
       "source": report.get("source") or report.get("binding_source"),
       "item_count": len(items),
+      "feedback_action_count": len(feedback_actions),
+      "latest_outcome_id": latest_outcome.get("target_id") if latest_outcome else "",
+      "latest_memory_source_id": latest_memory_source.get("target_id") if latest_memory_source else "",
       "raw_body_included": report.get("raw_body_included") is True or any(
           entry.get("raw_body_included") is True for entry in items
       ),
@@ -3043,10 +3109,28 @@ def owner_review_surface_summary():
         "--limit",
         "2",
     ])
+    expression_feedback_context = memory_os_cli([
+        "review",
+        "surface",
+        "--operation",
+        "expression_feedback_context",
+        "--limit",
+        "6",
+    ])
+    memory_sources_feedback_context = memory_os_cli([
+        "review",
+        "surface",
+        "--operation",
+        "memory_sources_feedback_context",
+        "--limit",
+        "9",
+    ])
     operations = {
       "next_page": _surface_operation_summary(next_page),
       "detail": _surface_operation_summary(detail),
       "proposal_followups": _surface_operation_summary(followups),
+      "expression_feedback_context": _surface_operation_summary(expression_feedback_context),
+      "memory_sources_feedback_context": _surface_operation_summary(memory_sources_feedback_context),
     }
     raw_body_count = sum(1 for item in operations.values() if item.get("raw_body_included") is True)
     boundary_true_count = sum(int(item.get("boundary_true_count") or 0) for item in operations.values())

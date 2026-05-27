@@ -16458,3 +16458,321 @@ Interpretation:
   `agenda_candidate_id` and `agenda_maturity_gate` in `proposal_quality`.
 - Duplicate, quality-blocked, and same-day repeated signals remain observable
   in the agenda candidate ledger without creating new owner agenda pressure.
+
+## 2026-05-27 - P1-R Latest Expression Feedback Context Surface
+
+Scope:
+
+- P1-R reaction-volume improvement.
+- Make the latest right-brain expression outcome easier for Hermes agent to
+  discuss with the owner and bind to expression feedback.
+- Do not add Memory-OS transport, conversation ownership, direct policy
+  mutation, or generic execution.
+
+Preflight:
+
+```text
+source_of_truth=38/40 P1-R, 32 active roadmap, live right_brain_expression_adapter outcome monitor
+finding_type=live behavior / agent collaboration gap
+owning_seam=memory_os_review_surface read-only context + memory_os_review_reply token binding
+reverse_scope=Hermes owns conversation and owner interaction; Memory-OS exposes bounded latest-outcome context and stable feedback tokens
+evidence_loop=unit tests + remote py_compile + 10.20.3.200 read-only surface smoke + token idempotency smoke + monitor
+monitor_or_validation_fields=owner_review_surface.expression_feedback_context, feedback_action_count, raw_body_included_count, boundary_true_count, expression_feedback.linked_outcome_count
+promotion_signal=Hermes agent can fetch latest outcome context and submit owner-chosen feedback token without raw body/send/execute
+stop_or_rollback_signal=raw body appears, Memory-OS sends or mutates policy directly, token maps to wrong outcome, generic target parser introduced
+external_review=not required for read-only surface plus existing owner-action path; required before new apply kind
+```
+
+Local regression:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py tests\plugins\memory\test_memory_os_lifecycle.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=116 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+```
+
+Remote deployment:
+
+```text
+deployed_files:
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/__init__.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/cli.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/status_tool_contract.py
+  /root/.hermes/plugins/memory-os-agent-os/__init__.py
+remote_py_compile=pass
+```
+
+Live surface smoke:
+
+```text
+command=HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os review surface --operation expression_feedback_context --limit 6
+status=ok
+source=right_brain_expression_adapter_latest_outcome
+latest_outcome_id=rbout_aa416c239b761e2b
+existing_feedback.count=1
+existing_feedback.ratings.too_mechanical=1
+feedback_tokens=6
+raw_body_included=false
+actual_send=false
+actual_execute=false
+```
+
+Live token smoke:
+
+```text
+command=memory feedback oa_ff2d2219b03a52 too_mechanical --apply
+status=ok
+owner_action_status=duplicate_ignored
+target_type=expression
+target_id=rbout_aa416c239b761e2b
+idempotency_key=owner|expression|rbout_aa416c239b761e2b|too_mechanical
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_unapproved_crystallized_approval=false
+```
+
+Live monitor after deploy:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh31_eval_measurement_signals]
+
+OwnerReviewSurface.operations.expression_feedback_context.status=ok
+OwnerReviewSurface.operations.expression_feedback_context.item_count=1
+OwnerReviewSurface.raw_body_included_count=0
+OwnerReviewSurface.boundary_true_count=0
+PASS includes owner_review_surface_expression_feedback_context_visible
+
+ModuleArtifacts.expression_feedback.feedback_count=3
+ModuleArtifacts.expression_feedback.linked_outcome_count=1
+ModuleArtifacts.expression_feedback.linked_outcome_missing_count=0
+ModuleArtifacts.right_brain_expression_adapter.outcome_feedback_count=1
+ModuleArtifacts.right_brain_expression_adapter.latest_outcome_feedback_count=1
+```
+
+Interpretation:
+
+- Hermes agent can now fetch bounded context for the latest right-brain
+  expression and choose from stable feedback tokens after the owner gives a
+  natural reaction.
+- The new surface does not create feedback by itself; it only makes linked
+  owner feedback easier to collect through the existing structured
+  `memory_os_review_reply` tool and OwnerActionProcessor.
+- The live token smoke hit an existing too-mechanical record and was
+  idempotently ignored, proving the new token map binds to the recorded outcome
+  without adding a duplicate feedback record or mutating policy.
+
+## 2026-05-27 - P1-S MemorySources Feedback Context Surface
+
+Scope:
+
+- P1-S / RH-39 MemorySources feedback volume and signal-to-agenda closure.
+- Make existing MemorySources attribution records actionable for Hermes-agent
+  feedback collection without adding a new signal source and without writing
+  live feedback unless the owner explicitly gives feedback.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=32 roadmap P1-S, 39 left-brain governance quality contract, 40 unified control plane, live MemorySources.feedback_count
+finding_type=feedback/control signal gap
+owning_seam=memory_os_review_surface read-only context + memory_os_review_reply token binding + OwnerActionProcessor
+reverse_scope=Hermes owns conversation and clarification; Memory-OS exposes bounded MemorySources context and stable feedback tokens
+evidence_loop=unit tests + remote py_compile + 10.20.3.200 read-only surface smoke + dry-run token parse + monitor
+monitor_or_validation_fields=owner_review_surface.memory_sources_feedback_context, feedback_action_count, latest_memory_source_id, raw_body_included_count, boundary_true_count, MemorySources.feedback_count
+promotion_signal=Hermes agent can fetch latest MemorySources context and submit owner-chosen feedback token through structured reply
+stop_or_rollback_signal=raw body appears, Memory-OS changes route/prompt/policy directly, token maps to wrong memory_source, generic target parser introduced
+external_review=not required for read-only surface plus dry-run token path; required before memory_sources_policy explicit apply
+```
+
+Local regression:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py tests\plugins\memory\test_memory_os_lifecycle.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=122 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+python -m py_compile plugins\memory\memory_os\owner_actions.py plugins\memory\memory_os\__init__.py plugins\memory\memory_os\cli.py plugins\memory-os-agent-os\__init__.py scripts\memory_os_3_200_monitor.py
+result=pass
+```
+
+Remote deployment:
+
+```text
+deployed_files:
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/__init__.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/cli.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/status_tool_contract.py
+  /root/.hermes/plugins/memory-os-agent-os/__init__.py
+remote_py_compile=pass
+```
+
+Live surface smoke:
+
+```text
+command=HERMES_HOME=/root/.hermes python3 -m plugins.memory.memory_os review surface --operation memory_sources_feedback_context --limit 9
+status=ok
+source=memory_sources_latest_record
+latest_memory_source_id=msrc_20260527T035855791901Z_d61c1a28
+route=active_task
+query_class=active_task
+feedback_action_count=9
+existing_feedback.count=0
+raw_body_included=false
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_unapproved_crystallized_approval=false
+```
+
+Dry-run token parse:
+
+```text
+command=memory feedback oa_c2e406e477c001 too_mechanistic
+status=ok
+dry_run=true
+parsed.action_type=mark_feedback
+parsed.target_type=memory_source
+parsed.target_id=msrc_20260527T035855791901Z_d61c1a28
+idempotency_key=owner|memory_source|msrc_20260527T035855791901Z_d61c1a28|mark_feedback:too_mechanistic
+owner_action_result.status=ok
+owner_action_result.dry_run=true
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_unapproved_crystallized_approval=false
+```
+
+Live monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh31_eval_measurement_signals, memory_sources_feedback_volume_missing]
+
+OwnerReviewSurface.operations.memory_sources_feedback_context.status=ok
+OwnerReviewSurface.operations.memory_sources_feedback_context.item_count=1
+OwnerReviewSurface.operations.memory_sources_feedback_context.feedback_action_count=9
+OwnerReviewSurface.operations.memory_sources_feedback_context.latest_memory_source_id=msrc_20260527T035855791901Z_d61c1a28
+OwnerReviewSurface.raw_body_included_count=0
+OwnerReviewSurface.boundary_true_count=0
+PASS includes owner_review_surface_memory_sources_feedback_context_visible
+
+MemorySources.feedback_count=0
+ModuleArtifacts.evidence.subject_counts.memory_sources_feedback=1
+ModuleArtifacts.left_brain_pipeline_check.memory_sources_policy_quality_ready_count=0
+ModuleArtifacts.left_brain_pipeline_check.memory_sources_policy_quality_blocked_count=0
+PASS includes owner_review_surface_memory_sources_feedback_context_visible
+WARN includes memory_sources_feedback_volume_missing
+```
+
+Interpretation:
+
+- MemorySources feedback now has the same owner/Hermes collection shape as
+  right-brain expression feedback: read bounded context first, then write
+  feedback only through a stable token and OwnerActionProcessor after owner
+  intent.
+- The live smoke deliberately stayed dry-run; it proves token binding without
+  fabricating live owner feedback.
+- MemorySources feedback idempotency now includes the owner-selected rating for
+  `mark_feedback`, so the same rating remains duplicate-safe while distinct
+  ratings on the same MemorySources record can accumulate as separate feedback
+  signals.
+- `MemorySources.feedback_count=0` remains the real maturity blocker. The next
+  promotion requires a real owner feedback sample before a
+  `memory_sources_policy` proposal or explicit apply can be treated as live.
+- The monitor now makes that blocker machine-visible as
+  `memory_sources_feedback_volume_missing` when the feedback context surface is
+  ready but no real MemorySources feedback records exist. Once
+  `feedback_count > 0`, classification switches to
+  `memory_sources_feedback_volume_present`.
+
+## 2026-05-27 - P1-S Agenda Candidate Trace Gate
+
+Goal:
+
+- Tighten the automatic agenda-candidate maturation contract so
+  owner-actionable, non-legacy proposals cannot look mature unless they trace
+  back to an `agenda_candidate` and explicit maturity gate.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=32 roadmap P1-S agenda-candidate maturation, 39 left-brain governance quality contract, 10.20.3.200 monitor
+finding_type=contract/monitor gap
+owning_seam=left_brain_pipeline_check proposal_quality gate + monitor classification
+reverse_scope=10.20.2.88 prototype uses proposal maturity fields; Memory-OS adapts the maturity contract without copying prototype scripts
+evidence_loop=unit tests + remote deployment + report-only left_brain_pipeline_check write + live monitor
+monitor_or_validation_fields=proposal_quality.agenda_trace_missing_count, agenda_trace_present_count, left_brain_proposal_agenda_trace_missing
+promotion_signal=owner-actionable non-legacy proposals have agenda_candidate_id, agenda_maturity_gate, and agenda_promotion_status before entering owner agenda
+stop_or_rollback_signal=proposal reaches owner agenda without agenda trace, actual_execute=true, generic executor introduced
+external_review=not required for report-only checker/monitor gate
+```
+
+Local regression:
+
+```text
+python -m pytest tests\system_modularization\test_left_brain_pipeline_checker.py tests\system_modularization\test_self_evolution_module.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=77 passed
+
+python -m py_compile plugins\modules\governance\pipeline_checker.py scripts\memory_os_3_200_monitor.py
+result=pass
+```
+
+Remote deployment:
+
+```text
+remote_backup=/root/.hermes/memory-os/runtime/python/plugins/modules/governance/pipeline_checker.py.bak-20260527T033719
+deployed_file=/root/.hermes/memory-os/runtime/python/plugins/modules/governance/pipeline_checker.py
+remote_py_compile=pass
+```
+
+Report-only live write:
+
+```text
+left_brain_pipeline_check.status=ok
+left_brain_pipeline_check.finding_codes=[]
+proposal_quality.agenda_trace_missing_count=0
+proposal_quality.agenda_trace_present_count=0
+actual_execute=false
+```
+
+Live monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh31_eval_measurement_signals, memory_sources_feedback_volume_missing]
+
+ModuleArtifacts.left_brain_pipeline_check.status=ok
+ModuleArtifacts.left_brain_pipeline_check.finding_count=0
+ModuleArtifacts.left_brain_pipeline_check.agenda_trace_missing_count=0
+ModuleArtifacts.left_brain_pipeline_check.actual_execute=false
+```
+
+Interpretation:
+
+- The left-brain pipeline now has a report-only gate for the core principle:
+  signal must mature into an agenda candidate before it can become an
+  owner-actionable proposal.
+- Current live data has no active owner-actionable proposal missing agenda
+  trace. The remaining left-brain blocker is not maturity metadata; it is
+  real MemorySources feedback volume.

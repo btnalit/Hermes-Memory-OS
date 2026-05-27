@@ -156,6 +156,9 @@ def test_left_brain_pipeline_checker_accepts_mature_expression_policy_proposal(t
             "runtime_target": "expression_policy",
             "direct_apply_allowed": False,
             "generic_executor_allowed": False,
+            "agenda_candidate_id": "agc_expression_1",
+            "agenda_maturity_gate": "linked_expression_feedback",
+            "agenda_promotion_status": "promoted_to_proposal",
         },
     )
 
@@ -164,6 +167,7 @@ def test_left_brain_pipeline_checker_accepts_mature_expression_policy_proposal(t
 
     assert report["status"] == "ok"
     assert report["proposal_quality"]["owner_actionable_proposal_count"] == 1
+    assert report["proposal_quality"]["agenda_trace_missing_count"] == 0
     assert report["proposal_quality"]["expression_policy_quality_ready_count"] == 1
     assert report["proposal_quality"]["expression_policy_quality_blocked_count"] == 0
     assert not any(finding["code"] == "expression_policy_proposal_quality_gap" for finding in report["findings"])
@@ -200,6 +204,39 @@ def test_left_brain_pipeline_checker_warns_on_unmature_expression_policy_proposa
     assert any(finding["code"] == "expression_policy_proposal_quality_gap" for finding in report["findings"])
 
 
+def test_left_brain_pipeline_checker_warns_when_owner_actionable_proposal_lacks_agenda_trace(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body=(
+            "具体改动: tune expression policy\n"
+            "证据: linked outcome rbout_1\n"
+            "验收标准: monitor shows owner feedback improved\n"
+            "后续状态: explicit apply only"
+        ),
+        kind="expression_policy",
+        proposal_class="expression_policy:too_mechanical",
+        dedupe_key="expression_policy:too_mechanical",
+        proposal_quality={
+            "quality_gate": "linked_expression_feedback",
+            "feedback_rating": "too_mechanical",
+            "feedback_count": 1,
+            "linked_outcome_count": 1,
+            "runtime_target": "expression_policy",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+        },
+    )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+
+    assert report["status"] == "warn"
+    assert report["proposal_quality"]["agenda_trace_missing_count"] == 1
+    assert any(finding["code"] == "proposal_agenda_trace_missing" for finding in report["findings"])
+
+
 def test_left_brain_pipeline_checker_accepts_mature_memory_sources_policy_proposal(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")
@@ -227,6 +264,9 @@ def test_left_brain_pipeline_checker_accepts_mature_memory_sources_policy_propos
             "direct_apply_allowed": False,
             "generic_executor_allowed": False,
             "selected_equals_successful_use": False,
+            "agenda_candidate_id": "agc_memory_sources_1",
+            "agenda_maturity_gate": "linked_corrective_memory_sources_feedback",
+            "agenda_promotion_status": "promoted_to_proposal",
         },
     )
 
@@ -234,6 +274,7 @@ def test_left_brain_pipeline_checker_accepts_mature_memory_sources_policy_propos
     status = LeftBrainPipelineCheckModule(tmp_path, profile="main").status()
 
     assert report["status"] == "ok"
+    assert report["proposal_quality"]["agenda_trace_missing_count"] == 0
     assert report["proposal_quality"]["memory_sources_policy_quality_ready_count"] == 1
     assert report["proposal_quality"]["memory_sources_policy_quality_blocked_count"] == 0
     assert not any(finding["code"] == "memory_sources_policy_proposal_quality_gap" for finding in report["findings"])

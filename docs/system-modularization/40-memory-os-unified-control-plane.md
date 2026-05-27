@@ -67,7 +67,7 @@ Memory-OS has four layers. Only the first is currently closed.
 | Layer 1 - Safety governance | Closed on test host | Hard boundaries, owner action, audit, monitor, and Hermes transport boundary are working. |
 | Layer 2 - Intelligent judgment | Not mature | EvidenceScoring and SelfEvolution are safe, but scoring quality and proposal novelty are not mature. |
 | Layer 3 - Right-brain expression operations | Runtime baseline, not mature | Test-host Hermes-agent expression, outcome ledger, expression-policy apply, and first outcome-linked feedback path work; reaction volume and cadence/prompt evaluation are not mature. |
-| Layer 4 - Hermes agent collaboration | Partially corrected | Hermes agent owns interaction; Memory-OS still needs stronger collaboration surfaces and fallback deprecation. |
+| Layer 4 - Hermes agent collaboration | Partially corrected | Hermes agent owns interaction; Memory-OS exposes bounded review and latest-expression feedback context; fallback deprecation still needs continued monitoring. |
 
 Allowed public/internal claims:
 
@@ -266,10 +266,11 @@ Near-term work order after synthesis and the 2026-05-27 runtime
 outcome-feedback baseline:
 
 1. **P1-S feedback backflow quality**: linked-outcome quality gating is now
-   live for expression feedback, and SelfEvolution now writes bounded agenda
-   candidates before proposal promotion. Remaining P1-S work should focus on
-   real feedback volume and proposal usefulness, not direct
-   prompt/policy/cadence mutation.
+   live for expression feedback, MemorySources-feedback can enter the same
+   bounded scoring/proposal path, and Hermes agent now has read-only
+   `memory_sources_feedback_context` to collect real owner feedback without
+   direct route/prompt/policy mutation. Remaining P1-S work should focus on
+   real feedback volume and proposal usefulness.
 2. **P1-T cadence split is no longer a WARN source**: cadence report is live,
    left-brain/context modules have module-local skip gates, and the remaining
    right-brain expression harness findings (`wandering_mind`,
@@ -396,6 +397,19 @@ Current truth:
   `expression_feedback_subject_count=3`, linked `1`, unlinked `2`,
   `proposal_created=false` due same-day same-signal cadence, and
   `actual_execute=false`.
+- P1-S MemorySources-feedback context surface is live: Hermes agent can request
+  `memory_os_review_surface(operation=memory_sources_feedback_context)` and get
+  bounded latest MemorySources attribution context plus stable feedback tokens.
+  The latest live smoke reports `feedback_action_count=9`,
+  `MemorySources.feedback_count=0`, dry-run token parsing to `mark_feedback`,
+  `raw_body_included=false`, and `actual_execute=false`. Current monitor
+  classifies the remaining volume blocker as
+  `memory_sources_feedback_volume_missing` until real owner feedback exists;
+- P1-S agenda trace gate is live: `left_brain_pipeline_check` now requires
+  owner-actionable non-legacy proposals with `proposal_quality` to trace back to
+  `agenda_candidate_id`, `agenda_maturity_gate`, and
+  `agenda_promotion_status`. The latest report-only run on `10.20.3.200`
+  reports `agenda_trace_missing_count=0` and `actual_execute=false`;
 - deployed P1-S slice 1 filters expired working out of EvidenceScoring and
   adds monitor visibility for expired scoring contamination;
 - last recorded 07 monitor evidence reports `expired_used_in_scoring_count=0` and PASS

@@ -749,6 +749,56 @@ def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp
     assert result["record"]["boundary"]["actual_send"] is False
 
 
+def test_mark_feedback_allows_distinct_ratings_for_same_memory_source(tmp_path):
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_test_002",
+            "created_at": "2026-05-25T00:00:00Z",
+            "route": "active_task",
+            "query_class": "active_task",
+        },
+    )
+
+    first = apply_owner_action(
+        store,
+        action_type="mark_feedback",
+        target="memory_source:msrc_test_002",
+        owner_id="owner",
+        channel="cli",
+        rating="too_mechanistic",
+        apply=True,
+    )
+    same_rating = apply_owner_action(
+        store,
+        action_type="mark_feedback",
+        target="memory_source:msrc_test_002",
+        owner_id="owner",
+        channel="cli",
+        rating="too_mechanistic",
+        apply=True,
+    )
+    different_rating = apply_owner_action(
+        store,
+        action_type="mark_feedback",
+        target="memory_source:msrc_test_002",
+        owner_id="owner",
+        channel="cli",
+        rating="missing_context",
+        apply=True,
+    )
+
+    feedback = _jsonl(memory_sources_feedback_path(store.roots))
+    assert first["status"] == "ok"
+    assert same_rating["status"] == "duplicate_ignored"
+    assert different_rating["status"] == "ok"
+    assert [item["rating"] for item in feedback] == ["too_mechanistic", "missing_context"]
+    assert first["idempotency_key"].endswith("|mark_feedback:too_mechanistic")
+    assert different_rating["idempotency_key"].endswith("|mark_feedback:missing_context")
+
+
 def test_expression_feedback_records_quality_signal_without_policy_mutation(tmp_path):
     store = _store(tmp_path)
 
@@ -914,6 +964,269 @@ def test_expression_feedback_latest_outcome_alias_is_idempotent_per_resolved_out
     assert first["status"] == "ok"
     assert second["status"] == "ok"
     assert [item["outcome_id"] for item in feedback] == ["rbout_first", "rbout_second"]
+
+
+def test_review_surface_exposes_latest_expression_feedback_context_tokens(tmp_path):
+    store = _store(tmp_path)
+    outcome_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    outcome_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.right_brain_expression_outcome.v0",
+                "outcome_id": "rbout_latest_context",
+                "request_id": "rbexpr_latest_context",
+                "observed_at": "2026-05-26T13:00:00Z",
+                "policy_version": 5,
+                "silent": False,
+                "outcome_preview": "今天这边很安静，我就在。",
+                "outcome_preview_chars": 12,
+                "raw_body_included": False,
+                "actual_send": False,
+                "actual_execute": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = owner_review_surface_report(store, operation="expression_feedback_context", limit=6)
+
+    assert report["status"] == "ok"
+    assert report["operation"] == "expression_feedback_context"
+    assert report["latest_outcome"]["target_id"] == "rbout_latest_context"
+    assert report["latest_outcome"]["expression_preview"] == "今天这边很安静，我就在。"
+    assert report["latest_outcome"]["raw_body_included"] is False
+    assert report["feedback_actions"]["too_mechanical"]["action"] == "feedback"
+    assert report["feedback_actions"]["too_mechanical"]["target_id"] == "rbout_latest_context"
+    assert report["boundary"]["actual_execute"] is False
+
+
+def test_expression_feedback_context_token_applies_without_digest_binding(tmp_path):
+    store = _store(tmp_path)
+    outcome_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    outcome_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.right_brain_expression_outcome.v0",
+                "outcome_id": "rbout_context_token",
+                "request_id": "rbexpr_context_token",
+                "observed_at": "2026-05-26T13:00:00Z",
+                "policy_version": 5,
+                "silent": False,
+                "outcome_preview_chars": 12,
+                "raw_body_included": False,
+                "actual_send": False,
+                "actual_execute": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    surface = owner_review_surface_report(store, operation="expression_feedback_context", limit=6)
+    token = surface["feedback_actions"]["too_mechanical"]["action_token"]
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory feedback {token} too_mechanical",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+        require_recorded_digest=True,
+    )
+
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert result["parsed"]["target_type"] == "expression"
+    assert result["parsed"]["target_id"] == "rbout_context_token"
+    assert result["active_digest"]["binding"] == "digest_not_found"
+    assert feedback["outcome_id"] == "rbout_context_token"
+    assert feedback["outcome_feedback_linked"] is True
+    assert feedback["raw_body_included"] is False
+
+
+def test_provider_expression_feedback_context_supports_structured_tool_reply(tmp_path):
+    store = _store(tmp_path)
+    outcome_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    outcome_path.parent.mkdir(parents=True, exist_ok=True)
+    outcome_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.right_brain_expression_outcome.v0",
+                "outcome_id": "rbout_provider_context",
+                "request_id": "rbexpr_provider_context",
+                "observed_at": "2026-05-26T13:00:00Z",
+                "policy_version": 5,
+                "silent": False,
+                "outcome_preview": "今天这边很安静，我就在。",
+                "outcome_preview_chars": 12,
+                "raw_body_included": False,
+                "actual_send": False,
+                "actual_execute": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+
+    surface = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_surface",
+            {"operation": "expression_feedback_context", "owner_utterance": "刚才那句还是太机械"},
+        )
+    )
+    token = surface["feedback_actions"]["too_mechanical"]["action_token"]
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_reply",
+            {
+                "action": "feedback",
+                "action_token": token,
+                "rating": "too_mechanical",
+                "owner_utterance": "刚才那句还是太机械",
+            },
+        )
+    )
+
+    feedback = _jsonl(expression_feedback_ledger_path(store.roots))[0]
+    assert surface["status"] == "ok"
+    assert result["status"] == "ok"
+    assert result["tool_input"]["mode"] == "structured"
+    assert result["parsed"]["target_id"] == "rbout_provider_context"
+    assert feedback["outcome_id"] == "rbout_provider_context"
+    assert feedback["outcome_feedback_linked"] is True
+
+
+def test_review_surface_exposes_latest_memory_sources_feedback_context_tokens(tmp_path):
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_context_001",
+            "created_at": "2026-05-27T01:00:00Z",
+            "profile": "main",
+            "route": "low_clue_recall",
+            "query_class": "low_clue_recall",
+            "route_reason_codes": ["low_clue_query"],
+            "selected": [{"source_class": "memory", "chars": 72, "safe_source_ids": ["evt_context_001"]}],
+            "boundary": {"raw_body_included": False},
+        },
+    )
+
+    report = owner_review_surface_report(store, operation="memory_sources_feedback_context", limit=5)
+
+    assert report["status"] == "ok"
+    assert report["operation"] == "memory_sources_feedback_context"
+    assert report["latest_memory_source"]["target_id"] == "msrc_context_001"
+    assert report["latest_memory_source"]["raw_body_included"] is False
+    assert report["feedback_actions"]["too_mechanistic"]["action"] == "feedback"
+    assert report["feedback_actions"]["too_mechanistic"]["rating"] == "too_mechanistic"
+    assert report["feedback_actions"]["too_mechanistic"]["target_id"] == "msrc_context_001"
+    assert "memory feedback" in report["feedback_actions"]["too_mechanistic"]["command"]
+    assert report["boundary"]["actual_execute"] is False
+
+
+def test_memory_sources_feedback_context_token_applies_without_digest_binding(tmp_path):
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_context_token",
+            "created_at": "2026-05-27T01:00:00Z",
+            "profile": "main",
+            "route": "low_clue_recall",
+            "query_class": "low_clue_recall",
+            "selected": [{"source_class": "memory", "chars": 72, "safe_source_ids": ["evt_context_001"]}],
+            "boundary": {"raw_body_included": False},
+        },
+    )
+    surface = owner_review_surface_report(store, operation="memory_sources_feedback_context", limit=5)
+    token = surface["feedback_actions"]["too_mechanistic"]["action_token"]
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory feedback {token} too_mechanistic",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+        require_recorded_digest=True,
+    )
+
+    feedback = _jsonl(memory_sources_feedback_path(store.roots))[0]
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "mark_feedback"
+    assert result["parsed"]["target_type"] == "memory_source"
+    assert result["parsed"]["target_id"] == "msrc_context_token"
+    assert result["active_digest"]["binding"] == "digest_not_found"
+    assert feedback["memory_source_record_id"] == "msrc_context_token"
+    assert feedback["rating"] == "too_mechanistic"
+
+
+def test_provider_memory_sources_feedback_context_supports_structured_tool_reply(tmp_path):
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        {
+            "schema_version": "memory-os.memory_sources.v0",
+            "record_id": "msrc_provider_context",
+            "created_at": "2026-05-27T01:00:00Z",
+            "profile": "main",
+            "route": "context_router",
+            "query_class": "ordinary_chat",
+            "selected": [{"source_class": "memory", "chars": 50, "safe_source_ids": ["evt_context_002"]}],
+            "boundary": {"raw_body_included": False},
+        },
+    )
+    provider = MemoryOSProvider()
+    provider.initialize(
+        "session-owner-review",
+        hermes_home=str(tmp_path),
+        platform="telegram",
+        agent_identity="main",
+        worker_autostart=False,
+    )
+
+    surface = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_surface",
+            {"operation": "memory_sources_feedback_context", "owner_utterance": "这次上下文太机械"},
+        )
+    )
+    token = surface["feedback_actions"]["too_mechanistic"]["action_token"]
+    result = json.loads(
+        provider.handle_tool_call(
+            "memory_os_review_reply",
+            {
+                "action": "feedback",
+                "action_token": token,
+                "rating": "too_mechanistic",
+                "owner_utterance": "这次上下文太机械",
+            },
+        )
+    )
+
+    feedback = _jsonl(memory_sources_feedback_path(store.roots))[0]
+    assert surface["status"] == "ok"
+    assert result["status"] == "ok"
+    assert result["tool_input"]["mode"] == "structured"
+    assert result["parsed"]["target_id"] == "msrc_provider_context"
+    assert feedback["memory_source_record_id"] == "msrc_provider_context"
+    assert feedback["rating"] == "too_mechanistic"
+
 
 def test_review_channel_uses_explicit_config_and_never_reads_body(tmp_path):
     store = _store(tmp_path)

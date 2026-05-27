@@ -33,7 +33,9 @@ MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION = (
 MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION = (
     "Read bounded Memory-OS owner-review surface data for Hermes agent "
     "conversation. Use when the owner asks for more review items, next page, "
-    "an item detail such as '展开 R3', or approved-proposal follow-up status. "
+    "an item detail such as '展开 R3', approved-proposal follow-up status, "
+    "feedback context for the latest right-brain expression outcome, or "
+    "feedback context for latest MemorySources recall/context quality. "
     "This tool is read-only: it never approves, rejects, sends, executes, "
     "writes identity, or writes crystallized memory. Hermes agent owns the "
     "Chinese explanation, pagination wording, and clarifying questions. "

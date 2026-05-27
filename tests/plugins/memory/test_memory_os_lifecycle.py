@@ -86,6 +86,8 @@ def test_memory_os_review_surface_tool_is_read_only_agent_surface():
         "next_page",
         "detail",
         "proposal_followups",
+        "expression_feedback_context",
+        "memory_sources_feedback_context",
     }
     assert schema["parameters"]["required"] == ["operation"]
 

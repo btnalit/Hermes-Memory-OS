@@ -1262,6 +1262,11 @@ Implemented runtime slices:
 10. monitor fields listed in RH-38 are present for the deployed slices;
 11. owner/Hermes expression feedback tokens are visible in the digest and are
    accepted through the structured review-reply tool, not only through SSH/CLI.
+12. latest-outcome reaction context is visible through the read-only
+    `memory_os_review_surface` operation `expression_feedback_context`, so
+    Hermes agent can ask natural follow-up questions and then call
+    `memory_os_review_reply` with a stable feedback token when owner intent is
+    clear.
 
 Prototype-informed runtime slices:
 
@@ -1283,6 +1288,9 @@ Promotion signal:
   applied after owner approval plus OpsGate report-only review;
 - owner reactions can be linked back to recorded Hermes-agent expression
   outcomes and counted by monitor;
+- owner reactions to the latest expression can be collected through a bounded
+  Hermes-agent surface without adding a Memory-OS transport or conversation
+  parser;
 - Hermes owns delivery and all hard boundaries remain false.
 
 Stop signal:
@@ -1345,6 +1353,18 @@ Reason:
   `memory_sources_feedback -> EvidenceScoring -> SelfEvolution
   memory_sources_policy -> GovernanceFeedback` path without writing fake
   feedback into the live owner profile;
+- deployed P1-S MemorySources-feedback context surface lets Hermes agent fetch
+  the latest bounded MemorySources attribution record and stable feedback
+  tokens via `memory_os_review_surface(operation=memory_sources_feedback_context)`.
+  Live smoke on `10.20.3.200` reports `status=ok`,
+  `latest_memory_source_id=msrc_20260527T035855791901Z_d61c1a28`,
+  `feedback_action_count=9`, `raw_body_included=false`, and boundary fields
+  false. A dry-run token reply resolves to `mark_feedback` without writing live
+  feedback; `mark_feedback` idempotency includes the selected rating so exact
+  repeat submissions are safe while distinct owner ratings can accumulate. The
+  monitor now emits `memory_sources_feedback_volume_missing` while this surface
+  is ready but `MemorySources.feedback_count=0`; real feedback still requires
+  owner intent before a `memory_sources_policy` proposal can be treated as live;
 - latest 10.20.3.200 targeted smoke reports
   `expression_feedback_subject_count=3`,
   `expression_feedback_linked_subject_count=1`,
@@ -1361,6 +1381,13 @@ Reason:
   status, and block reason; promoted proposals carry
   `agenda_candidate_id`/`agenda_maturity_gate`, while blocked/duplicate
   signals stay visible without creating owner agenda pressure;
+- deployed P1-S agenda trace checker makes this contract observable beyond
+  SelfEvolution producer tests: `left_brain_pipeline_check` now warns with
+  `proposal_agenda_trace_missing` when any owner-actionable non-legacy proposal
+  has `proposal_quality` but lacks `agenda_candidate_id`,
+  `agenda_maturity_gate`, or `agenda_promotion_status`. The 2026-05-27 live
+  report-only run on `10.20.3.200` reports `agenda_trace_missing_count=0` and
+  `actual_execute=false`;
 - the 2026-05-26 live structured expression-feedback smoke increased
   `expression_feedback_subject_count` to `2` and `OwnerReview.by_type.too_mechanical`
   to `2`, proving feedback is visible to scoring/governance instead of staying

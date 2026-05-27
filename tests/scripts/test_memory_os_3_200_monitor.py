@@ -332,6 +332,12 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(item["code"] == "owner_review_agenda_digest_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_reply_dry_run_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_surface_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_surface_expression_feedback_context_visible" for item in classification["pass"])
+    assert any(
+        item["code"] == "owner_review_surface_memory_sources_feedback_context_visible"
+        for item in classification["pass"]
+    )
+    assert "latest_memory_source_id" in rendered
     assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
     assert any(item["code"] == "owner_review_proposal_followups_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_cron_integration_status_ok" for item in classification["pass"])
@@ -696,6 +702,13 @@ def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
 
     assert classification["status"] == "WARN"
     assert any(item["code"] == "left_brain_memory_sources_policy_quality_blocked" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["agenda_trace_missing_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "left_brain_proposal_agenda_trace_missing" for item in classification["warn"])
 
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
@@ -1384,6 +1397,54 @@ def test_classify_snapshot_passes_memory_sources_stats_and_fails_for_forbidden_f
     assert any(item["code"] == "memory_sources_forbidden_fields" for item in classification["fail"])
 
 
+def test_classify_snapshot_warns_when_memory_sources_feedback_surface_has_no_real_feedback():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "feedback_count": 0,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+    snapshot["owner_review_surface"]["operations"]["memory_sources_feedback_context"] = {
+        "status": "ok",
+        "item_count": 1,
+        "feedback_action_count": 9,
+        "latest_memory_source_id": "msrc_123",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_sources_feedback_volume_missing" for item in classification["warn"])
+    assert classification["status"] == "WARN"
+
+
+def test_classify_snapshot_passes_when_memory_sources_feedback_volume_exists():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "feedback_count": 2,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+    snapshot["owner_review_surface"]["operations"]["memory_sources_feedback_context"] = {
+        "status": "ok",
+        "item_count": 1,
+        "feedback_action_count": 9,
+        "latest_memory_source_id": "msrc_123",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_sources_feedback_volume_present" for item in classification["pass"])
+    assert not any(item["code"] == "memory_sources_feedback_volume_missing" for item in classification["warn"])
+
+
 def test_classify_snapshot_fails_when_memory_sources_boundary_is_true():
     snapshot = _healthy_snapshot()
     snapshot["memory_sources"] = {
@@ -1950,6 +2011,18 @@ def _healthy_owner_review_surface() -> dict:
             "next_page": {"status": "ok", "item_count": 1, "source": "latest_owner_home_digest"},
             "detail": {"status": "ok", "item_count": 1, "source": "latest_recorded_digest"},
             "proposal_followups": {"status": "ok", "item_count": 1, "source": ""},
+            "expression_feedback_context": {
+                "status": "ok",
+                "item_count": 1,
+                "feedback_action_count": 6,
+                "latest_outcome_id": "rbout_123",
+            },
+            "memory_sources_feedback_context": {
+                "status": "ok",
+                "item_count": 1,
+                "feedback_action_count": 9,
+                "latest_memory_source_id": "msrc_123",
+            },
         },
         "raw_body_included_count": 0,
         "boundary_true_count": 0,
@@ -2090,6 +2163,7 @@ def _healthy_module_artifacts() -> dict:
             "memory_sources_policy_quality_ready_count": 0,
             "memory_sources_policy_quality_blocked_count": 0,
             "memory_sources_policy_unlinked_quality_count": 0,
+            "agenda_trace_missing_count": 0,
             "actual_execute": False,
         },
         "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},

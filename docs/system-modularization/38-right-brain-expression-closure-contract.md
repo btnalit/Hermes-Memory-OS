@@ -55,6 +55,15 @@ Current implementation state:
   `expression_feedback_subject_count=3`, `structured_review_reply_count=2`,
   `reply_fallback_used_count=0`, PASS
   `right_brain_expression_feedback_linked`, and no FAIL findings.
+- P1-R reaction-volume surface is deployed on `10.20.3.200`:
+  `memory_os_review_surface(operation=expression_feedback_context)` exposes the
+  latest right-brain outcome, bounded preview, existing feedback counts, and
+  stable feedback tokens for `like_expression`, `too_mechanical`,
+  `too_frequent`, `boundary_private`, `off_voice`, and `mute_period`. Hermes
+  still owns the conversation; Memory-OS only provides bounded context and
+  tokenized state transitions. A live token smoke for the existing
+  `too_mechanical` outcome returned `duplicate_ignored` with all hard
+  boundaries false.
 - Latest live outcome scan records `outcome_count=2`, latest
   `policy_version=1`, `latest_outcome_silent=false`,
   `outcome_internal_marker_count=0`, `outcome_raw_body_included_count=0`,

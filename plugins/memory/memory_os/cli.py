@@ -421,7 +421,19 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_queue = review_subs.add_parser("queue")
     review_queue.add_argument("--limit", type=int, default=20)
     review_surface = review_subs.add_parser("surface")
-    review_surface.add_argument("--operation", choices=["overview", "page", "next_page", "detail", "proposal_followups"], default="overview")
+    review_surface.add_argument(
+        "--operation",
+        choices=[
+            "overview",
+            "page",
+            "next_page",
+            "detail",
+            "proposal_followups",
+            "expression_feedback_context",
+            "memory_sources_feedback_context",
+        ],
+        default="overview",
+    )
     review_surface.add_argument("--section", choices=["all", "action_required", "review_suggested", "fyi"], default="all")
     review_surface.add_argument("--anchor", default="")
     review_surface.add_argument("--action-token", default="")

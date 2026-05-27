@@ -166,6 +166,20 @@ class MemoryOSProvider(MemoryProvider):
                     "and explain the returned bounded data conversationally. The surface tool is read-only; use "
                     "`memory_os_review_reply` only for explicit owner action tokens."
                 ),
+                (
+                    "If the owner reacts to the latest right-brain expression, call `memory_os_review_surface` "
+                    "with operation=`expression_feedback_context` to get bounded latest-outcome context and "
+                    "feedback tokens. Then call `memory_os_review_reply` only after the owner clearly chooses "
+                    "a feedback meaning such as too_mechanical, off_voice, too_frequent, boundary_private, "
+                    "mute_period, or like_expression."
+                ),
+                (
+                    "If the owner reacts to MemorySources recall/context quality, call `memory_os_review_surface` "
+                    "with operation=`memory_sources_feedback_context` to get bounded attribution context and "
+                    "feedback tokens. Then call `memory_os_review_reply` only after the owner clearly chooses "
+                    "a rating such as useful, missing_context, too_mechanistic, overconfident, irrelevant, "
+                    "or needs_specific_recall."
+                ),
             ]
         )
         if self._last_owner_review_reply_result:
@@ -222,7 +236,15 @@ class MemoryOSProvider(MemoryProvider):
                     "properties": {
                         "operation": {
                             "type": "string",
-                            "enum": ["overview", "page", "next_page", "detail", "proposal_followups"],
+                            "enum": [
+                                "overview",
+                                "page",
+                                "next_page",
+                                "detail",
+                                "proposal_followups",
+                                "expression_feedback_context",
+                                "memory_sources_feedback_context",
+                            ],
                             "description": "Read-only review surface operation requested by the owner.",
                         },
                         "section": {

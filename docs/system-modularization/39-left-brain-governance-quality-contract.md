@@ -25,6 +25,16 @@ Current implementation state:
   summary-only events. Corrective, source-linked feedback can create a
   `memory_sources_policy` proposal for owner review. Useful/non-corrective
   feedback remains evidence and does not create proposal pressure.
+- P1-S MemorySources-feedback collection surface is implemented on
+  `10.20.3.200`: Hermes agent can call
+  `memory_os_review_surface(operation=memory_sources_feedback_context)` to read
+  the latest bounded MemorySources attribution context and stable feedback
+  tokens, then call structured `memory_os_review_reply` only after owner intent.
+  The surface is read-only; it does not write feedback, route changes, prompt
+  changes, policy changes, or proposals by itself. The monitor emits
+  `memory_sources_feedback_volume_missing` while this collection surface is
+  ready but live `MemorySources.feedback_count=0`, and switches to
+  `memory_sources_feedback_volume_present` once real feedback exists.
 - P1-S agenda-candidate maturation is implemented and deployed on
   `10.20.3.200`: SelfEvolution now records every selected signal as a bounded
   `agenda_candidate` with maturity fields, quality gate, runtime target,
@@ -32,6 +42,11 @@ Current implementation state:
   Created proposals carry the source `agenda_candidate_id` and
   `agenda_maturity_gate`; blocked, duplicate, and same-day signals are visible
   without creating owner agenda pressure.
+- P1-S agenda trace checking is implemented and deployed on `10.20.3.200`:
+  `left_brain_pipeline_check` reports `agenda_trace_missing_count` and warns
+  with `proposal_agenda_trace_missing` when an owner-actionable non-legacy
+  proposal has `proposal_quality` but lacks `agenda_candidate_id`,
+  `agenda_maturity_gate`, or `agenda_promotion_status`.
 - 2026-05-26 live smoke on `10.20.3.200` proved the owner/Hermes interaction
   path, not only SSH/CLI: a rendered speak item exposed
   `memory feedback oa_<token> too_mechanical`, a structured
@@ -148,6 +163,7 @@ monitor_or_validation_fields:
   - left_brain_pipeline_check.memory_sources_policy_quality_ready_count
   - left_brain_pipeline_check.memory_sources_policy_quality_blocked_count
   - left_brain_pipeline_check.memory_sources_policy_unlinked_quality_count
+  - left_brain_pipeline_check.agenda_trace_missing_count
   - feedback_backflow.consumed_count
   - feedback_backflow.apply_ready_count
   - approved_proposal_followups.awaiting_ops_gate_count

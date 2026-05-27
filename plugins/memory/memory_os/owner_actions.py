@@ -19,6 +19,7 @@ from .memory_sources import (
     ALLOWED_FEEDBACK_RATINGS,
     append_memory_source_feedback_record,
     memory_sources_feedback_path,
+    read_memory_source_feedback_records,
     read_memory_source_records,
 )
 from .roots import MemoryOSRoots
@@ -342,7 +343,15 @@ def owner_review_surface_report(
 
     resolved_owner = str(owner_id or "owner")
     safe_operation = str(operation or "overview").strip().lower()
-    if safe_operation not in {"overview", "page", "next_page", "detail", "proposal_followups"}:
+    if safe_operation not in {
+        "overview",
+        "page",
+        "next_page",
+        "detail",
+        "proposal_followups",
+        "expression_feedback_context",
+        "memory_sources_feedback_context",
+    }:
         safe_operation = "overview"
     safe_section = _safe_review_section(section)
     bounded_limit = max(min(int(limit or 5), 10), 1)
@@ -367,6 +376,18 @@ def owner_review_surface_report(
             "raw_body_included": False,
             "boundary": _owner_review_false_boundary(),
         }
+    if safe_operation == "expression_feedback_context":
+        return _owner_review_surface_expression_feedback_context(
+            store,
+            owner_id=resolved_owner,
+            limit=bounded_limit,
+        )
+    if safe_operation == "memory_sources_feedback_context":
+        return _owner_review_surface_memory_sources_feedback_context(
+            store,
+            owner_id=resolved_owner,
+            limit=bounded_limit,
+        )
 
     queue = owner_review_queue_report(store, limit=1000)
     latest_record = _latest_owner_home_digest_record(store.roots, owner_id=resolved_owner)
@@ -1082,7 +1103,8 @@ def parse_owner_review_reply(
         max_review_suggested=max_review_suggested,
         max_fyi=max_fyi,
     )
-    if binding == "digest_not_found":
+    surface_token_match = _surface_action_token_map(store.roots).get(action_token) if action_token else None
+    if binding == "digest_not_found" and not surface_token_match:
         return _reply_result(
             status="needs_clarification",
             reply_text=reply_text,
@@ -1108,6 +1130,8 @@ def parse_owner_review_reply(
     action_type = ""
     if action_token:
         token_match = _rendered_action_token_map(rendered).get(action_token)
+        if not token_match:
+            token_match = surface_token_match or _surface_action_token_map(store.roots).get(action_token)
         if token_match:
             item = token_match["item"]
             action_type = str(token_match.get("action_type") or "")
@@ -1416,11 +1440,12 @@ def apply_owner_action(
         outcome = _find_right_brain_expression_outcome(store.roots, target_id)
         if outcome and str(outcome.get("outcome_id") or ""):
             target_id = str(outcome.get("outcome_id") or "")
+    idempotency_action_type = _idempotency_action_type(action_type, rating=rating)
     idempotency_key = _idempotency_key(
         owner_id=owner_id,
         target_type=target_type,
         target_id=target_id,
-        action_type=action_type,
+        action_type=idempotency_action_type,
     )
     existing = _find_idempotent_action(store.roots, idempotency_key)
     if existing:
@@ -3013,6 +3038,183 @@ def _rendered_action_token_map(rendered: dict[str, Any]) -> dict[str, dict[str, 
     return result
 
 
+MEMORY_SOURCE_FEEDBACK_CONTEXT_RATINGS = (
+    "useful",
+    "missing_context",
+    "too_mechanistic",
+    "needs_specific_recall",
+    "overconfident",
+    "irrelevant",
+    "missing_candidate",
+    "clarification_selected",
+    "clarification_rejected",
+)
+
+
+def _surface_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    result.update(_expression_feedback_action_token_map(roots))
+    result.update(_memory_sources_feedback_action_token_map(roots))
+    return result
+
+
+def _expression_feedback_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
+    """Stable token map for right-brain outcome feedback surfaced outside digests."""
+
+    result: dict[str, dict[str, Any]] = {}
+    for outcome in _read_jsonl(right_brain_expression_outcomes_path(roots)):
+        if not isinstance(outcome, dict):
+            continue
+        outcome_id = str(outcome.get("outcome_id") or "")
+        if not outcome_id:
+            continue
+        item = _right_brain_expression_feedback_item(outcome)
+        for action_type, token in (item.get("action_tokens") or {}).items():
+            clean = str(token or "").lower()
+            if not clean:
+                continue
+            result[clean] = {
+                "item": item,
+                "action_type": str(action_type),
+                "target_type": "expression",
+                "target_id": outcome_id,
+            }
+    return result
+
+
+def _memory_sources_feedback_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
+    """Stable token map for MemorySources feedback surfaced outside digests."""
+
+    result: dict[str, dict[str, Any]] = {}
+    for record in read_memory_source_records(roots, limit=50):
+        if not isinstance(record, dict):
+            continue
+        record_id = str(record.get("record_id") or "")
+        if not record_id:
+            continue
+        item = _memory_source_feedback_item(record)
+        token = str((item.get("action_tokens") or {}).get("mark_feedback") or "").lower()
+        if not token:
+            continue
+        result[token] = {
+            "item": item,
+            "action_type": "mark_feedback",
+            "target_type": "memory_source",
+            "target_id": record_id,
+        }
+    return result
+
+
+def _right_brain_expression_feedback_item(outcome: dict[str, Any]) -> dict[str, Any]:
+    outcome_id = str(outcome.get("outcome_id") or "")
+    actions = [
+        _review_action("feedback", action_type, "expression", outcome_id)
+        for action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
+    ]
+    observed_at = str(outcome.get("observed_at") or "")
+    policy_version = outcome.get("policy_version")
+    preview = _bounded_text(str(outcome.get("outcome_preview") or ""), 280)
+    return {
+        "anchor": "EXPR",
+        "target_type": "expression",
+        "target_id": outcome_id,
+        "source_module": "right_brain_expression_adapter",
+        "section": "feedback_context",
+        "question": "你对最近一次右脑表达的感觉是什么？",
+        "suggested_action": "Hermes agent 应先听 owner 的自然反馈，再用对应 token 调 memory_os_review_reply。",
+        "reason": _bounded_text(
+            f"最近一次右脑表达 outcome={outcome_id}; policy_version={policy_version}; observed_at={observed_at}。",
+            220,
+        ),
+        "consequence": "反馈只写入 expression_feedback ledger；不会直接改 prompt、policy、cadence、route 或发送行为。",
+        "expression_preview": preview,
+        "outcome_preview_chars": int(outcome.get("outcome_preview_chars") or len(preview)),
+        "outcome_silent": bool(outcome.get("silent")),
+        "policy_version": policy_version,
+        "request_id": str(outcome.get("request_id") or ""),
+        "observed_at": observed_at,
+        "available_actions": [action["command"] for action in actions],
+        "action_tokens": {action["action_type"]: action["token"] for action in actions},
+        "action_targets": {
+            action["action_type"]: {
+                "target_type": action["target_type"],
+                "target_id": action["target_id"],
+            }
+            for action in actions
+        },
+        "action_commands": [action["command"] for action in actions],
+        "safe_source_ids": [f"right_brain_expression_outcome:{outcome_id}"],
+        "raw_body_included": False,
+    }
+
+
+def _memory_source_feedback_item(record: dict[str, Any]) -> dict[str, Any]:
+    record_id = str(record.get("record_id") or "")
+    action = _review_action("feedback", "mark_feedback", "memory_source", record_id)
+    selected = record.get("selected") if isinstance(record.get("selected"), list) else []
+    source_classes: list[str] = []
+    safe_source_ids: list[str] = []
+    for entry in selected:
+        if not isinstance(entry, dict):
+            continue
+        source_class = str(entry.get("source_class") or entry.get("class") or "").strip()
+        if source_class:
+            source_classes.append(source_class)
+        safe_source_ids.extend(_safe_list(entry.get("safe_source_ids")))
+    route = str(record.get("route") or "unknown")
+    query_class = str(record.get("query_class") or route or "unknown")
+    created_at = str(record.get("created_at") or "")
+    return {
+        "anchor": "MSRC",
+        "target_type": "memory_source",
+        "target_id": record_id,
+        "source_module": "memory_sources",
+        "section": "feedback_context",
+        "question": "这次注入的记忆/上下文对回答有帮助吗？",
+        "suggested_action": "Hermes agent 应先听 owner 的自然反馈，再用对应 rating 和 token 调 memory_os_review_reply。",
+        "reason": _bounded_text(
+            f"最近一次 MemorySources 归因 record={record_id}; route={route}; query_class={query_class}; created_at={created_at}。",
+            240,
+        ),
+        "consequence": "反馈只写入 MemorySources feedback ledger；不会直接改 live route、context、prompt、policy 或发送行为。",
+        "route": route,
+        "query_class": query_class,
+        "route_reason_codes": _safe_list(record.get("route_reason_codes"))[:6],
+        "source_classes": _dedupe_strings(source_classes)[:8],
+        "safe_source_ids": _dedupe_strings(safe_source_ids)[:10],
+        "selected_count": len(selected),
+        "selected_chars_total": int(record.get("selected_chars_total") or 0),
+        "created_at": created_at,
+        "available_actions": [action["command"]],
+        "allowed_ratings": sorted(ALLOWED_FEEDBACK_RATINGS),
+        "action_tokens": {"mark_feedback": action["token"]},
+        "action_targets": {
+            "mark_feedback": {
+                "target_type": action["target_type"],
+                "target_id": action["target_id"],
+            }
+        },
+        "action_commands": [
+            f"memory feedback {action['token']} {rating}"
+            for rating in MEMORY_SOURCE_FEEDBACK_CONTEXT_RATINGS
+            if rating in ALLOWED_FEEDBACK_RATINGS
+        ],
+        "raw_body_included": False,
+}
+
+
+def _dedupe_strings(items: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 def _parse_owner_reply_text(reply_text: str) -> dict[str, Any]:
     text = " ".join(str(reply_text or "").strip().split())
     if text.startswith("/memory "):
@@ -3873,6 +4075,171 @@ def _surface_offsets(
     return {priority: explicit_offset for priority in sections}
 
 
+def _owner_review_surface_expression_feedback_context(
+    store: MemoryOSStore,
+    *,
+    owner_id: str,
+    limit: int,
+) -> dict[str, Any]:
+    outcomes = [
+        record
+        for record in _read_jsonl(right_brain_expression_outcomes_path(store.roots))
+        if isinstance(record, dict) and str(record.get("outcome_id") or "")
+    ]
+    feedback_records = [
+        record
+        for record in _read_jsonl(expression_feedback_ledger_path(store.roots))
+        if isinstance(record, dict)
+    ]
+    if not outcomes:
+        return {
+            "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+            "profile": store.roots.profile or "default",
+            "owner_id": owner_id,
+            "status": "empty",
+            "operation": "expression_feedback_context",
+            "reason": "no_right_brain_expression_outcome",
+            "latest_outcome": {},
+            "feedback_actions": {},
+            "existing_feedback": {"count": 0, "ratings": {}},
+            "raw_body_included": False,
+            "boundary": _owner_review_false_boundary(),
+        }
+    latest = outcomes[-1]
+    latest_id = str(latest.get("outcome_id") or "")
+    item = _right_brain_expression_feedback_item(latest)
+    rating_counts = Counter(
+        str(record.get("action_type") or record.get("rating") or "")
+        for record in feedback_records
+        if str(record.get("outcome_id") or "") == latest_id
+    )
+    action_tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
+    commands = item.get("action_commands") if isinstance(item.get("action_commands"), list) else []
+    actions: dict[str, dict[str, Any]] = {}
+    ordered_feedback_actions = list(EXPRESSION_FEEDBACK_DIGEST_ACTIONS) + [
+        action_type
+        for action_type in sorted(EXPRESSION_FEEDBACK_ACTION_TYPES)
+        if action_type not in EXPRESSION_FEEDBACK_DIGEST_ACTIONS
+    ]
+    for action_type in ordered_feedback_actions:
+        token = str(action_tokens.get(action_type) or "")
+        if not token:
+            continue
+        command = next((str(value) for value in commands if token and token in str(value)), "")
+        actions[action_type] = {
+            "action": "feedback",
+            "rating": action_type,
+            "action_token": token,
+            "command": command,
+            "target_type": "expression",
+            "target_id": latest_id,
+        }
+    return {
+        "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "owner_id": owner_id,
+        "status": "ok",
+        "operation": "expression_feedback_context",
+        "source": "right_brain_expression_adapter_latest_outcome",
+        "latest_outcome": item,
+        "feedback_actions": dict(list(actions.items())[: max(min(int(limit or 6), 6), 1)]),
+        "existing_feedback": {
+            "count": sum(1 for record in feedback_records if str(record.get("outcome_id") or "") == latest_id),
+            "ratings": dict(sorted(rating_counts.items())),
+        },
+        "agent_instruction": (
+            "Hermes agent owns the conversation. Ask a natural clarification if the owner feedback is vague; "
+            "when intent is clear, call memory_os_review_reply with action=feedback, the matching action_token, "
+            "and rating. Do not decide feedback on behalf of the owner."
+        ),
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _owner_review_surface_memory_sources_feedback_context(
+    store: MemoryOSStore,
+    *,
+    owner_id: str,
+    limit: int,
+) -> dict[str, Any]:
+    records = [
+        record
+        for record in read_memory_source_records(store.roots, limit=50)
+        if isinstance(record, dict) and str(record.get("record_id") or "")
+    ]
+    feedback_records = read_memory_source_feedback_records(store.roots, limit=1_000_000)
+    if not records:
+        return {
+            "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+            "profile": store.roots.profile or "default",
+            "owner_id": owner_id,
+            "status": "empty",
+            "operation": "memory_sources_feedback_context",
+            "reason": "no_memory_sources_record",
+            "latest_memory_source": {},
+            "feedback_actions": {},
+            "existing_feedback": {"count": 0, "ratings": {}},
+            "raw_body_included": False,
+            "boundary": _owner_review_false_boundary(),
+        }
+    latest = records[-1]
+    latest_id = str(latest.get("record_id") or "")
+    item = _memory_source_feedback_item(latest)
+    token = str((item.get("action_tokens") or {}).get("mark_feedback") or "")
+    rating_counts = Counter(
+        str(record.get("rating") or "")
+        for record in feedback_records
+        if isinstance(record, dict) and str(record.get("memory_source_record_id") or "") == latest_id
+    )
+    ordered_ratings = [
+        rating
+        for rating in MEMORY_SOURCE_FEEDBACK_CONTEXT_RATINGS
+        if rating in ALLOWED_FEEDBACK_RATINGS
+    ]
+    ordered_ratings.extend(
+        rating
+        for rating in sorted(ALLOWED_FEEDBACK_RATINGS)
+        if rating not in ordered_ratings
+    )
+    actions: dict[str, dict[str, Any]] = {}
+    for rating in ordered_ratings:
+        actions[rating] = {
+            "action": "feedback",
+            "rating": rating,
+            "action_token": token,
+            "command": f"memory feedback {token} {rating}",
+            "target_type": "memory_source",
+            "target_id": latest_id,
+        }
+    return {
+        "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "owner_id": owner_id,
+        "status": "ok",
+        "operation": "memory_sources_feedback_context",
+        "source": "memory_sources_latest_record",
+        "latest_memory_source": item,
+        "feedback_actions": dict(list(actions.items())[: max(min(int(limit or 5), len(actions)), 1)]),
+        "existing_feedback": {
+            "count": sum(
+                1
+                for record in feedback_records
+                if isinstance(record, dict) and str(record.get("memory_source_record_id") or "") == latest_id
+            ),
+            "ratings": dict(sorted(rating_counts.items())),
+        },
+        "agent_instruction": (
+            "Hermes agent owns the conversation. Ask whether the latest recalled context helped, misled, "
+            "felt too mechanical, missed context, or needed a more specific recall. When owner intent is clear, "
+            "call memory_os_review_reply with action=feedback, the action_token, and rating. "
+            "Do not decide feedback on behalf of the owner."
+        ),
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
 def _owner_review_surface_detail(
     store: MemoryOSStore,
     *,
@@ -4007,6 +4374,14 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
 
 def _idempotency_key(*, owner_id: str, target_type: str, target_id: str, action_type: str) -> str:
     return "|".join([str(owner_id), str(target_type), str(target_id), str(action_type)])
+
+
+def _idempotency_action_type(action_type: str, *, rating: str = "") -> str:
+    if action_type == "mark_feedback":
+        clean_rating = str(rating or "").strip().lower()
+        if clean_rating:
+            return f"mark_feedback:{clean_rating}"
+    return action_type
 
 
 def _find_idempotent_action(roots: MemoryOSRoots, idempotency_key: str) -> dict[str, Any] | None:

@@ -78,6 +78,7 @@ class LeftBrainPipelineCheckModule:
             "memory_sources_policy_unlinked_quality_count": proposal_quality.get(
                 "memory_sources_policy_unlinked_quality_count"
             ),
+            "agenda_trace_missing_count": proposal_quality.get("agenda_trace_missing_count"),
             "report_path": str(self.report_path),
             "actual_execute": False,
         }
@@ -216,6 +217,15 @@ class LeftBrainPipelineCheckModule:
                     "count": proposal_quality["quality_metadata_missing_count"],
                 }
             )
+        if proposal_quality["agenda_trace_missing_count"]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "proposal_agenda_trace_missing",
+                    "message": "Owner-actionable non-legacy proposals should trace back to an agenda candidate and maturity gate.",
+                    "count": proposal_quality["agenda_trace_missing_count"],
+                }
+            )
         return findings
 
     def _proposal_lifecycle(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -276,6 +286,12 @@ class LeftBrainPipelineCheckModule:
             and str(item.get("state", "candidate")) in {"candidate", "owner_eligible", "owner_defer"}
         ]
         quality_missing = [item for item in owner_actionable if not isinstance(item.get("proposal_quality"), dict)]
+        agenda_trace_missing = [
+            item
+            for item in owner_actionable
+            if isinstance(item.get("proposal_quality"), dict)
+            and not _has_agenda_trace(item["proposal_quality"])
+        ]
         concrete_body_missing = [item for item in owner_actionable if not _has_concrete_body(str(item.get("body") or ""))]
         expression_policy_items = [
             item
@@ -335,6 +351,8 @@ class LeftBrainPipelineCheckModule:
         return {
             "owner_actionable_proposal_count": len(owner_actionable),
             "quality_metadata_missing_count": len(quality_missing),
+            "agenda_trace_missing_count": len(agenda_trace_missing),
+            "agenda_trace_present_count": len(owner_actionable) - len(quality_missing) - len(agenda_trace_missing),
             "concrete_body_missing_count": len(concrete_body_missing),
             "expression_policy_count": len(expression_policy_items),
             "expression_policy_quality_ready_count": len(expression_policy_ready),
@@ -436,6 +454,14 @@ def _has_concrete_body(body: str) -> bool:
     return (
         ("具体改动:" in compact and "验收标准:" in compact)
         or ("Proposed change:" in compact and "Acceptance criteria:" in compact)
+    )
+
+
+def _has_agenda_trace(quality: dict[str, Any]) -> bool:
+    return (
+        bool(str(quality.get("agenda_candidate_id") or "").strip())
+        and bool(str(quality.get("agenda_maturity_gate") or "").strip())
+        and bool(str(quality.get("agenda_promotion_status") or "").strip())
     )
 
 
