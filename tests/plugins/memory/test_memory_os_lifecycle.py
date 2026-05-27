@@ -54,7 +54,8 @@ def test_memory_os_review_reply_tool_prefers_structured_action_token():
 
     assert schema["description"] == MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION
     assert "Use structured arguments only" in schema["description"]
-    assert "action=`approve|reject|allow|feedback`" in schema["description"]
+    assert "action=`approve|reject|allow|feedback|apply`" in schema["description"]
+    assert "apply" in schema["parameters"]["properties"]["action"]["enum"]
     assert "Do not send a free-form command string" in schema["description"]
     assert "display anchors such as A1/R1 without resolving" in schema["description"]
     assert "reply" not in schema["parameters"]["properties"]
@@ -105,6 +106,18 @@ def test_system_prompt_routes_expression_reactions_to_review_reply_not_profile_m
     assert "ask them to pick/copy the tokenized option" in prompt
     assert "Do not call general memory/user/profile tools" in prompt
     assert "record tokenized expression feedback through `memory_os_review_reply`" in prompt
+
+
+def test_system_prompt_forbids_owner_review_terminal_fallback(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+
+    prompt = provider.system_prompt_block()
+
+    assert "Never handle Memory-OS owner-review tokens with terminal, execute_code, CLI fallback" in prompt
+    assert "report the tool-schema mismatch and stop" in prompt
+    assert "even if the same token appears already processed in conversation history" in prompt
+    assert "Do not answer `already applied`" in prompt
 
 
 def test_memory_os_status_tool_contract_has_chinese_and_mixed_fixtures():

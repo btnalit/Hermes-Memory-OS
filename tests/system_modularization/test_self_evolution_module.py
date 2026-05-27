@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 
 from plugins.memory.memory_os.fixtures import build_event, build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -486,6 +487,116 @@ def test_self_evolution_prioritizes_top_memory_sources_signal_over_stale_express
     assert proposal["dedupe_key"] == "memory_sources_policy:missing_context:candidate_review:candidate_review"
     assert proposal["proposal_quality"]["trigger_rule"] == "memory_sources_feedback_policy"
     assert proposal["proposal_quality"]["memory_source_record_refs"] == ["msrc_new"]
+
+
+def test_self_evolution_promotes_next_actionable_signal_when_top_signal_already_processed(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    now = datetime.now(timezone.utc).isoformat()
+    memory_processed = proposal_queue.create_candidate(
+        store=store,
+        title="调整记忆来源/召回策略：missing_context 反馈",
+        body="具体改动: tune retrieval\n证据: owner feedback\n验收标准: monitor\n后续状态: apply gate",
+        source_refs=["feature_score:memory"],
+        kind="memory_sources_policy",
+        proposal_class="memory_sources_policy:missing_context",
+        dedupe_key="memory_sources_policy:missing_context:candidate_review:candidate_review",
+    )
+    mechanical_processed = proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body="具体改动: tune expression\n证据: owner feedback\n验收标准: monitor\n后续状态: apply gate",
+        source_refs=["feature_score:mechanical"],
+        kind="expression_policy",
+        proposal_class="expression_policy:too_mechanical",
+        dedupe_key="expression_policy:too_mechanical",
+    )
+    queue = proposal_queue.read_queue()
+    for item in queue["items"]:
+        if item["candidate_id"] == memory_processed["candidate_id"]:
+            item["state"] = "approved_for_proposal"
+            item["followup_state"] = "applied_memory_sources_policy"
+            item["updated_at"] = now
+        if item["candidate_id"] == mechanical_processed["candidate_id"]:
+            item["state"] = "owner_declined"
+            item["followup_state"] = "closed"
+            item["updated_at"] = now
+    proposal_queue._write_queue(queue)
+
+    class MixedProcessedEvidence:
+        def read_feature_scores(self):
+            return [
+                {
+                    "feature_score_id": "feature_memory",
+                    "subject_kind": "memory_sources_feedback",
+                    "subject_ref": "memory_sources_feedback:msfb_new",
+                    "evidence_refs": ["ev_mem"],
+                    "maturity_score": 0.91,
+                },
+                {
+                    "feature_score_id": "feature_mechanical",
+                    "subject_kind": "expression_feedback",
+                    "subject_ref": "expression_feedback:efb_mechanical",
+                    "evidence_refs": ["ev_mech"],
+                    "maturity_score": 0.86,
+                },
+                {
+                    "feature_score_id": "feature_frequency",
+                    "subject_kind": "expression_feedback",
+                    "subject_ref": "expression_feedback:efb_frequency",
+                    "evidence_refs": ["ev_freq"],
+                    "maturity_score": 0.84,
+                },
+            ]
+
+        def read_scores(self):
+            return []
+
+        def read_evidence(self):
+            return [
+                {
+                    "evidence_id": "ev_mem",
+                    "subject_kind": "memory_sources_feedback",
+                    "feedback_rating": "missing_context",
+                    "memory_source_record_id": "msrc_new",
+                    "route": "candidate_review",
+                    "query_class": "candidate_review",
+                },
+                {
+                    "evidence_id": "ev_mech",
+                    "subject_kind": "expression_feedback",
+                    "feedback_rating": "too_mechanical",
+                    "outcome_id": "rbout_old",
+                    "request_id": "rbreq_old",
+                    "policy_version": 1,
+                },
+                {
+                    "evidence_id": "ev_freq",
+                    "subject_kind": "expression_feedback",
+                    "feedback_rating": "too_frequent",
+                    "outcome_id": "rbout_current",
+                    "request_id": "rbreq_current",
+                    "policy_version": 1,
+                },
+            ]
+
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=MixedProcessedEvidence(),
+    )
+
+    assert result["proposal_created"] is True
+    assert result["proposal_class"] == "expression_policy:too_frequent"
+    assert result["agenda_candidate_status"] == "promoted_to_proposal"
+    proposal = proposal_queue.read_queue()["items"][-1]
+    assert proposal["kind"] == "expression_policy"
+    assert proposal["proposal_quality"]["feedback_rating"] == "too_frequent"
+    assert proposal["proposal_quality"]["linked_outcome_count"] == 1
+    assert "owner 标记右脑表达 too_frequent" in proposal["body"]
 
 
 def test_self_evolution_rejects_useful_memory_sources_feedback_as_report_only(tmp_path):

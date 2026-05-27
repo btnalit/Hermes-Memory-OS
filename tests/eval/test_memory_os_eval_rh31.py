@@ -148,6 +148,23 @@ def test_rh31_first_six_adapters_are_deterministic_and_report_metric_scope(tmp_p
     assert all(score["live_behavior_changed"] is False for score in summary["scores"])
 
 
+def test_rh31_synthetic_measurement_fixture_has_no_live_guard_failures(tmp_path):
+    from eval.memory_os.runner.run import run_rh31_eval
+
+    summary = run_rh31_eval(
+        fixture="synthetic",
+        adapters=["all"],
+        report_root=tmp_path / "eval" / "reports",
+        write_report=False,
+    )
+
+    assert summary["status"] == "pass"
+    assert summary["failure_count"] == 0
+    assert summary["failure_class_distribution"] == {}
+    assert summary["boundary_true_count"] == 0
+    assert summary["forbidden_field_count"] == 0
+
+
 def test_rh31_context_projection_candidate_boundary_uses_review_candidate_section(tmp_path):
     from eval.memory_os.runner.run import run_rh31_eval
 

@@ -563,6 +563,97 @@ def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops
     assert len(_jsonl(apply_log_path)) == 1
 
 
+def test_proposal_followup_surface_exposes_tokenized_explicit_apply(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_frequent 反馈",
+        body=(
+            "具体改动：降低右脑表达触发频次。\n"
+            "证据：owner 标记 too_frequent。\n"
+            "验收标准：policy.json 写入并保留 rollback。\n"
+            "后续状态：approved_for_proposal -> OpsGate report-only -> owner manual apply decision。\n"
+            "边界：不创建 generic executor。"
+        ),
+        kind="expression_policy",
+        proposal_class="expression_policy:too_frequent",
+        dedupe_key="expression_policy:too_frequent",
+        source_refs=["expression_feedback:too_frequent"],
+    )
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    surface = owner_review_surface_report(
+        store,
+        operation="proposal_followups",
+        owner_id="owner",
+        channel="telegram",
+    )
+    item = surface["proposal_followups"]["items"][0]
+    apply_token = item["action_tokens"]["apply_proposal"]
+
+    assert item["followup_state"] == "ops_gate_reviewed_awaiting_explicit_execution"
+    assert item["owner_utterance_examples"] == [f"memory apply {apply_token}"]
+    assert item["agent_tool_calls"] == [
+        {
+            "tool_name": "memory_os_review_reply",
+            "arguments": {"action": "apply", "action_token": apply_token},
+        }
+    ]
+    assert surface["boundary"]["actual_execute"] is False
+
+    rendered = render_owner_review_digest(
+        store,
+        owner_id="owner",
+        channel="telegram",
+        digest_mode="agenda",
+    )
+    digest_item = rendered["sections"]["action_required"][0]
+
+    assert digest_item["target_type"] == "proposal_apply"
+    assert digest_item["action_tokens"]["apply_proposal"] == apply_token
+    assert digest_item["owner_utterance_examples"] == [f"memory apply {apply_token}"]
+    assert "显式应用" in digest_item["question"]
+    assert "generic executor" in digest_item["consequence"]
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory apply {apply_token}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    policy_path = tmp_path / "system-modules" / "right_brain_expression_adapter" / "policy.json"
+    followups = approved_proposal_followups_report(store)
+    owner_actions = _jsonl(owner_actions_path(store.roots))
+
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "apply_proposal"
+    assert result["owner_action_result"]["result_ref"]["status"] == "applied"
+    assert result["owner_action_result"]["result_ref"]["policy_written"] is True
+    assert result["owner_action_result"]["result_ref"]["actual_execute"] is False
+    assert policy_path.exists()
+    assert followups["policy_apply_count"] == 1
+    assert followups["items"][0]["followup_state"] == "applied_expression_policy"
+    assert owner_actions[-1]["action_type"] == "apply_proposal"
+    assert owner_actions[-1]["result_ref"]["execution_ticket_created"] is False
+
+
 def test_approved_memory_sources_policy_proposal_can_be_explicitly_applied_after_ops_gate(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")

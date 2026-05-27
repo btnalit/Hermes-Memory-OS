@@ -6,4 +6,5 @@ provides_hooks:
   - on_session_start
   - on_session_reset
   - on_session_finalize
+  - pre_tool_call
 provides_tools: []

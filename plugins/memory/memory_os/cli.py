@@ -486,6 +486,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
             "mark_feedback",
             "approve_proposal",
             "reject_proposal",
+            "apply_proposal",
             "allow_speak_once",
             "like_expression",
             "too_mechanical",

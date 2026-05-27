@@ -76,13 +76,14 @@ ACTION_TYPES = {
     "mark_feedback",
     "approve_proposal",
     "reject_proposal",
+    "apply_proposal",
     "allow_speak_once",
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "candidate": {"approve_candidate", "reject_candidate"},
-    "proposal": {"approve_proposal", "reject_proposal"},
+    "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
     "expression": EXPRESSION_FEEDBACK_ACTION_TYPES,
@@ -384,6 +385,7 @@ def owner_review_surface_report(
         )
     if safe_operation == "proposal_followups":
         report = approved_proposal_followups_report(store, limit=bounded_limit)
+        _attach_proposal_followup_apply_actions(report)
         return {
             "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
             "profile": store.roots.profile or "default",
@@ -888,6 +890,7 @@ def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
     closed = _closed_targets(read_owner_action_records(store.roots))
     items = _candidate_review_items(store, closed)
     items.extend(_proposal_review_items(store, closed))
+    items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     return _review_aging_summary(aged_items, aging)
@@ -1463,6 +1466,7 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
     closed = _closed_targets(read_owner_action_records(store.roots))
     items = _candidate_review_items(store, closed)
     items.extend(_proposal_review_items(store, closed))
+    items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     sorted_items = sorted(
@@ -1830,6 +1834,8 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "consequence": _bounded_text(str(item.get("consequence") or ""), 240),
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360),
         "proposal_detail": _bounded_text(str(item.get("proposal_detail") or ""), 620),
+        "proposal_kind": _bounded_text(str(item.get("proposal_kind") or ""), 120),
+        "ops_gate_report_id": _bounded_text(str(item.get("ops_gate_report_id") or ""), 120),
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
         "action_tokens": {
@@ -1915,6 +1921,15 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             note=note,
         )
         return {"proposal_id": target_id, "state": proposal.get("state", "")}
+    if action_type == "apply_proposal":
+        return apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=target_id,
+            owner_id=str(record["owner_id"]),
+            channel=str(record["channel"]),
+            owner_approved=True,
+            apply=True,
+        )
     if action_type == "mark_feedback":
         feedback = _append_feedback(store, record, rating=rating, note=note)
         return {"feedback_id": feedback["feedback_id"], "memory_source_record_id": target_id}
@@ -1949,6 +1964,17 @@ def _validate_action_target(
             return "proposal_not_found"
         if str(proposal.get("state", "")) not in {"candidate", "owner_eligible", "owner_defer"}:
             return "proposal_not_pending"
+    if action_type == "apply_proposal":
+        report = apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=target_id,
+            owner_id="validation",
+            channel="validation",
+            owner_approved=False,
+            apply=False,
+        )
+        if report.get("status") != "ready":
+            return str(report.get("reason") or "proposal_apply_not_ready")
     if action_type == "mark_feedback":
         if rating not in ALLOWED_FEEDBACK_RATINGS:
             return "invalid_feedback_rating"
@@ -2091,7 +2117,7 @@ def _append_action_specific_ledger(store: MemoryOSStore, record: dict[str, Any])
     action_type = str(record.get("action_type", ""))
     if action_type in {"approve_candidate", "reject_candidate"}:
         _append_jsonl(crystallization_approvals_path(store.roots), record)
-    elif action_type in {"approve_proposal", "reject_proposal"}:
+    elif action_type in {"approve_proposal", "reject_proposal", "apply_proposal"}:
         _append_jsonl(proposal_action_ledger_path(store.roots), record)
 
 
@@ -2385,7 +2411,7 @@ def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[
     items: list[dict[str, Any]] = []
     for proposal in proposals:
         proposal_id = str(proposal.get("candidate_id", ""))
-        if not proposal_id or f"proposal:{proposal_id}" in closed:
+        if not proposal_id:
             continue
         state = str(proposal.get("state", ""))
         if state not in {"candidate", "owner_eligible", "owner_defer"}:
@@ -2412,6 +2438,55 @@ def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[
                 "proposal_detail": _proposal_detail(proposal, requires_maturation=requires_maturation),
                 "requires_maturation": requires_maturation,
                 "safe_source_ids": _safe_list(proposal.get("source_refs")),
+                "raw_body_included": False,
+            }
+        )
+    return items
+
+
+def _proposal_apply_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    followups = approved_proposal_followups_report(store, limit=1_000_000)
+    _attach_proposal_followup_apply_actions(followups)
+    items: list[dict[str, Any]] = []
+    for followup in followups.get("items") if isinstance(followups.get("items"), list) else []:
+        if not isinstance(followup, dict):
+            continue
+        proposal_id = str(followup.get("proposal_id") or "")
+        if not proposal_id:
+            continue
+        if str(followup.get("followup_state") or "") != "ops_gate_reviewed_awaiting_explicit_execution":
+            continue
+        if not (followup.get("action_tokens") or {}).get("apply_proposal"):
+            continue
+        title = _bounded_text(str(followup.get("title") or "approved proposal follow-up"), 160)
+        proposal_kind = str(followup.get("proposal_kind") or "")
+        detail = (
+            f"OpsGate report-only 已给出 would_allow；proposal_kind={proposal_kind}。"
+            "你现在要决定是否把这个 bounded proposal 写入对应 Memory-OS runtime policy/projection。"
+            "这不会创建 generic executor 或 execution ticket。"
+        )
+        created_at, created_at_source = _created_at_with_source(
+            followup,
+            primary_key="approved_at",
+            fallback_keys=("updated_at",),
+            fallback_source="updated_at_fallback",
+        )
+        items.append(
+            {
+                "schema_version": "memory-os.review_item.v0",
+                "review_item_id": f"review:proposal_apply:{proposal_id}",
+                "target_type": "proposal_apply",
+                "target_id": proposal_id,
+                "source_module": "proposal_followups",
+                "priority": "action_required",
+                "created_at": created_at,
+                "created_at_source": created_at_source,
+                "status": "awaiting_explicit_apply",
+                "summary": title,
+                "proposal_detail": _bounded_text(detail, 620),
+                "safe_source_ids": _safe_list(followup.get("safe_source_ids")),
+                "ops_gate_report_id": str(followup.get("ops_gate_report_id") or ""),
+                "proposal_kind": proposal_kind,
                 "raw_body_included": False,
             }
         )
@@ -2693,6 +2768,8 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         "summary": _bounded_text(str(item.get("summary") or ""), 180),
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360),
         "proposal_detail": _bounded_text(str(item.get("proposal_detail") or ""), 620),
+        "proposal_kind": _bounded_text(str(item.get("proposal_kind") or ""), 120),
+        "ops_gate_report_id": _bounded_text(str(item.get("ops_gate_report_id") or ""), 120),
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
         "payload_ref": _bounded_text(str(item.get("payload_ref") or ""), 220),
@@ -2757,7 +2834,7 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         if target_type == "candidate"
         else "",
         "proposal_detail": _bounded_text(str(item.get("proposal_detail") or ""), 620)
-        if target_type == "proposal"
+        if target_type in {"proposal", "proposal_apply"}
         else "",
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360)
@@ -2796,6 +2873,9 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
         if item.get("requires_maturation"):
             return _bounded_text(f"这个 proposal 还不能审批，需要先变成具体方案：{summary}", 180)
         return _bounded_text(f"这个 proposal 要进入人工后续处理吗？{summary}", 180)
+    if target_type == "proposal_apply":
+        summary = str(item.get("summary") or "this approved proposal")
+        return _bounded_text(f"要把这个已批准 proposal 显式应用到运行时策略/投影吗？{summary}", 180)
     if target_type == "memory_source":
         return "这次注入的记忆/上下文对回答有帮助吗？"
     if target_type == "speak":
@@ -2807,6 +2887,8 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
     examples = [action["owner_utterance_example"] for action in actions]
     if target_type in {"candidate", "proposal"} and len(examples) >= 2:
         return f"{examples[0]} or {examples[1]}"
+    if target_type == "proposal_apply" and examples:
+        return examples[0]
     if target_type == "proposal" and not examples:
         return "不进入今日审批；等待 SelfEvolution 生成具体方案后再进入 owner decision"
     if target_type == "memory_source" and examples:
@@ -2841,6 +2923,12 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
                 220,
             )
         return _bounded_text(f"{source_module} 排入了这个 proposal：{summary}。", 220)
+    if target_type == "proposal_apply":
+        report_id = str(item.get("ops_gate_report_id") or "")
+        return _bounded_text(
+            f"{source_module} 已完成 OpsGate report-only review；report={report_id or 'unknown'}，decision=would_allow。",
+            220,
+        )
     if target_type == "memory_source":
         route = str(item.get("route") or "unknown")
         query_class = str(item.get("query_class") or "unknown")
@@ -2862,6 +2950,8 @@ def _review_consequence(target_type: str) -> str:
         return "不会写入长期记忆；该项会留在 review backlog，直到整理或显式清理处理。"
     if target_type == "proposal":
         return "批准只表示允许进入人工 follow-up；不会执行任何工作。拒绝会降权/关闭该 proposal。"
+    if target_type == "proposal_apply":
+        return "应用只写入这个 bounded policy/projection 目标；不会创建 generic executor、execution ticket 或外部执行。"
     if target_type == "memory_source":
         return "反馈先作为证据入 ledger；不会直接改变 live routing，除非之后经过单独 apply gate。"
     if target_type == "speak":
@@ -2885,6 +2975,8 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
             _review_action("approve", "approve_proposal", target_type, target_id),
             _review_action("reject", "reject_proposal", target_type, target_id),
         ]
+    if target_type == "proposal_apply":
+        return [_review_action("apply", "apply_proposal", "proposal", target_id)]
     if target_type == "memory_source":
         return [_review_action("feedback", "mark_feedback", target_type, target_id)]
     if target_type == "speak":
@@ -3183,7 +3275,63 @@ def _surface_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]
     result: dict[str, dict[str, Any]] = {}
     result.update(_expression_feedback_action_token_map(roots))
     result.update(_memory_sources_feedback_action_token_map(roots))
+    result.update(_proposal_followup_action_token_map(roots))
     return result
+
+
+def _proposal_followup_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
+    """Stable apply tokens for approved proposal follow-ups surfaced outside digests."""
+
+    result: dict[str, dict[str, Any]] = {}
+    store = MemoryOSStore(roots)
+    report = approved_proposal_followups_report(store, limit=1_000_000)
+    _attach_proposal_followup_apply_actions(report)
+    for item in report.get("items") if isinstance(report.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        proposal_id = str(item.get("proposal_id") or "")
+        token = str((item.get("action_tokens") or {}).get("apply_proposal") or "").lower()
+        if not proposal_id or not token:
+            continue
+        result[token] = {
+            "item": item,
+            "action_type": "apply_proposal",
+            "target_type": "proposal",
+            "target_id": proposal_id,
+        }
+    return result
+
+
+def _attach_proposal_followup_apply_actions(report: dict[str, Any]) -> None:
+    """Attach owner/agent apply affordances to bounded follow-up report items."""
+
+    items = report.get("items") if isinstance(report.get("items"), list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("followup_state") or "") != "ops_gate_reviewed_awaiting_explicit_execution":
+            continue
+        if str(item.get("ops_gate_decision") or "") != "would_allow":
+            continue
+        proposal_kind = str(item.get("proposal_kind") or "")
+        if proposal_kind not in {"expression_policy", "memory_sources_policy", "proposal_queue_cleanup"}:
+            continue
+        proposal_id = str(item.get("proposal_id") or "")
+        if not proposal_id:
+            continue
+        token = _action_token(action_type="apply_proposal", target_type="proposal", target_id=proposal_id)
+        item["action_tokens"] = {"apply_proposal": token}
+        item["action_targets"] = {"apply_proposal": {"target_type": "proposal", "target_id": proposal_id}}
+        item["owner_utterance_examples"] = [
+            _owner_utterance_example(action="apply", action_token=token)
+        ]
+        item["agent_tool_calls"] = [
+            _owner_review_reply_tool_call(action="apply", action_token=token)
+        ]
+        item["explicit_apply_warning"] = (
+            "This applies only this bounded proposal kind after OpsGate would_allow; "
+            "it does not create a generic executor or execution ticket."
+        )
 
 
 def _expression_feedback_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
@@ -3424,6 +3572,9 @@ def _normalize_reply_verb(value: str) -> str:
         "反馈": "feedback",
         "allow": "allow",
         "允许": "allow",
+        "apply": "apply",
+        "应用": "apply",
+        "执行": "apply",
     }
     return mapping.get(verb, "")
 
@@ -3438,6 +3589,8 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "approve_proposal"
     if verb == "reject" and target_type == "proposal":
         return "reject_proposal"
+    if verb == "apply" and target_type == "proposal":
+        return "apply_proposal"
     if verb == "feedback" and target_type == "memory_source":
         return "mark_feedback"
     if verb == "allow" and target_type == "speak":
@@ -3454,6 +3607,8 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
         return action_type == "mark_feedback" or action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
     if verb == "allow":
         return action_type == "allow_speak_once"
+    if verb == "apply":
+        return action_type == "apply_proposal"
     return False
 
 
@@ -4802,6 +4957,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
     if action_type in {"approve_candidate", "reject_candidate"}:
         return "candidate", value
     if action_type in {"approve_proposal", "reject_proposal"}:
+        return "proposal", value
+    if action_type == "apply_proposal":
         return "proposal", value
     if action_type == "mark_feedback":
         return "memory_source", value

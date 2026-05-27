@@ -17417,3 +17417,571 @@ Interpretation:
 - The corrected live path requires the owner to reply with a tokenized command,
   for example `memory feedback oa_41a6cda70c5c9b like_expression`, so the
   feedback lands in `expression_feedback_ledger` instead of user/profile memory.
+
+### 2026-05-27 - Right-Brain Expression Reaction Volume Gate Closed
+
+Live finding:
+
+```text
+finding=right_brain_expression_reaction_volume_thin
+rule=linked right-brain expression outcome feedback must reach at least 3 records
+before_count=2
+before_warn=right_brain_expression_reaction_volume_thin
+```
+
+Live owner-channel test:
+
+```text
+prompt_job=memory-os-expression-feedback-smoke
+job_id=e9f3f263113f
+delivery=Telegram owner channel
+prompt_identity=tokenized Memory-OS expression feedback options
+```
+
+Duplicate protection evidence:
+
+```text
+owner_utterance=memory feedback oa_41a6cda70c5c9b like_expression
+result=duplicate_ignored
+existing_owner_action_id=oact_20260527T105332876988Z_45b350bf
+interpretation=repeating the same outcome/rating token does not inflate reaction volume
+```
+
+Applied feedback evidence:
+
+```text
+owner_utterance=memory feedback oa_673796949d6f91 too_frequent
+owner_action_id=oact_20260527T110528900558Z_6f5eb863
+action_type=too_frequent
+target_type=expression
+target_id=rbout_aa416c239b761e2b
+rating=too_frequent
+result=applied
+feedback_id=efb_20260527T110528900626Z_46348da7
+outcome_feedback_linked=true
+request_id=rbexpr_20260526T135329054000Z
+channel=telegram
+```
+
+Live monitor evidence after feedback:
+
+```text
+monitor_status=WARN
+FAIL=[]
+structured_review_reply_count=12
+reply_fallback_used_count=0
+ExpressionFeedback.feedback_count=5
+ExpressionFeedback.linked_outcome_count=3
+ExpressionFeedback.raw_body_included_count=0
+RightBrainExpressionAdapter.outcome_feedback_count=3
+RightBrainExpressionAdapter.latest_outcome_feedback_count=3
+RightBrainExpressionAdapter.outcome_actual_send_count=0
+RightBrainExpressionAdapter.outcome_actual_execute_count=0
+PASS includes right_brain_expression_reaction_volume_sufficient
+WARN=[left_brain_pipeline_check_warn, left_brain_proposal_agenda_trace_missing, rh31_eval_measurement_signals]
+```
+
+Interpretation:
+
+- The right-brain reaction volume gate is now live PASS for the configured
+  threshold. It was closed through the Telegram owner channel, not by CLI-only
+  injection or duplicate counting.
+- The same expression outcome now has mixed feedback: `like_expression` and
+  `too_frequent`. This means the style can be treated as acceptable while the
+  cadence/frequency signal should feed later right-brain policy or cadence
+  proposals. No prompt, policy, cadence, route, send, or execution behavior was
+  changed directly by the feedback.
+
+### 2026-05-27 - Left-Brain Pipeline WARN Closed And Too-Frequent Signal Promoted
+
+Preflight:
+
+```text
+source_of_truth=live monitor WARN + self_evolution/proposal_queue runtime state
+finding_type=live monitor gap + feedback/control signal
+owning_seam=SelfEvolution agenda candidate -> quality-gated ProposalQueue
+reverse_scope=Hermes owns owner interaction and delivery; Memory-OS owns bounded agenda/proposal state
+evidence_loop=local tests + deployed 10.20.3.200 cognitive loop + monitor summary
+monitor_or_validation_fields=left_brain_pipeline_check.status,agenda_trace_missing_count,expression_feedback_subject_count,self_evolution.latest_agenda_candidate_status,proposal_queue.latest.kind
+promotion_signal=linked expression feedback produces expression_policy agenda/proposal without direct policy mutation
+stop_or_rollback_signal=generic executor appears, direct prompt/policy/cadence mutation, boundary true, or agenda_trace_missing_count > 0
+external_review=not required before report-only proposal generation
+```
+
+Live stale-report finding:
+
+```text
+before_warn=left_brain_pipeline_check_warn,left_brain_proposal_agenda_trace_missing
+before_left_brain_pipeline_check.latest_json.status=warn
+before_finding=proposal_agenda_trace_missing
+before_count=2
+root_cause=stale left_brain_pipeline_check report; current ProposalQueue no longer had those owner-actionable missing-trace proposals
+```
+
+Refresh evidence:
+
+```text
+command=hermes memory-os-agent-os modules run-once --module left_brain_pipeline_check --dry-run
+dry_run_status=ok
+dry_run_agenda_trace_missing_count=0
+dry_run_findings=[]
+
+command=systemctl --user start hermes-memory-os-cognitive-loop.service
+service_result=SUCCESS
+boundary.actual_send=false
+boundary.actual_execute=false
+boundary.actual_identity_write=false
+boundary.actual_unapproved_crystallized_approval=false
+boundary.hindsight_exported=false
+```
+
+Live monitor after refresh:
+
+```text
+monitor_status=WARN
+FAIL=[]
+left_brain_pipeline_check.status=ok
+left_brain_pipeline_check.agenda_trace_missing_count=0
+left_brain_pipeline_check.finding_count=0
+left_brain_pipeline_check.expression_policy_quality_ready_count=1
+OwnerReview.action_required=1
+WARN=[rh31_eval_measurement_signals]
+```
+
+Runtime SelfEvolution correction:
+
+```text
+changed=plugins/modules/governance/self_evolution.py
+reason=SelfEvolution previously stopped on the highest-scoring same-day processed signal and never considered the next mature signal
+new_behavior=iterate mature proposal-shape attempts in score order; skip duplicate/same-day/quality-blocked attempts; promote the next actionable feedback signal
+direct_apply_allowed=false
+generic_executor_allowed=false
+```
+
+Live promotion evidence after deployment to 10.20.3.200:
+
+```text
+self_evolution.generated_at=2026-05-27T11:21:51.687702+00:00
+self_evolution.status=ok
+self_evolution.proposal_created=true
+self_evolution.proposal_id=prop_20260527T112151685691Z_13db23943f
+self_evolution.proposal_class=expression_policy:too_frequent
+self_evolution.dedupe_key=expression_policy:too_frequent
+self_evolution.agenda_candidate_status=promoted_to_proposal
+self_evolution.score_refs=[feature_score:feature_score_01dc4084a10b6153]
+
+agenda_candidate_id=agc_89f3fc8a2da2
+agenda_status=promoted_to_proposal
+proposal_id=prop_20260527T112151685691Z_13db23943f
+promotion_allowed=true
+
+proposal_queue.latest.candidate_id=prop_20260527T112151685691Z_13db23943f
+proposal_queue.latest.state=candidate
+proposal_queue.latest.kind=expression_policy
+proposal_queue.latest.title=调整右脑表达策略：too_frequent 反馈
+proposal_queue.latest.proposal_class=expression_policy:too_frequent
+proposal_queue.latest.dedupe_key=expression_policy:too_frequent
+proposal_queue.latest.created_at=2026-05-27T11:21:51.685688+00:00
+```
+
+Proposal quality evidence:
+
+```text
+proposal_quality.runtime_target=expression_policy
+proposal_quality.feedback_rating=too_frequent
+proposal_quality.linked_outcome_count=1
+proposal_quality.outcome_refs=[rbout_aa416c239b761e2b]
+proposal_quality.request_refs=[rbexpr_20260526T135329054000Z]
+proposal_quality.policy_versions=[1]
+proposal_quality.agenda_candidate_id=agc_89f3fc8a2da2
+proposal_quality.agenda_maturity_gate=linked_expression_feedback
+proposal_quality.agenda_promotion_status=promoted_to_proposal
+proposal_quality.direct_apply_allowed=false
+proposal_quality.generic_executor_allowed=false
+```
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_self_evolution_module.py tests\system_modularization\test_left_brain_pipeline_checker.py -q
+result=30 passed
+
+python -m pytest tests\system_modularization\test_evidence_scoring_module.py tests\system_modularization\test_governance_feedback_bridge_module.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=78 passed
+```
+
+Interpretation:
+
+- The left-brain agenda trace WARN is closed by live refresh and monitor
+  evidence, not by suppressing the checker.
+- The mixed right-brain expression feedback has now advanced one step further:
+  `too_frequent` became a mature `expression_policy` proposal candidate with
+  agenda trace and bounded runtime target.
+- This still does not change prompt, policy, cadence, route, send, or execution
+  behavior. Owner review and explicit apply remain the next gates.
+
+### 2026-05-27 - RH-31 Synthetic Measurement Signal Cleared
+
+Live finding:
+
+```text
+before_warn=rh31_eval_measurement_signals
+before_status=warning
+before_failure_count=3
+before_failure_class_distribution={fts_miss:2, lexical_miss:1}
+before_live_guard_candidate_count=0
+before_measurement_signal_count=3
+boundary_true_count=0
+forbidden_field_count=0
+```
+
+Root cause:
+
+```text
+type=measurement fixture/adapter gap
+lexical_miss=mechanism_noise_001 synthetic corpus lacked the expected project/understanding continuity terms
+fts_miss=memory_os_fts adapter searched Chinese expected terms as one space-joined query, e.g. "记忆 架构" and "项目 理解"
+live_behavior_changed=false
+guard_decision=measurement_only
+```
+
+Correction:
+
+```text
+changed=eval/memory_os/data/rh31_synthetic/corpus.jsonl
+change=add bounded synthetic diagnostic architecture wording and project-understanding continuity document
+
+changed=eval/memory_os/adapters/memory_os_fts.py
+change=try the joined expected-terms query, then individual expected terms, then the original case query
+scope=eval adapter only
+live_guard_added=false
+canonical_write=false
+```
+
+Local verification:
+
+```text
+python -m pytest tests\eval\test_memory_os_eval_rh31.py -q
+result=10 passed
+
+python - <<local no-write RH-31 run>>
+status=pass
+failure_count=0
+failure_class_distribution={}
+```
+
+Deployment evidence:
+
+```text
+deployed_to=10.20.3.200 runtime python tree
+backup=memory_os_fts.py.bak-20260527T113121Z
+backup=corpus.jsonl.bak-20260527T113121Z
+py_compile=pass
+
+command=hermes memory-os-agent-os eval rh31 run --fixture synthetic --adapter all --no-write-report
+live_status=pass
+adapter_count=6
+case_count=6
+score_count=27
+failure_count=0
+failure_class_distribution={}
+boundary_true_count=0
+forbidden_field_count=0
+report_written=false
+```
+
+Live monitor after deployment:
+
+```text
+monitor_status=PASS
+WARN=[]
+FAIL=[]
+RH31Eval.status=pass
+RH31Eval.failure_count=0
+RH31Eval.failure_class_distribution={}
+RH31Eval.measurement_signal_count=0
+RH31Eval.live_guard_candidate_count=0
+RH31Eval.boundary_true_count=0
+RH31Eval.forbidden_field_count=0
+
+left_brain_pipeline_check.status=ok
+left_brain_pipeline_check.agenda_trace_missing_count=0
+right_brain_expression_reaction_volume_sufficient=true
+```
+
+Interpretation:
+
+- RH-31 no longer blocks the runtime monitor. The previous failures were
+  measurement-only synthetic eval issues, not live recall misses.
+- No live guard, route, prompt, send, execute, or persistence behavior was
+  changed. The eval harness is now a cleaner signal for future real misses.
+- The current 10.20.3.200 monitor result is `PASS` with no WARN and no FAIL.
+
+Owner-channel closure smoke:
+
+```text
+job=memory-os-owner-review-digest
+job_id=2af755464ca8
+command=hermes cron run 2af755464ca8 && hermes cron tick
+deliver=telegram
+last_run=2026-05-27T07:34:59.186332-04:00
+last_run_status=ok
+agenda_action_required=1
+expected_owner_visible_item=expression_policy:too_frequent proposal
+```
+
+Interpretation:
+
+- The newly promoted right-brain cadence/frequency proposal was pushed back to
+  the owner review channel. This closes the artifact visibility loop for this
+  slice; approval or rejection remains an owner decision through the tokenized
+  Hermes agent path.
+
+Owner rejection evidence:
+
+```text
+owner_utterance=memory reject oa_584d70c5022f0f
+Hermes_agent_result=rejected proposal 调整右脑表达策略：too_frequent 反馈
+proposal_id=prop_20260527T112151685691Z_13db23943f
+proposal_state=owner_declined
+proposal_followup_state=closed
+proposal_kind=expression_policy
+proposal_class=expression_policy:too_frequent
+proposal_quality.runtime_target=expression_policy
+proposal_quality.feedback_rating=too_frequent
+proposal_quality.linked_outcome_count=1
+proposal_quality.direct_apply_allowed=false
+proposal_quality.generic_executor_allowed=false
+```
+
+Live monitor after owner rejection:
+
+```text
+monitor_status=PASS
+WARN=[]
+FAIL=[]
+OwnerReview.action_required=0
+OwnerReview.by_type.reject_proposal=3
+OwnerReview.owner_actions=24
+ProposalQueue.state_counts.owner_declined=4
+ProposalQueue.state_counts.candidate=0
+OwnerAgendaDigest.action_required_total=0
+RightBrainExpressionAdapter.policy_version=1
+RightBrainExpressionAdapter.policy_apply_count=1
+ExpressionFeedback.feedback_count=5
+ExpressionFeedback.linked_outcome_count=3
+RH31Eval.status=pass
+left_brain_pipeline_check.status=ok
+```
+
+Interpretation:
+
+- The complete loop for this `too_frequent` signal is now exercised:
+  expression outcome -> owner feedback -> EvidenceScoring subject ->
+  SelfEvolution agenda candidate -> quality-gated proposal -> Telegram owner
+  review -> owner reject -> proposal closed.
+- The feedback remains in the expression feedback ledger, but the proposed
+  cadence/policy adjustment was not applied. Runtime expression policy remains
+  at `policy_version=1`.
+- This is the desired boundary: feedback can create a proposal, but only owner
+  approval plus an explicit apply path can change runtime policy.
+
+Owner-requested retest approval evidence:
+
+```text
+reason=owner requested a second pushed proposal to approve once after rejecting the first too_frequent proposal
+original_rejected_proposal=prop_20260527T112151685691Z_13db23943f
+new_retest_proposal=prop_20260527T114329311747Z_0abb15f7b3
+proposal_kind=expression_policy
+proposal_class=expression_policy:too_frequent:owner_retest_20260527
+runtime_target=expression_policy
+direct_apply_allowed=false
+generic_executor_allowed=false
+source_refs=[feature_score:feature_score_01dc4084a10b6153, proposal:prop_20260527T112151685691Z_13db23943f, owner_request:retest_approve_once_20260527]
+```
+
+Telegram owner approval:
+
+```text
+job=memory-os-owner-review-digest
+job_id=2af755464ca8
+command=hermes cron run 2af755464ca8 && hermes cron tick
+last_run=2026-05-27T07:44:21.337626-04:00
+last_run_status=ok
+owner_utterance=memory approve oa_ec3441602bf738
+Hermes_agent_result=approved proposal 调整右脑表达策略：too_frequent 反馈
+proposal_id=prop_20260527T114329311747Z_0abb15f7b3
+proposal_state=approved_for_proposal
+followup_state=awaiting_ops_gate
+execution_decision_state=not_requested
+execution_ticket_count=0
+actual_execute=false
+```
+
+OpsGate report-only follow-up:
+
+```text
+command=hermes memory-os-agent-os review proposal-followups --proposal-id prop_20260527T114329311747Z_0abb15f7b3 --ops-gate --owner owner --channel telegram --apply
+status=ok
+ops_gate_report_written=true
+ops_gate_report_id=opsr_20260527T114911897842Z_1649ed4e54
+ops_gate_decision=would_allow
+execution_mode=report-only
+execution_ticket_created=false
+actual_execute=false
+actual_send=false
+raw_body_included=false
+```
+
+Live monitor after OpsGate follow-up:
+
+```text
+monitor_status=PASS
+WARN=[]
+FAIL=[]
+OwnerProposalFollowups.approved=8
+OwnerProposalFollowups.pending=0
+OwnerProposalFollowups.awaiting_ops_gate=0
+OwnerProposalFollowups.ops_gate_reviewed=5
+OwnerProposalFollowups.awaiting_explicit_execution=5
+OwnerProposalFollowups.execution_tickets=0
+OwnerProposalFollowups.actual_execute=false
+OwnerProposalFollowups.raw_body_included=false
+
+OwnerReview.action_required=0
+OwnerReview.owner_actions=25
+OwnerReview.owner_approved_crystallized=1
+OwnerReview.unapproved_crystallized=0
+OwnerReviewAging.raw_action_required=0
+OwnerReviewAging.effective_action_required=0
+
+RH31Eval.status=pass
+RH31Eval.failure_count=0
+RH31Eval.measurement_signal_count=0
+left_brain_pipeline_check.status=ok
+left_brain_pipeline_check.agenda_trace_missing_count=0
+right_brain_expression_reaction_volume_sufficient=true
+```
+
+Explicit apply dry-run:
+
+```text
+command=hermes memory-os-agent-os review proposal-followups --proposal-id prop_20260527T114329311747Z_0abb15f7b3 --execution-apply --owner owner --channel telegram
+status=ready
+dry_run=true
+apply_kind=expression_policy
+ops_gate_decision=would_allow
+ops_gate_report_id=opsr_20260527T114911897842Z_1649ed4e54
+policy_write_planned=true
+policy_path=/root/.hermes/system-modules/right_brain_expression_adapter/policy.json
+policy_version=2
+policy_written=false
+actual_policy_write=false
+execution_ticket_created=false
+actual_execute=false
+actual_send=false
+raw_body_included=false
+rollback=restore previous right_brain_expression_adapter/policy.json from policy_applies.jsonl previous_policy snapshot
+```
+
+Interpretation:
+
+- The approved `too_frequent` proposal has now moved through the next closed
+  stage: owner approval -> OpsGate report-only follow-up.
+- The proposal is ready for a separate explicit execution/apply decision and
+  the dry-run identifies the bounded runtime target and rollback path, but this
+  smoke intentionally did not apply the runtime expression policy.
+- No execution ticket was created, no send path was invoked by Memory-OS, and
+  `actual_execute=false` remains true in the follow-up report and monitor.
+
+## 2026-05-27 - Owner Apply Live Path Finding And Guard
+
+Scope:
+
+- Live Telegram owner command: `memory apply oa_05283bb25e3a0f`.
+- Expected path: Hermes agent -> `memory_os_review_reply(action=apply, action_token=...)`
+  -> OwnerActionProcessor -> bounded `expression_policy` apply.
+
+Finding:
+
+```text
+live_finding=Hermes agent did not call memory_os_review_reply(action=apply)
+observed_path=terminal CLI fallback attempted, then execute_code called bottom-layer function
+owner_denied_terminal=true
+execute_code_bypassed_structured_owner_review_tool=true
+classification=P0 owner-action path violation
+```
+
+Resulting runtime state:
+
+```text
+proposal_id=prop_20260527T114329311747Z_0abb15f7b3
+apply_kind=expression_policy
+status=applied
+policy_version=2
+policy_written=true
+policy_apply_count=2
+actual_execute=false
+actual_send=false
+raw_body_included=false
+execution_ticket_created=false
+```
+
+Root cause:
+
+```text
+root_cause_1=/root/.hermes/plugins/memory_os was the live gateway provider path
+root_cause_2=/root/.hermes/memory-os/runtime/python had been updated first, but live flat plugin path still had partial stale schema/CLI state
+root_cause_3=current Telegram session system_prompt was created before the no-terminal owner-action hard gate and still carried old context
+```
+
+Fix deployed:
+
+```text
+deployed_files:
+  /root/.hermes/plugins/memory_os/__init__.py
+  /root/.hermes/plugins/memory_os/cli.py
+  /root/.hermes/plugins/memory-os-agent-os/__init__.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/__init__.py
+  /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/cli.py
+
+provider_schema_apply=true
+provider_prompt_guard=true
+session_schema_apply=true
+session_prompt_guard=true
+gateway_restarted=true
+```
+
+Guard text added:
+
+```text
+Memory-OS owner-review tokens must not be handled with terminal, execute_code,
+CLI fallback, or direct Python function calls. If memory_os_review_reply cannot
+accept the required structured action, Hermes must report the schema mismatch
+and stop.
+```
+
+Post-fix evidence:
+
+```text
+targeted_tests=97 passed
+closure_matrix_status=ok
+monitor_status=PASS
+structured_review_reply_count=15
+reply_fallback_used_count=0
+OwnerReview.by_type.apply_proposal=1
+OwnerProposalFollowups.policy_apply_count=2
+OwnerProposalFollowups.execution_tickets=0
+OwnerProposalFollowups.actual_execute=false
+right_brain_expression_adapter.policy_version=2
+right_brain_expression_adapter.policy_actual_execute_count=0
+right_brain_expression_adapter.policy_raw_body_included_count=0
+```
+
+Residual evidence gap:
+
+- The policy was applied through an incorrect live fallback path before the hard
+  gate was deployed. The next live duplicate `memory apply oa_05283bb25e3a0f`
+  should return an idempotent/duplicate result through structured
+  `memory_os_review_reply(action=apply, action_token=...)`, not terminal or
+  execute_code.

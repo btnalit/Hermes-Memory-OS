@@ -167,6 +167,26 @@ class MemoryOSProvider(MemoryProvider):
                     "`memory_os_review_reply` only for explicit owner action tokens."
                 ),
                 (
+                    "If the owner asks about approved proposal follow-up or explicit apply, call "
+                    "`memory_os_review_surface` with operation=`proposal_followups`. If the surface returns an "
+                    "apply token and the owner clearly chooses to apply that bounded proposal, call "
+                    "`memory_os_review_reply` with action=`apply` and the stable token. Never infer apply from "
+                    "proposal approval alone."
+                ),
+                (
+                    "Never handle Memory-OS owner-review tokens with terminal, execute_code, CLI fallback, "
+                    "or direct Python function calls. If `memory_os_review_reply` cannot accept the needed "
+                    "structured action, report the tool-schema mismatch and stop; do not bypass the owner-review "
+                    "tool path."
+                ),
+                (
+                    "Every new owner message that contains an explicit Memory-OS action token must be verified "
+                    "by `memory_os_review_reply`, even if the same token appears already processed in conversation "
+                    "history. The tool is idempotent and returns duplicate/already-applied evidence. Do not answer "
+                    "`already applied`, `already approved`, or `already rejected` from prior chat or prior tool "
+                    "results alone."
+                ),
+                (
                     "If the owner reacts to the latest right-brain expression, call `memory_os_review_surface` "
                     "with operation=`expression_feedback_context` to get bounded latest-outcome context and "
                     "feedback tokens. Then call `memory_os_review_reply` only after the owner clearly chooses "
@@ -212,7 +232,7 @@ class MemoryOSProvider(MemoryProvider):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["approve", "reject", "allow", "feedback"],
+                            "enum": ["approve", "reject", "allow", "feedback", "apply"],
                             "description": "The owner review action resolved by Hermes agent.",
                         },
                         "action_token": {
@@ -735,7 +755,7 @@ def _owner_review_reply_tool_input(args: dict[str, Any]) -> tuple[str, dict[str,
     action = str(args.get("action") or "").strip().lower()
     action_token = str(args.get("action_token") or "").strip().lower()
     rating = str(args.get("rating") or "").strip()
-    if action not in {"approve", "reject", "allow", "feedback"}:
+    if action not in {"approve", "reject", "allow", "feedback", "apply"}:
         return "", {
             "mode": "structured",
             "action": action,
@@ -985,7 +1005,7 @@ def _looks_like_owner_review_reply(text: str) -> bool:
     prefix = r"(?:(?:memory|mos)\s+)?"
     return bool(
         re.fullmatch(
-            prefix + r"(?i:approve|reject|allow|批准|通过|拒绝|允许)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?",
+            prefix + r"(?i:approve|reject|allow|apply|批准|通过|拒绝|允许|应用|执行)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?",
             normalized,
         )
         or re.fullmatch(

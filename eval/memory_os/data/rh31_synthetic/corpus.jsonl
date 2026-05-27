@@ -2,4 +2,5 @@
 {"doc_id":"doc_n8n_agent","text":"n8n 负责流程外壳，AI 智能体负责判断和生成，两者适合组合成自动化编排。","source_class":"working","tags":["automation"]}
 {"doc_id":"doc_candidate_boundary","text":"candidate 队列里的条目是待审候选，不是已经批准的长期记忆，高分也不能自动批准。","source_class":"candidate","tags":["boundary"]}
 {"doc_id":"doc_comfyui_task","text":"ComfyUI 插件安装和视频渲染排查属于当前前台任务，不应被普通回忆候选抢占。","source_class":"foreground_task","tags":["task"]}
-{"doc_id":"doc_diagnostic","text":"Memory-OS 当前诊断应使用 Diagnostic Grounding 和 runtime facts，不应用旧事件替代实时状态。","source_class":"diagnostic","tags":["diagnostic"]}
+{"doc_id":"doc_diagnostic","text":"Memory-OS 当前记忆架构诊断应使用 Diagnostic Grounding 和 runtime facts，不应用旧事件替代实时状态。","source_class":"diagnostic","tags":["diagnostic","architecture"]}
+{"doc_id":"doc_project_understanding","text":"用户询问对项目的新理解时，应该走普通连续性上下文，避免把机制报告当成自然回应。","source_class":"event","tags":["continuity","mechanism_noise"]}

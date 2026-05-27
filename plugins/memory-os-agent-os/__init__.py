@@ -7,10 +7,12 @@ Memory-OS provider and runtime remain the source of truth.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,84 @@ def register(ctx: Any) -> None:
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_reset", _on_session_reset)
     ctx.register_hook("on_session_finalize", _on_session_finalize)
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
+
+
+_OWNER_ACTION_TOKEN_RE = re.compile(r"\boa_[0-9a-f]{8,32}\b", re.IGNORECASE)
+_OWNER_REVIEW_COMMAND_RE = re.compile(
+    r"\b(?:memory|mos)\s+(?:approve|reject|allow|feedback|apply)\s+oa_[0-9a-f]{8,32}\b",
+    re.IGNORECASE,
+)
+_DIRECT_OWNER_ACTION_BYPASS_MARKERS = (
+    "apply_approved_proposal_execution_decision",
+    "apply_owner_action",
+    "parse_owner_review_reply",
+)
+_TOKEN_OWNER_ACTION_BYPASS_MARKERS = (
+    "memory-os-agent-os review apply",
+    "memory_os_review_reply_tool_input",
+    "plugins.memory.memory_os.owner_actions",
+    "memory_os/owner_actions.py",
+    "memory_os\\owner_actions.py",
+)
+_OWNER_ACTION_BYPASS_TOOLS = {"terminal", "execute_code"}
+_OWNER_ACTION_BYPASS_BLOCK_MESSAGE = (
+    "Memory-OS owner-action bypass blocked. Use the structured "
+    "memory_os_review_reply tool with action=approve|reject|allow|feedback|apply "
+    "and the stable action_token, or use memory_os_review_surface for read-only "
+    "context. Do not process Memory-OS owner-review tokens through terminal, "
+    "execute_code, CLI fallback, or direct Python calls."
+)
+
+
+def _on_pre_tool_call(tool_name: str = "", args: dict[str, Any] | None = None, **_: object) -> dict[str, str] | None:
+    """Block shell/code bypasses for Memory-OS owner-review action tokens.
+
+    This hook is safety-only. It does not interpret owner intent or mutate
+    Memory-OS state; the normal path remains Hermes agent ->
+    memory_os_review_reply -> OwnerActionProcessor.
+    """
+
+    if str(tool_name) not in _OWNER_ACTION_BYPASS_TOOLS:
+        return None
+    args_text = _bounded_args_text(args)
+    if not _looks_like_owner_action_bypass(args_text):
+        return None
+    _append_session_marker(
+        action="owner_review_tool_bypass_blocked",
+        hook="pre_tool_call",
+        status="blocked",
+        tool_name=str(tool_name),
+        args_sha256=_sha256(args_text),
+    )
+    return {"action": "block", "message": _OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
+def _bounded_args_text(args: Any) -> str:
+    try:
+        text = json.dumps(args if isinstance(args, dict) else {}, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        text = str(args or "")
+    return text[:12000]
+
+
+def _looks_like_owner_action_bypass(args_text: str) -> bool:
+    if not args_text:
+        return False
+    lowered = args_text.lower()
+    if _OWNER_REVIEW_COMMAND_RE.search(args_text):
+        return True
+    if any(marker in lowered for marker in _DIRECT_OWNER_ACTION_BYPASS_MARKERS):
+        return True
+    if "memory-os-agent-os review apply" in lowered:
+        return True
+    if "review apply" in lowered and "--action" in lowered:
+        return True
+    if _OWNER_ACTION_TOKEN_RE.search(args_text) and any(marker in lowered for marker in _TOKEN_OWNER_ACTION_BYPASS_MARKERS):
+        return True
+    if "apply_proposal" in lowered and any(marker in lowered for marker in ("python3 -c", "python -c")):
+        return True
+    return False
 
 
 def _on_session_start(session_id: str = "", model: str = "", platform: str = "", **_: object) -> None:
@@ -210,6 +290,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
             "mark_feedback",
             "approve_proposal",
             "reject_proposal",
+            "apply_proposal",
             "allow_speak_once",
             "like_expression",
             "too_mechanical",
@@ -320,9 +401,11 @@ def _append_session_marker(
     *,
     action: str,
     hook: str,
+    status: str = "ok",
     session_id: str = "",
     platform: str = "",
     model: str = "",
+    **extra_details: str,
 ) -> None:
     hermes_home = _resolve_hermes_home()
     if hermes_home is None:
@@ -337,10 +420,12 @@ def _append_session_marker(
         }
         if model:
             details["model"] = str(model)
+        for key, value in extra_details.items():
+            details[str(key)] = str(value)
         append_audit(
             roots.audit_path,
             action=action,
-            status="ok",
+            status=status,
             target="memory-os-agent-os",
             details=details,
         )
@@ -397,3 +482,7 @@ def _extend_existing_package_namespace(package_name: str, package_path: Path) ->
     package_path_text = str(package_path)
     if package_path_text not in module_path:
         module_path.append(package_path_text)
+
+
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()

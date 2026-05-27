@@ -56,6 +56,7 @@ def test_shell_manifest_is_official_user_plugin_shape():
     assert "on_session_start" in manifest
     assert "on_session_reset" in manifest
     assert "on_session_finalize" in manifest
+    assert "pre_tool_call" in manifest
 
 
 def test_shell_registers_cli_alias_and_session_marker_hooks_without_slash_commands():
@@ -68,8 +69,66 @@ def test_shell_registers_cli_alias_and_session_marker_hooks_without_slash_comman
     command = ctx.cli_commands[0]
     assert command["handler_fn"] is module.memory_os_agent_os_command
     assert callable(command["setup_fn"])
-    assert ctx.hooks == ["on_session_start", "on_session_reset", "on_session_finalize"]
+    assert ctx.hooks == ["on_session_start", "on_session_reset", "on_session_finalize", "pre_tool_call"]
     assert ctx.slash_commands == []
+
+
+def test_shell_pre_tool_call_blocks_owner_review_terminal_bypass(monkeypatch, tmp_path):
+    module = load_shell_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = module._on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": "cd /root/.hermes && hermes memory-os-agent-os review apply --action apply_proposal --target prop_1 --apply # memory apply oa_05283bb25e3a0f"},
+    )
+
+    assert result == {
+        "action": "block",
+        "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE,
+    }
+    entries = _audit_entries(tmp_path)
+    assert entries[-1]["action"] == "owner_review_tool_bypass_blocked"
+    assert entries[-1]["status"] == "blocked"
+    assert entries[-1]["details"]["tool_name"] == "terminal"
+
+
+def test_shell_pre_tool_call_blocks_direct_python_owner_action_bypass():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="execute_code",
+        args={
+            "code": (
+                "from plugins.memory.memory_os.owner_actions import "
+                "apply_approved_proposal_execution_decision\n"
+                "token='oa_05283bb25e3a0f'\n"
+            )
+        },
+    )
+
+    assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
+def test_shell_pre_tool_call_allows_read_only_shell_without_owner_token():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": "grep -n apply_proposal /root/.hermes/plugins/memory_os/owner_actions.py"},
+    )
+
+    assert result is None
+
+
+def test_shell_pre_tool_call_does_not_block_structured_review_tool():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="memory_os_review_reply",
+        args={"action": "apply", "action_token": "oa_05283bb25e3a0f"},
+    )
+
+    assert result is None
 
 
 def test_shell_cli_exposes_status_and_doctor_aliases():
@@ -257,6 +316,21 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_apply_args.target == "candidate:cand_1"
     assert review_apply_args.owner == "owner"
     assert review_apply_args.apply is True
+    review_apply_proposal_args = parser.parse_args(
+        [
+            "review",
+            "apply",
+            "--action",
+            "apply_proposal",
+            "--target",
+            "proposal:prop_1",
+            "--apply",
+        ]
+    )
+    assert review_apply_proposal_args.review_command == "apply"
+    assert review_apply_proposal_args.action == "apply_proposal"
+    assert review_apply_proposal_args.target == "proposal:prop_1"
+    assert review_apply_proposal_args.apply is True
     expression_feedback_args = parser.parse_args(
         ["review", "apply", "--action", "too_mechanical", "--target", "expr_123"]
     )

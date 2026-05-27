@@ -103,206 +103,68 @@ class SelfEvolutionGovernorModule:
             )
             return result
 
-        selected = scores[:3]
-        score_refs = [_score_ref(score) for score in selected]
-        proposal_shape = _proposal_shape(selected, evidence_scoring=evidence_scoring)
         cadence_day = _utc_day()
-        cadence_input_fingerprint = _cadence_input_fingerprint(
-            score_refs,
-            proposal_shape=proposal_shape,
-        )
-        agenda_candidate = _agenda_candidate(
-            self.profile,
-            scores=selected,
-            score_refs=score_refs,
-            proposal_shape=proposal_shape,
-            cadence_day=cadence_day,
-            cadence_input_fingerprint=cadence_input_fingerprint,
-        )
-        duplicate = _unresolved_self_evolution_duplicate(
-            proposal_queue,
-            score_refs,
-            proposal_shape=proposal_shape,
-        )
-        if duplicate is not None:
-            agenda_record = _agenda_candidate_status(
-                agenda_candidate,
-                status="blocked_duplicate_unresolved",
-                promotion_allowed=False,
-                reason="duplicate_unresolved_proposal",
-                existing_proposal_id=str(duplicate.get("candidate_id") or ""),
+        reports = self.read_reports()
+        selected: list[dict[str, Any]] = []
+        score_refs: list[str] = []
+        proposal_shape: dict[str, Any] = {}
+        cadence_input_fingerprint = ""
+        agenda_candidate: dict[str, Any] = {}
+        blocked_attempt: dict[str, Any] | None = None
+        for attempt_scores, attempt_shape in _proposal_shape_options(scores, evidence_scoring=evidence_scoring):
+            attempt_refs = [_score_ref(score) for score in attempt_scores]
+            attempt_fingerprint = _cadence_input_fingerprint(
+                attempt_refs,
+                proposal_shape=attempt_shape,
             )
-            self._write_agenda_candidate(agenda_record)
-            result = self._result(
-                status="ok",
-                proposal_created=False,
-                proposal_id="",
-                ops_gate_decision={},
+            attempt_agenda = _agenda_candidate(
+                self.profile,
+                scores=attempt_scores,
+                score_refs=attempt_refs,
+                proposal_shape=attempt_shape,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=attempt_fingerprint,
+            )
+            blocked = _proposal_attempt_blocker(
+                proposal_queue=proposal_queue,
+                reports=reports,
+                score_refs=attempt_refs,
+                proposal_shape=attempt_shape,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=attempt_fingerprint,
+            )
+            if blocked is not None:
+                if blocked_attempt is None:
+                    blocked_attempt = {
+                        **blocked,
+                        "selected": attempt_scores,
+                        "score_refs": attempt_refs,
+                        "proposal_shape": attempt_shape,
+                        "cadence_input_fingerprint": attempt_fingerprint,
+                        "agenda_candidate": attempt_agenda,
+                    }
+                continue
+            selected = attempt_scores
+            score_refs = attempt_refs
+            proposal_shape = attempt_shape
+            cadence_input_fingerprint = attempt_fingerprint
+            agenda_candidate = attempt_agenda
+            break
+        if not proposal_shape and blocked_attempt is not None:
+            return self._write_blocked_attempt_result(store, cadence_day=cadence_day, blocked_attempt=blocked_attempt)
+        if not proposal_shape:
+            selected = scores[:3]
+            score_refs = [_score_ref(score) for score in selected]
+            proposal_shape = _proposal_shape(selected, evidence_scoring=evidence_scoring)
+            cadence_input_fingerprint = _cadence_input_fingerprint(score_refs, proposal_shape=proposal_shape)
+            agenda_candidate = _agenda_candidate(
+                self.profile,
+                scores=selected,
                 score_refs=score_refs,
-                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
-                reason="duplicate_unresolved_proposal",
-                novelty_skipped=True,
-                existing_proposal_id=str(duplicate.get("candidate_id") or ""),
-                proposal_class=str(proposal_shape.get("proposal_class") or ""),
-                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
-                skipped=True,
+                proposal_shape=proposal_shape,
                 cadence_day=cadence_day,
                 cadence_input_fingerprint=cadence_input_fingerprint,
-                agenda_candidate=agenda_record,
             )
-            self._write_report(result)
-            append_audit(
-                store.roots.audit_path,
-                action="self_evolution_dry_run_written",
-                status="ok",
-                target=str(self.reports_path),
-                details={
-                    "proposal_created": False,
-                    "reason": "duplicate_unresolved_proposal",
-                    "existing_proposal_id": result.get("existing_proposal_id", ""),
-                    "score_ref_count": len(score_refs),
-                    "direct_self_modify": False,
-                    "actual_execute": False,
-                },
-            )
-            return result
-        processed_proposal = _same_day_proposal_history_processed(
-            proposal_queue,
-            proposal_shape=proposal_shape,
-            cadence_day=cadence_day,
-        )
-        if processed_proposal is not None:
-            agenda_record = _agenda_candidate_status(
-                agenda_candidate,
-                status="skipped_same_day_same_signal",
-                promotion_allowed=False,
-                reason="cadence_same_day_same_signal",
-                previous_proposal_id=str(processed_proposal.get("candidate_id") or ""),
-            )
-            self._write_agenda_candidate(agenda_record)
-            result = self._result(
-                status="ok",
-                proposal_created=False,
-                proposal_id="",
-                ops_gate_decision={},
-                score_refs=score_refs,
-                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
-                reason="cadence_same_day_same_signal",
-                proposal_class=str(proposal_shape.get("proposal_class") or ""),
-                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
-                skipped=True,
-                cadence_skipped=True,
-                cadence_day=cadence_day,
-                cadence_input_fingerprint=cadence_input_fingerprint,
-                previous_proposal_id=str(processed_proposal.get("candidate_id") or ""),
-                agenda_candidate=agenda_record,
-            )
-            self._write_report(result)
-            append_audit(
-                store.roots.audit_path,
-                action="self_evolution_dry_run_written",
-                status="ok",
-                target=str(self.reports_path),
-                details={
-                    "proposal_created": False,
-                    "reason": "cadence_same_day_same_signal",
-                    "previous_proposal_id": result.get("previous_proposal_id", ""),
-                    "score_ref_count": len(score_refs),
-                    "direct_self_modify": False,
-                    "actual_execute": False,
-                },
-            )
-            return result
-        processed = _same_day_same_signal_processed(
-            self.read_reports(),
-            cadence_day=cadence_day,
-            cadence_input_fingerprint=cadence_input_fingerprint,
-        )
-        if processed is not None:
-            agenda_record = _agenda_candidate_status(
-                agenda_candidate,
-                status="skipped_same_day_same_signal",
-                promotion_allowed=False,
-                reason="cadence_same_day_same_signal",
-                previous_report_id=str(processed.get("report_id") or ""),
-            )
-            self._write_agenda_candidate(agenda_record)
-            result = self._result(
-                status="ok",
-                proposal_created=False,
-                proposal_id="",
-                ops_gate_decision={},
-                score_refs=score_refs,
-                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
-                reason="cadence_same_day_same_signal",
-                proposal_class=str(proposal_shape.get("proposal_class") or ""),
-                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
-                skipped=True,
-                cadence_skipped=True,
-                cadence_day=cadence_day,
-                cadence_input_fingerprint=cadence_input_fingerprint,
-                previous_report_id=str(processed.get("report_id") or ""),
-                agenda_candidate=agenda_record,
-            )
-            self._write_report(result)
-            append_audit(
-                store.roots.audit_path,
-                action="self_evolution_dry_run_written",
-                status="ok",
-                target=str(self.reports_path),
-                details={
-                    "proposal_created": False,
-                    "reason": "cadence_same_day_same_signal",
-                    "score_ref_count": len(score_refs),
-                    "direct_self_modify": False,
-                    "actual_execute": False,
-                },
-            )
-            return result
-        if proposal_shape.get("quality_gate_failed") is True:
-            agenda_record = _agenda_candidate_status(
-                agenda_candidate,
-                status="blocked_quality_gate",
-                promotion_allowed=False,
-                reason=str(proposal_shape.get("quality_gate_reason") or "proposal_quality_gate_failed"),
-            )
-            self._write_agenda_candidate(agenda_record)
-            result = self._result(
-                status="ok",
-                proposal_created=False,
-                proposal_id="",
-                ops_gate_decision={},
-                score_refs=score_refs,
-                digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
-                reason="proposal_quality_gate_failed",
-                proposal_class=str(proposal_shape.get("proposal_class") or ""),
-                dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
-                skipped=True,
-                cadence_day=cadence_day,
-                cadence_input_fingerprint=cadence_input_fingerprint,
-                proposal_quality_gate_failed=True,
-                quality_gate_reason=str(proposal_shape.get("quality_gate_reason") or ""),
-                proposal_quality=proposal_shape.get("proposal_quality")
-                if isinstance(proposal_shape.get("proposal_quality"), dict)
-                else None,
-                agenda_candidate=agenda_record,
-            )
-            self._write_report(result)
-            append_audit(
-                store.roots.audit_path,
-                action="self_evolution_dry_run_written",
-                status="ok",
-                target=str(self.reports_path),
-                details={
-                    "proposal_created": False,
-                    "reason": "proposal_quality_gate_failed",
-                    "quality_gate_reason": result.get("quality_gate_reason", ""),
-                    "score_ref_count": len(score_refs),
-                    "direct_self_modify": False,
-                    "actual_execute": False,
-                },
-            )
-            return result
         digest = self._write_digest(selected, evidence_scoring=evidence_scoring)
         gate_result = ops_gate.run_once(
             store=store,
@@ -587,6 +449,84 @@ class SelfEvolutionGovernorModule:
             result["reason"] = reason
         return result
 
+    def _write_blocked_attempt_result(
+        self,
+        store: MemoryOSStore,
+        *,
+        cadence_day: str,
+        blocked_attempt: dict[str, Any],
+    ) -> dict[str, Any]:
+        proposal_shape = (
+            blocked_attempt.get("proposal_shape") if isinstance(blocked_attempt.get("proposal_shape"), dict) else {}
+        )
+        agenda_candidate = (
+            blocked_attempt.get("agenda_candidate")
+            if isinstance(blocked_attempt.get("agenda_candidate"), dict)
+            else {}
+        )
+        score_refs = [str(ref) for ref in blocked_attempt.get("score_refs", [])]
+        reason = str(blocked_attempt.get("reason") or "")
+        agenda_reason = (
+            str(blocked_attempt.get("quality_gate_reason") or "")
+            if reason == "proposal_quality_gate_failed"
+            else reason
+        )
+        status = str(blocked_attempt.get("agenda_status") or "blocked_quality_gate")
+        agenda_record = _agenda_candidate_status(
+            agenda_candidate,
+            status=status,
+            promotion_allowed=False,
+            reason=agenda_reason,
+            existing_proposal_id=str(blocked_attempt.get("existing_proposal_id") or ""),
+            previous_report_id=str(blocked_attempt.get("previous_report_id") or ""),
+            previous_proposal_id=str(blocked_attempt.get("previous_proposal_id") or ""),
+        )
+        self._write_agenda_candidate(agenda_record)
+        result = self._result(
+            status="ok",
+            proposal_created=False,
+            proposal_id="",
+            ops_gate_decision={},
+            score_refs=score_refs,
+            digest_ref=str(self.digest_path) if self.digest_path.exists() else "",
+            reason=reason,
+            novelty_skipped=reason == "duplicate_unresolved_proposal",
+            existing_proposal_id=str(blocked_attempt.get("existing_proposal_id") or ""),
+            proposal_class=str(proposal_shape.get("proposal_class") or ""),
+            dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
+            skipped=True,
+            cadence_skipped=reason == "cadence_same_day_same_signal",
+            cadence_day=cadence_day,
+            cadence_input_fingerprint=str(blocked_attempt.get("cadence_input_fingerprint") or ""),
+            previous_report_id=str(blocked_attempt.get("previous_report_id") or ""),
+            previous_proposal_id=str(blocked_attempt.get("previous_proposal_id") or ""),
+            proposal_quality_gate_failed=reason == "proposal_quality_gate_failed",
+            quality_gate_reason=str(blocked_attempt.get("quality_gate_reason") or ""),
+            proposal_quality=proposal_shape.get("proposal_quality")
+            if isinstance(proposal_shape.get("proposal_quality"), dict)
+            else None,
+            agenda_candidate=agenda_record,
+        )
+        self._write_report(result)
+        append_audit(
+            store.roots.audit_path,
+            action="self_evolution_dry_run_written",
+            status="ok",
+            target=str(self.reports_path),
+            details={
+                "proposal_created": False,
+                "reason": reason,
+                "existing_proposal_id": result.get("existing_proposal_id", ""),
+                "previous_report_id": result.get("previous_report_id", ""),
+                "previous_proposal_id": result.get("previous_proposal_id", ""),
+                "quality_gate_reason": result.get("quality_gate_reason", ""),
+                "score_ref_count": len(score_refs),
+                "direct_self_modify": False,
+                "actual_execute": False,
+            },
+        )
+        return result
+
 
 def _utc_day() -> str:
     return datetime.now(timezone.utc).date().isoformat()
@@ -805,6 +745,181 @@ def _primary_governance_scores(evidence_scoring: Any) -> list[dict[str, Any]]:
     if feature_scores:
         return feature_scores
     return list(evidence_scoring.read_scores())
+
+
+def _proposal_shape_options(
+    scores: list[dict[str, Any]],
+    *,
+    evidence_scoring: Any,
+) -> list[tuple[list[dict[str, Any]], dict[str, Any]]]:
+    """Return mature agenda attempts in score order.
+
+    The governor should not stop forever on the highest-scoring signal when
+    that signal already produced a proposal today. This keeps the pipeline
+    moving to the next concrete signal while preserving score-order priority.
+    """
+
+    evidence_by_id = {
+        str(record.get("evidence_id", "")): record
+        for record in evidence_scoring.read_evidence()
+        if isinstance(record, dict)
+    }
+    attempts: list[list[dict[str, Any]]] = []
+    seen_keys: set[str] = set()
+    feedback_attempt_seen = False
+    for score in scores:
+        before_count = len(attempts)
+        subject_kind = str(score.get("subject_kind") or "")
+        key = ""
+        if subject_kind == "expression_feedback":
+            rating = _score_feedback_rating(score, evidence_by_id=evidence_by_id)
+            if rating:
+                key = f"expression_feedback:{rating}"
+                grouped = _scores_for_feedback(scores, evidence_by_id=evidence_by_id, subject_kind=subject_kind, rating=rating)
+                attempts.append(grouped[:3])
+                feedback_attempt_seen = True
+        elif subject_kind == "memory_sources_feedback":
+            rating = _score_feedback_rating(score, evidence_by_id=evidence_by_id)
+            route = _score_evidence_field(score, evidence_by_id=evidence_by_id, field="route") or "unknown"
+            query_class = _score_evidence_field(score, evidence_by_id=evidence_by_id, field="query_class") or "unknown"
+            if rating:
+                key = f"memory_sources_feedback:{rating}:{route}:{query_class}"
+                grouped = [
+                    item
+                    for item in _scores_for_feedback(
+                        scores,
+                        evidence_by_id=evidence_by_id,
+                        subject_kind=subject_kind,
+                        rating=rating,
+                    )
+                    if (_score_evidence_field(item, evidence_by_id=evidence_by_id, field="route") or "unknown") == route
+                    and (_score_evidence_field(item, evidence_by_id=evidence_by_id, field="query_class") or "unknown")
+                    == query_class
+                ]
+                attempts.append(grouped[:3])
+                feedback_attempt_seen = True
+        else:
+            key = f"generic:{subject_kind}:{score.get('subject_ref')}"
+            other_generic = [
+                item
+                for item in scores
+                if item is not score
+                and str(item.get("subject_kind") or "") not in {"expression_feedback", "memory_sources_feedback"}
+            ]
+            attempts.append([score, *other_generic[:2]])
+        if not key:
+            continue
+        if key in seen_keys:
+            if len(attempts) > before_count:
+                attempts.pop()
+            continue
+        seen_keys.add(key)
+    if feedback_attempt_seen:
+        attempts = [
+            attempt
+            for attempt in attempts
+            if attempt
+            and str(attempt[0].get("subject_kind") or "") in {"expression_feedback", "memory_sources_feedback"}
+        ]
+    if not attempts:
+        attempts = [scores[:3]]
+    result: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
+    seen_shapes: set[str] = set()
+    for attempt_scores in attempts:
+        if not attempt_scores:
+            continue
+        shape = _proposal_shape(attempt_scores, evidence_scoring=evidence_scoring)
+        shape_key = "|".join(
+            [
+                str(shape.get("kind") or ""),
+                str(shape.get("proposal_class") or ""),
+                str(shape.get("dedupe_key") or ""),
+            ]
+        )
+        if shape_key in seen_shapes:
+            continue
+        seen_shapes.add(shape_key)
+        result.append((attempt_scores, shape))
+    return result
+
+
+def _proposal_attempt_blocker(
+    *,
+    proposal_queue: Any,
+    reports: list[dict[str, Any]],
+    score_refs: list[str],
+    proposal_shape: dict[str, Any],
+    cadence_day: str,
+    cadence_input_fingerprint: str,
+) -> dict[str, Any] | None:
+    duplicate = _unresolved_self_evolution_duplicate(
+        proposal_queue,
+        score_refs,
+        proposal_shape=proposal_shape,
+    )
+    if duplicate is not None:
+        return {
+            "reason": "duplicate_unresolved_proposal",
+            "agenda_status": "blocked_duplicate_unresolved",
+            "existing_proposal_id": str(duplicate.get("candidate_id") or ""),
+        }
+    processed_proposal = _same_day_proposal_history_processed(
+        proposal_queue,
+        proposal_shape=proposal_shape,
+        cadence_day=cadence_day,
+    )
+    if processed_proposal is not None:
+        return {
+            "reason": "cadence_same_day_same_signal",
+            "agenda_status": "skipped_same_day_same_signal",
+            "previous_proposal_id": str(processed_proposal.get("candidate_id") or ""),
+        }
+    processed = _same_day_same_signal_processed(
+        reports,
+        cadence_day=cadence_day,
+        cadence_input_fingerprint=cadence_input_fingerprint,
+    )
+    if processed is not None:
+        return {
+            "reason": "cadence_same_day_same_signal",
+            "agenda_status": "skipped_same_day_same_signal",
+            "previous_report_id": str(processed.get("report_id") or ""),
+        }
+    if proposal_shape.get("quality_gate_failed") is True:
+        return {
+            "reason": "proposal_quality_gate_failed",
+            "agenda_status": "blocked_quality_gate",
+            "quality_gate_reason": str(proposal_shape.get("quality_gate_reason") or ""),
+        }
+    return None
+
+
+def _score_feedback_rating(score: dict[str, Any], *, evidence_by_id: dict[str, dict[str, Any]]) -> str:
+    return _score_evidence_field(score, evidence_by_id=evidence_by_id, field="feedback_rating")
+
+
+def _score_evidence_field(score: dict[str, Any], *, evidence_by_id: dict[str, dict[str, Any]], field: str) -> str:
+    for evidence_ref in score.get("evidence_refs", []):
+        record = evidence_by_id.get(str(evidence_ref), {})
+        value = str(record.get(field) or "")
+        if value:
+            return value
+    return ""
+
+
+def _scores_for_feedback(
+    scores: list[dict[str, Any]],
+    *,
+    evidence_by_id: dict[str, dict[str, Any]],
+    subject_kind: str,
+    rating: str,
+) -> list[dict[str, Any]]:
+    return [
+        score
+        for score in scores
+        if str(score.get("subject_kind") or "") == subject_kind
+        and _score_feedback_rating(score, evidence_by_id=evidence_by_id) == rating
+    ]
 
 
 def _score_ref(score: dict[str, Any]) -> str:
