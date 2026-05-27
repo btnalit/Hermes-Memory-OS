@@ -17,8 +17,13 @@ from .config import load_config
 from .crystallized import CrystallizedCandidate, CrystallizedMemoryService, read_candidate_queue
 from .memory_sources import (
     ALLOWED_FEEDBACK_RATINGS,
+    POLICY_APPLY_SCHEMA_VERSION,
+    POLICY_SCHEMA_VERSION,
     append_memory_source_feedback_record,
     memory_sources_feedback_path,
+    memory_sources_policy_applies_path,
+    memory_sources_policy_path,
+    read_memory_sources_policy,
     read_memory_source_feedback_records,
     read_memory_source_records,
 )
@@ -214,6 +219,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     approvals = _latest_proposal_approval_by_target(read_owner_action_records(store.roots))
     ops_gate_reviews = _ops_gate_reviews_by_proposal(store)
     policy_applies = _policy_applies_by_proposal(store)
+    memory_sources_policy_applies = _memory_sources_policy_applies_by_proposal(store)
     legacy_cleanup_applies = _legacy_template_cleanup_applies_by_proposal(store)
     items: list[dict[str, Any]] = []
     for proposal in proposals:
@@ -223,9 +229,12 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         approval = approvals.get(proposal_id, {})
         ops_gate_review = ops_gate_reviews.get(proposal_id, {})
         policy_apply = policy_applies.get(proposal_id, {})
+        memory_sources_policy_apply = memory_sources_policy_applies.get(proposal_id, {})
         legacy_cleanup_apply = legacy_cleanup_applies.get(proposal_id, {})
         if policy_apply:
             followup_state = "applied_expression_policy"
+        elif memory_sources_policy_apply:
+            followup_state = "applied_memory_sources_policy"
         elif legacy_cleanup_apply:
             followup_state = "applied_legacy_template_cleanup"
         elif ops_gate_review:
@@ -251,6 +260,9 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "policy_apply_id": str(policy_apply.get("apply_id") or ""),
                 "policy_version": int(policy_apply.get("policy_version") or 0),
                 "policy_written": bool(policy_apply),
+                "memory_sources_policy_apply_id": str(memory_sources_policy_apply.get("apply_id") or ""),
+                "memory_sources_policy_version": int(memory_sources_policy_apply.get("policy_version") or 0),
+                "memory_sources_policy_written": bool(memory_sources_policy_apply),
                 "legacy_template_cleanup_apply_id": str(legacy_cleanup_apply.get("apply_id") or ""),
                 "legacy_template_closed_count": int(legacy_cleanup_apply.get("closed_count") or 0),
                 "safe_source_ids": _safe_list(proposal.get("source_refs")),
@@ -268,6 +280,9 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
     )
     policy_apply_count = sum(1 for item in items if item.get("followup_state") == "applied_expression_policy")
+    memory_sources_policy_apply_count = sum(
+        1 for item in items if item.get("followup_state") == "applied_memory_sources_policy"
+    )
     legacy_cleanup_apply_count = sum(
         1 for item in items if item.get("followup_state") == "applied_legacy_template_cleanup"
     )
@@ -280,7 +295,8 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         "open_followup_count": sum(
             1
             for item in items
-            if item.get("followup_state") not in {"applied_expression_policy", "applied_legacy_template_cleanup"}
+            if item.get("followup_state")
+            not in {"applied_expression_policy", "applied_memory_sources_policy", "applied_legacy_template_cleanup"}
         ),
         "shown_count": len(shown),
         "overflow_count": max(len(items) - bounded_limit, 0),
@@ -288,6 +304,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         "ops_gate_reviewed_count": ops_gate_reviewed_count,
         "awaiting_explicit_execution_count": ops_gate_reviewed_count,
         "policy_apply_count": policy_apply_count,
+        "memory_sources_policy_apply_count": memory_sources_policy_apply_count,
         "legacy_template_cleanup_apply_count": legacy_cleanup_apply_count,
         "execution_ticket_count": 0,
         "actual_execute": False,
@@ -315,6 +332,7 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "ops_gate_reviewed_count": report["ops_gate_reviewed_count"],
         "awaiting_explicit_execution_count": report["awaiting_explicit_execution_count"],
         "policy_apply_count": report["policy_apply_count"],
+        "memory_sources_policy_apply_count": report["memory_sources_policy_apply_count"],
         "legacy_template_cleanup_apply_count": report["legacy_template_cleanup_apply_count"],
         "execution_ticket_count": report["execution_ticket_count"],
         "actual_execute": report["actual_execute"],
@@ -588,10 +606,10 @@ def apply_approved_proposal_execution_decision(
     """Apply an owner-approved proposal after OpsGate review.
 
     This is the explicit apply step after ``approved_for_proposal`` and
-    OpsGate report-only review. v0 supports only right-brain
-    ``expression_policy`` proposals and writes a bounded policy file consumed
-    by the right-brain expression adapter. It does not run shell commands,
-    send messages, or create external execution tickets.
+    OpsGate report-only review. v0 supports only concrete bounded policy
+    proposal kinds and writes local policy files consumed by Memory-OS runtime
+    surfaces. It does not run shell commands, send messages, or create
+    external execution tickets.
     """
 
     proposal = _find_proposal(store, proposal_id)
@@ -614,7 +632,7 @@ def apply_approved_proposal_execution_decision(
             apply=apply,
         )
     apply_kind = _explicit_proposal_apply_kind(proposal)
-    if apply_kind not in {"expression_policy", "proposal_queue_legacy_template_cleanup"}:
+    if apply_kind not in {"expression_policy", "memory_sources_policy", "proposal_queue_legacy_template_cleanup"}:
         return _approved_proposal_execution_apply_error(
             store,
             proposal_id=proposal_id,
@@ -692,6 +710,53 @@ def apply_approved_proposal_execution_decision(
             target_ids=[str(item.get("candidate_id") or "") for item in targets],
             closed_count=closed_count,
             cleanup_written=bool(apply_record),
+        )
+
+    if apply_kind == "memory_sources_policy":
+        existing_memory_sources_apply = _memory_sources_policy_applies_by_proposal(store).get(proposal_id, {})
+        if apply and existing_memory_sources_apply:
+            return _approved_proposal_memory_sources_policy_apply_result(
+                store,
+                status="duplicate_ignored",
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                ops_gate_review=ops_gate_review,
+                apply_record=existing_memory_sources_apply,
+                policy={},
+                policy_written=False,
+            )
+        memory_sources_policy = _memory_sources_policy_from_proposal(
+            store,
+            proposal=proposal,
+            owner_id=owner_id,
+            channel=channel,
+            ops_gate_review=ops_gate_review,
+        )
+        memory_sources_apply_record: dict[str, Any] = {}
+        if apply:
+            memory_sources_apply_record = _write_memory_sources_policy(
+                store,
+                proposal=proposal,
+                policy=memory_sources_policy,
+            )
+            _mark_proposal_memory_sources_policy_applied(
+                store,
+                proposal_id=proposal_id,
+                apply_record=memory_sources_apply_record,
+            )
+        return _approved_proposal_memory_sources_policy_apply_result(
+            store,
+            status="applied" if apply else "ready",
+            proposal=proposal,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            ops_gate_review=ops_gate_review,
+            apply_record=memory_sources_apply_record,
+            policy=memory_sources_policy,
+            policy_written=bool(memory_sources_apply_record),
         )
 
     existing_apply = _policy_applies_by_proposal(store).get(proposal_id, {})
@@ -1767,7 +1832,6 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "proposal_detail": _bounded_text(str(item.get("proposal_detail") or ""), 620),
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
-        "available_actions": [str(action) for action in item.get("available_actions") or []][:8],
         "action_tokens": {
             str(key): str(value)
             for key, value in (item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}).items()
@@ -1782,7 +1846,16 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
             ).items()
             if isinstance(value, dict)
         },
-        "action_commands": [str(command) for command in item.get("action_commands") or []][:8],
+        "owner_utterance_scope": str(item.get("owner_utterance_scope") or "owner_chat_utterance"),
+        "owner_utterance_examples": [
+            str(value)
+            for value in (item.get("owner_utterance_examples") or item.get("action_commands") or [])
+        ][:8],
+        "agent_tool_calls": [
+            value
+            for value in (item.get("agent_tool_calls") if isinstance(item.get("agent_tool_calls"), list) else [])
+            if isinstance(value, dict)
+        ][:8],
         "safe_source_ids": [str(source_id) for source_id in item.get("safe_source_ids") or []][:12],
         "raw_body_included": False,
     }
@@ -2690,7 +2763,6 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360)
         if target_type == "speak"
         else "",
-        "available_actions": [action["command"] for action in actions],
         "action_tokens": {action["action_type"]: action["token"] for action in actions},
         "action_targets": {
             action["action_type"]: {
@@ -2699,7 +2771,13 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
             }
             for action in actions
         },
-        "action_commands": [action["command"] for action in actions],
+        "owner_utterance_scope": "owner_chat_utterance",
+        "owner_utterance_examples": [action["owner_utterance_example"] for action in actions],
+        "agent_tool_calls": [
+            action["agent_tool_call"]
+            for action in actions
+            if isinstance(action.get("agent_tool_call"), dict) and action["agent_tool_call"]
+        ],
         "safe_source_ids": item.get("safe_source_ids") or [],
         "raw_body_included": False,
     }
@@ -2726,15 +2804,15 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
 
 
 def _review_suggested_action(actions: list[dict[str, str]], target_type: str) -> str:
-    commands = [action["command"] for action in actions]
-    if target_type in {"candidate", "proposal"} and len(commands) >= 2:
-        return f"{commands[0]} or {commands[1]}"
-    if target_type == "proposal" and not commands:
+    examples = [action["owner_utterance_example"] for action in actions]
+    if target_type in {"candidate", "proposal"} and len(examples) >= 2:
+        return f"{examples[0]} or {examples[1]}"
+    if target_type == "proposal" and not examples:
         return "不进入今日审批；等待 SelfEvolution 生成具体方案后再进入 owner decision"
-    if target_type == "memory_source" and commands:
-        return commands[0]
-    if target_type == "speak" and commands:
-        return f"{commands[0]}；如果内容不合适，用 feedback 命令标记原因"
+    if target_type == "memory_source" and examples:
+        return examples[0]
+    if target_type == "speak" and examples:
+        return f"{examples[0]}；如果内容不合适，让 Hermes 记录具体表达反馈"
     if target_type == "candidate_cleanup":
         return "这次摘要里不需要操作；等待后续整理或 review queue 清理"
     return "不需要操作"
@@ -2825,18 +2903,25 @@ def _review_item_suppresses_actions(item: dict[str, Any]) -> bool:
 
 def _review_action(verb: str, action_type: str, target_type: str, target_id: str) -> dict[str, str]:
     token = _action_token(action_type=action_type, target_type=target_type, target_id=target_id)
-    command = f"memory {verb} {token}"
+    rating = ""
     if action_type == "mark_feedback":
-        command += " useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall"
+        rating = "useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall"
     elif action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
-        command += f" {action_type}"
+        rating = action_type
+    owner_utterance_example = _owner_utterance_example(action=verb, action_token=token, rating=rating)
+    agent_tool_call = (
+        {}
+        if "|" in rating
+        else _owner_review_reply_tool_call(action=verb, action_token=token, rating=rating)
+    )
     return {
         "verb": verb,
         "action_type": action_type,
         "target_type": target_type,
         "target_id": target_id,
         "token": token,
-        "command": command,
+        "owner_utterance_example": owner_utterance_example,
+        "agent_tool_call": agent_tool_call,
     }
 
 
@@ -2868,18 +2953,22 @@ def _rendered_digest_text(
     digest_mode = _digest_mode(digest_mode)
     max_chars = OWNER_REVIEW_TEXT_LIMIT
     title = "Memory-OS 今日审批议程" if digest_mode == "agenda" else "Memory-OS 审批摘要"
+    initial_overview = _rendered_overview_lines(counts or {}, overflow or {}, digest_mode=digest_mode)
+    overview_start = 2
+    overview_end = overview_start + len(initial_overview)
     lines = [
         title,
         "",
-        *_rendered_overview_lines(counts or {}, overflow or {}, digest_mode=digest_mode),
+        *initial_overview,
         "",
         "回复方式：",
-        "- 直接复制完整命令，例如：memory approve oa_...",
+        "- 直接在 Hermes 会话里回复示例，例如：memory approve oa_...",
         "- 也可以只回复 oa_...，Hermes 会继续问你要 approve/reject/allow/feedback。",
         "- A1/R1/F1 只是列表编号，不是审批 ID。",
         "",
     ]
-    omitted = 0
+    rendered_counts: dict[str, int] = {}
+    budget_omitted: dict[str, int] = {}
     section_specs = [("需要你决定", "action_required")]
     if digest_mode != "agenda":
         section_specs.extend(
@@ -2891,22 +2980,35 @@ def _rendered_digest_text(
     for section_title, key in section_specs:
         section_lines = [f"{section_title}:"]
         items = sections.get(key, [])
+        shown_count = 0
+        section_omitted = 0
         if not items:
             section_lines.append("- 无")
         for item in items:
             item_lines = _rendered_digest_item_lines(item)
             candidate = lines + section_lines + item_lines + [""]
             if len("\n".join(candidate).rstrip()) > max_chars:
-                omitted += 1
+                section_omitted += 1
                 continue
             section_lines.extend(item_lines)
-        if key == "fyi" and omitted:
-            summary_line = f"- 还有 {omitted} 项为了控制 Telegram 摘要长度被省略。"
+            shown_count += 1
+        rendered_counts[key] = shown_count
+        budget_omitted[key] = section_omitted
+        if section_omitted:
+            summary_line = f"- 还有 {section_omitted} 项为了控制 Telegram 摘要长度被省略。"
             candidate = lines + section_lines + [summary_line, ""]
             if len("\n".join(candidate).rstrip()) <= max_chars:
                 section_lines.append(summary_line)
         lines.extend(section_lines)
         lines.append("")
+    final_overview = _rendered_overview_lines(
+        counts or {},
+        overflow or {},
+        digest_mode=digest_mode,
+        rendered_counts=rendered_counts,
+        budget_omitted=budget_omitted,
+    )
+    lines = lines[:overview_start] + final_overview + lines[overview_end:]
     return "\n".join(lines).rstrip()
 
 
@@ -2915,6 +3017,8 @@ def _rendered_overview_lines(
     overflow: dict[str, Any],
     *,
     digest_mode: str = "review",
+    rendered_counts: dict[str, int] | None = None,
+    budget_omitted: dict[str, int] | None = None,
 ) -> list[str]:
     if not counts:
         return ["全貌：本条摘要只展示当前优先项；未展示项会在后续摘要或你主动要求时继续展开。"]
@@ -2925,9 +3029,26 @@ def _rendered_overview_lines(
     suggested_shown = int(counts.get("review_suggested_shown") or 0)
     fyi_total = int(counts.get("fyi_total") or 0)
     fyi_shown = int(counts.get("fyi_shown") or 0)
-    action_omitted = max(int(overflow.get("action_required") or 0), max(action_total - action_shown, 0))
-    suggested_omitted = max(int(overflow.get("review_suggested") or 0), max(suggested_total - suggested_shown, 0))
-    fyi_omitted = max(int(overflow.get("fyi") or 0), max(fyi_total - fyi_shown, 0))
+    if rendered_counts is not None:
+        action_shown = int(rendered_counts.get("action_required", action_shown))
+        suggested_shown = int(rendered_counts.get("review_suggested", suggested_shown))
+        fyi_shown = int(rendered_counts.get("fyi", fyi_shown))
+    budget_omitted = budget_omitted or {}
+    action_omitted = max(
+        int(overflow.get("action_required") or 0),
+        int(budget_omitted.get("action_required") or 0),
+        max(action_total - action_shown, 0),
+    )
+    suggested_omitted = max(
+        int(overflow.get("review_suggested") or 0),
+        int(budget_omitted.get("review_suggested") or 0),
+        max(suggested_total - suggested_shown, 0),
+    )
+    fyi_omitted = max(
+        int(overflow.get("fyi") or 0),
+        int(budget_omitted.get("fyi") or 0),
+        max(fyi_total - fyi_shown, 0),
+    )
     if _digest_mode(digest_mode) == "agenda":
         lines = [
             "今日议程：",
@@ -2983,11 +3104,14 @@ def _rendered_digest_lines(items: list[dict[str, Any]]) -> list[str]:
 
 def _rendered_digest_item_lines(item: dict[str, Any]) -> list[str]:
     target_ref = f"{item.get('target_type')}:{item.get('target_id')}"
-    commands = [str(command) for command in item.get("action_commands") or []]
-    action_line = " / ".join(commands) if commands else str(item.get("suggested_action") or "no action required")
+    examples = [
+        str(value)
+        for value in (item.get("owner_utterance_examples") or item.get("action_commands") or [])
+    ]
+    action_line = " / ".join(examples) if examples else str(item.get("suggested_action") or "no action required")
     lines = [
         f"- [{item.get('anchor')}] {item.get('question')}",
-        f"  操作: {action_line}",
+        f"  会话回复示例: {action_line}",
         f"  引用: {target_ref}",
         f"  原因: {item.get('reason')}",
         f"  结果: {item.get('consequence')}",
@@ -2998,7 +3122,11 @@ def _rendered_digest_item_lines(item: dict[str, Any]) -> list[str]:
         lines.insert(1, f"  内容: {expression_preview}")
     proposal_detail = str(item.get("proposal_detail") or "")
     if proposal_detail:
-        lines.insert(1, f"  内容: {proposal_detail}")
+        proposal_detail = proposal_detail.replace("owner 对", "用户对").replace("owner 标记", "用户标记")
+        proposal_detail = proposal_detail.replace("根据 owner ", "根据用户 ")
+        proposal_detail = proposal_detail.replace("根据 用户", "根据用户").replace("根据用户 ", "根据用户")
+        proposal_detail = proposal_detail.replace("用户 表达", "用户表达")
+        lines.insert(1, f"  内容: {_bounded_text(proposal_detail, 280)}")
     return lines
 
 
@@ -3133,7 +3261,6 @@ def _right_brain_expression_feedback_item(outcome: dict[str, Any]) -> dict[str, 
         "policy_version": policy_version,
         "request_id": str(outcome.get("request_id") or ""),
         "observed_at": observed_at,
-        "available_actions": [action["command"] for action in actions],
         "action_tokens": {action["action_type"]: action["token"] for action in actions},
         "action_targets": {
             action["action_type"]: {
@@ -3142,13 +3269,19 @@ def _right_brain_expression_feedback_item(outcome: dict[str, Any]) -> dict[str, 
             }
             for action in actions
         },
-        "action_commands": [action["command"] for action in actions],
+        "owner_utterance_scope": "owner_chat_utterance",
+        "owner_utterance_examples": [action["owner_utterance_example"] for action in actions],
+        "agent_tool_calls": [
+            action["agent_tool_call"]
+            for action in actions
+            if isinstance(action.get("agent_tool_call"), dict) and action["agent_tool_call"]
+        ],
         "safe_source_ids": [f"right_brain_expression_outcome:{outcome_id}"],
         "raw_body_included": False,
     }
 
 
-def _memory_source_feedback_item(record: dict[str, Any]) -> dict[str, Any]:
+def _memory_source_feedback_item(record: dict[str, Any], *, roots: MemoryOSRoots | None = None) -> dict[str, Any]:
     record_id = str(record.get("record_id") or "")
     action = _review_action("feedback", "mark_feedback", "memory_source", record_id)
     selected = record.get("selected") if isinstance(record.get("selected"), list) else []
@@ -3164,7 +3297,12 @@ def _memory_source_feedback_item(record: dict[str, Any]) -> dict[str, Any]:
     route = str(record.get("route") or "unknown")
     query_class = str(record.get("query_class") or route or "unknown")
     created_at = str(record.get("created_at") or "")
-    return {
+    owner_utterance_examples = [
+        _owner_utterance_example(action="feedback", action_token=action["token"], rating=rating)
+        for rating in MEMORY_SOURCE_FEEDBACK_CONTEXT_RATINGS
+        if rating in ALLOWED_FEEDBACK_RATINGS
+    ]
+    item = {
         "anchor": "MSRC",
         "target_type": "memory_source",
         "target_id": record_id,
@@ -3185,7 +3323,6 @@ def _memory_source_feedback_item(record: dict[str, Any]) -> dict[str, Any]:
         "selected_count": len(selected),
         "selected_chars_total": int(record.get("selected_chars_total") or 0),
         "created_at": created_at,
-        "available_actions": [action["command"]],
         "allowed_ratings": sorted(ALLOWED_FEEDBACK_RATINGS),
         "action_tokens": {"mark_feedback": action["token"]},
         "action_targets": {
@@ -3194,13 +3331,24 @@ def _memory_source_feedback_item(record: dict[str, Any]) -> dict[str, Any]:
                 "target_id": action["target_id"],
             }
         },
-        "action_commands": [
-            f"memory feedback {action['token']} {rating}"
+        "owner_utterance_scope": "owner_chat_utterance",
+        "owner_utterance_examples": owner_utterance_examples,
+        "raw_body_included": False,
+    }
+    if roots is not None:
+        item["agent_tool_calls"] = [
+            {
+                "rating": rating,
+                "agent_tool_call": _owner_review_reply_tool_call(
+                    action="feedback",
+                    action_token=action["token"],
+                    rating=rating,
+                ),
+            }
             for rating in MEMORY_SOURCE_FEEDBACK_CONTEXT_RATINGS
             if rating in ALLOWED_FEEDBACK_RATINGS
-        ],
-        "raw_body_included": False,
-}
+        ]
+    return item
 
 
 def _dedupe_strings(items: list[str]) -> list[str]:
@@ -3572,6 +3720,8 @@ def _explicit_proposal_apply_kind(proposal: dict[str, Any]) -> str:
     dedupe_key = str(proposal.get("dedupe_key") or "").strip().lower()
     if kind == "expression_policy":
         return "expression_policy"
+    if kind == "memory_sources_policy" or proposal_class.startswith("memory_sources_policy:"):
+        return "memory_sources_policy"
     if kind == "proposal_queue_cleanup" and (
         proposal_class == "proposal_queue_legacy_template_cleanup"
         or dedupe_key == "proposal_queue_legacy_template_cleanup"
@@ -3625,6 +3775,49 @@ def _approved_proposal_legacy_template_cleanup_apply_result(
         "actual_send": False,
         "raw_body_included": False,
         "rollback": "reopen pressure_blocked legacy template entries listed in legacy_template_cleanup_applies.jsonl if owner reverses the cleanup",
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _approved_proposal_memory_sources_policy_apply_result(
+    store: MemoryOSStore,
+    *,
+    status: str,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    apply: bool,
+    ops_gate_review: dict[str, Any],
+    apply_record: dict[str, Any],
+    policy: dict[str, Any],
+    policy_written: bool,
+) -> dict[str, Any]:
+    proposal_id = str(proposal.get("candidate_id") or "")
+    return {
+        "schema_version": APPROVED_PROPOSAL_EXECUTION_APPLY_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "proposal_state": str(proposal.get("state") or ""),
+        "apply_kind": "memory_sources_policy",
+        "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+        "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
+        "policy_write_planned": True,
+        "policy_written": policy_written,
+        "memory_sources_policy_apply_id": str(apply_record.get("apply_id") or ""),
+        "policy_version": int(apply_record.get("policy_version") or policy.get("policy_version") or 0),
+        "policy_path": str(memory_sources_policy_path(store.roots)),
+        "runtime_target": "context_retrieval_policy_review",
+        "selection_policy_changed": False,
+        "execution_ticket_created": False,
+        "actual_policy_write": policy_written,
+        "actual_execute": False,
+        "actual_send": False,
+        "raw_body_included": False,
+        "rollback": "restore previous memory_sources/policy.json from policy_applies.jsonl previous_policy snapshot",
         "boundary": _owner_review_false_boundary(),
     }
 
@@ -3712,6 +3905,15 @@ def _proposal_queue_legacy_template_cleanup_applies_path(store: MemoryOSStore) -
     return store.roots.hermes_home / "system-modules" / "proposal_queue" / "legacy_template_cleanup_applies.jsonl"
 
 
+def _memory_sources_policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
+    applies: dict[str, dict[str, Any]] = {}
+    for record in _read_jsonl(memory_sources_policy_applies_path(store.roots)):
+        proposal_id = str(record.get("proposal_id") or "")
+        if proposal_id:
+            applies[proposal_id] = record
+    return applies
+
+
 def _policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
     applies: dict[str, dict[str, Any]] = {}
     for record in _read_jsonl(_right_brain_expression_policy_applies_path(store)):
@@ -3749,7 +3951,12 @@ def _proposal_queue_item_terminal_for_cleanup(item: dict[str, Any]) -> bool:
     followup_state = str(item.get("followup_state") or "")
     if state in {"owner_declined", "expired", "pressure_blocked"}:
         return True
-    return followup_state in {"closed", "applied_expression_policy", "applied_legacy_template_cleanup"}
+    return followup_state in {
+        "closed",
+        "applied_expression_policy",
+        "applied_memory_sources_policy",
+        "applied_legacy_template_cleanup",
+    }
 
 
 def _legacy_template_proposal(item: dict[str, Any]) -> bool:
@@ -3764,6 +3971,124 @@ def _legacy_template_proposal(item: dict[str, Any]) -> bool:
     if title == "Tune right-brain expression policy" and "prompt/cadence/policy proposal" in body:
         return True
     return False
+
+
+def _memory_sources_policy_from_proposal(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    ops_gate_review: dict[str, Any],
+) -> dict[str, Any]:
+    previous = read_memory_sources_policy(store.roots)
+    previous_version = int(previous.get("policy_version") or 0) if previous else 0
+    proposal_id = str(proposal.get("candidate_id") or "")
+    quality = proposal.get("proposal_quality") if isinstance(proposal.get("proposal_quality"), dict) else {}
+    body = str(proposal.get("body") or "")
+    title = str(proposal.get("title") or "")
+    rating = str(quality.get("feedback_rating") or _memory_sources_policy_rating(title=title, body=body))
+    return {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "policy_id": f"mspol_{_stable_token(proposal_id, 12)}",
+        "policy_version": previous_version + 1,
+        "active": True,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "profile": store.roots.profile or "default",
+        "owner_id": owner_id,
+        "channel": channel,
+        "applied_from_proposal_id": proposal_id,
+        "proposal_title": _bounded_text(title, 180),
+        "proposal_kind": str(proposal.get("kind") or "memory_sources_policy"),
+        "proposal_class": str(proposal.get("proposal_class") or ""),
+        "runtime_target": "context_retrieval_policy_review",
+        "feedback_rating": rating,
+        "routes": _safe_list(quality.get("routes"))[:12],
+        "query_classes": _safe_list(quality.get("query_classes"))[:12],
+        "memory_source_record_refs": _safe_list(quality.get("memory_source_record_refs"))[:12],
+        "policy_guidance": _memory_sources_policy_guidance(rating=rating, title=title, body=body),
+        "selection_policy_changed": False,
+        "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+        "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
+        "source_refs": _safe_list(proposal.get("source_refs"))[:12],
+        "raw_body_included": False,
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+
+
+def _memory_sources_policy_rating(*, title: str, body: str) -> str:
+    text = f"{title}\n{body}".lower()
+    for rating in ("missing_context", "needs_specific_recall", "too_mechanistic", "overconfident", "irrelevant"):
+        if rating in text:
+            return rating
+    if "缺" in text:
+        return "missing_context"
+    return "review_required"
+
+
+def _memory_sources_policy_guidance(*, rating: str, title: str, body: str) -> list[str]:
+    guidance = [
+        "MemorySources 只记录和暴露 bounded attribution，不直接改 live route、prompt、send 或 execution。",
+        "后续 MemorySources record 必须带 active policy_ref，方便评估该 policy 是否改善上下文质量。",
+    ]
+    if rating == "missing_context" or "missing_context" in f"{title}\n{body}":
+        guidance.append("针对 missing_context：后续评估候选/审批上下文时，优先检查是否缺少关键 source class 或具体 recall anchor。")
+    if rating == "needs_specific_recall":
+        guidance.append("针对 needs_specific_recall：后续反馈提示应要求 Hermes agent 追问更具体的时间、项目、关键词或来源。")
+    if rating == "too_mechanistic":
+        guidance.append("针对 too_mechanistic：后续反馈提示应避免系统字段堆砌，要求 Hermes agent 用自然语言解释上下文用途。")
+    return guidance[:6]
+
+
+def _write_memory_sources_policy(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    policy_path = memory_sources_policy_path(store.roots)
+    previous = read_memory_sources_policy(store.roots)
+    apply_id = f"msapply_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}"
+    policy_path.parent.mkdir(parents=True, exist_ok=True)
+    policy_path.write_text(json.dumps(policy, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    record = {
+        "schema_version": POLICY_APPLY_SCHEMA_VERSION,
+        "apply_id": apply_id,
+        "created_at": policy["created_at"],
+        "proposal_id": str(proposal.get("candidate_id") or ""),
+        "proposal_title": _bounded_text(str(proposal.get("title") or ""), 180),
+        "policy_id": policy["policy_id"],
+        "policy_version": policy["policy_version"],
+        "policy_path": str(policy_path),
+        "runtime_target": "context_retrieval_policy_review",
+        "previous_policy_digest": _json_digest(previous) if previous else "",
+        "previous_policy": previous,
+        "selection_policy_changed": False,
+        "actual_policy_write": True,
+        "actual_execute": False,
+        "actual_send": False,
+        "raw_body_included": False,
+    }
+    _append_jsonl(memory_sources_policy_applies_path(store.roots), record)
+    append_audit(
+        store.roots.audit_path,
+        action="memory_sources_policy_applied",
+        status="ok",
+        target=str(policy_path),
+        details={
+            "apply_id": apply_id,
+            "proposal_id": record["proposal_id"],
+            "policy_version": policy["policy_version"],
+            "runtime_target": "context_retrieval_policy_review",
+            "selection_policy_changed": False,
+            "actual_policy_write": True,
+            "actual_execute": False,
+        },
+    )
+    return record
 
 
 def _right_brain_expression_policy_from_proposal(
@@ -3992,6 +4317,32 @@ def _mark_proposal_policy_applied(
         _write_proposal_queue_document(path, queue)
 
 
+def _mark_proposal_memory_sources_policy_applied(
+    store: MemoryOSStore,
+    *,
+    proposal_id: str,
+    apply_record: dict[str, Any],
+) -> None:
+    path = _proposal_queue_path(store)
+    queue = _read_proposal_queue_document(path)
+    changed = False
+    for item in queue.get("items", []):
+        if not isinstance(item, dict) or str(item.get("candidate_id") or "") != proposal_id:
+            continue
+        item["followup_state"] = "applied_memory_sources_policy"
+        item["execution_decision_state"] = "owner_applied_memory_sources_policy"
+        item["memory_sources_policy_apply_count"] = int(item.get("memory_sources_policy_apply_count") or 0) + 1
+        item["memory_sources_policy_apply_id"] = str(apply_record.get("apply_id") or "")
+        item["memory_sources_policy_version"] = int(apply_record.get("policy_version") or 0)
+        item["memory_sources_policy_path"] = str(apply_record.get("policy_path") or "")
+        item["actual_execute"] = False
+        item["updated_at"] = str(apply_record.get("created_at") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        changed = True
+        break
+    if changed:
+        _write_proposal_queue_document(path, queue)
+
+
 def _proposal_queue_path(store: MemoryOSStore) -> Path:
     return store.roots.hermes_home / "system-modules" / "proposal_queue" / "queue.json"
 
@@ -4114,7 +4465,9 @@ def _owner_review_surface_expression_feedback_context(
         if str(record.get("outcome_id") or "") == latest_id
     )
     action_tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
-    commands = item.get("action_commands") if isinstance(item.get("action_commands"), list) else []
+    examples = (
+        item.get("owner_utterance_examples") if isinstance(item.get("owner_utterance_examples"), list) else []
+    )
     actions: dict[str, dict[str, Any]] = {}
     ordered_feedback_actions = list(EXPRESSION_FEEDBACK_DIGEST_ACTIONS) + [
         action_type
@@ -4125,12 +4478,18 @@ def _owner_review_surface_expression_feedback_context(
         token = str(action_tokens.get(action_type) or "")
         if not token:
             continue
-        command = next((str(value) for value in commands if token and token in str(value)), "")
+        example = next((str(value) for value in examples if token and token in str(value)), "")
         actions[action_type] = {
             "action": "feedback",
             "rating": action_type,
             "action_token": token,
-            "command": command,
+            "owner_utterance_example": example,
+            "owner_utterance_scope": "owner_chat_utterance",
+            "agent_tool_call": _owner_review_reply_tool_call(
+                action="feedback",
+                action_token=token,
+                rating=action_type,
+            ),
             "target_type": "expression",
             "target_id": latest_id,
         }
@@ -4185,7 +4544,7 @@ def _owner_review_surface_memory_sources_feedback_context(
         }
     latest = records[-1]
     latest_id = str(latest.get("record_id") or "")
-    item = _memory_source_feedback_item(latest)
+    item = _memory_source_feedback_item(latest, roots=store.roots)
     token = str((item.get("action_tokens") or {}).get("mark_feedback") or "")
     rating_counts = Counter(
         str(record.get("rating") or "")
@@ -4204,11 +4563,18 @@ def _owner_review_surface_memory_sources_feedback_context(
     )
     actions: dict[str, dict[str, Any]] = {}
     for rating in ordered_ratings:
+        example = _owner_utterance_example(action="feedback", action_token=token, rating=rating)
         actions[rating] = {
             "action": "feedback",
             "rating": rating,
             "action_token": token,
-            "command": f"memory feedback {token} {rating}",
+            "owner_utterance_example": example,
+            "owner_utterance_scope": "owner_chat_utterance",
+            "agent_tool_call": _owner_review_reply_tool_call(
+                action="feedback",
+                action_token=token,
+                rating=rating,
+            ),
             "target_type": "memory_source",
             "target_id": latest_id,
         }
@@ -4237,6 +4603,25 @@ def _owner_review_surface_memory_sources_feedback_context(
         ),
         "raw_body_included": False,
         "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _owner_utterance_example(*, action: str, action_token: str, rating: str = "") -> str:
+    if action == "feedback":
+        return " ".join(part for part in ["memory feedback", str(action_token or ""), str(rating or "")] if part)
+    return " ".join(part for part in ["memory", str(action or ""), str(action_token or "")] if part)
+
+
+def _owner_review_reply_tool_call(*, action: str, action_token: str, rating: str = "") -> dict[str, Any]:
+    arguments = {
+        "action": str(action or ""),
+        "action_token": str(action_token or ""),
+    }
+    if str(action or "") == "feedback" and rating:
+        arguments["rating"] = str(rating or "")
+    return {
+        "tool_name": "memory_os_review_reply",
+        "arguments": arguments,
     }
 
 

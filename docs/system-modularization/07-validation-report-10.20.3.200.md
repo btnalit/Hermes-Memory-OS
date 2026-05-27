@@ -16776,3 +16776,495 @@ Interpretation:
 - Current live data has no active owner-actionable proposal missing agenda
   trace. The remaining left-brain blocker is not maturity metadata; it is
   real MemorySources feedback volume.
+
+## 2026-05-27 - P1-R Expression Reaction Volume Gate
+
+Scope:
+
+- P1-R / RH-38 right-brain expression reaction-volume maturity.
+- Monitor-only classification; no Hermes transport, prompt, policy, cadence,
+  send, or execution behavior changed.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=38/40 P1-R plus live right_brain_expression_adapter outcome monitor
+finding_type=monitor gap / reaction-volume maturity gap
+owning_seam=right-brain expression outcome monitor classification
+reverse_scope=Hermes owns expression/delivery/interaction; Memory-OS owns bounded outcome and feedback counters
+evidence_loop=local monitor tests + live 10.20.3.200 monitor
+monitor_or_validation_fields=right_brain_expression_reaction_volume_thin, right_brain_expression_reaction_volume_sufficient, outcome_count, outcome_feedback_count
+promotion_signal=at least 3 linked outcome feedback records produce reaction-volume sufficient PASS
+stop_or_rollback_signal=missing outcome linkage, raw body, actual_send, actual_execute, or feedback directly mutating policy/prompt/cadence
+external_review=not required for monitor-only classification
+```
+
+Local verification:
+
+```text
+python -m pytest tests\scripts\test_memory_os_3_200_monitor.py -q -k "right_brain_reaction_volume or right_brain_expression"
+4 passed, 47 deselected
+```
+
+Live monitor after classification change:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[
+  right_brain_expression_reaction_volume_thin,
+  rh31_eval_measurement_signals,
+  memory_sources_feedback_volume_missing
+]
+
+ModuleArtifacts.right_brain_expression_adapter.outcome_count=2
+ModuleArtifacts.right_brain_expression_adapter.outcome_feedback_count=1
+ModuleArtifacts.right_brain_expression_adapter.outcome_feedback_missing_count=0
+ModuleArtifacts.right_brain_expression_adapter.outcome_actual_send_count=0
+ModuleArtifacts.right_brain_expression_adapter.outcome_actual_execute_count=0
+PASS includes right_brain_expression_outcome_recorded
+PASS includes right_brain_expression_feedback_linked
+```
+
+Interpretation:
+
+- Right-brain expression outcome and linked-feedback plumbing are working, but
+  reaction volume is too thin to claim mature prompt/policy/cadence learning.
+- The new WARN is a maturity/observation signal only. It does not block the
+  existing expression runtime, and it does not authorize automatic policy
+  changes.
+
+## 2026-05-27 - Owner-Facing Review Surface Agent Tool Contract
+
+Scope:
+
+- Owner-review and feedback surfaces no longer present shell/operator command
+  fields as the product path.
+- Owner-facing strings are chat utterance examples for Hermes agent
+  interaction; the executable path is the structured `memory_os_review_reply`
+  tool call.
+- Operator CLI remains a debug/runbook fallback outside the owner-facing review
+  payload.
+- Contract/docs terminology was synchronized across quickstart, 29, 32, 34,
+  36, 37, 39, and 40 so future work starts from the same agent-mediated seam.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=29/37/40 contracts plus live owner feedback shell confusion
+finding_type=contract gap / live interaction seam mismatch
+owning_seam=owner review surface + Hermes agent structured tool handoff
+reverse_scope=Hermes owns conversation and clarification; Memory-OS owns bounded tokens, state machine, audit, monitor
+evidence_loop=local owner action tests + monitor tests + live 10.20.3.200 owner_review_surface monitor
+monitor_or_validation_fields=forbidden_owner_command_field_count, owner_utterance_example_count, agent_tool_call_count, owner_review_surface_agent_tool_contract_ok
+promotion_signal=owner-facing surfaces expose owner_utterance_example(s) and agent_tool_call(s), with forbidden shell/operator fields absent
+stop_or_rollback_signal=owner-facing surface exposes command/operator_cli/action_commands/available_actions or owner action requires shell execution
+external_review=not required before monitor/schema wording fix; external review useful before public claims
+```
+
+Local verification:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py tests\scripts\test_memory_os_3_200_monitor.py -q
+109 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+```
+
+10.20.3.200 deployment/smoke:
+
+```text
+deployed:
+- /root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+- /root/.hermes/plugins/memory_os/owner_actions.py
+- /root/.hermes/scripts/memory_os_3_200_monitor.py
+
+gateway restart:
+hermes-gateway.service active, pid=525948
+
+live owner review surface:
+feedback_actions expose owner_utterance_example and agent_tool_call
+feedback_actions do not expose command or operator_cli
+latest_memory_source exposes owner_utterance_examples and agent_tool_calls
+latest_memory_source does not expose action_commands or available_actions
+
+live agenda digest:
+header says "直接在 Hermes 会话里回复示例"
+item label says "会话回复示例"
+text does not use "完整命令" or "操作:" as the owner product path
+```
+
+Live monitor:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[right_brain_expression_reaction_volume_thin, rh31_eval_measurement_signals, memory_sources_feedback_volume_missing]
+
+OwnerReviewSurface.status=ok
+OwnerReviewSurface.raw_body_included_count=0
+OwnerReviewSurface.boundary_true_count=0
+OwnerReviewSurface.forbidden_owner_command_field_count=0
+OwnerReviewSurface.forbidden_owner_command_fields=[]
+OwnerReviewSurface.owner_utterance_example_count=30
+OwnerReviewSurface.agent_tool_call_count=39
+PASS includes owner_review_surface_agent_tool_contract_ok
+
+OwnerIngressGuard.structured_review_reply_count=1
+OwnerIngressGuard.reply_fallback_used_count=0
+OwnerIngressGuard.owner_review_command_pollution_count=0
+```
+
+Interpretation:
+
+- The owner-facing surface is now aligned with the Hermes-agent contract:
+  owner text is a conversation utterance example, not an instruction to run a
+  shell command.
+- The executable handoff is visible as `agent_tool_call(s)` and remains routed
+  through `memory_os_review_reply` / OwnerActionProcessor.
+- The remaining WARNs are unrelated maturity/volume signals:
+  right-brain reaction volume is still thin, RH-31 remains measurement-only,
+  and real MemorySources feedback volume is still missing.
+
+## 2026-05-27 - Process Correction: Observation Requires Owner-Visible Activation
+
+Scope:
+
+- Process/documentation correction after the owner identified that many
+  feedback/approval signals were missing because the relevant items had not
+  been pushed into the primary Hermes owner channel.
+- This section records a process defect, not a runtime code change.
+
+Conversation postmortem:
+
+```text
+failure_pattern=monitor/fixture readiness was repeatedly treated as observation
+root_cause_1=dynamic closure required evidence but did not require owner-visible activation before observation
+root_cause_2=project docs allowed "observe volume" wording while the source of owner volume had not been pushed to the owner channel
+root_cause_3=CLI/debug paths leaked into product thinking, causing attempts to ask the owner to run shell-like commands
+root_cause_4=external reviews and local monitor PASS were over-weighted relative to real Hermes-channel owner interaction
+corrective_rule=owner-actionable artifacts are not observable until the owner can see and act on them through Hermes
+```
+
+Global process correction:
+
+```text
+updated=C:\Users\btnal\.codex\AGENTS.md
+updated=C:\Users\btnal\.codex\skills\evidence-driven-dynamic-closure\SKILL.md
+
+new generic rule:
+- user-actionable artifacts must reach the user's normal product interaction channel
+- "上线测试/真实运行/推送给我看/推进闭环" requires deployed realistic user-channel smoke
+- monitor-only evidence cannot prove a user feedback/approval loop
+- do not observe a feedback/approval loop before the user-visible path is deployed or triggered
+```
+
+Memory-OS contract correction:
+
+```text
+updated=docs/system-modularization/29-memory-os-module-integration-contract.md
+updated=docs/system-modularization/32-active-roadmap-and-gates.md
+updated=docs/system-modularization/37-agent-memoryos-collaboration-contract.md
+updated=docs/system-modularization/40-memory-os-unified-control-plane.md
+updated=docs/system-modularization/41-operating-closure-implementation-blueprint.md
+
+new Memory-OS rule:
+- if owner judgment is required, the item must be pushed to or reachable from
+  the configured Hermes owner/home channel
+- CLI, JSON, files, and monitor counters are support evidence, not the normal
+  governance loop
+- MemorySources feedback volume remains missing because the owner-visible path
+  has not yet been activated; zero volume is not a mature observation result
+```
+
+Immediate implication:
+
+```text
+next_valid_runtime_slice=P1-S MemorySources feedback owner-channel activation
+required_smoke=Hermes agent shows bounded MemorySources feedback item in the owner channel, owner replies in that channel, memory_os_review_reply writes feedback ledger, monitor shows MemorySources.feedback_count>0
+forbidden=asking owner to SSH and run memory feedback ... as the normal product path
+```
+
+## 2026-05-27 - P1-S Live MemorySources Feedback Owner-Channel Closure
+
+Scope:
+
+- Activate the MemorySources feedback loop through the configured Hermes owner
+  channel instead of asking the owner to run a shell or CLI command.
+- Verify the full chain from owner-visible prompt to feedback ledger, scoring,
+  SelfEvolution agenda promotion, owner agenda delivery, and owner action.
+
+Dynamic closure preflight:
+
+```text
+source_of_truth=10.20.3.200 Telegram transcript, live monitor, 29/37/40 contracts, this validation report
+finding_type=live human-feedback workflow
+owning_seam=Hermes agent interaction + Memory-OS review surface / memory_os_review_reply / OwnerActionProcessor
+reverse_scope=Hermes owns conversation, clarification, delivery, and tool calling; Memory-OS owns bounded context, action tokens, ledger, agenda/proposal, and monitor
+evidence_loop=Telegram prompt -> owner reply -> structured tool -> feedback ledger -> cognitive loop -> agenda candidate -> owner review digest -> owner action
+monitor_or_validation_fields=MemorySources.feedback_count, memory_sources_feedback_subject_count, self_evolution.agenda_candidate_*, left_brain_memory_sources_policy_quality_ready, OwnerAgendaDigest, structured_review_reply_count, reply_fallback_used_count
+user_visible_surface=Telegram owner home channel via Hermes cron/agent
+deployed_smoke=memory-os-memory-sources-feedback-smoke delivered through Hermes cron; owner replied in Telegram
+promotion_signal=real owner feedback produces an agenda-traced memory_sources_policy proposal without direct live mutation
+stop_or_rollback_signal=feedback mutates live policy directly, proposal appears without agenda trace, generic executor appears, or user-visible prompt reverts to CLI-only instruction
+external_review=not required for this report-only/owner-review slice; required before adding a new explicit apply kind
+```
+
+Live user-visible activation:
+
+```text
+job_name=memory-os-memory-sources-feedback-smoke
+job_id=5e524fcc4f89
+output=/root/.hermes/cron/output/5e524fcc4f89/2026-05-27_05-11-15.md
+delivery=telegram:6808688675 via Hermes cron/live adapter
+surface=Hermes agent rendered a MemorySources feedback request in the owner channel
+owner_reply=memory feedback oa_f3a98913b7d9e5 useful; memory feedback oa_f3a98913b7d9e5 missing_context
+tool_path=Hermes agent -> memory_os_review_reply(action=feedback, action_token=oa_f3a98913b7d9e5, rating=...)
+```
+
+Feedback ledger evidence:
+
+```text
+memory_sources_feedback.jsonl:
+- feedback_id=msfb_20260527T091227751230Z_be66368d
+  owner_action_id=oact_20260527T091227751153Z_27899611
+  memory_source_record_id=msrc_20260527T084422239209Z_72e818e3
+  route=candidate_review
+  rating=useful
+  source=owner_action
+
+- feedback_id=msfb_20260527T091229940309Z_d4ead740
+  owner_action_id=oact_20260527T091229940215Z_8f48923c
+  memory_source_record_id=msrc_20260527T084422239209Z_72e818e3
+  route=candidate_review
+  rating=missing_context
+  source=owner_action
+```
+
+Prompt quality finding and fix:
+
+```text
+finding=owner pasted two feedback commands in one Telegram message; Hermes agent submitted both
+impact=ledger remains auditable and useful+missing_context can be interpreted as "helpful but missing key context", but the prompt should avoid accidental multi-rating submission
+fix=scripts/memory_os_memory_sources_feedback_prompt.py now tells Hermes agent to ask one natural-language question, collect one rating, and ask clarification if the owner gives multiple ratings
+boundary=Memory-OS did not replace Hermes conversation; it provides bounded context and structured tool guidance only
+```
+
+Downstream scoring and agenda promotion:
+
+```text
+first_live_finding=SelfEvolution incorrectly promoted stale expression feedback when the top mature subject was memory_sources_feedback
+root_cause=_proposal_shape preferred expression_feedback whenever any expression feedback existed, ignoring the top subject kind
+local_regression_test=test_self_evolution_prioritizes_top_memory_sources_signal_over_stale_expression_feedback
+fix=when top_subject_kind == memory_sources_feedback, expression feedback is ignored for that agenda decision
+
+after_fix_live_result:
+- agenda_candidate_id=agc_242193b568a9
+- candidate_kind=memory_sources_policy
+- proposal_class=memory_sources_policy:missing_context
+- dedupe_key=memory_sources_policy:missing_context:candidate_review:candidate_review
+- proposal_id=prop_20260527T092345596288Z_c01a2e2606
+- status=promoted_to_proposal
+- promotion_allowed=true
+- runtime_target=context_retrieval_policy_review
+```
+
+Owner agenda renderer finding and fix:
+
+```text
+finding=agenda digest summary claimed 3 action items while long proposal text could consume the budget and omit the third item
+local_regression_test=test_agenda_count_matches_rendered_items_when_proposals_are_long
+fix=rendered digest recomputes shown counts from actually rendered items, records section budget omissions, and bounds proposal detail text for Telegram readability
+boundary=raw_body_included=false; internal schema labels remain hidden
+```
+
+Owner-channel agenda delivery:
+
+```text
+job_name=memory-os-owner-review-digest
+job_id=2af755464ca8
+output=/root/.hermes/cron/output/2af755464ca8/2026-05-27_05-31-43.md
+delivery=telegram:6808688675 via Hermes cron/live adapter
+rendered_action_required=3
+
+displayed_items:
+- A1 expression_policy too_mechanical feedback proposal
+- A2 reflection continuity behavior proposal
+- A3 memory_sources_policy missing_context feedback proposal
+```
+
+Owner actions after agenda delivery:
+
+```text
+owner_rejected_A1:
+  owner_action_id=oact_20260527T093211521612Z_f481a622
+  action_type=reject_proposal
+  target_id=prop_20260527T001838849188Z_1808f182c6
+  state=owner_declined
+
+owner_approved_A2:
+  owner_action_id=oact_20260527T093212575813Z_a68b6929
+  action_type=approve_proposal
+  target_id=prop_20260527T041202858584Z_c11a7a1f41
+  state=approved_for_proposal
+
+memory_sources_policy_A3:
+  status=pending owner decision
+  approve_token=oa_48b99381cf0431
+  reject_token=oa_07c4191d2d5a9f
+```
+
+Live monitor evidence after smoke:
+
+```text
+monitor_status=WARN
+MemorySources.feedback_count=2
+MemorySources.feedback_ratings={missing_context: 1, useful: 1}
+ModuleArtifacts.evidence.subject_counts.memory_sources_feedback=3
+ModuleArtifacts.evidence.owner_feedback_signal_count=6
+ModuleArtifacts.self_evolution.agenda_candidate_count=2
+ModuleArtifacts.self_evolution.agenda_candidate_promoted_count=1
+ModuleArtifacts.self_evolution.latest_agenda_candidate_status=promoted_to_proposal
+ModuleArtifacts.left_brain_pipeline_check.memory_sources_policy_quality_ready_count=1
+OwnerReview.action_required=1
+OwnerAgendaDigest.section_counts.action_required=1
+OwnerReviewSurface.operations.memory_sources_feedback_context.status=ok
+OwnerReviewSurface.owner_utterance_example_count=30
+OwnerReviewSurface.agent_tool_call_count=39
+OwnerIngressGuard.reply_fallback_used_count=0
+OwnerIngressGuard.owner_review_command_pollution_count=0
+OwnerCronIntegration.status=ok
+FAIL=[]
+WARN=[left_brain_pipeline_check_warn, left_brain_proposal_agenda_trace_missing, right_brain_expression_reaction_volume_thin, owner_review_approved_proposals_pending_followup, rh31_eval_measurement_signals]
+```
+
+Interpretation:
+
+- P1-S owner-visible feedback activation is now live PASS: the owner saw the
+  request in Telegram, replied in Telegram, and Memory-OS wrote auditable
+  MemorySources feedback through OwnerActionProcessor.
+- The feedback did not directly change recall, prompts, cadence, or policy.
+  It became evidence, then a quality-gated `memory_sources_policy` proposal.
+- The remaining step for the new `memory_sources_policy` proposal is owner
+  approval or rejection in the same Telegram governance loop. Memory-OS must
+  not apply it automatically.
+
+### 2026-05-27 - P1-Q MemorySources Policy Explicit Apply Closure
+
+Scope:
+
+- Close the next segment for the owner-approved A3 `memory_sources_policy`
+  proposal.
+- Keep the apply bounded to Memory-OS retrieval policy evidence only.
+- Do not create a generic executor, external task, transport action, or
+  execution ticket.
+
+Prerequisite owner/Hermes evidence:
+
+```text
+proposal_id=prop_20260527T092345596288Z_c01a2e2606
+proposal_kind=memory_sources_policy
+proposal_class=memory_sources_policy:missing_context
+owner_channel=telegram:6808688675
+owner_action_id=oact_20260527T093741325326Z_a48190c9
+owner_action=approve_proposal
+state=approved_for_proposal
+```
+
+OpsGate report-only follow-up:
+
+```text
+command=hermes memory-os-agent-os review proposal-followups --ops-gate --all-pending --limit 20 --owner owner --channel telegram --apply
+ops_gate_report_written_count=2
+memory_sources_policy_report_id=opsr_20260527T094702783800Z_1f3affa351
+decision=would_allow
+actual_execute=false
+execution_ticket_created=false
+```
+
+Explicit bounded apply dry-run:
+
+```text
+command=hermes memory-os-agent-os review proposal-followups --proposal-id prop_20260527T092345596288Z_c01a2e2606 --execution-apply --owner-approved
+status=ready
+apply_kind=memory_sources_policy
+runtime_target=context_retrieval_policy_review
+policy_write_planned=true
+actual_policy_write=false
+actual_execute=false
+actual_send=false
+execution_ticket_created=false
+raw_body_included=false
+rollback=restore previous memory_sources/policy.json from policy_applies.jsonl previous_policy snapshot
+```
+
+Explicit bounded apply:
+
+```text
+command=hermes memory-os-agent-os review proposal-followups --proposal-id prop_20260527T092345596288Z_c01a2e2606 --execution-apply --owner-approved --owner owner --channel telegram --apply
+status=applied
+apply_kind=memory_sources_policy
+memory_sources_policy_apply_id=msapply_20260527T100228563170Z_caf26c35
+policy_version=1
+policy_path=/root/.hermes/system-modules/memory_sources/policy.json
+selection_policy_changed=false
+actual_policy_write=true
+actual_execute=false
+actual_send=false
+execution_ticket_created=false
+raw_body_included=false
+```
+
+Idempotency:
+
+```text
+repeat_apply_status=duplicate_ignored
+repeat_apply_id=msapply_20260527T100228563170Z_caf26c35
+repeat_actual_policy_write=false
+repeat_actual_execute=false
+repeat_execution_ticket_created=false
+```
+
+Live monitor evidence after apply:
+
+```text
+monitor_status=WARN
+MemorySources.policy_present=true
+MemorySources.policy_version=1
+MemorySources.policy_apply_count=1
+MemorySources.latest_policy_apply_id=msapply_20260527T100228563170Z_caf26c35
+MemorySources.policy_actual_execute_count=0
+MemorySources.policy_raw_body_included_count=0
+OwnerProposalFollowups.awaiting_ops_gate=0
+OwnerProposalFollowups.memory_sources_policy_apply_count=1
+OwnerProposalFollowups.execution_tickets=0
+OwnerProposalFollowups.actual_execute=false
+OwnerReview.action_required=0
+OwnerAgendaDigest.section_counts.action_required=0
+PASS includes memory_sources_policy_present and owner_review_proposal_followups_ok
+FAIL=[]
+WARN=[left_brain_pipeline_check_warn, left_brain_proposal_agenda_trace_missing, right_brain_expression_reaction_volume_thin, rh31_eval_measurement_signals]
+```
+
+Deployment note:
+
+- Runtime files were deployed to 10.20.3.200 and `py_compile` passed.
+- The first backup command for this deployment slice had a shell quoting error;
+  no rollback file was created by that command. Existing same-host historical
+  backups remain present for `owner_actions.py`, and the committed/local source
+  remains the authoritative restore source for this slice.
+
+Interpretation:
+
+- The approved proposal no longer stops at `approved_for_proposal`.
+- It passed OpsGate report-only follow-up and reached one bounded explicit
+  apply path.
+- This is still not a generic executor. Only the concrete
+  `memory_sources_policy` runtime target is open, and it writes a bounded
+  Memory-OS policy record with rollback evidence.

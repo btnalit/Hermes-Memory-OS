@@ -60,6 +60,9 @@ Hermes agent owns:
 - making non-binding suggestions to the owner;
 - selecting and calling Memory-OS tools when intent is definite;
 - user-visible acknowledgement and recovery guidance.
+- ensuring owner-actionable review/feedback items are actually reachable in the
+  owner's configured Hermes channel before Memory-OS treats feedback volume as
+  observable.
 
 Memory-OS owns:
 
@@ -120,7 +123,8 @@ But Hermes must not apply that suggestion unless the owner gives a definite
 action. Suggested wording should preserve owner control:
 
 ```text
-我建议 reject。你可以回 "reject" 或直接使用这条 token 命令。
+我建议 reject。你可以直接在当前会话回复，也可以使用这条 token
+短句示例。Hermes 会调用结构化 Memory-OS 工具，不需要你进入 shell。
 ```
 
 Hermes must not batch-approve, batch-reject, or change Memory-OS state from its
@@ -141,6 +145,15 @@ owner_utterance: "<optional bounded owner text for audit/debug>"
 Rules:
 
 - `action_token` is the executable identity.
+- Owner-facing `memory approve oa_...` / `memory feedback oa_...` strings are
+  `owner_utterance_example` values for chat. They are not shell commands.
+- Review and feedback surfaces should expose both
+  `owner_utterance_example(s)` and `agent_tool_call(s)`. The former is what the
+  owner can say in Hermes; the latter is what Hermes should call against
+  Memory-OS.
+- `operator_cli` or shell-oriented `command` fields do not belong in normal
+  owner-facing review surfaces. If an operator fallback is needed, keep it in a
+  runbook/debug section outside the owner interaction payload.
 - Display anchors such as `A1/R1/F1` are visual labels only.
 - The model-facing tool schema should not expose text-first `reply` as the
 primary path. Compatibility fallback may exist for old CLI/tool callers, but it
@@ -187,6 +200,9 @@ state except for its own bounded evidence ledger.
 - Feedback immediately changes live routing or scoring.
 - Agent suggestions mutate state without owner confirmation.
 - Raw private transcript bodies appear in review context.
+- Memory-OS declares an owner-feedback or approval loop "observing" when the
+  item has never been delivered or exposed through the owner's configured
+  Hermes channel.
 
 ## Monitor And Follow-Up Requirements
 
@@ -198,6 +214,7 @@ The following follow-ups are required before this contract can be called mature:
 | gateway hook safety boundary | monitor proves gateway hook is safety-only and not the primary owner-action path |
 | candidate/proposal timestamps | producer-created `created_at`, `unknown_timestamp_count` trend |
 | approved proposal follow-up | owner-visible follow-up surface and explicit apply gate, `actual_execute=false` |
+| owner-visible activation | at least one deployed Hermes-channel smoke for any new review/feedback surface before using zero feedback volume as an observation result |
 | RH-34/RH-35 family map | readable owner-governance subsystem map before public productization |
 
 ## Acceptance For RH-37

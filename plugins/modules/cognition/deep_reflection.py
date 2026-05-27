@@ -1091,7 +1091,12 @@ def _proposal_is_closed(item: dict[str, Any]) -> bool:
     followup_state = str(item.get("followup_state") or "")
     if state in {"owner_declined", "expired", "pressure_blocked"}:
         return True
-    return followup_state in {"closed", "applied_expression_policy", "applied_legacy_template_cleanup"}
+    return followup_state in {
+        "closed",
+        "applied_expression_policy",
+        "applied_memory_sources_policy",
+        "applied_legacy_template_cleanup",
+    }
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:

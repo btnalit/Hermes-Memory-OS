@@ -85,11 +85,13 @@ Therefore:
   memory pollution or fail open to normal Hermes dispatch. They must not be the
   primary path for owner-facing state changes and must not surface user-visible
   internal ingress errors for valid interactive tasks.
-- Owner-facing review digests should present stable token commands such as
-  `memory approve oa_<token>`. Hermes may phrase and explain the task, but the
-  Memory-OS tool/state-machine layer should receive only structured action plus
-  the resolved stable `oa_<token>` identity. Display anchors (`A1/R1/F1`) are
-  visual labels, not recommended owner commands.
+- Owner-facing review digests should present stable token utterance examples
+  such as `memory approve oa_<token>`. Hermes may phrase and explain the task,
+  but the Memory-OS tool/state-machine layer should receive only structured
+  `memory_os_review_reply(action, action_token, rating)` arguments plus the
+  resolved stable `oa_<token>` identity. Display anchors (`A1/R1/F1`) are
+  visual labels, not recommended owner utterances. Shell/CLI commands are
+  operator/debug fallbacks, not the normal owner interaction path.
 - If a module cannot explain how Hermes owns the interactive part and
   Memory-OS owns only plugin/runtime state, the design is not ready to
   implement.
@@ -827,6 +829,12 @@ Hard rules:
   If a module creates candidates, proposals, speak requests, or review
   recommendations, it must declare the owner-visible review surface and the
   OwnerActionProcessor path that can close or defer the item.
+- Observation is not valid until the source of owner feedback has been
+  activated. If owner judgment is required, the item must be pushed to or made
+  reachable from the configured Hermes owner/home channel, and the deployed
+  smoke must prove the owner can see, respond, and produce ledger/monitor
+  evidence. CLI, JSON, files, and monitor counters are support evidence, not
+  the normal governance loop.
 - Review digest delivery must use Hermes' configured owner/home-channel
   delivery path when recurring delivery is enabled. Telegram is one possible
   Hermes frontend, not the Memory-OS contract.
@@ -876,12 +884,12 @@ Hard rules:
   gateway hook is ever used as a safety layer, it must fail open to normal agent
   dispatch and must not show user-visible `gateway_ingress_error` failures for
   valid review commands.
-- Provider lifecycle/sync hooks may prevent control-plane token commands from
+- Provider lifecycle/sync hooks may prevent control-plane token utterances from
   being captured as ordinary memory, but they must not be the normal live state
   mutation path. If the agent did not call `memory_os_review_reply`, the monitor
   should report `owner_review_reply_tool_not_called` for token-like owner
-  commands instead of silently treating the command as approved.
-- Successfully processed owner-review token commands are control-plane
+  utterances instead of silently treating the utterance as approved.
+- Successfully processed owner-review token utterances are control-plane
   messages. They must not be appended as ordinary conversation events, must not
   create working-memory items, and must not become crystallized candidates.
 - `approve_proposal` does not execute and does not create an execution ticket.
@@ -939,10 +947,11 @@ Hard rules:
   target_id + action_type`; digest ids and review item ids are UI/evidence
   context and must not be part of the dedupe key.
 - Digest text replies must resolve to stable action tokens printed in the
-  digest, for example `memory approve oa_<token>`. Display anchors such as
-  `A1/R1/F1` are scan aids only. Hermes may use them as natural-language clues
-  when the current visible digest context maps the anchor to exactly one token,
-  but Memory-OS tools/state machines must receive and execute only the stable
+  digest as owner utterance examples, for example `memory approve oa_<token>`.
+  Display anchors such as `A1/R1/F1` are scan aids only. Hermes may use them as
+  natural-language clues when the current visible digest context maps the
+  anchor to exactly one token, but Memory-OS tools/state machines must receive
+  and execute only the structured `memory_os_review_reply` call with stable
   `oa_` token identity.
 - Legitimate owner-approved crystallization is reported as an owner effect,
   not as a violation of the historical hard-boundary fields. Any crystallized
@@ -1149,12 +1158,14 @@ Promotion signal:
   reinterpret an old command against shifted targets;
 - live owner-review reply handling must run through the Hermes agent and the
   Memory-OS provider tool before the assistant claims an approval result. It
-  must require a recorded digest for that owner/channel and may accept only
-  explicit tokenized commands such as `memory approve oa_<token>`,
-  `memory reject oa_<token>`, `memory allow oa_<token>`, or
-  `memory feedback oa_<token> too_mechanistic`. Stable-token shorthand such as
-  `approve oa_<token>` is allowed when the latest owner message is only that
-  command; display anchors remain invalid;
+  must require a recorded digest or bounded review surface for that
+  owner/channel. Owner-facing text may include tokenized utterance examples
+  such as `memory approve oa_<token>`, `memory reject oa_<token>`,
+  `memory allow oa_<token>`, or `memory feedback oa_<token>
+  too_mechanistic`; Hermes then calls `memory_os_review_reply` with structured
+  `action`, `action_token`, and optional `rating`. Stable-token shorthand such
+  as `approve oa_<token>` is allowed when the latest owner message is only that
+  utterance; display anchors remain invalid;
 - Hermes cron integration renders at most one bounded digest per owner/window
   and Hermes owns the delivery; Memory-OS records rendered/skipped/error
   outcomes;
@@ -1175,8 +1186,13 @@ Promotion signal:
 - Hermes agent-mediated approval uses the provider tool
   `memory_os_review_reply`; gateway hard interception is not the primary path
   and must not be required for approval to work;
+- owner-review and feedback surfaces must not expose `operator_cli` or
+  shell-oriented `command` fields as the normal owner path. They should expose
+  `owner_utterance_example(s)` for owner chat text and `agent_tool_call(s)` for
+  the exact Hermes-to-Memory-OS structured call. CLI/shell forms are operator
+  runbook/debug material only;
 - owner action application is idempotent in local and test-host tests;
-- monitor proves owner-review token commands remain control-plane only
+- monitor proves owner-review token utterances remain control-plane only
   (`event_count=0`, `working_count=0`, `candidate_count=0`) and flags duplicate
   proposal-follow-up OpsGate reports;
 - monitor reports owner action and review queue fields;

@@ -48,8 +48,8 @@ Current implementation state:
   proposal has `proposal_quality` but lacks `agenda_candidate_id`,
   `agenda_maturity_gate`, or `agenda_promotion_status`.
 - 2026-05-26 live smoke on `10.20.3.200` proved the owner/Hermes interaction
-  path, not only SSH/CLI: a rendered speak item exposed
-  `memory feedback oa_<token> too_mechanical`, a structured
+  path, not only SSH/CLI: a rendered speak item exposed the owner chat
+  utterance example `memory feedback oa_<token> too_mechanical`, a structured
   `memory_os_review_reply` call recorded `too_mechanical` feedback for
   `target_type=expression`, and the next cognitive-loop run exposed it in
   EvidenceScoring/GovernanceFeedback monitor fields.

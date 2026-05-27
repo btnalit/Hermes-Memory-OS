@@ -705,11 +705,11 @@ Status:
 - RH-35.2 deployed on `10.20.3.200`: owner reply parser initially mapped
   `approve A1`, `reject R2`, `allow A1`, and `feedback F1 too_mechanistic`
   style replies to OwnerActionProcessor without frontend state mutation;
-  RH-35.5 supersedes this display-anchor command style with stable action
+  RH-35.5 supersedes this display-anchor reply style with stable action
   tokens.
 - RH-35.3 provider owner-reply ingress was deployed but is now superseded as
   the primary live path. The 2026-05-26 live Telegram test exposed
-  `gateway_ingress_error` when a pre-gateway hook intercepted the owner command
+  `gateway_ingress_error` when a pre-gateway hook intercepted the owner utterance
   before the Hermes agent could act. The corrected path is RH-35.8.
 - RH-34d `deliver-once` is reduced to legacy smoke-only in code; RH-34e must
   use Hermes cron/send for real recurring delivery;
@@ -741,7 +741,7 @@ Status:
 - RH-34g/RH-35.9 live follow-up: the recurring owner-review Telegram digest
   now runs through Hermes agent mode and includes a Chinese full-picture
   overview, shown/omitted counts, complete item meanings, consequences, and
-  stable `memory approve/reject/allow oa_...` commands. Monitor requires both
+  stable `memory approve/reject/allow oa_...` owner utterance examples. Monitor requires both
   `response_header_present=true` and `overview_present=true`. A real owner
   reply `memory reject oa_1e9ca00f639ca2` was processed by Hermes through
   `memory_os_review_reply` as `reject_proposal`; `actual_execute=false`,
@@ -764,14 +764,14 @@ Status:
   `boundary_true_count=0`. Approved proposals can be inspected and routed into
   OpsGate report-only review after explicit owner/operator intent, but real
   execution remains a separate future execution/apply RH.
-- RH-35.5 deployed and monitor-observed on `10.20.3.200`: owner-facing commands now use stable
+- RH-35.5 deployed and monitor-observed on `10.20.3.200`: owner-facing utterance examples now use stable
   `memory <verb> oa_<token>` action tokens derived from target type, target id,
   and action type. `A1/R1/F1` are display anchors only, following the
   10.20.2.88 Sannai pattern of candidate ids / proposal hashes for review
   apply. Live ingress no longer intercepts plain `approve A1` style text.
   Monitor reports `legacy_anchor_accepted=false` and
   `token_command_accepted=true`.
-- Real owner action smoke applied `memory approve oa_<token>` for A2 through
+- Real owner action smoke applied the owner utterance `memory approve oa_<token>` for A2 through
   OwnerActionProcessor. The proposal moved to `approved_for_proposal`; no work
   executed.
 - RH-35.6 deployed and monitor-observed on `10.20.3.200`: `review proposal-followups` projects
@@ -783,7 +783,7 @@ Status:
   `execution_ticket_created=false` and `actual_execute=false`; execution still
   requires a separate future explicit execution/apply command.
 - 2026-05-26 independent mainline review follow-up: successfully processed
-  owner-review token commands are now control-plane only and must not be
+  owner-review token utterances are now control-plane only and must not be
   captured/promoted as ordinary conversation events, working memory, or
   candidates; repeated approved-proposal OpsGate apply must return
   duplicate/already-reviewed evidence instead of appending duplicate OpsGate
@@ -797,7 +797,7 @@ Status:
   pre-dispatch owner-review interception is removed from the shell plugin and
   monitor now expects `gateway_hook_registered=false`,
   `review_reply_tool_available=true`, and `review_reply_tool_status=ok`.
-  `sync_turn` skips token commands that were processed by the tool; if the
+  `sync_turn` skips token utterances that were processed by the tool; if the
   tool was not called, it records `owner_review_reply_tool_not_called` and
   still prevents ordinary memory pollution.
 - RH-35.9 is deployed on `10.20.3.200` at the provider/tool-contract level:
@@ -807,8 +807,8 @@ Status:
   the model-facing schema.
   The monitor owner-review ingress probe now requires structured tool input
   and reports `review_reply_tool_input_mode=structured`, gateway hook disabled,
-  and owner command pollution counts at `0`. One real Hermes-agent owner phrase
-  smoke using a tokenized digest command is still the remaining gate before
+  and owner utterance pollution counts at `0`. One real Hermes-agent owner phrase
+  smoke using a tokenized digest utterance is still the remaining gate before
   calling the interactive-agent path fully closed. Display anchors are not the
   recommended apply input.
 - RH-36 documented: all currently known left/right brain and governance modules
@@ -909,7 +909,7 @@ Next action:
    as approval for Memory-OS-owned recurring delivery;
 3. observe the enabled Hermes cron job through monitor and owner-visible
    Telegram receipt; verify one owner/window behavior and config-only rollback;
-4. run the next owner-reply action smoke only with the rendered stable command
+4. run the next owner-reply action smoke only with the rendered stable owner utterance
    (`memory approve oa_<token>` or `memory reject oa_<token>`), not with
    display anchors such as `approve A1`;
 5. keep RH-35.6 in monitor observation. Approved proposals must stay visible as
@@ -954,7 +954,7 @@ Promotion signal:
   `execution_ticket_count=0`;
 - approved proposals can be routed through OpsGate report-only review with
   `ops_gate_reviewed_count` visible and `execution_ticket_count=0`;
-- owner-review token commands show `event_count=0`, `working_count=0`, and
+- owner-review token utterances show `event_count=0`, `working_count=0`, and
   `candidate_count=0` in monitor/integration evidence;
 - OpsGate reports contain no duplicate `proposal_followup:<proposal_id>`
   action ids after repeated apply attempts;
@@ -1211,9 +1211,9 @@ Reason:
   `right_brain_review_speak_preview_visible`;
 - expression feedback and GovernanceFeedback summary backflow are deployed;
 - the 2026-05-26 live smoke rendered speak items with bounded content plus
-  `memory feedback oa_<token> too_mechanical|too_frequent|boundary_private|off_voice`
-  commands, and a structured `memory_os_review_reply` tool call successfully
-  recorded `too_mechanical` feedback for `target_type=expression`;
+  owner chat utterance examples such as `memory feedback oa_<token>
+  too_mechanical`; Hermes then used the structured `memory_os_review_reply`
+  tool call to record `too_mechanical` feedback for `target_type=expression`;
 - Hermes-agent expression adapter is deployed as
   `memory-os-right-brain-expression`, deliver target `origin`, agent mode
   (`--script`, no `--no-agent`), last run `ok`;
@@ -1231,6 +1231,11 @@ Reason:
   `right_brain_adapter_outcome_feedback_count=1`,
   `right_brain_adapter_latest_outcome_feedback_count=1`, and PASS
   `right_brain_expression_feedback_linked`.
+- latest reaction-volume monitor reports WARN
+  `right_brain_expression_reaction_volume_thin` because recorded expression
+  outcomes exist but linked owner feedback volume is still below the 3-reaction
+  maturity threshold. This is a maturity/observation WARN, not a delivery or
+  boundary failure.
 - live backflow smoke reports `expression_feedback_subject_count=3`; a
   `too_mechanical` owner reaction reached SelfEvolution as
   `proposal_class=expression_policy:too_mechanical`, then the same-day
@@ -1260,8 +1265,9 @@ Implemented runtime slices:
 9. expression outcomes can enter GovernanceFeedback / SelfEvolution as
    proposals, not direct prompt/cadence mutation;
 10. monitor fields listed in RH-38 are present for the deployed slices;
-11. owner/Hermes expression feedback tokens are visible in the digest and are
-   accepted through the structured review-reply tool, not only through SSH/CLI.
+11. owner/Hermes expression feedback tokens are visible as chat utterance
+   examples in the digest and are accepted through the structured review-reply
+   tool. SSH/CLI is operator fallback, not the product path.
 12. latest-outcome reaction context is visible through the read-only
     `memory_os_review_surface` operation `expression_feedback_context`, so
     Hermes agent can ask natural follow-up questions and then call
@@ -1288,6 +1294,8 @@ Promotion signal:
   applied after owner approval plus OpsGate report-only review;
 - owner reactions can be linked back to recorded Hermes-agent expression
   outcomes and counted by monitor;
+- at least 3 linked owner reactions are recorded before claiming sufficient
+  expression reaction volume;
 - owner reactions to the latest expression can be collected through a bounded
   Hermes-agent surface without adding a Memory-OS transport or conversation
   parser;
@@ -1363,8 +1371,12 @@ Reason:
   feedback; `mark_feedback` idempotency includes the selected rating so exact
   repeat submissions are safe while distinct owner ratings can accumulate. The
   monitor now emits `memory_sources_feedback_volume_missing` while this surface
-  is ready but `MemorySources.feedback_count=0`; real feedback still requires
-  owner intent before a `memory_sources_policy` proposal can be treated as live;
+  is ready but `MemorySources.feedback_count=0`. This is not a mature
+  observation result yet: the next closure step must push or expose the bounded
+  MemorySources feedback item through the configured Hermes owner channel and
+  let the owner respond there. Do not ask the owner to run shell commands, and
+  do not treat zero feedback volume as meaningful until the owner-visible path
+  has been activated;
 - latest 10.20.3.200 targeted smoke reports
   `expression_feedback_subject_count=3`,
   `expression_feedback_linked_subject_count=1`,

@@ -1046,6 +1046,9 @@ Live evidence is required for:
 - Hermes-agent review tool behavior;
 - owner-origin delivery behavior;
 - installer / deployment behavior.
+- any owner-review, approval, feedback, or observation workflow that is meant
+  to collect real owner signal. The item must be visible in the configured
+  Hermes owner channel before zero volume can be interpreted.
 
 Live evidence is not required for pure documentation or local-only fixture
 repairs, but those cannot claim runtime closure.
@@ -1101,6 +1104,8 @@ Stop implementation and return to design if any appears:
 
 - RH-36 mapping missing for a new module or active work item;
 - 07 evidence claims a behavior without a matching test/live signal;
+- a task is marked observing when the required owner-visible Hermes path was
+  never deployed, triggered, or shown to the owner;
 - implementation duplicates Hermes-owned scheduler / transport / conversation
   logic;
 - external review required but skipped.

@@ -68,6 +68,12 @@ Current implementation state:
   `policy_version=1`, `latest_outcome_silent=false`,
   `outcome_internal_marker_count=0`, `outcome_raw_body_included_count=0`,
   `outcome_actual_send_count=0`, and `outcome_actual_execute_count=0`.
+- P1-R reaction-volume monitor classification is implemented: recorded
+  outcomes with fewer than 3 linked owner feedback records emit WARN
+  `right_brain_expression_reaction_volume_thin`; 3 or more linked feedback
+  records emit PASS `right_brain_expression_reaction_volume_sufficient`. The
+  latest live monitor reports `outcome_count=2`, `outcome_feedback_count=1`,
+  WARN `right_brain_expression_reaction_volume_thin`, and no FAIL findings.
 - EvidenceScoring now preserves expression feedback labels in the left-brain
   maturity dimensions; the live feedback records show
   `feedback_rating=too_mechanical` rather than `unknown`.

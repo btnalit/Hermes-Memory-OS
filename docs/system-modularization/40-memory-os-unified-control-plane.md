@@ -101,6 +101,8 @@ reverse_scope:
 equivalent_contract_or_project_contract:
 evidence_loop:
 monitor_or_validation_fields:
+owner_visible_surface:
+deployed_smoke:
 promotion_signal:
 stop_or_rollback_signal:
 external_review:
@@ -109,6 +111,12 @@ external_review:
 If a change touches live behavior, installer/deploy, scheduler, owner review,
 retrieval/routing, feedback, monitor, eval, or human interaction, this preflight
 is mandatory.
+
+For any task that creates owner-actionable artifacts, `owner_visible_surface`
+must name the main Hermes/owner channel path. CLI, JSON, log, and monitor-only
+visibility are not enough. For any task where the owner asks to "上线",
+"真实运行", "推送给我看", or "推进闭环", `deployed_smoke` must be a real or
+realistic owner-channel smoke unless explicitly marked blocked.
 
 ### Gate 2 - Host / Prototype Ownership
 
@@ -161,12 +169,17 @@ Do not collapse evidence types:
 | local behavior | unit/integration test |
 | installed behavior | installer or CLI smoke |
 | Telegram/gateway behavior | real or realistic live smoke |
+| owner governance/feedback loop | owner-visible Hermes channel item plus structured tool/ledger evidence |
 | monitor behavior | monitor field plus fixture or real run |
 | architecture claim | contract + mapping + evidence |
 | production readiness | repeated live evidence plus promotion/stop signals |
 
 Every live/deployed finding must close with live or realistic integration
 evidence, not local-only tests.
+
+Monitor-only evidence may prove safety, readiness, or counters. It does not
+prove an owner loop if the owner never received the item in the primary
+interaction channel.
 
 ### Gate 5 - External Review
 
@@ -361,6 +374,11 @@ Current truth:
   `linked_outcome_count=1`, `outcome_feedback_count=1`,
   `latest_outcome_feedback_count=1`, and PASS
   `right_brain_expression_feedback_linked`.
+- reaction-volume classification is now explicit: live monitor reports
+  `right_brain_expression_reaction_volume_thin` while outcome feedback volume
+  is below 3 linked reactions, and will switch to
+  `right_brain_expression_reaction_volume_sufficient` once enough owner
+  reactions exist.
 - the live backflow smoke reached EvidenceScoring and SelfEvolution:
   `expression_feedback_subject_count=3`; SelfEvolution identified
   `proposal_class=expression_policy:too_mechanical` and correctly skipped a
@@ -523,6 +541,10 @@ Current truth:
 - structured `memory_os_review_reply` path exists;
 - fallback must remain visible and deprecated by evidence;
 - gateway hook is safety-only, not normal approval path.
+- owner-facing review/feedback surfaces use `owner_utterance_example(s)` for
+  chat text and `agent_tool_call(s)` for the exact Hermes-to-Memory-OS
+  structured call. They must not present shell/operator `command` or
+  `operator_cli` fields as the normal owner path.
 
 Gate:
 
@@ -639,6 +661,13 @@ Stop and redesign if any of these happen:
 - `actual_execute=true` before explicit execution apply gate;
 - raw body appears in public/owner review/monitor surfaces;
 - Memory-OS implements platform transport or cron semantics instead of Hermes;
+- owner-facing review/feedback surfaces expose shell/operator command fields
+  (`command`, `operator_cli`) as the normal path instead of
+  `owner_utterance_example(s)` and `agent_tool_call(s)`;
+- owner-actionable artifacts accumulate or report zero feedback because the
+  owner-visible Hermes channel path was never activated;
+- a task is marked "observing" before the runtime source of events has been
+  enabled, scheduled, or pushed to the owner channel;
 - feedback directly mutates prompt/routing/cadence/scoring;
 - right-brain text becomes task/proposal/agenda language;
 - recurring owner agenda pushes bulk Review Suggested/FYI/backlog totals

@@ -91,18 +91,33 @@ apply shadow journals.
 Test-host mode enables observation loops. It does not enable real sends,
 executes, identity writes, or crystallized approvals.
 
-## 6. Owner Review Commands
+## 6. Owner Review Via Hermes Agent
 
 Owner review digests use short display anchors such as `A1`, `R1`, and `F1` to
 make the list readable. Those anchors are not durable approval identities.
 
-The safest reply is to use the stable token printed on the digest item:
+The normal path is conversational: reply in the same Hermes channel where the
+digest appears. Hermes interprets your intent, asks when ambiguous, and calls
+Memory-OS with structured `memory_os_review_reply` arguments. Memory-OS does
+not require a root shell command for owner approval.
+
+Stable-token owner utterance examples:
 
 ```text
 memory approve oa_<token>
 memory reject oa_<token>
 memory allow oa_<token>
 memory feedback oa_<token> too_mechanistic
+```
+
+The corresponding agent tool call is structured, for example:
+
+```yaml
+tool: memory_os_review_reply
+arguments:
+  action: feedback
+  action_token: oa_<token>
+  rating: too_mechanistic
 ```
 
 Hermes is the interactive agent. If you reply with natural phrasing such as
@@ -114,3 +129,6 @@ Memory-OS itself does not execute display anchors. `A1/R1/F1` are UI labels
 only; the plugin/state-machine layer applies only stable `oa_` action tokens.
 A proposal approval only marks the proposal as approved for human-controlled
 follow-up; it does not execute work.
+
+Shell/CLI paths are operator/debug fallbacks only. They are not the owner-facing
+approval workflow.

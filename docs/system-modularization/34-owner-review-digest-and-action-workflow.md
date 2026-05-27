@@ -244,7 +244,7 @@ inside Memory-OS until three missing pieces are completed:
 1. RH-34e.1 Review Digest Renderer - turn artifacts into owner-readable
    questions, suggested actions, reasons, consequences, display anchors, and
    stable action tokens.
-2. RH-35.2/RH-35.5/RH-35.8 Owner Reply Parser and provider tool - map explicit token commands such as
+2. RH-35.2/RH-35.5/RH-35.8 Owner Reply Parser and provider tool - map explicit owner chat utterance examples such as
    `memory approve oa_<token>` or `memory reject oa_<token>` to
    OwnerActionProcessor through the Hermes agent tool path, without frontend
    mutation or gateway hard interception.
@@ -528,7 +528,7 @@ Interaction v0:
   for action-required items, `[R2]` for review-suggested items, and `[F1]`
   for feedback targets;
 - anchors are display-only; they are not approval identity;
-- every executable item also gets stable action tokens, for example
+- every executable item also gets stable owner utterance examples, for example
   `memory approve oa_<token>` and `memory reject oa_<token>`;
 - Hermes agent should resolve interactive owner replies to a structured
   `action + action_token` tool call; provider text parsing is compatibility
@@ -537,10 +537,10 @@ Interaction v0:
   reviewed stable target id, the processor must ask for clarification and must
   not guess;
 - examples:
-  - `memory approve oa_<token>`
-  - `memory reject oa_<token>`
-  - `memory feedback oa_<token> too_mechanistic`
-  - `memory allow oa_<token>`
+  - owner says `memory approve oa_<token>`
+  - owner says `memory reject oa_<token>`
+  - owner says `memory feedback oa_<token> too_mechanistic`
+  - owner says `memory allow oa_<token>`
   - `snooze item_003 7d`
 
 Boundaries:
@@ -1294,8 +1294,8 @@ Each rendered item should include:
 - why this needs review;
 - recommended actions;
 - what each action changes;
-- display anchor such as `[A1]` or `[R2]`, plus stable action-token
-  commands such as `memory approve oa_<token>`;
+- display anchor such as `[A1]` or `[R2]`, plus stable action-token owner
+  utterance examples such as `memory approve oa_<token>`;
 - safe source class and confidence metadata only when useful.
 
 Renderer must not:
@@ -1351,7 +1351,7 @@ Scope correction from the `10.20.2.88` Sannai prototype:
 Flow:
 
 ```text
-owner command ("memory approve oa_<token>", "memory reject oa_<token>")
+owner chat utterance ("memory approve oa_<token>", "memory reject oa_<token>")
 -> recorded/active digest action-token lookup
 -> stable target id + action type
 -> OwnerActionProcessor
@@ -1420,7 +1420,8 @@ MemoryProvider.on_turn_start(message)
 
 Rules:
 
-- only explicit prefixed owner-review command shapes are intercepted:
+- only explicit prefixed owner-review utterance shapes are accepted by the
+  compatibility parser:
   `memory approve oa_<token>`, `memory reject oa_<token>`,
   `memory allow oa_<token>`, or
   `memory feedback oa_<token> too_mechanistic`;
@@ -1439,16 +1440,16 @@ Implementation checkpoint (superseded by RH-35.8 as the primary live path):
   ingress safety while preserving CLI preview behavior.
 - The provider returns a short owner-review prefetch/system-prompt block so the
   assistant confirms the action instead of continuing ordinary conversation.
-- A successfully processed token command is a control-plane message. `sync_turn`
+- A successfully processed token utterance is a control-plane message. `sync_turn`
   must skip ordinary conversation capture for that turn, so heartbeat cannot
-  promote the command text into working memory or a new candidate.
+  promote the control-plane text into working memory or a new candidate.
 - This display-anchor ingress model is superseded by RH-35.5. Current live
-  ingress requires stable token commands and treats plain `reject R1` style
+  ingress requires stable token utterances and treats plain `reject R1` style
   text as ordinary conversation.
 
 Architecture correction on 2026-05-26:
 
-Hermes is an agent, not just a gateway transport. A valid owner command such as
+Hermes is an agent, not just a gateway transport. A valid owner utterance such as
 `memory approve oa_<token>` should be interpreted by the Hermes agent as a
 Memory-OS approval task, then completed by calling a Memory-OS provider tool.
 The gateway and provider lifecycle hooks are not the normal state-mutation
@@ -1457,7 +1458,7 @@ surface.
 New rule:
 
 ```text
-owner command in chat
+owner utterance in chat
 -> Hermes agent
 -> memory_os_review_reply provider tool
 -> parse_owner_review_reply(..., apply=true, require_recorded_digest=true)
@@ -1501,9 +1502,9 @@ Rules:
 - Hermes is the interactive agent. It interprets owner intent, asks a short
   clarification when the target is ambiguous, and calls this tool only after it
   has a definite `action` and stable `oa_` token;
-- the digest should print stable token commands such as
-  `memory <verb> oa_<token>` for copy/paste safety; those token commands are
-  the primary owner-facing apply input;
+- the digest should print stable token utterance examples such as
+  `memory <verb> oa_<token>` for owner chat safety; the primary executable path
+  remains Hermes calling `memory_os_review_reply(action, action_token, rating)`;
 - display anchors such as `A1/R1/F1` are visual labels only. If the owner uses
   one anyway, Hermes may clarify or resolve from visible context, but the
   Memory-OS tool/state-machine layer still receives only the stable token;
@@ -1515,7 +1516,7 @@ Rules:
 - call only `parse_owner_review_reply()` and OwnerActionProcessor;
 - never send, execute work, write identity, or approve crystallized memory
   without the matching owner action token;
-- processed token commands are control-plane messages and must not become
+- processed token utterances are control-plane messages and must not become
   conversation events, working-memory items, or candidates.
 
 Monitor evidence:
@@ -1523,9 +1524,9 @@ Monitor evidence:
 - `owner_review_ingress_guard.review_reply_tool_available=true`;
 - `owner_review_ingress_guard.review_reply_tool_status=ok`;
 - `owner_review_ingress_guard.gateway_hook_registered=false`;
-- token commands accepted by the detector, legacy anchors rejected, and
+- token utterances accepted by the detector, legacy anchors rejected, and
   ordinary token mentions rejected;
-- owner command event/working/candidate counts remain zero.
+- owner utterance event/working/candidate counts remain zero.
 
 Follow-up live finding on 2026-05-25:
 
@@ -1583,7 +1584,7 @@ Boundary:
   compatibility, OwnerActionProcessor, audit, and monitor evidence.
 - Gateway hooks are safety-only and must not be the primary execution path.
 - Provider lifecycle hooks may prevent memory pollution but must not mutate live
-  owner state without a tool call or CLI/API command.
+  owner state without a structured tool call.
 
 Implementation:
 
@@ -1596,7 +1597,8 @@ Implementation:
 3. Update the provider system prompt block so Hermes knows when to call the
    tool and when to ask a clarification.
 4. Keep display anchors (`A1/R1/F1`) as UI labels only. The owner-facing digest
-   prints stable token commands, and the tool receives only stable `oa_` tokens.
+   prints stable token utterance examples, and the tool receives only stable
+   `oa_` tokens.
 5. Keep `sync_turn` pollution guard for token-like control-plane replies that
    were not successfully processed; this is a safety net, not the main action
    path.
@@ -1634,7 +1636,7 @@ Implementation checkpoint:
   run was `ok`. The remaining smoke is the owner replying with a tokenized
   phrase such as `memory approve oa_<token>` or `批准 oa_<token>` and Hermes
   agent resolving it to the structured tool call.
-- The owner then replied with the exact token command
+- The owner then replied with the exact tokenized owner utterance
   `memory approve oa_e9a4e734a07de7`. Hermes agent called
   `memory_os_review_reply` successfully and Memory-OS applied
   `approve_proposal` with no memory pollution and no boundary violation. The
@@ -1643,7 +1645,8 @@ Implementation checkpoint:
 
 Acceptance:
 
-- `approve oa_<token>` and `memory approve oa_<token>` still work.
+- `approve oa_<token>` and `memory approve oa_<token>` still work as owner chat
+  utterances resolved by Hermes.
 - Display anchors such as `A1/R1/F1` are not the recommended owner apply
   input. If the owner sends an anchor-only phrase, Hermes must not pass the
   anchor as identity; it should clarify unless it can resolve the current
@@ -1671,7 +1674,7 @@ understandable:
 
 ```text
 回复方式：
-- 直接复制完整命令，例如：memory approve oa_...
+- 直接在 Hermes 会话里回复示例，例如：memory approve oa_...
 - 也可以只回复 oa_...，Hermes 会继续问你要 approve/reject/allow/feedback。
 - A1/R1/F1 只是列表编号，不是审批 ID。
 ```
@@ -1689,9 +1692,9 @@ burden, but they must be expressed as pagination rather than truncation:
   owner-requested expansion path, not silently hidden.
 
 Hermes agent-mode delivery must not collapse the digest into command-only
-lists. Stable `memory approve oa_...` / `memory reject oa_...` commands are
-required, but they are the action handles attached to an owner-readable item,
-not the whole item.
+lists. Stable `memory approve oa_...` / `memory reject oa_...` owner utterance
+examples are useful handles attached to an owner-readable item, but they are
+not shell commands and not the whole item.
 
 Monitor treats this as a contract:
 
@@ -1794,7 +1797,7 @@ Rules:
   owner-home binding;
 - live ingress still requires a recorded digest and never renders a fresh
   digest to apply an owner action;
-- exact owner commands remain required, but they use stable action tokens,
+- definite owner utterances remain required, and they use stable action tokens,
   not display anchors;
 - ordinary chat mentioning `A1` or `A3` is not intercepted.
 
@@ -1844,7 +1847,7 @@ Rules:
 
 - `A1/R1/F1` must never be the durable approval identity.
 - The provider/tool layer executes only stable `oa_` action tokens.
-- Hermes should prefer the stable token commands printed in the digest. If an
+- Hermes should prefer the stable token utterance examples printed in the digest. If an
   owner sends anchor-only phrasing anyway, Hermes must clarify or resolve it to
   exactly one current visible stable token before calling Memory-OS.
 - ordinary text containing anchors must not mutate Memory-OS state.
@@ -1854,14 +1857,15 @@ Rules:
 
 Implementation checkpoint:
 
-- Renderer now includes `action_tokens` and `action_commands` per actionable
-  item and shows stable commands in the owner-facing text.
+- Renderer now includes `action_tokens`, `owner_utterance_examples`, and
+  `agent_tool_calls` per actionable item and shows stable chat utterance
+  examples in the owner-facing text.
 - Parser can resolve action tokens from recorded digests and maps them to the
   target id/action type before calling `OwnerActionProcessor`.
 - Provider fallback parsing recognizes token command shapes only, reducing
   false positives in ordinary chat. The primary product path after RH-35.9 is
   structured agent tool execution, not lifecycle interception.
-- Monitor owner-reply dry-run now derives a real action command from the
+- Monitor owner-reply dry-run now derives a real owner utterance from the
   rendered digest before testing parser health.
 
 ## RH-35 - Owner Action Processor
@@ -2150,7 +2154,7 @@ RH-34 / RH-35 touches:
 - new Contract 8 - OwnerAction.
 
 No module may mutate candidate, proposal, feedback, speak permission, or
-crystallized approval state directly from owner-facing commands. It must go
+crystallized approval state directly from owner-facing utterances. It must go
 through OwnerActionProcessor.
 
 ## Monitor Evidence

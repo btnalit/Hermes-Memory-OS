@@ -561,15 +561,34 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             elif int(right_brain_adapter.get("outcome_feedback_missing_count") or 0) > 0:
                 fail.append({"code": "right_brain_expression_feedback_missing_outcome", "value": right_brain_adapter})
             elif int(right_brain_adapter.get("outcome_count") or 0) > 0:
+                outcome_count = int(right_brain_adapter.get("outcome_count") or 0)
+                outcome_feedback_count = int(right_brain_adapter.get("outcome_feedback_count") or 0)
                 passed.append(
                     {
                         "code": "right_brain_expression_outcome_recorded",
-                        "outcome_count": right_brain_adapter.get("outcome_count"),
+                        "outcome_count": outcome_count,
                         "latest_policy_version": right_brain_adapter.get("latest_outcome_policy_version"),
                         "latest_silent": right_brain_adapter.get("latest_outcome_silent"),
-                        "outcome_feedback_count": right_brain_adapter.get("outcome_feedback_count"),
+                        "outcome_feedback_count": outcome_feedback_count,
                     }
                 )
+                if outcome_feedback_count >= 3:
+                    passed.append(
+                        {
+                            "code": "right_brain_expression_reaction_volume_sufficient",
+                            "outcome_count": outcome_count,
+                            "outcome_feedback_count": outcome_feedback_count,
+                        }
+                    )
+                else:
+                    warn.append(
+                        {
+                            "code": "right_brain_expression_reaction_volume_thin",
+                            "outcome_count": outcome_count,
+                            "outcome_feedback_count": outcome_feedback_count,
+                            "minimum_feedback_count": 3,
+                        }
+                    )
             elif int(right_brain_adapter.get("request_count") or 0) > 0:
                 warn.append(
                     {
@@ -850,6 +869,11 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "owner_review_surface_raw_body_included"})
             if int(review_surface.get("boundary_true_count") or 0) > 0:
                 fail.append({"code": "owner_review_surface_boundary_true"})
+            if int(review_surface.get("forbidden_owner_command_field_count") or 0) > 0:
+                fail.append({
+                    "code": "owner_review_surface_forbidden_command_fields",
+                    "value": review_surface.get("forbidden_owner_command_fields") or [],
+                })
             operations = review_surface.get("operations") if isinstance(review_surface.get("operations"), dict) else {}
             expression_context = (
                 operations.get("expression_feedback_context")
@@ -868,6 +892,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 and int(memory_sources_context.get("feedback_action_count") or 0) > 0
             ):
                 passed.append({"code": "owner_review_surface_memory_sources_feedback_context_visible"})
+            if (
+                int(review_surface.get("forbidden_owner_command_field_count") or 0) == 0
+                and int(review_surface.get("owner_utterance_example_count") or 0) > 0
+                and int(review_surface.get("agent_tool_call_count") or 0) > 0
+            ):
+                passed.append({"code": "owner_review_surface_agent_tool_contract_ok"})
         else:
             warn.append({"code": "owner_review_surface_unavailable", "value": review_surface})
 
@@ -1097,6 +1127,28 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 {
                     "code": "memory_sources_feedback_volume_present",
                     "feedback_count": memory_sources.get("feedback_count"),
+                }
+            )
+        if bool(memory_sources.get("policy_present")):
+            passed.append(
+                {
+                    "code": "memory_sources_policy_present",
+                    "policy_version": memory_sources.get("policy_version"),
+                    "policy_apply_count": memory_sources.get("policy_apply_count"),
+                }
+            )
+        if int(memory_sources.get("policy_actual_execute_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "memory_sources_policy_actual_execute_true",
+                    "value": memory_sources.get("policy_actual_execute_count"),
+                }
+            )
+        if int(memory_sources.get("policy_raw_body_included_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "memory_sources_policy_raw_body_included",
+                    "value": memory_sources.get("policy_raw_body_included_count"),
                 }
             )
     else:
@@ -1451,6 +1503,12 @@ def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
         "feedback_count": stats.get("feedback_count"),
         "feedback_ratings": stats.get("feedback_rating_distribution"),
         "feedback_file_size_bytes": stats.get("feedback_file_size_bytes"),
+        "policy_present": stats.get("policy_present"),
+        "policy_version": stats.get("policy_version"),
+        "policy_apply_count": stats.get("policy_apply_count"),
+        "latest_policy_apply_id": stats.get("latest_policy_apply_id"),
+        "policy_actual_execute_count": stats.get("policy_actual_execute_count"),
+        "policy_raw_body_included_count": stats.get("policy_raw_body_included_count"),
         "routes": stats.get("route_distribution"),
         "selected_sources": stats.get("selected_source_class_distribution"),
         "selected_headings": stats.get("selected_heading_distribution"),
@@ -1648,7 +1706,7 @@ def _owner_reply_dry_run_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "owner_action_status": summary.get("owner_action_status"),
         "owner_action_dry_run": summary.get("owner_action_dry_run"),
         "reason": summary.get("reason"),
-        "command_source": summary.get("command_source"),
+        "owner_utterance_source": summary.get("owner_utterance_source"),
     }
 
 
@@ -1658,6 +1716,10 @@ def _owner_review_surface_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "status": summary.get("status"),
         "raw_body_included_count": summary.get("raw_body_included_count"),
         "boundary_true_count": summary.get("boundary_true_count"),
+        "forbidden_owner_command_field_count": summary.get("forbidden_owner_command_field_count"),
+        "forbidden_owner_command_fields": summary.get("forbidden_owner_command_fields"),
+        "owner_utterance_example_count": summary.get("owner_utterance_example_count"),
+        "agent_tool_call_count": summary.get("agent_tool_call_count"),
         "operations": {
             name: {
                 "status": op.get("status"),
@@ -1666,6 +1728,9 @@ def _owner_review_surface_summary(summary: dict[str, Any]) -> dict[str, Any]:
                 "latest_outcome_id": op.get("latest_outcome_id"),
                 "latest_memory_source_id": op.get("latest_memory_source_id"),
                 "source": op.get("source"),
+                "forbidden_owner_command_field_count": op.get("forbidden_owner_command_field_count"),
+                "owner_utterance_example_count": op.get("owner_utterance_example_count"),
+                "agent_tool_call_count": op.get("agent_tool_call_count"),
             }
             for name, op in operations.items()
             if isinstance(op, dict)
@@ -1707,6 +1772,7 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
         "ops_gate_reviewed": summary.get("ops_gate_reviewed_count"),
         "awaiting_explicit_execution": summary.get("awaiting_explicit_execution_count"),
         "policy_apply_count": summary.get("policy_apply_count"),
+        "memory_sources_policy_apply_count": summary.get("memory_sources_policy_apply_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
         "actual_execute": summary.get("actual_execute"),
         "raw_body_included": summary.get("raw_body_included"),
@@ -3011,22 +3077,22 @@ def owner_review_agenda_digest_summary():
     }
 
 def owner_review_reply_dry_run_summary():
-    command = _latest_recorded_owner_command()
-    command_source = "latest_recorded_digest" if command else ""
-    if not command:
-        command_source = "fresh_render_no_record"
+    owner_utterance = _latest_recorded_owner_utterance()
+    owner_utterance_source = "latest_recorded_digest" if owner_utterance else ""
+    if not owner_utterance:
+        owner_utterance_source = "fresh_render_no_record"
         rendered = memory_os_cli(["review", "render-digest", "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
         if isinstance(rendered, dict):
-            command = _first_rendered_action_command(rendered)
-    if not command:
+            owner_utterance = _first_rendered_owner_utterance(rendered)
+    if not owner_utterance:
         return {
           "schema_version": "memory-os.owner_review_reply.v0",
           "status": "needs_clarification",
           "dry_run": True,
-          "reason": "no_action_command_available",
-          "command_source": command_source,
+          "reason": "no_owner_utterance_available",
+          "owner_utterance_source": owner_utterance_source,
         }
-    report = memory_os_cli(["review", "reply", *command.split(), "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
+    report = memory_os_cli(["review", "reply", *owner_utterance.split(), "--max-action-required", "2", "--max-review-suggested", "2", "--max-fyi", "2"])
     if not isinstance(report, dict) or report.get("_error"):
         return report
     parsed = report.get("parsed") if isinstance(report.get("parsed"), dict) else {}
@@ -3036,7 +3102,7 @@ def owner_review_reply_dry_run_summary():
       "status": report.get("status"),
       "dry_run": report.get("dry_run"),
       "reason": report.get("reason"),
-      "command_source": command_source,
+      "owner_utterance_source": owner_utterance_source,
       "parsed_action_type": parsed.get("action_type"),
       "parsed_target_type": parsed.get("target_type"),
       "owner_action_status": owner_action.get("status"),
@@ -3065,6 +3131,9 @@ def _surface_operation_summary(report):
         items.append(latest_outcome)
     if latest_memory_source:
         items.append(latest_memory_source)
+    forbidden_counts = _owner_surface_forbidden_field_counts(report)
+    owner_utterance_example_count = _owner_surface_field_count(report, {"owner_utterance_example", "owner_utterance_examples"})
+    agent_tool_call_count = _owner_surface_field_count(report, {"agent_tool_call", "agent_tool_calls"})
     return {
       "schema_version": report.get("schema_version"),
       "status": report.get("status"),
@@ -3078,6 +3147,10 @@ def _surface_operation_summary(report):
           entry.get("raw_body_included") is True for entry in items
       ),
       "boundary_true_count": sum(1 for value in boundary.values() if value is True),
+      "forbidden_owner_command_field_count": sum(forbidden_counts.values()),
+      "forbidden_owner_command_fields": sorted(key for key, count in forbidden_counts.items() if count),
+      "owner_utterance_example_count": owner_utterance_example_count,
+      "agent_tool_call_count": agent_tool_call_count,
     }
 
 def owner_review_surface_summary():
@@ -3134,6 +3207,15 @@ def owner_review_surface_summary():
     }
     raw_body_count = sum(1 for item in operations.values() if item.get("raw_body_included") is True)
     boundary_true_count = sum(int(item.get("boundary_true_count") or 0) for item in operations.values())
+    forbidden_counts = {}
+    for item in operations.values():
+        for key in item.get("forbidden_owner_command_fields") or []:
+            forbidden_counts[key] = forbidden_counts.get(key, 0) + 1
+    forbidden_owner_command_field_count = sum(
+        int(item.get("forbidden_owner_command_field_count") or 0) for item in operations.values()
+    )
+    owner_utterance_example_count = sum(int(item.get("owner_utterance_example_count") or 0) for item in operations.values())
+    agent_tool_call_count = sum(int(item.get("agent_tool_call_count") or 0) for item in operations.values())
     statuses = {str(item.get("status") or "") for item in operations.values()}
     allowed_statuses = {"ok", "needs_clarification", "empty", "unavailable"}
     return {
@@ -3142,22 +3224,56 @@ def owner_review_surface_summary():
       "operations": operations,
       "raw_body_included_count": raw_body_count,
       "boundary_true_count": boundary_true_count,
+      "forbidden_owner_command_field_count": forbidden_owner_command_field_count,
+      "forbidden_owner_command_fields": sorted(forbidden_counts),
+      "owner_utterance_example_count": owner_utterance_example_count,
+      "agent_tool_call_count": agent_tool_call_count,
     }
 
-def _first_rendered_action_command(rendered):
+def _owner_surface_forbidden_field_counts(value):
+    forbidden = {"operator_cli", "command", "command_scope", "action_commands", "available_actions"}
+    counts = {key: 0 for key in forbidden}
+    _owner_surface_count_keys(value, forbidden, counts)
+    return counts
+
+def _owner_surface_field_count(value, keys):
+    counts = {key: 0 for key in keys}
+    _owner_surface_count_keys(value, keys, counts)
+    return sum(counts.values())
+
+def _owner_surface_count_keys(value, keys, counts):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in keys:
+                if isinstance(child, list):
+                    counts[key] = counts.get(key, 0) + len(child)
+                elif child not in (None, "", {}):
+                    counts[key] = counts.get(key, 0) + 1
+            _owner_surface_count_keys(child, keys, counts)
+    elif isinstance(value, list):
+        for child in value:
+            _owner_surface_count_keys(child, keys, counts)
+
+def _first_rendered_owner_utterance(rendered):
     for items in (rendered.get("sections") or {}).values():
         if not isinstance(items, list):
             continue
         for item in items:
             if not isinstance(item, dict):
                 continue
-            commands = item.get("action_commands") if isinstance(item.get("action_commands"), list) else []
-            command = str(commands[0] if commands else "")
-            if command:
-                return command
+            examples = (
+                item.get("owner_utterance_examples")
+                if isinstance(item.get("owner_utterance_examples"), list)
+                else item.get("action_commands")
+                if isinstance(item.get("action_commands"), list)
+                else []
+            )
+            example = str(examples[0] if examples else "")
+            if example:
+                return example
     return ""
 
-def _latest_recorded_owner_command():
+def _latest_recorded_owner_utterance():
     path = Path("/root/.hermes/memory-os/system/owner_review_rendered_digests.jsonl")
     if not path.exists():
         return ""
@@ -3173,7 +3289,7 @@ def _latest_recorded_owner_command():
         except Exception:
             continue
         digest = record.get("rendered_digest") if isinstance(record.get("rendered_digest"), dict) else {}
-        command = _first_rendered_action_command(digest)
+        command = _first_rendered_owner_utterance(digest)
         if command:
             return command
     return ""

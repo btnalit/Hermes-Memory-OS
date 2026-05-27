@@ -417,6 +417,77 @@ def test_self_evolution_creates_memory_sources_policy_proposal_from_corrective_f
     assert proposal["actual_execute"] is False
 
 
+def test_self_evolution_prioritizes_top_memory_sources_signal_over_stale_expression_feedback(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+
+    class MixedFeedbackEvidence:
+        def read_feature_scores(self):
+            return [
+                {
+                    "feature_score_id": "feature_memory",
+                    "subject_kind": "memory_sources_feedback",
+                    "subject_ref": "memory_sources_feedback:msfb_new",
+                    "evidence_refs": ["ev_mem"],
+                    "maturity_score": 0.91,
+                    "summary": "MemorySources missing_context owner feedback.",
+                },
+                {
+                    "feature_score_id": "feature_expression",
+                    "subject_kind": "expression_feedback",
+                    "subject_ref": "expression_feedback:efb_old",
+                    "evidence_refs": ["ev_expr"],
+                    "maturity_score": 0.74,
+                    "summary": "Older expression feedback.",
+                },
+            ]
+
+        def read_scores(self):
+            return []
+
+        def read_evidence(self):
+            return [
+                {
+                    "evidence_id": "ev_mem",
+                    "subject_kind": "memory_sources_feedback",
+                    "subject_ref": "memory_sources_feedback:msfb_new",
+                    "feedback_rating": "missing_context",
+                    "memory_source_record_id": "msrc_new",
+                    "route": "candidate_review",
+                    "query_class": "candidate_review",
+                    "summary": "Owner said the selected sources missed key context.",
+                },
+                {
+                    "evidence_id": "ev_expr",
+                    "subject_kind": "expression_feedback",
+                    "subject_ref": "expression_feedback:efb_old",
+                    "feedback_rating": "too_mechanical",
+                    "outcome_id": "rbout_old",
+                    "request_id": "rbreq_old",
+                    "policy_version": 1,
+                    "summary": "Older expression feedback should not steal the top signal.",
+                },
+            ]
+
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=MixedFeedbackEvidence(),
+    )
+
+    assert result["proposal_created"] is True
+    assert result["proposal_class"] == "memory_sources_policy:missing_context"
+    assert result["agenda_candidate_status"] == "promoted_to_proposal"
+    proposal = proposal_queue.read_queue()["items"][0]
+    assert proposal["kind"] == "memory_sources_policy"
+    assert proposal["dedupe_key"] == "memory_sources_policy:missing_context:candidate_review:candidate_review"
+    assert proposal["proposal_quality"]["trigger_rule"] == "memory_sources_feedback_policy"
+    assert proposal["proposal_quality"]["memory_source_record_refs"] == ["msrc_new"]
+
+
 def test_self_evolution_rejects_useful_memory_sources_feedback_as_report_only(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")

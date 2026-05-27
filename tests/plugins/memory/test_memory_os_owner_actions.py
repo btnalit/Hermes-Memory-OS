@@ -6,7 +6,14 @@ import sqlite3
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue, read_candidate_queue
 from plugins.memory.memory_os import MemoryOSProvider
-from plugins.memory.memory_os.memory_sources import append_memory_source_record, memory_sources_feedback_path
+from plugins.memory.memory_os.context_router import ContextSection
+from plugins.memory.memory_os.memory_sources import (
+    append_memory_source_record,
+    build_memory_source_record,
+    memory_sources_feedback_path,
+    memory_sources_policy_path,
+    memory_sources_stats_report,
+)
 from plugins.memory.memory_os.owner_actions import (
     approved_proposal_followups_report,
     apply_owner_action,
@@ -556,6 +563,130 @@ def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops
     assert len(_jsonl(apply_log_path)) == 1
 
 
+def test_approved_memory_sources_policy_proposal_can_be_explicitly_applied_after_ops_gate(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(
+        store=store,
+        title="调整记忆来源/召回策略：missing_context 反馈",
+        body=(
+            "具体改动：记录 MemorySources missing_context policy，后续 record 带 policy_ref 供评估。\n"
+            "证据：owner 对 candidate_review 的 MemorySources 反馈 missing_context。\n"
+            "验收标准：policy.json 写入，后续 MemorySources record 带 policy_version。\n"
+            "后续状态：approved_for_proposal -> OpsGate report-only -> owner manual apply decision。\n"
+            "边界：不自动改 route，不执行外部任务。"
+        ),
+        source_refs=["feature_score:memory_sources_feedback_001"],
+        kind="memory_sources_policy",
+        proposal_class="memory_sources_policy:missing_context",
+        dedupe_key="memory_sources_policy:missing_context:candidate_review:candidate_review",
+        proposal_quality={
+            "quality_gate": "linked_corrective_memory_sources_feedback",
+            "runtime_target": "context_retrieval_policy_review",
+            "feedback_rating": "missing_context",
+            "routes": ["candidate_review"],
+            "query_classes": ["candidate_review"],
+            "memory_source_record_refs": ["msrc_policy_001"],
+            "linked_memory_source_count": 1,
+            "agenda_candidate_id": "agc_memory_sources_001",
+            "agenda_promotion_status": "promoted_to_proposal",
+            "agenda_maturity_gate": "linked_corrective_memory_sources_feedback",
+        },
+    )
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    dry_run = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="telegram",
+        owner_approved=True,
+        apply=False,
+    )
+
+    assert dry_run["status"] == "ready"
+    assert dry_run["apply_kind"] == "memory_sources_policy"
+    assert dry_run["runtime_target"] == "context_retrieval_policy_review"
+    assert dry_run["policy_write_planned"] is True
+    assert dry_run["actual_execute"] is False
+    assert not memory_sources_policy_path(store.roots).exists()
+
+    applied = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="telegram",
+        owner_approved=True,
+        apply=True,
+    )
+
+    policy = json.loads(memory_sources_policy_path(store.roots).read_text(encoding="utf-8"))
+    record = build_memory_source_record(
+        roots=store.roots,
+        route_report={
+            "route": "candidate_review",
+            "selected_sections": [{"section": "Current Foreground Task"}],
+            "dropped_sections": [],
+        },
+        selected_sections=[
+            ContextSection(
+                section="Current Foreground Task",
+                text="bounded context",
+                source_class="foreground",
+                metadata={"source_ids": ["event:evt_policy_001"]},
+            )
+        ],
+        context_router_config={"mode": "apply", "apply_routes": ["all"]},
+        router_applied=True,
+        prefetch_mode="indexed",
+    )
+    append_memory_source_record(store.roots, record)
+    stats = memory_sources_stats_report(store.roots, hours=24)
+    followups = approved_proposal_followups_report(store)
+
+    assert applied["status"] == "applied"
+    assert applied["policy_written"] is True
+    assert applied["actual_policy_write"] is True
+    assert applied["actual_execute"] is False
+    assert applied["execution_ticket_created"] is False
+    assert policy["schema_version"] == "memory-os.memory_sources_policy.v0"
+    assert policy["applied_from_proposal_id"] == candidate["candidate_id"]
+    assert policy["selection_policy_changed"] is False
+    assert record["policy_ref"]["policy_version"] == policy["policy_version"]
+    assert stats["policy_present"] is True
+    assert stats["policy_apply_count"] == 1
+    assert stats["policy_actual_execute_count"] == 0
+    assert stats["policy_raw_body_included_count"] == 0
+    assert followups["memory_sources_policy_apply_count"] == 1
+    assert followups["items"][0]["followup_state"] == "applied_memory_sources_policy"
+
+    duplicate = apply_approved_proposal_execution_decision(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="telegram",
+        owner_approved=True,
+        apply=True,
+    )
+
+    assert duplicate["status"] == "duplicate_ignored"
+    assert duplicate["policy_written"] is False
+
+
 def test_approved_legacy_template_cleanup_only_closes_legacy_templates_after_ops_gate(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")
@@ -1000,6 +1131,9 @@ def test_review_surface_exposes_latest_expression_feedback_context_tokens(tmp_pa
     assert report["latest_outcome"]["raw_body_included"] is False
     assert report["feedback_actions"]["too_mechanical"]["action"] == "feedback"
     assert report["feedback_actions"]["too_mechanical"]["target_id"] == "rbout_latest_context"
+    assert report["feedback_actions"]["too_mechanical"]["owner_utterance_example"].startswith("memory feedback oa_")
+    assert report["feedback_actions"]["too_mechanical"]["agent_tool_call"]["tool_name"] == "memory_os_review_reply"
+    assert "command" not in report["feedback_actions"]["too_mechanical"]
     assert report["boundary"]["actual_execute"] is False
 
 
@@ -1132,10 +1266,34 @@ def test_review_surface_exposes_latest_memory_sources_feedback_context_tokens(tm
     assert report["operation"] == "memory_sources_feedback_context"
     assert report["latest_memory_source"]["target_id"] == "msrc_context_001"
     assert report["latest_memory_source"]["raw_body_included"] is False
+    assert report["latest_memory_source"]["owner_utterance_scope"] == "owner_chat_utterance"
+    assert report["latest_memory_source"]["agent_tool_calls"][0]["rating"] == "useful"
+    assert report["latest_memory_source"]["agent_tool_calls"][0]["agent_tool_call"] == {
+        "tool_name": "memory_os_review_reply",
+        "arguments": {
+            "action": "feedback",
+            "action_token": report["latest_memory_source"]["action_tokens"]["mark_feedback"],
+            "rating": "useful",
+        },
+    }
+    assert report["latest_memory_source"]["owner_utterance_examples"][0].startswith("memory feedback oa_")
+    assert "action_commands" not in report["latest_memory_source"]
+    assert "available_actions" not in report["latest_memory_source"]
     assert report["feedback_actions"]["too_mechanistic"]["action"] == "feedback"
     assert report["feedback_actions"]["too_mechanistic"]["rating"] == "too_mechanistic"
     assert report["feedback_actions"]["too_mechanistic"]["target_id"] == "msrc_context_001"
-    assert "memory feedback" in report["feedback_actions"]["too_mechanistic"]["command"]
+    assert "memory feedback" in report["feedback_actions"]["too_mechanistic"]["owner_utterance_example"]
+    assert report["feedback_actions"]["too_mechanistic"]["owner_utterance_scope"] == "owner_chat_utterance"
+    assert report["feedback_actions"]["too_mechanistic"]["agent_tool_call"] == {
+        "tool_name": "memory_os_review_reply",
+        "arguments": {
+            "action": "feedback",
+            "action_token": report["feedback_actions"]["too_mechanistic"]["action_token"],
+            "rating": "too_mechanistic",
+        },
+    }
+    assert "operator_cli" not in report["feedback_actions"]["too_mechanistic"]
+    assert "command" not in report["feedback_actions"]["too_mechanistic"]
     assert report["boundary"]["actual_execute"] is False
 
 
@@ -1369,10 +1527,14 @@ def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_p
     assert item["suggested_action"]
     assert item["reason"]
     assert item["consequence"]
-    assert item["action_commands"]
-    assert all(command.startswith("memory ") for command in item["action_commands"])
+    assert item["owner_utterance_examples"]
+    assert all(example.startswith("memory ") for example in item["owner_utterance_examples"])
+    assert "action_commands" not in item
     assert item["raw_body_included"] is False
     assert "memory approve oa_" in text or "memory reject oa_" in text
+    assert "完整命令" not in text
+    assert "操作:" not in text
+    assert "会话回复示例:" in text
     assert "User prefers concise owner-review summaries" in text
     assert "proposed_memory_text" in serialized
     assert "Candidate kind=" not in text
@@ -1432,7 +1594,8 @@ def test_agenda_suppresses_generic_self_evolution_template_proposals(tmp_path):
     assert "Self-Evolution dry-run proposal" not in rendered["text"]
     item = review["sections"]["review_suggested"][0]
     assert item["requires_maturation"] is True
-    assert item["action_commands"] == []
+    assert item["owner_utterance_examples"] == []
+    assert "action_commands" not in item
     assert "缺少具体要调整什么" in item["proposal_detail"]
     assert "不会进入今日审批" in review["text"]
 
@@ -1460,6 +1623,34 @@ def test_concrete_proposal_agenda_shows_bounded_detail(tmp_path):
     assert "memory approve oa_" in rendered["text"]
 
 
+def test_agenda_count_matches_rendered_items_when_proposals_are_long(tmp_path):
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    body = (
+        "具体改动: 根据用户反馈形成一条可复核策略候选，不直接改变运行时。"
+        "证据: " + "长证据片段 " * 80 + " "
+        "验收标准: 必须列出影响面、monitor 字段、rollback 和停止条件。"
+        "后续状态: approved_for_proposal -> OpsGate report-only -> explicit apply gate."
+    )
+    for index in range(3):
+        proposal.create_candidate(
+            store=store,
+            title=f"Concrete policy proposal {index + 1}",
+            body=body,
+            source_refs=[f"feedback:item_{index}"],
+            kind="memory_sources_policy",
+        )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    text = rendered["text"]
+
+    assert "本条展示 3 项" in text
+    assert "[A1]" in text
+    assert "[A2]" in text
+    assert "[A3]" in text
+    assert "未展示 0 项" in text
+
+
 def test_render_digest_downgrades_transcript_like_candidate_to_cleanup_fyi(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(
@@ -1479,7 +1670,8 @@ def test_render_digest_downgrades_transcript_like_candidate_to_cleanup_fyi(tmp_p
     fyi = rendered["sections"]["fyi"][0]
 
     assert fyi["target_type"] == "candidate_cleanup"
-    assert fyi["available_actions"] == []
+    assert fyi["owner_utterance_examples"] == []
+    assert "available_actions" not in fyi
     assert "需要先整理" in text
     assert "User:" not in text
     assert "Assistant:" not in text

@@ -781,7 +781,7 @@ def _proposal_still_unresolved(item: dict[str, Any]) -> bool:
     followup_state = str(item.get("followup_state") or "")
     if state in {"owner_declined", "expired", "pressure_blocked"}:
         return False
-    if followup_state in {"closed", "applied_expression_policy"}:
+    if followup_state in {"closed", "applied_expression_policy", "applied_memory_sources_policy"}:
         return False
     return state in {"candidate", "owner_eligible", "owner_defer", "approved_for_proposal"}
 
@@ -822,11 +822,13 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
     }
     expression_feedback = _expression_feedback_signals(scores, evidence_by_id=evidence_by_id)
     memory_sources_feedback = _memory_sources_feedback_signals(scores, evidence_by_id=evidence_by_id)
-    rating = str(expression_feedback.get("feedback_rating") or "")
     top_score = scores[0] if scores else {}
     top_summary = _score_summary(top_score, evidence_by_id=evidence_by_id)
     top_subject = str(top_score.get("subject_ref") or "unknown_subject")
     top_subject_kind = str(top_score.get("subject_kind") or "unknown")
+    rating = str(expression_feedback.get("feedback_rating") or "")
+    if top_subject_kind == "memory_sources_feedback":
+        rating = ""
     top_score_value = top_score.get("maturity_score", top_score.get("score", ""))
     evidence_line = _evidence_line(top_score, evidence_by_id=evidence_by_id)
     quality = _proposal_quality(top_score, trigger_rule="feature_maturity_top_signal")

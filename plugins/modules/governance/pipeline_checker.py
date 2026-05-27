@@ -417,7 +417,7 @@ def _proposal_resolved_or_terminal(item: dict[str, Any]) -> bool:
     followup_state = str(item.get("followup_state", ""))
     if state in {"owner_declined", "expired", "pressure_blocked"}:
         return True
-    return followup_state in {"closed", "applied_expression_policy"}
+    return followup_state in {"closed", "applied_expression_policy", "applied_memory_sources_policy"}
 
 
 def _proposal_duplicate_key(item: dict[str, Any]) -> str:

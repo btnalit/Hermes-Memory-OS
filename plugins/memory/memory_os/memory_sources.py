@@ -21,6 +21,8 @@ HISTORY_SCHEMA_VERSION = "memory-os.memory_sources_history.v0"
 STATS_SCHEMA_VERSION = "memory-os.memory_sources_stats.v0"
 FEEDBACK_SCHEMA_VERSION = "memory-os.memory_sources_feedback.v0"
 FEEDBACK_HISTORY_SCHEMA_VERSION = "memory-os.memory_sources_feedback_history.v0"
+POLICY_SCHEMA_VERSION = "memory-os.memory_sources_policy.v0"
+POLICY_APPLY_SCHEMA_VERSION = "memory-os.memory_sources_policy_apply.v0"
 
 ALLOWED_FEEDBACK_RATINGS = {
     "useful",
@@ -84,6 +86,48 @@ def memory_sources_path(roots: MemoryOSRoots) -> Path:
 
 def memory_sources_feedback_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
+
+
+def memory_sources_policy_path(roots: MemoryOSRoots) -> Path:
+    return roots.hermes_home / "system-modules" / "memory_sources" / "policy.json"
+
+
+def memory_sources_policy_applies_path(roots: MemoryOSRoots) -> Path:
+    return roots.hermes_home / "system-modules" / "memory_sources" / "policy_applies.jsonl"
+
+
+def read_memory_sources_policy(roots: MemoryOSRoots) -> dict[str, Any]:
+    path = memory_sources_policy_path(roots)
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if parsed.get("schema_version") != POLICY_SCHEMA_VERSION:
+        return {}
+    return parsed
+
+
+def read_memory_sources_policy_apply_records(roots: MemoryOSRoots, *, limit: int = 20) -> list[dict[str, Any]]:
+    path = memory_sources_policy_applies_path(roots)
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    if limit <= 0:
+        return []
+    return records[-limit:]
 
 
 def normalize_memory_sources_config(config: dict[str, Any] | None) -> dict[str, Any]:
@@ -154,6 +198,8 @@ def build_memory_source_record(
         selected_sections,
         selected_entries=list(route_report.get("selected_sections") or []),
     )
+    policy = read_memory_sources_policy(roots)
+    policy_ref = _policy_ref(policy)
     return {
         "schema_version": SCHEMA_VERSION,
         "record_id": _new_record_id(created_at),
@@ -168,6 +214,8 @@ def build_memory_source_record(
         "router_applied": bool(router_applied),
         "selected": selected_report,
         "dropped": _dropped_report(list(route_report.get("dropped_sections") or [])),
+        "policy_ref": policy_ref,
+        "policy_version": int(policy_ref.get("policy_version") or 0),
         "selected_chars_total": sum(int(item.get("chars", 0)) for item in selected_report),
         "dropped_count_total": len(route_report.get("dropped_sections") or []),
         "boundary": _boundary(boundary),
@@ -324,6 +372,8 @@ def memory_sources_history_report(roots: MemoryOSRoots, *, limit: int) -> dict[s
 def memory_sources_stats_report(roots: MemoryOSRoots, *, hours: int) -> dict[str, Any]:
     path = memory_sources_path(roots)
     feedback_path = memory_sources_feedback_path(roots)
+    policy = read_memory_sources_policy(roots)
+    policy_applies = read_memory_sources_policy_apply_records(roots, limit=1_000_000)
     records = _records_since(read_memory_source_records(roots, limit=1_000_000), hours=max(int(hours), 0))
     feedback_records = _records_since(
         read_memory_source_feedback_records(roots, limit=1_000_000),
@@ -364,6 +414,13 @@ def memory_sources_stats_report(roots: MemoryOSRoots, *, hours: int) -> dict[str
         "feedback_ledger_path": str(feedback_path),
         "feedback_ledger_exists": feedback_path.exists(),
         "feedback_file_size_bytes": feedback_path.stat().st_size if feedback_path.exists() else 0,
+        "policy_path": str(memory_sources_policy_path(roots)),
+        "policy_present": bool(policy),
+        "policy_version": int(policy.get("policy_version") or 0) if policy else 0,
+        "latest_policy_apply_id": str(policy_applies[-1].get("apply_id") or "") if policy_applies else "",
+        "policy_apply_count": len(policy_applies),
+        "policy_actual_execute_count": sum(1 for record in policy_applies if bool(record.get("actual_execute"))),
+        "policy_raw_body_included_count": sum(1 for record in policy_applies if bool(record.get("raw_body_included"))),
         "record_count": len(records),
         "feedback_count": len(feedback_records),
         "oldest_created_at": str(records[0].get("created_at", "")) if records else "",
@@ -489,6 +546,17 @@ def _forbidden_field_findings(record: Any, *, path: str = "$") -> list[dict[str,
         for index, item in enumerate(record):
             findings.extend(_forbidden_field_findings(item, path=f"{path}[{index}]"))
     return findings
+
+
+def _policy_ref(policy: dict[str, Any]) -> dict[str, Any]:
+    if not policy or policy.get("schema_version") != POLICY_SCHEMA_VERSION:
+        return {}
+    return {
+        "policy_id": str(policy.get("policy_id") or ""),
+        "policy_version": int(policy.get("policy_version") or 0),
+        "applied_from_proposal_id": str(policy.get("applied_from_proposal_id") or ""),
+        "runtime_target": str(policy.get("runtime_target") or ""),
+    }
 
 
 def _dedupe(items: list[str]) -> list[str]:

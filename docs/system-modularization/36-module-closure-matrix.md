@@ -141,7 +141,7 @@ Cadence rules:
 | Right-Brain Expression Closure Contract | architecture right-brain principles, Wandering/SpeakGate evidence, Hermes origin delivery constraints | design contract only | no | no | RH-38 + SpeakGate + Hermes origin delivery | separates test-host observation from formal scheduled expression and defines expression feedback backflow |
 | Left-Brain Governance Quality Contract | evidence scoring, self-evolution, feedback, working expiry, proposal follow-up, cadence evidence | design contract only | no | no | RH-39 + FeedbackSignal + SchedulerStep + OwnerAction | separates safety governance from judgment quality, feedback learning, and production cadence maturity |
 | Agent-Mediated Owner Reply Tool | live owner message, visible digest context, provider platform, recorded digest binding | OwnerActionProcessor request + bounded tool result | yes, only after Hermes resolves a definite action + stable `oa_` token | no | recorded digest + OwnerActionProcessor | lets Hermes agent complete interactive owner review tasks through structured `memory_os_review_reply`; stable action tokens feed durable owner-action state |
-| Owner Reply Parser | owner command text, recorded digest action-token binding | parsed action request | yes, through processor only | no | OwnerActionProcessor | applies approve/reject/feedback/allow as auditable state transitions |
+| Owner Reply Parser | owner utterance text, recorded digest action-token binding | parsed action request | yes, through processor only | no | OwnerActionProcessor | applies approve/reject/feedback/allow as auditable state transitions |
 | OwnerActionProcessor | parsed owner actions, target state | owner action ledger, approved crystallized records, proposal state, feedback ledger, speak ticket | yes | no | MemoryWriteSurface / Proposal / Feedback / Speak permission | durable owner choices feed candidates, proposals, RH-30 feedback, and monitor |
 | Owner Review Hermes Cron Helper | preview/render commands | bounded stdout for Hermes cron | no | configured digest delivery only | Hermes cron, export eligibility | delivery success/failure and text quality feed monitor and renderer improvements |
 | Cron / Session / State Mirrors | Hermes cron/session/state metadata | bounded events or mirror status | no | no | explicit run-once/apply gate | improves entrance/event completeness; never owner facts by itself |
@@ -230,7 +230,7 @@ review queue / aging projection
 -> Review Digest Renderer
    - turns artifacts into owner-readable questions/actions/reasons/consequences
    - records display anchors such as A1/R1/F1 for readability only
-   - records stable action tokens for executable owner commands
+   - records stable action tokens and owner utterance examples for executable owner actions
    - marks configured recurring delivery output as delivery_binding.scope=owner_home
    - never sends and never mutates target state
 -> Owner Review Hermes Cron Helper
@@ -253,10 +253,10 @@ and processor close the action loop.
 ### Owner Reply Ingress
 
 ```text
-owner command in primary platform ("memory approve oa_<token>", "批准 oa_<token>")
+owner utterance in primary platform ("memory approve oa_<token>", "批准 oa_<token>")
 -> Hermes agent interprets it as a Memory-OS approval task
    - uses stable action tokens from the visible digest
-   - treats display anchors as visual labels, not preferred commands
+   - treats display anchors as visual labels, not preferred owner utterances
    - asks a clarification when the requested target or action is ambiguous
 -> memory_os_review_reply provider tool
    - receives structured action + stable action token
@@ -266,14 +266,14 @@ owner command in primary platform ("memory approve oa_<token>", "批准 oa_<toke
 -> OwnerActionProcessor
 -> bounded assistant confirmation from the tool result
 -> sync_turn control-plane skip
-   - processed token command is not appended as conversation event
+   - processed token utterance is not appended as conversation event
    - heartbeat must not promote it into working memory or candidates
 ```
 
 This is the live ingress counterpart to the CLI parser. Without it, Hermes
 delivers a correct digest but the owner's reply can fall through into ordinary
 chat. The provider tool must execute only stable action tokens. Exact tokenized
-commands such as `memory approve oa_<token>` or `approve oa_<token>` remain a
+utterances such as `memory approve oa_<token>` or `approve oa_<token>` remain a
 compatibility fallback, but the primary product path is the Hermes agent
 resolving the owner's interactive request and calling a structured tool.
 Display anchors (`A1/R1/F1`) are not approval identity. They are only UI labels

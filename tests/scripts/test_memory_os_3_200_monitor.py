@@ -337,6 +337,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
         item["code"] == "owner_review_surface_memory_sources_feedback_context_visible"
         for item in classification["pass"]
     )
+    assert any(item["code"] == "owner_review_surface_agent_tool_contract_ok" for item in classification["pass"])
     assert "latest_memory_source_id" in rendered
     assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
     assert any(item["code"] == "owner_review_proposal_followups_ok" for item in classification["pass"])
@@ -450,6 +451,14 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "owner_review_surface_boundary_true" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_surface"]["forbidden_owner_command_field_count"] = 1
+    snapshot["owner_review_surface"]["forbidden_owner_command_fields"] = ["operator_cli"]
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "owner_review_surface_forbidden_command_fields" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_ingress_guard"]["legacy_anchor_accepted"] = True
@@ -951,6 +960,56 @@ def test_classify_snapshot_fails_when_expression_feedback_links_missing_outcome(
     assert any(item["code"] == "right_brain_expression_feedback_missing_outcome" for item in classification["fail"])
 
 
+def test_classify_snapshot_warns_when_right_brain_reaction_volume_is_thin():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["right_brain_expression_adapter"] = {
+        "request_count": 2,
+        "latest_actual_send": False,
+        "raw_body_included_count": 0,
+        "policy_actual_execute_count": 0,
+        "policy_raw_body_included_count": 0,
+        "outcome_count": 2,
+        "outcome_actual_send_count": 0,
+        "outcome_actual_execute_count": 0,
+        "outcome_raw_body_included_count": 0,
+        "outcome_internal_marker_count": 0,
+        "outcome_feedback_count": 1,
+        "outcome_feedback_missing_count": 0,
+        "latest_outcome_feedback_count": 1,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "right_brain_expression_reaction_volume_thin" for item in classification["warn"])
+
+
+def test_classify_snapshot_passes_when_right_brain_reaction_volume_is_sufficient():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["right_brain_expression_adapter"] = {
+        "request_count": 3,
+        "latest_actual_send": False,
+        "raw_body_included_count": 0,
+        "policy_actual_execute_count": 0,
+        "policy_raw_body_included_count": 0,
+        "outcome_count": 3,
+        "outcome_actual_send_count": 0,
+        "outcome_actual_execute_count": 0,
+        "outcome_raw_body_included_count": 0,
+        "outcome_internal_marker_count": 0,
+        "outcome_feedback_count": 3,
+        "outcome_feedback_missing_count": 0,
+        "latest_outcome_feedback_count": 1,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "right_brain_expression_reaction_volume_sufficient" for item in classification["pass"]
+    )
+    assert not any(item["code"] == "right_brain_expression_reaction_volume_thin" for item in classification["warn"])
+
+
 def test_classify_snapshot_tracks_module_cadence_report():
     snapshot = _healthy_snapshot()
     snapshot["module_cadence"] = {
@@ -1443,6 +1502,54 @@ def test_classify_snapshot_passes_when_memory_sources_feedback_volume_exists():
 
     assert any(item["code"] == "memory_sources_feedback_volume_present" for item in classification["pass"])
     assert not any(item["code"] == "memory_sources_feedback_volume_missing" for item in classification["warn"])
+
+
+def test_classify_snapshot_tracks_memory_sources_policy_apply():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "feedback_count": 2,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+        "policy_present": True,
+        "policy_version": 1,
+        "policy_apply_count": 1,
+        "policy_actual_execute_count": 0,
+        "policy_raw_body_included_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_sources_policy_present" for item in classification["pass"])
+    assert not any(item["code"] == "memory_sources_policy_actual_execute_true" for item in classification["fail"])
+    assert not any(item["code"] == "memory_sources_policy_raw_body_included" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_memory_sources_policy_violates_boundary():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "feedback_count": 2,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+        "policy_present": True,
+        "policy_version": 1,
+        "policy_apply_count": 1,
+        "policy_actual_execute_count": 1,
+        "policy_raw_body_included_count": 1,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "memory_sources_policy_actual_execute_true" for item in classification["fail"])
+    assert any(item["code"] == "memory_sources_policy_raw_body_included" for item in classification["fail"])
 
 
 def test_classify_snapshot_fails_when_memory_sources_boundary_is_true():
@@ -1989,7 +2096,7 @@ def _healthy_owner_reply_dry_run() -> dict:
         "status": "ok",
         "dry_run": True,
         "reason": "",
-        "command_source": "latest_recorded_digest",
+        "owner_utterance_source": "latest_recorded_digest",
         "parsed_action_type": "approve_proposal",
         "parsed_target_type": "proposal",
         "owner_action_status": "ok",
@@ -2008,24 +2115,55 @@ def _healthy_owner_review_surface() -> dict:
         "schema_version": "memory-os.owner_review_surface_monitor.v0",
         "status": "ok",
         "operations": {
-            "next_page": {"status": "ok", "item_count": 1, "source": "latest_owner_home_digest"},
-            "detail": {"status": "ok", "item_count": 1, "source": "latest_recorded_digest"},
-            "proposal_followups": {"status": "ok", "item_count": 1, "source": ""},
+            "next_page": {
+                "status": "ok",
+                "item_count": 1,
+                "source": "latest_owner_home_digest",
+                "forbidden_owner_command_field_count": 0,
+                "owner_utterance_example_count": 1,
+                "agent_tool_call_count": 1,
+            },
+            "detail": {
+                "status": "ok",
+                "item_count": 1,
+                "source": "latest_recorded_digest",
+                "forbidden_owner_command_field_count": 0,
+                "owner_utterance_example_count": 1,
+                "agent_tool_call_count": 1,
+            },
+            "proposal_followups": {
+                "status": "ok",
+                "item_count": 1,
+                "source": "",
+                "forbidden_owner_command_field_count": 0,
+                "owner_utterance_example_count": 1,
+                "agent_tool_call_count": 1,
+            },
             "expression_feedback_context": {
                 "status": "ok",
                 "item_count": 1,
                 "feedback_action_count": 6,
                 "latest_outcome_id": "rbout_123",
+                "forbidden_owner_command_field_count": 0,
+                "owner_utterance_example_count": 6,
+                "agent_tool_call_count": 6,
             },
             "memory_sources_feedback_context": {
                 "status": "ok",
                 "item_count": 1,
                 "feedback_action_count": 9,
                 "latest_memory_source_id": "msrc_123",
+                "forbidden_owner_command_field_count": 0,
+                "owner_utterance_example_count": 9,
+                "agent_tool_call_count": 9,
             },
         },
         "raw_body_included_count": 0,
         "boundary_true_count": 0,
+        "forbidden_owner_command_field_count": 0,
+        "forbidden_owner_command_fields": [],
+        "owner_utterance_example_count": 18,
+        "agent_tool_call_count": 18,
     }
 
 
