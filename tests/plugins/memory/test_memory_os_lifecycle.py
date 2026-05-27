@@ -92,6 +92,21 @@ def test_memory_os_review_surface_tool_is_read_only_agent_surface():
     assert schema["parameters"]["required"] == ["operation"]
 
 
+def test_system_prompt_routes_expression_reactions_to_review_reply_not_profile_memory(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="telegram", agent_identity="memoryos-test")
+
+    prompt = provider.system_prompt_block()
+
+    assert "If the owner reacts to the latest right-brain expression" in prompt
+    assert "natural words such as `喜欢`" in prompt
+    assert "like_expression" in prompt
+    assert "labels, not action IDs" in prompt
+    assert "ask them to pick/copy the tokenized option" in prompt
+    assert "Do not call general memory/user/profile tools" in prompt
+    assert "record tokenized expression feedback through `memory_os_review_reply`" in prompt
+
+
 def test_memory_os_status_tool_contract_has_chinese_and_mixed_fixtures():
     contract = memory_os_status_tool_contract()
 

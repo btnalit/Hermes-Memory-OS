@@ -17369,3 +17369,51 @@ Interpretation:
 - Right-brain expression feedback is user-visible and waiting for more owner
   reaction volume. This keeps `right_brain_expression_reaction_volume_thin` as
   a real WARN rather than hiding it.
+
+### 2026-05-27 - Expression Feedback Tokenization Correction
+
+Live finding:
+
+```text
+owner_reply=喜欢
+expected=Hermes asks for/uses Memory-OS expression feedback token
+actual=Hermes treated the reply as ordinary preference/profile memory
+expression_feedback_count_before=3
+expression_feedback_count_after=3
+owner_action_count_before=20
+owner_action_count_after=20
+root_cause=natural-language labels were not clearly separated from executable action identity
+```
+
+Correction:
+
+```text
+rule=natural labels are not durable action IDs
+executable_identity=stable oa_<token>
+agent_behavior_if_no_token=ask owner to copy/pick the tokenized option
+forbidden=do not call general memory/user/profile tools for expression feedback
+allowed=call memory_os_review_reply(action=feedback, action_token=oa_..., rating=...)
+right_brain_boundary=Hermes owns owner interaction; Memory-OS keeps internal reflection/draft/policy substrate and records only tokenized feedback
+```
+
+Deployment evidence:
+
+```text
+changed=plugins/memory/memory_os/__init__.py system prompt rule
+changed=scripts/memory_os_expression_feedback_prompt.py tokenized option renderer
+changed=live skill /root/.hermes/skills/memory/memory-os-owner-review/SKILL.md
+gateway_restart=hermes-gateway.service active pid=529848
+py_compile=pass
+tokenized_prompt_job=memory-os-expression-feedback-smoke job_id=77a0fb64a00d
+prompt_contains=memory feedback oa_41a6cda70c5c9b like_expression
+prompt_instruction=If owner replies only with natural word, ask for tokenized command
+```
+
+Interpretation:
+
+- The previous `喜欢` reply is not retroactively counted as Memory-OS
+  expression feedback because it did not include the stable token and was
+  already misrouted by Hermes.
+- The corrected live path requires the owner to reply with a tokenized command,
+  for example `memory feedback oa_41a6cda70c5c9b like_expression`, so the
+  feedback lands in `expression_feedback_ledger` instead of user/profile memory.

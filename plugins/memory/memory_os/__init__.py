@@ -171,7 +171,12 @@ class MemoryOSProvider(MemoryProvider):
                     "with operation=`expression_feedback_context` to get bounded latest-outcome context and "
                     "feedback tokens. Then call `memory_os_review_reply` only after the owner clearly chooses "
                     "a feedback meaning such as too_mechanical, off_voice, too_frequent, boundary_private, "
-                    "mute_period, or like_expression."
+                    "mute_period, or like_expression. The executable identity is the stable `oa_<token>`; "
+                    "natural words such as `喜欢`, `太机械`, or `不像我` are labels, not action IDs. If the "
+                    "owner replies without a token, ask them to pick/copy the tokenized option from the "
+                    "active expression-feedback prompt instead of calling the tool. Do not call general "
+                    "memory/user/profile tools or write identity for expression feedback; record tokenized "
+                    "expression feedback through `memory_os_review_reply`."
                 ),
                 (
                     "If the owner reacts to MemorySources recall/context quality, call `memory_os_review_surface` "
