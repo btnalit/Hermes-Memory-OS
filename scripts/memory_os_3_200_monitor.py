@@ -329,6 +329,31 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "left_brain_pipeline_check_failed", "value": pipeline_check})
             elif pipeline_check.get("status") == "warn":
                 warn.append({"code": "left_brain_pipeline_check_warn", "value": pipeline_check})
+            if int(pipeline_check.get("expression_policy_quality_ready_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "left_brain_feedback_proposal_quality_ready",
+                        "expression_policy_quality_ready_count": pipeline_check.get(
+                            "expression_policy_quality_ready_count"
+                        ),
+                    }
+                )
+            if int(pipeline_check.get("expression_policy_quality_blocked_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "left_brain_feedback_proposal_quality_blocked",
+                        "expression_policy_quality_blocked_count": pipeline_check.get(
+                            "expression_policy_quality_blocked_count"
+                        ),
+                    }
+                )
+            if int(pipeline_check.get("proposal_quality_missing_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "left_brain_proposal_quality_metadata_missing",
+                        "proposal_quality_missing_count": pipeline_check.get("proposal_quality_missing_count"),
+                    }
+                )
         expression_feedback = (
             module_artifacts.get("expression_feedback")
             if isinstance(module_artifacts.get("expression_feedback"), dict)
@@ -1017,6 +1042,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "active_input_count": int(deep_reflection.get("latest_active_working_input_count") or 0),
                 }
             )
+    if int(deep_reflection.get("cadence_skipped_count") or 0) > 0:
+        passed.append(
+            {
+                "code": "deep_reflection_cadence_skip_visible",
+                "cadence_skipped_count": int(deep_reflection.get("cadence_skipped_count") or 0),
+                "latest_skip_reason": str(deep_reflection.get("latest_skip_reason") or ""),
+            }
+        )
 
     compaction = snapshot.get("compaction", {})
     if int(compaction.get("focus_none_count") or 0) > 0:
@@ -1376,6 +1409,8 @@ def _owner_review_aging_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "unknown_timestamp": summary.get("unknown_timestamp_count"),
         "unknown_timestamp_by_item_type": summary.get("unknown_timestamp_by_item_type"),
         "created_at_coverage_ratio": summary.get("created_at_coverage_ratio"),
+        "created_at_source_distribution": summary.get("created_at_source_distribution"),
+        "created_at_source_by_item_type": summary.get("created_at_source_by_item_type"),
         "true_aged": summary.get("true_aged_count"),
         "unknown_aged": summary.get("unknown_aged_count"),
         "canonical_state_changed": summary.get("canonical_state_changed"),
@@ -1991,7 +2026,8 @@ keys = [
   "rolling_injection_source_classes","actual_send","actual_execute",
   "actual_identity_write","actual_crystallized_approval",
   "latest_active_working_input_count","latest_expired_working_skipped_count",
-  "latest_expired_working_used_in_analysis_count"
+  "latest_expired_working_used_in_analysis_count",
+  "latest_cadence_skipped","latest_skip_reason","cadence_skipped_count"
 ]
 print(json.dumps({k:status.get(k) for k in keys if k in status}, ensure_ascii=False, sort_keys=True))
 """
@@ -2220,12 +2256,16 @@ def module_artifact_summary():
       "governance_feedback": {
         "emitted_event_count": governance.get("emitted_event_count"),
       },
-      "left_brain_pipeline_check": {
+        "left_brain_pipeline_check": {
         "status": left_brain_pipeline.get("status"),
         "finding_count": left_brain_pipeline.get("finding_count"),
         "active_duplicate_group_count": left_brain_pipeline.get("active_duplicate_group_count"),
         "followup_duplicate_group_count": left_brain_pipeline.get("followup_duplicate_group_count"),
         "legacy_template_duplicate_group_count": left_brain_pipeline.get("legacy_template_duplicate_group_count"),
+        "proposal_quality_missing_count": left_brain_pipeline.get("proposal_quality_missing_count"),
+        "expression_policy_quality_ready_count": left_brain_pipeline.get("expression_policy_quality_ready_count"),
+        "expression_policy_quality_blocked_count": left_brain_pipeline.get("expression_policy_quality_blocked_count"),
+        "expression_policy_unlinked_quality_count": left_brain_pipeline.get("expression_policy_unlinked_quality_count"),
         "actual_execute": left_brain_pipeline.get("actual_execute"),
       },
       "deep_reflection": {
@@ -2237,6 +2277,9 @@ def module_artifact_summary():
         "latest_expired_working_used_in_analysis_count": deep_reflection.get(
             "latest_expired_working_used_in_analysis_count"
         ),
+        "latest_cadence_skipped": deep_reflection.get("latest_cadence_skipped"),
+        "latest_skip_reason": deep_reflection.get("latest_skip_reason"),
+        "cadence_skipped_count": deep_reflection.get("cadence_skipped_count"),
         "wandering_seed_count": len(_read_jsonl("/root/.hermes/system-modules/deep_reflection/wandering_seeds.jsonl")),
       },
       "ops_gate": {

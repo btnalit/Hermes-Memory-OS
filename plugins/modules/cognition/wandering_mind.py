@@ -193,6 +193,7 @@ class WanderingMindModule:
             "schema_version": "hermes.delivery_would_send.v0",
             "id": f"wsend_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
             "ts": now.isoformat(),
+            "created_at": now.isoformat(),
             "profile": self.profile,
             "module": "wandering_mind",
             "mode": "would_send",

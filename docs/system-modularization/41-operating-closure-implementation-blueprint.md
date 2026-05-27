@@ -1210,12 +1210,17 @@ Completed baseline:
     legacy template proposals, writes
     `proposal_queue/legacy_template_cleanup_applies.jsonl`, and keeps
     `execution_ticket_created=false` / `actual_execute=false`.
+15. P1-T fourth split is deployed: DeepReflection records an input fingerprint
+    and skips same-day unchanged apply-mode reruns with
+    `cadence_skipped=true`, while leaving Hermes cron/systemd timers
+    unchanged.
 
 Next runtime order:
 
 1. P1-P timestamp / aging quality.
 2. P1-T choose any further module split from refreshed generated/skipped/error/
-   duplicate counters after SelfEvolution, EvidenceScoring, and OpsGate.
+   duplicate counters after SelfEvolution, EvidenceScoring, OpsGate, and
+   DeepReflection.
 3. P1-S remaining work narrows to feedback proposal usefulness/maturity after
    the linked-outcome quality gate; no direct policy/prompt/cadence mutation.
 4. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate

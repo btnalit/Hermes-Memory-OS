@@ -57,6 +57,7 @@ class LeftBrainPipelineCheckModule:
     def status(self) -> dict[str, Any]:
         report = self.read_latest()
         duplicate = report.get("duplicate_unresolved") if isinstance(report.get("duplicate_unresolved"), dict) else {}
+        proposal_quality = report.get("proposal_quality") if isinstance(report.get("proposal_quality"), dict) else {}
         return {
             "schema_version": "hermes.memory_os.left_brain_pipeline_check_status.v0",
             "module": "left_brain_pipeline_check",
@@ -66,6 +67,10 @@ class LeftBrainPipelineCheckModule:
             "active_duplicate_group_count": duplicate.get("active_duplicate_group_count"),
             "followup_duplicate_group_count": duplicate.get("followup_duplicate_group_count"),
             "legacy_template_duplicate_group_count": duplicate.get("legacy_template_duplicate_group_count"),
+            "proposal_quality_missing_count": proposal_quality.get("quality_metadata_missing_count"),
+            "expression_policy_quality_ready_count": proposal_quality.get("expression_policy_quality_ready_count"),
+            "expression_policy_quality_blocked_count": proposal_quality.get("expression_policy_quality_blocked_count"),
+            "expression_policy_unlinked_quality_count": proposal_quality.get("expression_policy_unlinked_quality_count"),
             "report_path": str(self.report_path),
             "actual_execute": False,
         }
@@ -113,6 +118,7 @@ class LeftBrainPipelineCheckModule:
             "status": status,
             "proposal_lifecycle": self._proposal_lifecycle(proposals),
             "duplicate_unresolved": self._duplicate_unresolved(proposals),
+            "proposal_quality": self._proposal_quality(proposals),
             "approved_followup": self._approved_followup(proposals),
             "execution_boundary": self._execution_boundary(proposals),
             "feature_scoring": self._feature_scoring(feature_scores),
@@ -167,6 +173,25 @@ class LeftBrainPipelineCheckModule:
                     "count": unresolved_duplicates["active_duplicate_group_count"],
                 }
             )
+        proposal_quality = self._proposal_quality(proposals)
+        if proposal_quality["expression_policy_quality_blocked_count"]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "expression_policy_proposal_quality_gap",
+                    "message": "Owner-actionable expression_policy proposals must reference linked expression feedback and stay bounded to explicit apply.",
+                    "count": proposal_quality["expression_policy_quality_blocked_count"],
+                }
+            )
+        if proposal_quality["quality_metadata_missing_count"]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "proposal_quality_metadata_missing",
+                    "message": "Owner-actionable non-legacy proposals should carry proposal_quality metadata.",
+                    "count": proposal_quality["quality_metadata_missing_count"],
+                }
+            )
         return findings
 
     def _proposal_lifecycle(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -215,6 +240,61 @@ class LeftBrainPipelineCheckModule:
             "legacy_template_duplicate_candidate_count": sum(len(ids) for ids in legacy_template_duplicates.values()),
             "resolved_or_terminal_skipped_count": resolved_or_terminal_skipped_count,
             "grouping": "dedupe_key_or_proposal_class_with_title_fallback",
+        }
+
+    def _proposal_quality(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
+        owner_actionable = [
+            item
+            for item in proposals
+            if isinstance(item, dict)
+            and not _proposal_resolved_or_terminal(item)
+            and not _legacy_template_proposal(item)
+            and str(item.get("state", "candidate")) in {"candidate", "owner_eligible", "owner_defer"}
+        ]
+        quality_missing = [item for item in owner_actionable if not isinstance(item.get("proposal_quality"), dict)]
+        concrete_body_missing = [item for item in owner_actionable if not _has_concrete_body(str(item.get("body") or ""))]
+        expression_policy_items = [
+            item
+            for item in owner_actionable
+            if str(item.get("kind") or "") == "expression_policy"
+            or str(item.get("proposal_class") or "").startswith("expression_policy:")
+        ]
+        expression_policy_ready: list[dict[str, Any]] = []
+        expression_policy_blocked: list[dict[str, Any]] = []
+        expression_policy_unlinked = 0
+        for item in expression_policy_items:
+            quality = item.get("proposal_quality") if isinstance(item.get("proposal_quality"), dict) else {}
+            linked_outcome_count = int(quality.get("linked_outcome_count") or 0)
+            is_unlinked = linked_outcome_count <= 0
+            if is_unlinked:
+                expression_policy_unlinked += 1
+            ready = (
+                str(quality.get("quality_gate") or "") == "linked_expression_feedback"
+                and linked_outcome_count > 0
+                and str(quality.get("runtime_target") or "") == "expression_policy"
+                and quality.get("direct_apply_allowed") is False
+                and quality.get("generic_executor_allowed") is False
+                and _has_concrete_body(str(item.get("body") or ""))
+            )
+            if ready:
+                expression_policy_ready.append(item)
+            else:
+                expression_policy_blocked.append(item)
+        return {
+            "owner_actionable_proposal_count": len(owner_actionable),
+            "quality_metadata_missing_count": len(quality_missing),
+            "concrete_body_missing_count": len(concrete_body_missing),
+            "expression_policy_count": len(expression_policy_items),
+            "expression_policy_quality_ready_count": len(expression_policy_ready),
+            "expression_policy_quality_blocked_count": len(expression_policy_blocked),
+            "expression_policy_unlinked_quality_count": expression_policy_unlinked,
+            "runtime_target_expression_policy_count": sum(
+                1
+                for item in expression_policy_items
+                if isinstance(item.get("proposal_quality"), dict)
+                and str(item["proposal_quality"].get("runtime_target") or "") == "expression_policy"
+            ),
+            "actual_execute": False,
         }
 
     def _approved_followup(self, proposals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -287,6 +367,14 @@ def _legacy_template_proposal(item: dict[str, Any]) -> bool:
     if title == "Tune right-brain expression policy" and "prompt/cadence/policy proposal" in body:
         return True
     return False
+
+
+def _has_concrete_body(body: str) -> bool:
+    compact = " ".join(str(body or "").split())
+    return (
+        ("具体改动:" in compact and "验收标准:" in compact)
+        or ("Proposed change:" in compact and "Acceptance criteria:" in compact)
+    )
 
 
 def _duplicate_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:

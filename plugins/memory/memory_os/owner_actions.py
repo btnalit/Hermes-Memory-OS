@@ -2236,6 +2236,7 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
         if target_ref in closed:
             continue
         needs_consolidation = _candidate_needs_consolidation(candidate.body)
+        created_at, created_at_source = _candidate_created_at_info(store, candidate)
         items.append(
             {
                 "schema_version": "memory-os.review_item.v0",
@@ -2244,7 +2245,8 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
                 "target_id": candidate.candidate_id,
                 "source_module": "crystallized_candidates",
                 "priority": "fyi" if needs_consolidation else "action_required",
-                "created_at": _candidate_created_at(store, candidate),
+                "created_at": created_at,
+                "created_at_source": created_at_source,
                 "status": "pending",
                 "summary": (
                     "Memory candidate is a transcript/event excerpt and needs consolidation before approval"
@@ -2261,10 +2263,14 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
 
 
 def _candidate_created_at(store: MemoryOSStore, candidate: CrystallizedCandidate) -> str:
+    return _candidate_created_at_info(store, candidate)[0]
+
+
+def _candidate_created_at_info(store: MemoryOSStore, candidate: CrystallizedCandidate) -> tuple[str, str]:
     if candidate.created_at:
-        return candidate.created_at
+        return candidate.created_at, "producer"
     if not candidate.source_event_ids:
-        return ""
+        return "", "missing"
     events_by_id = {str(event.id): event for event in store.read_events()}
     for event_id in candidate.source_event_ids:
         event = events_by_id.get(str(event_id))
@@ -2272,8 +2278,8 @@ def _candidate_created_at(store: MemoryOSStore, candidate: CrystallizedCandidate
             continue
         created_at = str(getattr(event, "ts", "") or "")
         if created_at:
-            return created_at
-    return ""
+            return created_at, "safe_source_ref"
+    return "", "missing"
 
 
 def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
@@ -2287,6 +2293,12 @@ def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[
         if state not in {"candidate", "owner_eligible", "owner_defer"}:
             continue
         requires_maturation = _proposal_requires_maturation(proposal)
+        created_at, created_at_source = _created_at_with_source(
+            proposal,
+            primary_key="created_at",
+            fallback_keys=("updated_at",),
+            fallback_source="updated_at_fallback",
+        )
         items.append(
             {
                 "schema_version": "memory-os.review_item.v0",
@@ -2295,7 +2307,8 @@ def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[
                 "target_id": proposal_id,
                 "source_module": "proposal_queue",
                 "priority": "review_suggested" if requires_maturation else "action_required",
-                "created_at": str(proposal.get("created_at") or proposal.get("updated_at") or ""),
+                "created_at": created_at,
+                "created_at_source": created_at_source,
                 "status": "pending",
                 "summary": _bounded_text(str(proposal.get("title") or "Proposal candidate"), 160),
                 "proposal_detail": _proposal_detail(proposal, requires_maturation=requires_maturation),
@@ -2317,6 +2330,12 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
                 continue
             payload_ref = str(record.get("payload_ref") or "")
             expression_preview = _expression_preview_for_payload_ref(store, payload_ref)
+            created_at, created_at_source = _created_at_with_source(
+                record,
+                primary_key="created_at",
+                fallback_keys=("ts",),
+                fallback_source="legacy_ts",
+            )
             items.append(
                 {
                     "schema_version": "memory-os.review_item.v0",
@@ -2325,7 +2344,8 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
                     "target_id": target_id,
                     "source_module": module_name,
                     "priority": "review_suggested",
-                    "created_at": str(record.get("created_at") or record.get("ts") or ""),
+                    "created_at": created_at,
+                    "created_at_source": created_at_source,
                     "status": "pending",
                     "summary": "右脑 would-send 主动发言草案",
                     "payload_ref": payload_ref,
@@ -2335,6 +2355,23 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
                 }
             )
     return items
+
+
+def _created_at_with_source(
+    record: dict[str, Any],
+    *,
+    primary_key: str,
+    fallback_keys: tuple[str, ...],
+    fallback_source: str,
+) -> tuple[str, str]:
+    primary = str(record.get(primary_key) or "")
+    if primary:
+        return primary, "producer"
+    for key in fallback_keys:
+        value = str(record.get(key) or "")
+        if value:
+            return value, fallback_source
+    return "", "missing"
 
 
 def _memory_source_fyi_items(store: MemoryOSStore, *, limit: int, start: int = 1) -> list[dict[str, Any]]:
@@ -4106,6 +4143,11 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
         if item.get("source_priority") == "action_required" and item.get("age_days") is None
     )
     known_created_at_count = sum(1 for item in items if _parse_dt(str(item.get("created_at") or "")))
+    created_at_source_distribution = Counter(_created_at_source(item) for item in items)
+    created_at_source_by_item_type: dict[str, Counter[str]] = {}
+    for item in items:
+        item_type = str(item.get("target_type") or "unknown")
+        created_at_source_by_item_type.setdefault(item_type, Counter())[_created_at_source(item)] += 1
     true_aged_count = sum(1 for item in items if str(item.get("aging_reason") or "").startswith("older_than_"))
     unknown_aged_count = sum(1 for item in items if item.get("aging_reason") == "unknown_timestamp")
     action_required_ages = [
@@ -4136,6 +4178,10 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
         "unknown_timestamp_count": unknown_timestamp_count,
         "unknown_timestamp_by_item_type": dict(unknown_timestamp_by_item_type),
         "created_at_coverage_ratio": round(known_created_at_count / len(items), 3) if items else 1.0,
+        "created_at_source_distribution": dict(created_at_source_distribution),
+        "created_at_source_by_item_type": {
+            item_type: dict(counter) for item_type, counter in created_at_source_by_item_type.items()
+        },
         "true_aged_count": true_aged_count,
         "unknown_aged_count": unknown_aged_count,
         "oldest_action_required_age_days": max(action_required_ages) if action_required_ages else None,
@@ -4143,6 +4189,15 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
         "canonical_state_changed": False,
         "owner_action_created": False,
     }
+
+
+def _created_at_source(item: dict[str, Any]) -> str:
+    source = str(item.get("created_at_source") or "")
+    if source:
+        return source
+    if _parse_dt(str(item.get("created_at") or "")):
+        return "producer"
+    return "missing"
 
 
 def _with_anchors(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

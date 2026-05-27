@@ -291,6 +291,7 @@ class SpeakGateModule:
             "schema_version": "hermes.speak_gate_would_send.v0",
             "id": f"sgws_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
             "ts": now.isoformat(),
+            "created_at": now.isoformat(),
             "profile": self.profile,
             "module": "speak_gate",
             "source_module": source_module,

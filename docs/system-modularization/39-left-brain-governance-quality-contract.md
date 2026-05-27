@@ -39,6 +39,16 @@ Current implementation state:
   Current live evidence reports `status=ok`, `finding_count=0`,
   `active_duplicate_group_count=0`, `followup_duplicate_group_count=0`, and
   `legacy_template_duplicate_group_count=1`.
+- P1-S proposal-usefulness maturity check is implemented and deployed on
+  `10.20.3.200`: pipeline check now reports
+  `proposal_quality_missing_count`,
+  `expression_policy_quality_ready_count`,
+  `expression_policy_quality_blocked_count`, and
+  `expression_policy_unlinked_quality_count`. It only checks
+  owner-actionable non-legacy proposals and remains report-only
+  (`actual_execute=false`). Latest live monitor reports all four counts at `0`,
+  meaning no active expression-policy proposal is currently waiting for owner
+  approval and no quality gap is hidden.
 - This replaces legacy hash scoring as the primary scoring path. It does not
   implement automatic prompt/policy/cadence apply, production cadence, or
   execution apply.

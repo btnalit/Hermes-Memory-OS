@@ -139,6 +139,26 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
         + "\n",
         encoding="utf-8",
     )
+    deep_root = home / "system-modules" / "deep_reflection"
+    deep_root.mkdir(parents=True)
+    (deep_root / "reports.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps({"schema_version": "hermes.deep_reflection_result.v0", "status": "ok"}),
+                json.dumps(
+                    {
+                        "schema_version": "hermes.deep_reflection_result.v0",
+                        "status": "skipped",
+                        "skipped": True,
+                        "cadence_skipped": True,
+                        "reason": "unchanged_input_fingerprint",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     report = module.build_cadence_report(hermes_home=home, profile="main", apply=True)
 
@@ -181,6 +201,7 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
     assert by_module["evidence_scoring"]["cadence_counters"]["error_count"] == 1
     assert by_module["evidence_scoring"]["cadence_counters"]["skipped_count"] == 1
     assert by_module["ops_gate"]["cadence_counters"]["skipped_count"] == 1
+    assert by_module["deep_reflection"]["cadence_counters"]["skipped_count"] == 1
     assert report["generated_count"] >= 2
     assert report["skipped_count"] >= 2
     assert report["error_count"] >= 1

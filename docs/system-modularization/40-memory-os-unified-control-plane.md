@@ -408,6 +408,12 @@ Current truth:
   groups are `0`, follow-up duplicate groups are `0`, and the remaining
   `legacy_template_duplicate_group_count=1` is historical template noise rather
   than a current owner-agenda blocker;
+- P1-S proposal-usefulness maturity check is live: pipeline check now exposes
+  `proposal_quality_missing_count`,
+  `expression_policy_quality_ready_count`,
+  `expression_policy_quality_blocked_count`, and
+  `expression_policy_unlinked_quality_count`; latest live monitor reports all
+  four counts at `0` with `actual_execute=false`.
 - P1-S DeepReflection expired-working hygiene is deployed: latest
   `10.20.3.200` dry-run reports `active_working_input_count=8`,
   `expired_working_skipped_count=158`,
@@ -438,6 +444,12 @@ Current truth:
   report. Latest `10.20.3.200` smoke kept `report_count=58` unchanged,
   increased `run_report_count` to `1`, and monitor PASS includes
   `ops_gate_no_pending_skip_visible`.
+- P1-T fourth split is live: DeepReflection now records an input fingerprint
+  and skips same-day unchanged apply-mode reruns with `cadence_skipped=true`
+  without writing another internal analysis artifact. Latest `10.20.3.200`
+  smoke shows `first_status=ok`, `second_status=skipped`,
+  `reason=unchanged_input_fingerprint`, `second_analysis_artifact_created=false`,
+  and monitor-visible `cadence_skipped_count=1`.
 
 Implementation order:
 
@@ -450,8 +462,9 @@ Implementation order:
 7. feedback backflow report-only/proposal-only;
 8. approved-proposal execution-decision state design;
 9. production cadence split after report-specific counters; SelfEvolution,
-   EvidenceScoring, and OpsGate module-local skip gates are deployed, and any
-   next module must still be chosen from refreshed counter evidence;
+   EvidenceScoring, OpsGate, and DeepReflection module-local skip gates are
+   deployed, and any next module must still be chosen from refreshed counter
+   evidence;
 10. ContextRouter / Ingress de-duplication with parity tests.
 
 ### P1-O - Owner Review Fallback / Gateway Boundary
@@ -538,7 +551,10 @@ Current truth:
 
 - new review items now have timestamp coverage;
 - old unknown timestamp issues were a real aging distortion;
-- monitor must keep `unknown_timestamp_count` and coverage ratio visible.
+- Wandering Mind and SpeakGate would-send producers now write bounded
+  `created_at`;
+- monitor must keep `unknown_timestamp_count`, coverage ratio, and
+  producer/derived/missing timestamp source distribution visible.
 
 ### P1-J - SessionMirror Entrance Completeness
 

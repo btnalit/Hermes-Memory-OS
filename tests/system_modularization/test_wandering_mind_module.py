@@ -76,6 +76,7 @@ def test_wandering_mind_records_would_send_without_real_delivery(tmp_path):
     records = module.read_would_send_records()
     assert len(records) == 1
     assert records[0]["payload_ref"] == result["output_ref"]
+    assert records[0]["created_at"] == records[0]["ts"]
     assert "body" not in records[0]
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -124,6 +125,9 @@ class DeepReflectionModule:
             "latest_expired_working_used_in_analysis_count": int(
                 latest_report.get("expired_working_used_in_analysis_count", 0) or 0
             ),
+            "latest_cadence_skipped": bool(latest_report.get("cadence_skipped") is True),
+            "latest_skip_reason": str(latest_report.get("reason") or ""),
+            "cadence_skipped_count": sum(1 for report in reports if report.get("cadence_skipped") is True),
             "actual_send": False,
             "actual_execute": False,
             "actual_identity_write": False,
@@ -217,6 +221,23 @@ class DeepReflectionModule:
             }
 
         input_snapshot = self.collect_inputs(store=store)
+        cadence_input_fingerprint = _input_snapshot_fingerprint(input_snapshot)
+        cadence_day = datetime.now(timezone.utc).date().isoformat()
+        if not dry_run and _has_same_day_fingerprint_report(
+            self.reports_path,
+            cadence_day=cadence_day,
+            cadence_input_fingerprint=cadence_input_fingerprint,
+        ):
+            result = _skip_result(
+                profile=self.profile,
+                dry_run=dry_run,
+                config=config,
+                input_snapshot=input_snapshot,
+                cadence_day=cadence_day,
+                cadence_input_fingerprint=cadence_input_fingerprint,
+            )
+            _append_jsonl(self.reports_path, result)
+            return result
         analysis = self._build_deterministic_analysis(input_snapshot)
         artifact = self._write_internal_analysis(input_snapshot=input_snapshot, analysis=analysis)
         injection_report = self.build_injection_cards(
@@ -246,6 +267,11 @@ class DeepReflectionModule:
             "injection_mode": str(self._read_config().get("injection_mode", "disabled")),
             "analysis_mode": artifact["analysis_mode"],
             "llm_enabled": artifact["llm_enabled"],
+            "cadence_day": cadence_day,
+            "cadence_input_fingerprint": cadence_input_fingerprint,
+            "cadence_skipped": False,
+            "skipped": False,
+            "reason": "",
             "analysis_artifact_created": True,
             "analysis_artifact_ref": artifact["artifact_ref"],
             "source_event_count": len(input_snapshot["recent_events"]),
@@ -1003,6 +1029,125 @@ def _read_json_document(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _input_snapshot_fingerprint(input_snapshot: dict[str, Any]) -> str:
+    payload = {
+        "input_refs": input_snapshot.get("input_refs") or [],
+        "working_items": [
+            {
+                "ref": item.get("ref"),
+                "updated_at": item.get("updated_at"),
+                "status": item.get("status"),
+                "text": item.get("text"),
+            }
+            for item in input_snapshot.get("working_items", [])
+            if isinstance(item, dict)
+        ],
+        "digest_artifacts": input_snapshot.get("digest_artifacts") or [],
+        "evidence_scores": [
+            {
+                "ref": item.get("ref"),
+                "score": item.get("score"),
+                "subject": item.get("subject"),
+            }
+            for item in input_snapshot.get("evidence_scores", [])
+            if isinstance(item, dict)
+        ],
+        "proposal_backlog": input_snapshot.get("proposal_backlog") or [],
+        "governance_feedback": [
+            {
+                "ref": item.get("ref"),
+                "summary": item.get("summary"),
+                "ts": item.get("ts"),
+            }
+            for item in input_snapshot.get("governance_feedback", [])
+            if isinstance(item, dict)
+        ],
+        "recent_events": [
+            {
+                "ref": item.get("ref"),
+                "summary": item.get("summary"),
+                "ts": item.get("ts"),
+            }
+            for item in input_snapshot.get("recent_events", [])
+            if isinstance(item, dict)
+        ],
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:20]
+
+
+def _has_same_day_fingerprint_report(
+    path: Path,
+    *,
+    cadence_day: str,
+    cadence_input_fingerprint: str,
+) -> bool:
+    if not cadence_day or not cadence_input_fingerprint:
+        return False
+    for report in reversed(_read_jsonl(path)):
+        if not isinstance(report, dict):
+            continue
+        if str(report.get("cadence_day") or "") != cadence_day:
+            continue
+        if str(report.get("cadence_input_fingerprint") or "") != cadence_input_fingerprint:
+            continue
+        if report.get("cadence_skipped") is True:
+            continue
+        if str(report.get("status") or "") == "ok":
+            return True
+    return False
+
+
+def _skip_result(
+    *,
+    profile: str,
+    dry_run: bool,
+    config: dict[str, Any],
+    input_snapshot: dict[str, Any],
+    cadence_day: str,
+    cadence_input_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "hermes.deep_reflection_result.v0",
+        "module": "deep_reflection",
+        "profile": profile,
+        "status": "skipped",
+        "reason": "unchanged_input_fingerprint",
+        "dry_run": bool(dry_run),
+        "injection_mode": str(config.get("injection_mode", "disabled")),
+        "analysis_mode": "skipped",
+        "llm_enabled": False,
+        "cadence_day": cadence_day,
+        "cadence_input_fingerprint": cadence_input_fingerprint,
+        "cadence_skipped": True,
+        "skipped": True,
+        "analysis_artifact_created": False,
+        "analysis_artifact_ref": "",
+        "source_event_count": len(input_snapshot.get("recent_events") or []),
+        "input_ref_count": len(input_snapshot.get("input_refs") or []),
+        "active_working_input_count": int(input_snapshot["working_item_hygiene"]["active_input_count"]),
+        "expired_working_skipped_count": int(input_snapshot["working_item_hygiene"]["expired_skipped_count"]),
+        "expired_working_used_in_analysis_count": int(
+            input_snapshot["working_item_hygiene"]["expired_used_in_analysis_count"]
+        ),
+        "selected_injection_count": 0,
+        "dropped_injection_count": 0,
+        "selected_injection_by_source_class": {},
+        "dropped_injection_by_source_class": {},
+        "selected_working_update_count": 0,
+        "dropped_working_update_count": 0,
+        "working_updates_applied": False,
+        "selected_optional_output_count": 0,
+        "dropped_optional_output_count": 0,
+        "proposal_created_count": 0,
+        "wandering_seed_created_count": 0,
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_crystallized_approval": False,
+    }
 
 
 def _injection_source_class_distribution(report: dict[str, Any]) -> dict[str, Any]:

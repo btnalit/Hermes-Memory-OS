@@ -147,8 +147,10 @@ def test_review_queue_derives_legacy_candidate_created_at_from_source_event(tmp_
     report = owner_review_queue_report(store)
 
     assert report["items"][0]["created_at"] == event_ts
+    assert report["items"][0]["created_at_source"] == "safe_source_ref"
     assert report["review_aging"]["unknown_timestamp_count"] == 0
     assert report["review_aging"]["created_at_coverage_ratio"] == 1.0
+    assert report["review_aging"]["created_at_source_distribution"] == {"safe_source_ref": 1}
 
 
 def test_review_aging_projects_old_and_unknown_items_without_mutating_state(tmp_path):
@@ -181,6 +183,8 @@ def test_review_aging_projects_old_and_unknown_items_without_mutating_state(tmp_
     assert aging["true_aged_count"] == 1
     assert aging["unknown_aged_count"] == 1
     assert aging["created_at_coverage_ratio"] == 0.5
+    assert aging["created_at_source_distribution"] == {"missing": 1, "producer": 1}
+    assert aging["created_at_source_by_item_type"] == {"candidate": {"missing": 1}, "proposal": {"producer": 1}}
     assert aging["canonical_state_changed"] is False
     assert aging["owner_action_created"] is False
     assert report["action_required_count"] == 0

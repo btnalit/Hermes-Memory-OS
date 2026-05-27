@@ -105,6 +105,7 @@ def test_speak_gate_keeps_wandering_mind_non_task(tmp_path):
     records = module.read_would_send_records()
     assert len(records) == 1
     assert records[0]["source_module"] == "wandering_mind"
+    assert records[0]["created_at"] == records[0]["ts"]
     assert "proposal" not in records[0]
     assert "agenda" not in records[0]
     assert "task" not in records[0]

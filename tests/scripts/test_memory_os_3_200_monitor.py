@@ -656,6 +656,7 @@ def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
     assert any(item["code"] == "left_brain_pipeline_check_visible" for item in classification["pass"])
     assert any(item["code"] == "expression_feedback_report_only" for item in classification["pass"])
     assert any(item["code"] == "left_brain_expression_feedback_context_linked" for item in classification["pass"])
+    assert any(item["code"] == "left_brain_feedback_proposal_quality_ready" for item in classification["pass"])
 
     snapshot["module_artifacts"]["left_brain_pipeline_check"]["status"] = "fail"
     classification = classify_snapshot(snapshot)
@@ -669,6 +670,16 @@ def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "expression_feedback_live_policy_changed" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["expression_policy_quality_ready_count"] = 0
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["expression_policy_quality_blocked_count"] = 1
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["proposal_quality_missing_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "left_brain_feedback_proposal_quality_blocked" for item in classification["warn"])
+    assert any(item["code"] == "left_brain_proposal_quality_metadata_missing" for item in classification["warn"])
 
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
@@ -703,10 +714,13 @@ def test_classify_snapshot_tracks_deep_reflection_expired_working_hygiene():
     snapshot["deep_reflection"]["latest_active_working_input_count"] = 3
     snapshot["deep_reflection"]["latest_expired_working_skipped_count"] = 12
     snapshot["deep_reflection"]["latest_expired_working_used_in_analysis_count"] = 0
+    snapshot["deep_reflection"]["cadence_skipped_count"] = 1
+    snapshot["deep_reflection"]["latest_skip_reason"] = "unchanged_input_fingerprint"
 
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "deep_reflection_expired_working_not_used" for item in classification["pass"])
+    assert any(item["code"] == "deep_reflection_cadence_skip_visible" for item in classification["pass"])
 
     snapshot["deep_reflection"]["latest_expired_working_used_in_analysis_count"] = 2
     classification = classify_snapshot(snapshot)
@@ -1698,6 +1712,8 @@ def _healthy_owner_review_aging() -> dict:
         "unknown_timestamp_count": 0,
         "unknown_timestamp_by_item_type": {},
         "created_at_coverage_ratio": 1.0,
+        "created_at_source_distribution": {"producer": 3},
+        "created_at_source_by_item_type": {"proposal": {"producer": 3}},
         "true_aged_count": 0,
         "unknown_aged_count": 0,
         "raw_body_included": False,
@@ -1993,6 +2009,10 @@ def _healthy_module_artifacts() -> dict:
             "active_duplicate_group_count": 0,
             "followup_duplicate_group_count": 0,
             "legacy_template_duplicate_group_count": 0,
+            "proposal_quality_missing_count": 0,
+            "expression_policy_quality_ready_count": 1,
+            "expression_policy_quality_blocked_count": 0,
+            "expression_policy_unlinked_quality_count": 0,
             "actual_execute": False,
         },
         "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},

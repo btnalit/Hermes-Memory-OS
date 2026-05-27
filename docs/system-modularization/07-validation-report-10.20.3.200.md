@@ -15270,3 +15270,275 @@ Conclusion:
   `execution_ticket_count=0`, `raw_body_included=false`.
 - Full consolidated monitor still has runtime timeout risk; this does not
   invalidate the targeted live evidence but remains a monitor performance gap.
+
+## 2026-05-27 - P1-P Timestamp / Aging Source-Quality Slice
+
+Scope:
+
+- Make timestamp maturity observable beyond `created_at_coverage_ratio`.
+- New Wandering Mind and SpeakGate would-send producers now write bounded
+  `created_at` in addition to legacy `ts`.
+- Review queue projection annotates timestamp source as `producer`,
+  `safe_source_ref`, `legacy_ts`, `updated_at_fallback`, or `missing`.
+- Aging summary and monitor expose `created_at_source_distribution` and
+  `created_at_source_by_item_type`.
+- No canonical history rewrite; old missing/fallback timestamps remain visible.
+
+Local verification:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_owner_actions.py tests\system_modularization\test_wandering_mind_module.py tests\system_modularization\test_speak_gate_module.py tests\scripts\test_memory_os_3_200_monitor.py::test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_boundaries -q
+65 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Deployment:
+
+```text
+scp plugins\memory\memory_os\owner_actions.py hermes-media:/root/.hermes/plugins/memory_os/owner_actions.py
+scp plugins\memory\memory_os\owner_actions.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+scp plugins\modules\cognition\wandering_mind.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/cognition/wandering_mind.py
+scp plugins\modules\expression\speak_gate.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/expression/speak_gate.py
+```
+
+Targeted live producer smoke:
+
+```json
+{
+  "speak_actual_send": false,
+  "speak_decision": "would_send",
+  "speak_last_created_at_equals_ts": true,
+  "speak_last_has_created_at": true,
+  "wandering_actual_send": false,
+  "wandering_last_created_at_equals_ts": true,
+  "wandering_last_has_created_at": true,
+  "wandering_would_send": true
+}
+```
+
+Remote aging report after deploy:
+
+```json
+{
+  "created_at_coverage_ratio": 1.0,
+  "created_at_source_distribution": {
+    "legacy_ts": 43,
+    "producer": 2,
+    "safe_source_ref": 167
+  },
+  "created_at_source_by_item_type": {
+    "candidate_cleanup": {
+      "safe_source_ref": 167
+    },
+    "speak": {
+      "legacy_ts": 43,
+      "producer": 2
+    }
+  },
+  "unknown_timestamp_count": 0,
+  "unknown_timestamp_by_item_type": {},
+  "true_aged_count": 0,
+  "unknown_aged_count": 0,
+  "canonical_state_changed": false,
+  "owner_action_created": false,
+  "raw_body_included": false
+}
+```
+
+Full monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --host hermes-media --output summary
+status=WARN
+FAIL=[]
+OwnerReviewAging.created_at_source_distribution={'legacy_ts': 43, 'producer': 2, 'safe_source_ref': 167}
+OwnerReviewAging.created_at_source_by_item_type={'candidate_cleanup': {'safe_source_ref': 167}, 'speak': {'legacy_ts': 43, 'producer': 2}}
+PASS includes owner_review_aging_ok
+WARN=['module_cadence_split_pending', 'session_mirror_pending_sessions', 'rh31_eval_has_failures', 'rh26_casual_empty']
+```
+
+Conclusion:
+
+- LIVE PASS that new speak/wandering would-send producer records carry
+  bounded `created_at`.
+- MONITOR PASS that aging distinguishes producer timestamps from safe derived
+  source refs and legacy `ts` fallback.
+- Boundary evidence remains clean: no actual send, no owner action created by
+  aging, no canonical mutation, no raw body included.
+
+## 2026-05-27 - P1-T Fourth Cadence Split: DeepReflection
+
+Selection basis:
+
+- Refreshed `10.20.3.200` counters after the earlier SelfEvolution,
+  EvidenceScoring, and OpsGate splits still showed DeepReflection generating
+  every harness cycle without a skip counter.
+- 36号矩阵 requires DeepReflection to have a bounded cycle with TTL/minimum
+  new-signal gating; this slice implements the module-local no-new-signal gate
+  without changing Hermes cron/systemd timers.
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_deep_reflection_module.py tests\scripts\test_memory_os_module_cadence_report.py -q
+28 passed
+
+python -m pytest tests\scripts\test_memory_os_3_200_monitor.py::test_classify_snapshot_tracks_deep_reflection_expired_working_hygiene -q
+1 passed
+```
+
+Deployment:
+
+```text
+scp plugins\modules\cognition\deep_reflection.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/cognition/deep_reflection.py
+scp scripts\memory_os_module_cadence_report.py hermes-media:/root/.hermes/scripts/memory_os_module_cadence_report.py
+```
+
+Targeted live smoke:
+
+```json
+{
+  "before_reports": 37,
+  "after_reports": 39,
+  "before_artifacts": 37,
+  "after_artifacts": 38,
+  "first_status": "ok",
+  "first_cadence_skipped": false,
+  "second_status": "skipped",
+  "second_reason": "unchanged_input_fingerprint",
+  "second_cadence_skipped": true,
+  "same_fingerprint": true,
+  "second_analysis_artifact_created": false,
+  "first_actual_send": false,
+  "second_actual_send": false,
+  "first_actual_execute": false,
+  "second_actual_execute": false
+}
+```
+
+Cadence report after deploy:
+
+```text
+/root/.hermes/scripts/memory_os_module_cadence_report.py --apply --format summary
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+generated_count=899
+skipped_count=20
+error_count=15
+duplicate_count=11
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Full monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --host hermes-media --output summary
+status=WARN
+FAIL=[]
+ModuleArtifacts.deep_reflection.cadence_skipped_count=1
+ModuleArtifacts.deep_reflection.latest_cadence_skipped=True
+ModuleArtifacts.deep_reflection.latest_skip_reason=unchanged_input_fingerprint
+ModuleCadence.module_counters.deep_reflection.skipped_count=1
+PASS includes deep_reflection_cadence_skip_visible
+WARN=['module_cadence_split_pending', 'session_mirror_pending_sessions', 'rh31_eval_has_failures', 'rh26_casual_empty']
+```
+
+Conclusion:
+
+- LIVE PASS that DeepReflection same-day unchanged apply-mode reruns skip
+  instead of creating another internal analysis artifact.
+- MONITOR PASS that the skip is visible through both DeepReflection module
+  artifacts and the module-cadence report.
+- Boundary evidence remains clean: `actual_send=false`, `actual_execute=false`,
+  and no Hermes timer/cron ownership moved into Memory-OS.
+
+## 2026-05-27 - P1-S Feedback Proposal Usefulness / Maturity Check
+
+Preflight:
+
+```text
+source_of_truth=32 roadmap P1-S, 39 left-brain governance quality contract, live monitor
+finding_type=feedback/proposal quality observability gap
+owning_seam=LeftBrainPipelineCheck + monitor
+reverse_scope=Memory-OS report-only checker; Hermes remains interaction/scheduler owner
+monitor_or_validation_fields=proposal_quality_missing_count,expression_policy_quality_ready_count,expression_policy_quality_blocked_count,expression_policy_unlinked_quality_count
+promotion_signal=active expression-policy proposals show ready_count>0 only when linked outcome and explicit-apply boundaries are present
+stop_or_rollback_signal=quality gap hidden, actual_execute=true, or generic executor fields appear
+external_review=not required for report-only checker fields
+```
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_left_brain_pipeline_checker.py tests\scripts\test_memory_os_3_200_monitor.py::test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline -q
+8 passed
+```
+
+Deployment:
+
+```text
+scp plugins\modules\governance\pipeline_checker.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/governance/pipeline_checker.py
+scp scripts\memory_os_3_200_monitor.py hermes-media:/root/.hermes/scripts/memory_os_3_200_monitor.py
+```
+
+Targeted live check:
+
+```json
+{
+  "status": "ok",
+  "finding_codes": [],
+  "proposal_quality": {
+    "owner_actionable_proposal_count": 0,
+    "quality_metadata_missing_count": 0,
+    "concrete_body_missing_count": 0,
+    "expression_policy_count": 0,
+    "expression_policy_quality_ready_count": 0,
+    "expression_policy_quality_blocked_count": 0,
+    "expression_policy_unlinked_quality_count": 0,
+    "runtime_target_expression_policy_count": 0,
+    "actual_execute": false
+  },
+  "actual_execute": false
+}
+```
+
+Full monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --host hermes-media --output summary
+status=WARN
+FAIL=[]
+ModuleArtifacts.left_brain_pipeline_check.status=ok
+ModuleArtifacts.left_brain_pipeline_check.finding_count=0
+ModuleArtifacts.left_brain_pipeline_check.proposal_quality_missing_count=0
+ModuleArtifacts.left_brain_pipeline_check.expression_policy_quality_ready_count=0
+ModuleArtifacts.left_brain_pipeline_check.expression_policy_quality_blocked_count=0
+ModuleArtifacts.left_brain_pipeline_check.expression_policy_unlinked_quality_count=0
+ModuleArtifacts.left_brain_pipeline_check.actual_execute=False
+WARN=['module_cadence_split_pending', 'session_mirror_pending_sessions', 'rh31_eval_has_failures', 'rh26_casual_empty']
+```
+
+Conclusion:
+
+- LIVE PASS that the left-brain checker exposes feedback-proposal usefulness
+  fields without creating proposals, tickets, prompt changes, cadence changes,
+  or execution.
+- Current live state has no active owner-actionable expression-policy proposal,
+  so ready/block counts are `0`; this is a correct absence signal, not hidden
+  maturity.

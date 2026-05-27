@@ -682,6 +682,12 @@ effective_action_required_count:
 aged_to_review_suggested_count:
 aged_to_fyi_count:
 unknown_timestamp_count:
+unknown_timestamp_by_item_type:
+created_at_coverage_ratio:
+created_at_source_distribution:
+created_at_source_by_item_type:
+true_aged_count:
+unknown_aged_count:
 oldest_action_required_age_days:
 raw_body_included: false
 canonical_state_changed: false
@@ -695,6 +701,12 @@ Monitor fields:
 - `review_aging.aged_to_review_suggested_count`
 - `review_aging.aged_to_fyi_count`
 - `review_aging.unknown_timestamp_count`
+- `review_aging.unknown_timestamp_by_item_type`
+- `review_aging.created_at_coverage_ratio`
+- `review_aging.created_at_source_distribution`
+- `review_aging.created_at_source_by_item_type`
+- `review_aging.true_aged_count`
+- `review_aging.unknown_aged_count`
 - `review_aging.raw_body_included`
 - `review_aging.canonical_state_changed`
 - `review_aging.owner_action_created`

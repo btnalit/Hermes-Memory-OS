@@ -1038,16 +1038,19 @@ Reason:
 Implemented local slice:
 
 - new crystallized candidate queue entries receive bounded `created_at`;
+- new Wandering Mind and SpeakGate would-send records receive bounded
+  `created_at` at the producer;
 - review queue projection can derive candidate display time from safe source
   refs when needed;
 - aging summary and monitor expose `unknown_timestamp_count`,
   `unknown_timestamp_by_item_type`, `created_at_coverage_ratio`,
+  `created_at_source_distribution`, `created_at_source_by_item_type`,
   `true_aged_count`, and `unknown_aged_count`.
 
 Next action:
 
-1. extend the same producer rule to any remaining proposal/speak producers
-   when their next write path is touched;
+1. keep producer-vs-derived-vs-missing timestamp source visible in monitor
+   instead of treating coverage ratio alone as maturity;
 2. keep old missing timestamps visible instead of rewriting canonical data.
 
 Stop signal:
@@ -1303,6 +1306,13 @@ Reason:
   `active_duplicate_group_count=0`, `followup_duplicate_group_count=0`, and
   `legacy_template_duplicate_group_count=1`; the remaining duplicate is legacy
   template noise, not an owner-actionable proposal duplicate;
+- deployed P1-S proposal-usefulness maturity check is live in
+  `left_brain_pipeline_check`: owner-actionable non-legacy proposals are now
+  checked for `proposal_quality` metadata, concrete body sections, and
+  expression-policy linked-outcome quality. Latest live monitor reports
+  `proposal_quality_missing_count=0`,
+  `expression_policy_quality_ready_count=0`,
+  `expression_policy_quality_blocked_count=0`, and `actual_execute=false`;
 - latest monitor evidence reports `feature_score_count=508`,
   `hash_score_legacy_count=0`, `legacy_hash_comparison_count=508`, and PASS
   `left_brain_feature_scoring_primary_ok`;
@@ -1515,6 +1525,34 @@ Third split decision:
   `ModuleArtifacts.ops_gate.skipped_run_count=1`,
   `latest_cadence_skipped=true`, and
   `latest_skip_reason=no_pending_proposed_actions`.
+
+Fourth split decision:
+
+- target module: `DeepReflection`;
+- reason: refreshed live cadence counters showed
+  `deep_reflection.generated_count=39`, `skipped_count=0`, and
+  `report_count=37+`; 36号矩阵 already requires TTL/minimum-signal gating for
+  DeepReflection so the cognitive-loop harness does not keep producing
+  identical analysis/injection artifacts;
+- prototype reference: `10.20.2.88` separates reflection work by cadence, but
+  Memory-OS keeps Hermes as scheduler owner and adds a module-local input
+  fingerprint instead of copying the prototype timer table;
+- implementation: `DeepReflectionModule.run_once(dry_run=False)` records
+  `cadence_input_fingerprint`; same-day same-fingerprint reruns append a
+  bounded `status=skipped`, `cadence_skipped=true`,
+  `reason=unchanged_input_fingerprint` report without creating another
+  internal analysis artifact;
+- unchanged path: new distinct input still creates analysis/injection artifacts
+  through the existing DeepReflection path; dry-run behavior is not used as a
+  production skip gate;
+- live evidence: on `10.20.3.200`, two consecutive apply-mode calls produced
+  `first_status=ok`, `second_status=skipped`, `same_fingerprint=true`,
+  `second_analysis_artifact_created=false`, `before_artifacts=37`,
+  `after_artifacts=38`, `before_reports=37`, `after_reports=39`;
+- monitor evidence: `ModuleArtifacts.deep_reflection.cadence_skipped_count=1`,
+  `latest_cadence_skipped=true`,
+  `latest_skip_reason=unchanged_input_fingerprint`, and
+  `ModuleCadence.module_counters.deep_reflection.skipped_count=1`.
 
 ## Active P2 Queue
 

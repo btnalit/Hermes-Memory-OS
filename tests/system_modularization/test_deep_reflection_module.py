@@ -516,6 +516,37 @@ def test_deep_reflection_run_once_apply_writes_working_updates_when_enabled(tmp_
     assert len(store.read_events()) == before_event_count
 
 
+def test_deep_reflection_apply_skips_same_day_unchanged_input(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=531, profile="main"),
+            "kind": "conversation_turn",
+            "summary": "Owner is testing DeepReflection cadence gating.",
+            "safe_ref": {"drive_policy": "eligible"},
+        }
+    )
+    store.append_event(event)
+    module = DeepReflectionModule(tmp_path, profile="main")
+    module.config_path.parent.mkdir(parents=True, exist_ok=True)
+    module.config_path.write_text(json.dumps({"enabled": True}, indent=2) + "\n", encoding="utf-8")
+
+    first = module.run_once(store=store, dry_run=False)
+    second = module.run_once(store=store, dry_run=False)
+    reports = [json.loads(line) for line in module.reports_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert first["status"] == "ok"
+    assert first["cadence_skipped"] is False
+    assert first["cadence_input_fingerprint"]
+    assert second["status"] == "skipped"
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_input_fingerprint"
+    assert second["cadence_input_fingerprint"] == first["cadence_input_fingerprint"]
+    assert second["analysis_artifact_created"] is False
+    assert len(list(module.internal_analysis_root.glob("*.json"))) == 1
+    assert [report["status"] for report in reports] == ["ok", "skipped"]
+
+
 def test_deep_reflection_optional_outputs_create_proposal_and_wandering_seed_no_send(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

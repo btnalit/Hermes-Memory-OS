@@ -115,3 +115,70 @@ def test_left_brain_pipeline_checker_tracks_followup_duplicates_without_owner_ac
     assert report["duplicate_unresolved"]["active_duplicate_group_count"] == 0
     assert report["duplicate_unresolved"]["followup_duplicate_group_count"] == 1
     assert report["approved_followup"]["approved_for_proposal_count"] == 2
+
+
+def test_left_brain_pipeline_checker_accepts_mature_expression_policy_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body=(
+            "具体改动: tune expression policy\n"
+            "证据: linked outcome rbout_1\n"
+            "验收标准: monitor shows owner feedback improved\n"
+            "后续状态: explicit apply only"
+        ),
+        kind="expression_policy",
+        proposal_class="expression_policy:too_mechanical",
+        dedupe_key="expression_policy:too_mechanical",
+        proposal_quality={
+            "quality_gate": "linked_expression_feedback",
+            "feedback_rating": "too_mechanical",
+            "feedback_count": 1,
+            "linked_outcome_count": 1,
+            "runtime_target": "expression_policy",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+        },
+    )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+    status = LeftBrainPipelineCheckModule(tmp_path, profile="main").status()
+
+    assert report["status"] == "ok"
+    assert report["proposal_quality"]["owner_actionable_proposal_count"] == 1
+    assert report["proposal_quality"]["expression_policy_quality_ready_count"] == 1
+    assert report["proposal_quality"]["expression_policy_quality_blocked_count"] == 0
+    assert not any(finding["code"] == "expression_policy_proposal_quality_gap" for finding in report["findings"])
+    assert status["expression_policy_quality_ready_count"] == 1
+
+
+def test_left_brain_pipeline_checker_warns_on_unmature_expression_policy_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_mechanical 反馈",
+        body="具体改动: tune expression policy\n证据: owner feedback\n验收标准: monitor\n后续状态: explicit apply",
+        kind="expression_policy",
+        proposal_class="expression_policy:too_mechanical",
+        dedupe_key="expression_policy:too_mechanical",
+        proposal_quality={
+            "quality_gate": "linked_expression_feedback",
+            "feedback_rating": "too_mechanical",
+            "feedback_count": 1,
+            "linked_outcome_count": 0,
+            "runtime_target": "expression_policy",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+        },
+    )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+
+    assert report["status"] == "warn"
+    assert report["proposal_quality"]["expression_policy_quality_ready_count"] == 0
+    assert report["proposal_quality"]["expression_policy_quality_blocked_count"] == 1
+    assert report["proposal_quality"]["expression_policy_unlinked_quality_count"] == 1
+    assert any(finding["code"] == "expression_policy_proposal_quality_gap" for finding in report["findings"])
