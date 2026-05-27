@@ -1,68 +1,103 @@
 # Hermes Memory-OS
 
-Hermes Memory-OS is a file-first memory and agent-OS runtime for long-running
+Hermes Memory-OS is a file-first memory and governance runtime for long-running
 Hermes agents.
 
-It is built for one practical problem: a long-running agent should remember
-stable facts, carry useful context across sessions, and run bounded reflection
-or governance loops without turning every temporary guess into permanent memory
-or taking actions on its own.
+It gives a Hermes profile durable memory, bounded cognition modules, owner
+review, right-brain expression feedback, and operational monitor evidence
+without making Memory-OS the owner of conversation, transport, or scheduling.
+Hermes remains the host agent. Memory-OS provides bounded state, stable action
+tokens, helper scripts, audit, and monitor evidence.
 
-The design is deliberately conservative:
+## What This Project Is
 
-- canonical memory lives in profile-local files;
-- SQLite is a rebuildable index, not the source of truth;
-- runtime cognition and governance modules write bounded artifacts;
-- owner approval remains required for crystallized memory;
-- send, execute, identity writes, Hindsight export, cleanup apply, and shadow
-  journal apply are off by default.
+Memory-OS is for operators who want an inspectable memory substrate for Hermes:
 
-This repository is intentionally extracted as a clean project. It does not
-vendor the full Hermes agent manager source tree.
+- profile-local canonical files instead of opaque hosted storage;
+- rebuildable SQLite indexes for search and prefetch;
+- working memory separated from owner-approved crystallized memory;
+- attribution and feedback ledgers for memory-source quality;
+- owner-visible approval and feedback loops through Hermes;
+- module cadence, proposal follow-up, and right-brain expression evidence;
+- safe bounded apply paths for explicitly supported proposal kinds.
 
-## What It Solves
-
-Memory-OS is for Hermes operators who need more than chat-window context:
-
-- keep durable memory in inspectable profile-local files;
-- keep transient work separate from approved long-term memory;
-- make memory injection explainable through context routing and attribution;
-- let cognitive modules run in no-send / no-execute test-host mode;
-- preserve owner approval for crystallized memory and identity changes.
-
-It is not a hosted memory service, a SaaS backend, or an auto-action framework.
-The default posture is observe, report, and ask for owner approval.
+It is not a standalone chat server, a SaaS memory service, or a generic
+executor. External sends, user conversation, cron delivery, channel selection,
+origin/local routing, and natural-language interaction belong to Hermes.
 
 ## Quick Start
 
-For a normal operator, start with the interactive installer:
+Install into an existing Hermes profile:
 
 ```bash
-export HERMES_HOME=/root/.hermes
-bash scripts/install_memory_os.sh
+git clone <this-repo-url>
+cd Hermes-Memory-OS
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational
 ```
 
-For a no-send test host that enables the full observation stack:
+`--operational` is the normal open-source install path. It installs and enables:
+
+- the `memory_os` Hermes memory provider;
+- the `memory-os-agent-os` Hermes shell plugin;
+- portable Memory-OS runtime modules;
+- heartbeat runtime;
+- the current cognitive-loop integration harness;
+- seven Hermes cron jobs for owner review, right-brain expression, monitor
+  reports, feedback prompts, and proposal follow-up.
+
+The installer auto-detects the owner-facing Hermes channel from
+`$HERMES_HOME/channel_directory.json`. Telegram is used only when Telegram is
+the configured owner channel. Other installs can resolve to Discord, Signal,
+Slack, Matrix, or another configured platform. Background jobs use
+`deliver=local` with no agent where appropriate; right-brain expression uses
+Hermes `deliver=origin`.
+
+Interactive install is also available:
 
 ```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh
 ```
 
-`--test-host` also installs and enables the owner review digest through Hermes
-cron by default. Hermes owns the scheduled delivery; Memory-OS only renders the
-bounded review text and stable owner-action tokens.
-
-For a conservative profile where DeepReflection and attribution are explicitly
-safe/off unless later enabled:
+Conservative install without the operational cron set:
 
 ```bash
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
 ```
 
+Install helpers but do not enable recurring cron jobs:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational \
+  --no-enable-owner-cron-onboarding
+```
+
+The installer does not restart `hermes-gateway.service`.
+
+## What Gets Scheduled
+
+The operational preset creates or verifies this Hermes cron set:
+
+| Job | Deliver | Agent | Purpose |
+| --- | --- | --- | --- |
+| `memory-os-owner-review-digest` | owner channel | yes | sends only approval items and real alerts to the owner |
+| `memory-os-right-brain-expression` | `origin` | yes | low-frequency right-brain expression through Hermes |
+| `memory-os-module-cadence-report` | `local` | no | records module generated/skipped/error/duplicate counters |
+| `memory-os-right-brain-expression-outcome` | `local` | no | records expression outcomes for feedback linkage |
+| `memory-os-proposal-followups-opsgate` | `local` | no | routes approved proposals through OpsGate/report-only follow-up |
+| `memory-os-expression-feedback-request` | owner channel | yes | asks for tokenized right-brain expression feedback |
+| `memory-os-memory-sources-feedback-request` | owner channel | yes | asks for tokenized MemorySources feedback |
+
+Hermes owns the scheduler, transport, retry behavior, origin/local routing, and
+agent wording. Memory-OS owns the helper outputs, tokens, state transitions,
+audit, and monitor fields.
+
+## Verify
+
 After install:
 
 ```bash
 HERMES_HOME=/root/.hermes hermes memory
+HERMES_HOME=/root/.hermes hermes plugins list
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os status
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os doctor
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules status
@@ -76,359 +111,137 @@ plugins.enabled includes memory-os-agent-os
 plugins.enabled does not include memory_os
 ```
 
-Short operator docs:
+`memory_os` is selected through `memory.provider`. It should not be enabled as a
+general Hermes plugin.
 
-- [Quickstart](docs/quickstart.md)
-- [Configuration](docs/configuration.md)
-- [Test-host monitor](docs/system-modularization/19-memory-os-3-200-monitor.md)
+Useful operator checks:
 
-Owner review digests show display numbers such as `A1`, `R1`, and `F1` for
-scanning only. Approval commands must use the stable token printed in the
-digest, for example `memory approve oa_<token>` or `memory reject oa_<token>`.
-Hermes cron owns delivery and transport; Memory-OS owns bounded digest rendering
-and the owner action state machine.
+```bash
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os memory-sources stats --hours 24
+HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules validate-no-send
+```
 
-## Project Status
+## Owner Interaction
 
-The v0 Memory-OS provider is closed and validated. The v0.1 Agent OS work adds
-portable higher-layer modules and an official-style Hermes plugin shell while
-keeping the provider path authoritative.
+Owner review and feedback happen in the normal Hermes conversation channel. The
+owner should not need a root shell to approve Memory-OS items.
 
-Implemented and tested:
+Digest labels such as `A1`, `R1`, and `F1` are display-only list numbers. The
+durable identity is the printed `oa_` action token.
 
-- `memory_os` Hermes memory provider
-- local filesystem store with event, working, crystallized candidate, identity,
-  relationship, audit, import, and quarantine roots
-- SQLite runtime index with heartbeat catch-up
-- indexed prefetch and diagnostic grounding
-- `memory_os_status` tool contract for current provider/backend facts
-- runtime heartbeat from events to working memory and review candidates
-- dry-run-first cleanup and shadow journal ingestion
-- portable L2-L4 module runtime:
-  - mailbox no-send
-  - household digest
-  - wandering mind
-  - inner drive
-  - ops gate
-  - proposal queue
-  - evidence/scoring
-  - self-evolution governor
-  - speak gate
-  - governance feedback bridge
-  - DeepReflection baseline
-- official-style `memory-os-agent-os` shell plugin:
-  - `hermes memory-os-agent-os status`
-  - `hermes memory-os-agent-os doctor`
-  - `hermes memory-os-agent-os low-clue-recall dry-run`
-  - `hermes memory-os-agent-os memory-sources last/history/stats/feedback`
-  - `hermes memory-os-agent-os modules status/doctor/run-once`
-  - `hermes memory-os-agent-os modules validate-no-send`
-  - `hermes memory-os-agent-os modules deep_reflection preview-current/history`
-  - minimal session marker hooks
+Examples of owner utterances:
 
-See:
+```text
+memory approve oa_<token>
+memory reject oa_<token>
+memory apply oa_<token>
+memory feedback oa_<token> too_mechanistic
+memory feedback oa_<token> like_expression
+```
 
-- `docs/memory-os/v0-closeout.md`
-- `docs/system-modularization/07-validation-report-10.20.3.200.md`
-- `docs/system-modularization/17-deep-reflection-runtime-design.md`
-- `docs/system-modularization/19-hermes-official-plugin-compatibility.md`
-- `docs/system-modularization/19-memory-os-3-200-monitor.md`
-- `docs/system-modularization/30-hermes-upgrade-compatibility-gate.md`
+Hermes interprets the owner utterance, asks follow-up questions when ambiguous,
+and calls the structured Memory-OS review tool. Memory-OS applies only stable
+tokens through the owner action state machine.
+
+Approving a proposal does not execute work. It moves the proposal into
+human-controlled follow-up. Only proposal kinds with a bounded runtime target,
+rollback, monitor fields, and an explicit apply token can be applied.
+
+## Safety Model
+
+Memory-OS keeps these boundaries by default:
+
+- no direct platform sends from Memory-OS;
+- no external execution;
+- no identity writes without explicit owner-approved path;
+- no unapproved crystallized memory writes;
+- no Hindsight export;
+- no cleanup or shadow-journal apply without a separate gate.
+
+Canonical data lives under the Hermes profile. SQLite indexes are rebuildable.
+Review, feedback, and apply operations are audited.
 
 ## Architecture
 
-Memory-OS is provider-first.
-
 ```text
-Hermes memory.provider=memory_os
-  -> plugins/memory/memory_os/
-     -> canonical profile-local Memory-OS files
-     -> rebuildable SQLite index
-     -> prefetch / sync_turn / memory_os_status / heartbeat
+Hermes agent
+  owns conversation, LLM interaction, cron, delivery, origin/local routing,
+  clarification, transport, retry, and channel adapters
 
-Hermes general plugin shell
-  -> plugins/memory-os-agent-os/
-     -> operator-facing status/doctor aliases
-     -> bounded session marker hooks
-     -> no carryover injection
-     -> no send / execute / identity / crystallized approval
+Memory-OS provider
+  owns profile-local canonical memory, indexes, prefetch, sync_turn,
+  working memory, crystallized candidates, and audit
 
-Portable module runtime
-  -> plugins/system/
-  -> plugins/modules/
-  -> installed under $HERMES_HOME/memory-os/runtime/python/plugins/
+Memory-OS Agent OS shell
+  exposes operator status, doctor, module, feedback, and review tools
+
+Portable modules
+  produce bounded artifacts: evidence scores, proposals, expression drafts,
+  cadence reports, feedback signals, and OpsGate reports
+
+OwnerActionProcessor
+  is the state-changing entry point for approve, reject, feedback, allow,
+  and bounded apply actions
 ```
-
-`memory_os` is not meant to be enabled as a general Hermes plugin. It is enabled
-through:
-
-```yaml
-memory:
-  provider: memory_os
-```
-
-`memory-os-agent-os` is the optional official-style shell plugin. It is enabled
-through `plugins.enabled` for operator discoverability and shell aliases.
 
 ## Repository Layout
 
 ```text
-agent/                         # Minimal Hermes compatibility surface
-plugins/memory/memory_os/      # Memory-OS provider and core services
-plugins/memory-os-agent-os/    # Official-style Hermes shell plugin
-plugins/system/                # Module contracts and coordination primitives
-plugins/modules/               # Portable L2-L4 modules
-scripts/                       # Installer and operator scripts
-tests/                         # Provider, runtime, module, and installer tests
-docs/memory-os/                # v0 architecture and implementation records
-docs/system-modularization/    # v0.1 Agent OS, RH, DR, and validation docs
+agent/                         Minimal Hermes compatibility surface
+plugins/memory/memory_os/      Memory-OS provider and core services
+plugins/memory-os-agent-os/    Hermes shell plugin and review tools
+plugins/system/                Module contracts and coordination primitives
+plugins/modules/               Portable cognition/governance/expression modules
+scripts/                       Installer, monitor, cron helpers, validation
+tests/                         Provider, module, installer, and monitor tests
+docs/                          Public operator docs
 ```
 
-## Install
+Normal users should start with [docs/quickstart.md](docs/quickstart.md) and
+[docs/configuration.md](docs/configuration.md). Internal development notes and
+validation history are intentionally excluded from the public upload.
 
-Use a target Hermes profile home:
+## Development
+
+Install development dependencies:
 
 ```bash
-export HERMES_HOME=/root/.hermes
-```
-
-Recommended interactive installer:
-
-```bash
-bash scripts/install_memory_os.sh
-```
-
-The interactive installer:
-
-- discovers existing Hermes home candidates from `HERMES_HOME`, `~/.hermes`,
-  and `/root/.hermes`;
-- prints current provider, shell plugin, runtime, and heartbeat timer state;
-- installs/updates the `memory_os` provider as the required base component;
-- asks which optional parts to install or enable:
-  - `memory-os-agent-os` shell plugin
-  - `memory.provider=memory_os`
-  - `plugins.enabled: memory-os-agent-os`
-  - portable L2-L4 system modules
-  - heartbeat runtime artifacts
-  - heartbeat timer
-  - owner review Hermes cron helper and recurring delivery gate
-  - DeepReflection preset
-- delegates writes to `scripts/install_memory_os_plugin.py`;
-- when enabled, creates the daily owner review job through Hermes cron
-  `--script --deliver` in agent mode rather than a Memory-OS transport path;
-  Hermes turns the bounded Memory-OS review brief into owner-facing wording and
-  handles interaction;
-- verifies provider and shell status after install;
-- does not restart `hermes-gateway.service`;
-- does not run cleanup apply or shadow-journal apply.
-
-Non-interactive test-host install:
-
-```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
-```
-
-Override the owner review cron target or disable it:
-
-```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host \
-  --owner-review-cron-schedule "0 9 * * *" \
-  --owner-review-cron-deliver telegram
-
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host \
-  --no-enable-owner-review-cron
-```
-
-For non-test-host installs, the owner review delivery target defaults to
-`origin`, which asks Hermes cron to deliver back through Hermes' origin/home
-channel semantics. `--test-host` resolves the default to `telegram` because the
-`10.20.3.200` validation host uses Telegram as its owner channel.
-
-Non-interactive production-safe install:
-
-```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
-```
-
-Advanced provider install with the Python installer. This requires the `hermes`
-CLI in `PATH` when `--enable` is used:
-
-```bash
-python3 scripts/install_memory_os_plugin.py \
-  --hermes-home "$HERMES_HOME" \
-  --enable \
-  --install-runtime \
-  --enable-runtime
-```
-
-Full Agent OS test-host install:
-
-```bash
-python3 scripts/install_memory_os_plugin.py \
-  --hermes-home "$HERMES_HOME" \
-  --enable \
-  --enable-shell \
-  --install-system-modules \
-  --install-runtime \
-  --enable-runtime \
-  --runtime-interval 5min \
-  --deep-reflection-preset test-host
-```
-
-Test-host compatibility wrapper:
-
-```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os_test_host.sh
-```
-
-The wrapper delegates to `scripts/install_memory_os.sh --yes --test-host`.
-
-Production-safe DeepReflection preset:
-
-```bash
-python3 scripts/install_memory_os_plugin.py \
-  --hermes-home "$HERMES_HOME" \
-  --enable \
-  --enable-shell \
-  --install-system-modules \
-  --install-runtime \
-  --enable-runtime \
-  --deep-reflection-preset production-safe
-```
-
-Installer behavior:
-
-- copies the `memory_os` provider to `$HERMES_HOME/plugins/memory_os/`;
-- copies the `memory-os-agent-os` shell to
-  `$HERMES_HOME/plugins/memory-os-agent-os/` unless `--no-install-shell` is
-  passed;
-- enables the provider only when `--enable` is passed;
-- enables the shell only when `--enable-shell` is passed;
-- writes heartbeat runtime artifacts when `--install-runtime` is passed;
-- enables the user systemd heartbeat timer when `--enable-runtime` is passed;
-- installs portable modules when `--install-system-modules` is passed;
-- installs owner review cron helper/gate scripts and, unless disabled, enables
-  the Hermes cron owner review job from the shell installer;
-- keeps Memory-OS backup manifests out of `$HERMES_HOME/plugins/`; backups
-  belong under `$HERMES_HOME/plugin-backups/`.
-
-## Verify
-
-Provider checks:
-
-```bash
-HERMES_HOME="$HERMES_HOME" hermes memory
-```
-
-`memory_os` is selected through `memory.provider`; it is not expected to appear
-as a top-level `hermes memory_os ...` command on current Hermes builds.
-
-Shell plugin checks:
-
-```bash
-HERMES_HOME="$HERMES_HOME" hermes plugins list
-HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os status
-HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os doctor
-HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules status
-HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules doctor
-HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules run-once \
-  --module cron_mirror --dry-run
-HERMES_HOME="$HERMES_HOME" hermes memory-os-agent-os modules validate-no-send
-```
-
-When the shell plugin is installed under the default Hermes home, the shell
-aliases also infer their home from their plugin path:
-
-```bash
-hermes memory-os-agent-os status
-hermes memory-os-agent-os doctor
-hermes memory-os-agent-os modules status
-```
-
-Useful operator aliases:
-
-```bash
-hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个"
-hermes memory-os-agent-os memory-sources last
-hermes memory-os-agent-os memory-sources stats --hours 24
-hermes memory-os-agent-os modules deep_reflection preview-current
-```
-
-Expected plugin relationship:
-
-```text
-memory.provider = memory_os
-plugins.enabled includes memory-os-agent-os
-plugins.enabled does not include memory_os
-```
-
-Regression checks:
-
-```bash
-python scripts/memory_os_upgrade_compat_check.py --host hermes-media --output summary
-python scripts/memory_os_3_200_monitor.py --host hermes-media --output summary
-```
-
-## DeepReflection Presets
-
-`scripts/install_memory_os_plugin.py` supports these presets:
-
-| Preset | Purpose |
-| --- | --- |
-| `production-safe` | Explicitly disabled; safe default for formal profiles. |
-| `observe` | Dry-run only; creates observation artifacts without injection. |
-| `auto-bounded` | Bounded deterministic carryover injection only. |
-| `test-host` | Enables no-send test observation outputs such as self-evolution proposals and wandering seeds. |
-
-The following remain disabled unless a future gate explicitly changes them:
-
-- `working_updates_enabled`
-- `llm_enabled`
-- real sends
-- real executes
-- identity writes
-- crystallized approval
-- Hindsight export
-
-## Run Tests
-
-```powershell
 python -m pip install -e ".[dev]"
+```
+
+Run the main test suite:
+
+```bash
 python -m pytest -q
 ```
 
-Current local baseline after the Agent OS shell installer integration:
+Installer and closure checks:
 
-```text
-433 passed
+```bash
+python -m pytest tests/scripts/test_memory_os_plugin_install.py \
+  tests/scripts/test_memory_os_owner_cron_onboarding.py -q
+git diff --check
 ```
 
-## Safety Defaults
+Before changing scheduler, owner review, feedback, installer, module closure,
+or live monitor behavior, verify the owning interface and run the relevant
+checks. Internal closure-matrix documents are not part of the public upload.
+Do not rely on conversation history as the source of truth.
 
-- Files are canonical; SQLite is a rebuildable index.
-- Runtime heartbeat creates working items and review candidates only.
-- Crystallized records require explicit owner approval.
-- Diagnostic grounding is restricted to explicit current
-  architecture/provider/status questions.
-- DeepReflection carryover is injected only through the provider prefetch path;
-  the shell plugin does not register `pre_llm_call`.
-- Shell hooks write bounded audit markers only.
-- Cleanup and shadow journal ingestion are dry-run-first.
-- No module sends messages, executes actions, writes identity, approves
-  crystallized memory, or exports to Hindsight by default.
+## Current Maturity
 
-## Monitoring
+The operational baseline has live validation evidence:
 
-The test-host monitor is documented in
-`docs/system-modularization/19-memory-os-3-200-monitor.md`.
+- operational installer path completed;
+- seven Hermes cron jobs present and enabled;
+- owner channel auto-detected from `channel_directory.json`;
+- monitor status `PASS` with no WARN/FAIL at the latest recorded validation;
+- owner-approved crystallized memory, feedback ledger, proposal follow-up, and
+  bounded expression policy apply have live evidence.
 
-It is read-only. It checks service health, provider status, shell plugin state,
-shell aliases without explicit `HERMES_HOME`, modules alias parity, doctor
-output, status-tool contract, context-router mode, low-clue recall probes,
-Memory Sources attribution health, DeepReflection source-class distribution,
-backup-manifest pollution, and session hook audit markers. It must not restart
-services, run heartbeat catch-up, invoke hooks, force `/new`, apply cleanup,
-apply shadow journals, or read private transcripts.
+This does not mean Memory-OS is a generic autonomous executor. New proposal
+kinds require their own bounded apply contract, rollback, monitor fields, and
+owner-visible workflow.
 
 ## License
 

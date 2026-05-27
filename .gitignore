@@ -9,6 +9,8 @@ dist/
 build/
 *.egg-info/
 /memory-os/
+docs/memory-os/
+docs/system-modularization/
 docs/public-materials-drafts/
 eval/reports/
 *.tmp

@@ -3,7 +3,17 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import pytest
+
 from scripts.memory_os_closure_matrix_check import build_report, parse_classification_overlay
+
+
+INTERNAL_MATRIX_PATH = Path(__file__).resolve().parents[2] / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+
+pytestmark = pytest.mark.skipif(
+    not INTERNAL_MATRIX_PATH.exists(),
+    reason="internal closure matrix docs are not included in public checkouts",
+)
 
 
 def test_closure_matrix_check_passes_for_current_repo() -> None:

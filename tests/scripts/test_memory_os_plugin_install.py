@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -172,6 +173,72 @@ def test_installer_can_copy_right_brain_expression_cron_helper_without_enabling_
     assert "Hermes agent owns the final expression" in helper.read_text(encoding="utf-8")
     assert "Right-brain expression Hermes cron" in gate.read_text(encoding="utf-8")
     assert "Hermes owns the agent turn" in outcome.read_text(encoding="utf-8")
+
+
+def test_installer_can_copy_owner_cron_onboarding_without_enabling_cron(tmp_path):
+    report = install_plugin(hermes_home=tmp_path / "home", install_owner_cron_onboarding=True)
+
+    onboarding = tmp_path / "home" / "scripts" / "memory_os_owner_cron_onboarding.py"
+    assert report["owner_cron_onboarding_install_requested"] is True
+    assert report["owner_cron_onboarding_installed"] is True
+    assert report["owner_cron_onboarding_path"] == str(onboarding)
+    assert report["owner_cron_onboarding_run_status"] == ""
+    assert onboarding.is_file()
+    assert "detect" not in onboarding.read_text(encoding="utf-8").lower() or "channel" in onboarding.read_text(encoding="utf-8").lower()
+    assert not (tmp_path / "home" / "cron" / "jobs.json").exists()
+
+
+def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    home.joinpath("channel_directory.json").write_text(
+        json.dumps(
+            {
+                "platforms": {
+                    "telegram": [],
+                    "discord": [{"id": "room-1", "type": "dm", "name": "owner"}],
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    report = install_plugin(
+        hermes_home=home,
+        install_system_modules=True,
+        install_owner_cron_onboarding=True,
+        run_owner_cron_onboarding=True,
+        owner_cron_owner_approved=True,
+        hermes_bin=_fake_hermes(tmp_path),
+        owner_review_deliver="auto",
+        right_brain_deliver="origin",
+    )
+
+    assert report["owner_cron_onboarding_run_status"] == "applied"
+    assert report["owner_cron_onboarding_report"]["selected_owner_review_deliver"] == "discord"
+    assert report["owner_cron_onboarding_report"]["selected_owner_review_channel"] == "discord"
+    assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 7
+    jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
+    by_name = {job["name"]: job for job in jobs}
+    assert set(by_name) == {
+        "memory-os-owner-review-digest",
+        "memory-os-right-brain-expression",
+        "memory-os-module-cadence-report",
+        "memory-os-right-brain-expression-outcome",
+        "memory-os-proposal-followups-opsgate",
+        "memory-os-expression-feedback-request",
+        "memory-os-memory-sources-feedback-request",
+    }
+    assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
+    assert by_name["memory-os-expression-feedback-request"]["deliver"] == "discord"
+    assert by_name["memory-os-memory-sources-feedback-request"]["deliver"] == "discord"
+    assert by_name["memory-os-right-brain-expression"]["deliver"] == "origin"
+    assert by_name["memory-os-module-cadence-report"]["deliver"] == "local"
+    assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
+    assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
+    assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
 
 
 def test_installer_can_install_system_module_runtime_package(tmp_path):
@@ -514,6 +581,10 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "--yes" in text
     assert "--dry-run" in text
     assert "scripts/install_memory_os_plugin.py" in text
+    assert "--install-owner-cron-onboarding" in text
+    assert "--run-owner-cron-onboarding" in text
+    assert "--owner-cron-owner-approved" in text
+    assert "channel_directory.json" in text
     assert "install_runtime" in text
     assert "enable_runtime" in text
     assert "install_cognitive_loop" in text
@@ -525,6 +596,19 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "hermes memory-os-agent-os status" in text
     assert "hermes memory-os-agent-os doctor" in text
     assert "plugins.memory.memory_os cognitive-loop status" in text
+
+
+def test_install_shell_exposes_one_command_operational_product_install():
+    text = Path("scripts/install_memory_os.sh").read_text(encoding="utf-8")
+
+    assert "--operational" in text
+    assert "MODE=\"operational\"" in text
+    assert "DEEP_REFLECTION_PRESET=\"${DEEP_REFLECTION_PRESET:-operational}\"" in text
+    assert "MEMORY_SOURCES_PRESET=\"${MEMORY_SOURCES_PRESET:-operational}\"" in text
+    assert "default_enable_cognitive_loop=\"yes\"" in text
+    assert "default_enable_owner_cron_onboarding=\"yes\"" in text
+    assert "--enable-owner-cron-onboarding" in text
+    assert "--run-owner-cron-onboarding" in text
 
 
 def test_test_host_wrapper_delegates_to_interactive_installer_defaults():
@@ -555,6 +639,63 @@ def shutil_copy_source(source: Path, target: Path) -> None:
     import shutil
 
     shutil.copytree(source, target)
+
+
+def _fake_hermes(tmp_path: Path) -> str:
+    script = tmp_path / "fake_hermes_for_install.py"
+    script.write_text(
+        """
+import json
+import os
+import pathlib
+import sys
+
+args = sys.argv[1:]
+home = pathlib.Path(os.environ.get("HERMES_HOME", "."))
+
+if args[:3] == ["cron", "create", "--help"]:
+    print("usage: hermes cron create [--name NAME] [--deliver DELIVER] [--script SCRIPT] [--no-agent] schedule prompt")
+    raise SystemExit(0)
+
+if args[:3] == ["memory-os-agent-os", "review", "render-digest"]:
+    print("Memory-OS owner review digest")
+    raise SystemExit(0)
+
+if args[:2] == ["cron", "create"]:
+    def value(flag):
+        return args[args.index(flag) + 1] if flag in args else ""
+    jobs_path = home / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True, exist_ok=True)
+    loaded = json.loads(jobs_path.read_text(encoding="utf-8")) if jobs_path.exists() else {"jobs": []}
+    jobs = loaded.get("jobs", [])
+    name = value("--name")
+    jobs.append(
+        {
+            "id": "job_" + name.replace("-", "_"),
+            "name": name,
+            "enabled": True,
+            "deliver": value("--deliver"),
+            "script": value("--script"),
+            "no_agent": "--no-agent" in args,
+            "prompt": args[-1],
+        }
+    )
+    jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    raise SystemExit(0)
+
+print("unexpected command", args, file=sys.stderr)
+raise SystemExit(2)
+""".lstrip(),
+        encoding="utf-8",
+    )
+    if os.name == "nt":
+        launcher = tmp_path / "hermes.cmd"
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\n', encoding="utf-8")
+    else:
+        launcher = tmp_path / "hermes"
+        launcher.write_text(f'#! /bin/sh\nexec "{sys.executable}" "{script}" "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+    return str(launcher)
 
 
 def _enabled_plugins_from_config_text(config_text: str) -> list[str]:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import stat
@@ -32,6 +33,7 @@ SOURCE_MODULE_CADENCE_REPORT_CRON = REPO_ROOT / "scripts" / "memory_os_module_ca
 SOURCE_EXPRESSION_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_expression_feedback_prompt.py"
 SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
 SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE = REPO_ROOT / "scripts" / "memory_os_proposal_followups_ops_gate.py"
+SOURCE_OWNER_CRON_ONBOARDING = REPO_ROOT / "scripts" / "memory_os_owner_cron_onboarding.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -68,6 +70,16 @@ DEEP_REFLECTION_PRESETS: dict[str, dict[str, object]] = {
         "max_self_evolution_proposals": 1,
         "max_wandering_seeds": 1,
     },
+    "operational": {
+        "enabled": True,
+        "injection_mode": "auto_bounded",
+        "working_updates_enabled": False,
+        "self_evolution_proposals_enabled": True,
+        "wandering_seed_enabled": True,
+        "max_optional_outputs": 2,
+        "max_self_evolution_proposals": 1,
+        "max_wandering_seeds": 1,
+    },
 }
 
 
@@ -95,6 +107,13 @@ MEMORY_SOURCES_PRESETS: dict[str, dict[str, object]] = {
         "record_dry_run": False,
     },
     "test-host": {
+        "enabled": True,
+        "mode": "metadata_only",
+        "retention_days": 30,
+        "record_live_prefetch": True,
+        "record_dry_run": False,
+    },
+    "operational": {
         "enabled": True,
         "mode": "metadata_only",
         "retention_days": 30,
@@ -170,6 +189,21 @@ def install_plugin(
     cognitive_loop_interval: str = "6h",
     install_owner_review_cron_helper: bool = False,
     install_right_brain_expression_cron_helper: bool = False,
+    install_owner_cron_onboarding: bool = False,
+    run_owner_cron_onboarding: bool = False,
+    owner_cron_owner_approved: bool = False,
+    owner_review_deliver: str = "auto",
+    right_brain_deliver: str = "origin",
+    owner_review_owner: str = "owner",
+    owner_review_channel: str = "owner_review_cron",
+    owner_review_schedule: str = "0 9 * * *",
+    right_brain_schedule: str = "30 4 * * 0",
+    module_cadence_schedule: str = "15 */6 * * *",
+    right_brain_outcome_schedule: str = "45 4 * * 0",
+    proposal_followups_schedule: str = "*/30 * * * *",
+    expression_feedback_schedule: str = "0 5 * * 0",
+    memory_sources_feedback_schedule: str = "30 10 * * *",
+    hermes_bin: str = "hermes",
     deep_reflection_preset: str | None = None,
     memory_sources_preset: str | None = None,
     llm_judge_preset: str | None = None,
@@ -255,11 +289,46 @@ def install_plugin(
             hermes_home,
             dry_run=dry_run,
         )
+    owner_cron_onboarding_path: Path | None = None
+    if install_owner_cron_onboarding or run_owner_cron_onboarding:
+        owner_cron_onboarding_path = _write_owner_cron_onboarding_script(hermes_home, dry_run=dry_run)
     module_cadence_report: Path | None = None
     operational_helper_paths: dict[str, Path] = {}
     if install_system_modules:
         module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
         operational_helper_paths = _write_operational_helper_scripts(hermes_home, dry_run=dry_run)
+    owner_cron_onboarding_report: dict[str, object] = {}
+    if run_owner_cron_onboarding:
+        if not owner_review_cron_helper:
+            owner_review_cron_helper = _write_owner_review_cron_helper(hermes_home, dry_run=dry_run)
+        if not right_brain_expression_cron_helper:
+            right_brain_expression_cron_helper = _write_right_brain_expression_cron_helper(
+                hermes_home,
+                dry_run=dry_run,
+            )
+        if module_cadence_report is None:
+            module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
+        if not operational_helper_paths:
+            operational_helper_paths = _write_operational_helper_scripts(hermes_home, dry_run=dry_run)
+        if not dry_run:
+            owner_cron_onboarding_report = _run_owner_cron_onboarding(
+                hermes_home=hermes_home,
+                hermes_bin=hermes_bin,
+                owner_approved=owner_cron_owner_approved,
+                owner_review_deliver=owner_review_deliver,
+                right_brain_deliver=right_brain_deliver,
+                owner_review_owner=owner_review_owner,
+                owner_review_channel=owner_review_channel,
+                owner_review_schedule=owner_review_schedule,
+                right_brain_schedule=right_brain_schedule,
+                module_cadence_schedule=module_cadence_schedule,
+                right_brain_outcome_schedule=right_brain_outcome_schedule,
+                proposal_followups_schedule=proposal_followups_schedule,
+                expression_feedback_schedule=expression_feedback_schedule,
+                memory_sources_feedback_schedule=memory_sources_feedback_schedule,
+            )
+        else:
+            owner_cron_onboarding_report = {"status": "dry_run"}
     enabled = False
     enable_command: list[str] = []
     if enable:
@@ -382,6 +451,12 @@ def install_plugin(
         "right_brain_expression_cron_helper_path": str(right_brain_expression_cron_helper.get("helper") or ""),
         "right_brain_expression_cron_gate_path": str(right_brain_expression_cron_helper.get("gate") or ""),
         "right_brain_expression_outcome_path": str(right_brain_expression_cron_helper.get("outcome") or ""),
+        "owner_cron_onboarding_install_requested": install_owner_cron_onboarding or run_owner_cron_onboarding,
+        "owner_cron_onboarding_installed": bool(owner_cron_onboarding_path) and not dry_run,
+        "owner_cron_onboarding_path": str(owner_cron_onboarding_path or ""),
+        "owner_cron_onboarding_run_requested": run_owner_cron_onboarding,
+        "owner_cron_onboarding_run_status": str(owner_cron_onboarding_report.get("status") or ""),
+        "owner_cron_onboarding_report": owner_cron_onboarding_report,
         "module_cadence_report_path": str(module_cadence_report or ""),
         "module_cadence_report_cron_path": str(operational_helper_paths.get("module_cadence_report_cron") or ""),
         "right_brain_expression_outcome_cron_path": str(operational_helper_paths.get("right_brain_expression_outcome_cron") or ""),
@@ -722,6 +797,82 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
     return targets
 
 
+def _write_owner_cron_onboarding_script(hermes_home: Path, *, dry_run: bool) -> Path:
+    if not SOURCE_OWNER_CRON_ONBOARDING.is_file():
+        raise SystemExit(f"Owner cron onboarding source is missing: {SOURCE_OWNER_CRON_ONBOARDING}")
+    target = hermes_home / "scripts" / SOURCE_OWNER_CRON_ONBOARDING.name
+    if dry_run:
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SOURCE_OWNER_CRON_ONBOARDING, target)
+    target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return target
+
+
+def _run_owner_cron_onboarding(
+    *,
+    hermes_home: Path,
+    hermes_bin: str,
+    owner_approved: bool,
+    owner_review_deliver: str,
+    right_brain_deliver: str,
+    owner_review_owner: str,
+    owner_review_channel: str,
+    owner_review_schedule: str,
+    right_brain_schedule: str,
+    module_cadence_schedule: str,
+    right_brain_outcome_schedule: str,
+    proposal_followups_schedule: str,
+    expression_feedback_schedule: str,
+    memory_sources_feedback_schedule: str,
+) -> dict[str, object]:
+    module = _load_python_script_module(SOURCE_OWNER_CRON_ONBOARDING)
+    argv = [
+        "--hermes-home",
+        str(hermes_home),
+        "--hermes-bin",
+        hermes_bin,
+        "--owner-review-deliver",
+        owner_review_deliver,
+        "--right-brain-deliver",
+        right_brain_deliver,
+        "--owner",
+        owner_review_owner,
+        "--channel",
+        owner_review_channel,
+        "--owner-review-schedule",
+        owner_review_schedule,
+        "--right-brain-schedule",
+        right_brain_schedule,
+        "--module-cadence-schedule",
+        module_cadence_schedule,
+        "--right-brain-outcome-schedule",
+        right_brain_outcome_schedule,
+        "--proposal-followups-schedule",
+        proposal_followups_schedule,
+        "--expression-feedback-schedule",
+        expression_feedback_schedule,
+        "--memory-sources-feedback-schedule",
+        memory_sources_feedback_schedule,
+        "--apply",
+    ]
+    if owner_approved:
+        argv.append("--owner-approved")
+    args = module.build_parser().parse_args(argv)
+    report = module.run_onboarding(args)
+    if isinstance(report, dict):
+        return dict(report)
+    return {"status": "error", "error": "owner cron onboarding returned a non-dict report"}
+
+
+def _load_python_script_module(path: Path):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
 def _write_deep_reflection_config(
     hermes_home: Path,
     *,
@@ -835,6 +986,33 @@ def main() -> int:
         help="Copy the Memory-OS right-brain expression helper and explicit recurring-enable gate into HERMES_HOME/scripts. Does not create or enable a cron job.",
     )
     parser.add_argument(
+        "--install-owner-cron-onboarding",
+        action="store_true",
+        help="Copy the Memory-OS Hermes cron onboarding script into HERMES_HOME/scripts. Does not create cron jobs.",
+    )
+    parser.add_argument(
+        "--run-owner-cron-onboarding",
+        action="store_true",
+        help="Run Memory-OS cron onboarding after installing helper scripts. Requires --owner-cron-owner-approved for actual cron creation.",
+    )
+    parser.add_argument(
+        "--owner-cron-owner-approved",
+        action="store_true",
+        help="Explicit owner/operator approval for owner cron onboarding to create or update Hermes cron jobs.",
+    )
+    parser.add_argument("--hermes-bin", default="hermes", help="Hermes command used for cron onboarding")
+    parser.add_argument("--owner-review-deliver", default="auto", help="Owner-review deliver target; auto discovers the owner home channel")
+    parser.add_argument("--right-brain-deliver", default="origin", help="Right-brain expression deliver target, default: origin")
+    parser.add_argument("--owner-review-owner", default="owner", help="Owner id used by the owner review helper")
+    parser.add_argument("--owner-review-channel", default="owner_review_cron", help="Channel label used for owner review active digest binding")
+    parser.add_argument("--owner-review-schedule", default="0 9 * * *", help="Owner review cron schedule")
+    parser.add_argument("--right-brain-schedule", default="30 4 * * 0", help="Right-brain expression cron schedule")
+    parser.add_argument("--module-cadence-schedule", default="15 */6 * * *", help="Module cadence report cron schedule")
+    parser.add_argument("--right-brain-outcome-schedule", default="45 4 * * 0", help="Right-brain outcome capture cron schedule")
+    parser.add_argument("--proposal-followups-schedule", default="*/30 * * * *", help="Proposal follow-up OpsGate cron schedule")
+    parser.add_argument("--expression-feedback-schedule", default="0 5 * * 0", help="Right-brain expression feedback cron schedule")
+    parser.add_argument("--memory-sources-feedback-schedule", default="30 10 * * *", help="MemorySources feedback cron schedule")
+    parser.add_argument(
         "--deep-reflection-preset",
         choices=sorted(DEEP_REFLECTION_PRESETS),
         help=(
@@ -879,6 +1057,21 @@ def main() -> int:
         cognitive_loop_interval=args.cognitive_loop_interval,
         install_owner_review_cron_helper=args.install_owner_review_cron_helper,
         install_right_brain_expression_cron_helper=args.install_right_brain_expression_cron_helper,
+        install_owner_cron_onboarding=args.install_owner_cron_onboarding,
+        run_owner_cron_onboarding=args.run_owner_cron_onboarding,
+        owner_cron_owner_approved=args.owner_cron_owner_approved,
+        owner_review_deliver=args.owner_review_deliver,
+        right_brain_deliver=args.right_brain_deliver,
+        owner_review_owner=args.owner_review_owner,
+        owner_review_channel=args.owner_review_channel,
+        owner_review_schedule=args.owner_review_schedule,
+        right_brain_schedule=args.right_brain_schedule,
+        module_cadence_schedule=args.module_cadence_schedule,
+        right_brain_outcome_schedule=args.right_brain_outcome_schedule,
+        proposal_followups_schedule=args.proposal_followups_schedule,
+        expression_feedback_schedule=args.expression_feedback_schedule,
+        memory_sources_feedback_schedule=args.memory_sources_feedback_schedule,
+        hermes_bin=args.hermes_bin,
         deep_reflection_preset=args.deep_reflection_preset,
         memory_sources_preset=args.memory_sources_preset,
         llm_judge_preset=args.llm_judge_preset,

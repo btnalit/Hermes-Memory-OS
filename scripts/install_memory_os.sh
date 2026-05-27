@@ -37,11 +37,12 @@ ENABLE_RUNTIME=""
 INSTALL_COGNITIVE_LOOP=""
 ENABLE_COGNITIVE_LOOP=""
 INSTALL_OWNER_REVIEW_CRON_HELPER=""
+ENABLE_OWNER_CRON_ONBOARDING=""
 ENABLE_OWNER_REVIEW_CRON=""
 INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=""
 ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=""
 RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE="${RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE:-30 4 * * 0}"
-RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER:-auto}"
+RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER:-origin}"
 
 usage() {
   cat <<'USAGE'
@@ -52,17 +53,21 @@ Safe installer for Memory-OS Agent OS.
 Options:
   --hermes-home PATH            Target existing Hermes home.
   --yes, -y                     Accept defaults / run non-interactively.
+  --operational                 Product-style one-command install: install and
+                                enable provider, shell, runtime, module
+                                runtime, cognitive loop, and seven-node Hermes
+                                cron onboarding with owner channel autodetect.
   --test-host                   Test-host defaults: install and enable all
                                 Memory-OS pieces with DeepReflection test-host.
   --production-safe             Production-safe defaults with DeepReflection
                                 explicitly disabled.
-  --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host.
-  --memory-sources-preset NAME none|production-safe|test-host.
+  --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host|operational.
+  --memory-sources-preset NAME none|production-safe|test-host|operational.
   --llm-judge-preset NAME      none|report-only|bounded-vote. Optional low-clue
                                 recall LLM judge; reuses Hermes provider/model config.
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
   --cognitive-loop-interval VALUE
-                                Test-host cognitive loop timer interval. Default: 6h.
+                                Cognitive-loop integration harness interval. Default: 6h.
   --no-install-shell            Do not install memory-os-agent-os shell plugin.
   --no-enable-shell             Do not add memory-os-agent-os to plugins.enabled.
   --no-install-system-modules   Do not install portable L2-L4 runtime modules.
@@ -80,25 +85,23 @@ Options:
                                 and explicit recurring-enable gate to
                                 HERMES_HOME/scripts. Does not create or enable
                                 a cron job.
-  --enable-owner-review-cron    Enable recurring owner review delivery through
-                                Hermes cron --script --deliver in agent mode.
-  --no-enable-owner-review-cron Do not create/enable the Hermes owner review
-                                cron job.
-  --enable-right-brain-expression-cron
-                                Enable low-frequency right-brain expression
-                                through Hermes cron in agent mode.
-  --no-enable-right-brain-expression-cron
-                                Do not create/enable right-brain expression cron.
+  --enable-owner-cron-onboarding
+                                Enable the seven-node Memory-OS Hermes cron
+                                operational set. Owner-facing deliver targets
+                                are auto-detected from Hermes channel_directory.
+  --no-enable-owner-cron-onboarding
+                                Do not create/enable the seven-node Hermes cron
+                                operational set.
   --right-brain-expression-cron-schedule VALUE
                                 Hermes cron schedule. Default: 30 4 * * 0
   --right-brain-expression-cron-deliver VALUE
-                                Hermes cron --deliver target. Default: auto.
+                                Hermes cron --deliver target. Default: origin.
   --owner-review-cron-schedule VALUE
                                 Hermes cron schedule. Default: 0 9 * * *
   --owner-review-cron-deliver VALUE
                                 Hermes cron --deliver target. Default: auto.
-                                auto resolves to telegram for --test-host and
-                                origin otherwise.
+                                auto is resolved by the onboarding script from
+                                Hermes channel_directory.json.
   --owner-review-cron-owner VALUE
                                 Owner id used by the digest helper. Default: owner
   --owner-review-cron-channel VALUE
@@ -121,6 +124,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --yes|-y)
       YES=1
+      shift
+      ;;
+    --operational)
+      MODE="operational"
+      YES=1
+      DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-operational}"
+      MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-operational}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-none}"
+      ENABLE_OWNER_CRON_ONBOARDING=1
+      INSTALL_OWNER_REVIEW_CRON_HELPER=1
+      INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
       shift
       ;;
     --test-host)
@@ -196,21 +210,35 @@ while [[ $# -gt 0 ]]; do
       INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
       shift
       ;;
+    --enable-owner-cron-onboarding)
+      ENABLE_OWNER_CRON_ONBOARDING=1
+      INSTALL_OWNER_REVIEW_CRON_HELPER=1
+      INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
+      shift
+      ;;
+    --no-enable-owner-cron-onboarding)
+      ENABLE_OWNER_CRON_ONBOARDING=0
+      shift
+      ;;
     --enable-owner-review-cron)
+      ENABLE_OWNER_CRON_ONBOARDING=1
       ENABLE_OWNER_REVIEW_CRON=1
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
       shift
       ;;
     --no-enable-owner-review-cron)
+      ENABLE_OWNER_CRON_ONBOARDING=0
       ENABLE_OWNER_REVIEW_CRON=0
       shift
       ;;
     --enable-right-brain-expression-cron)
+      ENABLE_OWNER_CRON_ONBOARDING=1
       ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1
       INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
       shift
       ;;
     --no-enable-right-brain-expression-cron)
+      ENABLE_OWNER_CRON_ONBOARDING=0
       ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=0
       shift
       ;;
@@ -396,10 +424,10 @@ choose_preset() {
     DEEP_REFLECTION_PRESET="${default}"
     return
   fi
-  read -r -p "DeepReflection preset [none/production-safe/observe/auto-bounded/test-host] [${default}] " answer
+  read -r -p "DeepReflection preset [none/production-safe/observe/auto-bounded/test-host/operational] [${default}] " answer
   answer="${answer:-${default}}"
   case "${answer}" in
-    none|production-safe|observe|auto-bounded|test-host)
+    none|production-safe|observe|auto-bounded|test-host|operational)
       DEEP_REFLECTION_PRESET="${answer}"
       ;;
     *)
@@ -417,10 +445,10 @@ choose_memory_sources_preset() {
     MEMORY_SOURCES_PRESET="${default}"
     return
   fi
-  read -r -p "Memory Sources preset [none/production-safe/test-host] [${default}] " answer
+  read -r -p "Memory Sources preset [none/production-safe/test-host/operational] [${default}] " answer
   answer="${answer:-${default}}"
   case "${answer}" in
-    none|production-safe|test-host)
+    none|production-safe|test-host|operational)
       MEMORY_SOURCES_PRESET="${answer}"
       ;;
     *)
@@ -484,22 +512,20 @@ select_options() {
   local default_install_cognitive_loop="no"
   local default_enable_cognitive_loop="no"
   local default_owner_review_cron_helper="yes"
-  local default_enable_owner_review_cron="yes"
+  local default_enable_owner_cron_onboarding="yes"
   local default_right_brain_expression_cron_helper="yes"
-  local default_enable_right_brain_expression_cron="yes"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
   local default_llm_judge_preset="none"
 
-  if [[ "${MODE}" == "test-host" ]]; then
-    default_preset="test-host"
-    default_memory_sources_preset="test-host"
+  if [[ "${MODE}" == "test-host" || "${MODE}" == "operational" ]]; then
+    default_preset="${MODE}"
+    default_memory_sources_preset="${MODE}"
     default_install_cognitive_loop="yes"
     default_enable_cognitive_loop="yes"
   fi
   if [[ "${MODE}" == "production-safe" ]]; then
-    default_enable_owner_review_cron="no"
-    default_enable_right_brain_expression_cron="no"
+    default_enable_owner_cron_onboarding="no"
   fi
 
   [[ -n "${INSTALL_SHELL}" ]] || { ask_yes_no "Install/update memory-os-agent-os shell plugin?" "${default_shell}" && INSTALL_SHELL=1 || INSTALL_SHELL=0; }
@@ -514,23 +540,22 @@ select_options() {
   fi
   [[ -n "${ENABLE_RUNTIME}" ]] || { ask_yes_no "Enable heartbeat timer?" "${default_enable_runtime}" && ENABLE_RUNTIME=1 || ENABLE_RUNTIME=0; }
 
-  [[ -n "${INSTALL_COGNITIVE_LOOP}" ]] || { ask_yes_no "Install test-host cognitive-loop runtime artifacts?" "${default_install_cognitive_loop}" && INSTALL_COGNITIVE_LOOP=1 || INSTALL_COGNITIVE_LOOP=0; }
+  [[ -n "${INSTALL_COGNITIVE_LOOP}" ]] || { ask_yes_no "Install cognitive-loop integration harness runtime artifacts?" "${default_install_cognitive_loop}" && INSTALL_COGNITIVE_LOOP=1 || INSTALL_COGNITIVE_LOOP=0; }
   if [[ "${INSTALL_COGNITIVE_LOOP}" == "0" && -z "${ENABLE_COGNITIVE_LOOP}" ]]; then
     echo "Enable cognitive-loop timer? [no] -> no (cognitive-loop artifacts are not being installed)"
     ENABLE_COGNITIVE_LOOP=0
   fi
-  [[ -n "${ENABLE_COGNITIVE_LOOP}" ]] || { ask_yes_no "Enable test-host cognitive-loop timer?" "${default_enable_cognitive_loop}" && ENABLE_COGNITIVE_LOOP=1 || ENABLE_COGNITIVE_LOOP=0; }
+  [[ -n "${ENABLE_COGNITIVE_LOOP}" ]] || { ask_yes_no "Enable cognitive-loop integration harness timer?" "${default_enable_cognitive_loop}" && ENABLE_COGNITIVE_LOOP=1 || ENABLE_COGNITIVE_LOOP=0; }
   [[ -n "${INSTALL_OWNER_REVIEW_CRON_HELPER}" ]] || { ask_yes_no "Install owner review Hermes cron helper/gate scripts?" "${default_owner_review_cron_helper}" && INSTALL_OWNER_REVIEW_CRON_HELPER=1 || INSTALL_OWNER_REVIEW_CRON_HELPER=0; }
-  [[ -n "${ENABLE_OWNER_REVIEW_CRON}" ]] || { ask_yes_no "Enable daily owner review through Hermes cron?" "${default_enable_owner_review_cron}" && ENABLE_OWNER_REVIEW_CRON=1 || ENABLE_OWNER_REVIEW_CRON=0; }
-  if [[ "${ENABLE_OWNER_REVIEW_CRON}" == "1" ]]; then
+  [[ -n "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" ]] || { ask_yes_no "Install right-brain expression Hermes cron helper/gate scripts?" "${default_right_brain_expression_cron_helper}" && INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1 || INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=0; }
+  [[ -n "${ENABLE_OWNER_CRON_ONBOARDING}" ]] || { ask_yes_no "Enable Memory-OS seven-node Hermes cron onboarding?" "${default_enable_owner_cron_onboarding}" && ENABLE_OWNER_CRON_ONBOARDING=1 || ENABLE_OWNER_CRON_ONBOARDING=0; }
+  if [[ "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" ]]; then
+    ENABLE_OWNER_REVIEW_CRON=1
+    ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1
     INSTALL_OWNER_REVIEW_CRON_HELPER=1
+    INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
     resolve_owner_review_cron_deliver
     resolve_owner_review_cron_channel
-  fi
-  [[ -n "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" ]] || { ask_yes_no "Install right-brain expression Hermes cron helper/gate scripts?" "${default_right_brain_expression_cron_helper}" && INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1 || INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=0; }
-  [[ -n "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" ]] || { ask_yes_no "Enable low-frequency right-brain expression through Hermes cron?" "${default_enable_right_brain_expression_cron}" && ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1 || ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=0; }
-  if [[ "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" == "1" ]]; then
-    INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
     resolve_right_brain_expression_cron_deliver
   fi
 
@@ -549,23 +574,7 @@ resolve_owner_review_cron_deliver() {
   if [[ "${OWNER_REVIEW_CRON_DELIVER}" != "auto" ]]; then
     return 0
   fi
-  if [[ "${MODE}" == "test-host" ]]; then
-    OWNER_REVIEW_CRON_DELIVER="telegram"
-    echo "Owner review cron deliver target [auto] -> telegram (--test-host)"
-    return 0
-  fi
-  if [[ "${YES}" == "1" ]]; then
-    OWNER_REVIEW_CRON_DELIVER="origin"
-    echo "Owner review cron deliver target [auto] -> origin (non-interactive default)"
-    return 0
-  fi
-
-  local answer
-  echo "Hermes cron delivery targets are owned by Hermes. Common targets:"
-  echo "  origin, telegram, discord, signal, platform:chat_id"
-  read -r -p "Owner review cron deliver target [origin]: " answer
-  answer="${answer:-origin}"
-  OWNER_REVIEW_CRON_DELIVER="${answer}"
+  echo "Owner review cron deliver target [auto] -> onboarding will detect Hermes owner channel"
 }
 
 resolve_owner_review_cron_channel() {
@@ -583,50 +592,19 @@ resolve_right_brain_expression_cron_deliver() {
   if [[ "${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER}" != "auto" ]]; then
     return 0
   fi
-  if [[ "${MODE}" == "test-host" ]]; then
-    RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="origin"
-    echo "Right-brain expression cron deliver target [auto] -> origin (--test-host)"
-    return 0
-  fi
-  if [[ "${YES}" == "1" ]]; then
-    RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="origin"
-    echo "Right-brain expression cron deliver target [auto] -> origin (non-interactive default)"
-    return 0
-  fi
-  local answer
-  read -r -p "Right-brain expression cron deliver target [origin]: " answer
-  RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="${answer:-origin}"
+  RIGHT_BRAIN_EXPRESSION_CRON_DELIVER="origin"
+  echo "Right-brain expression cron deliver target [auto] -> origin"
 }
 
 require_hermes_for_selected_actions() {
   [[ "${DRY_RUN}" == "1" ]] && return 0
   command_exists hermes && return 0
 
-  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${ENABLE_OWNER_REVIEW_CRON}" == "1" || "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
+  if [[ "${ENABLE_PROVIDER}" == "1" || "${ENABLE_SHELL}" == "1" || "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" || "${SKIP_VERIFY}" != "1" ]]; then
     echo "ERROR: hermes command not found in PATH." >&2
     echo "Install Hermes or rerun with --skip-verify and without provider/shell enablement for file-copy-only installs." >&2
     exit 1
   fi
-}
-
-enable_owner_review_cron() {
-  [[ "${ENABLE_OWNER_REVIEW_CRON}" == "1" ]] || return 0
-  local gate="${HERMES_HOME}/scripts/memory_os_owner_review_cron_gate.py"
-  local args=("${PYTHON_BIN}" "${gate}" "--hermes-home" "${HERMES_HOME}" "--schedule" "${OWNER_REVIEW_CRON_SCHEDULE}" "--deliver" "${OWNER_REVIEW_CRON_DELIVER}" "--owner" "${OWNER_REVIEW_CRON_OWNER}" "--channel" "${OWNER_REVIEW_CRON_CHANNEL}")
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    echo
-    echo "Dry-run owner review Hermes cron enable plan:"
-    printf '  %q' "${args[@]}" "--apply" "--owner-approved"
-    echo
-    return 0
-  fi
-  args+=("--apply" "--owner-approved")
-
-  echo
-  echo "Configuring owner review Hermes cron:"
-  printf '  %q' "${args[@]}"
-  echo
-  "${args[@]}"
 }
 
 run_installer() {
@@ -644,32 +622,27 @@ run_installer() {
   args+=("--cognitive-loop-interval" "${COGNITIVE_LOOP_INTERVAL}")
   [[ "${INSTALL_OWNER_REVIEW_CRON_HELPER}" == "1" ]] && args+=("--install-owner-review-cron-helper")
   [[ "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" == "1" ]] && args+=("--install-right-brain-expression-cron-helper")
+  if [[ "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" ]]; then
+    args+=(
+      "--install-owner-cron-onboarding"
+      "--run-owner-cron-onboarding"
+      "--owner-cron-owner-approved"
+      "--owner-review-deliver" "${OWNER_REVIEW_CRON_DELIVER}"
+      "--right-brain-deliver" "${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER}"
+      "--owner-review-owner" "${OWNER_REVIEW_CRON_OWNER}"
+      "--owner-review-channel" "${OWNER_REVIEW_CRON_CHANNEL}"
+      "--owner-review-schedule" "${OWNER_REVIEW_CRON_SCHEDULE}"
+      "--right-brain-schedule" "${RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE}"
+    )
+  elif [[ "${INSTALL_OWNER_REVIEW_CRON_HELPER}" == "1" || "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" == "1" ]]; then
+    args+=("--install-owner-cron-onboarding")
+  fi
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
   [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
   [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
   echo "Running installer:"
-  printf '  %q' "${args[@]}"
-  echo
-  "${args[@]}"
-}
-
-enable_right_brain_expression_cron() {
-  [[ "${ENABLE_RIGHT_BRAIN_EXPRESSION_CRON}" == "1" ]] || return 0
-  local gate="${HERMES_HOME}/scripts/memory_os_right_brain_expression_cron_gate.py"
-  local args=("${PYTHON_BIN}" "${gate}" "--hermes-home" "${HERMES_HOME}" "--schedule" "${RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE}" "--deliver" "${RIGHT_BRAIN_EXPRESSION_CRON_DELIVER}")
-  if [[ "${DRY_RUN}" == "1" ]]; then
-    echo
-    echo "Dry-run right-brain expression Hermes cron enable plan:"
-    printf '  %q' "${args[@]}" "--apply" "--owner-approved"
-    echo
-    return 0
-  fi
-  args+=("--apply" "--owner-approved")
-
-  echo
-  echo "Configuring right-brain expression Hermes cron:"
   printf '  %q' "${args[@]}"
   echo
   "${args[@]}"
@@ -716,8 +689,6 @@ inspect_current_state
 select_options
 require_hermes_for_selected_actions
 run_installer
-enable_owner_review_cron
-enable_right_brain_expression_cron
 verify_install
 
 echo

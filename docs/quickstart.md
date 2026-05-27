@@ -16,26 +16,29 @@ target explicit.
 
 ## 2. Install
 
+One-command operational install for an existing Hermes profile:
+
+```bash
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational
+```
+
+This installs and enables the Memory-OS provider, the Hermes Agent OS shell,
+the portable runtime, heartbeat, the current cognitive loop harness, and the
+seven-node Hermes cron operational set. Owner-facing cron jobs use Hermes
+`channel_directory.json` autodiscovery, so Telegram is selected only when it is
+the configured owner channel. Right-brain expression uses `deliver=origin`, and
+background maintenance jobs use `deliver=local` / no-agent.
+
 Interactive install:
 
 ```bash
 bash scripts/install_memory_os.sh
 ```
 
-No-send test-host install:
-
-```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --test-host
-```
-
-The test-host preset installs the owner review helper and enables the daily
-owner review digest through Hermes cron by default. Use
-`--no-enable-owner-review-cron` if you want the helper installed but no recurring
-delivery job. Outside `--test-host`, the installer resolves the default owner
-review delivery target to Hermes cron `origin` rather than hardcoding Telegram.
-Hermes owns the scheduled delivery, platform transport, and final owner-facing
-wording in agent mode; Memory-OS only renders the bounded review brief and
-processes owner actions.
+Use `--no-enable-owner-cron-onboarding` if you want helper scripts installed
+but no recurring jobs. Hermes owns scheduled delivery, platform transport, and
+final owner-facing wording in agent mode; Memory-OS only renders bounded briefs,
+tokens, state transitions, audit, and monitor evidence.
 
 Production-safe install:
 
@@ -76,8 +79,8 @@ They do not need to expose `hermes memory_os ...` as a top-level command.
   `$HERMES_HOME/memory-os/runtime/python/`
 - optional heartbeat and cognitive-loop systemd user units under
   `$HERMES_HOME/memory-os/systemd/`
-- optional owner review digest helper/gate under `$HERMES_HOME/scripts/`; the
-  test-host preset enables the daily Hermes cron job unless explicitly disabled
+- optional Memory-OS Hermes cron onboarding under `$HERMES_HOME/scripts/`; the
+  operational preset creates the seven-node cron set unless explicitly disabled
 
 Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 `$HERMES_HOME/plugins/`.
@@ -88,8 +91,9 @@ Memory-OS does not automatically send messages, execute external actions, write
 identity, approve crystallized memory, export to Hindsight, apply cleanup, or
 apply shadow journals.
 
-Test-host mode enables observation loops. It does not enable real sends,
-executes, identity writes, or crystallized approvals.
+The operational preset enables runtime loops and Hermes cron jobs, but it does
+not enable direct Memory-OS sends, external execution, identity writes, or
+unapproved crystallized approvals.
 
 ## 6. Owner Review Via Hermes Agent
 
