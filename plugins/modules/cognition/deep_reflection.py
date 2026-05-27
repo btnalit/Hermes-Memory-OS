@@ -489,14 +489,29 @@ class DeepReflectionModule:
                     if proposal_queue is None:
                         dropped.append(_optional_drop_record(item, "missing_proposal_queue"))
                         continue
+                    proposal_class = _deep_reflection_proposal_class(item)
+                    dedupe_key = proposal_class
+                    if _has_unresolved_deep_reflection_proposal(
+                        proposal_queue,
+                        proposal_class=proposal_class,
+                        dedupe_key=dedupe_key,
+                        title=str(item["title"]),
+                    ):
+                        dropped.append(_optional_drop_record(item, "duplicate_unresolved_proposal"))
+                        continue
                     proposal = proposal_queue.create_candidate(
                         store=store,
                         title=str(item["title"]),
-                        body=str(item["body"]),
+                        body=_deep_reflection_proposal_body(item, proposal_class=proposal_class),
                         source_refs=list(item["source_refs"]),
                         kind="deep_reflection_self_evolution",
+                        proposal_class=proposal_class,
+                        dedupe_key=dedupe_key,
+                        proposal_quality=_deep_reflection_proposal_quality(item, proposal_class=proposal_class),
                     )
                     item["proposal_id"] = str(proposal["candidate_id"])
+                    item["proposal_class"] = proposal_class
+                    item["dedupe_key"] = dedupe_key
                     proposal_created_count += 1
                 elif output_kind == "wandering_seed":
                     self._append_wandering_seed(item)
@@ -992,6 +1007,91 @@ class DeepReflectionModule:
         _append_jsonl(self.wandering_seeds_path, record)
         item["seed_id"] = record["seed_id"]
         return record
+
+
+def _deep_reflection_proposal_class(item: dict[str, Any]) -> str:
+    text = " ".join([str(item.get("title", "")), str(item.get("body", ""))]).lower()
+    if any(marker in text for marker in ("tone", "report-like", "too formal", "normal chat", "正常聊天", "像报告")):
+        return "deep_reflection:ordinary_tone"
+    return "deep_reflection:continuity_behavior"
+
+
+def _deep_reflection_proposal_body(item: dict[str, Any], *, proposal_class: str) -> str:
+    source_refs = [str(ref) for ref in item.get("source_refs", []) if str(ref)]
+    summary = _safe_sentence_clip(str(item.get("body", "")), 180)
+    if proposal_class == "deep_reflection:ordinary_tone":
+        change = "将普通记忆对话的语气反馈整理成人工 follow-up 项，避免后续只出现泛化标题。"
+        acceptance = "审批摘要能看到语气问题、证据和停止条件；pipeline checker 不再报告 quality metadata missing；不会产生实际运行变更。"
+    else:
+        change = "将连续性回顾发现整理成人工 follow-up 项，后续只在有明确人工决策时再制定具体调整。"
+        acceptance = "审批摘要能看到连续性问题、证据和停止条件；pipeline checker 不再报告 quality metadata missing；不会产生实际运行变更。"
+    return "\n".join(
+        [
+            f"具体改动: {change}",
+            f"证据: {_clip(summary, 180)}；bounded_refs={len(source_refs)}.",
+            f"验收标准: {acceptance}",
+            "后续状态: 仅进入 report-only 复核；任何实际应用都必须另开显式 apply gate.",
+        ]
+    )
+
+
+def _deep_reflection_proposal_quality(item: dict[str, Any], *, proposal_class: str) -> dict[str, Any]:
+    source_refs = [str(ref) for ref in item.get("source_refs", []) if str(ref)]
+    source_classes = [str(item) for item in item.get("source_classes", []) if str(item)]
+    return {
+        "quality_gate": "deep_reflection_report_only",
+        "trigger_rule": "deep_reflection_optional_self_evolution_topic",
+        "runtime_target": "report_only_deep_reflection",
+        "direct_apply_allowed": False,
+        "generic_executor_allowed": False,
+        "evidence_ref_count": len(source_refs),
+        "top_subject_ref": source_refs[0] if source_refs else "",
+        "top_subject_kind": proposal_class,
+        "maturity_score": 0.45 if len(source_refs) < 2 else 0.55,
+        "maturity_dimensions": {
+            "evidence_strength": min(len(source_refs), 4),
+            "source_diversity": len(set(source_classes)),
+            "actionability": "manual_followup_only",
+            "gate_state": "report_only",
+            "risk": "no_direct_runtime_change",
+        },
+    }
+
+
+def _has_unresolved_deep_reflection_proposal(
+    proposal_queue: Any,
+    *,
+    proposal_class: str,
+    dedupe_key: str,
+    title: str,
+) -> bool:
+    try:
+        items = proposal_queue.read_queue().get("items", [])
+    except Exception:
+        return False
+    normalized_title = " ".join(str(title).lower().split())
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _proposal_is_closed(item):
+            continue
+        if str(item.get("dedupe_key") or "") == dedupe_key:
+            return True
+        if str(item.get("proposal_class") or "") == proposal_class:
+            return True
+        if str(item.get("kind") or "") == "deep_reflection_self_evolution":
+            item_title = " ".join(str(item.get("title") or "").lower().split())
+            if item_title and item_title == normalized_title:
+                return True
+    return False
+
+
+def _proposal_is_closed(item: dict[str, Any]) -> bool:
+    state = str(item.get("state") or "")
+    followup_state = str(item.get("followup_state") or "")
+    if state in {"owner_declined", "expired", "pressure_blocked"}:
+        return True
+    return followup_state in {"closed", "applied_expression_policy", "applied_legacy_template_cleanup"}
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:

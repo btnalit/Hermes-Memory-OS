@@ -15783,3 +15783,239 @@ Conclusion:
   `module_cadence_split_pending` WARN is gone.
 - The next right-brain maturity gate is owner reaction volume and expression
   quality, not more scheduler or transport work.
+
+## 2026-05-27 - P1-S DeepReflection Proposal Quality Repair
+
+Scope:
+
+- P1-S / RH-39 left-brain pipeline quality.
+- Fix the live `left_brain_pipeline_check_warn` /
+  `left_brain_proposal_quality_metadata_missing` finding at the producer
+  source rather than suppressing the checker.
+
+Preflight:
+
+```text
+source_of_truth=40/41 P1-S, 39 left-brain governance quality contract, live left_brain_pipeline_check latest.json
+finding_type=live monitor WARN / proposal quality metadata gap
+owning_seam=DeepReflection optional self-evolution proposal producer + ProposalQueue quality metadata + LeftBrainPipelineCheck
+reverse_scope=Hermes agent/transport unchanged; Memory-OS repairs bounded proposal metadata and duplicate gating only
+monitor_or_validation_fields=proposal_quality_missing_count, concrete_body_missing_count, duplicate_unresolved.active_duplicate_group_count, left_brain_pipeline_check.status
+promotion_signal=left_brain_pipeline_check.status=ok, finding_count=0, proposal_quality_missing_count=0, duplicate_unresolved active groups=0
+stop_or_rollback_signal=actual_execute/send true, generic executor introduced, or left_brain_pipeline_check_warn remains
+external_review=not required for bounded metadata repair with no execution/send/apply
+```
+
+Finding:
+
+```text
+/root/.hermes/system-modules/left_brain_pipeline_check/latest.json
+status=warn
+findings=[proposal_quality_metadata_missing]
+owner_actionable_proposal_count=2
+quality_metadata_missing_count=1
+concrete_body_missing_count=1
+actual_execute=false
+
+/root/.hermes/system-modules/proposal_queue/queue.json
+kind=deep_reflection_self_evolution
+title=Review reflection continuity behavior
+proposal_class=null
+dedupe_key=null
+proposal_quality missing
+body=Review whether reflection outputs should improve bounded continuity handling.
+```
+
+Local implementation:
+
+- `DeepReflectionModule.emit_optional_outputs()` now creates
+  `deep_reflection_self_evolution` proposals with:
+  - stable `proposal_class`;
+  - stable `dedupe_key`;
+  - concrete owner-readable body containing `具体改动:` and `验收标准:`;
+  - report-only `proposal_quality`;
+  - `direct_apply_allowed=false`;
+  - `generic_executor_allowed=false`.
+- unresolved duplicate DeepReflection proposals are dropped before
+  `ProposalQueueModule.create_candidate()`.
+- no Hermes agent, transport, cron, send, or execution ownership changed.
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_deep_reflection_module.py -q
+26 passed
+
+python -m pytest tests\system_modularization\test_left_brain_pipeline_checker.py tests\system_modularization\test_deep_reflection_module.py -q
+34 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+```
+
+Live deployment:
+
+```text
+scp plugins/modules/cognition/deep_reflection.py hermes-media:/root/.hermes/memory-os/runtime/python/plugins/modules/cognition/deep_reflection.py
+PYTHONPATH=/root/.hermes/memory-os/runtime/python python3 -m py_compile /root/.hermes/memory-os/runtime/python/plugins/modules/cognition/deep_reflection.py
+```
+
+Bounded live repair:
+
+```text
+schema_version=memory-os.deep_reflection_proposal_quality_repair.v0
+repaired_count=3
+closed_duplicate_count=1
+closed_duplicate_candidate_ids=[prop_20260527T041204579820Z_7a29eb0016]
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+```
+
+Live left-brain checker after repair:
+
+```text
+status=ok
+findings=[]
+proposal_quality.quality_metadata_missing_count=0
+proposal_quality.concrete_body_missing_count=0
+duplicate_unresolved.active_duplicate_group_count=0
+duplicate_unresolved.active_duplicate_candidate_count=0
+execution_boundary.execution_ticket_count=0
+execution_boundary.actual_execute=false
+```
+
+Full monitor after repair:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+ModuleArtifacts.left_brain_pipeline_check.status=ok
+ModuleArtifacts.left_brain_pipeline_check.finding_count=0
+ModuleArtifacts.left_brain_pipeline_check.proposal_quality_missing_count=0
+ModuleArtifacts.left_brain_pipeline_check.actual_execute=false
+WARN=['session_mirror_pending_sessions', 'rh31_eval_has_failures', 'rh26_casual_empty']
+```
+
+Conclusion:
+
+- LIVE PASS / MONITOR PASS for the P1-S left-brain pipeline WARN slice.
+- The previous `left_brain_pipeline_check_warn` and
+  `left_brain_proposal_quality_metadata_missing` warnings are closed by fixing
+  the DeepReflection producer plus bounded live metadata repair.
+- Remaining WARN items are unrelated observation/eval/recall items:
+  SessionMirror pending sessions, RH-31 eval failures, and RH-26 casual empty.
+
+## 2026-05-27 - P1-J SessionMirror / RH-28 Source Correlation Refresh
+
+Scope:
+
+- P1-J SessionMirror entrance completeness.
+- Read-only correlation only; no one-time apply and no mirrored event writes.
+
+Preflight:
+
+```text
+source_of_truth=32 P1-J, 29 SessionMirror/RH-28 contract, live monitor
+finding_type=live monitor WARN / pending session coverage
+owning_seam=SessionMirror coverage + RH-28 low-clue candidate source completeness
+reverse_scope=Hermes session surfaces are read only; Memory-OS does not apply pending sessions without correlation and owner approval
+monitor_or_validation_fields=pending_session_count,dry_run_new_event_count,dry_run_written_event_ids_count,dry_run_findings_count,pending_only_groups,internet_data_collection_pending_count
+promotion_signal=pending-only source group correlates with a real RH-28/RH-26 recall omission and dry-run remains bounded
+stop_or_rollback_signal=dry-run writes events, raw private body printed, pending sessions treated as approved memory, or SessionMirror duplicate provider-captured turns
+external_review=required before any one-time apply; not required for read-only correlation
+```
+
+Read-only commands:
+
+```text
+hermes memory-os-agent-os modules status
+hermes memory-os-agent-os modules run-once --module session_mirror --dry-run
+hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个" --limit 4 --llm-judge none
+bounded custom correlation probe using SessionMirror._discover_sessions() without printing raw message bodies
+```
+
+SessionMirror status and dry-run:
+
+```text
+session_count=64
+covered_session_count=31
+pending_session_count=33
+dry_run_new_event_count=33
+dry_run_written_event_ids_count=0
+dry_run_findings_count=0
+state_rebuilt=false
+```
+
+Bounded correlation result:
+
+```text
+schema_version=memory-os.session_mirror_correlation_probe.v1
+dry_run_only=true
+raw_private_body_printed=false
+written_event_ids_count=0
+pending_platform_counts={acp:5, cli:8, cron:7, telegram:13}
+pending_event_kind_counts={conversation_turn_mirrored:24, session_observed:9}
+pending_message_count_min=0
+pending_message_count_max=253
+
+topic_group_counts.pending_sessions={
+  approval_governance:5,
+  hermes_voice_skill:3,
+  memory_os:11,
+  right_brain_expression:1
+}
+
+topic_group_counts.provider_captured_events={
+  approval_governance:8,
+  automation_orchestration:25,
+  hermes_voice_skill:49,
+  internet_data_collection:12,
+  memory_os:53,
+  right_brain_expression:1
+}
+
+pending_only_groups=[]
+internet_data_collection_pending_count=0
+internet_data_collection_provider_count=12
+```
+
+RH-28 low-clue dry-run snapshot:
+
+```text
+query="继续昨天那个"
+decision=ask_choice
+candidate_count=4
+candidate_quality.eligible_candidate_count=134
+candidate_quality.diversity_applied=false
+selected_source_distribution={working:4}
+first_candidate_label=我们之前说的互联网数据采集系统，如果重新设计，你会怎么分层
+other_candidate_labels include owner-command/noise-like items such as approve A3 and R2/R3/R4
+boundaries.actual_send=false
+boundaries.actual_execute=false
+```
+
+Interpretation:
+
+- Pending sessions are still real coverage debt.
+- The current bounded correlation does not show a pending-only topic group.
+- `internet_data_collection` is not missing from provider-captured events; it
+  appears in provider-captured evidence and remains the first low-clue
+  candidate from working memory.
+- The current RH-28 quality issue is more likely candidate ranking/noise
+  hygiene than SessionMirror source absence.
+- Do not proceed to one-time SessionMirror apply from this evidence alone.
+
+Next gate:
+
+- Continue treating `session_mirror_pending_sessions` as WARN observation.
+- Re-open one-time apply review only if a future live recall miss maps to a
+  bounded pending-only SessionMirror source group and dry-run remains
+  no-write/no-finding.

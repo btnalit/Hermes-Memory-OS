@@ -1220,6 +1220,11 @@ Completed baseline:
     GovernanceFeedback mirror events for fingerprint purposes; cadence report
     now treats modules with visible skip/duplicate evidence as no longer
     `production_cadence_split_pending`.
+17. P1-S DeepReflection proposal quality repair is deployed: optional
+    `deep_reflection_self_evolution` proposals now include stable
+    `proposal_class`, `dedupe_key`, concrete body sections, and report-only
+    `proposal_quality`; the live historical repair fixed 3 proposals, closed
+    1 duplicate, and left `left_brain_pipeline_check.status=ok`.
 
 Next runtime order:
 
@@ -1230,8 +1235,9 @@ Next runtime order:
 2. P1-P timestamp / aging quality.
 3. P1-T choose any further module split only from refreshed
    generated/skipped/error/duplicate counters and real owner/outcome volume.
-4. P1-S remaining work narrows to feedback proposal usefulness/maturity after
-   the linked-outcome quality gate; no direct policy/prompt/cadence mutation.
+4. P1-S remaining work is no longer the pipeline WARN; further left-brain
+   quality work should be selected from fresh monitor findings and must not
+   directly mutate policy/prompt/cadence.
 5. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
    bounded-live gate.
 

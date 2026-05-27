@@ -609,11 +609,70 @@ def test_deep_reflection_optional_outputs_create_proposal_and_wandering_seed_no_
     assert proposal["kind"] == "deep_reflection_self_evolution"
     assert proposal["state"] == "candidate"
     assert proposal["crystallized_approved"] is False
+    assert proposal["proposal_class"] == "deep_reflection:continuity_behavior"
+    assert proposal["dedupe_key"] == "deep_reflection:continuity_behavior"
+    assert "具体改动:" in proposal["body"]
+    assert "验收标准:" in proposal["body"]
+    assert proposal["proposal_quality"]["quality_gate"] == "deep_reflection_report_only"
+    assert proposal["proposal_quality"]["runtime_target"] == "report_only_deep_reflection"
+    assert proposal["proposal_quality"]["direct_apply_allowed"] is False
+    assert proposal["proposal_quality"]["generic_executor_allowed"] is False
+    assert proposal["proposal_quality"]["evidence_ref_count"] == 1
     seed_records = [json.loads(line) for line in module.wandering_seeds_path.read_text(encoding="utf-8").splitlines()]
     assert seed_records[0]["schema_version"] == "hermes.deep_reflection.wandering_seed.v0"
     assert seed_records[0]["delivery_mode"] == "no-send"
     assert seed_records[0]["actual_send"] is False
     assert not (tmp_path / "system-modules" / "wandering_mind" / "would_send.jsonl").exists()
+
+
+def test_deep_reflection_optional_outputs_skip_duplicate_unresolved_proposal(tmp_path):
+    store = _store(tmp_path)
+    event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=541, profile="main"),
+            "kind": "conversation_turn",
+            "summary": "Owner noticed reflection could improve bounded context selection.",
+            "safe_ref": {"drive_policy": "eligible"},
+        }
+    )
+    store.append_event(event)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    module = DeepReflectionModule(tmp_path, profile="main")
+    module.config_path.parent.mkdir(parents=True, exist_ok=True)
+    module.config_path.write_text(
+        json.dumps({"self_evolution_proposals_enabled": True}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    input_snapshot = module.collect_inputs(store=store)
+    analysis = {
+        "candidate_self_evolution_topics": [
+            {
+                "title": "Tune reflection context selection",
+                "text": "Review whether bounded reflection cards improve continuity without exposing mechanisms.",
+                "source_refs": [f"event:{event.id}"],
+            }
+        ]
+    }
+
+    first = module.emit_optional_outputs(
+        store=store,
+        analysis=analysis,
+        input_snapshot=input_snapshot,
+        proposal_queue=proposal_queue,
+        apply=True,
+    )
+    second = module.emit_optional_outputs(
+        store=store,
+        analysis=analysis,
+        input_snapshot=input_snapshot,
+        proposal_queue=proposal_queue,
+        apply=True,
+    )
+
+    assert first["proposal_created_count"] == 1
+    assert second["proposal_created_count"] == 0
+    assert len(proposal_queue.read_queue()["items"]) == 1
+    assert {item["reason"] for item in second["dropped_outputs"]} == {"duplicate_unresolved_proposal"}
 
 
 def test_deep_reflection_optional_outputs_reject_unsafe_or_ineligible_outputs(tmp_path):

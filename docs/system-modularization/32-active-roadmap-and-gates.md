@@ -506,17 +506,20 @@ Source:
 Status:
 
 - `session_mirror` is implemented and commandized;
-- last recorded 07 monitor evidence reports `session_count=54`, `covered_session_count=29`,
-  and `pending_session_count=25`;
-- last recorded dry-run monitor evidence reports `dry_run_new_event_count=25`,
+- latest 07 monitor evidence reports `session_count=64`, `covered_session_count=31`,
+  and `pending_session_count=33`;
+- latest dry-run monitor evidence reports `dry_run_new_event_count=33`,
   `dry_run_written_event_ids_count=0`, and `dry_run_findings_count=0`;
-- read-only topic-signature correlation found:
-  - pending sessions: `automation_orchestration=1`, `memory_os=8`;
-  - provider-captured events: `automation_orchestration=33`,
-    `internet_data_collection=10`, `memory_os=53`, `comfyui_media=47`,
-    `mindvideo_api=10`;
-  - pending sessions did not show an `internet_data_collection` pending-only
-    signal;
+- latest read-only topic-signature correlation found:
+  - pending sessions: `approval_governance=5`, `hermes_voice_skill=3`,
+    `memory_os=11`, `right_brain_expression=1`;
+  - provider-captured events: `approval_governance=8`,
+    `automation_orchestration=25`, `hermes_voice_skill=49`,
+    `internet_data_collection=12`, `memory_os=53`,
+    `right_brain_expression=1`;
+  - `pending_only_groups=[]`;
+  - `internet_data_collection_pending_count=0` while
+    `internet_data_collection_provider_count=12`;
 - no recurring SessionMirror apply is enabled.
 - monitor now exposes the P1-J coverage summary and treats pending sessions as
   WARN observation rather than FAIL.
@@ -531,10 +534,13 @@ Why it matters:
 Next action:
 
 - continue scheduled monitor observation of pending/covered counts;
-- use the monitor trend to decide whether a separate one-time SessionMirror
-  apply review is worth asking Claude to inspect;
+- do not request one-time SessionMirror apply from the current evidence alone;
+- revisit apply review only if a future bounded probe shows pending-only source
+  groups matching a real RH-28/RH-26 recall omission;
 - do not treat P1-J as the likely fix for the earlier
-  `internet_data_collection` candidate omission.
+  `internet_data_collection` candidate omission; current low-clue dry-run still
+  selects that topic from working memory, while other candidates show
+  owner-command/noise pressure.
 
 Promotion signal:
 
@@ -1313,6 +1319,14 @@ Reason:
   `proposal_quality_missing_count=0`,
   `expression_policy_quality_ready_count=0`,
   `expression_policy_quality_blocked_count=0`, and `actual_execute=false`;
+- P1-S DeepReflection proposal quality repair is deployed: optional
+  `deep_reflection_self_evolution` proposals now carry stable
+  `proposal_class`, `dedupe_key`, concrete owner-readable body sections, and
+  report-only `proposal_quality`; a bounded live repair added missing quality
+  metadata to 3 historical proposals, closed 1 duplicate as
+  `pressure_blocked`, and the latest monitor no longer reports
+  `left_brain_pipeline_check_warn` or
+  `left_brain_proposal_quality_metadata_missing`;
 - latest monitor evidence reports `feature_score_count=508`,
   `hash_score_legacy_count=0`, `legacy_hash_comparison_count=508`, and PASS
   `left_brain_feature_scoring_primary_ok`;

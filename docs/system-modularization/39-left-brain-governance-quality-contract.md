@@ -49,6 +49,13 @@ Current implementation state:
   (`actual_execute=false`). Latest live monitor reports all four counts at `0`,
   meaning no active expression-policy proposal is currently waiting for owner
   approval and no quality gap is hidden.
+- P1-S DeepReflection proposal quality repair is implemented and deployed on
+  `10.20.3.200`: optional `deep_reflection_self_evolution` proposals now write
+  stable `proposal_class`, `dedupe_key`, concrete owner-readable body sections,
+  and report-only `proposal_quality`. A bounded live metadata repair fixed 3
+  historical DeepReflection proposals and closed 1 duplicate as
+  `pressure_blocked`; latest monitor reports `left_brain_pipeline_check.status=ok`,
+  `finding_count=0`, and `proposal_quality_missing_count=0`.
 - This replaces legacy hash scoring as the primary scoring path. It does not
   implement automatic prompt/policy/cadence apply, production cadence, or
   execution apply.

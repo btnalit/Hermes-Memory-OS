@@ -417,6 +417,13 @@ Current truth:
   `expression_policy_quality_blocked_count`, and
   `expression_policy_unlinked_quality_count`; latest live monitor reports all
   four counts at `0` with `actual_execute=false`.
+- P1-S DeepReflection proposal quality repair is live: optional
+  `deep_reflection_self_evolution` proposals now include stable
+  `proposal_class`, `dedupe_key`, concrete owner-readable body sections, and
+  report-only `proposal_quality`; a bounded live metadata repair fixed 3
+  historical DeepReflection proposals, closed 1 duplicate as
+  `pressure_blocked`, and removed the
+  `left_brain_proposal_quality_metadata_missing` monitor WARN.
 - P1-S DeepReflection expired-working hygiene is deployed: latest
   `10.20.3.200` dry-run reports `active_working_input_count=8`,
   `expired_working_skipped_count=158`,
@@ -586,10 +593,17 @@ Owning docs:
 
 Current truth:
 
-- pending sessions remain;
-- dry-run shows would-generate bounded events;
-- no apply until pending sessions correlate with real recall omissions and
-  owner approves apply.
+- pending sessions remain: latest read-only evidence reports
+  `session_count=64`, `covered_session_count=31`,
+  `pending_session_count=33`, and `dry_run_new_event_count=33`;
+- dry-run writes no events and reports no findings:
+  `dry_run_written_event_ids_count=0`, `dry_run_findings_count=0`;
+- the latest bounded source-correlation found no pending-only topic group and
+  `internet_data_collection_pending_count=0` versus
+  `internet_data_collection_provider_count=12`;
+- current evidence does not justify one-time SessionMirror apply. Apply review
+  requires a future pending-only source group that correlates with a real
+  RH-28/RH-26 recall omission plus explicit owner approval.
 
 ### Observation Queue
 
