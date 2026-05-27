@@ -418,6 +418,17 @@ Status:
   - `记忆系统带来的变化 这条`
   with no attachment placeholders, internal projection headings, or duplicate
   raw session-search variants;
+- 2026-05-27 follow-up fixed live owner-review command and transcript-residue
+  noise in the candidate pool:
+  - action command fragments such as `approve A3`, `R2/R3/R4`, and
+    `oa_... approve/reject/allow/feedback` are filtered as non-topic titles;
+  - generic speaker residue such as `Assistant / 系统` is filtered;
+  - internal diagnostic terms no longer steal the title from user questions
+    (`memory_os / canonical / store / index...` became
+    `老实说，我们现在这套记忆系统强大么`);
+  - latest dry-run remains `ask_choice`, with
+    `filtered_non_topic_title_count=8`, `max_title_chars=40`, and all
+    boundaries false;
 - `memory_sources` did not produce an eligible topic candidate in that run,
   so candidate quality still needs live observation rather than a maturity
   claim;

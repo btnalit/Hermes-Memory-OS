@@ -16019,3 +16019,103 @@ Next gate:
 - Re-open one-time apply review only if a future live recall miss maps to a
   bounded pending-only SessionMirror source group and dry-run remains
   no-write/no-finding.
+
+## 2026-05-27 - RH-28 Candidate Ranking / Noise Hygiene Follow-up
+
+Scope:
+
+- RH-28 low-clue recall candidate title eligibility and display ranking.
+- No direct-resume change, no SessionMirror apply, no Hermes transport change.
+
+Preflight:
+
+```text
+source_of_truth=32 P1-G/P1-J, 29 ingress/context contract, live low-clue dry-run
+finding_type=live behavior / candidate quality noise
+owning_seam=RH-28 low-clue recall title eligibility and normalized choice title selection
+reverse_scope=Hermes owns conversation and transport; Memory-OS only filters bounded candidate titles
+monitor_or_validation_fields=filtered_non_topic_title_count, candidate labels, selected_source_distribution, boundaries
+promotion_signal=owner-review commands and internal diagnostic titles no longer appear as low-clue choices
+stop_or_rollback_signal=topic-specific hardcode, direct resume enabled from this signal, boundary true, or legitimate approval/governance topics filtered
+external_review=not required for bounded deterministic filter; live Telegram retest remains highest-value validation
+```
+
+Local regression:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_low_clue_recall.py -q
+result=30 passed
+
+python -m pytest tests\plugins\memory\test_memory_os_low_clue_recall.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=76 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+result=clean
+```
+
+Remote deployment / smoke:
+
+```text
+deployed_file=plugins/memory/memory_os/low_clue_recall.py
+remote_path=/root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/low_clue_recall.py
+remote_py_compile=pass
+remote_test_path=not available on test host (no tests/plugins/memory tree)
+```
+
+Live dry-run after fix:
+
+```text
+command=hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个" --limit 4 --llm-judge none
+decision=ask_choice
+candidate_count=4
+raw_candidate_count=136
+eligible_candidate_count=128
+filtered_non_topic_title_count=8
+cluster_count=34
+merged_duplicates=102
+selected_source_distribution={working:4}
+diversity_applied=false
+max_title_chars=40
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+```
+
+User-facing candidate label changes:
+
+```text
+removed_owner_review_command_noise=true
+removed_examples=approve A3; R2/R3/R4; oa_... approve/reject/allow/feedback prompt
+removed_generic_transcript_residue=Assistant / 系统
+internal_diagnostic_terms_no_longer_steal_title=true
+previous_bad_label=memory_os / canonical / store / index...
+new_label=老实说，我们现在这套记忆系统强大么
+first_candidate_label=我们之前说的互联网数据采集系统，如果重新设计，你会怎么分层
+```
+
+Interpretation:
+
+- The fix is generic title hygiene, not topic hard-coding.
+- Owner-review action commands and bare action-token dialog fragments are now
+  filtered as non-topic artifacts.
+- Diagnostic storage terms such as `memory_os`, `canonical`, `store`, and
+  `index` no longer outrank the user's actual question when normalizing a
+  transcript-derived candidate title.
+- The dry-run still selects four `working` candidates and reports
+  `diversity_applied=false`; source-diversity maturity remains an observation
+  item, not a closed claim.
+
+Next gate:
+
+- Retest through real Telegram when a live-process verification is needed.
+- Continue observing source distribution and candidate usefulness before
+  promoting RH-28 candidate quality to mature.

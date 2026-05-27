@@ -57,6 +57,26 @@ _NON_TOPIC_TITLE_PATTERNS = (
     re.compile(r"(?i)^\s*(tool|browser|terminal|execute_code|session_search|read_file|skill_view)\s*[:：]"),
     re.compile(r"(?i)^\s*(tool output|browser output|terminal output|render preview|attachment preview)\b"),
 )
+_OWNER_REVIEW_TOKEN_RE = re.compile(r"(?i)\boa_[0-9a-f]{8,32}\b")
+_OWNER_REVIEW_ANCHOR_RE = re.compile(r"(?i)\b[arf]\d{1,3}\b")
+_OWNER_REVIEW_ACTION_TERMS = {"approve", "approved", "reject", "rejected", "allow", "feedback"}
+_OWNER_REVIEW_COMMAND_PHRASES = (
+    "what should i do with",
+    "which one should we continue",
+    "approve, reject, allow, or feedback",
+    "not r1",
+)
+_INTERNAL_DIAGNOSTIC_TITLE_TERMS = {
+    "audit",
+    "canonical",
+    "entries",
+    "health",
+    "index",
+    "memory_os",
+    "provider",
+    "status",
+    "store",
+}
 
 _ASCII_ENTITY_PATTERN = re.compile(r"\b[A-Za-z][A-Za-z0-9_.+-]{1,40}\b")
 _CHINESE_KEYWORDS = {
@@ -790,7 +810,7 @@ def _normalized_cluster_title(candidates: list[dict[str, Any]], topic_terms: set
         return "", False
     fallback = _topic_title_from_terms(labels, topic_terms)
     title = _best_title_segment(labels, topic_terms) or fallback
-    if fallback and _title_should_use_terms(title):
+    if fallback and not _is_generic_topic_fallback(fallback) and _title_should_use_terms(title):
         title = fallback
     title = _compress_choice_title(_clean_title(title), fallback)
     if not title:
@@ -806,9 +826,9 @@ def _compress_choice_title(title: str, fallback: str) -> str:
     fallback_clean = _clean_title(fallback)
     if len(clean) <= _CHOICE_TITLE_MAX_CHARS:
         return clean
-    if fallback_clean and len(fallback_clean) <= _CHOICE_TITLE_MAX_CHARS:
+    if fallback_clean and len(fallback_clean) <= _CHOICE_TITLE_MAX_CHARS and not _is_generic_topic_fallback(fallback_clean):
         return fallback_clean
-    if fallback_clean:
+    if fallback_clean and not _is_generic_topic_fallback(fallback_clean):
         return _clip(fallback_clean, _CHOICE_TITLE_MAX_CHARS - 2)
     return _clip(clean, _CHOICE_TITLE_MAX_CHARS - 2)
 
@@ -819,7 +839,12 @@ def _best_title_segment(labels: list[str], topic_terms: set[str]) -> str:
         for segment in _title_segments(label):
             for option in _title_options(segment):
                 clean = _clean_title(option)
-                if not clean or _looks_too_mechanistic(clean) or _is_non_topic_title(clean):
+                if (
+                    not clean
+                    or _looks_too_mechanistic(clean)
+                    or _is_non_topic_title(clean)
+                    or _is_internal_diagnostic_title(clean)
+                ):
                     continue
                 if len(clean) > _TITLE_MAX_CHARS:
                     continue
@@ -910,6 +935,7 @@ def _topic_title_from_terms(labels: list[str], topic_terms: set[str]) -> str:
         for term in ordered
         if term
         and term.lower() not in _ENGLISH_TOPIC_STOPWORDS
+        and term.lower() not in _INTERNAL_DIAGNOSTIC_TITLE_TERMS
         and "." not in term
         and not re.search(r"(?i)\.(png|jpg|jpeg|json|py|safetensors|txt|md)$", term)
     ]
@@ -1293,7 +1319,64 @@ def _is_non_topic_title(text: str) -> bool:
     clean = _clean_title(text)
     if not clean:
         return True
-    return any(pattern.search(clean) for pattern in _NON_TOPIC_TITLE_PATTERNS)
+    return any(pattern.search(clean) for pattern in _NON_TOPIC_TITLE_PATTERNS) or _is_owner_review_command_artifact_title(
+        clean
+    ) or _has_only_generic_topic_terms(clean)
+
+
+def _is_owner_review_command_artifact_title(text: str) -> bool:
+    clean = _clean_title(text)
+    if not clean:
+        return True
+    lower = clean.lower()
+    if _OWNER_REVIEW_TOKEN_RE.search(clean):
+        return True
+    if any(phrase in lower for phrase in _OWNER_REVIEW_COMMAND_PHRASES):
+        return True
+
+    anchor_count = len(_OWNER_REVIEW_ANCHOR_RE.findall(clean))
+    terms = _terms(clean)
+    action_terms = terms & _OWNER_REVIEW_ACTION_TERMS
+    topical_terms = _topic_terms(clean) - _OWNER_REVIEW_ACTION_TERMS
+    if anchor_count >= 2 and len(clean) <= 48:
+        return True
+    if anchor_count and action_terms and len(clean) <= 96:
+        return True
+    if action_terms and len(terms) <= 4:
+        return True
+    return len(action_terms) >= 2 and len(topical_terms) <= 2
+
+
+def _is_internal_diagnostic_title(text: str) -> bool:
+    terms = _topic_terms(text)
+    if not terms:
+        return False
+    internal_terms = terms & _INTERNAL_DIAGNOSTIC_TITLE_TERMS
+    if len(internal_terms) >= 3 and len(terms - internal_terms) <= 2:
+        return True
+    return len(internal_terms) >= 2 and len(terms - internal_terms) <= 1
+
+
+def _is_generic_topic_fallback(text: str) -> bool:
+    clean = _clean_title(text)
+    if not clean:
+        return True
+    terms = _topic_terms(clean)
+    return bool(terms) and terms <= {"记忆", "长期"}
+
+
+def _has_only_generic_topic_terms(text: str) -> bool:
+    terms = _terms(text)
+    if not terms:
+        return False
+    meaningful_terms = {
+        term
+        for term in terms
+        if term not in _GENERIC_TOPIC_TERMS
+        and term not in _ENGLISH_TOPIC_STOPWORDS
+        and term not in _GENERIC_RECALL_TERMS
+    }
+    return not meaningful_terms
 
 
 def _safe_id(value: str) -> str:

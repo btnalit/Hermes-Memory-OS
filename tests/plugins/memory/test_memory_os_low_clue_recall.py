@@ -427,6 +427,33 @@ def test_low_clue_recall_filters_self_review_memory_prompts(tmp_path):
     assert report["candidate_count"] == 0
 
 
+def test_low_clue_recall_filters_owner_review_command_artifacts(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "approve A3",
+            "R2, R3, or R4?",
+            "What should I do with oa_10521e52d56f93 -- approve, reject, allow, or feedback?",
+            "Assistant / 系统",
+            "Owner approval workflow architecture: digest tokens, structured tool calls, audit ledger.",
+            "互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。",
+        ],
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    labels = [candidate["label"] for candidate in report["candidates"]]
+    serialized = json.dumps(labels, ensure_ascii=False)
+    assert report["candidate_quality"]["filtered_non_topic_title_count"] >= 4
+    assert "approve A3" not in serialized
+    assert "R2, R3" not in serialized
+    assert "oa_10521e52d56f93" not in serialized
+    assert "Assistant / 系统" not in serialized
+    assert any("approval" in label.lower() and "workflow" in label.lower() for label in labels)
+    assert any("互联网数据采集" in label for label in labels)
+
+
 def test_low_clue_recall_falls_back_to_topic_terms_for_sentence_like_titles(tmp_path):
     store = _store(tmp_path)
     _write_working(
@@ -443,6 +470,31 @@ def test_low_clue_recall_falls_back_to_topic_terms_for_sentence_like_titles(tmp_
     assert not label.lower().startswith("each visual should")
     assert "visual" in label.lower()
     assert len(label) <= 96
+
+
+def test_low_clue_recall_prefers_user_topic_over_internal_diagnostic_terms(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            (
+                "User: 别像报告一样，像正常聊天一样说说你的感受。 | "
+                "Assistant: 现在这种感觉变了，我知道在 Audit Entries 里保留了更多记忆。"
+            ),
+            (
+                "User: 老实说，我们现在这套记忆系统强大么？你用着的感觉如何？ | "
+                "Assistant: 强在 memory_os canonical store index health audit 链路和 provider status。"
+            ),
+            "互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。",
+        ],
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    labels = [candidate["label"] for candidate in report["candidates"]]
+    assert any("记忆系统强大" in label or "用着的感觉" in label for label in labels)
+    assert "记忆" not in labels
+    assert all("canonical / store / index" not in label.lower() for label in labels)
 
 
 def test_low_clue_recall_direct_resume_when_keyword_confidence_is_clear(tmp_path):
