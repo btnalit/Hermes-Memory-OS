@@ -1355,6 +1355,12 @@ Reason:
   they can become daily agenda items: generated proposals now include bounded
   Chinese `具体改动`, `证据`, `验收标准`, `后续状态`, and `边界`; legacy generic
   templates do not block creation of concrete proposals;
+- deployed P1-S agenda-candidate maturation makes SelfEvolution write a
+  bounded `agenda_candidate` record before proposal creation. Each selected
+  signal now carries maturity fields, quality gate, runtime target, promotion
+  status, and block reason; promoted proposals carry
+  `agenda_candidate_id`/`agenda_maturity_gate`, while blocked/duplicate
+  signals stay visible without creating owner agenda pressure;
 - the 2026-05-26 live structured expression-feedback smoke increased
   `expression_feedback_subject_count` to `2` and `OwnerReview.by_type.too_mechanical`
   to `2`, proving feedback is visible to scoring/governance instead of staying

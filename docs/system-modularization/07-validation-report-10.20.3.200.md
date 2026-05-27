@@ -16383,3 +16383,78 @@ Interpretation:
 - The new proposal kind remains bounded: it can request
   `context_retrieval_policy_review` follow-up, but cannot directly change
   ContextRouter, prompt, cadence, delivery, or execution.
+
+## 2026-05-27 - P1-S Agenda Candidate Maturation
+
+Preflight:
+
+```text
+source_of_truth=40 unified control plane, 32 active roadmap, 39 left-brain governance quality, 10.20.3.200 monitor
+finding_type=runtime maturity gap / signal-to-proposal quality gap
+owning_seam=SelfEvolution signal -> agenda_candidate -> proposal promotion
+reverse_scope=borrow 10.20.2.88 staged agenda maturity pattern; do not copy cron/scripts or move scheduling/transport into Memory-OS
+equivalent_contract_or_project_contract=29-series contract + RH-36 closure matrix + RH-39 left-brain governance quality
+evidence_loop=unit tests + remote temporary-fixture smoke + live monitor classification
+monitor_or_validation_fields=self_evolution.agenda_candidate_count, agenda_candidate_promoted_count, agenda_candidate_blocked_count, latest_agenda_candidate_status, proposal_quality.agenda_candidate_id
+promotion_signal=selected signal writes agenda_candidate before proposal promotion and proposals carry agenda maturity link
+stop_or_rollback_signal=proposal bypasses agenda candidate, blocked/duplicate signal creates owner agenda pressure, or actual_execute=true
+external_review=not required for proposal-only/report-only maturity artifact
+```
+
+Local regression:
+
+```text
+python -m pytest tests\system_modularization\test_self_evolution_module.py tests\system_modularization\test_left_brain_pipeline_checker.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=74 passed
+```
+
+Remote deployment:
+
+```text
+deployed_files:
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/self_evolution.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/proposal_queue.py
+remote_py_compile=pass
+```
+
+Remote temporary-fixture smoke:
+
+```text
+proposal_created=true
+agenda_candidate_status=promoted_to_proposal
+agenda_promotion_allowed=true
+agenda_candidate_count=1
+proposal_count=1
+proposal_quality_agenda_candidate_id=agc_5c5f289b7404
+proposal_quality_agenda_maturity_gate=feature_maturity_top_signal
+actual_execute=false
+```
+
+Live monitor after deploy:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh31_eval_measurement_signals]
+
+ModuleArtifacts.self_evolution.agenda_candidate_count=0
+ModuleArtifacts.self_evolution.agenda_candidate_promoted_count=0
+ModuleArtifacts.self_evolution.agenda_candidate_blocked_count=0
+ModuleArtifacts.self_evolution.latest_agenda_candidate_status=""
+
+PASS includes:
+  left_brain_agenda_candidate_maturity_visible
+  left_brain_pipeline_check_visible
+  left_brain_feedback_proposal_quality_ready
+```
+
+Interpretation:
+
+- SelfEvolution no longer jumps directly from selected signal to owner-facing
+  proposal. It first writes a bounded `agenda_candidate` record with maturity
+  score, evidence count, quality gate, runtime target, promotion status, and
+  block reason.
+- Promotion into `proposal_queue` now carries the source
+  `agenda_candidate_id` and `agenda_maturity_gate` in `proposal_quality`.
+- Duplicate, quality-blocked, and same-day repeated signals remain observable
+  in the agenda candidate ledger without creating new owner agenda pressure.

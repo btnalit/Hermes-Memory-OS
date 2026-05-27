@@ -350,6 +350,10 @@ def _bounded_proposal_quality(value: dict[str, Any]) -> dict[str, Any]:
         "maturity_dimensions",
         "unlinked_feedback_count",
         "unlinked_memory_source_count",
+        "agenda_candidate_id",
+        "agenda_promotion_status",
+        "agenda_maturity_gate",
+        "agenda_candidate_evidence_ref_count",
     }
     bool_keys = {"direct_apply_allowed", "generic_executor_allowed", "selected_equals_successful_use"}
     int_keys = {
@@ -359,6 +363,7 @@ def _bounded_proposal_quality(value: dict[str, Any]) -> dict[str, Any]:
         "linked_memory_source_count",
         "unlinked_feedback_count",
         "unlinked_memory_source_count",
+        "agenda_candidate_evidence_ref_count",
     }
     list_keys = {"memory_source_record_refs", "outcome_refs", "policy_versions", "query_classes", "request_refs", "routes"}
     result: dict[str, Any] = {}

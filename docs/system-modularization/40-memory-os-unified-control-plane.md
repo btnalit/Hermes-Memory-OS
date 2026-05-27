@@ -266,8 +266,10 @@ Near-term work order after synthesis and the 2026-05-27 runtime
 outcome-feedback baseline:
 
 1. **P1-S feedback backflow quality**: linked-outcome quality gating is now
-   live for expression feedback. Remaining P1-S work should focus on feedback
-   proposal usefulness and maturity, not direct prompt/policy/cadence mutation.
+   live for expression feedback, and SelfEvolution now writes bounded agenda
+   candidates before proposal promotion. Remaining P1-S work should focus on
+   real feedback volume and proposal usefulness, not direct
+   prompt/policy/cadence mutation.
 2. **P1-T cadence split is no longer a WARN source**: cadence report is live,
    left-brain/context modules have module-local skip gates, and the remaining
    right-brain expression harness findings (`wandering_mind`,

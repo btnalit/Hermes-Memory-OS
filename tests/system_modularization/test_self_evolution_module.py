@@ -64,6 +64,8 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert result["direct_self_modify"] is False
     assert result["actual_execute"] is False
     assert result["proposal_created"] is True
+    assert result["agenda_candidate_status"] == "promoted_to_proposal"
+    assert result["agenda_promotion_allowed"] is True
     queue = proposal_queue.read_queue()
     assert len(queue["items"]) == 1
     proposal = queue["items"][0]
@@ -74,6 +76,9 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert proposal["dedupe_key"].startswith(proposal["proposal_class"])
     assert proposal["proposal_quality"]["trigger_rule"] == "feature_maturity_top_signal"
     assert proposal["proposal_quality"]["evidence_ref_count"] >= 1
+    assert proposal["proposal_quality"]["agenda_candidate_id"].startswith("agc_")
+    assert proposal["proposal_quality"]["agenda_promotion_status"] == "promoted_to_proposal"
+    assert proposal["proposal_quality"]["agenda_maturity_gate"] == "feature_maturity_top_signal"
     assert proposal["title"] != "Self-Evolution dry-run proposal"
     assert "具体改动:" in proposal["body"]
     assert "证据:" in proposal["body"]
@@ -87,6 +92,11 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert "hard-coded focus" not in digest
     audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
     assert any("self_evolution_dry_run_written" in line for line in audit_lines)
+    agenda_candidates = module.read_agenda_candidates()
+    assert len(agenda_candidates) == 1
+    assert agenda_candidates[0]["status"] == "promoted_to_proposal"
+    assert agenda_candidates[0]["promotion_allowed"] is True
+    assert agenda_candidates[0]["proposal_id"] == proposal["candidate_id"]
 
 
 def test_self_evolution_does_not_create_proposal_without_scores(tmp_path):
@@ -320,6 +330,7 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     )
 
     assert result["proposal_created"] is True
+    assert result["agenda_candidate_status"] == "promoted_to_proposal"
     proposal = proposal_queue.read_queue()["items"][0]
     assert proposal["kind"] == "expression_policy"
     assert proposal["proposal_class"] == "expression_policy:too_mechanical"
@@ -332,6 +343,9 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     assert proposal["proposal_quality"]["unlinked_feedback_count"] == 0
     assert proposal["proposal_quality"]["outcome_refs"] == ["rbout_1"]
     assert proposal["proposal_quality"]["policy_versions"] == ["1"]
+    assert proposal["proposal_quality"]["agenda_candidate_id"].startswith("agc_")
+    assert proposal["proposal_quality"]["agenda_promotion_status"] == "promoted_to_proposal"
+    assert proposal["proposal_quality"]["agenda_maturity_gate"] == "linked_expression_feedback"
     assert proposal["proposal_quality"]["direct_apply_allowed"] is False
     assert proposal["proposal_quality"]["generic_executor_allowed"] is False
     assert "调整右脑表达策略" in proposal["title"]
@@ -382,6 +396,7 @@ def test_self_evolution_creates_memory_sources_policy_proposal_from_corrective_f
     )
 
     assert result["proposal_created"] is True
+    assert result["agenda_candidate_status"] == "promoted_to_proposal"
     proposal = proposal_queue.read_queue()["items"][0]
     assert proposal["kind"] == "memory_sources_policy"
     assert proposal["proposal_class"] == "memory_sources_policy:missing_context"
@@ -392,6 +407,9 @@ def test_self_evolution_creates_memory_sources_policy_proposal_from_corrective_f
     assert proposal["proposal_quality"]["linked_memory_source_count"] == 1
     assert proposal["proposal_quality"]["memory_source_record_refs"] == ["msrc_policy_1"]
     assert proposal["proposal_quality"]["runtime_target"] == "context_retrieval_policy_review"
+    assert proposal["proposal_quality"]["agenda_candidate_id"].startswith("agc_")
+    assert proposal["proposal_quality"]["agenda_promotion_status"] == "promoted_to_proposal"
+    assert proposal["proposal_quality"]["agenda_maturity_gate"] == "linked_corrective_memory_sources_feedback"
     assert proposal["proposal_quality"]["selected_equals_successful_use"] is False
     assert "调整记忆来源/召回策略" in proposal["title"]
     assert "selected 当 successful_use" in proposal["body"]
@@ -436,9 +454,14 @@ def test_self_evolution_rejects_useful_memory_sources_feedback_as_report_only(tm
 
     assert result["proposal_created"] is False
     assert result["proposal_quality_gate_failed"] is True
+    assert result["agenda_candidate_status"] == "blocked_quality_gate"
+    assert result["agenda_promotion_allowed"] is False
     assert result["quality_gate_reason"] == "memory_sources_feedback_requires_corrective_rating"
     assert proposal_queue.read_queue()["items"] == []
     assert ops_gate.read_reports() == []
+    agenda_candidates = module.read_agenda_candidates()
+    assert agenda_candidates[-1]["status"] == "blocked_quality_gate"
+    assert agenda_candidates[-1]["reason"] == "memory_sources_feedback_requires_corrective_rating"
 
 
 def test_self_evolution_rejects_unlinked_expression_feedback_as_low_quality_proposal_input(tmp_path):
@@ -482,9 +505,24 @@ def test_self_evolution_rejects_unlinked_expression_feedback_as_low_quality_prop
     assert result["proposal_quality_gate_failed"] is True
     assert result["reason"] == "proposal_quality_gate_failed"
     assert result["quality_gate_reason"] == "expression_feedback_requires_linked_outcome"
+    assert result["agenda_candidate_status"] == "blocked_quality_gate"
+    assert result["agenda_promotion_allowed"] is False
     assert result["proposal_class"] == "expression_policy:too_mechanical"
     assert proposal_queue.read_queue()["items"] == []
     assert ops_gate.read_reports() == []
+    agenda_candidates = module.read_agenda_candidates()
+    assert agenda_candidates[-1]["status"] == "blocked_quality_gate"
+    assert agenda_candidates[-1]["promotion_allowed"] is False
+    second = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+    assert second["proposal_created"] is False
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "cadence_same_day_same_signal"
+    assert second["agenda_candidate_status"] == "skipped_same_day_same_signal"
 
 
 def test_self_evolution_skips_unresolved_expression_policy_by_class(tmp_path):
@@ -537,6 +575,8 @@ def test_self_evolution_skips_unresolved_expression_policy_by_class(tmp_path):
     assert result["proposal_created"] is False
     assert result["novelty_skipped"] is True
     assert result["reason"] == "duplicate_unresolved_proposal"
+    assert result["agenda_candidate_status"] == "blocked_duplicate_unresolved"
+    assert result["agenda_promotion_allowed"] is False
     assert result["proposal_class"] == "expression_policy:too_mechanical"
     assert len(proposal_queue.read_queue()["items"]) == 1
 

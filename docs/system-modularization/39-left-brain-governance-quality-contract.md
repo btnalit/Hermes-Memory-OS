@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score primary scoring v2, prototype-aligned maturity scoring, expression-feedback proposal input, and report-only pipeline-check slices.
+Status: design gate plus deployed data-hygiene, duplicate-suppression, feature-score primary scoring v2, prototype-aligned maturity scoring, expression-feedback proposal input, agenda-candidate maturation, and report-only pipeline-check slices.
 
 Current implementation state:
 
@@ -25,6 +25,13 @@ Current implementation state:
   summary-only events. Corrective, source-linked feedback can create a
   `memory_sources_policy` proposal for owner review. Useful/non-corrective
   feedback remains evidence and does not create proposal pressure.
+- P1-S agenda-candidate maturation is implemented and deployed on
+  `10.20.3.200`: SelfEvolution now records every selected signal as a bounded
+  `agenda_candidate` with maturity fields, quality gate, runtime target,
+  promotion status, and block reason before it can be promoted into a proposal.
+  Created proposals carry the source `agenda_candidate_id` and
+  `agenda_maturity_gate`; blocked, duplicate, and same-day signals are visible
+  without creating owner agenda pressure.
 - 2026-05-26 live smoke on `10.20.3.200` proved the owner/Hermes interaction
   path, not only SSH/CLI: a rendered speak item exposed
   `memory feedback oa_<token> too_mechanical`, a structured

@@ -347,6 +347,21 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
         evidence = module_artifacts.get("evidence") if isinstance(module_artifacts.get("evidence"), dict) else {}
+        self_evolution = (
+            module_artifacts.get("self_evolution")
+            if isinstance(module_artifacts.get("self_evolution"), dict)
+            else {}
+        )
+        if self_evolution and self_evolution.get("agenda_candidate_count") is not None:
+            passed.append(
+                {
+                    "code": "left_brain_agenda_candidate_maturity_visible",
+                    "agenda_candidate_count": self_evolution.get("agenda_candidate_count"),
+                    "agenda_candidate_promoted_count": self_evolution.get("agenda_candidate_promoted_count"),
+                    "agenda_candidate_blocked_count": self_evolution.get("agenda_candidate_blocked_count"),
+                    "latest_agenda_candidate_status": self_evolution.get("latest_agenda_candidate_status"),
+                }
+            )
         pipeline_check = (
             module_artifacts.get("left_brain_pipeline_check")
             if isinstance(module_artifacts.get("left_brain_pipeline_check"), dict)
@@ -2345,6 +2360,11 @@ def module_artifact_summary():
       },
       "self_evolution": {
         "report_count": self_evolution.get("report_count"),
+            "agenda_candidate_count": self_evolution.get("agenda_candidate_count"),
+            "agenda_candidate_promoted_count": self_evolution.get("agenda_candidate_promoted_count"),
+            "agenda_candidate_blocked_count": self_evolution.get("agenda_candidate_blocked_count"),
+            "agenda_candidate_ready_count": self_evolution.get("agenda_candidate_ready_count"),
+            "latest_agenda_candidate_status": self_evolution.get("latest_agenda_candidate_status"),
             "proposal_count": self_evolution.get("proposal_count"),
             "novelty_skipped_count": self_evolution.get("novelty_skipped_count"),
             "proposal_quality_gate_failed_count": self_evolution.get("proposal_quality_gate_failed_count"),

@@ -67,6 +67,10 @@ class SelfEvolutionGovernorModule:
     def reports_path(self) -> Path:
         return self.module_root / "reports.jsonl"
 
+    @property
+    def agenda_candidates_path(self) -> Path:
+        return self.module_root / "agenda_candidates.jsonl"
+
     def run_once(
         self,
         *,
@@ -107,12 +111,28 @@ class SelfEvolutionGovernorModule:
             score_refs,
             proposal_shape=proposal_shape,
         )
+        agenda_candidate = _agenda_candidate(
+            self.profile,
+            scores=selected,
+            score_refs=score_refs,
+            proposal_shape=proposal_shape,
+            cadence_day=cadence_day,
+            cadence_input_fingerprint=cadence_input_fingerprint,
+        )
         duplicate = _unresolved_self_evolution_duplicate(
             proposal_queue,
             score_refs,
             proposal_shape=proposal_shape,
         )
         if duplicate is not None:
+            agenda_record = _agenda_candidate_status(
+                agenda_candidate,
+                status="blocked_duplicate_unresolved",
+                promotion_allowed=False,
+                reason="duplicate_unresolved_proposal",
+                existing_proposal_id=str(duplicate.get("candidate_id") or ""),
+            )
+            self._write_agenda_candidate(agenda_record)
             result = self._result(
                 status="ok",
                 proposal_created=False,
@@ -128,6 +148,7 @@ class SelfEvolutionGovernorModule:
                 skipped=True,
                 cadence_day=cadence_day,
                 cadence_input_fingerprint=cadence_input_fingerprint,
+                agenda_candidate=agenda_record,
             )
             self._write_report(result)
             append_audit(
@@ -151,6 +172,14 @@ class SelfEvolutionGovernorModule:
             cadence_day=cadence_day,
         )
         if processed_proposal is not None:
+            agenda_record = _agenda_candidate_status(
+                agenda_candidate,
+                status="skipped_same_day_same_signal",
+                promotion_allowed=False,
+                reason="cadence_same_day_same_signal",
+                previous_proposal_id=str(processed_proposal.get("candidate_id") or ""),
+            )
+            self._write_agenda_candidate(agenda_record)
             result = self._result(
                 status="ok",
                 proposal_created=False,
@@ -166,6 +195,7 @@ class SelfEvolutionGovernorModule:
                 cadence_day=cadence_day,
                 cadence_input_fingerprint=cadence_input_fingerprint,
                 previous_proposal_id=str(processed_proposal.get("candidate_id") or ""),
+                agenda_candidate=agenda_record,
             )
             self._write_report(result)
             append_audit(
@@ -189,6 +219,14 @@ class SelfEvolutionGovernorModule:
             cadence_input_fingerprint=cadence_input_fingerprint,
         )
         if processed is not None:
+            agenda_record = _agenda_candidate_status(
+                agenda_candidate,
+                status="skipped_same_day_same_signal",
+                promotion_allowed=False,
+                reason="cadence_same_day_same_signal",
+                previous_report_id=str(processed.get("report_id") or ""),
+            )
+            self._write_agenda_candidate(agenda_record)
             result = self._result(
                 status="ok",
                 proposal_created=False,
@@ -204,6 +242,7 @@ class SelfEvolutionGovernorModule:
                 cadence_day=cadence_day,
                 cadence_input_fingerprint=cadence_input_fingerprint,
                 previous_report_id=str(processed.get("report_id") or ""),
+                agenda_candidate=agenda_record,
             )
             self._write_report(result)
             append_audit(
@@ -221,6 +260,13 @@ class SelfEvolutionGovernorModule:
             )
             return result
         if proposal_shape.get("quality_gate_failed") is True:
+            agenda_record = _agenda_candidate_status(
+                agenda_candidate,
+                status="blocked_quality_gate",
+                promotion_allowed=False,
+                reason=str(proposal_shape.get("quality_gate_reason") or "proposal_quality_gate_failed"),
+            )
+            self._write_agenda_candidate(agenda_record)
             result = self._result(
                 status="ok",
                 proposal_created=False,
@@ -239,6 +285,7 @@ class SelfEvolutionGovernorModule:
                 proposal_quality=proposal_shape.get("proposal_quality")
                 if isinstance(proposal_shape.get("proposal_quality"), dict)
                 else None,
+                agenda_candidate=agenda_record,
             )
             self._write_report(result)
             append_audit(
@@ -270,7 +317,16 @@ class SelfEvolutionGovernorModule:
         gate_decision = gate_result.get("decisions", [{}])[0] if gate_result.get("decisions") else {}
         proposal_created = gate_decision.get("decision") == "would_allow"
         proposal_id = ""
+        agenda_record = _agenda_candidate_status(
+            agenda_candidate,
+            status="promoted_to_proposal" if proposal_created else "blocked_by_ops_gate",
+            promotion_allowed=bool(proposal_created),
+            reason="" if proposal_created else str(gate_decision.get("reason") or "ops_gate_not_allowed"),
+        )
         if proposal_created:
+            proposal_quality = proposal_shape.get("proposal_quality")
+            if isinstance(proposal_quality, dict):
+                proposal_quality = _proposal_quality_with_agenda(proposal_quality, agenda_record)
             proposal = proposal_queue.create_candidate(
                 store=store,
                 title=proposal_shape["title"],
@@ -279,11 +335,12 @@ class SelfEvolutionGovernorModule:
                 kind=proposal_shape["kind"],
                 proposal_class=str(proposal_shape.get("proposal_class") or ""),
                 dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
-                proposal_quality=proposal_shape.get("proposal_quality")
-                if isinstance(proposal_shape.get("proposal_quality"), dict)
-                else None,
+                proposal_quality=proposal_quality,
             )
             proposal_id = str(proposal["candidate_id"])
+            agenda_record = dict(agenda_record)
+            agenda_record["proposal_id"] = proposal_id
+        self._write_agenda_candidate(agenda_record)
 
         result = self._result(
             status="ok",
@@ -296,6 +353,7 @@ class SelfEvolutionGovernorModule:
             dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
             cadence_day=cadence_day,
             cadence_input_fingerprint=cadence_input_fingerprint,
+            agenda_candidate=agenda_record,
         )
         self._write_report(result)
         append_audit(
@@ -316,12 +374,25 @@ class SelfEvolutionGovernorModule:
     def status(self) -> dict[str, Any]:
         reports = self.read_reports()
         last = reports[-1] if reports else {}
+        agenda_candidates = self.read_agenda_candidates()
+        latest_agenda = agenda_candidates[-1] if agenda_candidates else {}
         return {
             "schema_version": "hermes.self_evolution_status.v0",
             "module": "self_evolution",
             "profile": self.profile,
             "execution_mode": self.execution_mode,
             "digest_exists": self.digest_path.exists(),
+            "agenda_candidate_count": len(agenda_candidates),
+            "agenda_candidate_promoted_count": sum(
+                1 for item in agenda_candidates if item.get("status") == "promoted_to_proposal"
+            ),
+            "agenda_candidate_blocked_count": sum(
+                1 for item in agenda_candidates if item.get("promotion_allowed") is False
+            ),
+            "agenda_candidate_ready_count": sum(
+                1 for item in agenda_candidates if item.get("promotion_allowed") is True
+            ),
+            "latest_agenda_candidate_status": str(latest_agenda.get("status", "")),
             "report_count": len(reports),
             "proposal_count": sum(1 for report in reports if report.get("proposal_created")),
             "novelty_skipped_count": sum(1 for report in reports if report.get("novelty_skipped")),
@@ -399,6 +470,17 @@ class SelfEvolutionGovernorModule:
                     reports.append(parsed)
         return reports
 
+    def read_agenda_candidates(self) -> list[dict[str, Any]]:
+        if not self.agenda_candidates_path.exists():
+            return []
+        candidates: list[dict[str, Any]] = []
+        for line in self.agenda_candidates_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    candidates.append(parsed)
+        return candidates
+
     def _write_digest(self, scores: list[dict[str, Any]], *, evidence_scoring: Any) -> Path:
         evidence_by_id = {
             str(record.get("evidence_id", "")): str(record.get("summary", ""))
@@ -434,6 +516,12 @@ class SelfEvolutionGovernorModule:
             handle.write(json.dumps(result, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
 
+    def _write_agenda_candidate(self, candidate: dict[str, Any]) -> None:
+        self.agenda_candidates_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.agenda_candidates_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(candidate, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
     def _result(
         self,
         *,
@@ -457,6 +545,7 @@ class SelfEvolutionGovernorModule:
         proposal_quality_gate_failed: bool = False,
         quality_gate_reason: str = "",
         proposal_quality: dict[str, Any] | None = None,
+        agenda_candidate: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         generated_at = datetime.now(timezone.utc).isoformat()
         result = {
@@ -487,6 +576,11 @@ class SelfEvolutionGovernorModule:
             "direct_self_modify": False,
             "actual_execute": False,
         }
+        if agenda_candidate:
+            result["agenda_candidate_id"] = str(agenda_candidate.get("agenda_candidate_id") or "")
+            result["agenda_candidate_status"] = str(agenda_candidate.get("status") or "")
+            result["agenda_promotion_allowed"] = bool(agenda_candidate.get("promotion_allowed"))
+            result["agenda_promotion_block_reason"] = str(agenda_candidate.get("reason") or "")
         if proposal_quality is not None:
             result["proposal_quality"] = dict(proposal_quality)
         if reason:
@@ -508,6 +602,93 @@ def _cadence_input_fingerprint(score_refs: list[str], *, proposal_shape: dict[st
     return _stable_digest(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
+def _agenda_candidate(
+    profile: str,
+    *,
+    scores: list[dict[str, Any]],
+    score_refs: list[str],
+    proposal_shape: dict[str, Any],
+    cadence_day: str,
+    cadence_input_fingerprint: str,
+) -> dict[str, Any]:
+    top_score = scores[0] if scores else {}
+    quality = proposal_shape.get("proposal_quality") if isinstance(proposal_shape.get("proposal_quality"), dict) else {}
+    maturity_dimensions = quality.get("maturity_dimensions") if isinstance(quality.get("maturity_dimensions"), dict) else {}
+    agenda_key = "|".join(
+        [
+            profile,
+            str(proposal_shape.get("kind") or ""),
+            str(proposal_shape.get("proposal_class") or ""),
+            str(proposal_shape.get("dedupe_key") or ""),
+            cadence_input_fingerprint,
+        ]
+    )
+    return {
+        "schema_version": "hermes.self_evolution_agenda_candidate.v0",
+        "agenda_candidate_id": f"agc_{_stable_digest(agenda_key)}",
+        "profile": profile,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source_module": "self_evolution",
+        "candidate_kind": str(proposal_shape.get("kind") or ""),
+        "title": _bounded_line(str(proposal_shape.get("title") or ""), 140),
+        "proposal_class": str(proposal_shape.get("proposal_class") or ""),
+        "dedupe_key": str(proposal_shape.get("dedupe_key") or ""),
+        "signal_refs": list(score_refs),
+        "top_subject_ref": str(top_score.get("subject_ref") or quality.get("top_subject_ref") or ""),
+        "top_subject_kind": str(top_score.get("subject_kind") or quality.get("top_subject_kind") or ""),
+        "maturity_score": quality.get("maturity_score", top_score.get("maturity_score", top_score.get("score", 0.0))),
+        "maturity_dimensions": maturity_dimensions,
+        "evidence_ref_count": int(quality.get("evidence_ref_count") or 0),
+        "trigger_rule": str(quality.get("trigger_rule") or ""),
+        "quality_gate": str(quality.get("quality_gate") or "feature_maturity_top_signal"),
+        "runtime_target": str(quality.get("runtime_target") or "governance_followup_review"),
+        "cadence_day": cadence_day,
+        "cadence_input_fingerprint": cadence_input_fingerprint,
+        "direct_apply_allowed": False,
+        "generic_executor_allowed": False,
+        "actual_execute": False,
+    }
+
+
+def _agenda_candidate_status(
+    candidate: dict[str, Any],
+    *,
+    status: str,
+    promotion_allowed: bool,
+    reason: str = "",
+    existing_proposal_id: str = "",
+    previous_report_id: str = "",
+    previous_proposal_id: str = "",
+) -> dict[str, Any]:
+    result = dict(candidate)
+    result.update(
+        {
+            "status": status,
+            "promotion_allowed": bool(promotion_allowed),
+            "reason": _bounded_line(reason, 180),
+            "existing_proposal_id": existing_proposal_id,
+            "previous_report_id": previous_report_id,
+            "previous_proposal_id": previous_proposal_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "actual_execute": False,
+        }
+    )
+    return result
+
+
+def _proposal_quality_with_agenda(quality: dict[str, Any], agenda_candidate: dict[str, Any]) -> dict[str, Any]:
+    result = dict(quality)
+    result.update(
+        {
+            "agenda_candidate_id": str(agenda_candidate.get("agenda_candidate_id") or ""),
+            "agenda_promotion_status": str(agenda_candidate.get("status") or ""),
+            "agenda_maturity_gate": str(agenda_candidate.get("quality_gate") or ""),
+            "agenda_candidate_evidence_ref_count": int(agenda_candidate.get("evidence_ref_count") or 0),
+        }
+    )
+    return result
+
+
 def _same_day_same_signal_processed(
     reports: list[dict[str, Any]],
     *,
@@ -524,6 +705,8 @@ def _same_day_same_signal_processed(
         if report.get("proposal_created") is True:
             return report
         if report.get("novelty_skipped") is True:
+            return report
+        if report.get("proposal_quality_gate_failed") is True:
             return report
         if report.get("cadence_skipped") is True:
             return report
@@ -574,7 +757,7 @@ def _unresolved_self_evolution_duplicate(
     for item in queue.get("items", []):
         if not isinstance(item, dict):
             continue
-        if item.get("kind") not in {"self_evolution", "expression_policy"}:
+        if item.get("kind") not in {"self_evolution", "expression_policy", "memory_sources_policy"}:
             continue
         if not _proposal_still_unresolved(item):
             continue
