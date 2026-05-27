@@ -376,6 +376,63 @@ def test_low_clue_recall_counts_merged_event_source_as_selected_diversity(tmp_pa
     assert any("Epsilon" in label for label in labels)
 
 
+def test_low_clue_recall_forces_lower_ranked_merged_event_source_into_choices(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "Epsilon diversity event coverage.",
+            "Alpha routing evidence archive.",
+            "Alpha routing evidence ledger.",
+            "Alpha archive ledger.",
+            "Beta digest archive ledger.",
+            "Beta digest archive summary.",
+            "Beta ledger summary.",
+            "Gamma cadence scheduler monitor.",
+            "Gamma scheduler monitor.",
+            "Gamma cadence skipgate.",
+            "Delta scoring maturity quality.",
+            "Delta scoring quality.",
+            "Delta maturity dimensions.",
+        ],
+    )
+    _append_event(
+        store,
+        seed=906,
+        summary="Epsilon diversity event coverage.",
+    )
+
+    report = build_low_clue_recall_report("继续昨天那个。", store=store, limit=4)
+
+    selected_distribution = report["candidate_quality"]["selected_source_distribution"]
+    labels = [candidate["label"] for candidate in report["candidates"]]
+    assert report["candidate_quality"]["diversity_applied"] is True
+    assert selected_distribution["event"] >= 1
+    assert any("Epsilon" in label for label in labels)
+
+
+def test_low_clue_recall_source_diversity_slot_uses_merged_source_classes():
+    selected = [
+        {"candidate_id": "a", "source_class": "working", "source_classes": ["working"], "score": 0.5},
+        {"candidate_id": "b", "source_class": "working", "source_classes": ["working"], "score": 0.4},
+    ]
+    clusters = [
+        *selected,
+        {
+            "candidate_id": "c",
+            "source_class": "working",
+            "source_classes": ["working", "event"],
+            "score": 0.35,
+            "reason_codes": [],
+        },
+    ]
+
+    diversified, changed = low_clue_recall_module._ensure_source_diversity_slot(selected, clusters, limit=2)
+
+    assert changed is True
+    assert any("event" in candidate.get("source_classes", []) for candidate in diversified)
+
+
 def test_low_clue_recall_preserves_duplicate_label_sources_across_collectors(tmp_path):
     store = _store(tmp_path)
     topic = "Project Zeta recall contract: source diversity, topic eligibility, owner clarification."

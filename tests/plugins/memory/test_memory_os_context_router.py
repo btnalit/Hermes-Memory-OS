@@ -196,6 +196,40 @@ def test_active_task_report_keeps_relevant_working_and_drops_hindsight_noise():
     assert "diagnostic_style_in_non_diagnostic_route" in dropped_text
 
 
+def test_casual_continuity_report_selects_safe_carryover_without_mechanism_working():
+    sections = [
+        ContextSection(
+            section="Conversation Carryover",
+            text="Recent conversation has something worth carrying forward without exposing internals.",
+            source_class="carryover",
+        ),
+        ContextSection(
+            section="Working Memory",
+            text="Memory-OS provider-status note with memory_os canonical store index health audit details.",
+            source_class="working",
+        ),
+        ContextSection(
+            section="Indexed Recall",
+            text="query route: fast_path; search: memory_os diagnostic architecture.",
+            source_class="indexed",
+        ),
+    ]
+
+    report = route_context_sections(
+        "我们继续聊刚才那套记忆系统，你觉得它现在带来的变化是什么？",
+        sections=sections,
+        current_task_anchor="",
+        budget_chars=1200,
+    )
+
+    selected = {item["section"] for item in report["selected_sections"]}
+    rendered_selected = json.dumps(report["selected_sections"], ensure_ascii=False)
+
+    assert report["route"] == "casual_continuity"
+    assert selected == {"Conversation Carryover"}
+    assert "memory_os canonical store" not in rendered_selected
+
+
 def test_router_report_redacts_secrets():
     sections = [
         ContextSection(

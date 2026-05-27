@@ -347,6 +347,8 @@ def _is_required_by_route(section: ContextSection, route: str) -> bool:
         return "candidate" in name or "crystallized" in name
     if route == "ambiguous_recall":
         return name == "recall clarification guard"
+    if route == "casual_continuity":
+        return name == "conversation carryover"
     return False
 
 

@@ -429,6 +429,12 @@ Status:
   - latest dry-run remains `ask_choice`, with
     `filtered_non_topic_title_count=8`, `max_title_chars=40`, and all
     boundaries false;
+- 2026-05-27 source-diversity follow-up fixed merged-source accounting:
+  - diversity slot now considers merged `source_classes`, not only primary
+    `source_class`;
+  - live dry-run reports `selected_source_distribution={working:4,event:1}`;
+  - `diversity_applied=true`;
+  - all boundaries remain false;
 - `memory_sources` did not produce an eligible topic candidate in that run,
   so candidate quality still needs live observation rather than a maturity
   claim;
@@ -456,6 +462,29 @@ Stop signal:
   topics;
 - attachment placeholders, tool-render snippets, or other non-topic artifacts
   appear as user-facing recall choices.
+
+### P1-G.1 - RH-26 Casual Continuity Empty Context
+
+Status:
+
+- 2026-05-27 live monitor no longer reports `rh26_casual_empty`;
+- the casual memory-system opinion probe now selects a bounded
+  `Conversation Carryover` section:
+  - `casual_memory_system_change=174:Conversation Carryover`;
+  - no Memory-OS diagnostic/status, indexed recall, or mechanism-heavy working
+    context is selected;
+  - latest monitor WARN list is only `session_mirror_pending_sessions` and
+    `rh31_eval_has_failures`.
+
+Next action:
+
+- keep this as closed unless casual chat starts leaking diagnostic/status
+  mechanism text again.
+
+Stop signal:
+
+- casual route includes `Diagnostic Grounding`, `Current Memory-OS Runtime
+  Facts`, raw `Working Memory`, or internal mechanism labels.
 
 ### P1-H - RH-30 Feedback Collection Volume
 

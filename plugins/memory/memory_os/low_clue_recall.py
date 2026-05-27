@@ -734,14 +734,14 @@ def _ensure_source_diversity_slot(
 ) -> tuple[list[dict[str, Any]], bool]:
     if limit <= 1 or not selected:
         return selected, False
-    selected_sources = {str(item.get("source_class") or "unknown") for item in selected}
-    available_sources = {str(item.get("source_class") or "unknown") for item in clusters}
+    selected_sources = {source_class for item in selected for source_class in _candidate_source_classes(item)}
+    available_sources = {source_class for item in clusters for source_class in _candidate_source_classes(item)}
     if len(selected_sources) > 1 or len(available_sources) <= 1:
         return selected, False
     dominant_source = next(iter(selected_sources))
     for cluster in clusters:
-        source_class = str(cluster.get("source_class") or "unknown")
-        if source_class == dominant_source:
+        source_classes = set(_candidate_source_classes(cluster))
+        if not (source_classes - {dominant_source}):
             continue
         if float(cluster.get("score") or 0.0) < _MIN_SOURCE_DIVERSITY_FALLBACK_SCORE:
             continue

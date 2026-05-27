@@ -16119,3 +16119,99 @@ Next gate:
 - Retest through real Telegram when a live-process verification is needed.
 - Continue observing source distribution and candidate usefulness before
   promoting RH-28 candidate quality to mature.
+
+## 2026-05-27 - RH-28 Source Diversity And RH-26 Casual Carryover Follow-up
+
+Scope:
+
+- RH-28 low-clue source diversity when an alternate source is present only as a
+  merged `source_classes` member.
+- RH-26 casual continuity empty-context warning.
+- No SessionMirror apply, no direct-resume change, no diagnostic/status context
+  added to casual chat.
+
+Preflight:
+
+```text
+source_of_truth=live monitor WARN, 32 P1-G/P1-J, 29 context projection contract
+finding_type=live monitor WARN + candidate source diversity observation
+owning_seam=RH-28 source diversity selection + RH-26 context router casual continuity projection
+reverse_scope=Hermes owns conversation/transport; Memory-OS only chooses bounded context sections and candidate display sources
+monitor_or_validation_fields=selected_source_distribution, diversity_applied, RH-26 probe chars/headings, WARN list, boundaries
+promotion_signal=low-clue selected distribution includes a non-working source when one is available, and casual probe has safe carryover context
+stop_or_rollback_signal=casual route includes diagnostic/status/working mechanism content, direct resume becomes enabled, or boundary true
+external_review=not required for deterministic bounded projection; real Telegram remains the strongest validation
+```
+
+Local regression:
+
+```text
+python -m pytest tests\plugins\memory\test_memory_os_low_clue_recall.py tests\plugins\memory\test_memory_os_context_router.py tests\plugins\memory\test_memory_os_prefetch.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=118 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+result=clean
+```
+
+Remote deployment:
+
+```text
+deployed_files=plugins/memory/memory_os/low_clue_recall.py, plugins/memory/memory_os/context_router.py
+remote_py_compile=pass
+```
+
+RH-28 low-clue live dry-run after source-diversity fix:
+
+```text
+command=hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个" --limit 4 --llm-judge none
+decision=ask_choice
+source_distribution={event:1, working:136}
+eligible_source_distribution={event:1, working:128}
+selected_source_distribution={event:1, working:4}
+diversity_applied=true
+boundaries.actual_send=false
+boundaries.actual_execute=false
+boundaries.actual_identity_write=false
+boundaries.actual_crystallized_approval=false
+```
+
+RH-26 casual continuity live probe after carryover fix:
+
+```text
+query=我们继续聊刚才那套记忆系统，你觉得它现在带来的变化是什么？
+context_chars=174
+headings=[Conversation Carryover]
+preview=Recent conversation has something worth carrying forward; Recent background activity suggests staying careful and steady
+diagnostic_status_included=false
+working_mechanism_context_included=false
+```
+
+Full monitor after deployment:
+
+```text
+status=WARN
+PASS includes low_clue_recall_probe_ok, context_router_apply, memory_sources_stats_ok
+RH-26 probe casual_memory_system_change=174:Conversation Carryover
+WARN=[session_mirror_pending_sessions, rh31_eval_has_failures]
+FAIL=[]
+```
+
+Interpretation:
+
+- RH-28 source diversity now counts merged `source_classes`, not only the
+  primary `source_class`, so a merged event source can reserve a bounded choice
+  slot.
+- RH-26 casual continuity is no longer empty when safe DeepReflection carryover
+  exists.
+- The casual route remains bounded: it did not include Memory-OS diagnostic
+  status, indexed recall, or mechanism-heavy working memory.
+- The remaining WARN items are now SessionMirror pending coverage and RH-31
+  eval failures.
