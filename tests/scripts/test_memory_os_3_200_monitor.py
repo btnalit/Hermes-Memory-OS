@@ -24,12 +24,12 @@ def test_rh26_heading_anomalies_allow_known_casual_empty_and_safe_carryover_stat
         {
             "id": "candidate_vs_crystallized",
             "chars": 1306,
-            "headings": ["Crystallized Review Candidates", "Indexed Recall"],
+            "headings": ["Crystallized Review Candidates", "Crystallized Memory", "Indexed Recall"],
         },
         {
             "id": "active_comfyui_install",
             "chars": 2051,
-            "headings": ["Current Foreground Task", "Indexed Recall", "Recent Event Summaries"],
+            "headings": ["Current Foreground Task", "Crystallized Memory", "Indexed Recall", "Recent Event Summaries"],
         },
         {"id": "deferred_cancellation", "chars": 110, "headings": ["Current Foreground Task"]},
     ]
@@ -305,6 +305,7 @@ def test_classify_snapshot_tracks_owner_review_status_and_illegal_crystallized_w
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
     assert any(item["code"] == "owner_review_status_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_owner_approved_crystallized_write" for item in classification["pass"])
     assert "OwnerReview" in rendered
     assert "'owner_approved_crystallized': 1" in rendered
 
@@ -313,6 +314,28 @@ def test_classify_snapshot_tracks_owner_review_status_and_illegal_crystallized_w
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "owner_review_unapproved_crystallized_write" for item in classification["fail"])
+
+
+def test_classify_snapshot_allows_owner_approved_crystallized_records():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_status"]["counts"]["crystallized_records"] = 1
+    snapshot["owner_review"] = {
+        "schema_version": "memory-os.owner_review_status.v0",
+        "review_queue": {"pending_count": 0, "action_required_count": 0, "stale_count": 0},
+        "owner_action_count": 1,
+        "action_type_counts": {"approve_candidate": 1},
+        "duplicate_ignored_count": 0,
+        "error_count": 0,
+        "owner_approved_crystallized_write_count": 1,
+        "unapproved_crystallized_write_count": 0,
+        "digest_burden": {"owner_active_period": True},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "unexpected_crystallized_records" for item in classification["fail"])
+    assert any(item["code"] == "crystallized_records_present" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_owner_approved_crystallized_write" for item in classification["pass"])
 
 
 def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_boundaries():

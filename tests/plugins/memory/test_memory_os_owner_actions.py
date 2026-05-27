@@ -1840,6 +1840,74 @@ def test_review_surface_detail_expands_latest_digest_anchor_without_applying_act
     assert missing["reason"] == "digest_not_found_or_expired"
 
 
+def test_review_surface_detail_scrubs_actions_from_stale_digest(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {
+            "owner_review": {
+                "owner_id": "owner",
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": "origin",
+                "recurring_delivery_target_class": "origin",
+            }
+        },
+        str(tmp_path),
+    )
+    append_candidate_queue(store, _candidate())
+    first = render_owner_review_digest(
+        store,
+        channel="origin",
+        max_action_required=1,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+    old_reject_token = first["sections"]["action_required"][0]["action_tokens"]["reject_candidate"]
+
+    parse_owner_review_reply(
+        store,
+        _review_command(first, "A1", "reject_candidate"),
+        owner_id="owner",
+        channel="origin",
+        digest_id=first["digest_id"],
+        apply=True,
+    )
+    ProposalQueueModule(tmp_path, profile="main").create_candidate(
+        store=store,
+        title="Newer proposal",
+        body="RAW PROPOSAL BODY",
+    )
+    render_owner_review_digest(
+        store,
+        channel="origin",
+        max_action_required=1,
+        max_review_suggested=1,
+        max_fyi=0,
+        record_active=True,
+    )
+
+    report = owner_review_surface_report(
+        store,
+        operation="detail",
+        action_token=old_reject_token,
+        channel="telegram",
+    )
+    serialized = json.dumps(report, ensure_ascii=False)
+
+    assert report["status"] == "report_only"
+    assert report["actions_stale"] is True
+    assert report["stale_reason"] == "detail_from_non_latest_digest"
+    assert report["item"]["actions_stale"] is True
+    assert "action_tokens" not in report["item"]
+    assert "agent_tool_calls" not in report["item"]
+    assert "owner_utterance_examples" not in report["item"]
+    assert old_reject_token not in serialized
+    assert "只能查看" in report["text"]
+    assert "旧 digest" in report["agent_instruction"]
+    assert report["boundary"]["actual_execute"] is False
+
+
 def test_reply_parser_maps_delivered_digest_anchor_to_owner_action_processor(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())

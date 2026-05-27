@@ -17268,3 +17268,104 @@ Interpretation:
 - This is still not a generic executor. Only the concrete
   `memory_sources_policy` runtime target is open, and it writes a bounded
   Memory-OS policy record with rollback evidence.
+
+### 2026-05-27 - Candidate Approval, Review Surface Stale-Token Guard, And Expression Feedback Prompt
+
+Scope:
+
+- Prove positive owner approval for a high-quality crystallized memory
+  candidate through the Hermes owner channel.
+- Fix the live review-surface finding where a stale digest detail could show
+  old action tokens as if they were still executable.
+- Deliver a right-brain expression feedback prompt through Telegram without
+  changing Hermes transport ownership.
+
+Candidate consolidation and owner approval:
+
+```text
+source_event_id=evt_20260527T084431437632Z_dbee0b2225
+candidate_id=cand_consolidated_owner_channel_closure_20260527
+candidate_body=用户希望 Memory-OS 的审批和观察闭环通过 Hermes 主会话通道真实推送、反馈和审批，而不是停留在 CLI、日志或 monitor-only 证据。
+queued_by=scripts/memory_os_queue_consolidated_candidate.py --apply
+actual_send=false
+actual_execute=false
+owner_action_created=false
+crystallized_write_created=false
+```
+
+Telegram owner action:
+
+```text
+owner_utterance=memory approve oa_9302a203abfb42
+owner_action_id=oact_20260527T102137607791Z_45ab2e16
+action_type=approve_candidate
+target_id=cand_consolidated_owner_channel_closure_20260527
+channel=telegram
+owner_effect.owner_approved_crystallized_write=true
+crystallized_id=cry_20260527T102137610425Z_4dbff6c999
+crystallized_path=/root/.hermes/memory-os/crystallized/owner_approved.md
+```
+
+Review surface live finding and fix:
+
+```text
+finding=owner asked "展开 R1"; Hermes found an old digest detail and displayed stale action tokens.
+fix=detail items from non-latest owner-home digest are now report_only.
+fix_behavior=content remains visible, but action_tokens/agent_tool_calls/owner_utterance_examples are scrubbed.
+deployed_paths=/root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/owner_actions.py
+deployed_paths=/root/.hermes/plugins/memory_os/owner_actions.py
+py_compile=pass
+surface_direct_check=detail on current stale token returns no executable token path; stale details are report-only by regression test.
+```
+
+Right-brain expression feedback prompt:
+
+```text
+cron_job=memory-os-expression-feedback-smoke
+job_id=5e3eb62ffd56
+delivery=Telegram owner channel
+latest_expression_preview=今天这边很安静，我就轻轻在场。你如果刚好路过，我也在。
+owner_visible_prompt=true
+memory_os_transport_owned=false
+actual_execute=false
+actual_send=false
+raw_body_included=false
+pending_owner_feedback=true
+```
+
+Live monitor evidence after deployment:
+
+```text
+monitor_status=WARN
+FAIL=[]
+crystallized_records=1
+OwnerReview.owner_actions=20
+OwnerReview.by_type.approve_candidate=1
+OwnerReview.owner_approved_crystallized=1
+OwnerReview.unapproved_crystallized=0
+OwnerReview.action_required=0
+OwnerReviewAging.unknown_timestamp=0
+OwnerReviewAging.created_at_coverage_ratio=1.0
+OwnerReviewSurface.operations.detail.status=needs_clarification
+OwnerReviewSurface.boundary_true_count=0
+OwnerReviewSurface.raw_body_included_count=0
+OwnerCronIntegration.status=ok
+OwnerCronIntegration.rendered_count_24h=15
+RightBrainExpressionAdapter.outcome_count=2
+RightBrainExpressionAdapter.outcome_feedback_count=1
+ExpressionFeedback.feedback_count=3
+ExpressionFeedback.linked_outcome_count=1
+WARN=[left_brain_pipeline_check_warn, left_brain_proposal_agenda_trace_missing, right_brain_expression_reaction_volume_thin, rh31_eval_measurement_signals]
+```
+
+Interpretation:
+
+- The candidate approval closure is now live PASS: owner approval in Telegram
+  created the first owner-approved crystallized record and did not create any
+  unapproved crystallized write.
+- The review surface remains read-only for stale digest details. Historical
+  details can still be explained, but execution requires a current action
+  token from the latest overview/page.
+- Right-brain expression feedback is user-visible and waiting for more owner
+  reaction volume. This keeps `right_brain_expression_reaction_volume_thin` as
+  a real WARN rather than hiding it.

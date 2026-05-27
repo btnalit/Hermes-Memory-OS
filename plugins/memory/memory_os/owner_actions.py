@@ -4679,20 +4679,75 @@ def _owner_review_surface_detail(
             reason="review_item_not_found_in_latest_digest",
             digest_id=str(rendered.get("digest_id") or ""),
         )
+    actions_stale = _owner_review_surface_detail_actions_stale(
+        store,
+        owner_id=owner_id,
+        binding=binding,
+        rendered=rendered,
+    )
+    display_item = _stale_owner_review_surface_item(item) if actions_stale else item
     return {
         "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
         "owner_id": owner_id,
-        "status": "ok",
+        "status": "report_only" if actions_stale else "ok",
         "operation": "detail",
         "binding": binding,
         "match": match,
         "digest_id": str(rendered.get("digest_id") or ""),
-        "item": item,
-        "text": "\n".join(_rendered_digest_item_lines(item)),
+        "actions_stale": actions_stale,
+        "stale_reason": "detail_from_non_latest_digest" if actions_stale else "",
+        "item": display_item,
+        "text": "\n".join(_rendered_digest_item_lines(display_item)),
+        "agent_instruction": (
+            "这条详情来自旧 digest。只能作为只读上下文解释给 owner；如果 owner 要操作，"
+            "请先拉取最新 overview/下一页，使用当前 digest 的 action token。"
+            if actions_stale
+            else "Explain the bounded detail. If the owner chooses an action, call memory_os_review_reply with the stable token."
+        ),
         "raw_body_included": False,
         "boundary": _owner_review_false_boundary(),
     }
+
+
+def _owner_review_surface_detail_actions_stale(
+    store: MemoryOSStore,
+    *,
+    owner_id: str,
+    binding: str,
+    rendered: dict[str, Any],
+) -> bool:
+    if binding == "latest_recorded_digest":
+        return False
+    if binding != "latest_owner_home_digest":
+        return True
+    latest = _latest_owner_home_digest_record(store.roots, owner_id=owner_id)
+    if not latest:
+        return True
+    latest_digest_id = str(latest.get("digest_id") or "")
+    return str(rendered.get("digest_id") or "") != latest_digest_id
+
+
+def _stale_owner_review_surface_item(item: dict[str, Any]) -> dict[str, Any]:
+    safe = dict(item)
+    for key in (
+        "action_tokens",
+        "action_targets",
+        "agent_tool_calls",
+        "owner_utterance_examples",
+        "action_commands",
+    ):
+        safe.pop(key, None)
+    safe["actions_stale"] = True
+    safe["stale_reason"] = "detail_from_non_latest_digest"
+    safe["suggested_action"] = (
+        "这条详情来自旧 digest，只能查看；请先查看最新 overview/下一页，再使用当前 action token 操作。"
+    )
+    safe["consequence"] = (
+        str(safe.get("consequence") or "")
+        + " 旧 digest 的 action token 已失效，不能从这条历史详情直接执行。"
+    ).strip()
+    return safe
 
 
 def _owner_review_surface_needs_clarification(

@@ -21,12 +21,12 @@ EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
     "continue_current_task": ["Current Foreground Task"],
     "casual_memory_system_change": [],
     "diagnostic_current_architecture": ["Diagnostic Grounding", "Current Memory-OS Runtime Facts"],
-    "candidate_vs_crystallized": ["Crystallized Review Candidates", "Indexed Recall"],
+    "candidate_vs_crystallized": ["Crystallized Review Candidates", "Crystallized Memory", "Indexed Recall"],
     "active_comfyui_install": ["Current Foreground Task", "Indexed Recall"],
     "deferred_cancellation": ["Current Foreground Task"],
 }
 ALLOWED_RH26_EXTRA_HEADINGS: dict[str, set[str]] = {
-    "active_comfyui_install": {"Working Memory", "Recent Event Summaries"},
+    "active_comfyui_install": {"Working Memory", "Crystallized Memory", "Recent Event Summaries"},
 }
 SAFE_CASUAL_HEADINGS = {"Conversation Carryover", "Recent Event Summaries"}
 FORBIDDEN_CASUAL_HEADINGS = {
@@ -220,8 +220,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         warn.append({"code": "index_not_healthy", "value": memory_status.get("index_health")})
     if memory_status.get("prefetch_mode") != "indexed":
         warn.append({"code": "prefetch_not_indexed", "value": memory_status.get("prefetch_mode")})
-    if int(memory_status.get("counts", {}).get("crystallized_records", 0)) != 0:
-        fail.append({"code": "unexpected_crystallized_records", "value": memory_status.get("counts", {})})
+    crystallized_record_count = int(memory_status.get("counts", {}).get("crystallized_records", 0))
+    if crystallized_record_count > 0:
+        passed.append(
+            {
+                "code": "crystallized_records_present",
+                "value": crystallized_record_count,
+            }
+        )
 
     doctor = snapshot.get("doctor", {})
     if doctor.get("status") == "ok":
@@ -726,6 +732,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     {
                         "code": "owner_review_unapproved_crystallized_write",
                         "value": owner_review.get("unapproved_crystallized_write_count"),
+                    }
+                )
+            if int(owner_review.get("owner_approved_crystallized_write_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "owner_review_owner_approved_crystallized_write",
+                        "value": owner_review.get("owner_approved_crystallized_write_count"),
                     }
                 )
             if int(owner_review.get("error_count") or 0) > 0:
