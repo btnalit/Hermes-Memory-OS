@@ -135,6 +135,53 @@ def test_governance_feedback_writes_summary_only_events_and_is_idempotent(tmp_pa
         assert event.safe_ref["body_policy"] == "summary_only"
 
 
+def test_governance_feedback_skips_when_no_new_events_are_pending(tmp_path):
+    store = _store(tmp_path)
+    modules = _seed_governance_artifacts(tmp_path, store)
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    first = bridge.run_once(store=store, dry_run=False, **modules)
+    second = bridge.run_once(store=store, dry_run=False, **modules)
+    status = bridge.status()
+
+    assert first["status"] == "ok"
+    assert second["status"] == "skipped"
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "no_new_governance_feedback_events"
+    assert second["written_event_count"] == 0
+    assert status["generated_count"] == 1
+    assert status["skipped_count"] == 1
+
+
+def test_governance_feedback_ignores_duplicate_self_evolution_noop_reports(tmp_path):
+    class DuplicateSelfEvolution:
+        def read_reports(self):
+            return [
+                {
+                    "schema_version": "hermes.self_evolution.report.v0",
+                    "profile": "main",
+                    "status": "ok",
+                    "proposal_created": False,
+                    "skipped": True,
+                    "novelty_skipped": True,
+                    "reason": "duplicate_unresolved_proposal",
+                    "score_refs": ["score:1"],
+                }
+            ]
+
+    store = _store(tmp_path)
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    result = bridge.run_once(store=store, dry_run=False, self_evolution=DuplicateSelfEvolution())
+
+    assert result["status"] == "skipped"
+    assert result["source_event_count"] == 0
+    assert result["written_event_count"] == 0
+    assert result["event_kinds"] == {}
+    assert not [event for event in store.read_events() if event.kind == "governance_self_evolution_reported"]
+
+
 def test_governance_feedback_consumes_expression_feedback_without_live_mutation(tmp_path):
     store = _store(tmp_path)
     expression_ledger = tmp_path / "memory-os" / "system" / "expression_feedback_ledger.jsonl"

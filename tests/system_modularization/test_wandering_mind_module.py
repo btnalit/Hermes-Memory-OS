@@ -1,3 +1,5 @@
+import json
+
 from plugins.memory.memory_os.fixtures import build_event, build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
@@ -78,6 +80,48 @@ def test_wandering_mind_records_would_send_without_real_delivery(tmp_path):
     assert records[0]["payload_ref"] == result["output_ref"]
     assert records[0]["created_at"] == records[0]["ts"]
     assert "body" not in records[0]
+
+
+def test_wandering_mind_skips_unchanged_signal_until_owner_reaction_changes(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(EventEnvelope.from_dict(build_event(seed=4, profile="main")))
+    HouseholdDigestModule(tmp_path, profile="main").build_digest(store=store)
+    module = WanderingMindModule(tmp_path, profile="main")
+
+    first = module.run_once(store=store, min_events=1)
+    second = module.run_once(store=store, min_events=1)
+
+    assert first["would_send"] is True
+    assert second["status"] == "skipped"
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_right_brain_signal"
+    assert len(module.read_would_send_records()) == 1
+
+    feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.expression_feedback.v0",
+                "feedback_id": "exprfb_test_001",
+                "target_id": "latest_outcome",
+                "action_type": "expression_feedback_too_mechanical",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    after_reaction = module.run_once(store=store, min_events=1)
+
+    assert after_reaction["would_send"] is True
+    assert after_reaction["signal_summary"]["feedback_count"] == 1
+    assert len(module.read_would_send_records()) == 2
+    status = module.status()
+    assert status["generated_count"] == 2
+    assert status["skipped_count"] == 1
 
 
 def test_wandering_mind_does_not_touch_sannai_shape_fixture(tmp_path):

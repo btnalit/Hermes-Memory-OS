@@ -34,6 +34,22 @@ def test_left_brain_pipeline_checker_reports_approved_followup_without_execution
     assert report["execution_boundary"]["actual_execute"] is False
 
 
+def test_left_brain_pipeline_checker_skips_rewriting_unchanged_report(tmp_path):
+    store = _store(tmp_path)
+    module = LeftBrainPipelineCheckModule(tmp_path, profile="main")
+
+    first = module.run_once(store=store, write=True)
+    persisted = module.report_path.read_text(encoding="utf-8")
+    second = module.run_once(store=store, write=True)
+
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_pipeline_report"
+    assert module.report_path.read_text(encoding="utf-8") == persisted
+
+
 def test_left_brain_pipeline_checker_detects_live_feature_scoring_as_fail(tmp_path):
     store = _store(tmp_path)
     evidence = EvidenceScoringModule(tmp_path, profile="main")

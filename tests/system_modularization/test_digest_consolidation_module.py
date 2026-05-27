@@ -123,6 +123,27 @@ def test_daily_digest_apply_writes_atomic_artifact_matching_dry_run(tmp_path):
     assert list(artifact_path.parent.glob("*.tmp")) == []
 
 
+def test_daily_digest_apply_skips_unchanged_artifact(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(
+        _event(
+            seed=11,
+            ts="2026-05-21T01:00:00+00:00",
+            summary="Stable daily digest source.",
+        )
+    )
+    module = DigestConsolidationModule(tmp_path, profile="main")
+
+    first = module.build_daily_digest(store=store, target_date="2026-05-21", dry_run=False)
+    second = module.build_daily_digest(store=store, target_date="2026-05-21", dry_run=False)
+
+    assert first["applied"] is True
+    assert second["applied"] is False
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_daily_digest"
+
+
 def test_candidate_dedup_key_is_order_independent_and_semantic_subject_scoped(tmp_path):
     module = DigestConsolidationModule(tmp_path, profile="main")
 
@@ -289,6 +310,40 @@ def test_weekly_dry_run_and_apply_artifacts_are_equivalent(tmp_path):
 
     assert artifact == dry_run["would_write"]
     assert applied["applied"] is True
+
+
+def test_weekly_consolidation_apply_skips_when_artifact_and_queue_are_synced(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    module = DigestConsolidationModule(tmp_path, profile="main")
+    store.append_event(
+        _event(
+            seed=81,
+            ts="2026-05-21T01:00:00+00:00",
+            summary="Weekly skip source.",
+            safe_ref={"semantic_subject": "telegram_session_continuity"},
+        )
+    )
+
+    first = module.build_weekly_consolidation(
+        store=store,
+        target_week="2026-W21",
+        proposal_queue=proposal_queue,
+        dry_run=False,
+    )
+    second = module.build_weekly_consolidation(
+        store=store,
+        target_week="2026-W21",
+        proposal_queue=proposal_queue,
+        dry_run=False,
+    )
+
+    assert first["applied"] is True
+    assert second["applied"] is False
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_weekly_consolidation"
+    assert len(proposal_queue.read_queue()["items"]) == 1
 
 
 def test_digest_doctor_warns_on_artifact_accumulation_threshold(tmp_path):

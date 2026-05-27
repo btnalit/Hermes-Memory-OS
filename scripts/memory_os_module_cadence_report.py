@@ -190,9 +190,11 @@ def build_cadence_report(*, hermes_home: Path, profile: str = DEFAULT_PROFILE, a
                 module,
                 generated_count=_cron_output_count(hermes_home, cron_matches),
             )
+        module_counters = observed_counters.get(module, _empty_counters())
+        module_local_skip_gate_visible = _module_local_skip_gate_visible(module_counters)
         split_recommended = bool(target.get("split_recommended"))
         finding_codes: list[str] = []
-        if split_recommended:
+        if split_recommended and not module_local_skip_gate_visible:
             finding_codes.append("production_cadence_split_pending")
             findings.append(
                 {
@@ -222,7 +224,8 @@ def build_cadence_report(*, hermes_home: Path, profile: str = DEFAULT_PROFILE, a
                 "current_cron_jobs": [_job_summary(job) for job in cron_matches],
                 "integration_harness_member": target.get("current_runner") == "cognitive_loop",
                 "production_split_recommended": split_recommended,
-                "cadence_counters": observed_counters.get(module, _empty_counters()),
+                "module_local_skip_gate_visible": module_local_skip_gate_visible,
+                "cadence_counters": module_counters,
                 "finding_codes": finding_codes,
                 "notes": target.get("notes"),
             }
@@ -489,6 +492,10 @@ def _empty_counters() -> dict[str, Any]:
     }
 
 
+def _module_local_skip_gate_visible(counters: dict[str, Any]) -> bool:
+    return int(counters.get("skipped_count") or 0) > 0 or int(counters.get("duplicate_count") or 0) > 0
+
+
 def _modules_for_step(step_name: str) -> tuple[str, ...]:
     if step_name in {"heartbeat_pre", "heartbeat_post"}:
         return ("heartbeat_inner_drive",)
@@ -520,10 +527,14 @@ def _record_expression_submodule_steps(
     result = step.get("result") if isinstance(step.get("result"), dict) else {}
     if result.get("expression_draft_created") is True or isinstance(result.get("expression_draft"), dict):
         _record_synthetic_result(counters, "expression_draft", finished_at, generated=True)
+    elif result.get("expression_draft_skipped") is True:
+        _record_synthetic_result(counters, "expression_draft", finished_at, skipped=True)
     elif result.get("output") == "[SILENT]":
         _record_synthetic_result(counters, "expression_draft", finished_at, skipped=True)
     if isinstance(result.get("speak_gate_decision"), dict):
         _record_synthetic_result(counters, "speak_gate", finished_at, generated=True)
+    elif result.get("speak_gate_skipped") is True:
+        _record_synthetic_result(counters, "speak_gate", finished_at, skipped=True)
     elif result.get("would_send") is True:
         _record_synthetic_result(counters, "speak_gate", finished_at, error=True)
 
@@ -552,7 +563,7 @@ def _record_synthetic_result(
 def _result_is_skipped(result: dict[str, Any], status: str) -> bool:
     if status in {"skipped", "deferred", "skipped_dependency_failed"}:
         return True
-    if result.get("skipped") is True or result.get("novelty_skipped") is True:
+    if result.get("skipped") is True or result.get("novelty_skipped") is True or result.get("cadence_skipped") is True:
         return True
     return result.get("output") == "[SILENT]"
 

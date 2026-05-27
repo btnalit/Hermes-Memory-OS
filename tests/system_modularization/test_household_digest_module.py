@@ -54,6 +54,30 @@ def test_household_digest_builds_summary_from_memory_os_events(tmp_path):
     assert "body" not in digest.lower()
 
 
+def test_household_digest_skips_when_input_fingerprint_is_unchanged(tmp_path):
+    store = _store(tmp_path)
+    store.append_event(
+        EventEnvelope.from_dict(
+            {**build_event(seed=11, profile="main"), "summary": "Stable household digest source."}
+        )
+    )
+    module = HouseholdDigestModule(tmp_path, profile="main")
+
+    first = module.build_digest(store=store, limit=10)
+    before = module.digest_path.read_text(encoding="utf-8")
+    second = module.build_digest(store=store, limit=10)
+    status = module.status()
+
+    assert first["status"] == "ok"
+    assert second["status"] == "skipped"
+    assert second["skipped"] is True
+    assert second["cadence_skipped"] is True
+    assert second["reason"] == "unchanged_input_fingerprint"
+    assert module.digest_path.read_text(encoding="utf-8") == before
+    assert status["generated_count"] == 1
+    assert status["skipped_count"] == 1
+
+
 def test_household_digest_degrades_gracefully_with_few_events(tmp_path):
     store = _store(tmp_path)
     store.append_event(EventEnvelope.from_dict(build_event(seed=3, profile="main")))

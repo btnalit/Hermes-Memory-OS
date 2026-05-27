@@ -84,11 +84,16 @@ class GovernanceFeedbackBridgeModule:
     def status(self) -> dict[str, Any]:
         state = self.read_state()
         records = state.get("records", [])
+        counters = state.get("counters") if isinstance(state.get("counters"), dict) else {}
         return {
             "schema_version": "hermes.governance_feedback_status.v0",
             "module": "governance_feedback",
             "profile": self.profile,
             "emitted_event_count": len(records) if isinstance(records, list) else 0,
+            "generated_count": int(counters.get("generated_count") or 0),
+            "skipped_count": int(counters.get("skipped_count") or 0),
+            "latest_run_status": str(state.get("latest_run_status") or "missing"),
+            "latest_skip_reason": str(state.get("latest_skip_reason") or ""),
             "state_path": str(self.state_path),
             "delivery_mode": "no-send",
             "actual_send": False,
@@ -140,13 +145,28 @@ class GovernanceFeedbackBridgeModule:
         pending = [event for event in events if str(event.safe_ref.get("governance_feedback_key", "")) not in emitted_keys]
 
         if not dry_run:
-            for event in pending:
-                store.append_event(event)
-                state_records.append(_state_record(event))
-            self._write_state(state_records)
+            if pending:
+                for event in pending:
+                    store.append_event(event)
+                    state_records.append(_state_record(event))
+                self._write_state(
+                    state_records,
+                    latest_run_status="ok",
+                    latest_skip_reason="",
+                    generated_delta=1,
+                    skipped_delta=0,
+                )
+            else:
+                self._write_state(
+                    state_records,
+                    latest_run_status="skipped",
+                    latest_skip_reason="no_new_governance_feedback_events",
+                    generated_delta=0,
+                    skipped_delta=1,
+                )
             append_audit(
                 store.roots.audit_path,
-                action="governance_feedback_events_written",
+                action="governance_feedback_events_written" if pending else "governance_feedback_skipped",
                 status="ok",
                 target=str(self.state_path),
                 details={
@@ -158,11 +178,11 @@ class GovernanceFeedbackBridgeModule:
                 },
             )
 
-        return {
+        result = {
             "schema_version": "hermes.governance_feedback_result.v0",
             "module": "governance_feedback",
             "profile": self.profile,
-            "status": "ok",
+            "status": "ok" if (dry_run or pending) else "skipped",
             "dry_run": dry_run,
             "would_write_event_count": len(pending),
             "written_event_count": 0 if dry_run else len(pending),
@@ -172,6 +192,15 @@ class GovernanceFeedbackBridgeModule:
             "actual_send": False,
             "actual_execute": False,
         }
+        if not dry_run and not pending:
+            result.update(
+                {
+                    "skipped": True,
+                    "cadence_skipped": True,
+                    "reason": "no_new_governance_feedback_events",
+                }
+            )
+        return result
 
     def read_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
@@ -188,6 +217,7 @@ class GovernanceFeedbackBridgeModule:
                 "records": [],
             }
         parsed.setdefault("records", [])
+        parsed.setdefault("counters", {"generated_count": 0, "skipped_count": 0})
         return parsed
 
     def _collect_events(
@@ -345,6 +375,8 @@ class GovernanceFeedbackBridgeModule:
         for index, report in enumerate(self_evolution.read_reports()):
             if str(report.get("profile", self.profile)) != self.profile:
                 continue
+            if _self_evolution_noop_report(report):
+                continue
             proposal_id = str(report.get("proposal_id", ""))
             report_id = proposal_id or _hash_json(report)[:12] or f"report_{index}"
             records.append(
@@ -406,12 +438,29 @@ class GovernanceFeedbackBridgeModule:
                 keys.add(key)
         return keys
 
-    def _write_state(self, records: list[dict[str, Any]]) -> None:
+    def _write_state(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        latest_run_status: str,
+        latest_skip_reason: str,
+        generated_delta: int,
+        skipped_delta: int,
+    ) -> None:
+        state = self.read_state()
+        counters = state.get("counters") if isinstance(state.get("counters"), dict) else {}
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         document = {
             "schema_version": "hermes.governance_feedback_state.v0",
             "profile": self.profile,
             "records": records,
+            "latest_run_at": _timestamp(),
+            "latest_run_status": latest_run_status,
+            "latest_skip_reason": latest_skip_reason,
+            "counters": {
+                "generated_count": int(counters.get("generated_count") or 0) + generated_delta,
+                "skipped_count": int(counters.get("skipped_count") or 0) + skipped_delta,
+            },
         }
         self.state_path.write_text(
             json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -437,6 +486,18 @@ def _optional_refs(record: dict[str, Any]) -> dict[str, Any]:
         if record.get(key):
             output[key] = record[key]
     return output
+
+
+def _self_evolution_noop_report(report: dict[str, Any]) -> bool:
+    if report.get("proposal_created") is True:
+        return False
+    reason = str(report.get("reason") or "")
+    return (
+        report.get("skipped") is True
+        or report.get("novelty_skipped") is True
+        or report.get("cadence_skipped") is True
+        or "duplicate" in reason
+    )
 
 
 def _idempotency_key(record: dict[str, Any]) -> str:

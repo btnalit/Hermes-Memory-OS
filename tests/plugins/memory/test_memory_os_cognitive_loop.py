@@ -65,6 +65,28 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert wandering_result["speak_gate_decision"]["actual_send"] is False
 
 
+def test_cognitive_loop_skips_right_brain_downstream_when_signal_unchanged(tmp_path):
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed right-brain cadence.")
+
+    runner = CognitiveLoopRunner(store)
+    first = runner.run_once(apply=True, test_host=True)
+    second = runner.run_once(apply=True, test_host=True)
+
+    first_steps = {step["step"]: step for step in first["steps"]}
+    second_steps = {step["step"]: step for step in second["steps"]}
+    assert first_steps["wandering_mind"]["result"]["expression_draft_created"] is True
+    wandering_result = second_steps["wandering_mind"]["result"]
+    assert wandering_result["status"] == "skipped"
+    assert wandering_result["cadence_skipped"] is True
+    assert wandering_result["expression_draft_skipped"] is True
+    assert wandering_result["speak_gate_skipped"] is True
+    assert "expression_draft" not in wandering_result
+    assert "speak_gate_decision" not in wandering_result
+    assert second["boundaries"]["actual_send"] is False
+
+
 def test_cognitive_loop_continues_after_step_failure(tmp_path, monkeypatch):
     store = _init_store(tmp_path)
     _append_event(store, "evt_1", "User discussed failure isolation.")

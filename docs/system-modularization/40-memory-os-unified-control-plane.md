@@ -268,9 +268,12 @@ outcome-feedback baseline:
 1. **P1-S feedback backflow quality**: linked-outcome quality gating is now
    live for expression feedback. Remaining P1-S work should focus on feedback
    proposal usefulness and maturity, not direct prompt/policy/cadence mutation.
-2. **P1-T next cadence split**: cadence report is live and SelfEvolution,
-   EvidenceScoring, and OpsGate now have module-local skip gates; choose any
-   further module from refreshed counters, not a timer guess.
+2. **P1-T cadence split is no longer a WARN source**: cadence report is live,
+   left-brain/context modules have module-local skip gates, and the remaining
+   right-brain expression harness findings (`wandering_mind`,
+   `expression_draft`, `speak_gate`) were closed through outcome/reaction-aware
+   skip evidence rather than timer guessing. Further cadence work must be
+   chosen from refreshed generated/skipped/error/duplicate counters.
 3. **P1-Q extension only for concrete proposal kinds**: extend explicit apply
    only when a proposal kind has owner approval, OpsGate report-only evidence,
    bounded runtime target, rollback, and monitor fields.
@@ -422,12 +425,13 @@ Current truth:
 - P1-T cadence report is deployed on `10.20.3.200`; live monitor reports
   `module_cadence_report_visible`, `module_count=18`, `cron_job_count=2`,
   `integration_harness_member_count=11`, `split_recommended_count=11`,
-  `expected_hermes_cron_missing_count=0`, `generated_count=882`,
-  `skipped_count=15`, `error_count=15`, `duplicate_count=11`, and
-  `counter_coverage_count=18`;
-- production cadence is not mature because the report intentionally shows 11
-  modules still needing cadence split work. The counters now make that split
-  observable instead of timer-only.
+  `expected_hermes_cron_missing_count=0`, `finding_count=0`,
+  `generated_count=897`, `skipped_count=63`, `error_count=15`,
+  `duplicate_count=22`, and `counter_coverage_count=18`;
+- production cadence is not fully mature, but the previous
+  `module_cadence_split_pending` WARN is closed. Remaining cadence work should
+  be selected from refreshed counters and real owner/outcome volume, not from
+  timer tables.
 - P1-T first split is live: SelfEvolution-local cadence gating now makes a
   same-day same-signal rerun return monitor-visible `cadence_skipped=true`
   instead of generating another proposal or calling OpsGate. The cognitive loop
@@ -450,6 +454,21 @@ Current truth:
   smoke shows `first_status=ok`, `second_status=skipped`,
   `reason=unchanged_input_fingerprint`, `second_analysis_artifact_created=false`,
   and monitor-visible `cadence_skipped_count=1`.
+- P1-T fifth split is live: HouseholdDigest, DigestConsolidation,
+  GovernanceFeedback, and LeftBrainPipelineCheck now skip unchanged/no-new-signal
+  runs, and EvidenceScoring no longer lets GovernanceFeedback mirror events
+  change its input fingerprint. Latest `10.20.3.200` cycle showed
+  `household_digest=skipped`, `digest_consolidation=skipped`,
+  `governance_feedback=skipped`, `left_brain_pipeline_check=skipped`,
+  `evidence_scoring=skipped`, and all hard boundaries false. Cadence report
+  pending findings dropped from 11 to 3.
+- P1-T sixth split is live: WanderingMind now records a bounded right-brain
+  signal fingerprint and skips unchanged owner-facing/reaction signals.
+  CognitiveLoop records downstream `expression_draft_skipped=true` and
+  `speak_gate_skipped=true` instead of creating another draft/gate decision.
+  Latest live evidence shows `ModuleCadence.finding_count=0`,
+  `wandering_mind.skipped_count=1`, `expression_draft.skipped_count=1`,
+  `speak_gate.skipped_count=1`, and no `module_cadence_split_pending` WARN.
 
 Implementation order:
 
@@ -462,9 +481,11 @@ Implementation order:
 7. feedback backflow report-only/proposal-only;
 8. approved-proposal execution-decision state design;
 9. production cadence split after report-specific counters; SelfEvolution,
-   EvidenceScoring, OpsGate, and DeepReflection module-local skip gates are
-   deployed, and any next module must still be chosen from refreshed counter
-   evidence;
+   EvidenceScoring, OpsGate, DeepReflection, HouseholdDigest,
+   DigestConsolidation, GovernanceFeedback, and LeftBrainPipelineCheck
+   module-local skip gates are deployed. The right-brain expression harness
+   also has outcome/reaction-aware skip evidence; future split work must be
+   chosen from refreshed counter evidence and owner/outcome volume;
 10. ContextRouter / Ingress de-duplication with parity tests.
 
 ### P1-O - Owner Review Fallback / Gateway Boundary

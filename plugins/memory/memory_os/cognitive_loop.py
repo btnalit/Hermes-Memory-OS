@@ -246,15 +246,25 @@ class CognitiveLoopRunner:
             proposal_queue=proposal_queue,
             dry_run=False,
         )
-        return {
+        both_skipped = bool(daily.get("skipped") is True and weekly.get("skipped") is True)
+        result = {
             "schema_version": "memory-os.cognitive_loop.digest_consolidation.v0",
             "module": "digest_consolidation",
-            "status": "ok",
+            "status": "skipped" if both_skipped else "ok",
             "daily": _bounded(daily),
             "weekly": _bounded(weekly),
             "actual_send": False,
             "actual_approve": False,
         }
+        if both_skipped:
+            result.update(
+                {
+                    "skipped": True,
+                    "cadence_skipped": True,
+                    "reason": "unchanged_daily_and_weekly_digest",
+                }
+            )
+        return result
 
     def _wandering_mind(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.cognition.wandering_mind import WanderingMindModule
@@ -265,6 +275,14 @@ class CognitiveLoopRunner:
             store=self.store,
             min_events=1,
         )
+        if result.get("cadence_skipped") is True or result.get("skipped") is True:
+            return {
+                **result,
+                "expression_draft_skipped": True,
+                "expression_draft_skip_reason": str(result.get("reason") or "wandering_mind_skipped"),
+                "speak_gate_skipped": True,
+                "speak_gate_skip_reason": str(result.get("reason") or "wandering_mind_skipped"),
+            }
         if "output" not in result:
             return result
 
@@ -434,7 +452,7 @@ class CognitiveLoopRunner:
 
 def _step_status(result: dict[str, Any]) -> str:
     status = str(result.get("status", "") or "").lower()
-    if status in {"ok", "warning", "error", "deferred", "skipped_dependency_failed"}:
+    if status in {"ok", "warning", "error", "deferred", "skipped", "skipped_dependency_failed"}:
         return "warning" if status == "deferred" else status
     if result.get("output") == "[SILENT]" or result.get("reason"):
         return "warning"

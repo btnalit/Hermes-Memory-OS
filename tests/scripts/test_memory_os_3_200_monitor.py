@@ -969,6 +969,13 @@ def test_classify_snapshot_tracks_module_cadence_report():
     assert "ModuleCadence" in rendered
     assert snapshot["module_cadence"]["module_counters"]["self_evolution"]["duplicate_count"] == 1
 
+    snapshot["module_cadence"]["finding_count"] = 0
+    snapshot["module_cadence"]["latest_status"] = "ok"
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "module_cadence_split_pending" for item in classification["warn"])
+
+    snapshot["module_cadence"]["finding_count"] = 10
     snapshot["module_cadence"]["boundary"]["cron_modified"] = True
     classification = classify_snapshot(snapshot)
 

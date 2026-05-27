@@ -1214,16 +1214,25 @@ Completed baseline:
     and skips same-day unchanged apply-mode reruns with
     `cadence_skipped=true`, while leaving Hermes cron/systemd timers
     unchanged.
+16. P1-T fifth split is deployed: HouseholdDigest, DigestConsolidation,
+    GovernanceFeedback, and LeftBrainPipelineCheck now have module-local
+    no-new-signal / unchanged-report skip gates; EvidenceScoring ignores
+    GovernanceFeedback mirror events for fingerprint purposes; cadence report
+    now treats modules with visible skip/duplicate evidence as no longer
+    `production_cadence_split_pending`.
 
 Next runtime order:
 
-1. P1-P timestamp / aging quality.
-2. P1-T choose any further module split from refreshed generated/skipped/error/
-   duplicate counters after SelfEvolution, EvidenceScoring, OpsGate, and
-   DeepReflection.
-3. P1-S remaining work narrows to feedback proposal usefulness/maturity after
+1. P1-R/P1-T right-brain outcome/reaction cadence is deployed: unchanged
+   owner-facing/reaction signals now skip `wandering_mind` and downstream
+   `expression_draft` / `speak_gate`, and live ModuleCadence reports
+   `finding_count=0`.
+2. P1-P timestamp / aging quality.
+3. P1-T choose any further module split only from refreshed
+   generated/skipped/error/duplicate counters and real owner/outcome volume.
+4. P1-S remaining work narrows to feedback proposal usefulness/maturity after
    the linked-outcome quality gate; no direct policy/prompt/cadence mutation.
-4. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
+5. RH-28/RH-31 LLM judge remains report-only until evidence supports a separate
    bounded-live gate.
 
 This order is deliberate:
@@ -1231,9 +1240,9 @@ This order is deliberate:
 - SelfEvolution is the first split because it already has quality gates and
   duplicate evidence, and repeated owner-facing proposals are the highest
   visible cadence risk;
-- right-brain now has outcome evidence and one linked owner-reaction smoke, so
-  the next right-brain gap is reaction volume and cadence evaluation, not
-  another send path;
+- right-brain now has outcome evidence, one linked owner-reaction smoke, and
+  outcome/reaction-aware cadence skip evidence; the next gap is expression
+  quality and reaction volume, not another send path or timer edit;
 - cadence report came before scheduler changes; each cadence slice must add a
   module-local skip/error/duplicate gate before changing timers;
 - left-brain checker comes before claiming proposal quality maturity;

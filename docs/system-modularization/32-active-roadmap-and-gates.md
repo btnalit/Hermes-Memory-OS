@@ -142,7 +142,7 @@ These are not the remaining queue, but future work depends on them.
 | RH-17 metadata/report retention helper | implemented as dry-run | no canonical paths touched; physical apply remains open |
 | Hermes upgrade compatibility gate | designed and script-backed | future Hermes version upgrade still needs live run |
 | RH-34/RH-35 owner governance | RH-35.1 + RH-34a/b/c/d + RH-34e.1 + RH-35.2/35.5/35.8 + RH-34e/f/g live on test host | owner action processor, review queue/status/apply CLI, channel resolver, digest preview, export eligibility gate, aging projection, one-shot Hermes send compatibility smoke, owner-readable renderer, stable action-token parser, agent-mediated `memory_os_review_reply` tool, Hermes cron recurring delivery, portable owner channel defaults, and bounded digest quality checks are deployed; Memory-OS renders bounded text and exposes tools/state, Hermes owns delivery and agent interaction |
-| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, RH-38 right-brain expression closure, RH-39 left-brain governance quality, ExpressionDraft, LeftBrainPipelineCheck, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=18`, `matrix_module_count=30`, `active_work_item_count=20`, `active_work_mapping_count=20`, `finding_count=0` |
+| RH-36 module closure matrix | documented and locally enforced | left/right brain, governance, feedback, scheduler, monitor, owner-review, and Hermes transport seams are listed with reads/writes, owner-action behavior, speech behavior, gates, and backflow; the matrix now includes delivery/state-change/cadence classification fields, renderer/helper/Hermes delivery split, mailbox-internal scope, cadence transitions, production cadence targets, active roadmap closure mapping, RH-38 right-brain expression closure, RH-39 left-brain governance quality, ExpressionDraft, LeftBrainPipelineCheck, and violation severity rules aligned with `10.20.2.88` main/Sannai cron and mailbox patterns; `scripts/memory_os_closure_matrix_check.py` reconciles code-defined live modules, contract-critical non-live surfaces, and active `P1-*`/`P2-F` work items against RH-36 and currently reports `status=ok`, `live_module_count=18`, `matrix_module_count=31`, `active_work_item_count=20`, `active_work_mapping_count=20`, `finding_count=0` |
 | RH-37 Agent / Memory-OS collaboration contract | design contract active; no new execution capability | defines how Hermes agent reads bounded Memory-OS review context, explains owner questions, suggests without deciding, asks when ambiguous, and calls structured tools only after definite owner intent; follow-up implementation remains split into P1 items below |
 
 ## Full Documentation-to-Code-to-Live Reconciliation
@@ -1393,9 +1393,11 @@ Stop signal:
 ### P1-T - Prototype-Informed Module Cadence Split
 
 Status: report-only runtime baseline deployed on `10.20.3.200`; runtime
-splits are deployed for `SelfEvolution`, `EvidenceScoring`, and `OpsGate` as
-module-local skip gates; no Hermes cron/systemd scheduling changes have been
-made.
+splits are deployed for `SelfEvolution`, `EvidenceScoring`, `OpsGate`,
+`DeepReflection`, `HouseholdDigest`, `DigestConsolidation`,
+`GovernanceFeedback`, `LeftBrainPipelineCheck`, and the right-brain expression
+harness (`wandering_mind`, `expression_draft`, `speak_gate`) as module-local
+skip gates; no Hermes cron/systemd scheduling changes have been made.
 
 Implementation blueprint:
 
@@ -1460,8 +1462,9 @@ Promotion signal:
 - module-local cadence report exists; live `10.20.3.200` evidence currently
   reports `module_count=18`, `cron_job_count=2`,
   `integration_harness_member_count=11`, `split_recommended_count=11`,
-  `expected_hermes_cron_missing_count=0`, `generated_count=874`,
-  `skipped_count=12`, `error_count=15`, `duplicate_count=11`,
+  `expected_hermes_cron_missing_count=0`, `finding_count=0`,
+  `generated_count=897`, `skipped_count=63`, `error_count=15`,
+  `duplicate_count=22`,
   `counter_coverage_count=18`, and PASS
   `module_cadence_report_visible`;
 - no module uses production cadence without generated/skipped/error counters;
@@ -1483,6 +1486,8 @@ Stop signal:
   or changes `actual_execute` / `actual_send`.
 - OpsGate skips a non-empty proposed action set, stops writing report-only
   follow-up reports for approved proposals, or sets `actual_execute=true`.
+- right-brain cadence skip suppresses a new owner-facing event, new recorded
+  expression outcome, new owner expression feedback, or policy change.
 
 Second split decision:
 
@@ -1553,6 +1558,63 @@ Fourth split decision:
   `latest_cadence_skipped=true`,
   `latest_skip_reason=unchanged_input_fingerprint`, and
   `ModuleCadence.module_counters.deep_reflection.skipped_count=1`.
+
+Fifth split decision:
+
+- target modules: `HouseholdDigest`, `DigestConsolidation`,
+  `GovernanceFeedback`, `LeftBrainPipelineCheck`, plus EvidenceScoring
+  governance-mirror fingerprint hygiene;
+- reason: refreshed live counters showed several context/governance modules with
+  generated output but no module-local skip proof. After SelfEvolution,
+  EvidenceScoring, OpsGate, and DeepReflection had skip gates, the remaining
+  easy wins were no-new-signal/unchanged-artifact gates, not timer changes;
+- implementation:
+  - HouseholdDigest records an input fingerprint and skips unchanged digest
+    rewrites;
+  - DigestConsolidation skips unchanged daily/weekly artifacts when the weekly
+    proposal queue is already synced;
+  - GovernanceFeedback skips when no new governance events are pending and
+    ignores duplicate/no-op SelfEvolution reports;
+  - LeftBrainPipelineCheck avoids rewriting identical reports;
+  - EvidenceScoring skips GovernanceFeedback mirror events and excludes skipped
+    event counters from its input fingerprint;
+- live evidence: on `10.20.3.200`, the latest cycle returned
+  `household_digest=skipped`, `digest_consolidation=skipped`,
+  `governance_feedback=skipped`, `left_brain_pipeline_check=skipped`,
+  `evidence_scoring=skipped`, `actual_send=false`, and `actual_execute=false`;
+- cadence report evidence: latest report shows `finding_count=3`; remaining
+  pending modules are `wandering_mind`, `expression_draft`, and `speak_gate`.
+
+Sixth split decision:
+
+- target modules: `wandering_mind`, `expression_draft`, and `speak_gate`;
+- reason: after the context/governance split, the only remaining cadence
+  findings were the right-brain expression harness. These modules should not
+  be split by guessing a timer; they should skip when there is no new
+  owner-facing event, right-brain expression outcome, owner reaction, or
+  expression policy change;
+- prototype reference: `10.20.2.88` shows low-frequency origin expression and
+  silence as a valid result, but Memory-OS keeps Hermes as expression/transport
+  owner and only records bounded signal/cadence evidence;
+- implementation:
+  - WanderingMind records a bounded right-brain signal fingerprint and returns
+    `status=skipped`, `cadence_skipped=true`,
+    `reason=unchanged_right_brain_signal` when the signal is unchanged;
+  - CognitiveLoop does not create a new ExpressionDraft or SpeakGate decision
+    for that unchanged-signal skip, and instead records
+    `expression_draft_skipped=true` and `speak_gate_skipped=true`;
+  - ModuleCadence counts those downstream skips, and monitor treats
+    `finding_count=0` as the split closure criterion instead of warning on
+    `split_recommended_count` alone;
+- live evidence: two consecutive 10.20.3.200 cognitive-loop runs produced first
+  a normal `would_send=true` right-brain output and then
+  `wandering_mind status=skipped`, `expression_draft_skipped=true`,
+  `speak_gate_skipped=true`, `would_send=false`, with all hard boundaries false;
+- cadence report evidence: latest report shows `status=ok`, `finding_count=0`,
+  `wandering_mind.skipped_count=1`, `expression_draft.skipped_count=1`, and
+  `speak_gate.skipped_count=1`;
+- monitor evidence: `module_cadence_split_pending` is no longer emitted;
+  remaining WARN items are outside this P1-R/P1-T slice.
 
 ## Active P2 Queue
 

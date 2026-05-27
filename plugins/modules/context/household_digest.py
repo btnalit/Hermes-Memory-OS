@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -59,13 +61,23 @@ class HouseholdDigestModule:
     def digest_path(self) -> Path:
         return self.module_root / "household_digest.md"
 
+    @property
+    def state_path(self) -> Path:
+        return self.module_root / "state.json"
+
     def status(self) -> dict[str, Any]:
+        state = self._read_state()
+        counters = state.get("counters") if isinstance(state.get("counters"), dict) else {}
         return {
             "schema_version": "hermes.household_digest_status.v0",
             "module": "household_digest",
             "profile": self.profile,
             "artifact_ref": str(self.digest_path),
             "artifact_exists": self.digest_path.exists(),
+            "generated_count": int(counters.get("generated_count") or 0),
+            "skipped_count": int(counters.get("skipped_count") or 0),
+            "latest_run_status": str(state.get("latest_run_status") or "missing"),
+            "latest_skip_reason": str(state.get("latest_skip_reason") or ""),
         }
 
     def doctor(self, *, store: MemoryOSStore | None = None, min_events: int = 50) -> dict[str, Any]:
@@ -116,6 +128,49 @@ class HouseholdDigestModule:
     ) -> dict[str, Any]:
         events = sorted(store.read_events(), key=lambda event: event.ts)[-limit:]
         degraded = len(events) < min_events
+        input_fingerprint = _input_fingerprint(
+            {
+                "profile": self.profile,
+                "limit": limit,
+                "min_events": min_events,
+                "events": [
+                    {
+                        "id": event.id,
+                        "ts": event.ts,
+                        "kind": event.kind,
+                        "summary": event.summary,
+                    }
+                    for event in events
+                ],
+            }
+        )
+        state = self._read_state()
+        if (
+            self.digest_path.exists()
+            and str(state.get("input_fingerprint") or "") == input_fingerprint
+        ):
+            self._write_state(
+                input_fingerprint=input_fingerprint,
+                status="skipped",
+                skip_reason="unchanged_input_fingerprint",
+                generated_delta=0,
+                skipped_delta=1,
+            )
+            return {
+                "schema_version": "hermes.household_digest_result.v0",
+                "module": "household_digest",
+                "profile": self.profile,
+                "status": "skipped",
+                "skipped": True,
+                "cadence_skipped": True,
+                "reason": "unchanged_input_fingerprint",
+                "event_count": len(events),
+                "degraded": degraded,
+                "artifact_ref": str(self.digest_path),
+                "actual_send": False,
+                "actual_execute": False,
+            }
+
         now = datetime.now(timezone.utc).isoformat()
         lines = [
             "# Household Digest",
@@ -141,10 +196,71 @@ class HouseholdDigestModule:
             "schema_version": "hermes.household_digest_result.v0",
             "module": "household_digest",
             "profile": self.profile,
+            "status": "ok",
             "event_count": len(events),
             "degraded": degraded,
             "artifact_ref": str(self.digest_path),
+            "actual_send": False,
+            "actual_execute": False,
         }
         if degraded:
             result["reason"] = "insufficient_events"
+        self._write_state(
+            input_fingerprint=input_fingerprint,
+            status="ok",
+            skip_reason="",
+            generated_delta=1,
+            skipped_delta=0,
+        )
         return result
+
+    def _read_state(self) -> dict[str, Any]:
+        if not self.state_path.exists():
+            return {
+                "schema_version": "hermes.household_digest_state.v0",
+                "profile": self.profile,
+                "counters": {"generated_count": 0, "skipped_count": 0},
+            }
+        try:
+            parsed = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        parsed.setdefault("schema_version", "hermes.household_digest_state.v0")
+        parsed.setdefault("profile", self.profile)
+        parsed.setdefault("counters", {"generated_count": 0, "skipped_count": 0})
+        return parsed
+
+    def _write_state(
+        self,
+        *,
+        input_fingerprint: str,
+        status: str,
+        skip_reason: str,
+        generated_delta: int,
+        skipped_delta: int,
+    ) -> None:
+        state = self._read_state()
+        counters = state.get("counters") if isinstance(state.get("counters"), dict) else {}
+        document = {
+            "schema_version": "hermes.household_digest_state.v0",
+            "profile": self.profile,
+            "input_fingerprint": input_fingerprint,
+            "latest_run_status": status,
+            "latest_skip_reason": skip_reason,
+            "latest_run_at": datetime.now(timezone.utc).isoformat(),
+            "counters": {
+                "generated_count": int(counters.get("generated_count") or 0) + generated_delta,
+                "skipped_count": int(counters.get("skipped_count") or 0) + skipped_delta,
+            },
+        }
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state_path.write_text(
+            json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _input_fingerprint(value: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()

@@ -299,6 +299,42 @@ def test_evidence_scoring_skips_expired_working_items(tmp_path):
     assert status["expired_used_in_scoring_count"] == 0
 
 
+def test_evidence_scoring_skips_governance_feedback_mirror_events(tmp_path):
+    store = _store(tmp_path)
+    foreground = EventEnvelope.from_dict(
+        {**build_event(seed=12, profile="main"), "summary": "Owner gave a real foreground signal."}
+    )
+    store.append_event(foreground)
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    first = module.score_all(store=store)
+
+    governance = EventEnvelope.from_dict(
+        {
+            **build_event(seed=13, profile="main"),
+            "source": "governance_feedback",
+            "kind": "governance_evidence_scored",
+            "summary": "Evidence scoring mirrored a local report.",
+            "safe_ref": {
+                "source_class": "governance",
+                "candidate_allowed": False,
+                "body_policy": "summary_only",
+            },
+        }
+    )
+    store.append_event(governance)
+
+    result = module.score_all(store=store)
+    subject_refs = {score["subject_ref"] for score in module.read_scores()}
+
+    assert first["skipped"] is False
+    assert result["skipped"] is True
+    assert result["cadence_skipped"] is True
+    assert result["governance_event_skipped_count"] == 1
+    assert f"event:{foreground.id}" in subject_refs
+    assert f"event:{governance.id}" not in subject_refs
+
+
 def test_evidence_scoring_status_uses_status_at_scoring_time(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

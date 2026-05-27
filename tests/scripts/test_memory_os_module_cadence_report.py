@@ -94,6 +94,18 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
                                 "status": "ok",
                                 "result": {"status": "ok", "daily_written": True},
                             },
+                            {
+                                "step": "wandering_mind",
+                                "status": "skipped",
+                                "result": {
+                                    "status": "skipped",
+                                    "skipped": True,
+                                    "cadence_skipped": True,
+                                    "reason": "unchanged_right_brain_signal",
+                                    "expression_draft_skipped": True,
+                                    "speak_gate_skipped": True,
+                                },
+                            },
                         ],
                     },
                     ensure_ascii=False,
@@ -188,6 +200,8 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
     assert by_module["cognitive_loop"]["cadence_counters"]["generated_count"] == 2
     assert by_module["right_brain_expression_adapter"]["current_cron_job_count"] == 1
     assert by_module["self_evolution"]["production_split_recommended"] is True
+    assert by_module["self_evolution"]["module_local_skip_gate_visible"] is True
+    assert "production_cadence_split_pending" not in by_module["self_evolution"]["finding_codes"]
     assert by_module["self_evolution"]["cadence_counters"] == {
         "run_count": 2,
         "generated_count": 1,
@@ -202,6 +216,12 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
     assert by_module["evidence_scoring"]["cadence_counters"]["skipped_count"] == 1
     assert by_module["ops_gate"]["cadence_counters"]["skipped_count"] == 1
     assert by_module["deep_reflection"]["cadence_counters"]["skipped_count"] == 1
+    assert by_module["wandering_mind"]["cadence_counters"]["skipped_count"] == 1
+    assert by_module["expression_draft"]["cadence_counters"]["skipped_count"] == 1
+    assert by_module["speak_gate"]["cadence_counters"]["skipped_count"] == 1
+    assert "production_cadence_split_pending" not in by_module["wandering_mind"]["finding_codes"]
+    assert "production_cadence_split_pending" not in by_module["expression_draft"]["finding_codes"]
+    assert "production_cadence_split_pending" not in by_module["speak_gate"]["finding_codes"]
     assert report["generated_count"] >= 2
     assert report["skipped_count"] >= 2
     assert report["error_count"] >= 1

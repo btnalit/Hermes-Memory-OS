@@ -471,11 +471,15 @@ class EvidenceScoringModule:
         proposal_queue: Any | None,
     ) -> tuple[list[dict[str, str]], dict[str, int]]:
         subjects: list[dict[str, str]] = []
+        governance_event_skipped_count = 0
         working_active_subject_count = 0
         working_expired_skipped_count = 0
         working_unknown_status_count = 0
         for event in sorted(store.read_events(), key=lambda item: item.id):
             if event.profile != self.profile:
+                continue
+            if _governance_feedback_event(event):
+                governance_event_skipped_count += 1
                 continue
             subjects.append(
                 {
@@ -568,6 +572,7 @@ class EvidenceScoringModule:
                 }
             )
         return sorted(subjects, key=lambda item: item["subject_ref"]), {
+            "governance_event_skipped_count": governance_event_skipped_count,
             "working_active_subject_count": working_active_subject_count,
             "working_expired_skipped_count": working_expired_skipped_count,
             "working_unknown_status_count": working_unknown_status_count,
@@ -638,10 +643,22 @@ def _input_fingerprint(
         "score_mode": "feature_maturity_v2",
         "maturity_dimensions": list(MATURITY_DIMENSION_KEYS),
         "subjects": subjects,
-        "collection_stats": collection_stats,
+        "collection_stats": _fingerprint_collection_stats(collection_stats),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _fingerprint_collection_stats(collection_stats: dict[str, int]) -> dict[str, int]:
+    non_scoring_stats = {
+        "governance_event_skipped_count",
+        "working_expired_skipped_count",
+    }
+    return {
+        key: int(value)
+        for key, value in sorted(collection_stats.items())
+        if key not in non_scoring_stats
+    }
 
 
 def _expired_working_subject_count(evidence: list[dict[str, Any]], hermes_home: Path) -> int:
@@ -794,6 +811,15 @@ def _source_class(source_ref: str) -> str:
     if source_ref.startswith("memory_os:expression_feedback"):
         return "expression_feedback"
     return "unknown"
+
+
+def _governance_feedback_event(event: Any) -> bool:
+    safe_ref = getattr(event, "safe_ref", {}) or {}
+    return (
+        str(getattr(event, "source", "") or "") == "governance_feedback"
+        or str(safe_ref.get("source_class") or "") == "governance"
+        or str(safe_ref.get("source_module") or "") == "governance_feedback"
+    )
 
 
 def _feature_inputs(subject: dict[str, str]) -> dict[str, float | int]:

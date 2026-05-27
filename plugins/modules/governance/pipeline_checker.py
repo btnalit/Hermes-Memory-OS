@@ -129,6 +129,14 @@ class LeftBrainPipelineCheckModule:
             "actual_identity_write": False,
         }
         if write:
+            previous = self.read_latest()
+            if previous and _stable_report(previous) == _stable_report(report):
+                return {
+                    **report,
+                    "skipped": True,
+                    "cadence_skipped": True,
+                    "reason": "unchanged_pipeline_report",
+                }
             self.module_root.mkdir(parents=True, exist_ok=True)
             self.report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return report
@@ -379,3 +387,11 @@ def _has_concrete_body(body: str) -> bool:
 
 def _duplicate_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:
     return {key: ids for key, ids in groups.items() if len(ids) > 1}
+
+
+def _stable_report(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in report.items()
+        if key not in {"skipped", "cadence_skipped", "reason"}
+    }

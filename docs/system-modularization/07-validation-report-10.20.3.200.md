@@ -15542,3 +15542,244 @@ Conclusion:
 - Current live state has no active owner-actionable expression-policy proposal,
   so ready/block counts are `0`; this is a correct absence signal, not hidden
   maturity.
+
+## 2026-05-27 - P1-T Context/Governance Cadence Skip Gates
+
+Preflight:
+
+```text
+source_of_truth=32 roadmap P1-T, 40 control plane, 41 operating closure blueprint, live module cadence report
+finding_type=runtime cadence / feedback-loop noise
+owning_seam=module run results + memory_os_module_cadence_report
+reverse_scope=Hermes owns cron/timers/transport; Memory-OS owns module-local no-new-signal skip evidence
+monitor_or_validation_fields=ModuleCadence.module_counters.*, module_local_skip_gate_visible, finding_count, generated/skipped/error/duplicate counts
+promotion_signal=latest cognitive-loop cycle shows no-new-signal modules returning skipped without boundary changes
+stop_or_rollback_signal=actual_send/actual_execute true, governance feedback keeps creating no-op mirror events, or cadence report hides pending modules
+external_review=not required for no-send skip gates
+```
+
+Local verification:
+
+```text
+python -m pytest tests\scripts\test_memory_os_module_cadence_report.py tests\system_modularization\test_evidence_scoring_module.py tests\system_modularization\test_governance_feedback_bridge_module.py tests\system_modularization\test_household_digest_module.py tests\system_modularization\test_left_brain_pipeline_checker.py tests\system_modularization\test_digest_consolidation_module.py -q
+51 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+```
+
+Deployment:
+
+```text
+scp plugins/memory/memory_os/cognitive_loop.py hermes-media:/tmp/cognitive_loop.py
+scp plugins/modules/context/digest_consolidation.py hermes-media:/tmp/digest_consolidation.py
+scp plugins/modules/context/household_digest.py hermes-media:/tmp/household_digest.py
+scp plugins/modules/evidence/scoring.py hermes-media:/tmp/scoring.py
+scp plugins/modules/governance/feedback_bridge.py hermes-media:/tmp/feedback_bridge.py
+scp plugins/modules/governance/pipeline_checker.py hermes-media:/tmp/pipeline_checker.py
+scp scripts/memory_os_module_cadence_report.py hermes-media:/tmp/memory_os_module_cadence_report.py
+```
+
+Targeted live cognitive-loop smoke:
+
+```text
+cycle=cloop_20260527T024531528416Z_49a24f59ce
+status=ok
+actual_send=false
+actual_execute=false
+actual_identity_write=false
+actual_crystallized_approval=false
+
+household_digest status=skipped reason=unchanged_input_fingerprint
+digest_consolidation status=skipped reason=unchanged_daily_and_weekly_digest daily_skipped=true weekly_skipped=true
+ops_gate skipped=true reason=no_pending_proposed_actions
+evidence_scoring skipped=true reason=unchanged_input_fingerprint score_count=378 governance_event_skipped_count=187
+self_evolution skipped=true reason=duplicate_unresolved_proposal
+left_brain_pipeline_check skipped=true reason=unchanged_pipeline_report
+governance_feedback status=skipped reason=no_new_governance_feedback_events written_event_count=0
+```
+
+Cadence report after deploy:
+
+```text
+/root/.hermes/scripts/memory_os_module_cadence_report.py --apply --format summary
+status=warning
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=3
+generated_count=872
+skipped_count=56
+error_count=15
+duplicate_count=20
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Remaining cadence findings:
+
+```text
+wandering_mind
+expression_draft
+speak_gate
+```
+
+Full monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+ModuleCadence.finding_count=3
+ModuleCadence.module_counters.household_digest.last_status=skipped
+ModuleCadence.module_counters.digest_consolidation.last_status=skipped
+ModuleCadence.module_counters.governance_feedback.last_status=skipped
+ModuleCadence.module_counters.left_brain_pipeline_check.skipped_count=6
+ModuleCadence.module_counters.evidence_scoring.skipped_count=6
+ModuleCadence.module_counters.ops_gate.skipped_count=12
+ModuleCadence.module_counters.self_evolution.skipped_count=24
+WARN=['module_cadence_split_pending', 'session_mirror_pending_sessions', 'rh31_eval_has_failures', 'rh26_casual_empty']
+```
+
+Conclusion:
+
+- LIVE PASS that context/governance modules now skip unchanged or no-new-signal
+  runs instead of producing new feedback-loop artifacts.
+- MONITOR PASS that cadence pending findings dropped from 11 to 3, leaving only
+  the right-brain expression harness (`wandering_mind`, `expression_draft`,
+  `speak_gate`) for the next P1-T/P1-R-linked split.
+- Boundary evidence remains clean: no send, no execute, no identity write, no
+  Hermes cron/systemd ownership moved into Memory-OS.
+
+## 2026-05-27 - P1-R/P1-T Right-Brain Outcome-Reaction Cadence Split
+
+Preflight:
+
+```text
+source_of_truth=38/40/41 P1-R/P1-T plus live ModuleCadence finding_count=3
+finding_type=runtime cadence / right-brain outcome-feedback volume
+owning_seam=wandering_mind result, cognitive-loop downstream expression steps, module cadence monitor
+reverse_scope=Hermes owns cron, origin delivery, final wording, and owner interaction; Memory-OS owns bounded signal fingerprints, drafts, gate evidence, and monitor counters
+monitor_or_validation_fields=wandering_mind.skipped_count, expression_draft.skipped_count, speak_gate.skipped_count, ModuleCadence.finding_count, latest_expression_draft_missing_count, latest_speak_gate_missing_evaluation_count
+promotion_signal=unchanged owner-facing/reaction signal returns skipped for wandering_mind and downstream expression/speak modules, with ModuleCadence.finding_count=0
+stop_or_rollback_signal=actual_send/actual_execute true, new owner-facing event/outcome/feedback suppressed, or latest expression draft/speak-gate missing counts become non-zero
+external_review=not required for no-send module-local skip evidence
+```
+
+Local verification:
+
+```text
+python -m pytest tests\system_modularization\test_wandering_mind_module.py tests\system_modularization\test_expression_draft_module.py tests\system_modularization\test_speak_gate_module.py tests\plugins\memory\test_memory_os_cognitive_loop.py tests\scripts\test_memory_os_module_cadence_report.py tests\scripts\test_memory_os_3_200_monitor.py -q
+72 passed
+
+python scripts\memory_os_closure_matrix_check.py --format summary
+status=ok
+live_module_count=18
+matrix_module_count=31
+active_work_item_count=20
+active_work_mapping_count=20
+finding_count=0
+
+git diff --check
+PASS
+```
+
+Implementation:
+
+- `WanderingMindModule` now records a bounded right-brain signal fingerprint in
+  `system-modules/wandering_mind/state.json`.
+- The fingerprint includes only owner-facing event identity/hash plus
+  right-brain expression policy/outcome/feedback volume. It intentionally
+  excludes internal governance/self-evolution events from the trigger signal.
+- When the signal is unchanged, Wandering returns `status=skipped`,
+  `cadence_skipped=true`, `reason=unchanged_right_brain_signal`, and
+  `would_send=false`.
+- CognitiveLoop does not create a new `ExpressionDraft` or `SpeakGate` decision
+  for that unchanged-signal skip; it records `expression_draft_skipped=true`
+  and `speak_gate_skipped=true` as downstream cadence evidence.
+- `memory_os_module_cadence_report.py` counts those downstream skips for
+  `expression_draft` and `speak_gate`.
+- `memory_os_3_200_monitor.py` treats `ModuleCadence.finding_count=0` as the
+  closure criterion; `split_recommended_count` remains target metadata, not a
+  WARN by itself.
+
+Live deployment:
+
+```text
+scp plugins/modules/cognition/wandering_mind.py plugins/memory/memory_os/cognitive_loop.py scripts/memory_os_module_cadence_report.py scripts/memory_os_3_200_monitor.py hermes-media:/tmp/
+install on /root/.hermes/memory-os/runtime/python and /root/.hermes/scripts
+```
+
+Targeted live cognitive-loop smoke:
+
+```text
+cycle 1 cloop_20260527T041201993038Z_3bd10ab1ed status=ok
+wandering_mind would=True actual_send=false
+boundaries.actual_send=false
+boundaries.actual_execute=false
+
+cycle 2 cloop_20260527T041203663585Z_64a43373af status=ok
+wandering_mind status=skipped skipped=true cadence_skipped=true reason=unchanged_right_brain_signal
+expression_draft_skipped=true
+speak_gate_skipped=true
+would_send=false
+boundaries.actual_send=false
+boundaries.actual_execute=false
+```
+
+Cadence report after deploy:
+
+```text
+/root/.hermes/scripts/memory_os_module_cadence_report.py --apply --format summary
+status=ok
+module_count=18
+cron_job_count=2
+integration_harness_member_count=11
+split_recommended_count=11
+expected_hermes_cron_missing_count=0
+finding_count=0
+generated_count=897
+skipped_count=63
+error_count=15
+duplicate_count=22
+actual_send=False
+actual_execute=False
+cron_modified=False
+```
+
+Full monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+ModuleCadence.latest_status=ok
+ModuleCadence.finding_count=0
+ModuleCadence.module_counters.wandering_mind.last_status=skipped
+ModuleCadence.module_counters.wandering_mind.skipped_count=1
+ModuleCadence.module_counters.expression_draft.last_status=skipped
+ModuleCadence.module_counters.expression_draft.skipped_count=1
+ModuleCadence.module_counters.speak_gate.last_status=skipped
+ModuleCadence.module_counters.speak_gate.skipped_count=1
+ExpressionArtifacts.latest_expression_draft_missing_count=0
+ExpressionArtifacts.latest_speak_gate_missing_evaluation_count=0
+ExpressionArtifacts.speak_gate_actual_send=false
+WARN=['left_brain_pipeline_check_warn', 'left_brain_proposal_quality_metadata_missing', 'session_mirror_pending_sessions', 'rh31_eval_has_failures', 'rh26_casual_empty']
+```
+
+Conclusion:
+
+- LIVE PASS that the three remaining right-brain cadence findings are closed
+  as module-local outcome/reaction-aware skip evidence, not by timer changes.
+- MONITOR PASS that `ModuleCadence.finding_count=0` and the old
+  `module_cadence_split_pending` WARN is gone.
+- The next right-brain maturity gate is owner reaction volume and expression
+  quality, not more scheduler or transport work.

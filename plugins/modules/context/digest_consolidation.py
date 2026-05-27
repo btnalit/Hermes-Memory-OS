@@ -205,21 +205,38 @@ class DigestConsolidationModule:
         }
         artifact_path = self.daily_root / f"{target_date}.json"
         if not dry_run:
-            _atomic_write_json(artifact_path, artifact)
-            append_audit(
-                store.roots.audit_path,
-                action="digest_daily_written",
-                status="ok",
-                target=str(artifact_path),
-                details={
+            if _json_artifact_matches(artifact_path, artifact):
+                return {
+                    "schema_version": "hermes.digest.daily_result.v0",
+                    "module": "digest_consolidation",
+                    "profile": self.profile,
                     "date": target_date,
-                    "selected_count": len(artifact["selected_refs"]),
-                    "dropped_count": artifact["dropped_count"],
-                    "late_arrival_count": artifact["late_arrival_count"],
+                    "dry_run": dry_run,
+                    "applied": False,
+                    "skipped": True,
+                    "cadence_skipped": True,
+                    "reason": "unchanged_daily_digest",
+                    "would_write": artifact,
+                    "artifact_ref": str(artifact_path),
                     "actual_send": False,
                     "actual_approve": False,
-                },
-            )
+                }
+            else:
+                _atomic_write_json(artifact_path, artifact)
+                append_audit(
+                    store.roots.audit_path,
+                    action="digest_daily_written",
+                    status="ok",
+                    target=str(artifact_path),
+                    details={
+                        "date": target_date,
+                        "selected_count": len(artifact["selected_refs"]),
+                        "dropped_count": artifact["dropped_count"],
+                        "late_arrival_count": artifact["late_arrival_count"],
+                        "actual_send": False,
+                        "actual_approve": False,
+                    },
+                )
         return {
             "schema_version": "hermes.digest.daily_result.v0",
             "module": "digest_consolidation",
@@ -274,28 +291,49 @@ class DigestConsolidationModule:
         }
         artifact_path = self.weekly_root / f"{target_week}.json"
         if not dry_run:
-            _atomic_write_json(artifact_path, artifact)
-            if proposal_queue is not None:
-                for candidate in selected_candidates:
-                    _upsert_proposal_candidate(
-                        proposal_queue=proposal_queue,
-                        store=store,
-                        candidate=candidate,
-                    )
-            append_audit(
-                store.roots.audit_path,
-                action="digest_weekly_written",
-                status="ok",
-                target=str(artifact_path),
-                details={
+            queue_synced = proposal_queue is None or _weekly_proposal_queue_synced(
+                proposal_queue=proposal_queue,
+                candidates=selected_candidates,
+            )
+            if _json_artifact_matches(artifact_path, artifact) and queue_synced:
+                return {
+                    "schema_version": "hermes.digest.weekly_result.v0",
+                    "module": "digest_consolidation",
+                    "profile": self.profile,
                     "week": target_week,
-                    "expanded_event_count": len(events),
-                    "candidate_suggestion_count": len(selected_candidates),
-                    "deferred_candidate_count": len(deferred_candidates),
+                    "dry_run": dry_run,
+                    "applied": False,
+                    "skipped": True,
+                    "cadence_skipped": True,
+                    "reason": "unchanged_weekly_consolidation",
+                    "would_write": artifact,
+                    "artifact_ref": str(artifact_path),
                     "actual_send": False,
                     "actual_approve": False,
-                },
-            )
+                }
+            else:
+                _atomic_write_json(artifact_path, artifact)
+                if proposal_queue is not None:
+                    for candidate in selected_candidates:
+                        _upsert_proposal_candidate(
+                            proposal_queue=proposal_queue,
+                            store=store,
+                            candidate=candidate,
+                        )
+                append_audit(
+                    store.roots.audit_path,
+                    action="digest_weekly_written",
+                    status="ok",
+                    target=str(artifact_path),
+                    details={
+                        "week": target_week,
+                        "expanded_event_count": len(events),
+                        "candidate_suggestion_count": len(selected_candidates),
+                        "deferred_candidate_count": len(deferred_candidates),
+                        "actual_send": False,
+                        "actual_approve": False,
+                    },
+                )
         return {
             "schema_version": "hermes.digest.weekly_result.v0",
             "module": "digest_consolidation",
@@ -429,6 +467,16 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+def _json_artifact_matches(path: Path, data: dict[str, Any]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    return existing == data
 
 
 def _safe_token(value: str) -> str:
@@ -573,3 +621,23 @@ def _upsert_proposal_candidate(*, proposal_queue: Any, store: MemoryOSStore, can
         item["source_class_counts"] = candidate["source_class_counts"]
         proposal_queue._write_queue(queue)
         return
+
+
+def _weekly_proposal_queue_synced(*, proposal_queue: Any, candidates: list[dict[str, Any]]) -> bool:
+    queue = proposal_queue.read_queue()
+    active_states = {"candidate", "owner_defer", "owner_eligible", "approved_for_proposal"}
+    items = [item for item in queue.get("items", []) if isinstance(item, dict)]
+    for candidate in candidates:
+        candidate_refs = {str(ref) for ref in candidate.get("source_refs", [])}
+        found = False
+        for item in items:
+            same_subject = item.get("semantic_subject") == candidate["semantic_subject"]
+            same_kind = item.get("kind") == "weekly_consolidation"
+            active = str(item.get("state", "")) in active_states
+            item_refs = {str(ref) for ref in item.get("source_refs", [])}
+            if same_subject and same_kind and active and candidate_refs.issubset(item_refs):
+                found = True
+                break
+        if not found:
+            return False
+    return True

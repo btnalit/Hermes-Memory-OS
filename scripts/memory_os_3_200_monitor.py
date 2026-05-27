@@ -525,7 +525,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 passed.append({"code": "module_cadence_report_visible"})
             if int(module_cadence.get("expected_hermes_cron_missing_count") or 0) > 0:
                 warn.append({"code": "module_cadence_expected_cron_missing", "value": module_cadence})
-            if int(module_cadence.get("split_recommended_count") or 0) > 0:
+            if int(module_cadence.get("finding_count") or 0) > 0:
                 warn.append({"code": "module_cadence_split_pending", "value": module_cadence})
         else:
             warn.append({"code": "module_cadence_report_unavailable", "value": module_cadence})
@@ -2401,8 +2401,10 @@ def expression_artifact_summary():
     wandering_would_send_result_count = 0
     wandering_silent_count = 0
     expression_draft_created_count = 0
+    expression_draft_skipped_count = 0
     expression_draft_missing_count = 0
     speak_gate_evaluated_count = 0
+    speak_gate_skipped_count = 0
     speak_gate_missing_evaluation_count = 0
     speak_gate_decision_distribution = {}
     latest_expression_draft_missing_count = 0
@@ -2430,6 +2432,8 @@ def expression_artifact_summary():
                 wandering_silent_count += 1
             if result.get("expression_draft_created") is True or isinstance(result.get("expression_draft"), dict):
                 expression_draft_created_count += 1
+            elif result.get("expression_draft_skipped") is True:
+                expression_draft_skipped_count += 1
             elif result.get("output") not in {None, ""}:
                 expression_draft_missing_count += 1
                 report_expression_missing += 1
@@ -2439,6 +2443,8 @@ def expression_artifact_summary():
                 report_speak_gate_evaluated += 1
                 decision_name = str(decision.get("decision") or "unknown")
                 speak_gate_decision_distribution[decision_name] = speak_gate_decision_distribution.get(decision_name, 0) + 1
+            elif result.get("speak_gate_skipped") is True:
+                speak_gate_skipped_count += 1
         if report_wandering_result_count:
             latest_expression_draft_missing_count = report_expression_missing
             latest_speak_gate_missing_evaluation_count = report_speak_gate_missing
@@ -2453,12 +2459,14 @@ def expression_artifact_summary():
       "wandering_silent_count": wandering_silent_count,
       "expression_draft_count": expression_draft.get("draft_count"),
       "expression_draft_created_count": expression_draft_created_count,
+      "expression_draft_skipped_count": expression_draft_skipped_count,
       "expression_draft_missing_count": expression_draft_missing_count,
       "latest_expression_draft_missing_count": latest_expression_draft_missing_count,
       "expression_feedback_count": modules.get("expression_feedback", {}).get("feedback_count") if isinstance(modules.get("expression_feedback"), dict) else None,
       "expression_feedback_linked_outcome_count": modules.get("expression_feedback", {}).get("linked_outcome_count") if isinstance(modules.get("expression_feedback"), dict) else None,
       "expression_feedback_unlinked_count": modules.get("expression_feedback", {}).get("unlinked_count") if isinstance(modules.get("expression_feedback"), dict) else None,
       "speak_gate_evaluated_count": speak_gate_evaluated_count,
+      "speak_gate_skipped_count": speak_gate_skipped_count,
       "speak_gate_missing_evaluation_count": speak_gate_missing_evaluation_count,
       "latest_speak_gate_missing_evaluation_count": latest_speak_gate_missing_evaluation_count,
       "latest_speak_gate_evaluated_count": latest_speak_gate_evaluated_count,
