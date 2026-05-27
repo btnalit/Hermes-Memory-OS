@@ -170,7 +170,8 @@ progress.
 ### P1-B - RH-31 Failure Attribution And Fixture Loop
 
 Status: first scorecard generated; `candidate_boundary_001` attribution
-completed.
+completed; latest monitor classifies the remaining RH-31 warning as
+`rh31_eval_measurement_signals`.
 
 Reason:
 
@@ -183,6 +184,8 @@ Next action:
 2. do not create a live guard from `candidate_boundary_001`;
 3. only create future fixtures or guards when a scorecard failure maps to live
    evidence or an owner-approved redacted fixture.
+4. keep `live_guard_candidate_count=0` visible in monitor output so a future
+   scorecard cannot silently become a live rule.
 
 Finding flow:
 
@@ -559,10 +562,11 @@ Status:
     `right_brain_expression=1`;
   - `pending_only_groups=[]`;
   - `internet_data_collection_pending_count=0` while
-    `internet_data_collection_provider_count=12`;
+    latest live monitor reports `internet_data_collection_provider_count=21`;
 - no recurring SessionMirror apply is enabled.
-- monitor now exposes the P1-J coverage summary and treats pending sessions as
-  WARN observation rather than FAIL.
+- monitor now exposes the P1-J coverage and correlation summary;
+- latest monitor passes `session_mirror_pending_no_correlated_gap`, because
+  pending sessions exist but no pending-only topic group is currently visible.
 
 Why it matters:
 
@@ -579,8 +583,9 @@ Next action:
   groups matching a real RH-28/RH-26 recall omission;
 - do not treat P1-J as the likely fix for the earlier
   `internet_data_collection` candidate omission; current low-clue dry-run still
-  selects that topic from working memory, while other candidates show
-  owner-command/noise pressure.
+  selects that topic from working memory, while other candidates showed
+  owner-command/noise pressure that was addressed through RH-28 candidate
+  hygiene.
 
 Promotion signal:
 
@@ -1785,6 +1790,8 @@ After the fix:
   actual_headings include Crystallized Review Candidates
   failure_count = 3
   failure_class_distribution = {"fts_miss": 2, "lexical_miss": 1}
+  measurement_signal_count = 3
+  live_guard_candidate_count = 0
   boundary_true_count = 0
   forbidden_field_count = 0
 

@@ -268,12 +268,16 @@ def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
         "forbidden_field_count": 0,
         "adapter_count": 6,
         "failure_count": 2,
+        "measurement_signal_count": 2,
+        "live_guard_candidate_count": 0,
+        "failure_class_distribution": {"fts_miss": 1, "lexical_miss": 1},
     }
 
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "rh31_eval_safety_ok" for item in classification["pass"])
-    assert any(item["code"] == "rh31_eval_has_failures" for item in classification["warn"])
+    assert any(item["code"] == "rh31_eval_measurement_signals" for item in classification["warn"])
+    assert not any(item["code"] == "rh31_eval_has_failures" for item in classification["warn"])
 
     snapshot["rh31_eval"]["forbidden_field_count"] = 1
     classification = classify_snapshot(snapshot)
@@ -1084,13 +1088,42 @@ def test_classify_snapshot_tracks_session_mirror_pending_as_observation():
         "dry_run_new_event_count": 25,
         "dry_run_written_event_ids_count": 0,
         "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 0,
+        "pending_only_groups": [],
+        "raw_private_body_printed": False,
     }
 
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "session_mirror_dry_run_ok" for item in classification["pass"])
-    assert any(item["code"] == "session_mirror_pending_sessions" for item in classification["warn"])
+    assert any(item["code"] == "session_mirror_pending_no_correlated_gap" for item in classification["pass"])
+    assert not any(item["code"] == "session_mirror_pending_sessions" for item in classification["warn"])
     assert not any(item["code"].startswith("session_mirror_") for item in classification["fail"])
+
+
+def test_classify_snapshot_warns_when_session_mirror_pending_only_groups_exist():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 29,
+        "pending_session_count": 25,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 25,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 1,
+        "pending_only_groups": ["new_owner_topic"],
+        "raw_private_body_printed": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "session_mirror_pending_source_gap" for item in classification["warn"])
+    assert not any(item["code"] == "session_mirror_pending_sessions" for item in classification["warn"])
 
 
 def test_classify_snapshot_fails_when_session_mirror_dry_run_writes_or_has_findings():
@@ -1125,7 +1158,17 @@ def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
         "boundary_true_count": 0,
         "forbidden_field_count": 0,
         "report_dir": "",
-        "scores": [{"case_id": "private_case", "details": {"raw": "should not be retained"}}],
+        "scores": [
+            {
+                "adapter": "memory_os_fts",
+                "case_id": "private_case",
+                "status": "fail",
+                "failure_class": "fts_miss",
+                "metric_scope": "context",
+                "live_behavior_changed": False,
+                "details": {"raw": "should not be retained"},
+            }
+        ],
         "source_distribution": {"working": 8},
     }
 
@@ -1139,6 +1182,18 @@ def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
         "score_count": 27,
         "failure_count": 4,
         "failure_class_distribution": {"projection_miss": 1},
+        "failure_attribution": [
+            {
+                "adapter": "memory_os_fts",
+                "case_id": "private_case",
+                "failure_class": "fts_miss",
+                "metric_scope": "context",
+                "live_behavior_changed": False,
+                "guard_decision": "measurement_only",
+            }
+        ],
+        "live_guard_candidate_count": 0,
+        "measurement_signal_count": 1,
         "boundary_true_count": 0,
         "forbidden_field_count": 0,
         "report_written": False,

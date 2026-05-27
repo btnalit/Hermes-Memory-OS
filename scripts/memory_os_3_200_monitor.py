@@ -114,6 +114,10 @@ def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
         return {}
     if summary.get("schema_version") != "memory-os.rh31_summary.v0":
         return dict(summary)
+    failure_attribution = _rh31_failure_attribution(summary)
+    live_guard_candidate_count = sum(
+        1 for item in failure_attribution if item.get("guard_decision") == "candidate_live_guard"
+    )
     return {
         "schema_version": summary.get("schema_version"),
         "status": summary.get("status"),
@@ -122,11 +126,39 @@ def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "score_count": summary.get("score_count"),
         "failure_count": summary.get("failure_count"),
         "failure_class_distribution": summary.get("failure_class_distribution") or {},
+        "failure_attribution": failure_attribution,
+        "live_guard_candidate_count": live_guard_candidate_count,
+        "measurement_signal_count": len(failure_attribution) - live_guard_candidate_count,
         "boundary_true_count": summary.get("boundary_true_count"),
         "forbidden_field_count": summary.get("forbidden_field_count"),
         "report_written": bool(summary.get("report_dir")),
         "source_distribution": summary.get("source_distribution") or {},
     }
+
+
+def _rh31_failure_attribution(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    attribution: list[dict[str, Any]] = []
+    for score in summary.get("scores") or []:
+        if not isinstance(score, dict) or score.get("status") != "fail":
+            continue
+        live_behavior_changed = score.get("live_behavior_changed") is True
+        boundary_true = score.get("boundary_true") is True
+        forbidden_count = int(score.get("forbidden_field_count") or 0)
+        if live_behavior_changed and not boundary_true and forbidden_count == 0:
+            guard_decision = "candidate_live_guard"
+        else:
+            guard_decision = "measurement_only"
+        attribution.append(
+            {
+                "adapter": str(score.get("adapter") or ""),
+                "case_id": str(score.get("case_id") or ""),
+                "failure_class": str(score.get("failure_class") or ""),
+                "metric_scope": str(score.get("metric_scope") or ""),
+                "live_behavior_changed": live_behavior_changed,
+                "guard_decision": guard_decision,
+            }
+        )
+    return attribution
 
 
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -585,17 +617,44 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "value": session_mirror.get("dry_run_findings_count"),
                 }
             )
+        if session_mirror.get("raw_private_body_printed") is True:
+            fail.append({"code": "session_mirror_correlation_raw_body_printed"})
+        if int(session_mirror.get("written_event_ids_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "session_mirror_correlation_wrote_events",
+                    "value": session_mirror.get("written_event_ids_count"),
+                }
+            )
         if session_mirror.get("dry_run_status") == "ok" and int(session_mirror.get("dry_run_written_event_ids_count") or 0) == 0:
             passed.append({"code": "session_mirror_dry_run_ok"})
         else:
             warn.append({"code": "session_mirror_dry_run_not_ok", "value": session_mirror})
         if int(session_mirror.get("pending_session_count") or 0) > 0:
-            warn.append(
-                {
-                    "code": "session_mirror_pending_sessions",
-                    "pending_session_count": session_mirror.get("pending_session_count"),
-                }
-            )
+            if session_mirror.get("correlation_status") == "ok":
+                pending_only_group_count = int(session_mirror.get("pending_only_group_count") or 0)
+                if pending_only_group_count > 0:
+                    warn.append(
+                        {
+                            "code": "session_mirror_pending_source_gap",
+                            "pending_session_count": session_mirror.get("pending_session_count"),
+                            "pending_only_groups": session_mirror.get("pending_only_groups") or [],
+                        }
+                    )
+                else:
+                    passed.append(
+                        {
+                            "code": "session_mirror_pending_no_correlated_gap",
+                            "pending_session_count": session_mirror.get("pending_session_count"),
+                        }
+                    )
+            else:
+                warn.append(
+                    {
+                        "code": "session_mirror_pending_sessions",
+                        "pending_session_count": session_mirror.get("pending_session_count"),
+                    }
+                )
     elif session_mirror:
         warn.append({"code": "session_mirror_summary_unavailable", "value": session_mirror})
 
@@ -913,7 +972,24 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             if int(rh31.get("boundary_true_count") or 0) == 0 and int(rh31.get("forbidden_field_count") or 0) == 0:
                 passed.append({"code": "rh31_eval_safety_ok"})
             if rh31.get("status") == "warning":
-                warn.append({"code": "rh31_eval_has_failures", "failure_count": rh31.get("failure_count")})
+                live_guard_candidate_count = int(rh31.get("live_guard_candidate_count") or 0)
+                if live_guard_candidate_count > 0:
+                    warn.append(
+                        {
+                            "code": "rh31_eval_live_guard_candidates",
+                            "failure_count": rh31.get("failure_count"),
+                            "live_guard_candidate_count": live_guard_candidate_count,
+                        }
+                    )
+                else:
+                    warn.append(
+                        {
+                            "code": "rh31_eval_measurement_signals",
+                            "failure_count": rh31.get("failure_count"),
+                            "measurement_signal_count": rh31.get("measurement_signal_count"),
+                            "failure_class_distribution": rh31.get("failure_class_distribution") or {},
+                        }
+                    )
             elif rh31.get("status") == "fail":
                 fail.append({"code": "rh31_eval_failed", "failure_count": rh31.get("failure_count")})
         else:
@@ -1306,9 +1382,12 @@ def _rh31_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "status": summary.get("status"),
         "adapter_count": summary.get("adapter_count"),
         "failure_count": summary.get("failure_count"),
+        "failure_class_distribution": summary.get("failure_class_distribution"),
+        "measurement_signal_count": summary.get("measurement_signal_count"),
+        "live_guard_candidate_count": summary.get("live_guard_candidate_count"),
         "boundary_true_count": summary.get("boundary_true_count"),
         "forbidden_field_count": summary.get("forbidden_field_count"),
-        "report_written": bool(summary.get("report_dir")),
+        "report_written": summary.get("report_written") if "report_written" in summary else bool(summary.get("report_dir")),
     }
 
 
@@ -1377,6 +1456,10 @@ def _session_mirror_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "dry_run_new_event_count": summary.get("dry_run_new_event_count"),
         "dry_run_written_event_ids_count": summary.get("dry_run_written_event_ids_count"),
         "dry_run_findings_count": summary.get("dry_run_findings_count"),
+        "correlation_status": summary.get("correlation_status"),
+        "pending_only_groups": summary.get("pending_only_groups"),
+        "internet_data_collection_pending_count": summary.get("internet_data_collection_pending_count"),
+        "internet_data_collection_provider_count": summary.get("internet_data_collection_provider_count"),
     }
 
 
@@ -2530,9 +2613,137 @@ def module_cadence_summary():
       },
     }
 
+def session_mirror_correlation_summary():
+    code = r"""
+import json
+from collections import Counter
+from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.session_mirror import SessionMirror, _read_event_records
+from plugins.memory.memory_os.store import MemoryOSStore
+
+home = "/root/.hermes"
+roots = MemoryOSRoots.from_hermes_home(home, profile="default")
+store = MemoryOSStore(roots)
+mirror = SessionMirror(store)
+state, state_rebuilt, findings = mirror._load_state(persist_repair=False)
+sessions = mirror._discover_sessions()
+covered = mirror._provider_captured_session_ids()
+pending = [
+    session
+    for session in sessions
+    if session["session_id"] not in covered and session["dedup_key"] not in state["seen_sessions"]
+]
+event_records = _read_event_records(store)
+
+TOPIC_PATTERNS = {
+    "approval_governance": ("审批", "approve", "reject", "proposal", "owner review", "oa_", "人工 follow-up"),
+    "automation_orchestration": ("自动化", "automation", "workflow", "orchestration", "cron", "定时任务"),
+    "hermes_voice_skill": ("voice", "voicebox", "语音", "skill", "built-in", "hermes skill"),
+    "internet_data_collection": ("互联网数据采集", "数据采集", "采集系统", "n8n", "make.com", "crawler"),
+    "memory_os": ("memory-os", "memory os", "记忆系统", "记忆架构", "crystallized", "deepreflection", "rh-"),
+    "right_brain_expression": ("右脑", "表达", "wandering", "speakgate", "speak gate", "too_mechanical"),
+}
+
+def topic_groups(value):
+    text = str(value or "").lower()
+    groups = []
+    for group, patterns in TOPIC_PATTERNS.items():
+        if any(pattern.lower() in text for pattern in patterns):
+            groups.append(group)
+    return groups
+
+def count_groups(values):
+    counter = Counter()
+    for value in values:
+        for group in topic_groups(value):
+            counter[group] += 1
+    return counter
+
+pending_counts = count_groups(
+    [
+        " ".join(
+            [
+                str(session.get("summary") or ""),
+                str(session.get("platform") or ""),
+                str(session.get("event_kind") or ""),
+            ]
+        )
+        for session in pending
+    ]
+)
+provider_counts = count_groups(
+    [
+        " ".join(
+            [
+                str(event.get("summary") or ""),
+                str(event.get("kind") or ""),
+                str(event.get("source") or ""),
+                " ".join(str(tag) for tag in event.get("tags") or []),
+            ]
+        )
+        for event in event_records
+        if event.get("kind") == "conversation_turn"
+    ]
+)
+mirrored_counts = count_groups(
+    [
+        " ".join(
+            [
+                str(event.get("summary") or ""),
+                str(event.get("kind") or ""),
+                str(event.get("source") or ""),
+                " ".join(str(tag) for tag in event.get("tags") or []),
+            ]
+        )
+        for event in event_records
+        if event.get("kind") == "conversation_turn_mirrored"
+    ]
+)
+pending_only = sorted(
+    group
+    for group, count in pending_counts.items()
+    if count > 0 and provider_counts.get(group, 0) == 0 and mirrored_counts.get(group, 0) == 0
+)
+message_counts = [int(session.get("message_count") or 0) for session in pending]
+result = {
+    "schema_version": "memory-os.session_mirror_correlation_probe.v2",
+    "status": "ok",
+    "dry_run_only": True,
+    "raw_private_body_printed": False,
+    "written_event_ids_count": 0,
+    "state_rebuilt": bool(state_rebuilt),
+    "finding_count": len(findings),
+    "session_count": len(sessions),
+    "covered_session_count": sum(1 for session in sessions if session["session_id"] in covered),
+    "pending_session_count": len(pending),
+    "pending_platform_counts": dict(Counter(str(session.get("platform") or "unknown") for session in pending)),
+    "pending_event_kind_counts": dict(Counter(str(session.get("event_kind") or "unknown") for session in pending)),
+    "pending_message_count_min": min(message_counts) if message_counts else 0,
+    "pending_message_count_max": max(message_counts) if message_counts else 0,
+    "topic_group_counts": {
+        "pending_sessions": dict(pending_counts),
+        "provider_captured_events": dict(provider_counts),
+        "existing_mirrored_events": dict(mirrored_counts),
+    },
+    "pending_only_groups": pending_only,
+    "pending_only_group_count": len(pending_only),
+    "internet_data_collection_pending_count": int(pending_counts.get("internet_data_collection") or 0),
+    "internet_data_collection_provider_count": int(provider_counts.get("internet_data_collection") or 0),
+}
+print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"
+    report = load_json_cmd(["python3", "-c", code], env=env)
+    if isinstance(report, dict) and report.get("_error"):
+        report.setdefault("schema_version", "memory-os.session_mirror_correlation_probe.v2")
+        report.setdefault("status", "error")
+    return report
+
 def session_mirror_summary():
     status_report = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     dry_run = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "run-once", "--module", "session_mirror", "--dry-run"])
+    correlation = session_mirror_correlation_summary()
     session_status = {}
     if isinstance(status_report, dict):
         for item in status_report.get("modules", []) if isinstance(status_report.get("modules"), list) else []:
@@ -2554,6 +2765,18 @@ def session_mirror_summary():
       "dry_run_new_event_count": dry_run.get("new_event_count") if isinstance(dry_run, dict) else None,
       "dry_run_written_event_ids_count": len(written_ids),
       "dry_run_findings_count": len(findings),
+      "correlation_schema_version": correlation.get("schema_version") if isinstance(correlation, dict) else None,
+      "correlation_status": correlation.get("status") if isinstance(correlation, dict) else None,
+      "correlation_finding_count": correlation.get("finding_count") if isinstance(correlation, dict) else None,
+      "raw_private_body_printed": correlation.get("raw_private_body_printed") if isinstance(correlation, dict) else None,
+      "written_event_ids_count": correlation.get("written_event_ids_count") if isinstance(correlation, dict) else None,
+      "pending_platform_counts": correlation.get("pending_platform_counts") if isinstance(correlation, dict) else {},
+      "pending_event_kind_counts": correlation.get("pending_event_kind_counts") if isinstance(correlation, dict) else {},
+      "topic_group_counts": correlation.get("topic_group_counts") if isinstance(correlation, dict) else {},
+      "pending_only_groups": correlation.get("pending_only_groups") if isinstance(correlation, dict) else [],
+      "pending_only_group_count": correlation.get("pending_only_group_count") if isinstance(correlation, dict) else None,
+      "internet_data_collection_pending_count": correlation.get("internet_data_collection_pending_count") if isinstance(correlation, dict) else None,
+      "internet_data_collection_provider_count": correlation.get("internet_data_collection_provider_count") if isinstance(correlation, dict) else None,
     }
 
 def shell_alias_no_env():

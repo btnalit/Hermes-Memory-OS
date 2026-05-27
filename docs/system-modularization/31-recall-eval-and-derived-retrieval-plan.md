@@ -1547,3 +1547,19 @@ Decision:
 - Do not add an RH-31 live guard for this case.
 - The remaining first-scorecard warning items are measurement signals:
   lexical/FTS misses only.
+
+2026-05-27 monitor attribution update:
+
+```text
+RH31Eval.status=warning
+failure_count=3
+failure_class_distribution={fts_miss:2, lexical_miss:1}
+measurement_signal_count=3
+live_guard_candidate_count=0
+boundary_true_count=0
+forbidden_field_count=0
+monitor_WARN=[rh31_eval_measurement_signals]
+```
+
+This keeps the eval warning actionable without promoting it to live behavior:
+the current scorecard still has no live-guard candidate and remains report-only.

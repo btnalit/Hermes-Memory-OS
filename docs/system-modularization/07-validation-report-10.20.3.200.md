@@ -16215,3 +16215,74 @@ Interpretation:
   status, indexed recall, or mechanism-heavy working memory.
 - The remaining WARN items are now SessionMirror pending coverage and RH-31
   eval failures.
+
+## 2026-05-27 - SessionMirror Correlation And RH-31 Eval Attribution WARN Split
+
+Scope:
+
+- P1-J SessionMirror pending correlation.
+- P1-B RH-31 eval attribution.
+- Monitor-only classification update; no SessionMirror apply, no RH-31 live
+  guard, no route/ranking behavior change.
+
+Preflight:
+
+```text
+source_of_truth=32 P1-J/P1-B, 29 Finding Flow Rules, 31 eval plan, live monitor
+finding_type=live monitor WARN + eval finding
+owning_seam=monitor/evidence classification
+reverse_scope=Hermes owns sessions/conversation; Memory-OS does not apply pending sessions or add live guards from synthetic scorecards
+monitor_or_validation_fields=correlation_status,pending_only_groups,internet_data_collection_pending_count,measurement_signal_count,live_guard_candidate_count,boundary_true_count,forbidden_field_count
+promotion_signal=pending-only source group maps to a real recall miss, or RH-31 failure maps to live/owner-approved fixture evidence
+stop_or_rollback_signal=raw body printed, dry-run writes events, boundary/forbidden nonzero, or scorecard directly changes live routing
+external_review=required before one-time apply or live guard; not required for read-only monitor attribution
+```
+
+Local regression:
+
+```text
+python -m pytest tests\scripts\test_memory_os_3_200_monitor.py -q
+result=47 passed
+```
+
+Live monitor:
+
+```text
+python scripts\memory_os_3_200_monitor.py --output summary
+status=WARN
+FAIL=[]
+
+SessionMirror:
+  session_count=64
+  covered_session_count=31
+  pending_session_count=33
+  dry_run_new_event_count=33
+  dry_run_written_event_ids_count=0
+  dry_run_findings_count=0
+  correlation_status=ok
+  pending_only_groups=[]
+  internet_data_collection_pending_count=0
+  internet_data_collection_provider_count=21
+
+RH31Eval:
+  status=warning
+  failure_count=3
+  failure_class_distribution={fts_miss:2, lexical_miss:1}
+  measurement_signal_count=3
+  live_guard_candidate_count=0
+  boundary_true_count=0
+  forbidden_field_count=0
+
+PASS includes session_mirror_pending_no_correlated_gap and rh31_eval_safety_ok
+WARN=[rh31_eval_measurement_signals]
+```
+
+Interpretation:
+
+- SessionMirror pending coverage is still real backlog, but the current bounded
+  correlation found no pending-only topic group and no
+  `internet_data_collection` pending gap. The earlier RH-28 candidate omission
+  should not be attributed to SessionMirror apply pressure from this evidence.
+- RH-31 still reports three deterministic synthetic failures, but all three are
+  measurement signals: no live behavior changed, no boundary bit is true, and
+  no forbidden field appears. No live guard is justified from this scorecard.
