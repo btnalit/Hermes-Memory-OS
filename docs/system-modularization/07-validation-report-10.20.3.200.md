@@ -17985,3 +17985,84 @@ Residual evidence gap:
   should return an idempotent/duplicate result through structured
   `memory_os_review_reply(action=apply, action_token=...)`, not terminal or
   execute_code.
+
+## 2026-05-27 P1-T Operational Cron Activation
+
+Trigger:
+
+```text
+owner finding=runtime cadence was not fully activated; too much work was still monitor/script-only
+source_of_truth=40 unified control plane, 41 blueprint, live 10.20.3.200 cron list, monitor output
+reverse_scope=Hermes owns cron, local/origin/telegram delivery, and agent turns; Memory-OS only provides bounded helper scripts and monitor evidence
+```
+
+Implemented and deployed on `10.20.3.200`:
+
+```text
+new_or_confirmed_jobs:
+  memory-os-owner-review-digest                0 9 * * *       deliver=telegram  agent
+  memory-os-right-brain-expression             30 4 * * 0      deliver=origin    agent
+  memory-os-module-cadence-report              15 */6 * * *    deliver=local     no-agent
+  memory-os-right-brain-expression-outcome     45 4 * * 0      deliver=local     no-agent
+  memory-os-proposal-followups-opsgate         */30 * * * *    deliver=local     no-agent
+  memory-os-expression-feedback-request        0 5 * * 0       deliver=telegram  agent
+  memory-os-memory-sources-feedback-request    30 10 * * *     deliver=telegram  agent
+```
+
+Helper behavior:
+
+```text
+memory_os_module_cadence_report_cron.py=applies module cadence report evidence
+memory_os_right_brain_expression_outcome_cron.py=records bounded Hermes cron expression outcomes
+memory_os_proposal_followups_ops_gate.py=routes approved proposals to OpsGate report-only; actual_execute=false; execution_ticket_created=false
+memory_os_expression_feedback_prompt.py=empty stdout if latest outcome is silent or already has feedback
+memory_os_memory_sources_feedback_prompt.py=empty stdout if latest MemorySources record already has feedback
+```
+
+Live trigger evidence:
+
+```text
+triggered_jobs:
+  memory-os-module-cadence-report last_run=2026-05-27T09:37:22-04:00 ok
+  memory-os-proposal-followups-opsgate last_run=2026-05-27T09:37:23-04:00 ok
+  memory-os-memory-sources-feedback-request last_run=2026-05-27T09:37:39-04:00 ok
+
+module_cadence_output:
+  status=ok
+  module_count=18
+  cron_job_count=7
+  finding_count=0
+  actual_send=false
+  actual_execute=false
+  cron_modified=false
+
+proposal_followups_output:
+  status=ok
+  eligible_count=0
+  ops_gate_report_written_count=0
+  execution_ticket_created=false
+  actual_execute=false
+  channel=hermes_cron
+
+memory_sources_feedback_request_output:
+  owner-visible Telegram prompt rendered with tokenized memory feedback command
+  one-rating-only instruction preserved
+```
+
+Validation:
+
+```text
+local_tests=46 passed
+closure_matrix_status=ok
+git_diff_check=ok
+monitor_status=PASS
+monitor_WARN=[]
+monitor_FAIL=[]
+module_cadence.cron_job_count=7
+module_cadence.finding_count=0
+owner_review_proposal_followups.execution_tickets=0
+owner_review_proposal_followups.actual_execute=false
+right_brain_expression_adapter.outcome_count=3
+right_brain_expression_adapter.policy_version=2
+memory_sources.feedback_count=2
+```

@@ -180,13 +180,33 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     runtime_python = tmp_path / "home" / "memory-os" / "runtime" / "python"
     runtime_root = runtime_python / "plugins"
     cadence_report = tmp_path / "home" / "scripts" / "memory_os_module_cadence_report.py"
+    cadence_report_cron = tmp_path / "home" / "scripts" / "memory_os_module_cadence_report_cron.py"
+    right_brain_outcome_cron = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_outcome_cron.py"
+    expression_feedback_prompt = tmp_path / "home" / "scripts" / "memory_os_expression_feedback_prompt.py"
+    memory_sources_feedback_prompt = tmp_path / "home" / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
+    proposal_followups_ops_gate = tmp_path / "home" / "scripts" / "memory_os_proposal_followups_ops_gate.py"
     assert report["system_modules_installed"] is True
     assert report["system_module_file_count"] > 0
     assert report["agent_runtime_file_count"] > 0
     assert report["eval_runtime_file_count"] > 0
     assert report["module_cadence_report_path"] == str(cadence_report)
+    assert report["module_cadence_report_cron_path"] == str(cadence_report_cron)
+    assert report["right_brain_expression_outcome_cron_path"] == str(right_brain_outcome_cron)
+    assert report["expression_feedback_prompt_path"] == str(expression_feedback_prompt)
+    assert report["memory_sources_feedback_prompt_path"] == str(memory_sources_feedback_prompt)
+    assert report["proposal_followups_ops_gate_path"] == str(proposal_followups_ops_gate)
     assert cadence_report.is_file()
+    assert cadence_report_cron.is_file()
+    assert right_brain_outcome_cron.is_file()
+    assert expression_feedback_prompt.is_file()
+    assert memory_sources_feedback_prompt.is_file()
+    assert proposal_followups_ops_gate.is_file()
     assert "Hermes owns cron" in cadence_report.read_text(encoding="utf-8")
+    assert "--apply" in cadence_report_cron.read_text(encoding="utf-8")
+    assert "--apply" in right_brain_outcome_cron.read_text(encoding="utf-8")
+    assert "Hermes agent owns the owner interaction" in expression_feedback_prompt.read_text(encoding="utf-8")
+    assert "Hermes agent owns the owner interaction" in memory_sources_feedback_prompt.read_text(encoding="utf-8")
+    assert "OpsGate report-only" in proposal_followups_ops_gate.read_text(encoding="utf-8")
     assert runtime_root.joinpath("system", "lifecycle.py").is_file()
     assert runtime_root.joinpath("modules", "context", "digest_consolidation.py").is_file()
     assert runtime_root.joinpath("modules", "cognition", "deep_reflection.py").is_file()

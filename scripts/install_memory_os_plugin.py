@@ -26,7 +26,12 @@ SOURCE_OWNER_REVIEW_CRON_GATE = REPO_ROOT / "scripts" / "memory_os_owner_review_
 SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_HELPER = REPO_ROOT / "scripts" / "memory_os_right_brain_expression.py"
 SOURCE_RIGHT_BRAIN_EXPRESSION_CRON_GATE = REPO_ROOT / "scripts" / "memory_os_right_brain_expression_cron_gate.py"
 SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME = REPO_ROOT / "scripts" / "memory_os_right_brain_expression_outcome.py"
+SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME_CRON = REPO_ROOT / "scripts" / "memory_os_right_brain_expression_outcome_cron.py"
 SOURCE_MODULE_CADENCE_REPORT = REPO_ROOT / "scripts" / "memory_os_module_cadence_report.py"
+SOURCE_MODULE_CADENCE_REPORT_CRON = REPO_ROOT / "scripts" / "memory_os_module_cadence_report_cron.py"
+SOURCE_EXPRESSION_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_expression_feedback_prompt.py"
+SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
+SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE = REPO_ROOT / "scripts" / "memory_os_proposal_followups_ops_gate.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -251,8 +256,10 @@ def install_plugin(
             dry_run=dry_run,
         )
     module_cadence_report: Path | None = None
+    operational_helper_paths: dict[str, Path] = {}
     if install_system_modules:
         module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
+        operational_helper_paths = _write_operational_helper_scripts(hermes_home, dry_run=dry_run)
     enabled = False
     enable_command: list[str] = []
     if enable:
@@ -376,6 +383,11 @@ def install_plugin(
         "right_brain_expression_cron_gate_path": str(right_brain_expression_cron_helper.get("gate") or ""),
         "right_brain_expression_outcome_path": str(right_brain_expression_cron_helper.get("outcome") or ""),
         "module_cadence_report_path": str(module_cadence_report or ""),
+        "module_cadence_report_cron_path": str(operational_helper_paths.get("module_cadence_report_cron") or ""),
+        "right_brain_expression_outcome_cron_path": str(operational_helper_paths.get("right_brain_expression_outcome_cron") or ""),
+        "expression_feedback_prompt_path": str(operational_helper_paths.get("expression_feedback_prompt") or ""),
+        "memory_sources_feedback_prompt_path": str(operational_helper_paths.get("memory_sources_feedback_prompt") or ""),
+        "proposal_followups_ops_gate_path": str(operational_helper_paths.get("proposal_followups_ops_gate") or ""),
         "deep_reflection_preset": deep_reflection_preset,
         "deep_reflection_config_written": bool(deep_reflection_config_path) and not dry_run,
         "deep_reflection_config_path": str(deep_reflection_config_path) if deep_reflection_config_path else "",
@@ -685,6 +697,29 @@ def _write_module_cadence_report_script(hermes_home: Path, *, dry_run: bool) -> 
     shutil.copy2(SOURCE_MODULE_CADENCE_REPORT, target)
     target.chmod(target.stat().st_mode | stat.S_IXUSR)
     return target
+
+
+def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
+    sources = {
+        "module_cadence_report_cron": SOURCE_MODULE_CADENCE_REPORT_CRON,
+        "right_brain_expression_outcome_cron": SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME_CRON,
+        "expression_feedback_prompt": SOURCE_EXPRESSION_FEEDBACK_PROMPT,
+        "memory_sources_feedback_prompt": SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT,
+        "proposal_followups_ops_gate": SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE,
+    }
+    targets: dict[str, Path] = {}
+    for key, source in sources.items():
+        if not source.is_file():
+            raise SystemExit(f"Operational helper source is missing: {source}")
+        targets[key] = hermes_home / "scripts" / source.name
+    if dry_run:
+        return targets
+    for key, source in sources.items():
+        target = targets[key]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    return targets
 
 
 def _write_deep_reflection_config(

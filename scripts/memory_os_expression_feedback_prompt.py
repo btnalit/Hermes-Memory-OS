@@ -32,6 +32,11 @@ def main() -> int:
         item = report.get("latest_outcome")
     if not isinstance(item, dict):
         return 0
+    if bool(item.get("outcome_silent")):
+        return 0
+    existing_feedback = report.get("existing_feedback") if isinstance(report.get("existing_feedback"), dict) else {}
+    if int(existing_feedback.get("count") or 0) > 0:
+        return 0
     preview = str(item.get("expression_preview") or item.get("outcome_preview") or "").strip()
     tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
     if not tokens:

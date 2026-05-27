@@ -31,6 +31,9 @@ def main() -> int:
     item = report.get("latest_memory_source")
     if not isinstance(item, dict):
         return 0
+    existing_feedback = report.get("existing_feedback") if isinstance(report.get("existing_feedback"), dict) else {}
+    if int(existing_feedback.get("count") or 0) > 0:
+        return 0
     token = str((item.get("action_tokens") or {}).get("mark_feedback") or "").strip()
     if not token:
         return 0

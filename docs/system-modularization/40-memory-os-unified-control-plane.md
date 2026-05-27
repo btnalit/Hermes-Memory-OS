@@ -464,11 +464,18 @@ Current truth:
   `expired_working_used_in_analysis_count=0`, and monitor PASS
   `deep_reflection_expired_working_not_used`;
 - P1-T cadence report is deployed on `10.20.3.200`; live monitor reports
-  `module_cadence_report_visible`, `module_count=18`, `cron_job_count=2`,
+  `module_cadence_report_visible`, `module_count=18`, `cron_job_count=7`,
   `integration_harness_member_count=11`, `split_recommended_count=11`,
   `expected_hermes_cron_missing_count=0`, `finding_count=0`,
-  `generated_count=897`, `skipped_count=63`, `error_count=15`,
-  `duplicate_count=22`, and `counter_coverage_count=18`;
+  `generated_count=994`, `skipped_count=82`, `error_count=15`,
+  `duplicate_count=24`, and `counter_coverage_count=18`;
+- P1-T operational cron activation is live on `10.20.3.200`: Hermes cron now
+  owns local/no-agent module cadence evidence,
+  local/no-agent right-brain outcome scanning, local/no-agent approved proposal
+  follow-up routing through OpsGate report-only, and conditional owner-channel
+  feedback prompts for MemorySources and right-brain expression. The feedback
+  prompt helpers emit empty stdout when the latest item is already rated or not
+  suitable for feedback.
 - production cadence is not fully mature, but the previous
   `module_cadence_split_pending` WARN is closed. Remaining cadence work should
   be selected from refreshed counters and real owner/outcome volume, not from
@@ -650,7 +657,6 @@ These remain observation or measurement, not immediate feature work:
 - P1-C DeepReflection / carryover source-class and leakage observation;
 - RH-31 eval findings;
 - audit density and retention;
-- MemorySources feedback volume;
 - Hermes upgrade compatibility.
 
 ## Stop Signals
