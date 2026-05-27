@@ -198,3 +198,74 @@ def test_left_brain_pipeline_checker_warns_on_unmature_expression_policy_proposa
     assert report["proposal_quality"]["expression_policy_quality_blocked_count"] == 1
     assert report["proposal_quality"]["expression_policy_unlinked_quality_count"] == 1
     assert any(finding["code"] == "expression_policy_proposal_quality_gap" for finding in report["findings"])
+
+
+def test_left_brain_pipeline_checker_accepts_mature_memory_sources_policy_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(
+        store=store,
+        title="调整记忆来源/召回策略：missing_context 反馈",
+        body=(
+            "具体改动: review low-clue source policy\n"
+            "证据: linked MemorySources feedback msrc_1\n"
+            "验收标准: monitor shows candidate coverage\n"
+            "后续状态: explicit apply only"
+        ),
+        kind="memory_sources_policy",
+        proposal_class="memory_sources_policy:missing_context",
+        dedupe_key="memory_sources_policy:missing_context:casual_continuity:low_clue_recall",
+        proposal_quality={
+            "quality_gate": "linked_corrective_memory_sources_feedback",
+            "feedback_rating": "missing_context",
+            "feedback_count": 1,
+            "linked_memory_source_count": 1,
+            "memory_source_record_refs": ["msrc_1"],
+            "routes": ["casual_continuity"],
+            "query_classes": ["low_clue_recall"],
+            "runtime_target": "context_retrieval_policy_review",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+            "selected_equals_successful_use": False,
+        },
+    )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+    status = LeftBrainPipelineCheckModule(tmp_path, profile="main").status()
+
+    assert report["status"] == "ok"
+    assert report["proposal_quality"]["memory_sources_policy_quality_ready_count"] == 1
+    assert report["proposal_quality"]["memory_sources_policy_quality_blocked_count"] == 0
+    assert not any(finding["code"] == "memory_sources_policy_proposal_quality_gap" for finding in report["findings"])
+    assert status["memory_sources_policy_quality_ready_count"] == 1
+
+
+def test_left_brain_pipeline_checker_warns_on_unmature_memory_sources_policy_proposal(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    proposal_queue.create_candidate(
+        store=store,
+        title="调整记忆来源/召回策略：missing_context 反馈",
+        body="具体改动: review source policy\n证据: owner feedback\n验收标准: monitor\n后续状态: explicit apply",
+        kind="memory_sources_policy",
+        proposal_class="memory_sources_policy:missing_context",
+        dedupe_key="memory_sources_policy:missing_context:casual_continuity:low_clue_recall",
+        proposal_quality={
+            "quality_gate": "linked_corrective_memory_sources_feedback",
+            "feedback_rating": "missing_context",
+            "feedback_count": 1,
+            "linked_memory_source_count": 0,
+            "runtime_target": "context_retrieval_policy_review",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+            "selected_equals_successful_use": False,
+        },
+    )
+
+    report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
+
+    assert report["status"] == "warn"
+    assert report["proposal_quality"]["memory_sources_policy_quality_ready_count"] == 0
+    assert report["proposal_quality"]["memory_sources_policy_quality_blocked_count"] == 1
+    assert report["proposal_quality"]["memory_sources_policy_unlinked_quality_count"] == 1
+    assert any(finding["code"] == "memory_sources_policy_proposal_quality_gap" for finding in report["findings"])

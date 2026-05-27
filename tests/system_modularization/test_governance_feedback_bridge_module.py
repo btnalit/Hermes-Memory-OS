@@ -217,6 +217,47 @@ def test_governance_feedback_consumes_expression_feedback_without_live_mutation(
     assert "raw_body" not in json.dumps(governance_events[0].to_dict(), ensure_ascii=False)
 
 
+def test_governance_feedback_consumes_memory_sources_feedback_without_route_mutation(tmp_path):
+    store = _store(tmp_path)
+    feedback_ledger = tmp_path / "memory-os" / "system" / "memory_sources_feedback.jsonl"
+    feedback_ledger.parent.mkdir(parents=True, exist_ok=True)
+    feedback_ledger.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.memory_sources_feedback.v0",
+                "feedback_id": "msfb_1",
+                "created_at": "2026-05-26T00:00:00Z",
+                "profile": "main",
+                "memory_source_record_id": "msrc_1",
+                "route": "ordinary_memory",
+                "query_class": "ordinary_memory",
+                "rating": "missing_context",
+                "note": "bounded feedback note",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    result = bridge.run_once(store=store, dry_run=False)
+    governance_events = [event for event in store.read_events() if event.kind == "governance_memory_sources_feedback"]
+
+    assert result["written_event_count"] == 1
+    assert result["event_kinds"]["governance_memory_sources_feedback"] == 1
+    assert governance_events
+    safe_ref = governance_events[0].safe_ref
+    assert safe_ref["candidate_allowed"] is False
+    assert safe_ref["body_policy"] == "summary_only"
+    assert safe_ref["memory_source_record_id"] == "msrc_1"
+    assert safe_ref["memory_sources_feedback_rating"] == "missing_context"
+    rendered = json.dumps(governance_events[0].to_dict(), ensure_ascii=False)
+    assert "live_route_changed=false" in rendered
+    assert "raw_body" not in rendered
+
+
 def test_governance_feedback_enters_continuity_but_not_inner_drive_working(tmp_path):
     store = _store(tmp_path)
     modules = _seed_governance_artifacts(tmp_path, store)

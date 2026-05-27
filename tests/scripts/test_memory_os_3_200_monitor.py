@@ -662,6 +662,11 @@ def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
     assert any(item["code"] == "left_brain_expression_feedback_context_linked" for item in classification["pass"])
     assert any(item["code"] == "left_brain_feedback_proposal_quality_ready" for item in classification["pass"])
 
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["memory_sources_policy_quality_ready_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "left_brain_memory_sources_policy_quality_ready" for item in classification["pass"])
+
     snapshot["module_artifacts"]["left_brain_pipeline_check"]["status"] = "fail"
     classification = classify_snapshot(snapshot)
 
@@ -684,6 +689,13 @@ def test_classify_snapshot_tracks_expression_feedback_and_left_brain_pipeline():
     assert classification["status"] == "WARN"
     assert any(item["code"] == "left_brain_feedback_proposal_quality_blocked" for item in classification["warn"])
     assert any(item["code"] == "left_brain_proposal_quality_metadata_missing" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["left_brain_pipeline_check"]["memory_sources_policy_quality_blocked_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "left_brain_memory_sources_policy_quality_blocked" for item in classification["warn"])
 
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
@@ -2075,6 +2087,9 @@ def _healthy_module_artifacts() -> dict:
             "expression_policy_quality_ready_count": 1,
             "expression_policy_quality_blocked_count": 0,
             "expression_policy_unlinked_quality_count": 0,
+            "memory_sources_policy_quality_ready_count": 0,
+            "memory_sources_policy_quality_blocked_count": 0,
+            "memory_sources_policy_unlinked_quality_count": 0,
             "actual_execute": False,
         },
         "deep_reflection": {"report_count": 0, "analysis_artifact_count": 0, "current_injection_exists": False},

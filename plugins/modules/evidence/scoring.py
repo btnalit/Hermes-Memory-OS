@@ -12,6 +12,7 @@ from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import read_candidate_queue
+from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path
 from plugins.memory.memory_os.store import MemoryOSStore
 
 MATURITY_DIMENSION_KEYS = [
@@ -376,6 +377,9 @@ class EvidenceScoringModule:
         expression_feedback_evidence = [
             record for record in evidence if str(record.get("subject_kind") or "") == "expression_feedback"
         ]
+        memory_sources_feedback_evidence = [
+            record for record in evidence if str(record.get("subject_kind") or "") == "memory_sources_feedback"
+        ]
         return {
             "schema_version": "hermes.evidence_scoring_status.v0",
             "module": "evidence_scoring",
@@ -396,7 +400,26 @@ class EvidenceScoringModule:
             "maturity_dimension_count": len(MATURITY_DIMENSION_KEYS),
             "maturity_dimension_keys": list(MATURITY_DIMENSION_KEYS),
             "maturity_live_applied": any(record.get("maturity_live_applied") is True for record in feature_scores),
-            "owner_feedback_signal_count": 0,
+            "owner_feedback_signal_count": subject_counts.get("expression_feedback", 0)
+            + subject_counts.get("memory_sources_feedback", 0),
+            "memory_sources_feedback_subject_count": subject_counts.get("memory_sources_feedback", 0),
+            "memory_sources_feedback_linked_subject_count": sum(
+                1 for record in memory_sources_feedback_evidence if str(record.get("memory_source_record_id") or "")
+            ),
+            "memory_sources_feedback_corrective_subject_count": sum(
+                1
+                for record in memory_sources_feedback_evidence
+                if str(record.get("feedback_rating") or "")
+                in {
+                    "irrelevant",
+                    "too_mechanistic",
+                    "missing_context",
+                    "overconfident",
+                    "needs_specific_recall",
+                    "clarification_rejected",
+                    "missing_candidate",
+                }
+            ),
             "expression_feedback_subject_count": subject_counts.get("expression_feedback", 0),
             "expression_feedback_linked_subject_count": sum(
                 1 for record in expression_feedback_evidence if str(record.get("outcome_id") or "")
@@ -534,6 +557,54 @@ class EvidenceScoringModule:
                     "source_ref": f"memory_os:crystallized_candidate:{candidate.candidate_id}",
                 }
             )
+        memory_sources_feedback_count = 0
+        memory_sources_feedback_corrective_count = 0
+        for feedback in _read_jsonl(memory_sources_feedback_path(store.roots)):
+            if str(feedback.get("profile", self.profile)) not in {"", self.profile}:
+                continue
+            feedback_id = str(feedback.get("feedback_id", ""))
+            if not feedback_id:
+                continue
+            memory_sources_feedback_count += 1
+            rating = str(feedback.get("rating") or "unknown")
+            if rating in {
+                "irrelevant",
+                "too_mechanistic",
+                "missing_context",
+                "overconfident",
+                "needs_specific_recall",
+                "clarification_rejected",
+                "missing_candidate",
+            }:
+                memory_sources_feedback_corrective_count += 1
+            memory_source_record_id = str(feedback.get("memory_source_record_id") or "")
+            route = str(feedback.get("route") or "unknown")
+            query_class = str(feedback.get("query_class") or "unknown")
+            note = _bounded_subject_note(str(feedback.get("note") or ""))
+            summary_parts = [
+                f"memory_sources_feedback rating={rating}",
+                f"route={route}",
+                f"query_class={query_class}",
+            ]
+            if memory_source_record_id:
+                summary_parts.append(f"record={memory_source_record_id}")
+            if note:
+                summary_parts.append(f"note={note}")
+            subjects.append(
+                {
+                    "subject_ref": f"memory_sources_feedback:{feedback_id}",
+                    "subject_kind": "memory_sources_feedback",
+                    "evidence_summary": " ".join(summary_parts),
+                    "source_ref": f"memory_os:memory_sources_feedback:{feedback_id}",
+                    "source_status": "active",
+                    "feedback_rating": rating,
+                    "target_id": memory_source_record_id,
+                    "memory_source_record_id": memory_source_record_id,
+                    "route": route,
+                    "query_class": query_class,
+                    "linked_memory_source": "true" if memory_source_record_id else "false",
+                }
+            )
         expression_feedback_count = 0
         expression_feedback_linked_subject_count = 0
         expression_feedback_unlinked_subject_count = 0
@@ -576,6 +647,8 @@ class EvidenceScoringModule:
             "working_active_subject_count": working_active_subject_count,
             "working_expired_skipped_count": working_expired_skipped_count,
             "working_unknown_status_count": working_unknown_status_count,
+            "memory_sources_feedback_subject_count": memory_sources_feedback_count,
+            "memory_sources_feedback_corrective_subject_count": memory_sources_feedback_corrective_count,
             "expression_feedback_subject_count": expression_feedback_count,
             "expression_feedback_linked_subject_count": expression_feedback_linked_subject_count,
             "expression_feedback_unlinked_subject_count": expression_feedback_unlinked_subject_count,
@@ -595,7 +668,17 @@ class EvidenceScoringModule:
         }
         if subject.get("feedback_rating"):
             record["feedback_rating"] = subject["feedback_rating"]
-        for key in ("target_id", "outcome_id", "request_id", "policy_version", "linked_outcome"):
+        for key in (
+            "target_id",
+            "outcome_id",
+            "request_id",
+            "policy_version",
+            "linked_outcome",
+            "memory_source_record_id",
+            "route",
+            "query_class",
+            "linked_memory_source",
+        ):
             if subject.get(key):
                 record[key] = subject[key]
         return record
@@ -810,6 +893,8 @@ def _source_class(source_ref: str) -> str:
         return "event"
     if source_ref.startswith("memory_os:expression_feedback"):
         return "expression_feedback"
+    if source_ref.startswith("memory_os:memory_sources_feedback"):
+        return "memory_sources_feedback"
     return "unknown"
 
 
@@ -853,6 +938,7 @@ def _subject_kind_weight(subject_kind: str) -> float:
         "proposal": 0.58,
         "crystallized_candidate": 0.50,
         "expression_feedback": 0.72,
+        "memory_sources_feedback": 0.74,
     }
     return weights.get(subject_kind, 0.45)
 
@@ -885,6 +971,8 @@ def _proposal_state(summary: str) -> str:
 def _actionability_score(*, subject_kind: str, proposal_state: str, feedback_rating: str = "") -> float:
     if subject_kind == "expression_feedback":
         return 0.85
+    if subject_kind == "memory_sources_feedback":
+        return 0.82
     if subject_kind == "proposal":
         if proposal_state == "approved_for_proposal":
             return 0.9
@@ -906,7 +994,19 @@ def _owner_feedback_signal(proposal_state: str, *, feedback_rating: str = "") ->
     if feedback_rating:
         if feedback_rating in {"like_expression"}:
             return 0.7
-        if feedback_rating in {"too_mechanical", "too_frequent", "boundary_private", "off_voice", "mute_period"}:
+        if feedback_rating in {
+            "too_mechanical",
+            "too_frequent",
+            "boundary_private",
+            "off_voice",
+            "mute_period",
+            "irrelevant",
+            "missing_context",
+            "overconfident",
+            "needs_specific_recall",
+            "clarification_rejected",
+            "missing_candidate",
+        }:
             return 0.9
         return 0.65
     if proposal_state == "approved_for_proposal":
@@ -921,6 +1021,8 @@ def _risk_level(*, subject_kind: str, proposal_state: str, source_status: str, f
     if subject_kind == "proposal":
         risk += 0.20
     if subject_kind == "expression_feedback":
+        risk += 0.10
+    if subject_kind == "memory_sources_feedback":
         risk += 0.10
     if feedback_rating == "boundary_private":
         risk += 0.35
@@ -947,6 +1049,13 @@ def _duplicate_backlog_signal(*, subject_kind: str, proposal_state: str) -> floa
     if subject_kind == "proposal" and proposal_state in {"owner_declined", "rejected", "closed"}:
         return 0.8
     return 0.65
+
+
+def _bounded_subject_note(value: str, *, limit: int = 120) -> str:
+    clean = " ".join(str(value or "").split())
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip() + "..."
 
 
 def _proposal_state_weight(state: str) -> float:

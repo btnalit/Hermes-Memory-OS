@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
+from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import expression_feedback_ledger_path
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -21,6 +22,7 @@ GOVERNANCE_EVENT_KINDS = {
     "governance_proposal_created",
     "governance_proposal_transitioned",
     "governance_expression_feedback",
+    "governance_memory_sources_feedback",
     "governance_self_evolution_reported",
 }
 
@@ -45,6 +47,7 @@ def governance_feedback_manifest() -> dict[str, Any]:
                 "local_artifact.ops_gate_report",
                 "local_artifact.proposal_queue_state",
                 "memory_os.expression_feedback_ledger",
+                "memory_os.memory_sources_feedback",
                 "local_artifact.self_evolution_report",
             ],
             "writes": ["memory_os.events.summary", "memory_os.audit", "local_artifact.governance_feedback_state"],
@@ -235,6 +238,7 @@ class GovernanceFeedbackBridgeModule:
             records.extend(self._ops_gate_events(ops_gate))
         if proposal_queue is not None:
             records.extend(self._proposal_events(proposal_queue))
+        records.extend(self._memory_sources_feedback_events())
         records.extend(self._expression_feedback_events())
         if self_evolution is not None:
             records.extend(self._self_evolution_events(self_evolution))
@@ -370,6 +374,49 @@ class GovernanceFeedbackBridgeModule:
             )
         return records
 
+    def _memory_sources_feedback_events(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        for feedback in _read_jsonl(memory_sources_feedback_path(roots)):
+            if str(feedback.get("profile", self.profile)) != self.profile:
+                continue
+            if not str(feedback.get("schema_version", "")).endswith("memory_sources_feedback.v0"):
+                continue
+            feedback_id = str(feedback.get("feedback_id", ""))
+            source_record_id = str(feedback.get("memory_source_record_id", ""))
+            rating = str(feedback.get("rating", "unknown"))
+            route = str(feedback.get("route", "unknown"))
+            query_class = str(feedback.get("query_class", "unknown"))
+            state_hash = _hash_json(
+                {
+                    "feedback_id": feedback_id,
+                    "memory_source_record_id": source_record_id,
+                    "rating": rating,
+                    "route": route,
+                    "query_class": query_class,
+                }
+            )
+            records.append(
+                {
+                    "kind": "governance_memory_sources_feedback",
+                    "source_module": "memory_sources_feedback",
+                    "source_key": f"memory_sources_feedback:{feedback_id}:{rating}",
+                    "state_hash": state_hash,
+                    "artifact_ref": f"local://memory_sources_feedback/{feedback_id}",
+                    "summary": (
+                        f"MemorySources feedback {rating} recorded for route={route}; "
+                        "live_route_changed=false."
+                    ),
+                    "evidence_refs": [f"memory_sources_feedback:{feedback_id}"],
+                    "memory_sources_feedback_id": feedback_id,
+                    "memory_source_record_id": source_record_id,
+                    "memory_sources_feedback_rating": rating,
+                    "memory_sources_feedback_route": route,
+                    "memory_sources_feedback_query_class": query_class,
+                }
+            )
+        return records
+
     def _self_evolution_events(self, self_evolution: Any) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for index, report in enumerate(self_evolution.read_reports()):
@@ -482,7 +529,18 @@ def _state_record(event: EventEnvelope) -> dict[str, Any]:
 
 def _optional_refs(record: dict[str, Any]) -> dict[str, Any]:
     output: dict[str, Any] = {}
-    for key in ("proposal_id", "proposal_state", "expression_feedback_id", "expression_draft_id", "expression_feedback_type"):
+    for key in (
+        "proposal_id",
+        "proposal_state",
+        "expression_feedback_id",
+        "expression_draft_id",
+        "expression_feedback_type",
+        "memory_sources_feedback_id",
+        "memory_source_record_id",
+        "memory_sources_feedback_rating",
+        "memory_sources_feedback_route",
+        "memory_sources_feedback_query_class",
+    ):
         if record.get(key):
             output[key] = record[key]
     return output

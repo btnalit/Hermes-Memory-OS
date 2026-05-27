@@ -346,6 +346,101 @@ def test_self_evolution_creates_expression_policy_proposal_from_expression_feedb
     assert proposal["actual_execute"] is False
 
 
+def test_self_evolution_creates_memory_sources_policy_proposal_from_corrective_feedback(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    feedback_path = store.roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.memory_sources_feedback.v0",
+                "feedback_id": "msfb_policy_1",
+                "created_at": "2026-05-27T00:00:00Z",
+                "profile": "main",
+                "memory_source_record_id": "msrc_policy_1",
+                "route": "casual_continuity",
+                "query_class": "low_clue_recall",
+                "rating": "missing_context",
+                "note": "candidate list missed the useful source",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evidence = EvidenceScoringModule(tmp_path, profile="main")
+    evidence.score_all(store=store, proposal_queue=proposal_queue)
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=OpsGateModule(tmp_path, profile="main"),
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is True
+    proposal = proposal_queue.read_queue()["items"][0]
+    assert proposal["kind"] == "memory_sources_policy"
+    assert proposal["proposal_class"] == "memory_sources_policy:missing_context"
+    assert proposal["dedupe_key"] == "memory_sources_policy:missing_context:casual_continuity:low_clue_recall"
+    assert proposal["proposal_quality"]["trigger_rule"] == "memory_sources_feedback_policy"
+    assert proposal["proposal_quality"]["quality_gate"] == "linked_corrective_memory_sources_feedback"
+    assert proposal["proposal_quality"]["feedback_rating"] == "missing_context"
+    assert proposal["proposal_quality"]["linked_memory_source_count"] == 1
+    assert proposal["proposal_quality"]["memory_source_record_refs"] == ["msrc_policy_1"]
+    assert proposal["proposal_quality"]["runtime_target"] == "context_retrieval_policy_review"
+    assert proposal["proposal_quality"]["selected_equals_successful_use"] is False
+    assert "调整记忆来源/召回策略" in proposal["title"]
+    assert "selected 当 successful_use" in proposal["body"]
+    assert "generic executor forbidden" in proposal["body"]
+    assert proposal["actual_execute"] is False
+
+
+def test_self_evolution_rejects_useful_memory_sources_feedback_as_report_only(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    feedback_path = store.roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.memory_sources_feedback.v0",
+                "feedback_id": "msfb_useful",
+                "created_at": "2026-05-27T00:00:00Z",
+                "profile": "main",
+                "memory_source_record_id": "msrc_useful",
+                "route": "casual_continuity",
+                "query_class": "low_clue_recall",
+                "rating": "useful",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    evidence = EvidenceScoringModule(tmp_path, profile="main")
+    evidence.score_all(store=store, proposal_queue=proposal_queue)
+    ops_gate = OpsGateModule(tmp_path, profile="main")
+    module = SelfEvolutionGovernorModule(tmp_path, profile="main")
+
+    result = module.run_once(
+        store=store,
+        ops_gate=ops_gate,
+        proposal_queue=proposal_queue,
+        evidence_scoring=evidence,
+    )
+
+    assert result["proposal_created"] is False
+    assert result["proposal_quality_gate_failed"] is True
+    assert result["quality_gate_reason"] == "memory_sources_feedback_requires_corrective_rating"
+    assert proposal_queue.read_queue()["items"] == []
+    assert ops_gate.read_reports() == []
+
+
 def test_self_evolution_rejects_unlinked_expression_feedback_as_low_quality_proposal_input(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")

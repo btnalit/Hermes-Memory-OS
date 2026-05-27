@@ -262,6 +262,49 @@ def test_evidence_scoring_preserves_expression_feedback_outcome_context(tmp_path
     assert signals["policy_version"] == "3"
 
 
+def test_evidence_scoring_preserves_memory_sources_feedback_context(tmp_path):
+    store = _store(tmp_path)
+    feedback_path = store.roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.memory_sources_feedback.v0",
+                "feedback_id": "msfb_001",
+                "created_at": "2026-05-27T00:00:00Z",
+                "profile": "main",
+                "memory_source_record_id": "msrc_001",
+                "route": "casual_continuity",
+                "query_class": "low_clue_recall",
+                "rating": "missing_context",
+                "note": "candidate list missed the useful source",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    result = module.score_all(store=store)
+
+    assert result["memory_sources_feedback_subject_count"] == 1
+    assert result["memory_sources_feedback_corrective_subject_count"] == 1
+    evidence = [record for record in module.read_evidence() if record["subject_kind"] == "memory_sources_feedback"][0]
+    feature = [record for record in module.read_feature_scores() if record["subject_kind"] == "memory_sources_feedback"][0]
+    assert evidence["feedback_rating"] == "missing_context"
+    assert evidence["memory_source_record_id"] == "msrc_001"
+    assert evidence["route"] == "casual_continuity"
+    assert evidence["query_class"] == "low_clue_recall"
+    signals = feature["maturity_dimensions"]["owner_feedback"]["signals"]
+    assert signals["feedback_rating"] == "missing_context"
+    assert signals["explicit_feedback_signal_count"] == 1
+    status = module.status()
+    assert status["owner_feedback_signal_count"] == 1
+    assert status["memory_sources_feedback_subject_count"] == 1
+    assert status["memory_sources_feedback_linked_subject_count"] == 1
+
+
 def test_evidence_scoring_skips_expired_working_items(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

@@ -71,6 +71,13 @@ class LeftBrainPipelineCheckModule:
             "expression_policy_quality_ready_count": proposal_quality.get("expression_policy_quality_ready_count"),
             "expression_policy_quality_blocked_count": proposal_quality.get("expression_policy_quality_blocked_count"),
             "expression_policy_unlinked_quality_count": proposal_quality.get("expression_policy_unlinked_quality_count"),
+            "memory_sources_policy_quality_ready_count": proposal_quality.get("memory_sources_policy_quality_ready_count"),
+            "memory_sources_policy_quality_blocked_count": proposal_quality.get(
+                "memory_sources_policy_quality_blocked_count"
+            ),
+            "memory_sources_policy_unlinked_quality_count": proposal_quality.get(
+                "memory_sources_policy_unlinked_quality_count"
+            ),
             "report_path": str(self.report_path),
             "actual_execute": False,
         }
@@ -191,6 +198,15 @@ class LeftBrainPipelineCheckModule:
                     "count": proposal_quality["expression_policy_quality_blocked_count"],
                 }
             )
+        if proposal_quality["memory_sources_policy_quality_blocked_count"]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "memory_sources_policy_proposal_quality_gap",
+                    "message": "Owner-actionable MemorySources policy proposals must reference linked MemorySources feedback and stay bounded to report-only follow-up.",
+                    "count": proposal_quality["memory_sources_policy_quality_blocked_count"],
+                }
+            )
         if proposal_quality["quality_metadata_missing_count"]:
             findings.append(
                 {
@@ -288,6 +304,34 @@ class LeftBrainPipelineCheckModule:
                 expression_policy_ready.append(item)
             else:
                 expression_policy_blocked.append(item)
+        memory_sources_policy_items = [
+            item
+            for item in owner_actionable
+            if str(item.get("kind") or "") == "memory_sources_policy"
+            or str(item.get("proposal_class") or "").startswith("memory_sources_policy:")
+        ]
+        memory_sources_policy_ready: list[dict[str, Any]] = []
+        memory_sources_policy_blocked: list[dict[str, Any]] = []
+        memory_sources_policy_unlinked = 0
+        for item in memory_sources_policy_items:
+            quality = item.get("proposal_quality") if isinstance(item.get("proposal_quality"), dict) else {}
+            linked_source_count = int(quality.get("linked_memory_source_count") or 0)
+            is_unlinked = linked_source_count <= 0
+            if is_unlinked:
+                memory_sources_policy_unlinked += 1
+            ready = (
+                str(quality.get("quality_gate") or "") == "linked_corrective_memory_sources_feedback"
+                and linked_source_count > 0
+                and str(quality.get("runtime_target") or "") == "context_retrieval_policy_review"
+                and quality.get("direct_apply_allowed") is False
+                and quality.get("generic_executor_allowed") is False
+                and quality.get("selected_equals_successful_use") is False
+                and _has_concrete_body(str(item.get("body") or ""))
+            )
+            if ready:
+                memory_sources_policy_ready.append(item)
+            else:
+                memory_sources_policy_blocked.append(item)
         return {
             "owner_actionable_proposal_count": len(owner_actionable),
             "quality_metadata_missing_count": len(quality_missing),
@@ -301,6 +345,16 @@ class LeftBrainPipelineCheckModule:
                 for item in expression_policy_items
                 if isinstance(item.get("proposal_quality"), dict)
                 and str(item["proposal_quality"].get("runtime_target") or "") == "expression_policy"
+            ),
+            "memory_sources_policy_count": len(memory_sources_policy_items),
+            "memory_sources_policy_quality_ready_count": len(memory_sources_policy_ready),
+            "memory_sources_policy_quality_blocked_count": len(memory_sources_policy_blocked),
+            "memory_sources_policy_unlinked_quality_count": memory_sources_policy_unlinked,
+            "runtime_target_context_retrieval_policy_review_count": sum(
+                1
+                for item in memory_sources_policy_items
+                if isinstance(item.get("proposal_quality"), dict)
+                and str(item["proposal_quality"].get("runtime_target") or "") == "context_retrieval_policy_review"
             ),
             "actual_execute": False,
         }

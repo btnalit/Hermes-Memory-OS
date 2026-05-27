@@ -16286,3 +16286,100 @@ Interpretation:
 - RH-31 still reports three deterministic synthetic failures, but all three are
   measurement signals: no live behavior changed, no boundary bit is true, and
   no forbidden field appears. No live guard is justified from this scorecard.
+
+## 2026-05-27 - P1-S MemorySources Feedback Backflow Quality
+
+Scope:
+
+- P1-S / RH-39 feedback backflow quality.
+- Add MemorySources/RH-30 feedback as a first-class left-brain signal source.
+- No direct route, prompt, cadence, delivery, or execution mutation.
+
+Preflight:
+
+```text
+source_of_truth=32 roadmap P1-S, 39 left-brain governance quality contract, live monitor MemorySources feedback_count
+finding_type=feedback backflow gap
+owning_seam=EvidenceScoring + SelfEvolution + GovernanceFeedback + LeftBrainPipelineCheck
+reverse_scope=Hermes owns conversation/transport/LLM; Memory-OS only turns bounded MemorySources feedback into evidence/proposal state
+monitor_or_validation_fields=memory_sources_feedback_subject_count, memory_sources_feedback_linked_subject_count, memory_sources_feedback_corrective_subject_count, memory_sources_policy_quality_ready_count, memory_sources_policy_quality_blocked_count, actual_execute
+promotion_signal=corrective source-linked MemorySources feedback can create an owner-reviewed memory_sources_policy proposal without direct live mutation
+stop_or_rollback_signal=feedback directly changes route/prompt/cadence, creates generic executor pressure, includes raw body, or actual_execute=true
+external_review=not required for proposal-only/report-only path; required before any concrete apply kind changes context routing
+```
+
+Local regression:
+
+```text
+python -m pytest tests\system_modularization\test_governance_feedback_bridge_module.py tests\system_modularization\test_evidence_scoring_module.py tests\system_modularization\test_self_evolution_module.py tests\system_modularization\test_left_brain_pipeline_checker.py tests\scripts\test_memory_os_3_200_monitor.py -q
+result=98 passed
+```
+
+Remote deployment:
+
+```text
+deployed_files:
+  /root/.hermes/memory-os/runtime/python/plugins/modules/evidence/scoring.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/self_evolution.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/proposal_queue.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/pipeline_checker.py
+  /root/.hermes/memory-os/runtime/python/plugins/modules/governance/feedback_bridge.py
+  /root/.hermes/scripts/memory_os_3_200_monitor.py
+remote_py_compile=pass
+```
+
+Remote temporary-fixture smoke:
+
+```text
+score_memory_sources_feedback_subject_count=1
+score_memory_sources_feedback_corrective_subject_count=1
+proposal_created=true
+proposal_kind=memory_sources_policy
+proposal_class=memory_sources_policy:missing_context
+quality_gate=linked_corrective_memory_sources_feedback
+runtime_target=context_retrieval_policy_review
+direct_apply_allowed=false
+generic_executor_allowed=false
+bridge_written_event_count=1
+bridge_event_kind_count=1
+gov_event_candidate_allowed=false
+gov_event_body_policy=summary_only
+actual_execute=false
+```
+
+Live monitor after deploy:
+
+```text
+status=WARN
+FAIL=[]
+WARN=[rh31_eval_measurement_signals]
+
+MemorySources.feedback_count=0
+
+ModuleArtifacts.left_brain_pipeline_check.status=ok
+ModuleArtifacts.left_brain_pipeline_check.finding_count=0
+ModuleArtifacts.left_brain_pipeline_check.proposal_quality_missing_count=0
+ModuleArtifacts.left_brain_pipeline_check.expression_policy_quality_ready_count=1
+ModuleArtifacts.left_brain_pipeline_check.expression_policy_quality_blocked_count=0
+ModuleArtifacts.left_brain_pipeline_check.memory_sources_policy_quality_ready_count=0
+ModuleArtifacts.left_brain_pipeline_check.memory_sources_policy_quality_blocked_count=0
+ModuleArtifacts.left_brain_pipeline_check.memory_sources_policy_unlinked_quality_count=0
+ModuleArtifacts.left_brain_pipeline_check.actual_execute=false
+
+PASS includes:
+  left_brain_pipeline_check_visible
+  left_brain_feedback_proposal_quality_ready
+  memory_sources_stats_ok
+  rh31_eval_safety_ok
+```
+
+Interpretation:
+
+- MemorySources feedback is now a real signal source for scoring,
+  GovernanceFeedback, and owner-reviewed proposal creation.
+- Live `MemorySources.feedback_count=0`, so the deployed path does not create
+  artificial owner agenda pressure. The remote fixture proves readiness for the
+  first real corrective MemorySources feedback.
+- The new proposal kind remains bounded: it can request
+  `context_retrieval_policy_review` follow-up, but cannot directly change
+  ContextRouter, prompt, cadence, delivery, or execution.

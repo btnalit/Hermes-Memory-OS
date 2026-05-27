@@ -333,21 +333,34 @@ def _bounded_proposal_quality(value: dict[str, Any]) -> dict[str, Any]:
         "feedback_rating",
         "generic_executor_allowed",
         "linked_outcome_count",
+        "linked_memory_source_count",
+        "memory_source_record_refs",
         "outcome_refs",
         "policy_versions",
         "quality_gate",
+        "query_classes",
         "request_refs",
+        "routes",
         "runtime_target",
+        "selected_equals_successful_use",
         "top_subject_ref",
         "top_subject_kind",
         "maturity_score",
         "evidence_ref_count",
         "maturity_dimensions",
         "unlinked_feedback_count",
+        "unlinked_memory_source_count",
     }
-    bool_keys = {"direct_apply_allowed", "generic_executor_allowed"}
-    int_keys = {"evidence_ref_count", "feedback_count", "linked_outcome_count", "unlinked_feedback_count"}
-    list_keys = {"outcome_refs", "request_refs", "policy_versions"}
+    bool_keys = {"direct_apply_allowed", "generic_executor_allowed", "selected_equals_successful_use"}
+    int_keys = {
+        "evidence_ref_count",
+        "feedback_count",
+        "linked_outcome_count",
+        "linked_memory_source_count",
+        "unlinked_feedback_count",
+        "unlinked_memory_source_count",
+    }
+    list_keys = {"memory_source_record_refs", "outcome_refs", "policy_versions", "query_classes", "request_refs", "routes"}
     result: dict[str, Any] = {}
     for key in allowed:
         if key not in value:

@@ -638,6 +638,7 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
         if isinstance(record, dict)
     }
     expression_feedback = _expression_feedback_signals(scores, evidence_by_id=evidence_by_id)
+    memory_sources_feedback = _memory_sources_feedback_signals(scores, evidence_by_id=evidence_by_id)
     rating = str(expression_feedback.get("feedback_rating") or "")
     top_score = scores[0] if scores else {}
     top_summary = _score_summary(top_score, evidence_by_id=evidence_by_id)
@@ -693,6 +694,61 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
                 follow_up=(
                     "approved_for_proposal -> OpsGate report-only -> owner manual apply decision；"
                     "actual_execute=false."
+                ),
+            ),
+        }
+    memory_sources_rating = str(memory_sources_feedback.get("feedback_rating") or "")
+    if memory_sources_rating:
+        route = str(memory_sources_feedback.get("route") or "unknown")
+        query_class = str(memory_sources_feedback.get("query_class") or "unknown")
+        proposal_class = f"memory_sources_policy:{_safe_key(memory_sources_rating)}"
+        dedupe_key = f"{proposal_class}:{_safe_key(route)}:{_safe_key(query_class)}"
+        proposal_quality = _memory_sources_feedback_proposal_quality(
+            top_score,
+            trigger_rule="memory_sources_feedback_policy",
+            signals=memory_sources_feedback,
+        )
+        is_corrective = memory_sources_rating in _MEMORY_SOURCES_CORRECTIVE_RATINGS
+        has_linked_source = int(memory_sources_feedback.get("linked_memory_source_count") or 0) > 0
+        evidence_bits = [
+            f"owner 标记 MemorySources {memory_sources_rating}",
+            f"feedback_count={memory_sources_feedback.get('feedback_count', 0)}",
+            f"linked_memory_source_count={memory_sources_feedback.get('linked_memory_source_count', 0)}",
+            f"route={route}",
+            f"query_class={query_class}",
+            f"maturity_score={top_score_value}",
+            f"summary={top_summary}",
+        ]
+        record_refs = memory_sources_feedback.get("memory_source_record_refs")
+        if isinstance(record_refs, list) and record_refs:
+            evidence_bits.append("memory_source_records=" + ",".join(str(ref) for ref in record_refs[:3]))
+        quality_gate_reason = ""
+        if not is_corrective:
+            quality_gate_reason = "memory_sources_feedback_requires_corrective_rating"
+        elif not has_linked_source:
+            quality_gate_reason = "memory_sources_feedback_requires_source_record"
+        return {
+            "kind": "memory_sources_policy",
+            "title": f"调整记忆来源/召回策略：{memory_sources_rating} 反馈",
+            "proposal_class": proposal_class,
+            "dedupe_key": dedupe_key,
+            "proposal_quality": proposal_quality,
+            "quality_gate_failed": bool(quality_gate_reason),
+            "quality_gate_reason": quality_gate_reason,
+            "body": _proposal_body(
+                proposed_change=(
+                    f"根据 owner 对 MemorySources 的 {memory_sources_rating} 反馈，复核 route={route} / "
+                    f"query_class={query_class} 的上下文来源选择、低线索召回候选和反馈惩罚策略；"
+                    "只形成可审查策略候选，不直接改路由或检索。"
+                ),
+                evidence="; ".join(evidence_bits),
+                acceptance=(
+                    "必须列出受影响的 route/query_class、MemorySources record、候选变化预期、"
+                    "monitor 字段和回滚/停止信号；不能把 selected 当 successful_use。"
+                ),
+                follow_up=(
+                    "approved_for_proposal -> OpsGate report-only -> 选择一个具体 bounded apply kind；"
+                    "generic executor forbidden; actual_execute=false."
                 ),
             ),
         }
@@ -829,6 +885,60 @@ def _expression_feedback_signals(
     }
 
 
+_MEMORY_SOURCES_CORRECTIVE_RATINGS = {
+    "irrelevant",
+    "too_mechanistic",
+    "missing_context",
+    "overconfident",
+    "needs_specific_recall",
+    "clarification_rejected",
+    "missing_candidate",
+}
+
+
+def _memory_sources_feedback_signals(
+    scores: list[dict[str, Any]],
+    *,
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    selected_records: list[dict[str, Any]] = []
+    for score in scores:
+        if str(score.get("subject_kind") or "") != "memory_sources_feedback":
+            continue
+        for evidence_ref in score.get("evidence_refs", []):
+            record = evidence_by_id.get(str(evidence_ref), {})
+            if str(record.get("subject_kind") or "") == "memory_sources_feedback":
+                selected_records.append(record)
+    selected_ratings = [str(record.get("feedback_rating") or "") for record in selected_records]
+    selected_ratings = [rating for rating in selected_ratings if rating and rating != "none"]
+    if not selected_ratings:
+        return {}
+    corrective = [rating for rating in selected_ratings if rating in _MEMORY_SOURCES_CORRECTIVE_RATINGS]
+    rating = corrective[0] if corrective else selected_ratings[0]
+    records = [
+        record
+        for record in evidence_by_id.values()
+        if str(record.get("subject_kind") or "") == "memory_sources_feedback"
+        and str(record.get("feedback_rating") or "") == rating
+    ]
+    routes = _unique_bounded([str(record.get("route") or "") for record in records])
+    query_classes = _unique_bounded([str(record.get("query_class") or "") for record in records])
+    source_refs = _unique_bounded([str(record.get("memory_source_record_id") or "") for record in records])
+    feedback_count = len(records)
+    linked_count = len([record for record in records if str(record.get("memory_source_record_id") or "")])
+    return {
+        "feedback_rating": rating,
+        "feedback_count": feedback_count,
+        "linked_memory_source_count": linked_count,
+        "unlinked_memory_source_count": max(feedback_count - linked_count, 0),
+        "route": routes[0] if routes else "unknown",
+        "query_class": query_classes[0] if query_classes else "unknown",
+        "routes": routes,
+        "query_classes": query_classes,
+        "memory_source_record_refs": source_refs,
+    }
+
+
 def _expression_feedback_proposal_quality(
     score: dict[str, Any],
     *,
@@ -849,6 +959,32 @@ def _expression_feedback_proposal_quality(
             "runtime_target": "expression_policy",
             "direct_apply_allowed": False,
             "generic_executor_allowed": False,
+        }
+    )
+    return quality
+
+
+def _memory_sources_feedback_proposal_quality(
+    score: dict[str, Any],
+    *,
+    trigger_rule: str,
+    signals: dict[str, Any],
+) -> dict[str, Any]:
+    quality = _proposal_quality(score, trigger_rule=trigger_rule)
+    quality.update(
+        {
+            "quality_gate": "linked_corrective_memory_sources_feedback",
+            "feedback_rating": str(signals.get("feedback_rating") or ""),
+            "feedback_count": int(signals.get("feedback_count") or 0),
+            "linked_memory_source_count": int(signals.get("linked_memory_source_count") or 0),
+            "unlinked_memory_source_count": int(signals.get("unlinked_memory_source_count") or 0),
+            "routes": list(signals.get("routes") or []),
+            "query_classes": list(signals.get("query_classes") or []),
+            "memory_source_record_refs": list(signals.get("memory_source_record_refs") or []),
+            "runtime_target": "context_retrieval_policy_review",
+            "direct_apply_allowed": False,
+            "generic_executor_allowed": False,
+            "selected_equals_successful_use": False,
         }
     )
     return quality

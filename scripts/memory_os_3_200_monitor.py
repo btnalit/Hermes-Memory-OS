@@ -379,6 +379,24 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         ),
                     }
                 )
+            if int(pipeline_check.get("memory_sources_policy_quality_ready_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "left_brain_memory_sources_policy_quality_ready",
+                        "memory_sources_policy_quality_ready_count": pipeline_check.get(
+                            "memory_sources_policy_quality_ready_count"
+                        ),
+                    }
+                )
+            if int(pipeline_check.get("memory_sources_policy_quality_blocked_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "left_brain_memory_sources_policy_quality_blocked",
+                        "memory_sources_policy_quality_blocked_count": pipeline_check.get(
+                            "memory_sources_policy_quality_blocked_count"
+                        ),
+                    }
+                )
             if int(pipeline_check.get("proposal_quality_missing_count") or 0) > 0:
                 warn.append(
                     {
@@ -2349,6 +2367,15 @@ def module_artifact_summary():
         "expression_policy_quality_ready_count": left_brain_pipeline.get("expression_policy_quality_ready_count"),
         "expression_policy_quality_blocked_count": left_brain_pipeline.get("expression_policy_quality_blocked_count"),
         "expression_policy_unlinked_quality_count": left_brain_pipeline.get("expression_policy_unlinked_quality_count"),
+        "memory_sources_policy_quality_ready_count": left_brain_pipeline.get(
+            "memory_sources_policy_quality_ready_count"
+        ),
+        "memory_sources_policy_quality_blocked_count": left_brain_pipeline.get(
+            "memory_sources_policy_quality_blocked_count"
+        ),
+        "memory_sources_policy_unlinked_quality_count": left_brain_pipeline.get(
+            "memory_sources_policy_unlinked_quality_count"
+        ),
         "actual_execute": left_brain_pipeline.get("actual_execute"),
       },
       "deep_reflection": {

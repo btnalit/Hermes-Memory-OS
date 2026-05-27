@@ -1334,6 +1334,17 @@ Reason:
   `expression_policy` proposal pressure; unlinked-only feedback is kept as
   evidence and returns `proposal_quality_gate_failed` instead of creating a
   proposal;
+- deployed P1-S MemorySources-feedback backflow lets RH-30
+  `memory_sources_feedback` enter EvidenceScoring and GovernanceFeedback as
+  bounded evidence. Corrective feedback linked to a MemorySources record can
+  create a `memory_sources_policy` proposal with runtime target
+  `context_retrieval_policy_review`, `direct_apply_allowed=false`, and
+  `generic_executor_allowed=false`. Useful/non-corrective feedback remains
+  evidence-only and does not create agenda pressure;
+- latest 10.20.3.200 temporary-fixture smoke proves the
+  `memory_sources_feedback -> EvidenceScoring -> SelfEvolution
+  memory_sources_policy -> GovernanceFeedback` path without writing fake
+  feedback into the live owner profile;
 - latest 10.20.3.200 targeted smoke reports
   `expression_feedback_subject_count=3`,
   `expression_feedback_linked_subject_count=1`,
@@ -1360,10 +1371,14 @@ Reason:
 - deployed P1-S proposal-usefulness maturity check is live in
   `left_brain_pipeline_check`: owner-actionable non-legacy proposals are now
   checked for `proposal_quality` metadata, concrete body sections, and
-  expression-policy linked-outcome quality. Latest live monitor reports
+  expression-policy linked-outcome quality plus MemorySources-policy linked
+  feedback quality. Latest live monitor reports
   `proposal_quality_missing_count=0`,
-  `expression_policy_quality_ready_count=0`,
-  `expression_policy_quality_blocked_count=0`, and `actual_execute=false`;
+  `expression_policy_quality_ready_count=1`,
+  `expression_policy_quality_blocked_count=0`,
+  `memory_sources_policy_quality_ready_count=0`,
+  `memory_sources_policy_quality_blocked_count=0`, and
+  `actual_execute=false`;
 - P1-S DeepReflection proposal quality repair is deployed: optional
   `deep_reflection_self_evolution` proposals now carry stable
   `proposal_class`, `dedupe_key`, concrete owner-readable body sections, and
@@ -1418,7 +1433,8 @@ Required design work:
    approval block, execution/follow-up block, timestamps, verification method,
    stale/terminal state;
 5. route MemorySources / owner / expression feedback into GovernanceFeedback as
-   bounded evidence only;
+   bounded evidence only; MemorySources corrective feedback may produce
+   owner-reviewed `memory_sources_policy` proposals, never direct route changes;
 6. keep expired working filtered from scoring and DeepReflection, with monitor
    visibility for any future regression;
 7. keep approved proposal follow-up visible and extend explicit apply only for
@@ -1437,7 +1453,9 @@ Promotion signal:
 - expired working usage is visible and no longer treated as active evidence;
 - feedback backflow can produce owner-reviewed proposals without direct live
   mutation, and linked outcome context is required before expression feedback
-  can produce new owner-facing proposal pressure;
+  can produce new owner-facing proposal pressure; linked MemorySources context
+  is required before MemorySources feedback can produce route/policy review
+  proposal pressure;
 - approved proposals reach explicit execution-decision visibility without
   creating execution tickets.
 

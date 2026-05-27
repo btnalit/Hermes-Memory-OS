@@ -20,6 +20,11 @@ Current implementation state:
   `expression_policy` proposal when the feedback is linked to a recorded
   right-brain expression outcome. This still does not directly change prompt,
   cadence, policy, delivery, or execution.
+- P1-S MemorySources-feedback input is implemented: RH-30
+  `memory_sources_feedback` records become scoring subjects and GovernanceFeedback
+  summary-only events. Corrective, source-linked feedback can create a
+  `memory_sources_policy` proposal for owner review. Useful/non-corrective
+  feedback remains evidence and does not create proposal pressure.
 - 2026-05-26 live smoke on `10.20.3.200` proved the owner/Hermes interaction
   path, not only SSH/CLI: a rendered speak item exposed
   `memory feedback oa_<token> too_mechanical`, a structured
@@ -120,6 +125,9 @@ monitor_or_validation_fields:
   - left_brain_scoring.hash_score_legacy_count
   - left_brain_scoring.expired_used_in_scoring_count
   - left_brain_scoring.owner_feedback_signal_count
+  - left_brain_scoring.memory_sources_feedback_subject_count
+  - left_brain_scoring.memory_sources_feedback_linked_subject_count
+  - left_brain_scoring.memory_sources_feedback_corrective_subject_count
   - left_brain_scoring.feature_score_live_applied
   - left_brain_scoring.comparison_count
   - left_brain_scoring.prototype_aligned_score_count
@@ -130,6 +138,9 @@ monitor_or_validation_fields:
   - left_brain_pipeline_check.active_duplicate_group_count
   - left_brain_pipeline_check.followup_duplicate_group_count
   - left_brain_pipeline_check.legacy_template_duplicate_group_count
+  - left_brain_pipeline_check.memory_sources_policy_quality_ready_count
+  - left_brain_pipeline_check.memory_sources_policy_quality_blocked_count
+  - left_brain_pipeline_check.memory_sources_policy_unlinked_quality_count
   - feedback_backflow.consumed_count
   - feedback_backflow.apply_ready_count
   - approved_proposal_followups.awaiting_ops_gate_count
