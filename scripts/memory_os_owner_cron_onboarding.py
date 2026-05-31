@@ -27,9 +27,13 @@ EXPRESSION_FEEDBACK_AGENT_PROMPT = (
     "不要替 owner 判断；owner 明确给 token/rating 后才调用 memory_os_review_reply。"
 )
 MEMORY_SOURCES_FEEDBACK_AGENT_PROMPT = (
-    "你正在处理 Memory-OS MemorySources 反馈请求。Script Output 为空时只回复 [SILENT]。"
-    "如果非空，请用中文自然询问这次上下文是否有帮助；一次只收一个 rating，"
-    "用户给多个 rating 时先反问确认；不要替 owner 判断，明确后调用 memory_os_review_reply。"
+    "你正在处理 Memory-OS MemorySources 反馈请求。Script Output 为空时最终只回复 [SILENT]。"
+    "如果非空，你的最终回复会直接发送给 owner；不要写 Cron Run Report、运行报告、表格或技术摘要。"
+    "只输出 OWNER_MESSAGE_BEGIN 和 OWNER_MESSAGE_END 之间的内容，不要输出分隔符本身。"
+    "不要展示 action token、tool call、record id、route/query_class、source_classes 或内部字段。"
+    "一次只问一个判断；owner 后续给出一个明确反馈后，再调用 memory_os_review_reply 记录对应 rating。"
+    "反馈映射：有帮助=useful，缺上下文/缺了关键上下文=missing_context，"
+    "太机制化/程序味=too_mechanistic，要更具体/需要更具体的召回=needs_specific_recall。"
 )
 CHANNEL_PRIORITY = (
     "telegram",
@@ -282,6 +286,30 @@ def _operational_specs(args: argparse.Namespace, owner_deliver: str) -> list[dic
 def _ensure_cron_job(*, hermes_home: Path, hermes_bin: str, spec: dict[str, Any]) -> dict[str, Any]:
     existing = _find_job_by_name(_read_jobs(hermes_home / "cron" / "jobs.json"), str(spec["name"]))
     if existing:
+        update_command = _cron_job_update_command(hermes_bin=hermes_bin, existing=existing, spec=spec)
+        if update_command:
+            env = dict(os.environ)
+            env["HERMES_HOME"] = str(hermes_home)
+            completed = subprocess.run(update_command, check=False, text=True, capture_output=True, env=env)
+            if completed.returncode != 0:
+                return {
+                    "name": spec["name"],
+                    "job_id": str(existing.get("id") or existing.get("job_id") or ""),
+                    "status": "error",
+                    "stderr": (completed.stderr or completed.stdout or "").strip()[:500],
+                    "deliver": str(spec["deliver"]),
+                    "script": str(spec["script"]),
+                    "no_agent": bool(spec.get("no_agent")),
+                }
+            existing = _find_job_by_name(_read_jobs(hermes_home / "cron" / "jobs.json"), str(spec["name"])) or existing
+            return {
+                "name": spec["name"],
+                "job_id": str(existing.get("id") or existing.get("job_id") or ""),
+                "status": "updated",
+                "deliver": str(existing.get("deliver") or spec["deliver"]),
+                "script": str(existing.get("script") or spec["script"]),
+                "no_agent": bool(existing.get("no_agent")),
+            }
         return {
             "name": spec["name"],
             "job_id": str(existing.get("id") or existing.get("job_id") or ""),
@@ -327,6 +355,48 @@ def _ensure_cron_job(*, hermes_home: Path, hermes_bin: str, spec: dict[str, Any]
         "script": str(spec["script"]),
         "no_agent": bool(spec.get("no_agent")),
     }
+
+
+def _cron_job_update_command(*, hermes_bin: str, existing: dict[str, Any], spec: dict[str, Any]) -> list[str]:
+    job_id = str(existing.get("id") or existing.get("job_id") or "")
+    if not job_id:
+        return []
+
+    command = [hermes_bin, "cron", "edit"]
+    desired_schedule = str(spec.get("schedule") or "")
+    existing_schedule = _cron_schedule_display(existing)
+    if desired_schedule and existing_schedule != desired_schedule:
+        command.extend(["--schedule", desired_schedule])
+
+    desired_prompt = str(spec.get("prompt") or "")
+    if str(existing.get("prompt") or "") != desired_prompt:
+        command.extend(["--prompt", desired_prompt])
+
+    desired_deliver = str(spec.get("deliver") or "")
+    if desired_deliver and str(existing.get("deliver") or "") != desired_deliver:
+        command.extend(["--deliver", desired_deliver])
+
+    desired_script = str(spec.get("script") or "")
+    if desired_script and str(existing.get("script") or "") != desired_script:
+        command.extend(["--script", desired_script])
+
+    desired_no_agent = bool(spec.get("no_agent"))
+    if bool(existing.get("no_agent")) != desired_no_agent:
+        command.append("--no-agent" if desired_no_agent else "--agent")
+
+    if len(command) == 3:
+        return []
+    command.append(job_id)
+    return command
+
+
+def _cron_schedule_display(job: dict[str, Any]) -> str:
+    if str(job.get("schedule_display") or ""):
+        return str(job.get("schedule_display") or "")
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        return str(schedule.get("expr") or schedule.get("display") or "")
+    return str(schedule or "")
 
 
 def _gate_job_entry(

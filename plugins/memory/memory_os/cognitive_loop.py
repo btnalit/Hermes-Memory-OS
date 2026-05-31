@@ -512,7 +512,17 @@ class CognitiveLoopRunner:
         from plugins.modules.governance.migration_controller import MigrationControllerModule
 
         ground_truth = context.get("ground_truth_miner_result") if isinstance(context.get("ground_truth_miner_result"), dict) else {}
+        evidence_scoring = (
+            context.get("evidence_scoring_result")
+            if isinstance(context.get("evidence_scoring_result"), dict)
+            else context.get("evidence_scoring")
+            if isinstance(context.get("evidence_scoring"), dict)
+            else {}
+        )
         imagination = context.get("imagination_loop_result") if isinstance(context.get("imagination_loop_result"), dict) else {}
+        owner_feedback_count = int(evidence_scoring.get("expression_feedback_subject_count") or 0) + int(
+            evidence_scoring.get("memory_sources_feedback_subject_count") or 0
+        )
         result = MigrationControllerModule(self.hermes_home, profile=self.profile).evaluate(
             signals={
                 "owner_label_count": int(
@@ -521,6 +531,7 @@ class CognitiveLoopRunner:
                     or ground_truth.get("label_count")
                     or 0
                 ),
+                "owner_feedback_count": owner_feedback_count,
                 "simulation_preheated": int(imagination.get("scenario_count") or 0) > 0,
                 "confidence_router_green": True,
             }

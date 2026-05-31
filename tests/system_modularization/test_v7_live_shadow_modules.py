@@ -126,6 +126,30 @@ def test_migration_controller_keeps_cold_start_shadow_only(tmp_path):
     assert result["actual_execute"] is False
 
 
+def test_migration_controller_counts_owner_feedback_as_cold_start_signal(tmp_path):
+    module = MigrationControllerModule(tmp_path, profile="main", label_floor=5)
+
+    result = module.evaluate(
+        signals={
+            "owner_label_count": 2,
+            "owner_feedback_count": 4,
+            "simulation_preheated": True,
+            "confidence_router_green": True,
+        }
+    )
+
+    assert result["owner_label_count"] == 2
+    assert result["owner_feedback_count"] == 4
+    assert result["owner_signal_count"] == 6
+    assert result["regime"] == "eligible_shadow"
+    assert result["migration_live_applied"] is False
+    assert result["actual_execute"] is False
+    status = module.status()
+    assert status["last_owner_label_count"] == 2
+    assert status["last_owner_feedback_count"] == 4
+    assert status["last_owner_signal_count"] == 6
+
+
 def test_abstraction_distillation_keeps_l0_refs_and_never_treats_distillation_as_truth(tmp_path):
     module = AbstractionDistillationModule(tmp_path, profile="main")
 

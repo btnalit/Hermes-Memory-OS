@@ -316,6 +316,59 @@ def test_v7_governance_summary_defaults_to_missing_shadow_components():
     assert summary["component_status"]["abstraction_distillation"] == "missing"
 
 
+def test_v7_governance_summary_uses_total_memory_sources_feedback_when_window_empty():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 0,
+        "feedback_count": 0,
+        "total_feedback_count": 2,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+
+    summary = summarize_v7_governance(snapshot)
+
+    assert summary["memory_sources_feedback_volume_ready"] is True
+    assert summary["memory_sources_feedback_count"] == 2
+    assert summary["memory_sources_feedback_canary_target"] == 20
+    assert summary["memory_sources_feedback_canary_remaining"] == 18
+    assert summary["memory_sources_feedback_canary_complete"] is False
+
+
+def test_classify_snapshot_tracks_memory_sources_feedback_canary_without_blocking_shadow_live():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 0,
+        "feedback_count": 1,
+        "total_feedback_count": 4,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+    snapshot["module_artifacts"]["v7_meta"] = {
+        "promotion_matrix_component": {
+            "component": "promotion_matrix",
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "none",
+            "task_installed": True,
+        }
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "v7_memory_sources_feedback_canary_running"
+        and item["feedback_count"] == 4
+        and item["target"] == 20
+        and item["remaining"] == 16
+        for item in classification["pass"]
+    )
+    assert not any(item["code"] == "v7_memory_sources_feedback_volume_pending" for item in classification["warn"])
+
+
 def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
@@ -437,11 +490,23 @@ def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
     }
     snapshot["module_artifacts"]["grounded_expression_judge"] = {
         "status": "ok",
-        "verdict_count": 1,
+        "verdict_count": 4,
+        "verdict_distribution": {
+            "grounded": 1,
+            "confabulation": 1,
+            "blind_spot": 1,
+            "unresolvable": 1,
+        },
         "unresolvable_count": 1,
-        "left_map_substrate_warning_count": 1,
+        "left_map_substrate_warning_count": 0,
+        "left_map_coverage_floor_met_count": 2,
+        "latest_left_map_snapshot_version": "leftmap_abc123",
+        "verdict_distribution_degenerate": False,
+        "substrate_unavailable_blocker_cleared": True,
         "actual_send": False,
         "actual_execute": False,
+        "actual_identity_write": False,
+        "delivery_affected": False,
         "delivery_gated": False,
         "policy_live_applied": False,
     }
@@ -469,6 +534,33 @@ def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
     assert summary["cross_check_anchoring_status"] == "live-shadow"
     assert summary["shadow_live_component_count"] >= 18
     assert any(item["code"] == "v7_shadow_live_components_visible" for item in classification["pass"])
+    assert any(item["code"] == "grounded_expression_verdict_distribution_visible" for item in classification["pass"])
+    assert any(item["code"] == "grounded_expression_alternate_left_map_substrate_ready" for item in classification["pass"])
+
+
+def test_classify_snapshot_fails_grounded_expression_if_delivery_affected():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["grounded_expression_judge"] = {
+        "status": "ok",
+        "verdict_count": 1,
+        "verdict_distribution": {
+            "grounded": 1,
+            "confabulation": 0,
+            "blind_spot": 0,
+            "unresolvable": 0,
+        },
+        "left_map_coverage_floor_met_count": 1,
+        "delivery_affected": True,
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "policy_live_applied": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "grounded_expression_delivery_affected_true" for item in classification["fail"])
 
 
 def test_v7_governance_summary_uses_code_promotion_matrix_not_docs():
@@ -1809,6 +1901,81 @@ def test_classify_snapshot_passes_when_memory_sources_feedback_volume_exists():
 
     assert any(item["code"] == "memory_sources_feedback_volume_present" for item in classification["pass"])
     assert not any(item["code"] == "memory_sources_feedback_volume_missing" for item in classification["warn"])
+
+
+def test_classify_snapshot_uses_total_memory_sources_feedback_when_window_empty():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 12,
+        "feedback_count": 0,
+        "total_feedback_count": 2,
+        "file_size_bytes": 4096,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+    snapshot["owner_review_surface"]["operations"]["memory_sources_feedback_context"] = {
+        "status": "ok",
+        "item_count": 1,
+        "feedback_action_count": 9,
+        "latest_memory_source_id": "msrc_123",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "memory_sources_feedback_volume_present" and item["feedback_count"] == 2
+        for item in classification["pass"]
+    )
+    assert not any(item["code"] == "memory_sources_feedback_volume_missing" for item in classification["warn"])
+
+
+def test_enrich_memory_sources_stats_preserves_window_and_total_feedback_counts(monkeypatch):
+    remote = monitor._remote_probe_script()
+    namespace: dict[str, object] = {}
+    exec(
+        remote.split(
+            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            1,
+        )[0],
+        namespace,
+    )
+
+    def fake_read_jsonl(path):
+        if str(path).endswith("memory_sources_feedback.jsonl"):
+            return [
+                {
+                    "schema_version": "memory-os.memory_sources_feedback.v0",
+                    "feedback_id": "fb_1",
+                    "rating": "useful",
+                },
+                {
+                    "schema_version": "memory-os.memory_sources_feedback.v0",
+                    "feedback_id": "fb_2",
+                    "rating": "missing_context",
+                },
+            ]
+        return []
+
+    monkeypatch.setitem(namespace, "_read_jsonl", fake_read_jsonl)
+
+    enriched = namespace["enrich_memory_sources_stats"](
+        {
+            "schema_version": "memory-os.memory_sources_stats.v0",
+            "hours": 24,
+            "record_count": 0,
+            "feedback_count": 0,
+            "feedback_rating_distribution": {},
+        }
+    )
+
+    assert enriched["feedback_count"] == 0
+    assert enriched["total_feedback_count"] == 2
+    assert enriched["total_feedback_rating_distribution"] == {
+        "missing_context": 1,
+        "useful": 1,
+    }
 
 
 def test_classify_snapshot_tracks_memory_sources_policy_apply():

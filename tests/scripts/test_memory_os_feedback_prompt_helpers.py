@@ -107,8 +107,16 @@ def test_memory_sources_feedback_prompt_renders_unrated_source(monkeypatch):
 
     output = _capture(memory_sources_prompt.main)
 
-    assert "MemorySources feedback request" in output
-    assert "memory feedback oa_feedback useful" in output
+    assert output.startswith("OWNER_MESSAGE_BEGIN")
+    assert "OWNER_MESSAGE_BEGIN" in output
+    assert "请只选一个反馈" in output
+    assert "有帮助、缺上下文、太机制化、要更具体" in output
+    assert "Do not write a cron run report" not in output
+    assert "Internal handling" not in output
+    assert "Rating mapping" not in output
+    assert "action_token" not in output
+    assert "oa_feedback" not in output
+    assert "memory feedback oa_feedback useful" not in output
 
 
 def test_proposal_followups_ops_gate_helper_rejects_execution_ticket(monkeypatch):

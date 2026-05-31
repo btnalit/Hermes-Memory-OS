@@ -57,6 +57,7 @@ V7_GOVERNANCE_COMPONENTS = (
     "grounded_expression_judge",
 )
 V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
+V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
 
 
 def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -219,13 +220,15 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         )
 
     memory_sources = snapshot.get("memory_sources") if isinstance(snapshot.get("memory_sources"), dict) else {}
+    memory_sources_feedback_count = _memory_sources_feedback_count(memory_sources)
     memory_sources_feedback_volume_ready = bool(existing.get("memory_sources_feedback_volume_ready"))
-    try:
-        memory_sources_feedback_volume_ready = (
-            memory_sources_feedback_volume_ready or int(memory_sources.get("feedback_count") or 0) > 0
-        )
-    except (TypeError, ValueError):
-        pass
+    memory_sources_feedback_volume_ready = (
+        memory_sources_feedback_volume_ready or memory_sources_feedback_count > 0
+    )
+    memory_sources_feedback_canary_remaining = max(
+        V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET - memory_sources_feedback_count,
+        0,
+    )
     component_status = {item["component"]: item["pipeline_liveness"] for item in components}
     return {
         "schema_version": "memory-os.v7_governance_summary.v0",
@@ -238,6 +241,10 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         ),
         "live_guard_registered_count": sum(1 for item in components if item["live_guard_registered"]),
         "memory_sources_feedback_volume_ready": memory_sources_feedback_volume_ready,
+        "memory_sources_feedback_count": memory_sources_feedback_count,
+        "memory_sources_feedback_canary_target": V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET,
+        "memory_sources_feedback_canary_remaining": memory_sources_feedback_canary_remaining,
+        "memory_sources_feedback_canary_complete": memory_sources_feedback_canary_remaining == 0,
         "confidence_router_status": component_status["confidence_router"],
         "judge_consistency_status": component_status["judge_calibration"],
         "review_accuracy_status": component_status["candidate_review"],
@@ -469,9 +476,9 @@ def _infer_v7_components_from_artifacts(snapshot: dict[str, Any]) -> dict[str, d
             "pipeline_liveness": "live-shadow",
             "autonomy_level": "shadow",
             "live_guard_registered": True,
-            "live_applied": bool(grounded_expression.get("policy_live_applied")) or bool(
-                grounded_expression.get("delivery_gated")
-            ),
+            "live_applied": bool(grounded_expression.get("policy_live_applied"))
+            or bool(grounded_expression.get("delivery_affected"))
+            or bool(grounded_expression.get("delivery_gated")),
             "actual_send": bool(grounded_expression.get("actual_send")),
             "actual_execute": bool(grounded_expression.get("actual_execute")),
             "actual_identity_write": bool(grounded_expression.get("actual_identity_write")),
@@ -909,6 +916,71 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 )
             else:
                 warn.append({"code": "left_brain_maturity_scoring_primary_incomplete", "value": evidence})
+        grounded_expression = (
+            module_artifacts.get("grounded_expression_judge")
+            if isinstance(module_artifacts.get("grounded_expression_judge"), dict)
+            else {}
+        )
+        if grounded_expression:
+            if grounded_expression.get("actual_send") is True:
+                fail.append({"code": "grounded_expression_actual_send_true", "value": grounded_expression})
+            if grounded_expression.get("actual_execute") is True:
+                fail.append({"code": "grounded_expression_actual_execute_true", "value": grounded_expression})
+            if grounded_expression.get("actual_identity_write") is True:
+                fail.append({"code": "grounded_expression_actual_identity_write_true", "value": grounded_expression})
+            if grounded_expression.get("delivery_affected") is True:
+                fail.append({"code": "grounded_expression_delivery_affected_true", "value": grounded_expression})
+            if grounded_expression.get("policy_live_applied") is True:
+                fail.append({"code": "grounded_expression_policy_live_applied_true", "value": grounded_expression})
+            verdict_distribution = (
+                grounded_expression.get("verdict_distribution")
+                if isinstance(grounded_expression.get("verdict_distribution"), dict)
+                else {}
+            )
+            if verdict_distribution:
+                passed.append(
+                    {
+                        "code": "grounded_expression_verdict_distribution_visible",
+                        "verdict_count": grounded_expression.get("verdict_count"),
+                        "verdict_distribution": verdict_distribution,
+                        "latest_left_map_snapshot_version": grounded_expression.get("latest_left_map_snapshot_version"),
+                    }
+                )
+                if grounded_expression.get("verdict_distribution_degenerate") is True:
+                    warn.append(
+                        {
+                            "code": "grounded_expression_verdict_distribution_degenerate",
+                            "verdict_distribution": verdict_distribution,
+                        }
+                    )
+            elif int(grounded_expression.get("verdict_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "grounded_expression_verdict_distribution_missing",
+                        "verdict_count": grounded_expression.get("verdict_count"),
+                    }
+                )
+            if grounded_expression.get("substrate_unavailable_blocker_cleared") is True:
+                passed.append(
+                    {
+                        "code": "grounded_expression_alternate_left_map_substrate_ready",
+                        "left_map_coverage_floor_met_count": grounded_expression.get(
+                            "left_map_coverage_floor_met_count"
+                        ),
+                    }
+                )
+            elif int(grounded_expression.get("verdict_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "grounded_expression_alternate_left_map_substrate_pending",
+                        "left_map_coverage_floor_met_count": grounded_expression.get(
+                            "left_map_coverage_floor_met_count"
+                        ),
+                        "verdict_distribution_degenerate": grounded_expression.get(
+                            "verdict_distribution_degenerate"
+                        ),
+                    }
+                )
         right_brain_adapter = (
             module_artifacts.get("right_brain_expression_adapter")
             if isinstance(module_artifacts.get("right_brain_expression_adapter"), dict)
@@ -1489,8 +1561,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             .get("operations", {})
             .get("memory_sources_feedback_context", {})
         )
+        memory_sources_feedback_count = _memory_sources_feedback_count(memory_sources)
         if (
-            int(memory_sources.get("feedback_count") or 0) == 0
+            memory_sources_feedback_count == 0
             and isinstance(memory_sources_surface, dict)
             and memory_sources_surface.get("status") == "ok"
             and int(memory_sources_surface.get("feedback_action_count") or 0) > 0
@@ -1502,11 +1575,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "feedback_action_count": memory_sources_surface.get("feedback_action_count"),
                 }
             )
-        elif int(memory_sources.get("feedback_count") or 0) > 0:
+        elif memory_sources_feedback_count > 0:
             passed.append(
                 {
                     "code": "memory_sources_feedback_volume_present",
-                    "feedback_count": memory_sources.get("feedback_count"),
+                    "feedback_count": memory_sources_feedback_count,
+                    "window_feedback_count": memory_sources.get("feedback_count"),
+                    "total_feedback_count": memory_sources.get("total_feedback_count"),
                 }
             )
         if bool(memory_sources.get("policy_present")):
@@ -1676,6 +1751,20 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     installed_components = [item for item in v7_governance["components"] if item["task_installed"]]
     if installed_components and not v7_governance["memory_sources_feedback_volume_ready"]:
         warn.append({"code": "v7_memory_sources_feedback_volume_pending"})
+    if installed_components and v7_governance["memory_sources_feedback_count"] > 0:
+        canary_code = (
+            "v7_memory_sources_feedback_canary_complete"
+            if v7_governance["memory_sources_feedback_canary_complete"]
+            else "v7_memory_sources_feedback_canary_running"
+        )
+        passed.append(
+            {
+                "code": canary_code,
+                "feedback_count": v7_governance["memory_sources_feedback_count"],
+                "target": v7_governance["memory_sources_feedback_canary_target"],
+                "remaining": v7_governance["memory_sources_feedback_canary_remaining"],
+            }
+        )
     for item in installed_components:
         acting = str(item["autonomy_level"]) in V7_ACTING_AUTONOMY_LEVELS
         if item["pipeline_liveness"] != "live-shadow" and not acting:
@@ -1751,6 +1840,10 @@ def _to_int(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _memory_sources_feedback_count(stats: dict[str, Any]) -> int:
+    return max(_to_int(stats.get("feedback_count")), _to_int(stats.get("total_feedback_count")))
 
 
 def _int_at(payload: dict[str, Any], path: tuple[str, ...]) -> int:
@@ -1933,9 +2026,12 @@ def _deep_reflection_summary(status: dict[str, Any]) -> dict[str, Any]:
 def _memory_sources_summary(stats: dict[str, Any]) -> dict[str, Any]:
     return {
         "record_count": stats.get("record_count"),
+        "total_record_count": stats.get("total_record_count"),
         "file_size_bytes": stats.get("file_size_bytes"),
         "feedback_count": stats.get("feedback_count"),
+        "total_feedback_count": stats.get("total_feedback_count"),
         "feedback_ratings": stats.get("feedback_rating_distribution"),
+        "total_feedback_ratings": stats.get("total_feedback_rating_distribution"),
         "feedback_file_size_bytes": stats.get("feedback_file_size_bytes"),
         "policy_present": stats.get("policy_present"),
         "policy_version": stats.get("policy_version"),
@@ -2591,9 +2687,11 @@ def enrich_memory_sources_stats(stats):
     if not isinstance(stats, dict):
         return stats
     records = _read_jsonl("/root/.hermes/memory-os/system/memory_sources.jsonl")
+    feedback_records = _read_jsonl("/root/.hermes/memory-os/system/memory_sources_feedback.jsonl")
     selected_headings = Counter()
     dropped_headings = Counter()
     selected_source_classes = Counter()
+    total_feedback_ratings = Counter()
     for record in records:
         for section in record.get("selected", []) if isinstance(record.get("selected"), list) else []:
             if isinstance(section, dict):
@@ -2602,7 +2700,15 @@ def enrich_memory_sources_stats(stats):
         for section in record.get("dropped", []) if isinstance(record.get("dropped"), list) else []:
             if isinstance(section, dict):
                 dropped_headings[str(section.get("heading") or "unknown")] += 1
+    valid_feedback_records = []
+    for record in feedback_records:
+        if str(record.get("schema_version") or "") == "memory-os.memory_sources_feedback.v0":
+            valid_feedback_records.append(record)
+            total_feedback_ratings[str(record.get("rating") or "unknown")] += 1
     enriched = dict(stats)
+    enriched["total_record_count"] = len(records)
+    enriched["total_feedback_count"] = len(valid_feedback_records)
+    enriched["total_feedback_rating_distribution"] = dict(total_feedback_ratings)
     enriched["selected_heading_distribution"] = dict(selected_headings)
     enriched["dropped_heading_distribution"] = dict(dropped_headings)
     enriched["selected_source_class_distribution"] = dict(
@@ -3078,6 +3184,11 @@ def module_artifact_summary():
         "status": migration_controller.get("status"),
         "run_count": migration_controller.get("run_count"),
         "last_regime": migration_controller.get("last_regime"),
+        "last_owner_label_count": migration_controller.get("last_owner_label_count"),
+        "last_owner_feedback_count": migration_controller.get("last_owner_feedback_count"),
+        "last_owner_signal_count": migration_controller.get("last_owner_signal_count"),
+        "label_floor": migration_controller.get("label_floor"),
+        "automation_allowed": migration_controller.get("automation_allowed"),
         "migration_live_applied": migration_controller.get("migration_live_applied"),
         "actual_send": migration_controller.get("actual_send"),
         "actual_execute": migration_controller.get("actual_execute"),
@@ -3145,12 +3256,23 @@ def module_artifact_summary():
       },
       "grounded_expression_judge": {
         "status": grounded_expression_judge.get("status"),
+        "hindsight_adapter_enabled": grounded_expression_judge.get("hindsight_adapter_enabled"),
+        "alternate_left_map_substrate_configured": grounded_expression_judge.get("alternate_left_map_substrate_configured"),
         "verdict_count": grounded_expression_judge.get("verdict_count"),
+        "verdict_distribution": grounded_expression_judge.get("verdict_distribution"),
+        "grounded_count": grounded_expression_judge.get("grounded_count"),
+        "confabulation_count": grounded_expression_judge.get("confabulation_count"),
+        "blind_spot_count": grounded_expression_judge.get("blind_spot_count"),
         "unresolvable_count": grounded_expression_judge.get("unresolvable_count"),
         "left_map_substrate_warning_count": grounded_expression_judge.get("left_map_substrate_warning_count"),
+        "left_map_coverage_floor_met_count": grounded_expression_judge.get("left_map_coverage_floor_met_count"),
+        "latest_left_map_snapshot_version": grounded_expression_judge.get("latest_left_map_snapshot_version"),
+        "verdict_distribution_degenerate": grounded_expression_judge.get("verdict_distribution_degenerate"),
+        "substrate_unavailable_blocker_cleared": grounded_expression_judge.get("substrate_unavailable_blocker_cleared"),
         "actual_send": grounded_expression_judge.get("actual_send"),
         "actual_execute": grounded_expression_judge.get("actual_execute"),
         "actual_identity_write": grounded_expression_judge.get("actual_identity_write"),
+        "delivery_affected": grounded_expression_judge.get("delivery_affected"),
         "delivery_gated": grounded_expression_judge.get("delivery_gated"),
         "policy_live_applied": grounded_expression_judge.get("policy_live_applied"),
       },

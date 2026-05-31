@@ -104,6 +104,41 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert steps["grounded_expression_judge"]["result"]["policy_live_applied"] is False
 
 
+def test_cognitive_loop_passes_owner_feedback_signals_to_migration_controller(tmp_path):
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed MemorySources owner feedback canary.")
+    feedback_path = store.roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    feedback_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.memory_sources_feedback.v0",
+                "feedback_id": "msfb_001",
+                "created_at": "2026-05-31T00:00:00Z",
+                "profile": "default",
+                "memory_source_record_id": "msrc_001",
+                "route": "casual_continuity",
+                "query_class": "casual_continuity",
+                "rating": "useful",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+
+    steps = {step["step"]: step for step in result["steps"]}
+    assert steps["evidence_scoring"]["result"]["memory_sources_feedback_subject_count"] == 1
+    migration = steps["migration_controller"]["result"]
+    assert migration["owner_feedback_count"] == 1
+    assert migration["owner_signal_count"] == 1
+    assert migration["migration_live_applied"] is False
+    assert migration["actual_execute"] is False
+
+
 def test_cognitive_loop_skips_right_brain_downstream_when_signal_unchanged(tmp_path):
     store = _init_store(tmp_path)
     _write_deep_reflection_test_host_config(tmp_path)

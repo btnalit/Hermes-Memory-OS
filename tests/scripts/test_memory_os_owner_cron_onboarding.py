@@ -61,6 +61,36 @@ if args[:2] == ["cron", "create"]:
     print("created", job["id"])
     raise SystemExit(0)
 
+if args[:2] == ["cron", "edit"]:
+    def value(flag):
+        return args[args.index(flag) + 1] if flag in args else None
+    jobs_path = home / "cron" / "jobs.json"
+    loaded = json.loads(jobs_path.read_text(encoding="utf-8"))
+    jobs = loaded.get("jobs", [])
+    job_id = args[-1]
+    for job in jobs:
+        if job.get("id") == job_id:
+            if value("--schedule") is not None:
+                job["schedule_display"] = value("--schedule")
+                job["schedule"] = {"kind": "cron", "expr": value("--schedule")}
+            if value("--prompt") is not None:
+                job["prompt"] = value("--prompt")
+            if value("--name") is not None:
+                job["name"] = value("--name")
+            if value("--deliver") is not None:
+                job["deliver"] = value("--deliver")
+            if value("--script") is not None:
+                job["script"] = value("--script")
+            if "--no-agent" in args:
+                job["no_agent"] = True
+            if "--agent" in args:
+                job["no_agent"] = False
+            jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+            print("updated", job_id)
+            raise SystemExit(0)
+    print("missing job", job_id, file=sys.stderr)
+    raise SystemExit(2)
+
 print("unexpected command", args, file=sys.stderr)
 raise SystemExit(2)
 """.lstrip(),
@@ -222,6 +252,67 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-expression-feedback-request"]["no_agent"] is False
     assert by_name["memory-os-memory-sources-feedback-request"]["deliver"] == "telegram"
     assert by_name["memory-os-memory-sources-feedback-request"]["no_agent"] is False
+    memory_sources_prompt = by_name["memory-os-memory-sources-feedback-request"]["prompt"]
+    assert "不要写 Cron Run Report" in memory_sources_prompt
+    assert "只输出 OWNER_MESSAGE_BEGIN 和 OWNER_MESSAGE_END 之间的内容" in memory_sources_prompt
     config = json.loads(home.joinpath("memory-os", "config.json").read_text(encoding="utf-8"))
     assert config["owner_review"]["recurring_delivery_enabled"] is True
     assert config["right_brain_expression"]["recurring_delivery_enabled"] is True
+
+
+def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypatch):
+    module = _load_module()
+    home = _home_with_helpers(
+        tmp_path,
+        platforms={"telegram": [{"id": "owner", "type": "dm", "name": "owner"}]},
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    jobs_path = home / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True)
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job_memory_sources",
+                        "name": "memory-os-memory-sources-feedback-request",
+                        "enabled": True,
+                        "deliver": "telegram",
+                        "script": "memory_os_memory_sources_feedback_prompt.py",
+                        "no_agent": False,
+                        "prompt": "旧提示：请写报告",
+                        "schedule_display": "30 10 * * *",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--hermes-home",
+            str(home),
+            "--hermes-bin",
+            str(_fake_hermes(tmp_path)),
+            "--owner-review-deliver",
+            "auto",
+            "--right-brain-deliver",
+            "origin",
+            "--apply",
+            "--owner-approved",
+        ]
+    )
+
+    report = module.run_onboarding(args)
+
+    assert report["status"] == "applied"
+    memory_sources_job_report = [
+        job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-memory-sources-feedback-request"
+    ][0]
+    assert memory_sources_job_report["status"] == "updated"
+    updated_jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
+    updated_job = [job for job in updated_jobs if job["name"] == "memory-os-memory-sources-feedback-request"][0]
+    assert "旧提示" not in updated_job["prompt"]
+    assert "不要写 Cron Run Report" in updated_job["prompt"]
+    assert "只输出 OWNER_MESSAGE_BEGIN 和 OWNER_MESSAGE_END 之间的内容" in updated_job["prompt"]

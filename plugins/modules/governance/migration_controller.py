@@ -48,7 +48,9 @@ class MigrationControllerModule:
         write: bool = True,
     ) -> dict[str, Any]:
         label_count = int(signals.get("owner_label_count") or 0)
-        cold_start = label_count < self.label_floor
+        feedback_count = int(signals.get("owner_feedback_count") or 0)
+        owner_signal_count = int(signals.get("owner_signal_count") or (label_count + feedback_count))
+        cold_start = owner_signal_count < self.label_floor
         requested_mode = "live-shadow" if cold_start else "acting_candidate"
         guard = LiveGuardRegistry().apply_automation_mode(
             component="migration_controller",
@@ -64,6 +66,8 @@ class MigrationControllerModule:
             "status": "ok",
             "regime": "cold_start" if cold_start else "eligible_shadow",
             "owner_label_count": label_count,
+            "owner_feedback_count": feedback_count,
+            "owner_signal_count": owner_signal_count,
             "label_floor": self.label_floor,
             "simulation_preheated": bool(signals.get("simulation_preheated")),
             "effective_mode": guard["effective_mode"],
@@ -80,13 +84,19 @@ class MigrationControllerModule:
 
     def status(self) -> dict[str, Any]:
         runs = _read_jsonl(self.runs_path)
+        latest = runs[-1] if runs else {}
         return {
             "schema_version": "hermes.migration_controller_status.v0",
             "module": "migration_controller",
             "profile": self.profile,
             "status": "ok" if runs else "missing",
             "run_count": len(runs),
-            "last_regime": str(runs[-1].get("regime") or "") if runs else "",
+            "last_regime": str(latest.get("regime") or "") if latest else "",
+            "last_owner_label_count": int(latest.get("owner_label_count") or 0) if latest else 0,
+            "last_owner_feedback_count": int(latest.get("owner_feedback_count") or 0) if latest else 0,
+            "last_owner_signal_count": int(latest.get("owner_signal_count") or 0) if latest else 0,
+            "label_floor": int(latest.get("label_floor") or self.label_floor),
+            "automation_allowed": bool(latest.get("automation_allowed")),
             "migration_live_applied": any(run.get("migration_live_applied") is True for run in runs),
             "actual_send": False,
             "actual_execute": False,

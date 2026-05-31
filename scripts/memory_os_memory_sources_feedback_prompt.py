@@ -38,45 +38,53 @@ def main() -> int:
     if not token:
         return 0
 
-    examples = [str(value) for value in item.get("owner_utterance_examples") or []]
     source_classes = ", ".join(str(value) for value in item.get("source_classes") or []) or "unknown"
     route = str(item.get("route") or item.get("query_class") or "unknown")
     selected_count = int(item.get("selected_count") or 0)
     selected_chars = int(item.get("selected_chars_total") or 0)
-    consequence = str(item.get("consequence") or "")
+    source_label = _human_source_classes(source_classes)
+    route_label = _human_route(route)
 
-    print("Memory-OS MemorySources feedback request")
-    print()
-    print("请用中文、自然地向用户询问下面这个上下文/记忆来源是否有帮助。")
-    print("不要称呼 Owner，不要展示内部 record id，不要替用户判断。")
-    print("这次只收一个 rating；如果用户一次给出多个 rating，先反问确认，不要一起提交。")
-    print("用户说清楚后，再调用结构化工具 memory_os_review_reply。")
-    print()
-    print(f"- target_type: memory_source")
-    print(f"- action_token: {token}")
-    print(f"- route/query_class: {route}")
-    print(f"- source_classes: {source_classes}")
-    print(f"- selected_count: {selected_count}")
-    print(f"- selected_chars_total: {selected_chars}")
-    if consequence:
-        print(f"- consequence: {consequence}")
-    print()
-    print("用户可以选择的反馈：")
-    print("- useful: 这次上下文有帮助")
-    print("- missing_context: 缺了关键上下文")
-    print("- too_mechanistic: 太机制化/程序味")
-    print("- needs_specific_recall: 需要更具体的召回")
-    print()
-    print("建议只问这个问题：")
-    print("这次 Memory-OS 为候选/审批上下文选出来的来源，对你刚才的判断有帮助吗？")
-    print()
-    print("如果用户明确选择一个 rating，调用：")
-    print('memory_os_review_reply({ "action": "feedback", "action_token": "' + token + '", "rating": "<owner_rating>" })')
-    print()
-    print("可展示给用户的会话回复示例：")
-    for example in examples[:4]:
-        print(f"- {example}")
+    print("OWNER_MESSAGE_BEGIN")
+    print("我想确认一下刚才 Memory-OS 选出来的上下文来源是否帮到你判断。")
+    print(f"这次主要用了{source_label}，用于{route_label}，数量约 {selected_count} 段。")
+    if selected_chars:
+        print(f"总长度约 {selected_chars} 字，所以这里只问来源质量，不展开原文。")
+    print("请只选一个反馈：")
+    print("1. 有帮助")
+    print("2. 缺了关键上下文")
+    print("3. 太机制化/程序味")
+    print("4. 需要更具体的召回")
+    print("你可以直接回：有帮助、缺上下文、太机制化、要更具体。")
+    print("OWNER_MESSAGE_END")
     return 0
+
+
+def _human_source_classes(source_classes: str) -> str:
+    labels = {
+        "foreground": "当前任务/前台上下文",
+        "event": "近期事件",
+        "carryover": "会话延续摘要",
+        "candidate": "候选记忆",
+        "crystallized": "已批准记忆",
+        "indexed": "索引召回结果",
+        "recall_guard": "低线索召回保护提示",
+        "diagnostic": "运行状态事实",
+    }
+    parts = [part.strip() for part in source_classes.split(",") if part.strip()]
+    rendered = [labels.get(part, part) for part in parts]
+    return "、".join(rendered) if rendered else "记忆来源摘要"
+
+
+def _human_route(route: str) -> str:
+    labels = {
+        "foreground_control": "判断当前任务/继续事项",
+        "casual_continuity": "保持普通对话延续",
+        "candidate_review": "辅助候选记忆/审批判断",
+        "low_clue_recall": "处理低线索召回",
+        "ambiguous_recall": "处理不明确的召回请求",
+    }
+    return labels.get(route, "辅助当前判断")
 
 
 def _run_json(command: list[str]) -> dict[str, object]:
