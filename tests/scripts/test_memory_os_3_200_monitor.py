@@ -1714,6 +1714,130 @@ def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
     }
 
 
+def test_compact_rh31_eval_summary_surfaces_retrieval_shadow_without_raw_details():
+    summary = {
+        "schema_version": "memory-os.rh31_summary.v0",
+        "status": "pass",
+        "adapter_count": 1,
+        "case_count": 1,
+        "score_count": 1,
+        "failure_count": 0,
+        "failure_class_distribution": {},
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+        "report_dir": "",
+        "scores": [
+            {
+                "adapter": "retrieval_shadow",
+                "case_id": "retrieval_shadow_summary",
+                "status": "pass",
+                "metric_scope": "retrieval_shadow",
+                "details": {
+                    "schema_version": "memory-os.retrieval_shadow_eval.v0",
+                    "run_count": 1,
+                    "semantic_gap_count": 2,
+                    "hybrid_would_retrieve_count": 3,
+                    "rrf_would_rank_count": 2,
+                    "live_input_available": True,
+                    "live_memory_sources_record_count": 4,
+                    "live_bounded_source_ref_count": 3,
+                    "live_shadow_source_selection_miss_count": 1,
+                    "live_shadow_diversification_gap_count": 2,
+                    "live_shadow_low_coverage_count": 1,
+                    "live_shadow_would_rank_count": 4,
+                    "live_route_distribution": {"personal_recall": 4},
+                    "live_selected_source_class_distribution": {"event": 3},
+                    "live_dropped_source_class_distribution": {"candidate": 2},
+                    "live_route_live_applied": False,
+                    "live_score_live_applied": False,
+                    "live_canonical_state_changed": False,
+                    "route_live_applied": False,
+                    "score_live_applied": False,
+                    "boundary_true_count": 0,
+                    "forbidden_field_count": 0,
+                    "raw": "should not be retained",
+                },
+            }
+        ],
+    }
+
+    compact = monitor.compact_rh31_eval_summary(summary)
+
+    assert compact["retrieval_shadow"] == {
+        "run_count": 1,
+        "semantic_gap_count": 2,
+        "hybrid_would_retrieve_count": 3,
+        "rrf_would_rank_count": 2,
+        "live_input_available": True,
+        "live_memory_sources_record_count": 4,
+        "live_bounded_source_ref_count": 3,
+        "live_shadow_source_selection_miss_count": 1,
+        "live_shadow_diversification_gap_count": 2,
+        "live_shadow_low_coverage_count": 1,
+        "live_shadow_would_rank_count": 4,
+        "live_route_distribution": {"personal_recall": 4},
+        "live_selected_source_class_distribution": {"event": 3},
+        "live_dropped_source_class_distribution": {"candidate": 2},
+        "live_route_live_applied": False,
+        "live_score_live_applied": False,
+        "live_canonical_state_changed": False,
+        "route_live_applied": False,
+        "score_live_applied": False,
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+    }
+    assert "should not be retained" not in json.dumps(compact)
+
+
+def test_classify_snapshot_tracks_retrieval_shadow_report_only_fields():
+    snapshot = _healthy_snapshot()
+    snapshot["rh31_eval"] = {
+        "schema_version": "memory-os.rh31_summary.v0",
+        "status": "pass",
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+        "adapter_count": 7,
+        "failure_count": 0,
+        "measurement_signal_count": 0,
+        "live_guard_candidate_count": 0,
+        "failure_class_distribution": {},
+        "retrieval_shadow": {
+            "run_count": 1,
+            "semantic_gap_count": 1,
+            "hybrid_would_retrieve_count": 1,
+            "rrf_would_rank_count": 1,
+            "live_input_available": True,
+            "live_memory_sources_record_count": 4,
+            "live_bounded_source_ref_count": 2,
+            "live_shadow_source_selection_miss_count": 1,
+            "live_shadow_diversification_gap_count": 1,
+            "live_shadow_low_coverage_count": 1,
+            "live_shadow_would_rank_count": 4,
+            "route_live_applied": False,
+            "score_live_applied": False,
+            "live_route_live_applied": False,
+            "live_score_live_applied": False,
+            "live_canonical_state_changed": False,
+            "boundary_true_count": 0,
+            "forbidden_field_count": 0,
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "retrieval_shadow_visible" for item in classification["pass"])
+    assert any(item["code"] == "retrieval_shadow_live_memory_sources_visible" for item in classification["pass"])
+    assert any(item["code"] == "retrieval_shadow_live_memory_sources_gap_visible" for item in classification["pass"])
+    assert any(item["code"] == "retrieval_shadow_semantic_gap_visible" for item in classification["pass"])
+    assert any(item["code"] == "retrieval_shadow_report_only" for item in classification["pass"])
+
+    snapshot["rh31_eval"]["retrieval_shadow"]["route_live_applied"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "retrieval_shadow_live_applied" for item in classification["fail"])
+
+
 def test_classify_snapshot_fails_on_low_clue_ingress_route_mismatch():
     snapshot = _healthy_snapshot()
     snapshot["low_clue_ingress_matrix"] = [
@@ -1750,6 +1874,39 @@ def test_classify_snapshot_fails_when_low_clue_guard_contract_missing():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "low_clue_guard_contract_missing" for item in classification["fail"])
+
+
+def test_classify_snapshot_clean_host_does_not_fail_on_live_host_assumptions():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["gateway"] = {"ActiveState": "inactive", "MainPID": "0"}
+    snapshot["low_clue_ingress_matrix"] = [
+        {
+            "id": "deictic_yesterday",
+            "route": "ambiguous_recall",
+            "headings": ["Recall Clarification Guard", "Conversation Carryover"],
+            "expected_route": "ambiguous_recall",
+            "expected_heading": "Recall Clarification Guard",
+            "guard_contract_ok": False,
+        }
+    ]
+    snapshot["rh26_apply_probe"] = [
+        {
+            "id": "cancel_failed_video",
+            "chars": 800,
+            "headings": ["Current Foreground Task", "Working Memory"],
+        }
+    ]
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] != "FAIL"
+    assert not any(item["code"] == "gateway_inactive" for item in classification["fail"])
+    assert not any(item["code"] == "low_clue_guard_contract_missing" for item in classification["fail"])
+    assert not any(item["code"] == "unexpected_rh26_headings" for item in classification["fail"])
+    assert any(item["code"] == "clean_host_gateway_inactive_expected" for item in classification["pass"])
+    assert any(item["code"] == "clean_host_low_clue_ingress_contract_not_required" for item in classification["pass"])
+    assert any(item["code"] == "clean_host_rh26_probe_contract_not_required" for item in classification["pass"])
 
 
 def test_classify_snapshot_fails_when_low_clue_candidate_uses_internal_label():
@@ -2304,8 +2461,9 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
         encoding="utf-8",
     )
 
-    def fake_collect_snapshot(*, host, previous):
+    def fake_collect_snapshot(*, host, previous, monitor_profile):
         assert host == "fake-host"
+        assert monitor_profile == "clean_host"
         assert previous["memory_status"]["counts"]["audit_entries"] == 5
         return {
             "hostname": "debian",
@@ -2345,10 +2503,13 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
             str(output),
             "--output",
             "summary",
+            "--monitor-profile",
+            "clean-host",
         ]
     ) == 0
 
     saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved["monitor_profile"] == "clean_host"
     assert saved["memory_status"]["counts"]["audit_entries"] == 9
     assert saved["deltas"]["counts_delta"]["audit_entries"] == 4
     assert "audit_entries=+4" in capsys.readouterr().out

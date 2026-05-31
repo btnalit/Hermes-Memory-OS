@@ -125,4 +125,8 @@ def default_adapter_registry() -> EvalAdapterRegistry:
         "offload_integrity",
         module_path="eval.memory_os.adapters.offload_integrity",
     )
+    registry.register(
+        "retrieval_shadow",
+        module_path="eval.memory_os.adapters.retrieval_shadow",
+    )
     return registry

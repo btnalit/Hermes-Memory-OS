@@ -141,7 +141,7 @@ def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
     live_guard_candidate_count = sum(
         1 for item in failure_attribution if item.get("guard_decision") == "candidate_live_guard"
     )
-    return {
+    compact = {
         "schema_version": summary.get("schema_version"),
         "status": summary.get("status"),
         "adapter_count": summary.get("adapter_count"),
@@ -157,6 +157,47 @@ def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "report_written": bool(summary.get("report_dir")),
         "source_distribution": summary.get("source_distribution") or {},
     }
+    retrieval_shadow = _rh31_retrieval_shadow_summary(summary)
+    if retrieval_shadow:
+        compact["retrieval_shadow"] = retrieval_shadow
+    return compact
+
+
+def _rh31_retrieval_shadow_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    for score in summary.get("scores") or []:
+        if not isinstance(score, dict) or score.get("adapter") != "retrieval_shadow":
+            continue
+        details = score.get("details") if isinstance(score.get("details"), dict) else {}
+        if details.get("schema_version") != "memory-os.retrieval_shadow_eval.v0":
+            continue
+        return {
+            "run_count": int(details.get("run_count") or 0),
+            "semantic_gap_count": int(details.get("semantic_gap_count") or 0),
+            "hybrid_would_retrieve_count": int(details.get("hybrid_would_retrieve_count") or 0),
+            "rrf_would_rank_count": int(details.get("rrf_would_rank_count") or 0),
+            "live_input_available": details.get("live_input_available") is True,
+            "live_memory_sources_record_count": int(details.get("live_memory_sources_record_count") or 0),
+            "live_bounded_source_ref_count": int(details.get("live_bounded_source_ref_count") or 0),
+            "live_shadow_source_selection_miss_count": int(
+                details.get("live_shadow_source_selection_miss_count") or 0
+            ),
+            "live_shadow_diversification_gap_count": int(
+                details.get("live_shadow_diversification_gap_count") or 0
+            ),
+            "live_shadow_low_coverage_count": int(details.get("live_shadow_low_coverage_count") or 0),
+            "live_shadow_would_rank_count": int(details.get("live_shadow_would_rank_count") or 0),
+            "live_route_distribution": details.get("live_route_distribution") or {},
+            "live_selected_source_class_distribution": details.get("live_selected_source_class_distribution") or {},
+            "live_dropped_source_class_distribution": details.get("live_dropped_source_class_distribution") or {},
+            "live_route_live_applied": details.get("live_route_live_applied") is True,
+            "live_score_live_applied": details.get("live_score_live_applied") is True,
+            "live_canonical_state_changed": details.get("live_canonical_state_changed") is True,
+            "route_live_applied": details.get("route_live_applied") is True,
+            "score_live_applied": details.get("score_live_applied") is True,
+            "boundary_true_count": int(details.get("boundary_true_count") or 0),
+            "forbidden_field_count": int(details.get("forbidden_field_count") or 0),
+        }
+    return {}
 
 
 def _rh31_failure_attribution(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -539,9 +580,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     fail: list[dict[str, Any]] = []
+    monitor_profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
+    clean_host = monitor_profile == "clean_host"
 
     if snapshot.get("gateway", {}).get("ActiveState") == "active":
         passed.append({"code": "gateway_active"})
+    elif clean_host:
+        passed.append({"code": "clean_host_gateway_inactive_expected", "value": snapshot.get("gateway")})
     else:
         fail.append({"code": "gateway_inactive", "value": snapshot.get("gateway")})
 
@@ -1537,6 +1582,89 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     )
             elif rh31.get("status") == "fail":
                 fail.append({"code": "rh31_eval_failed", "failure_count": rh31.get("failure_count")})
+            retrieval_shadow = rh31.get("retrieval_shadow") if isinstance(rh31.get("retrieval_shadow"), dict) else {}
+            if retrieval_shadow:
+                if int(retrieval_shadow.get("boundary_true_count") or 0) > 0:
+                    fail.append(
+                        {
+                            "code": "retrieval_shadow_boundary_true",
+                            "value": retrieval_shadow.get("boundary_true_count"),
+                        }
+                    )
+                if int(retrieval_shadow.get("forbidden_field_count") or 0) > 0:
+                    fail.append(
+                        {
+                            "code": "retrieval_shadow_forbidden_fields",
+                            "value": retrieval_shadow.get("forbidden_field_count"),
+                        }
+                    )
+                if retrieval_shadow.get("route_live_applied") is True or retrieval_shadow.get("score_live_applied") is True:
+                    fail.append(
+                        {
+                            "code": "retrieval_shadow_live_applied",
+                            "route_live_applied": retrieval_shadow.get("route_live_applied") is True,
+                            "score_live_applied": retrieval_shadow.get("score_live_applied") is True,
+                        }
+                    )
+                else:
+                    passed.append({"code": "retrieval_shadow_report_only"})
+                if (
+                    retrieval_shadow.get("live_route_live_applied") is True
+                    or retrieval_shadow.get("live_score_live_applied") is True
+                    or retrieval_shadow.get("live_canonical_state_changed") is True
+                ):
+                    fail.append(
+                        {
+                            "code": "retrieval_shadow_live_memory_sources_applied",
+                            "live_route_live_applied": retrieval_shadow.get("live_route_live_applied") is True,
+                            "live_score_live_applied": retrieval_shadow.get("live_score_live_applied") is True,
+                            "live_canonical_state_changed": retrieval_shadow.get("live_canonical_state_changed") is True,
+                        }
+                    )
+                if int(retrieval_shadow.get("run_count") or 0) > 0:
+                    passed.append({"code": "retrieval_shadow_visible"})
+                if retrieval_shadow.get("live_input_available") is True:
+                    passed.append(
+                        {
+                            "code": "retrieval_shadow_live_memory_sources_visible",
+                            "live_memory_sources_record_count": retrieval_shadow.get("live_memory_sources_record_count"),
+                            "live_bounded_source_ref_count": retrieval_shadow.get("live_bounded_source_ref_count"),
+                        }
+                    )
+                elif int((snapshot.get("memory_sources") or {}).get("record_count") or 0) > 0:
+                    warn.append(
+                        {
+                            "code": "retrieval_shadow_live_memory_sources_missing",
+                            "memory_sources_record_count": (snapshot.get("memory_sources") or {}).get("record_count"),
+                        }
+                    )
+                live_gap_count = (
+                    int(retrieval_shadow.get("live_shadow_source_selection_miss_count") or 0)
+                    + int(retrieval_shadow.get("live_shadow_diversification_gap_count") or 0)
+                    + int(retrieval_shadow.get("live_shadow_low_coverage_count") or 0)
+                )
+                if live_gap_count > 0:
+                    passed.append(
+                        {
+                            "code": "retrieval_shadow_live_memory_sources_gap_visible",
+                            "live_shadow_source_selection_miss_count": retrieval_shadow.get(
+                                "live_shadow_source_selection_miss_count"
+                            ),
+                            "live_shadow_diversification_gap_count": retrieval_shadow.get(
+                                "live_shadow_diversification_gap_count"
+                            ),
+                            "live_shadow_low_coverage_count": retrieval_shadow.get("live_shadow_low_coverage_count"),
+                        }
+                    )
+                if int(retrieval_shadow.get("semantic_gap_count") or 0) > 0:
+                    passed.append(
+                        {
+                            "code": "retrieval_shadow_semantic_gap_visible",
+                            "semantic_gap_count": retrieval_shadow.get("semantic_gap_count"),
+                        }
+                    )
+                else:
+                    warn.append({"code": "retrieval_shadow_semantic_gap_missing"})
         else:
             warn.append({"code": "rh31_eval_unavailable", "value": rh31})
 
@@ -1640,53 +1768,61 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         warn.append({"code": "low_clue_recall_probe_unavailable", "value": low_clue})
 
-    for item in snapshot.get("low_clue_ingress_matrix") or []:
-        if not isinstance(item, dict):
-            continue
-        expected_route = str(item.get("expected_route") or "")
-        route = str(item.get("route") or "")
-        if expected_route and route != expected_route:
-            fail.append(
-                {
-                    "code": "low_clue_ingress_route_mismatch",
-                    "id": item.get("id"),
-                    "expected": expected_route,
-                    "actual": route,
-                }
-            )
-        expected_heading = str(item.get("expected_heading") or "")
-        headings = [str(heading) for heading in item.get("headings") or []]
-        if expected_heading and expected_heading not in headings:
-            fail.append(
-                {
-                    "code": "low_clue_ingress_heading_mismatch",
-                    "id": item.get("id"),
-                    "expected": expected_heading,
-                    "actual": headings,
-                }
-            )
-        if (
-            expected_route == "ambiguous_recall"
-            and expected_heading == "Recall Clarification Guard"
-            and item.get("guard_contract_ok") is not True
-        ):
-            fail.append(
-                {
-                    "code": "low_clue_guard_contract_missing",
-                    "id": item.get("id"),
-                    "value": item.get("guard_contract_ok"),
-                }
-            )
+    low_clue_ingress = list(snapshot.get("low_clue_ingress_matrix") or [])
+    if clean_host and low_clue_ingress:
+        passed.append({"code": "clean_host_low_clue_ingress_contract_not_required"})
+    else:
+        for item in low_clue_ingress:
+            if not isinstance(item, dict):
+                continue
+            expected_route = str(item.get("expected_route") or "")
+            route = str(item.get("route") or "")
+            if expected_route and route != expected_route:
+                fail.append(
+                    {
+                        "code": "low_clue_ingress_route_mismatch",
+                        "id": item.get("id"),
+                        "expected": expected_route,
+                        "actual": route,
+                    }
+                )
+            expected_heading = str(item.get("expected_heading") or "")
+            headings = [str(heading) for heading in item.get("headings") or []]
+            if expected_heading and expected_heading not in headings:
+                fail.append(
+                    {
+                        "code": "low_clue_ingress_heading_mismatch",
+                        "id": item.get("id"),
+                        "expected": expected_heading,
+                        "actual": headings,
+                    }
+                )
+            if (
+                expected_route == "ambiguous_recall"
+                and expected_heading == "Recall Clarification Guard"
+                and item.get("guard_contract_ok") is not True
+            ):
+                fail.append(
+                    {
+                        "code": "low_clue_guard_contract_missing",
+                        "id": item.get("id"),
+                        "value": item.get("guard_contract_ok"),
+                    }
+                )
 
-    rh26_anomalies = find_rh26_heading_anomalies(list(snapshot.get("rh26_apply_probe") or []))
-    for anomaly in rh26_anomalies:
-        if anomaly.get("severity") == "fail":
-            fail.append(anomaly)
-        else:
-            warn.append(anomaly)
-    for probe in snapshot.get("rh26_apply_probe") or []:
-        if probe.get("id") == "casual_memory_system_change" and int(probe.get("chars", 0)) == 0:
-            warn.append({"code": "rh26_casual_empty"})
+    rh26_probes = list(snapshot.get("rh26_apply_probe") or [])
+    if clean_host and rh26_probes:
+        passed.append({"code": "clean_host_rh26_probe_contract_not_required"})
+    else:
+        rh26_anomalies = find_rh26_heading_anomalies(rh26_probes)
+        for anomaly in rh26_anomalies:
+            if anomaly.get("severity") == "fail":
+                fail.append(anomaly)
+            else:
+                warn.append(anomaly)
+        for probe in rh26_probes:
+            if probe.get("id") == "casual_memory_system_change" and int(probe.get("chars", 0)) == 0:
+                warn.append({"code": "rh26_casual_empty"})
 
     deep_reflection = snapshot.get("deep_reflection", {})
     for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_crystallized_approval"):
@@ -1884,7 +2020,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     lines = [
         f"监控结果: {classification['status']}",
         "",
-        f"- host={snapshot.get('hostname')} time={snapshot.get('date_utc')}",
+        f"- host={snapshot.get('hostname')} profile={snapshot.get('monitor_profile', 'live')} time={snapshot.get('date_utc')}",
         f"- gateway={snapshot.get('gateway', {}).get('ActiveState')} pid={snapshot.get('gateway', {}).get('MainPID')}",
         (
             f"- heartbeat={snapshot.get('heartbeat_timer', {}).get('ActiveState')}/"
@@ -1958,8 +2094,21 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def collect_snapshot(*, host: str = "hermes-media", previous: dict[str, Any] | None = None) -> dict[str, Any]:
+def _normalize_monitor_profile(value: Any) -> str:
+    profile = str(value or "live").strip().lower().replace("-", "_")
+    if profile in {"clean", "clean_host", "cleanhost", "install", "fresh_install"}:
+        return "clean_host"
+    return "live"
+
+
+def collect_snapshot(
+    *,
+    host: str = "hermes-media",
+    previous: dict[str, Any] | None = None,
+    monitor_profile: str = "live",
+) -> dict[str, Any]:
     raw = _ssh_json(host, _remote_probe_script())
+    raw["monitor_profile"] = _normalize_monitor_profile(monitor_profile)
     raw["rh31_eval"] = compact_rh31_eval_summary(raw.get("rh31_eval") or {})
     raw["deltas"] = compute_deltas(raw, previous)
     raw["l4_guard"] = summarize_l4_guard(raw)
@@ -1974,6 +2123,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--previous-json")
     parser.add_argument("--snapshot-out")
     parser.add_argument("--output", choices=["summary", "json"], default="summary")
+    parser.add_argument("--monitor-profile", choices=["live", "clean-host"], default="live")
     args = parser.parse_args(argv)
 
     previous = None
@@ -1981,7 +2131,9 @@ def main(argv: list[str] | None = None) -> int:
         previous_path = Path(args.previous_json)
         if previous_path.exists():
             previous = json.loads(previous_path.read_text(encoding="utf-8"))
-    snapshot = collect_snapshot(host=args.host, previous=previous)
+    monitor_profile = _normalize_monitor_profile(args.monitor_profile)
+    snapshot = collect_snapshot(host=args.host, previous=previous, monitor_profile=monitor_profile)
+    snapshot.setdefault("monitor_profile", monitor_profile)
     if args.snapshot_out:
         output_path = Path(args.snapshot_out)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4229,7 +4381,7 @@ doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
 contract = memory_os_cli(["conversation-regression", "status-tool-contract"])
 memory_sources = memory_os_cli(["memory-sources", "stats", "--hours", "24"])
 memory_sources = enrich_memory_sources_stats(memory_sources)
-rh31_eval = memory_os_cli(["eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
+rh31_eval = memory_os_cli(["eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--adapter", "retrieval_shadow", "--no-write-report"])
 owner_review = memory_os_cli(["review", "status"])
 owner_review_aging = memory_os_cli(["review", "aging-report"])
 owner_review_channel = memory_os_cli(["review", "channel"])

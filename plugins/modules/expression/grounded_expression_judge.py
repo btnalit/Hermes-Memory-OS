@@ -66,8 +66,22 @@ class GroundedExpressionJudge:
         confabulation_result: dict[str, Any] | None = None,
         evidence_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        right_brain_claim = _right_brain_claim(right_brain_result or {})
+        right_brain_claim = _right_brain_claim(right_brain_result or {}, hermes_home=self.hermes_home)
+        if _claim_is_silent(right_brain_claim):
+            backlog_claim = _next_unjudged_wandering_output_claim(self.hermes_home, self.verdicts_path)
+            if backlog_claim:
+                right_brain_claim = backlog_claim
+            else:
+                return self._base_verdict(
+                    status="skipped",
+                    decision="no_expression_to_judge",
+                    verdict_class="skipped",
+                    code="no_expression_to_judge",
+                    owner_escalation_required=False,
+                    audit_action="grounded_expression_no_expression_to_judge",
+                )
         left_brain_map = _left_brain_map(
+            right_brain_claim=right_brain_claim,
             confabulation_result=confabulation_result or {},
             evidence_result=evidence_result or {},
         )
@@ -237,6 +251,9 @@ class GroundedExpressionJudge:
                 "left_map_evidence_count": int(left_brain_map.get("evidence_count") or 0),
                 "left_map_confabulation_flag_count": int(left_brain_map.get("confabulation_flag_count") or 0),
                 "left_map_confabulation_weighting": str(left_brain_map.get("confabulation_weighting") or "none"),
+                "left_map_lookup_ref_count": len(left_brain_map.get("lookup_refs") or []),
+                "right_brain_artifact_kind": str(right_brain_claim.get("artifact_kind") or ""),
+                "right_brain_artifact_ref": str(right_brain_claim.get("artifact_ref") or ""),
             }
         )
 
@@ -248,14 +265,43 @@ class GroundedExpressionJudge:
             handle.write(json.dumps(verdict, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _right_brain_claim(result: dict[str, Any]) -> dict[str, Any]:
+def _right_brain_claim(result: dict[str, Any], *, hermes_home: Path | None = None) -> dict[str, Any]:
     output = str(result.get("output") or "")
+    explicit_source_refs = _string_list(result.get("source_event_ids")) + _string_list(result.get("source_refs"))
+    signal_summary = result.get("signal_summary") if isinstance(result.get("signal_summary"), dict) else {}
+    source_event_id = str(result.get("source_event_id") or signal_summary.get("latest_event_id") or "").strip()
+    output_ref = str(result.get("output_ref") or "").strip()
+    lookup_refs = _lookup_refs_for_source_event(source_event_id)
+    if output_ref:
+        lookup_refs.append(output_ref)
+        output_record = _wandering_output_by_ref(hermes_home, output_ref)
+        if output_record and not source_event_id:
+            lookup_refs.extend(_lookup_refs_for_source_event(str(output_record.get("source_event_id") or "")))
     return {
-        "grounded": bool(result.get("source_event_ids") or result.get("source_refs") or output.strip() == "[SILENT]"),
+        "text": output,
+        "grounded": bool(explicit_source_refs or output.strip() == "[SILENT]"),
+        "source_refs": _unique(explicit_source_refs),
+        "lookup_refs": _unique(lookup_refs),
+        "artifact_kind": "wandering_mind_result" if result else "",
+        "artifact_ref": output_ref,
     }
 
 
-def _left_brain_map(*, confabulation_result: dict[str, Any], evidence_result: dict[str, Any]) -> dict[str, Any]:
+def _left_brain_map(
+    *,
+    right_brain_claim: dict[str, Any],
+    confabulation_result: dict[str, Any],
+    evidence_result: dict[str, Any],
+) -> dict[str, Any]:
+    lookup_refs = _string_list(right_brain_claim.get("lookup_refs"))
+    if lookup_refs:
+        targeted = _targeted_left_brain_map(
+            lookup_refs=lookup_refs,
+            confabulation_result=confabulation_result,
+            evidence_result=evidence_result,
+        )
+        if targeted is not None:
+            return targeted
     flag_count = int(confabulation_result.get("flag_count") or 0)
     evidence_count = int(evidence_result.get("evidence_count") or 0)
     return _normalize_left_brain_map(
@@ -266,6 +312,44 @@ def _left_brain_map(*, confabulation_result: dict[str, Any], evidence_result: di
             "confabulation_flagged": flag_count > 0,
             "input_fingerprint": str(evidence_result.get("input_fingerprint") or ""),
             "score_fingerprint_count": len(evidence_result.get("score_fingerprints") or []),
+            "lookup_refs": lookup_refs,
+        }
+    )
+
+
+def _targeted_left_brain_map(
+    *,
+    lookup_refs: list[str],
+    confabulation_result: dict[str, Any],
+    evidence_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    feature_scores_path = str(evidence_result.get("feature_scores_path") or "").strip()
+    if not feature_scores_path:
+        return None
+    feature_scores = _read_jsonl(Path(feature_scores_path))
+    if not feature_scores:
+        return None
+    normalized_refs = set(_expand_lookup_refs(lookup_refs))
+    matched_scores = [
+        record
+        for record in feature_scores
+        if _record_matches_lookup_refs(record, normalized_refs)
+    ]
+    flags = confabulation_result.get("flags") if isinstance(confabulation_result.get("flags"), list) else []
+    matched_flags = [
+        flag
+        for flag in flags
+        if _record_matches_lookup_refs(flag, normalized_refs)
+    ]
+    return _normalize_left_brain_map(
+        {
+            "coverage": _coverage_for_count(len(matched_scores)),
+            "evidence_count": len(matched_scores),
+            "confabulation_flag_count": len(matched_flags),
+            "confabulation_flagged": bool(matched_flags),
+            "input_fingerprint": str(evidence_result.get("input_fingerprint") or ""),
+            "score_fingerprint_count": len(matched_scores),
+            "lookup_refs": sorted(normalized_refs),
         }
     )
 
@@ -317,6 +401,7 @@ def _normalize_left_brain_map(left_brain_map: dict[str, Any]) -> dict[str, Any]:
             "confabulation_flagged": confabulation_flagged,
             "confabulation_weighting": "demote_flagged_left_map_records" if confabulation_flagged else "normal",
             "snapshot_version": str(normalized.get("snapshot_version") or _snapshot_version(snapshot_payload)),
+            "lookup_refs": _string_list(normalized.get("lookup_refs")),
         }
     )
     return normalized
@@ -400,3 +485,100 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _claim_is_silent(claim: dict[str, Any]) -> bool:
+    return str(claim.get("text") or "").strip() == "[SILENT]" and not claim.get("artifact_ref")
+
+
+def _next_unjudged_wandering_output_claim(hermes_home: Path | None, verdicts_path: Path) -> dict[str, Any]:
+    if hermes_home is None:
+        return {}
+    judged_refs = {
+        str(item.get("right_brain_artifact_ref") or "")
+        for item in _read_jsonl(verdicts_path)
+        if str(item.get("right_brain_artifact_ref") or "")
+    }
+    outputs_path = hermes_home / "system-modules" / "wandering_mind" / "outputs.jsonl"
+    for record in _read_jsonl(outputs_path):
+        output = str(record.get("output") or "")
+        if not output.strip() or output.strip() == "[SILENT]":
+            continue
+        artifact_ref = str(record.get("output_ref") or "").strip()
+        if not artifact_ref:
+            artifact_ref = f"local://wandering_mind/{record.get('id')}"
+        if artifact_ref in judged_refs:
+            continue
+        return {
+            "text": output,
+            "grounded": bool(record.get("source_refs")),
+            "source_refs": _string_list(record.get("source_refs")),
+            "lookup_refs": _unique([artifact_ref, *_lookup_refs_for_source_event(str(record.get("source_event_id") or ""))]),
+            "artifact_kind": "wandering_mind_output",
+            "artifact_ref": artifact_ref,
+        }
+    return {}
+
+
+def _wandering_output_by_ref(hermes_home: Path | None, output_ref: str) -> dict[str, Any]:
+    if hermes_home is None or not output_ref:
+        return {}
+    outputs_path = hermes_home / "system-modules" / "wandering_mind" / "outputs.jsonl"
+    for record in _read_jsonl(outputs_path):
+        if str(record.get("output_ref") or "") == output_ref:
+            return record
+    return {}
+
+
+def _lookup_refs_for_source_event(source_event_id: str) -> list[str]:
+    source_event_id = str(source_event_id or "").strip()
+    if not source_event_id:
+        return []
+    return [f"event:{source_event_id}", f"memory_os:event:{source_event_id}"]
+
+
+def _expand_lookup_refs(refs: list[str]) -> list[str]:
+    expanded: list[str] = []
+    for ref in refs:
+        ref = str(ref or "").strip()
+        if not ref:
+            continue
+        expanded.append(ref)
+        if ref.startswith("event:"):
+            expanded.append("memory_os:" + ref)
+        elif ref.startswith("memory_os:event:"):
+            expanded.append(ref.removeprefix("memory_os:"))
+    return _unique(expanded)
+
+
+def _record_matches_lookup_refs(record: dict[str, Any], lookup_refs: set[str]) -> bool:
+    values = {
+        str(record.get("subject_ref") or ""),
+        str(record.get("source_ref") or ""),
+        str(record.get("subject") or ""),
+    }
+    values.update(_string_list(record.get("source_refs")))
+    return any(value in lookup_refs for value in values if value)
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        values = [str(item) for item in value]
+    else:
+        values = [str(value)]
+    return [item.strip() for item in values if item and item.strip()]
+
+
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique_values: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique_values.append(value)
+    return unique_values

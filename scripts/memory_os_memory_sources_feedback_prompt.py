@@ -8,12 +8,29 @@ stdout means there is no suitable feedback context to ask about.
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
+from pathlib import Path
+
+CANARY_TARGET = 20
+STATUS_SCHEMA_VERSION = "memory-os.memory_sources_feedback_prompt_status.v0"
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    argv = list(argv or [])
+    parser = argparse.ArgumentParser(
+        description=(
+            "Render a bounded MemorySources feedback prompt. The script prints "
+            "nothing when no unrated MemorySources context is available and never sends messages."
+        )
+    )
+    parser.add_argument("--status-json", action="store_true", help="Print prompt/canary status instead of owner text.")
+    if "-h" in argv or "--help" in argv:
+        parser.print_help()
+        return 0
+    args = parser.parse_args(argv)
     report = _run_json(
         [
             "hermes",
@@ -26,6 +43,10 @@ def main() -> int:
             "3",
         ]
     )
+    if args.status_json:
+        stats = _try_run_json(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
+        print(json.dumps(_status_report(report, stats), ensure_ascii=False, sort_keys=True))
+        return 0
     if report.get("status") != "ok":
         return 0
     item = report.get("latest_memory_source")
@@ -46,11 +67,11 @@ def main() -> int:
     route_label = _human_route(route)
 
     print("OWNER_MESSAGE_BEGIN")
-    print("我想确认一下刚才 Memory-OS 选出来的上下文来源是否帮到你判断。")
-    print(f"这次主要用了{source_label}，用于{route_label}，数量约 {selected_count} 段。")
+    print("我想确认一下刚才 Memory-OS 自动补进来的上下文来源是否帮到你。")
+    print(f"本次只问这一轮来源质量：主要用了{source_label}，用于{route_label}，数量约 {selected_count} 段。")
     if selected_chars:
         print(f"总长度约 {selected_chars} 字，所以这里只问来源质量，不展开原文。")
-    print("请只选一个反馈：")
+    print("请只选一个判断，不需要解释：")
     print("1. 有帮助")
     print("2. 缺了关键上下文")
     print("3. 太机制化/程序味")
@@ -58,6 +79,50 @@ def main() -> int:
     print("你可以直接回：有帮助、缺上下文、太机制化、要更具体。")
     print("OWNER_MESSAGE_END")
     return 0
+
+
+def _status_report(report: dict[str, object], stats: dict[str, object] | None) -> dict[str, object]:
+    item = report.get("latest_memory_source")
+    item = item if isinstance(item, dict) else {}
+    existing_feedback = report.get("existing_feedback") if isinstance(report.get("existing_feedback"), dict) else {}
+    existing_feedback_count = int(existing_feedback.get("count") or 0)
+    token = str((item.get("action_tokens") or {}).get("mark_feedback") or "").strip()
+    surface_status = str(report.get("status") or "")
+    prompt_status = "ready"
+    skip_reason = ""
+    if surface_status != "ok":
+        prompt_status = "skipped"
+        skip_reason = "surface_not_ok"
+    elif not item:
+        prompt_status = "skipped"
+        skip_reason = "no_memory_source_context"
+    elif existing_feedback_count > 0:
+        prompt_status = "skipped"
+        skip_reason = "already_feedback_for_latest_source"
+    elif not token:
+        prompt_status = "skipped"
+        skip_reason = "feedback_token_missing"
+
+    total_feedback_count, total_feedback_source = _feedback_total(stats)
+    return {
+        "schema_version": STATUS_SCHEMA_VERSION,
+        "surface_status": surface_status,
+        "prompt_status": prompt_status,
+        "skip_reason": skip_reason,
+        "prompt_would_render": prompt_status == "ready",
+        "latest_memory_source_id": str(item.get("id") or item.get("memory_source_id") or item.get("target_id") or ""),
+        "existing_feedback_count": existing_feedback_count,
+        "total_feedback_count": total_feedback_count,
+        "total_feedback_count_source": total_feedback_source,
+        "canary_target": CANARY_TARGET,
+        "canary_remaining": max(0, CANARY_TARGET - total_feedback_count),
+        "canary_complete": total_feedback_count >= CANARY_TARGET,
+        "stats_available": stats is not None,
+        "raw_body_included": bool(report.get("raw_body_included") is True),
+        "forbidden_owner_command_field_count": int(report.get("forbidden_owner_command_field_count") or 0),
+        "actual_send": False,
+        "actual_execute": False,
+    }
 
 
 def _human_source_classes(source_classes: str) -> str:
@@ -104,5 +169,30 @@ def _run_json(command: list[str]) -> dict[str, object]:
     return parsed
 
 
+def _try_run_json(command: list[str]) -> dict[str, object] | None:
+    try:
+        return _run_json(command)
+    except SystemExit:
+        return None
+
+
+def _feedback_total(stats: dict[str, object] | None) -> tuple[int, str]:
+    if not stats:
+        return 0, "unavailable"
+    total = stats.get("total_feedback_count")
+    if isinstance(total, int):
+        return total, "stats_total_feedback_count"
+    ledger_path = str(stats.get("feedback_ledger_path") or "").strip()
+    if ledger_path:
+        path = Path(ledger_path)
+        if path.exists() and path.is_file():
+            count = 0
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    count += 1
+            return count, "feedback_ledger_line_count"
+    return int(stats.get("feedback_count") or 0), "stats_window_feedback_count"
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

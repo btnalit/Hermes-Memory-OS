@@ -285,6 +285,8 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert runtime_python.joinpath("agent", "memory_provider.py").is_file()
     assert runtime_python.joinpath("eval", "memory_os", "runner", "run.py").is_file()
     assert runtime_python.joinpath("eval", "memory_os", "adapters", "grep.py").is_file()
+    assert runtime_python.joinpath("eval", "memory_os", "adapters", "retrieval_shadow.py").is_file()
+    assert runtime_python.joinpath("eval", "memory_os", "data", "retrieval_shadow_cases.jsonl").is_file()
     assert not any("__pycache__" in path for path in report["system_module_files"])
     assert not any("__pycache__" in path for path in report["agent_runtime_files"])
     assert not any("__pycache__" in path for path in report["eval_runtime_files"])
