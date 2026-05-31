@@ -62,7 +62,9 @@ def test_left_brain_pipeline_checker_detects_live_feature_scoring_as_fail(tmp_pa
     report = LeftBrainPipelineCheckModule(tmp_path, profile="main").run_once(store=store)
 
     assert report["status"] == "fail"
-    assert any(finding["code"] == "feature_score_live_applied" for finding in report["findings"])
+    finding = next(finding for finding in report["findings"] if finding["code"] == "feature_score_live_applied")
+    assert finding["count"] == 1
+    assert "live-shadow" in finding["message"]
 
 
 def test_left_brain_pipeline_checker_warns_on_active_concrete_duplicate_proposals(tmp_path):

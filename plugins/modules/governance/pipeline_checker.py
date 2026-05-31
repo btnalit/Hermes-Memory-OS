@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.modules.evidence.scoring import EvidenceScoringModule
+from plugins.modules.governance.live_guard import LiveGuardRegistry
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -157,20 +158,13 @@ class LeftBrainPipelineCheckModule:
 
     def _findings(self, *, proposals: list[dict[str, Any]], feature_scores: list[dict[str, Any]]) -> list[dict[str, Any]]:
         findings: list[dict[str, Any]] = []
-        live_feature_scores = [
-            score
-            for score in feature_scores
-            if bool(score.get("live_applied", False)) or bool(score.get("maturity_live_applied", False))
-        ]
-        if live_feature_scores:
-            findings.append(
-                {
-                    "severity": "error",
-                    "code": "feature_score_live_applied",
-                    "message": "Feature scoring must stay report-only until a separate apply gate promotes it.",
-                    "count": len(live_feature_scores),
-                }
-            )
+        live_guard = LiveGuardRegistry()
+        live_guard.register(
+            "feature_score",
+            live_applied_field=("live_applied", "maturity_live_applied"),
+            message="Feature scoring must stay live-shadow until a separate acting gate promotes it.",
+        )
+        findings.extend(live_guard.find_live_apply_findings(component="feature_score", records=feature_scores))
         if any(bool(item.get("actual_execute", False)) for item in proposals):
             findings.append(
                 {

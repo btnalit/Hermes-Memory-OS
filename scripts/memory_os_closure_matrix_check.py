@@ -52,17 +52,31 @@ LIVE_MODULE_TO_CLOSURE_LABEL = {
     "deep_reflection": "DeepReflection",
     "governance_feedback": "Governance Feedback",
     "left_brain_pipeline_check": "Left-Brain Pipeline Check",
+    "confidence_router": "Confidence Router",
+    "ground_truth_miner": "Ground Truth Miner",
+    "crystallized_revalidator": "Crystallized Revalidator",
+    "judge_calibration": "Judge Calibration / Canary",
+    "candidate_review": "FeaturePreRouter / CandidateReview",
+    "shadow_recall": "Shadow Recall",
+    "provisional": "Provisional Tier",
+    "cascade_routing_policy": "Cascade Routing Policy",
+    "migration_controller": "Migration Controller",
+    "symbolic_offloader": "Symbolic Offloader",
+    "abstraction_distillation": "Abstraction Distillation",
     "digest_consolidation": "Digest Consolidation",
     "inner_drive": "Heartbeat / Inner Drive",
     "mailbox": "Mailbox",
     "household_digest": "Household Digest",
     "wandering_mind": "Wandering Mind",
+    "imagination_loop": "Imagination Loop",
     "evidence_scoring": "Evidence Scoring",
+    "confabulation_detector": "Confabulation Detector",
     "ops_gate": "Ops Gate",
     "proposal_queue": "Proposal Queue",
     "self_evolution": "Self-Evolution",
     "speak_gate": "Speak Gate",
     "expression_draft": "Expression Draft",
+    "grounded_expression_judge": "Grounded Expression Judge",
 }
 
 REQUIRED_CONTRACT_LABELS = {
@@ -85,6 +99,16 @@ REQUIRED_CONTRACT_LABELS = {
 
 ACTIVE_WORK_ITEM_RE = re.compile(r"^### (P1-[A-Z]|P2-F) - ")
 
+MATRIX_PATH_CANDIDATES = (
+    ("docs", "internal-memory-os", "01-contracts", "36-module-closure-matrix.md"),
+    ("docs", "system-modularization", "36-module-closure-matrix.md"),
+)
+
+ROADMAP_PATH_CANDIDATES = (
+    ("docs", "internal-memory-os", "00-control", "32-active-roadmap-and-gates.md"),
+    ("docs", "system-modularization", "32-active-roadmap-and-gates.md"),
+)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
@@ -97,18 +121,27 @@ def main(argv: list[str] | None = None) -> int:
         print(render_summary(report))
     else:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if report["status"] == "ok" else 1
+    return 0 if report["status"] in {"ok", "skipped"} else 1
 
 
 def build_report(repo_root: Path) -> dict[str, Any]:
-    matrix_path = repo_root / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    matrix_path = find_doc_path(
+        repo_root,
+        MATRIX_PATH_CANDIDATES,
+    )
+    roadmap_path = find_doc_path(
+        repo_root,
+        ROADMAP_PATH_CANDIDATES,
+    )
+    if matrix_path is None or roadmap_path is None:
+        return skipped_internal_docs_report(repo_root, matrix_path, roadmap_path)
+
     matrix_text = matrix_path.read_text(encoding="utf-8")
     rows = parse_classification_overlay(matrix_text)
     row_by_module = {row["module"]: row for row in rows}
     active_work_mappings = parse_active_work_closure_mapping(matrix_text)
     mapping_by_item = {mapping["work_item"]: mapping for mapping in active_work_mappings}
 
-    roadmap_path = repo_root / "docs" / "system-modularization" / "32-active-roadmap-and-gates.md"
     active_work_items = parse_active_work_items(roadmap_path.read_text(encoding="utf-8"))
 
     live_modules = load_live_module_definitions(repo_root)
@@ -217,6 +250,67 @@ def build_report(repo_root: Path) -> dict[str, Any]:
         "invalid_active_work_mapping_count": len(invalid_active_work_mappings),
         "findings": findings,
     }
+
+
+def skipped_internal_docs_report(repo_root: Path, matrix_path: Path | None, roadmap_path: Path | None) -> dict[str, Any]:
+    missing = []
+    if matrix_path is None:
+        missing.append("closure_matrix")
+    if roadmap_path is None:
+        missing.append("active_roadmap")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "skipped",
+        "skip_reason": "internal-docs-missing",
+        "missing_internal_docs": missing,
+        "matrix_path": str(matrix_path) if matrix_path else "",
+        "roadmap_path": str(roadmap_path) if roadmap_path else "",
+        "live_module_count": 0,
+        "matrix_module_count": 0,
+        "active_work_item_count": 0,
+        "active_work_mapping_count": 0,
+        "live_modules": [],
+        "active_work_items": [],
+        "missing_live_modules": [],
+        "missing_contract_labels": [],
+        "unknown_live_modules": [],
+        "invalid_row_count": 0,
+        "missing_active_work_items": [],
+        "stale_active_work_mappings": [],
+        "invalid_active_work_mapping_count": 0,
+        "findings": [
+            {
+                "code": "internal_docs_missing",
+                "severity": "info",
+                "missing_internal_docs": missing,
+            }
+        ],
+    }
+
+
+def resolve_doc_path(
+    repo_root: Path,
+    candidates: tuple[tuple[str, ...], ...],
+    label: str,
+) -> Path:
+    attempted: list[str] = []
+    for candidate in candidates:
+        path = repo_root.joinpath(*candidate)
+        attempted.append(str(path))
+        if path.exists():
+            return path
+    raise FileNotFoundError(f"{label} not found. Tried: {', '.join(attempted)}")
+
+
+def find_doc_path(
+    repo_root: Path,
+    candidates: tuple[tuple[str, ...], ...],
+) -> Path | None:
+    for candidate in candidates:
+        path = repo_root.joinpath(*candidate)
+        if path.exists():
+            return path
+    return None
 
 
 def parse_classification_overlay(text: str) -> list[dict[str, str]]:
@@ -336,6 +430,7 @@ def _classes_are_valid(value: str, allowed: set[str]) -> bool:
 def render_summary(report: dict[str, Any]) -> str:
     lines = [
         f"status={report['status']}",
+        *([f"skip_reason={report['skip_reason']}"] if report.get("skip_reason") else []),
         f"live_module_count={report['live_module_count']}",
         f"matrix_module_count={report['matrix_module_count']}",
         f"active_work_item_count={report['active_work_item_count']}",

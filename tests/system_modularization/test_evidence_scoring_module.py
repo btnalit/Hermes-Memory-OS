@@ -173,6 +173,13 @@ def test_evidence_scoring_reports_prototype_aligned_maturity_dimensions(tmp_path
     for record in feature_scores:
         assert record["prototype_alignment"]["source"] == "10.20.2.88:self_evolution_daily_pipeline"
         assert record["prototype_alignment"]["mode"] == "adapted_primary"
+        assert record["evidence_profile"]["provenance"] == "observed"
+        assert record["evidence_profile"]["derivation"] in {
+            "owner_assertion",
+            "direct_observation",
+            "inference",
+        }
+        assert record["evidence_profile"]["coverage"]["source_diversity"] >= 0
         assert set(record["maturity_dimensions"]) == required_dimensions
         assert 0.0 <= record["maturity_score"] <= 1.0
         assert record["feature_score"] == record["maturity_score"]
@@ -340,6 +347,21 @@ def test_evidence_scoring_skips_expired_working_items(tmp_path):
     assert f"working:{expired.id}" not in subject_refs
     assert status["working_subject_count"] == 1
     assert status["expired_used_in_scoring_count"] == 0
+
+
+def test_evidence_scoring_writes_derived_profile_on_evidence_without_live_apply(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = _seed_scoring_inputs(tmp_path, store)
+    module = EvidenceScoringModule(tmp_path, profile="main")
+
+    result = module.score_all(store=store, proposal_queue=proposal_queue)
+
+    assert result["derived_evidence_profile_count"] == result["evidence_count"] == 4
+    for record in module.read_evidence():
+        assert record["evidence_profile"]["provenance"] == "observed"
+        assert record["evidence_profile"]["coverage"]["source_diversity"] >= 0
+        assert record["actual_execute"] is False
+        assert record["live_applied"] is False
 
 
 def test_evidence_scoring_skips_governance_feedback_mirror_events(tmp_path):

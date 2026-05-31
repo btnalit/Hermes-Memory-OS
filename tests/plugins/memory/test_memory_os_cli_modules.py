@@ -25,6 +25,27 @@ def test_modules_status_reports_commandized_and_uncommandized_modules(tmp_path, 
     assert modules["cron_mirror"]["commandized"] is True
     assert modules["deep_reflection"]["commandized"] is True
     assert modules["inner_drive"]["commandized"] is False
+    assert modules["imagination_loop"]["status_available"] is True
+    assert modules["imagination_loop"]["commandized"] is False
+    assert modules["confabulation_detector"]["status_available"] is True
+    assert modules["confabulation_detector"]["commandized"] is False
+    assert modules["ground_truth_miner"]["status_available"] is True
+    assert modules["ground_truth_miner"]["commandized"] is False
+    assert modules["confidence_router"]["status_available"] is True
+    assert modules["confidence_router"]["commandized"] is False
+    assert modules["crystallized_revalidator"]["status_available"] is True
+    assert modules["crystallized_revalidator"]["commandized"] is False
+    assert modules["judge_calibration"]["status_available"] is True
+    assert modules["candidate_review"]["status_available"] is True
+    assert modules["shadow_recall"]["status_available"] is True
+    assert modules["provisional"]["status_available"] is True
+    assert modules["cascade_routing_policy"]["status_available"] is True
+    assert modules["migration_controller"]["status_available"] is True
+    assert modules["symbolic_offloader"]["status_available"] is True
+    assert modules["symbolic_offloader"]["commandized"] is False
+    assert modules["abstraction_distillation"]["status_available"] is True
+    assert modules["grounded_expression_judge"]["status_available"] is True
+    assert modules["grounded_expression_judge"]["commandized"] is False
     assert modules["inner_drive"]["unavailable_reason"]
     assert "raw_body" not in json.dumps(output)
 

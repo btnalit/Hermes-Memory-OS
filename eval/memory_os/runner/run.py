@@ -13,19 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from eval.memory_os.data.rh31_synthetic import load_cases, load_corpus
+from eval.memory_os.runner.registry import FIRST_SIX_ADAPTERS, default_adapter_registry
 from eval.memory_os.runner.retention import build_report_retention_plan
 from eval.memory_os.runner.score import build_summary, scorecard_markdown
 from eval.memory_os.runner.types import Rh31Score
-
-
-FIRST_SIX_ADAPTERS = [
-    "grep",
-    "memory_os_fts",
-    "context_projection",
-    "low_clue_candidates",
-    "memory_sources_replay",
-    "diagnostic_grounding",
-]
 
 
 def run_rh31_eval(
@@ -39,15 +30,16 @@ def run_rh31_eval(
 ) -> dict[str, Any]:
     if fixture != "synthetic":
         raise ValueError(f"Unsupported RH-31 fixture: {fixture}")
-    adapter_names = _expand_adapters(adapters or ["all"])
+    adapter_specs = _expand_adapters(adapters or ["all"])
+    adapter_names = [spec.name for spec in adapter_specs]
     cases = load_cases()
     corpus = load_corpus()
     run_id = _run_id()
     root = Path(report_root) if report_root is not None else Path.cwd() / "eval" / "reports"
     run_dir = root / "memory-os-rh31" / run_id
     scores: list[Rh31Score] = []
-    for adapter_name in adapter_names:
-        module = importlib.import_module(f"eval.memory_os.adapters.{adapter_name}")
+    for adapter_spec in adapter_specs:
+        module = importlib.import_module(adapter_spec.module_path)
         scores.extend(module.run(cases, corpus))
     retention = build_report_retention_plan(
         root / "memory-os-rh31",
@@ -132,23 +124,8 @@ def _write_report(run_dir: Path, summary: dict[str, Any]) -> None:
     (run_dir / "scorecard.md").write_text(scorecard_markdown(summary), encoding="utf-8")
 
 
-def _expand_adapters(adapters: list[str] | tuple[str, ...]) -> list[str]:
-    names: list[str] = []
-    for adapter in adapters:
-        value = str(adapter or "").strip()
-        if not value:
-            continue
-        if value == "all":
-            names.extend(FIRST_SIX_ADAPTERS)
-        else:
-            names.append(value)
-    deduped: list[str] = []
-    for name in names:
-        if name not in FIRST_SIX_ADAPTERS:
-            raise ValueError(f"Unsupported RH-31 adapter: {name}")
-        if name not in deduped:
-            deduped.append(name)
-    return deduped or list(FIRST_SIX_ADAPTERS)
+def _expand_adapters(adapters: list[str] | tuple[str, ...]):
+    return default_adapter_registry().expand(adapters)
 
 
 def _run_id() -> str:

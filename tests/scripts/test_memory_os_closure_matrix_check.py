@@ -5,17 +5,43 @@ from pathlib import Path
 
 import pytest
 
-from scripts.memory_os_closure_matrix_check import build_report, parse_classification_overlay
+from scripts.memory_os_closure_matrix_check import build_report, main, parse_classification_overlay
 
 
-INTERNAL_MATRIX_PATH = Path(__file__).resolve().parents[2] / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+def _matrix_path(repo_root: Path) -> Path:
+    return repo_root / "docs" / "internal-memory-os" / "01-contracts" / "36-module-closure-matrix.md"
 
-pytestmark = pytest.mark.skipif(
+
+INTERNAL_MATRIX_PATH = _matrix_path(Path(__file__).resolve().parents[2])
+
+requires_internal_docs = pytest.mark.skipif(
     not INTERNAL_MATRIX_PATH.exists(),
     reason="internal closure matrix docs are not included in public checkouts",
 )
 
 
+def test_closure_matrix_check_skips_when_internal_docs_are_missing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    report = build_report(tmp_path)
+
+    assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
+    assert report["status"] == "skipped"
+    assert report["skip_reason"] == "internal-docs-missing"
+    assert set(report["missing_internal_docs"]) == {"closure_matrix", "active_roadmap"}
+    assert report["findings"] == [
+        {
+            "code": "internal_docs_missing",
+            "severity": "info",
+            "missing_internal_docs": ["closure_matrix", "active_roadmap"],
+        }
+    ]
+
+    assert main(["--repo-root", str(tmp_path), "--format", "summary"]) == 0
+    output = capsys.readouterr().out
+    assert "status=skipped" in output
+    assert "skip_reason=internal-docs-missing" in output
+
+
+@requires_internal_docs
 def test_closure_matrix_check_passes_for_current_repo() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 
@@ -23,8 +49,8 @@ def test_closure_matrix_check_passes_for_current_repo() -> None:
 
     assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
     assert report["status"] == "ok"
-    assert report["live_module_count"] == 18
-    assert report["matrix_module_count"] == 31
+    assert report["live_module_count"] == 32
+    assert report["matrix_module_count"] == 45
     assert report["active_work_item_count"] == 20
     assert report["active_work_mapping_count"] == 20
     assert report["missing_live_modules"] == []
@@ -36,11 +62,12 @@ def test_closure_matrix_check_passes_for_current_repo() -> None:
     assert report["findings"] == []
 
 
+@requires_internal_docs
 def test_closure_matrix_check_fails_when_live_module_row_is_missing(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     shadow_repo = tmp_path / "repo"
     shutil.copytree(repo_root / "docs", shadow_repo / "docs")
-    matrix_path = shadow_repo / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    matrix_path = _matrix_path(shadow_repo)
     text = matrix_path.read_text(encoding="utf-8")
     matrix_path.write_text(
         "\n".join(
@@ -63,11 +90,12 @@ def test_closure_matrix_check_fails_when_live_module_row_is_missing(tmp_path: Pa
     )
 
 
+@requires_internal_docs
 def test_closure_matrix_check_rejects_freeform_classification_text(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     shadow_repo = tmp_path / "repo"
     shutil.copytree(repo_root / "docs", shadow_repo / "docs")
-    matrix_path = shadow_repo / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    matrix_path = _matrix_path(shadow_repo)
     text = matrix_path.read_text(encoding="utf-8")
     matrix_path.write_text(
         text.replace(
@@ -88,12 +116,13 @@ def test_closure_matrix_check_rejects_freeform_classification_text(tmp_path: Pat
     )
 
 
+@requires_internal_docs
 def test_closure_matrix_check_accepts_expression_feedback_class() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 
     report = build_report(repo_root)
 
-    matrix_path = repo_root / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    matrix_path = _matrix_path(repo_root)
     rows = {row["module"]: row for row in parse_classification_overlay(matrix_path.read_text(encoding="utf-8"))}
     assert "expression_feedback" in rows["Wandering Mind"]["state_change_class"]
     assert "expression_feedback" in rows["Speak Gate"]["state_change_class"]
@@ -104,11 +133,12 @@ def test_closure_matrix_check_accepts_expression_feedback_class() -> None:
     )
 
 
+@requires_internal_docs
 def test_closure_matrix_check_fails_when_active_work_mapping_is_missing(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     shadow_repo = tmp_path / "repo"
     shutil.copytree(repo_root / "docs", shadow_repo / "docs")
-    matrix_path = shadow_repo / "docs" / "system-modularization" / "36-module-closure-matrix.md"
+    matrix_path = _matrix_path(shadow_repo)
     text = matrix_path.read_text(encoding="utf-8")
     matrix_path.write_text(
         "\n".join(

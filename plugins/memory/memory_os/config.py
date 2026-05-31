@@ -69,6 +69,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_review_suggested": 5,
         "max_fyi": 5,
     },
+    "l4": {
+        "kill_switch_enabled": False,
+    },
 }
 
 
@@ -120,6 +123,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "description": "Owner review digest and channel resolver settings",
             "default": DEFAULT_CONFIG["owner_review"],
         },
+        {
+            "key": "l4",
+            "description": "V7 L4 live-shadow and acting safety settings",
+            "default": DEFAULT_CONFIG["l4"],
+        },
     ]
 
 
@@ -161,6 +169,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
     merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
+    merged["l4"] = _merge_l4_config(merged.get("l4"))
     return merged
 
 
@@ -265,6 +274,18 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["recurring_delivery_target_class"] = str(merged.get("recurring_delivery_target_class") or "missing")
     merged["cron_job_name"] = str(merged.get("cron_job_name") or "memory-os-owner-review-digest")
     merged["aging_enabled"] = bool(merged.get("aging_enabled"))
+    return merged
+
+
+def _merge_l4_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["l4"])
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in default:
+        if key in value:
+            merged[key] = value[key]
+    merged["kill_switch_enabled"] = bool(merged.get("kill_switch_enabled"))
     return merged
 
 

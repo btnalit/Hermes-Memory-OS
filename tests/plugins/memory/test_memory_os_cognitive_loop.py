@@ -36,6 +36,19 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "wandering_mind",
         "ops_gate",
         "evidence_scoring",
+        "confidence_router",
+        "candidate_review",
+        "judge_calibration",
+        "shadow_recall",
+        "provisional",
+        "cascade_routing_policy",
+        "imagination_loop",
+        "confabulation_detector",
+        "ground_truth_miner",
+        "crystallized_revalidator",
+        "migration_controller",
+        "abstraction_distillation",
+        "grounded_expression_judge",
         "self_evolution",
         "left_brain_pipeline_check",
         "governance_feedback",
@@ -56,6 +69,19 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert (tmp_path / "system-modules" / "wandering_mind" / "outputs.jsonl").is_file()
     assert (tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl").is_file()
     assert (tmp_path / "system-modules" / "evidence_scoring" / "scores.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "confidence_router" / "routing.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "candidate_review" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "judge_calibration" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "shadow_recall" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "provisional" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "cascade_routing_policy" / "policy_proposals.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "imagination_loop" / "scenarios.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "confabulation_detector" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "ground_truth_miner" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "crystallized_revalidator" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "migration_controller" / "runs.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "abstraction_distillation" / "items.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "grounded_expression_judge" / "verdicts.jsonl").is_file()
     assert (tmp_path / "system-modules" / "governance_feedback" / "state.json").is_file()
     assert (tmp_path / "system-modules" / "deep_reflection" / "injection" / "current.json").is_file()
     steps = {step["step"]: step for step in result["steps"]}
@@ -63,6 +89,19 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert wandering_result["speak_gate_evaluated"] is True
     assert wandering_result["speak_gate_decision"]["decision"] == "would_send"
     assert wandering_result["speak_gate_decision"]["actual_send"] is False
+    assert steps["confidence_router"]["result"]["route_live_applied"] is False
+    assert steps["candidate_review"]["result"]["candidate_review_live_applied"] is False
+    assert steps["judge_calibration"]["result"]["calibration_live_applied"] is False
+    assert steps["shadow_recall"]["result"]["auto_discard_live_applied"] is False
+    assert steps["provisional"]["result"]["auto_promote_live_applied"] is False
+    assert steps["cascade_routing_policy"]["result"]["route_strategy_live_applied"] is False
+    assert steps["imagination_loop"]["result"]["live_applied"] is False
+    assert steps["confabulation_detector"]["result"]["live_behavior_changed"] is False
+    assert steps["ground_truth_miner"]["result"]["score_live_applied"] is False
+    assert steps["crystallized_revalidator"]["result"]["demotion_live_applied"] is False
+    assert steps["migration_controller"]["result"]["migration_live_applied"] is False
+    assert steps["abstraction_distillation"]["result"]["distillation_live_applied"] is False
+    assert steps["grounded_expression_judge"]["result"]["policy_live_applied"] is False
 
 
 def test_cognitive_loop_skips_right_brain_downstream_when_signal_unchanged(tmp_path):

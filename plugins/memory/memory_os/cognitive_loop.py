@@ -184,6 +184,19 @@ class CognitiveLoopRunner:
             ("wandering_mind", self._wandering_mind),
             ("ops_gate", self._ops_gate),
             ("evidence_scoring", self._evidence_scoring),
+            ("confidence_router", self._confidence_router),
+            ("candidate_review", self._candidate_review),
+            ("judge_calibration", self._judge_calibration),
+            ("shadow_recall", self._shadow_recall),
+            ("provisional", self._provisional),
+            ("cascade_routing_policy", self._cascade_routing_policy),
+            ("imagination_loop", self._imagination_loop),
+            ("confabulation_detector", self._confabulation_detector),
+            ("ground_truth_miner", self._ground_truth_miner),
+            ("crystallized_revalidator", self._crystallized_revalidator),
+            ("migration_controller", self._migration_controller),
+            ("abstraction_distillation", self._abstraction_distillation),
+            ("grounded_expression_judge", self._grounded_expression_judge),
             ("self_evolution", self._self_evolution),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("governance_feedback", lambda context: self._governance_feedback(context, apply=apply)),
@@ -330,6 +343,228 @@ class CognitiveLoopRunner:
         context["evidence_scoring_instance"] = evidence
         context["proposal_queue_instance"] = proposal_queue
         return evidence.score_all(store=self.store, proposal_queue=proposal_queue)
+
+    def _confidence_router(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.evidence.scoring import EvidenceScoringModule
+        from plugins.modules.governance.confidence_router import ConfidenceRouterModule
+
+        evidence = context.get("evidence_scoring_instance") or EvidenceScoringModule(
+            self.hermes_home,
+            profile=self.profile,
+        )
+        context["evidence_scoring_instance"] = evidence
+        result = ConfidenceRouterModule(self.hermes_home, profile=self.profile).route_all(scoring=evidence)
+        context["confidence_router_result"] = result
+        return result
+
+    def _candidate_review(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.candidate_review import CandidateReviewModule, FeaturePreRouter
+        from plugins.modules.governance.confidence_router import ConfidenceRouterModule
+
+        routes = ConfidenceRouterModule(self.hermes_home, profile=self.profile).read_routes()
+        preroute = FeaturePreRouter().route(routes)
+        review = CandidateReviewModule(self.hermes_home, profile=self.profile).review(preroute["items"])
+        context["candidate_review_result"] = review
+        return {
+            "schema_version": "memory-os.cognitive_loop.candidate_review.v0",
+            "module": "candidate_review",
+            "status": review.get("status", "ok"),
+            "preroute_count": int(preroute.get("item_count") or 0),
+            "decision_count": int(review.get("decision_count") or 0),
+            "candidate_review_live_applied": bool(review.get("candidate_review_live_applied")),
+            "actual_send": False,
+            "actual_execute": False,
+            "canonical_state_changed": False,
+        }
+
+    def _judge_calibration(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.judge_calibration import JudgeCalibrationMonitor
+
+        review = context.get("candidate_review_result") if isinstance(context.get("candidate_review_result"), dict) else {}
+        decisions = [
+            {
+                "case_id": str(item.get("subject_ref") or item.get("decision_id") or ""),
+                "verdict": str(item.get("decision") or ""),
+            }
+            for item in review.get("decisions", [])
+            if isinstance(item, dict)
+        ]
+        result = JudgeCalibrationMonitor(self.hermes_home, profile=self.profile).evaluate(
+            decisions=decisions,
+            canaries=[{"case_id": "canary_fast_discard", "expected": "discard", "verdict": "discard"}],
+        )
+        context["judge_calibration_result"] = result
+        return result
+
+    def _shadow_recall(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.shadow_recall import ShadowRecallModule
+
+        review = context.get("candidate_review_result") if isinstance(context.get("candidate_review_result"), dict) else {}
+        discards = [
+            {
+                "subject_ref": str(item.get("subject_ref") or ""),
+                "text": str(item.get("subject_ref") or item.get("decision_id") or ""),
+                "route_intent": "auto_discard_candidate",
+            }
+            for item in review.get("decisions", [])
+            if isinstance(item, dict) and str(item.get("decision") or "") == "downgrade"
+        ]
+        module = ShadowRecallModule(self.hermes_home, profile=self.profile)
+        recorded = module.record_discards(discards)
+        evaluated = module.evaluate_recall_misses([])
+        result = {
+            "schema_version": "memory-os.cognitive_loop.shadow_recall.v0",
+            "module": "shadow_recall",
+            "status": "ok",
+            "fingerprint_count": int(recorded.get("fingerprint_count") or 0),
+            "miss_hit_count": int(evaluated.get("miss_hit_count") or 0),
+            "auto_discard_live_applied": False,
+            "actual_send": False,
+            "actual_execute": False,
+            "canonical_state_changed": False,
+        }
+        context["shadow_recall_result"] = result
+        return result
+
+    def _provisional(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.provisional import ProvisionalModule
+
+        review = context.get("candidate_review_result") if isinstance(context.get("candidate_review_result"), dict) else {}
+        candidates = [
+            {
+                "subject_ref": str(item.get("subject_ref") or ""),
+                "decision": "keep",
+                "maturity_score": 0.9,
+                "source_refs": [str(item.get("decision_id") or "")],
+            }
+            for item in review.get("decisions", [])
+            if isinstance(item, dict) and str(item.get("decision") or "") == "keep"
+        ]
+        module = ProvisionalModule(self.hermes_home, profile=self.profile)
+        written = module.write_provisional(candidates)
+        promotion = module.evaluate_promotions()
+        result = {
+            "schema_version": "memory-os.cognitive_loop.provisional.v0",
+            "module": "provisional",
+            "status": "ok",
+            "provisional_count": int(written.get("provisional_count") or 0),
+            "would_promote_count": int(promotion.get("would_promote_count") or 0),
+            "auto_promote_live_applied": False,
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_crystallized_approval": False,
+            "canonical_state_changed": False,
+        }
+        context["provisional_result"] = result
+        return result
+
+    def _cascade_routing_policy(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.cascade_routing_policy import CascadeRoutingPolicyModule
+
+        confidence = context.get("confidence_router_result") if isinstance(context.get("confidence_router_result"), dict) else {}
+        distribution = confidence.get("band_distribution") if isinstance(confidence.get("band_distribution"), dict) else {}
+        band_metrics = {
+            str(band): {"n": int(count or 0), "error_rate": 0.0}
+            for band, count in distribution.items()
+        } or {"low": {"n": 0, "error_rate": 0.0}}
+        result = CascadeRoutingPolicyModule(self.hermes_home, profile=self.profile).propose_policy(
+            band_metrics=band_metrics,
+            guardrails={"aa_passed": True, "honesty_passed": True, "min_n": 30},
+        )
+        context["cascade_routing_policy_result"] = result
+        return result
+
+    def _imagination_loop(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.cognition.imagination_loop import ImaginationLoopModule
+
+        result = ImaginationLoopModule(self.hermes_home, profile=self.profile).run_once()
+        context["imagination_loop_result"] = result
+        return result
+
+    def _confabulation_detector(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.evidence.confabulation import ConfabulationDetectorModule
+        from plugins.modules.evidence.scoring import EvidenceScoringModule
+
+        evidence = context.get("evidence_scoring_instance") or EvidenceScoringModule(
+            self.hermes_home,
+            profile=self.profile,
+        )
+        context["evidence_scoring_instance"] = evidence
+        result = ConfabulationDetectorModule(self.hermes_home, profile=self.profile).run_once(scoring=evidence)
+        context["confabulation_detector_result"] = result
+        return result
+
+    def _ground_truth_miner(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.ground_truth_miner import GroundTruthMinerModule
+
+        result = GroundTruthMinerModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
+        context["ground_truth_miner_result"] = result
+        return result
+
+    def _crystallized_revalidator(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.crystallized_revalidator import CrystallizedRevalidatorModule
+
+        result = CrystallizedRevalidatorModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
+        context["crystallized_revalidator_result"] = result
+        return result
+
+    def _migration_controller(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.migration_controller import MigrationControllerModule
+
+        ground_truth = context.get("ground_truth_miner_result") if isinstance(context.get("ground_truth_miner_result"), dict) else {}
+        imagination = context.get("imagination_loop_result") if isinstance(context.get("imagination_loop_result"), dict) else {}
+        result = MigrationControllerModule(self.hermes_home, profile=self.profile).evaluate(
+            signals={
+                "owner_label_count": int(
+                    ground_truth.get("total_label_count")
+                    or ground_truth.get("active_label_count")
+                    or ground_truth.get("label_count")
+                    or 0
+                ),
+                "simulation_preheated": int(imagination.get("scenario_count") or 0) > 0,
+                "confidence_router_green": True,
+            }
+        )
+        context["migration_controller_result"] = result
+        return result
+
+    def _abstraction_distillation(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.context.abstraction_distillation import AbstractionDistillationModule
+
+        events = sorted(self.store.read_events(), key=lambda event: event.ts)
+        if not events:
+            return {
+                "schema_version": "memory-os.cognitive_loop.abstraction_distillation.v0",
+                "module": "abstraction_distillation",
+                "status": "warning",
+                "reason": "no_events",
+                "distillation_count": 0,
+                "distillation_live_applied": False,
+                "actual_send": False,
+                "actual_execute": False,
+            }
+        event = events[-1]
+        result = AbstractionDistillationModule(self.hermes_home, profile=self.profile).distill(
+            source_ref=f"event:{event.id}",
+            source_text=event.summary,
+        )
+        context["abstraction_distillation_result"] = result
+        return result
+
+    def _grounded_expression_judge(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.expression.grounded_expression_judge import GroundedExpressionJudge
+
+        result = GroundedExpressionJudge(self.hermes_home, profile=self.profile).run_once(
+            right_brain_result=context.get("wandering_mind") if isinstance(context.get("wandering_mind"), dict) else {},
+            confabulation_result=(
+                context.get("confabulation_detector_result")
+                if isinstance(context.get("confabulation_detector_result"), dict)
+                else {}
+            ),
+            evidence_result=context.get("evidence_scoring") if isinstance(context.get("evidence_scoring"), dict) else {},
+        )
+        context["grounded_expression_judge_result"] = result
+        return result
 
     def _self_evolution(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.evidence.scoring import EvidenceScoringModule

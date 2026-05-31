@@ -7,6 +7,8 @@ from scripts.memory_os_3_200_monitor import (
     find_rh26_heading_anomalies,
     main,
     render_chinese_summary,
+    summarize_l4_guard,
+    summarize_v7_governance,
 )
 
 
@@ -284,6 +286,288 @@ def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "rh31_eval_forbidden_fields" for item in classification["fail"])
+
+
+def test_v7_governance_summary_defaults_to_missing_shadow_components():
+    snapshot = _healthy_snapshot()
+
+    summary = summarize_v7_governance(snapshot)
+
+    assert summary["schema_version"] == "memory-os.v7_governance_summary.v0"
+    assert summary["component_count"] == 18
+    assert summary["shadow_live_component_count"] == 0
+    assert summary["acting_component_count"] == 0
+    assert summary["live_guard_registered_count"] == 0
+    assert summary["memory_sources_feedback_volume_ready"] is False
+    assert summary["component_status"]["promotion_matrix"] == "missing"
+    assert summary["component_status"]["live_guard_registry"] == "missing"
+    assert summary["confidence_router_status"] == "missing"
+    assert summary["simulation_coverage_status"] == "missing"
+    assert summary["confabulation_detection_status"] == "missing"
+    assert summary["crystallized_revalidator_status"] == "missing"
+    assert summary["cross_check_anchoring_status"] == "missing"
+    assert summary["component_status"]["symbolic_offloader"] == "missing"
+    assert summary["component_status"]["judge_calibration"] == "missing"
+    assert summary["component_status"]["candidate_review"] == "missing"
+    assert summary["component_status"]["shadow_recall"] == "missing"
+    assert summary["component_status"]["provisional"] == "missing"
+    assert summary["component_status"]["cascade_routing_policy"] == "missing"
+    assert summary["component_status"]["migration_controller"] == "missing"
+    assert summary["component_status"]["abstraction_distillation"] == "missing"
+
+
+def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["evidence"] = {
+        "evidence_count": 4,
+        "score_count": 4,
+        "derived_evidence_profile_count": 4,
+        "feature_score_live_applied": False,
+        "maturity_live_applied": False,
+    }
+    snapshot["module_artifacts"]["v7_meta"] = {
+        "promotion_matrix_component": {
+            "component": "promotion_matrix",
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": False,
+            "actual_execute": False,
+        },
+        "live_guard_registry_present": True,
+        "eval_adapter_registry_present": True,
+        "eval_adapter_count": 14,
+    }
+    snapshot["module_artifacts"]["imagination_loop"] = {
+        "status": "ok",
+        "scenario_count": 5,
+        "simulated_count": 5,
+        "actual_execute": False,
+        "live_behavior_changed": False,
+    }
+    snapshot["module_artifacts"]["confabulation_detector"] = {
+        "status": "ok",
+        "flag_count": 1,
+        "actual_execute": False,
+        "score_live_applied": False,
+        "route_live_applied": False,
+    }
+    snapshot["module_artifacts"]["ground_truth_miner"] = {
+        "status": "ok",
+        "label_count": 0,
+        "run_count": 1,
+        "active_label_count": 0,
+        "retracted_label_count": 0,
+        "actual_execute": False,
+        "score_live_applied": False,
+        "route_live_applied": False,
+    }
+    snapshot["module_artifacts"]["confidence_router"] = {
+        "status": "ok",
+        "route_count": 0,
+        "run_count": 1,
+        "band_distribution": {},
+        "actual_execute": False,
+        "score_live_applied": False,
+        "route_live_applied": False,
+    }
+    snapshot["module_artifacts"]["judge_calibration"] = {
+        "status": "ok",
+        "run_count": 1,
+        "calibration_live_applied": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["candidate_review"] = {
+        "status": "ok",
+        "decision_count": 3,
+        "run_count": 1,
+        "candidate_review_live_applied": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["shadow_recall"] = {
+        "status": "ok",
+        "fingerprint_count": 1,
+        "run_count": 1,
+        "auto_discard_live_applied": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["provisional"] = {
+        "status": "ok",
+        "record_count": 1,
+        "run_count": 1,
+        "auto_promote_live_applied": False,
+        "actual_crystallized_approval": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["cascade_routing_policy"] = {
+        "status": "ok",
+        "proposal_count": 1,
+        "route_strategy_live_applied": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["migration_controller"] = {
+        "status": "ok",
+        "run_count": 1,
+        "last_regime": "cold_start",
+        "migration_live_applied": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["symbolic_offloader"] = {
+        "status": "ok",
+        "report_count": 1,
+        "ref_count": 1,
+        "canonical_state_changed": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["abstraction_distillation"] = {
+        "status": "ok",
+        "item_count": 3,
+        "distillation_live_applied": False,
+        "actual_execute": False,
+    }
+    snapshot["module_artifacts"]["crystallized_revalidator"] = {
+        "status": "ok",
+        "flag_count": 0,
+        "run_count": 1,
+        "would_demote_count": 0,
+        "actual_execute": False,
+        "actual_crystallized_approval": False,
+        "demotion_live_applied": False,
+    }
+    snapshot["module_artifacts"]["grounded_expression_judge"] = {
+        "status": "ok",
+        "verdict_count": 1,
+        "unresolvable_count": 1,
+        "left_map_substrate_warning_count": 1,
+        "actual_send": False,
+        "actual_execute": False,
+        "delivery_gated": False,
+        "policy_live_applied": False,
+    }
+
+    summary = summarize_v7_governance(snapshot)
+    classification = classify_snapshot(snapshot)
+
+    assert summary["component_status"]["derived_evidence_profile"] == "live-shadow"
+    assert summary["component_status"]["promotion_matrix"] == "live-shadow"
+    assert summary["component_status"]["live_guard_registry"] == "live-shadow"
+    assert summary["component_status"]["eval_adapter_registry"] == "live-shadow"
+    assert summary["confidence_router_status"] == "live-shadow"
+    assert summary["component_status"]["retractable_label_miner"] == "live-shadow"
+    assert summary["component_status"]["judge_calibration"] == "live-shadow"
+    assert summary["component_status"]["candidate_review"] == "live-shadow"
+    assert summary["component_status"]["shadow_recall"] == "live-shadow"
+    assert summary["component_status"]["provisional"] == "live-shadow"
+    assert summary["component_status"]["cascade_routing_policy"] == "live-shadow"
+    assert summary["component_status"]["migration_controller"] == "live-shadow"
+    assert summary["component_status"]["symbolic_offloader"] == "live-shadow"
+    assert summary["component_status"]["abstraction_distillation"] == "live-shadow"
+    assert summary["simulation_coverage_status"] == "live-shadow"
+    assert summary["confabulation_detection_status"] == "live-shadow"
+    assert summary["crystallized_revalidator_status"] == "live-shadow"
+    assert summary["cross_check_anchoring_status"] == "live-shadow"
+    assert summary["shadow_live_component_count"] >= 18
+    assert any(item["code"] == "v7_shadow_live_components_visible" for item in classification["pass"])
+
+
+def test_v7_governance_summary_uses_code_promotion_matrix_not_docs():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["v7_meta"] = {
+        "promotion_matrix_component": {
+            "component": "promotion_matrix",
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": False,
+            "actual_execute": False,
+        },
+        "promotion_matrix_present": False,
+    }
+
+    summary = summarize_v7_governance(snapshot)
+
+    assert summary["component_status"]["promotion_matrix"] == "live-shadow"
+    assert summary["shadow_live_component_count"] == 1
+    assert summary["live_guard_registered_count"] == 1
+
+
+def test_classify_snapshot_accepts_v7_live_shadow_without_acting():
+    snapshot = _healthy_snapshot()
+    snapshot["v7_governance"] = {
+        "schema_version": "memory-os.v7_governance_summary.v0",
+        "components": [
+            {
+                "component": "live_guard_registry",
+                "task_installed": True,
+                "pipeline_liveness": "live-shadow",
+                "autonomy_level": "shadow",
+                "live_guard_registered": True,
+                "live_applied": False,
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_crystallized_approval": False,
+            }
+        ],
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "v7_shadow_live_components_visible" for item in classification["pass"])
+    assert not any(item["code"] == "v7_component_live_applied_without_acting_gate" for item in classification["fail"])
+    assert "V7Governance" in rendered
+    assert "shadow_live_component_count" in rendered
+
+
+def test_l4_guard_summary_tracks_kill_switch_and_live_apply_findings():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_os_config"] = {"l4": {"kill_switch_enabled": True}}
+    snapshot["module_artifacts"]["evidence"] = {
+        "feature_score_live_applied": True,
+        "maturity_live_applied": False,
+    }
+
+    summary = summarize_l4_guard(snapshot)
+
+    assert summary == {
+        "schema_version": "memory-os.l4_guard_summary.v0",
+        "kill_switch_enabled": True,
+        "registered_component_count": 1,
+        "live_applied_finding_count": 1,
+    }
+
+
+def test_classify_snapshot_fails_v7_live_apply_without_acting_gate():
+    snapshot = _healthy_snapshot()
+    snapshot["v7_governance"] = {
+        "schema_version": "memory-os.v7_governance_summary.v0",
+        "components": [
+            {
+                "component": "confidence_router",
+                "task_installed": True,
+                "pipeline_liveness": "live-shadow",
+                "autonomy_level": "shadow",
+                "live_guard_registered": True,
+                "live_applied": True,
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_crystallized_approval": False,
+            }
+        ],
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "v7_component_live_applied_without_acting_gate"
+        and item["component"] == "confidence_router"
+        for item in classification["fail"]
+    )
 
 
 def test_classify_snapshot_tracks_owner_review_status_and_illegal_crystallized_writes():

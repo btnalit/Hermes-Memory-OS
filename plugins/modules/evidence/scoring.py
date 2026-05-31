@@ -12,6 +12,7 @@ from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import read_candidate_queue
+from plugins.memory.memory_os.evidence_profile import EVIDENCE_PROFILE_SCHEMA_VERSION, build_evidence_profile
 from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -121,6 +122,7 @@ class EvidenceScoringModule:
                 "score_mode": "feature_maturity_v2",
                 "score_count": len(score_records),
                 "evidence_count": len(evidence_records),
+                "derived_evidence_profile_count": _derived_evidence_profile_count(evidence_records),
                 "feature_score_mode": "primary",
                 "feature_score_count": len(feature_score_records),
                 "generated_score_count": 0,
@@ -175,6 +177,7 @@ class EvidenceScoringModule:
                 subject=subject,
                 legacy_score=legacy_comparison,
                 subject_stats=subject_stats,
+                evidence_profile=evidence["evidence_profile"],
             )
             score = self.build_score_record(
                 subject_ref=subject["subject_ref"],
@@ -207,6 +210,7 @@ class EvidenceScoringModule:
             "score_mode": "feature_maturity_v2",
             "score_count": len(score_records),
             "evidence_count": len(evidence_records),
+            "derived_evidence_profile_count": _derived_evidence_profile_count(evidence_records),
             "feature_score_mode": "primary",
             "feature_score_count": len(feature_score_records),
             "generated_score_count": len(score_records),
@@ -298,6 +302,7 @@ class EvidenceScoringModule:
         subject: dict[str, str],
         legacy_score: dict[str, Any],
         subject_stats: dict[str, Any] | None = None,
+        evidence_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         features = _feature_inputs(subject)
         maturity_dimensions = _maturity_dimensions(subject, legacy_score, subject_stats or {})
@@ -323,6 +328,7 @@ class EvidenceScoringModule:
             "maturity_score": feature_score,
             "score_delta": round(feature_score - legacy_score_value, 3),
             "evidence_refs": evidence_refs,
+            "evidence_profile": dict(evidence_profile or {}),
             "features": features,
             "maturity_dimensions": maturity_dimensions,
             "prototype_alignment": {
@@ -387,6 +393,7 @@ class EvidenceScoringModule:
             "score_mode": "feature_maturity_v2",
             "score_count": len(scores),
             "evidence_count": len(evidence),
+            "derived_evidence_profile_count": _derived_evidence_profile_count(evidence),
             "feature_score_mode": "primary",
             "feature_score_count": len(feature_scores),
             "hash_score_legacy_count": 0,
@@ -656,6 +663,14 @@ class EvidenceScoringModule:
 
     def _build_evidence_record(self, subject: dict[str, str]) -> dict[str, Any]:
         evidence_id = _stable_id("evidence", subject["subject_ref"], subject["evidence_summary"])
+        evidence_profile = build_evidence_profile(
+            subject_ref=subject["subject_ref"],
+            subject_kind=subject["subject_kind"],
+            source_ref=subject["source_ref"],
+            evidence_summary=subject["evidence_summary"],
+            tags=str(subject.get("tags") or "").split(",") if subject.get("tags") else (),
+            provenance=str(subject.get("provenance") or "observed"),
+        )
         record = {
             "schema_version": "hermes.evidence_record.v0",
             "evidence_id": evidence_id,
@@ -665,6 +680,9 @@ class EvidenceScoringModule:
             "source_ref": subject["source_ref"],
             "source_status": subject.get("source_status", ""),
             "summary": subject["evidence_summary"],
+            "evidence_profile": evidence_profile,
+            "live_applied": False,
+            "actual_execute": False,
         }
         if subject.get("feedback_rating"):
             record["feedback_rating"] = subject["feedback_rating"]
@@ -724,6 +742,7 @@ def _input_fingerprint(
     payload = {
         "profile": profile,
         "score_mode": "feature_maturity_v2",
+        "evidence_profile_schema_version": EVIDENCE_PROFILE_SCHEMA_VERSION,
         "maturity_dimensions": list(MATURITY_DIMENSION_KEYS),
         "subjects": subjects,
         "collection_stats": _fingerprint_collection_stats(collection_stats),
@@ -752,6 +771,10 @@ def _expired_working_subject_count(evidence: list[dict[str, Any]], hermes_home: 
         if str(record.get("source_status") or "") == "expired":
             expired_count += 1
     return expired_count
+
+
+def _derived_evidence_profile_count(evidence: list[dict[str, Any]]) -> int:
+    return sum(1 for record in evidence if isinstance(record.get("evidence_profile"), dict))
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

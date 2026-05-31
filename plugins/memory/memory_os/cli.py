@@ -1477,6 +1477,94 @@ def _module_definitions() -> list[dict[str, Any]]:
             "runner": "run_once",
         },
         {
+            "module": "ground_truth_miner",
+            "kind": "governance",
+            "package": "plugins.modules.governance.ground_truth_miner",
+            "factory": _ground_truth_miner_module,
+            "runner": "",
+            "unavailable_reason": "ground_truth_miner writes retractable owner labels and needs owner-audit input",
+        },
+        {
+            "module": "confidence_router",
+            "kind": "governance",
+            "package": "plugins.modules.governance.confidence_router",
+            "factory": _confidence_router_module,
+            "runner": "",
+            "unavailable_reason": "confidence_router writes shadow route intent and requires explicit review before apply",
+        },
+        {
+            "module": "crystallized_revalidator",
+            "kind": "governance",
+            "package": "plugins.modules.governance.crystallized_revalidator",
+            "factory": _crystallized_revalidator_module,
+            "runner": "",
+            "unavailable_reason": "crystallized_revalidator writes would-demote flags and requires explicit review before apply",
+        },
+        {
+            "module": "judge_calibration",
+            "kind": "governance",
+            "package": "plugins.modules.governance.judge_calibration",
+            "factory": _judge_calibration_module,
+            "runner": "",
+            "unavailable_reason": "judge_calibration writes consistency/canary evidence and never flips authority through generic run-once",
+        },
+        {
+            "module": "candidate_review",
+            "kind": "governance",
+            "package": "plugins.modules.governance.candidate_review",
+            "factory": _candidate_review_module,
+            "runner": "",
+            "unavailable_reason": "candidate_review is report-only; owner/proposal effects require separate promoted action paths",
+        },
+        {
+            "module": "shadow_recall",
+            "kind": "governance",
+            "package": "plugins.modules.governance.shadow_recall",
+            "factory": _shadow_recall_module,
+            "runner": "",
+            "unavailable_reason": "shadow_recall records discard fingerprints but cannot enable auto-discard through generic run-once",
+        },
+        {
+            "module": "provisional",
+            "kind": "governance",
+            "package": "plugins.modules.governance.provisional",
+            "factory": _provisional_module,
+            "runner": "",
+            "unavailable_reason": "provisional writes shadow records only; promotion requires owner-reviewed apply",
+        },
+        {
+            "module": "cascade_routing_policy",
+            "kind": "governance",
+            "package": "plugins.modules.governance.cascade_routing_policy",
+            "factory": _cascade_routing_policy_module,
+            "runner": "",
+            "unavailable_reason": "cascade_routing_policy proposes guarded route policy but does not self-apply",
+        },
+        {
+            "module": "migration_controller",
+            "kind": "governance",
+            "package": "plugins.modules.governance.migration_controller",
+            "factory": _migration_controller_module,
+            "runner": "",
+            "unavailable_reason": "migration_controller emits regime signals; autonomy flips remain external owner-reviewed gates",
+        },
+        {
+            "module": "symbolic_offloader",
+            "kind": "context",
+            "package": "plugins.modules.context.symbolic_offloader",
+            "factory": _symbolic_offloader_module,
+            "runner": "",
+            "unavailable_reason": "symbolic_offloader is task-local lossless offload and is not exposed through generic run-once",
+        },
+        {
+            "module": "abstraction_distillation",
+            "kind": "context",
+            "package": "plugins.modules.context.abstraction_distillation",
+            "factory": _abstraction_distillation_module,
+            "runner": "",
+            "unavailable_reason": "abstraction_distillation writes candidate-only summaries and never treats distillation as truth",
+        },
+        {
             "module": "digest_consolidation",
             "kind": "context",
             "package": "plugins.modules.context.digest_consolidation",
@@ -1517,12 +1605,28 @@ def _module_definitions() -> list[dict[str, Any]]:
             "unavailable_reason": "wandering_mind run_once records would-send artifacts and is not exposed through generic dry-run",
         },
         {
+            "module": "imagination_loop",
+            "kind": "cognition",
+            "package": "plugins.modules.cognition.imagination_loop",
+            "factory": _imagination_loop_module,
+            "runner": "",
+            "unavailable_reason": "imagination_loop writes live-shadow simulated artifacts and needs an explicit scheduler path",
+        },
+        {
             "module": "evidence_scoring",
             "kind": "evidence",
             "package": "plugins.modules.evidence.scoring",
             "factory": _evidence_scoring_module,
             "runner": "",
             "unavailable_reason": "evidence_scoring score_all writes artifacts and is not exposed through generic dry-run",
+        },
+        {
+            "module": "confabulation_detector",
+            "kind": "evidence",
+            "package": "plugins.modules.evidence.confabulation",
+            "factory": _confabulation_detector_module,
+            "runner": "",
+            "unavailable_reason": "confabulation_detector writes live-shadow flags and needs evidence-scoring input",
         },
         {
             "module": "ops_gate",
@@ -1563,6 +1667,14 @@ def _module_definitions() -> list[dict[str, Any]]:
             "factory": _expression_draft_module,
             "runner": "",
             "unavailable_reason": "expression_draft creates drafts only from bounded module inputs",
+        },
+        {
+            "module": "grounded_expression_judge",
+            "kind": "expression",
+            "package": "plugins.modules.expression.grounded_expression_judge",
+            "factory": _grounded_expression_judge_module,
+            "runner": "",
+            "unavailable_reason": "grounded_expression_judge is advisory-only and does not gate delivery through generic run-once",
         },
     ]
 
@@ -1644,6 +1756,72 @@ def _left_brain_pipeline_check_module(store: MemoryOSStore) -> Any:
     return LeftBrainPipelineCheckModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
+def _ground_truth_miner_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.ground_truth_miner import GroundTruthMinerModule
+
+    return GroundTruthMinerModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _confidence_router_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.confidence_router import ConfidenceRouterModule
+
+    return ConfidenceRouterModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _crystallized_revalidator_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.crystallized_revalidator import CrystallizedRevalidatorModule
+
+    return CrystallizedRevalidatorModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _judge_calibration_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.judge_calibration import JudgeCalibrationMonitor
+
+    return JudgeCalibrationMonitor(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _candidate_review_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.candidate_review import CandidateReviewModule
+
+    return CandidateReviewModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _shadow_recall_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.shadow_recall import ShadowRecallModule
+
+    return ShadowRecallModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _provisional_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.provisional import ProvisionalModule
+
+    return ProvisionalModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _cascade_routing_policy_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.cascade_routing_policy import CascadeRoutingPolicyModule
+
+    return CascadeRoutingPolicyModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _migration_controller_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.governance.migration_controller import MigrationControllerModule
+
+    return MigrationControllerModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _symbolic_offloader_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.context.symbolic_offloader import SymbolicOffloaderModule
+
+    return SymbolicOffloaderModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _abstraction_distillation_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.context.abstraction_distillation import AbstractionDistillationModule
+
+    return AbstractionDistillationModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
 def _digest_consolidation_module(store: MemoryOSStore) -> Any:
     from plugins.modules.context.digest_consolidation import DigestConsolidationModule
 
@@ -1674,10 +1852,22 @@ def _wandering_mind_module(store: MemoryOSStore) -> Any:
     return WanderingMindModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
+def _imagination_loop_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.cognition.imagination_loop import ImaginationLoopModule
+
+    return ImaginationLoopModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
 def _evidence_scoring_module(store: MemoryOSStore) -> Any:
     from plugins.modules.evidence.scoring import EvidenceScoringModule
 
     return EvidenceScoringModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _confabulation_detector_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.evidence.confabulation import ConfabulationDetectorModule
+
+    return ConfabulationDetectorModule(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
 def _ops_gate_module(store: MemoryOSStore) -> Any:
@@ -1708,6 +1898,12 @@ def _expression_draft_module(store: MemoryOSStore) -> Any:
     from plugins.modules.expression.expression_draft import ExpressionDraftModule
 
     return ExpressionDraftModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+
+
+def _grounded_expression_judge_module(store: MemoryOSStore) -> Any:
+    from plugins.modules.expression.grounded_expression_judge import GroundedExpressionJudge
+
+    return GroundedExpressionJudge(store.roots.hermes_home, profile=store.roots.profile or "default")
 
 
 def _shadow_journal_command(args: argparse.Namespace, store: MemoryOSStore) -> int:

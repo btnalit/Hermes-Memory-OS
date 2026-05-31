@@ -36,6 +36,28 @@ FORBIDDEN_CASUAL_HEADINGS = {
     "Crystallized Review Candidates",
 }
 
+V7_GOVERNANCE_COMPONENTS = (
+    "promotion_matrix",
+    "live_guard_registry",
+    "eval_adapter_registry",
+    "derived_evidence_profile",
+    "confidence_router",
+    "judge_calibration",
+    "candidate_review",
+    "shadow_recall",
+    "provisional",
+    "cascade_routing_policy",
+    "migration_controller",
+    "symbolic_offloader",
+    "abstraction_distillation",
+    "retractable_label_miner",
+    "imagination_loop",
+    "confabulation_detector",
+    "crystallized_revalidator",
+    "grounded_expression_judge",
+)
+V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
+
 
 def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     anomalies: list[dict[str, Any]] = []
@@ -159,6 +181,351 @@ def _rh31_failure_attribution(summary: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return attribution
+
+
+def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
+    existing = snapshot.get("v7_governance") if isinstance(snapshot.get("v7_governance"), dict) else {}
+    existing_components = {
+        str(item.get("component") or ""): item
+        for item in existing.get("components", [])
+        if isinstance(item, dict) and item.get("component")
+    }
+    inferred_components = _infer_v7_components_from_artifacts(snapshot)
+    components: list[dict[str, Any]] = []
+    for component in V7_GOVERNANCE_COMPONENTS:
+        item = dict(inferred_components.get(component) or {})
+        for key, value in (existing_components.get(component) or {}).items():
+            if key == "pipeline_liveness" and item and str(value or "") in {"", "missing"}:
+                continue
+            if key == "task_installed" and item and value is False:
+                continue
+            item[key] = value
+        pipeline_liveness = str(item.get("pipeline_liveness") or "missing")
+        autonomy_level = str(item.get("autonomy_level") or "none")
+        task_installed = bool(item.get("task_installed")) or pipeline_liveness != "missing"
+        components.append(
+            {
+                "component": component,
+                "task_installed": task_installed,
+                "pipeline_liveness": pipeline_liveness,
+                "autonomy_level": autonomy_level,
+                "live_guard_registered": bool(item.get("live_guard_registered")),
+                "live_applied": bool(item.get("live_applied")),
+                "actual_send": bool(item.get("actual_send")),
+                "actual_execute": bool(item.get("actual_execute")),
+                "actual_identity_write": bool(item.get("actual_identity_write")),
+                "actual_crystallized_approval": bool(item.get("actual_crystallized_approval")),
+            }
+        )
+
+    memory_sources = snapshot.get("memory_sources") if isinstance(snapshot.get("memory_sources"), dict) else {}
+    memory_sources_feedback_volume_ready = bool(existing.get("memory_sources_feedback_volume_ready"))
+    try:
+        memory_sources_feedback_volume_ready = (
+            memory_sources_feedback_volume_ready or int(memory_sources.get("feedback_count") or 0) > 0
+        )
+    except (TypeError, ValueError):
+        pass
+    component_status = {item["component"]: item["pipeline_liveness"] for item in components}
+    return {
+        "schema_version": "memory-os.v7_governance_summary.v0",
+        "component_count": len(components),
+        "shadow_live_component_count": sum(
+            1 for item in components if item["pipeline_liveness"] == "live-shadow"
+        ),
+        "acting_component_count": sum(
+            1 for item in components if str(item["autonomy_level"]) in V7_ACTING_AUTONOMY_LEVELS
+        ),
+        "live_guard_registered_count": sum(1 for item in components if item["live_guard_registered"]),
+        "memory_sources_feedback_volume_ready": memory_sources_feedback_volume_ready,
+        "confidence_router_status": component_status["confidence_router"],
+        "judge_consistency_status": component_status["judge_calibration"],
+        "review_accuracy_status": component_status["candidate_review"],
+        "shadow_recall_status": component_status["shadow_recall"],
+        "deferral_accuracy_status": component_status["cascade_routing_policy"],
+        "migration_regression_status": component_status["migration_controller"],
+        "offload_integrity_status": component_status["symbolic_offloader"],
+        "distillation_fidelity_status": component_status["abstraction_distillation"],
+        "simulation_coverage_status": component_status["imagination_loop"],
+        "confabulation_detection_status": component_status["confabulation_detector"],
+        "crystallized_revalidator_status": component_status["crystallized_revalidator"],
+        "cross_check_anchoring_status": component_status["grounded_expression_judge"],
+        "component_status": component_status,
+        "components": components,
+    }
+
+
+def _infer_v7_components_from_artifacts(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    module_artifacts = snapshot.get("module_artifacts") if isinstance(snapshot.get("module_artifacts"), dict) else {}
+    inferred: dict[str, dict[str, Any]] = {}
+
+    evidence = module_artifacts.get("evidence") if isinstance(module_artifacts.get("evidence"), dict) else {}
+    if int(evidence.get("derived_evidence_profile_count") or 0) > 0:
+        inferred["derived_evidence_profile"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(evidence.get("feature_score_live_applied")) or bool(evidence.get("maturity_live_applied")),
+            "actual_execute": bool(evidence.get("actual_execute")),
+        }
+    meta = module_artifacts.get("v7_meta") if isinstance(module_artifacts.get("v7_meta"), dict) else {}
+    promotion_matrix = meta.get("promotion_matrix_component")
+    if isinstance(promotion_matrix, dict) and promotion_matrix.get("component") == "promotion_matrix":
+        inferred["promotion_matrix"] = dict(promotion_matrix)
+    elif meta.get("promotion_matrix_present") is True:
+        inferred["promotion_matrix"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": False,
+            "actual_execute": False,
+        }
+    if meta.get("live_guard_registry_present") is True:
+        inferred["live_guard_registry"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": False,
+            "actual_execute": False,
+        }
+    if meta.get("eval_adapter_registry_present") is True:
+        inferred["eval_adapter_registry"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": False,
+            "actual_execute": False,
+        }
+
+    imagination = (
+        module_artifacts.get("imagination_loop")
+        if isinstance(module_artifacts.get("imagination_loop"), dict)
+        else {}
+    )
+    if int(imagination.get("scenario_count") or 0) > 0:
+        inferred["imagination_loop"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(imagination.get("live_applied")) or bool(imagination.get("live_behavior_changed")),
+            "actual_send": bool(imagination.get("actual_send")),
+            "actual_execute": bool(imagination.get("actual_execute")),
+            "actual_identity_write": bool(imagination.get("actual_identity_write")),
+        }
+
+    confabulation = (
+        module_artifacts.get("confabulation_detector")
+        if isinstance(module_artifacts.get("confabulation_detector"), dict)
+        else {}
+    )
+    if str(confabulation.get("status") or "") == "ok" or confabulation.get("flag_count") is not None:
+        inferred["confabulation_detector"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(confabulation.get("score_live_applied")) or bool(confabulation.get("route_live_applied")),
+            "actual_send": bool(confabulation.get("actual_send")),
+            "actual_execute": bool(confabulation.get("actual_execute")),
+            "actual_identity_write": bool(confabulation.get("actual_identity_write")),
+        }
+    ground_truth = (
+        module_artifacts.get("ground_truth_miner")
+        if isinstance(module_artifacts.get("ground_truth_miner"), dict)
+        else {}
+    )
+    if str(ground_truth.get("status") or "") == "ok" or ground_truth.get("label_count") is not None:
+        inferred["retractable_label_miner"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(ground_truth.get("score_live_applied")) or bool(ground_truth.get("route_live_applied")),
+            "actual_send": bool(ground_truth.get("actual_send")),
+            "actual_execute": bool(ground_truth.get("actual_execute")),
+            "actual_identity_write": bool(ground_truth.get("actual_identity_write")),
+        }
+    confidence_router = (
+        module_artifacts.get("confidence_router")
+        if isinstance(module_artifacts.get("confidence_router"), dict)
+        else {}
+    )
+    if str(confidence_router.get("status") or "") == "ok" or confidence_router.get("route_count") is not None:
+        inferred["confidence_router"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(confidence_router.get("route_live_applied")) or bool(
+                confidence_router.get("score_live_applied")
+            ),
+            "actual_send": bool(confidence_router.get("actual_send")),
+            "actual_execute": bool(confidence_router.get("actual_execute")),
+            "actual_identity_write": bool(confidence_router.get("actual_identity_write")),
+        }
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="judge_calibration",
+            status_key="judge_calibration",
+            count_keys=("run_count",),
+            live_applied_keys=("calibration_live_applied",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="candidate_review",
+            status_key="candidate_review",
+            count_keys=("decision_count", "run_count"),
+            live_applied_keys=("candidate_review_live_applied",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="shadow_recall",
+            status_key="shadow_recall",
+            count_keys=("fingerprint_count", "run_count"),
+            live_applied_keys=("auto_discard_live_applied",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="provisional",
+            status_key="provisional",
+            count_keys=("record_count", "run_count"),
+            live_applied_keys=("auto_promote_live_applied",),
+            extra_boundary_keys=("actual_crystallized_approval",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="cascade_routing_policy",
+            status_key="cascade_routing_policy",
+            count_keys=("proposal_count",),
+            live_applied_keys=("route_strategy_live_applied",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="migration_controller",
+            status_key="migration_controller",
+            count_keys=("run_count",),
+            live_applied_keys=("migration_live_applied",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="symbolic_offloader",
+            status_key="symbolic_offloader",
+            count_keys=("report_count", "ref_count"),
+            live_applied_keys=("canonical_state_changed",),
+        )
+    )
+    inferred.update(
+        _infer_v7_shadow_module(
+            module_artifacts,
+            component="abstraction_distillation",
+            status_key="abstraction_distillation",
+            count_keys=("item_count",),
+            live_applied_keys=("distillation_live_applied",),
+        )
+    )
+    crystallized = (
+        module_artifacts.get("crystallized_revalidator")
+        if isinstance(module_artifacts.get("crystallized_revalidator"), dict)
+        else {}
+    )
+    if str(crystallized.get("status") or "") == "ok" or crystallized.get("flag_count") is not None:
+        inferred["crystallized_revalidator"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(crystallized.get("demotion_live_applied")),
+            "actual_send": bool(crystallized.get("actual_send")),
+            "actual_execute": bool(crystallized.get("actual_execute")),
+            "actual_identity_write": bool(crystallized.get("actual_identity_write")),
+            "actual_crystallized_approval": bool(crystallized.get("actual_crystallized_approval")),
+        }
+    grounded_expression = (
+        module_artifacts.get("grounded_expression_judge")
+        if isinstance(module_artifacts.get("grounded_expression_judge"), dict)
+        else {}
+    )
+    if int(grounded_expression.get("verdict_count") or 0) > 0:
+        inferred["grounded_expression_judge"] = {
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": bool(grounded_expression.get("policy_live_applied")) or bool(
+                grounded_expression.get("delivery_gated")
+            ),
+            "actual_send": bool(grounded_expression.get("actual_send")),
+            "actual_execute": bool(grounded_expression.get("actual_execute")),
+            "actual_identity_write": bool(grounded_expression.get("actual_identity_write")),
+        }
+    return inferred
+
+
+def _infer_v7_shadow_module(
+    module_artifacts: dict[str, Any],
+    *,
+    component: str,
+    status_key: str,
+    count_keys: tuple[str, ...],
+    live_applied_keys: tuple[str, ...],
+    extra_boundary_keys: tuple[str, ...] = (),
+) -> dict[str, dict[str, Any]]:
+    artifact = module_artifacts.get(status_key) if isinstance(module_artifacts.get(status_key), dict) else {}
+    has_count = any(int(artifact.get(key) or 0) > 0 for key in count_keys)
+    if str(artifact.get("status") or "") != "ok" and not has_count:
+        return {}
+    item = {
+        "task_installed": True,
+        "pipeline_liveness": "live-shadow",
+        "autonomy_level": "shadow",
+        "live_guard_registered": True,
+        "live_applied": any(bool(artifact.get(key)) for key in live_applied_keys),
+        "actual_send": bool(artifact.get("actual_send")),
+        "actual_execute": bool(artifact.get("actual_execute")),
+        "actual_identity_write": bool(artifact.get("actual_identity_write")),
+    }
+    for key in extra_boundary_keys:
+        item[key] = bool(artifact.get(key))
+    return {component: item}
+
+
+def summarize_l4_guard(snapshot: dict[str, Any]) -> dict[str, Any]:
+    config = snapshot.get("memory_os_config") if isinstance(snapshot.get("memory_os_config"), dict) else {}
+    l4 = config.get("l4") if isinstance(config.get("l4"), dict) else {}
+    v7_governance = summarize_v7_governance(snapshot)
+    evidence = (
+        snapshot.get("module_artifacts", {}).get("evidence", {})
+        if isinstance(snapshot.get("module_artifacts", {}), dict)
+        and isinstance(snapshot.get("module_artifacts", {}).get("evidence", {}), dict)
+        else {}
+    )
+    live_applied_finding_count = int(bool(evidence.get("feature_score_live_applied"))) + int(
+        bool(evidence.get("maturity_live_applied"))
+    )
+    return {
+        "schema_version": "memory-os.l4_guard_summary.v0",
+        "kill_switch_enabled": bool(l4.get("kill_switch_enabled")),
+        "registered_component_count": max(1, int(v7_governance.get("live_guard_registered_count") or 0)),
+        "live_applied_finding_count": live_applied_finding_count,
+    }
 
 
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1285,6 +1652,56 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    l4_guard = summarize_l4_guard(snapshot)
+    if int(l4_guard.get("registered_component_count") or 0) > 0:
+        passed.append({"code": "l4_guard_visible", "registered_component_count": l4_guard["registered_component_count"]})
+    if l4_guard.get("kill_switch_enabled") is True:
+        warn.append({"code": "l4_kill_switch_enabled"})
+
+    v7_governance = summarize_v7_governance(snapshot)
+    if v7_governance["shadow_live_component_count"]:
+        passed.append(
+            {
+                "code": "v7_shadow_live_components_visible",
+                "shadow_live_component_count": v7_governance["shadow_live_component_count"],
+            }
+        )
+    if v7_governance["acting_component_count"]:
+        passed.append(
+            {
+                "code": "v7_acting_components_visible",
+                "acting_component_count": v7_governance["acting_component_count"],
+            }
+        )
+    installed_components = [item for item in v7_governance["components"] if item["task_installed"]]
+    if installed_components and not v7_governance["memory_sources_feedback_volume_ready"]:
+        warn.append({"code": "v7_memory_sources_feedback_volume_pending"})
+    for item in installed_components:
+        acting = str(item["autonomy_level"]) in V7_ACTING_AUTONOMY_LEVELS
+        if item["pipeline_liveness"] != "live-shadow" and not acting:
+            warn.append(
+                {
+                    "code": "v7_installed_component_not_shadow_live",
+                    "component": item["component"],
+                    "pipeline_liveness": item["pipeline_liveness"],
+                }
+            )
+        if item["live_applied"] and not acting:
+            fail.append(
+                {
+                    "code": "v7_component_live_applied_without_acting_gate",
+                    "component": item["component"],
+                }
+            )
+        for flag in ("actual_send", "actual_execute", "actual_identity_write", "actual_crystallized_approval"):
+            if item[flag] and not acting:
+                fail.append(
+                    {
+                        "code": f"v7_component_{flag}_without_acting_gate",
+                        "component": item["component"],
+                    }
+                )
+
     status = "FAIL" if fail else "WARN" if warn else "PASS"
     return {"status": status, "pass": passed, "warn": warn, "fail": fail}
 
@@ -1418,6 +1835,8 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH31Eval={_rh31_summary(snapshot.get('rh31_eval') or {})}",
         f"- compaction={snapshot.get('compaction')}",
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
+        f"- L4Guard={summarize_l4_guard(snapshot)}",
+        f"- V7Governance={summarize_v7_governance(snapshot)}",
         f"- disk={snapshot.get('disk_du')}",
         "",
         f"PASS: {[item.get('code') for item in classification['pass']]}",
@@ -1431,6 +1850,8 @@ def collect_snapshot(*, host: str = "hermes-media", previous: dict[str, Any] | N
     raw = _ssh_json(host, _remote_probe_script())
     raw["rh31_eval"] = compact_rh31_eval_summary(raw.get("rh31_eval") or {})
     raw["deltas"] = compute_deltas(raw, previous)
+    raw["l4_guard"] = summarize_l4_guard(raw)
+    raw["v7_governance"] = summarize_v7_governance(raw)
     raw["classification"] = classify_snapshot(raw)
     return raw
 
@@ -1931,10 +2352,14 @@ def _ssh_json(host: str, script: str) -> dict[str, Any]:
 
 def _remote_probe_script() -> str:
     return r'''
-import json, os, re, subprocess
+import json, os, re, subprocess, sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+
+for _path in ("/root/.hermes/memory-os/runtime/python", "/root/.hermes/plugins/memory_os"):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 def run(cmd, env=None):
     try:
@@ -2345,14 +2770,28 @@ def module_artifact_summary():
     household = status("household_digest")
     wandering = status("wandering_mind")
     evidence = status("evidence_scoring")
+    imagination_loop = status("imagination_loop")
+    confabulation_detector = status("confabulation_detector")
     proposal = status("proposal_queue")
     self_evolution = status("self_evolution")
     governance = status("governance_feedback")
     left_brain_pipeline = status("left_brain_pipeline_check")
+    ground_truth_miner = status("ground_truth_miner")
+    confidence_router = status("confidence_router")
+    judge_calibration = status("judge_calibration")
+    candidate_review = status("candidate_review")
+    shadow_recall = status("shadow_recall")
+    provisional = status("provisional")
+    cascade_routing_policy = status("cascade_routing_policy")
+    migration_controller = status("migration_controller")
+    symbolic_offloader = status("symbolic_offloader")
+    abstraction_distillation = status("abstraction_distillation")
+    crystallized_revalidator = status("crystallized_revalidator")
     deep_reflection = status("deep_reflection")
     ops_gate = status("ops_gate")
     speak_gate = status("speak_gate")
     expression_draft = status("expression_draft")
+    grounded_expression_judge = status("grounded_expression_judge")
     mailbox = status("mailbox")
     expression_feedback = _read_jsonl("/root/.hermes/memory-os/system/expression_feedback_ledger.jsonl")
     right_brain_expression_requests = _read_jsonl(
@@ -2364,6 +2803,23 @@ def module_artifact_summary():
     right_brain_expression_policy_applies = _read_jsonl(
         "/root/.hermes/system-modules/right_brain_expression_adapter/policy_applies.jsonl"
     )
+    repo_roots = (
+        "/root/.hermes/plugins/memory_os",
+        "/root/.hermes/memory-os/runtime/python",
+    )
+    def repo_file_exists(*parts):
+        return any(os.path.exists(os.path.join(root, *parts)) for root in repo_roots)
+
+    def promotion_matrix_component():
+        try:
+            from plugins.memory.memory_os.v7_promotion import promotion_matrix_component as _component
+            component = _component()
+            if isinstance(component, dict) and component.get("component") == "promotion_matrix":
+                return component
+        except Exception:
+            pass
+        return {}
+
     proposal_queue_legacy_template_cleanup_applies = _read_jsonl(
         "/root/.hermes/system-modules/proposal_queue/legacy_template_cleanup_applies.jsonl"
     )
@@ -2441,6 +2897,7 @@ def module_artifact_summary():
       "evidence": {
         "evidence_count": evidence.get("evidence_count"),
         "score_count": evidence.get("score_count"),
+        "derived_evidence_profile_count": evidence.get("derived_evidence_profile_count"),
         "score_mode": evidence.get("score_mode"),
         "feature_score_mode": evidence.get("feature_score_mode"),
         "feature_score_count": evidence.get("feature_score_count"),
@@ -2464,6 +2921,30 @@ def module_artifact_summary():
         "skipped_run_count": evidence.get("skipped_run_count"),
         "latest_cadence_skipped": evidence.get("latest_cadence_skipped"),
         "latest_skip_reason": evidence.get("latest_skip_reason"),
+      },
+      "v7_meta": {
+        "promotion_matrix_component": promotion_matrix_component(),
+        "live_guard_registry_present": repo_file_exists("plugins", "modules", "governance", "live_guard.py"),
+        "eval_adapter_registry_present": repo_file_exists("eval", "memory_os", "runner", "registry.py"),
+      },
+      "imagination_loop": {
+        "status": imagination_loop.get("status"),
+        "scenario_count": imagination_loop.get("scenario_count"),
+        "simulated_count": imagination_loop.get("simulated_count"),
+        "actual_send": imagination_loop.get("actual_send"),
+        "actual_execute": imagination_loop.get("actual_execute"),
+        "actual_identity_write": imagination_loop.get("actual_identity_write"),
+        "live_behavior_changed": imagination_loop.get("live_behavior_changed"),
+      },
+      "confabulation_detector": {
+        "status": confabulation_detector.get("status"),
+        "flag_count": confabulation_detector.get("flag_count"),
+        "run_count": confabulation_detector.get("run_count"),
+        "actual_send": confabulation_detector.get("actual_send"),
+        "actual_execute": confabulation_detector.get("actual_execute"),
+        "actual_identity_write": confabulation_detector.get("actual_identity_write"),
+        "score_live_applied": confabulation_detector.get("score_live_applied"),
+        "route_live_applied": confabulation_detector.get("route_live_applied"),
       },
       "proposal_queue": {
         "candidate_count": proposal.get("candidate_count"),
@@ -2531,6 +3012,102 @@ def module_artifact_summary():
         "agenda_trace_missing_count": left_brain_pipeline.get("agenda_trace_missing_count"),
         "actual_execute": left_brain_pipeline.get("actual_execute"),
       },
+      "ground_truth_miner": {
+        "status": ground_truth_miner.get("status"),
+        "label_count": ground_truth_miner.get("label_count"),
+        "run_count": ground_truth_miner.get("run_count"),
+        "active_label_count": ground_truth_miner.get("active_label_count"),
+        "retracted_label_count": ground_truth_miner.get("retracted_label_count"),
+        "actual_send": ground_truth_miner.get("actual_send"),
+        "actual_execute": ground_truth_miner.get("actual_execute"),
+        "actual_identity_write": ground_truth_miner.get("actual_identity_write"),
+        "score_live_applied": ground_truth_miner.get("score_live_applied"),
+        "route_live_applied": ground_truth_miner.get("route_live_applied"),
+      },
+      "confidence_router": {
+        "status": confidence_router.get("status"),
+        "route_count": confidence_router.get("route_count"),
+        "run_count": confidence_router.get("run_count"),
+        "band_distribution": confidence_router.get("band_distribution"),
+        "actual_send": confidence_router.get("actual_send"),
+        "actual_execute": confidence_router.get("actual_execute"),
+        "actual_identity_write": confidence_router.get("actual_identity_write"),
+        "score_live_applied": confidence_router.get("score_live_applied"),
+        "route_live_applied": confidence_router.get("route_live_applied"),
+      },
+      "judge_calibration": {
+        "status": judge_calibration.get("status"),
+        "run_count": judge_calibration.get("run_count"),
+        "calibration_live_applied": judge_calibration.get("calibration_live_applied"),
+        "actual_send": judge_calibration.get("actual_send"),
+        "actual_execute": judge_calibration.get("actual_execute"),
+      },
+      "candidate_review": {
+        "status": candidate_review.get("status"),
+        "decision_count": candidate_review.get("decision_count"),
+        "run_count": candidate_review.get("run_count"),
+        "candidate_review_live_applied": candidate_review.get("candidate_review_live_applied"),
+        "actual_send": candidate_review.get("actual_send"),
+        "actual_execute": candidate_review.get("actual_execute"),
+      },
+      "shadow_recall": {
+        "status": shadow_recall.get("status"),
+        "fingerprint_count": shadow_recall.get("fingerprint_count"),
+        "run_count": shadow_recall.get("run_count"),
+        "auto_discard_live_applied": shadow_recall.get("auto_discard_live_applied"),
+        "actual_send": shadow_recall.get("actual_send"),
+        "actual_execute": shadow_recall.get("actual_execute"),
+      },
+      "provisional": {
+        "status": provisional.get("status"),
+        "record_count": provisional.get("record_count"),
+        "run_count": provisional.get("run_count"),
+        "auto_promote_live_applied": provisional.get("auto_promote_live_applied"),
+        "actual_send": provisional.get("actual_send"),
+        "actual_execute": provisional.get("actual_execute"),
+        "actual_crystallized_approval": provisional.get("actual_crystallized_approval"),
+      },
+      "cascade_routing_policy": {
+        "status": cascade_routing_policy.get("status"),
+        "proposal_count": cascade_routing_policy.get("proposal_count"),
+        "route_strategy_live_applied": cascade_routing_policy.get("route_strategy_live_applied"),
+        "actual_send": cascade_routing_policy.get("actual_send"),
+        "actual_execute": cascade_routing_policy.get("actual_execute"),
+      },
+      "migration_controller": {
+        "status": migration_controller.get("status"),
+        "run_count": migration_controller.get("run_count"),
+        "last_regime": migration_controller.get("last_regime"),
+        "migration_live_applied": migration_controller.get("migration_live_applied"),
+        "actual_send": migration_controller.get("actual_send"),
+        "actual_execute": migration_controller.get("actual_execute"),
+      },
+      "symbolic_offloader": {
+        "status": symbolic_offloader.get("status"),
+        "report_count": symbolic_offloader.get("report_count"),
+        "ref_count": symbolic_offloader.get("ref_count"),
+        "canonical_state_changed": symbolic_offloader.get("canonical_state_changed"),
+        "actual_send": symbolic_offloader.get("actual_send"),
+        "actual_execute": symbolic_offloader.get("actual_execute"),
+      },
+      "abstraction_distillation": {
+        "status": abstraction_distillation.get("status"),
+        "item_count": abstraction_distillation.get("item_count"),
+        "distillation_live_applied": abstraction_distillation.get("distillation_live_applied"),
+        "actual_send": abstraction_distillation.get("actual_send"),
+        "actual_execute": abstraction_distillation.get("actual_execute"),
+      },
+      "crystallized_revalidator": {
+        "status": crystallized_revalidator.get("status"),
+        "flag_count": crystallized_revalidator.get("flag_count"),
+        "run_count": crystallized_revalidator.get("run_count"),
+        "would_demote_count": crystallized_revalidator.get("would_demote_count"),
+        "actual_send": crystallized_revalidator.get("actual_send"),
+        "actual_execute": crystallized_revalidator.get("actual_execute"),
+        "actual_identity_write": crystallized_revalidator.get("actual_identity_write"),
+        "actual_crystallized_approval": crystallized_revalidator.get("actual_crystallized_approval"),
+        "demotion_live_applied": crystallized_revalidator.get("demotion_live_applied"),
+      },
       "deep_reflection": {
         "report_count": deep_reflection.get("report_count"),
         "analysis_artifact_count": deep_reflection.get("analysis_artifact_count"),
@@ -2565,6 +3142,17 @@ def module_artifact_summary():
         "silent_count": expression_draft.get("silent_count"),
         "draft_error_count": expression_draft.get("draft_error_count"),
         "raw_body_included": expression_draft.get("body_included"),
+      },
+      "grounded_expression_judge": {
+        "status": grounded_expression_judge.get("status"),
+        "verdict_count": grounded_expression_judge.get("verdict_count"),
+        "unresolvable_count": grounded_expression_judge.get("unresolvable_count"),
+        "left_map_substrate_warning_count": grounded_expression_judge.get("left_map_substrate_warning_count"),
+        "actual_send": grounded_expression_judge.get("actual_send"),
+        "actual_execute": grounded_expression_judge.get("actual_execute"),
+        "actual_identity_write": grounded_expression_judge.get("actual_identity_write"),
+        "delivery_gated": grounded_expression_judge.get("delivery_gated"),
+        "policy_live_applied": grounded_expression_judge.get("policy_live_applied"),
       },
       "expression_feedback": {
         "feedback_count": len(expression_feedback),
@@ -3521,6 +4109,7 @@ print(json.dumps({
   "session_mirror": session_mirror_summary(),
   "audit_actions": audit_action_stats(),
   "working_status": working_status(),
+  "memory_os_config": {"l4": cfg.get("l4", {})},
   "context_router": cfg.get("context_router", {}),
   "low_clue_recall_config": cfg.get("low_clue_recall", {}),
   "low_clue_recall": low_clue_recall_probe(),
