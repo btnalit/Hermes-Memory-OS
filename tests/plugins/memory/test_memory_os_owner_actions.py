@@ -17,6 +17,7 @@ from plugins.memory.memory_os.memory_sources import (
 from plugins.memory.memory_os.owner_actions import (
     approved_proposal_followups_report,
     apply_owner_action,
+    approved_proposal_execution_tickets_path,
     deliver_owner_review_digest_once,
     expression_feedback_ledger_path,
     owner_actions_path,
@@ -388,9 +389,10 @@ def test_approved_proposal_followup_routes_to_ops_gate_without_execution(tmp_pat
     assert followups["pending_followup_count"] == 0
     assert followups["open_followup_count"] == 1
     assert followups["awaiting_explicit_execution_count"] == 1
+    assert followups["unsupported_requires_execution_ticket_count"] == 1
     assert followups["execution_ticket_count"] == 0
     assert followups["actual_execute"] is False
-    assert followups["items"][0]["followup_state"] == "ops_gate_reviewed_awaiting_explicit_execution"
+    assert followups["items"][0]["followup_state"] == "unsupported_requires_execution_ticket"
 
     duplicate = route_approved_proposal_followup_to_ops_gate(
         store,
@@ -606,7 +608,7 @@ def test_proposal_followup_surface_exposes_tokenized_explicit_apply(tmp_path):
     item = surface["proposal_followups"]["items"][0]
     apply_token = item["action_tokens"]["apply_proposal"]
 
-    assert item["followup_state"] == "ops_gate_reviewed_awaiting_explicit_execution"
+    assert item["followup_state"] == "supported_apply_ready"
     assert item["owner_utterance_examples"] == [f"memory apply {apply_token}"]
     assert item["agent_tool_calls"] == [
         {
@@ -937,6 +939,94 @@ def test_generic_self_evolution_proposal_still_cannot_be_execution_applied(tmp_p
     assert result["apply_kind"] == ""
     assert result["actual_execute"] is False
     assert result["execution_ticket_created"] is False
+
+
+def test_unsupported_approved_proposals_create_typed_execution_tickets_without_execution(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    specs = [
+        (
+            "deep_reflection_self_evolution",
+            "Review reflection continuity behavior",
+            "event:evt_gov_1",
+        ),
+        (
+            "weekly_consolidation",
+            "Weekly consolidation: foreground_conversation_turn",
+            "event:evt_weekly_1",
+        ),
+        (
+            "proposal",
+            "Fresh deployment proposal queue validation",
+            "event:evt_deploy_1",
+        ),
+    ]
+    proposal_ids = []
+    for kind, title, source_ref in specs:
+        candidate = proposal_queue.create_candidate(
+            store=store,
+            title=title,
+            body="PRIVATE RAW BODY SHOULD NOT LEAK",
+            source_refs=[source_ref],
+            kind=kind,
+        )
+        proposal_ids.append(candidate["candidate_id"])
+        apply_owner_action(
+            store,
+            action_type="approve_proposal",
+            target=f"proposal:{candidate['candidate_id']}",
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+        route_approved_proposal_followup_to_ops_gate(
+            store,
+            proposal_id=candidate["candidate_id"],
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+
+    results = [
+        apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=proposal_id,
+            owner_id="owner",
+            channel="cli",
+            owner_approved=True,
+            apply=True,
+            evidence_refs=["commit:73b8b33", "monitor:FAIL=[]"],
+            evidence_summary="P0 fresh HEAD archive and monitor closure evidence.",
+        )
+        for proposal_id in proposal_ids
+    ]
+    tickets = _jsonl(approved_proposal_execution_tickets_path(store.roots))
+    report = approved_proposal_followups_report(store)
+    by_title = {item["title"]: item for item in report["items"]}
+
+    assert [result["status"] for result in results] == ["ticket_created", "ticket_created", "evidence_resolved"]
+    assert all(result["execution_ticket_created"] is True for result in results)
+    assert all(result["actual_execute"] is False for result in results)
+    assert all(result["actual_send"] is False for result in results)
+    assert len(tickets) == 3
+    assert {ticket["proposal_id"] for ticket in tickets} == set(proposal_ids)
+    assert all(ticket["raw_body_included"] is False for ticket in tickets)
+    assert "PRIVATE RAW BODY" not in json.dumps(tickets, ensure_ascii=False)
+    assert report["execution_ticket_count"] == 3
+    assert report["ticket_created_count"] == 3
+    assert report["unsupported_requires_execution_ticket_count"] == 0
+    assert report["supported_apply_ready_count"] == 0
+    assert report["awaiting_explicit_execution_count"] == 0
+    assert report["awaiting_typed_execution_plan_count"] == 2
+    assert report["evidence_resolved_count"] == 1
+    assert report["open_followup_count"] == 2
+    assert by_title["Review reflection continuity behavior"]["followup_state"] == "awaiting_typed_execution_plan"
+    assert by_title["Weekly consolidation: foreground_conversation_turn"]["followup_state"] == "awaiting_typed_execution_plan"
+    assert by_title["Fresh deployment proposal queue validation"]["followup_state"] == "evidence_resolved"
+    assert by_title["Fresh deployment proposal queue validation"]["evidence_refs"] == [
+        "commit:73b8b33",
+        "monitor:FAIL=[]",
+    ]
 
 
 def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):

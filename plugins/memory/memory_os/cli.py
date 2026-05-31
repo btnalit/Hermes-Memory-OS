@@ -448,6 +448,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_followups.add_argument("--all-pending", action="store_true")
     review_followups.add_argument("--execution-apply", action="store_true")
     review_followups.add_argument("--owner-approved", action="store_true")
+    review_followups.add_argument("--evidence-ref", action="append", default=[])
+    review_followups.add_argument("--evidence-summary", default="")
     review_followups.add_argument("--owner", default="owner")
     review_followups.add_argument("--channel", default="cli")
     review_followups.add_argument("--apply", action="store_true")
@@ -980,6 +982,8 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
                 channel=str(args.channel),
                 owner_approved=bool(args.owner_approved),
                 apply=bool(args.apply),
+                evidence_refs=list(getattr(args, "evidence_ref", []) or []),
+                evidence_summary=str(getattr(args, "evidence_summary", "") or ""),
             )
             print(
                 json.dumps(
@@ -989,7 +993,7 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
                     sort_keys=True,
                 )
             )
-            return 0 if report.get("status") in {"ready", "applied", "duplicate_ignored"} else 1
+            return 0 if report.get("status") in {"ready", "applied", "duplicate_ignored", "ticket_created", "evidence_resolved"} else 1
         if bool(getattr(args, "ops_gate", False)):
             if bool(getattr(args, "all_pending", False)):
                 report = route_pending_approved_proposal_followups_to_ops_gate(

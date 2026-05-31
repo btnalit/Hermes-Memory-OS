@@ -929,8 +929,18 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     snapshot["owner_review_proposal_followups"]["items"] = [{"execution_ticket_created": True}]
     classification = classify_snapshot(snapshot)
 
-    assert classification["status"] == "FAIL"
-    assert any(item["code"] == "owner_review_proposal_followups_item_execution_ticket_created" for item in classification["fail"])
+    assert not any(item["code"] == "owner_review_proposal_followups_item_execution_ticket_created" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_proposal_followups_ok" for item in classification["pass"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_followups"]["execution_ticket_count"] = 4
+    snapshot["owner_review_proposal_followups"]["ticket_created_count"] = 4
+    snapshot["owner_review_proposal_followups"]["awaiting_typed_execution_plan_count"] = 3
+    snapshot["owner_review_proposal_followups"]["evidence_resolved_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert not classification["fail"]
+    assert any(item["code"] == "owner_review_proposal_followups_execution_tickets_visible" for item in classification["pass"])
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_proposal_followups"]["pending_followup_count"] = 1

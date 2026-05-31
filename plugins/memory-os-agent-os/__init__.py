@@ -252,6 +252,8 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_followups.add_argument("--all-pending", action="store_true")
     review_followups.add_argument("--execution-apply", action="store_true")
     review_followups.add_argument("--owner-approved", action="store_true")
+    review_followups.add_argument("--evidence-ref", action="append", default=[])
+    review_followups.add_argument("--evidence-summary", default="")
     review_followups.add_argument("--owner", default="owner")
     review_followups.add_argument("--channel", default="cli")
     review_followups.add_argument("--apply", action="store_true")

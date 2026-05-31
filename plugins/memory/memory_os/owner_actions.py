@@ -48,6 +48,7 @@ APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_follow
 APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate.v0"
 APPROVED_PROPOSAL_OPS_GATE_BATCH_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate_batch.v0"
 APPROVED_PROPOSAL_EXECUTION_APPLY_SCHEMA_VERSION = "memory-os.approved_proposal_execution_apply.v0"
+APPROVED_PROPOSAL_EXECUTION_TICKET_SCHEMA_VERSION = "memory-os.approved_proposal_execution_ticket.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 EXPRESSION_FEEDBACK_SCHEMA_VERSION = "memory-os.expression_feedback.v0"
@@ -108,6 +109,10 @@ def proposal_action_ledger_path(roots: MemoryOSRoots) -> Path:
 
 def speak_permission_tickets_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "speak_permission_tickets.jsonl"
+
+
+def approved_proposal_execution_tickets_path(roots: MemoryOSRoots) -> Path:
+    return roots.memory_os_root / "system" / "approved_proposal_execution_tickets.jsonl"
 
 
 def expression_feedback_ledger_path(roots: MemoryOSRoots) -> Path:
@@ -222,6 +227,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     policy_applies = _policy_applies_by_proposal(store)
     memory_sources_policy_applies = _memory_sources_policy_applies_by_proposal(store)
     legacy_cleanup_applies = _legacy_template_cleanup_applies_by_proposal(store)
+    execution_tickets = _approved_proposal_execution_tickets_by_proposal(store)
     items: list[dict[str, Any]] = []
     for proposal in proposals:
         proposal_id = str(proposal.get("candidate_id") or "")
@@ -232,14 +238,24 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         policy_apply = policy_applies.get(proposal_id, {})
         memory_sources_policy_apply = memory_sources_policy_applies.get(proposal_id, {})
         legacy_cleanup_apply = legacy_cleanup_applies.get(proposal_id, {})
+        execution_ticket = execution_tickets.get(proposal_id, {})
+        apply_kind = _explicit_proposal_apply_kind(proposal)
+        ticket_kind = _unsupported_proposal_execution_ticket_kind(proposal)
         if policy_apply:
             followup_state = "applied_expression_policy"
         elif memory_sources_policy_apply:
             followup_state = "applied_memory_sources_policy"
         elif legacy_cleanup_apply:
             followup_state = "applied_legacy_template_cleanup"
+        elif execution_ticket:
+            followup_state = str(execution_ticket.get("ticket_state") or "awaiting_typed_execution_plan")
         elif ops_gate_review:
-            followup_state = "ops_gate_reviewed_awaiting_explicit_execution"
+            if apply_kind:
+                followup_state = "supported_apply_ready"
+            elif ticket_kind:
+                followup_state = "unsupported_requires_execution_ticket"
+            else:
+                followup_state = "unsupported_apply_kind"
         else:
             followup_state = "awaiting_ops_gate_review"
         approved_at = str(approval.get("created_at") or proposal.get("updated_at") or "")
@@ -261,14 +277,22 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "policy_apply_id": str(policy_apply.get("apply_id") or ""),
                 "policy_version": int(policy_apply.get("policy_version") or 0),
                 "policy_written": bool(policy_apply),
+                "apply_kind": apply_kind,
                 "memory_sources_policy_apply_id": str(memory_sources_policy_apply.get("apply_id") or ""),
                 "memory_sources_policy_version": int(memory_sources_policy_apply.get("policy_version") or 0),
                 "memory_sources_policy_written": bool(memory_sources_policy_apply),
                 "legacy_template_cleanup_apply_id": str(legacy_cleanup_apply.get("apply_id") or ""),
                 "legacy_template_closed_count": int(legacy_cleanup_apply.get("closed_count") or 0),
+                "execution_ticket_id": str(execution_ticket.get("ticket_id") or ""),
+                "execution_ticket_type": str(execution_ticket.get("ticket_type") or ticket_kind),
+                "execution_ticket_state": str(execution_ticket.get("ticket_state") or ""),
+                "evidence_refs": _safe_list(execution_ticket.get("evidence_refs")),
+                "evidence_required": _safe_list(execution_ticket.get("evidence_required")),
+                "rollback": _bounded_text(str(execution_ticket.get("rollback") or ""), 260),
+                "suggested_path": _bounded_text(str(execution_ticket.get("suggested_path") or ""), 260),
                 "safe_source_ids": _safe_list(proposal.get("source_refs")),
-                "next_step": "inspect or route through OpsGate; actual execution requires a separate explicit apply command",
-                "execution_ticket_created": False,
+                "next_step": _proposal_followup_next_step(followup_state),
+                "execution_ticket_created": bool(execution_ticket),
                 "actual_execute": False,
                 "raw_body_included": False,
             }
@@ -277,9 +301,19 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     bounded_limit = max(int(limit), 0)
     shown = items[:bounded_limit]
     awaiting_ops_gate_count = sum(1 for item in items if item.get("followup_state") == "awaiting_ops_gate_review")
-    ops_gate_reviewed_count = sum(
-        1 for item in items if item.get("followup_state") == "ops_gate_reviewed_awaiting_explicit_execution"
+    supported_apply_ready_count = sum(1 for item in items if item.get("followup_state") == "supported_apply_ready")
+    unsupported_requires_execution_ticket_count = sum(
+        1 for item in items if item.get("followup_state") == "unsupported_requires_execution_ticket"
     )
+    unsupported_apply_kind_count = sum(1 for item in items if item.get("followup_state") == "unsupported_apply_kind")
+    ops_gate_reviewed_count = (
+        supported_apply_ready_count + unsupported_requires_execution_ticket_count + unsupported_apply_kind_count
+    )
+    ticket_created_count = sum(1 for item in items if item.get("execution_ticket_created") is True)
+    awaiting_typed_execution_plan_count = sum(
+        1 for item in items if item.get("followup_state") == "awaiting_typed_execution_plan"
+    )
+    evidence_resolved_count = sum(1 for item in items if item.get("followup_state") == "evidence_resolved")
     policy_apply_count = sum(1 for item in items if item.get("followup_state") == "applied_expression_policy")
     memory_sources_policy_apply_count = sum(
         1 for item in items if item.get("followup_state") == "applied_memory_sources_policy"
@@ -297,17 +331,28 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
             1
             for item in items
             if item.get("followup_state")
-            not in {"applied_expression_policy", "applied_memory_sources_policy", "applied_legacy_template_cleanup"}
+            not in {
+                "applied_expression_policy",
+                "applied_memory_sources_policy",
+                "applied_legacy_template_cleanup",
+                "evidence_resolved",
+            }
         ),
         "shown_count": len(shown),
         "overflow_count": max(len(items) - bounded_limit, 0),
         "awaiting_ops_gate_count": awaiting_ops_gate_count,
         "ops_gate_reviewed_count": ops_gate_reviewed_count,
-        "awaiting_explicit_execution_count": ops_gate_reviewed_count,
+        "supported_apply_ready_count": supported_apply_ready_count,
+        "unsupported_requires_execution_ticket_count": unsupported_requires_execution_ticket_count,
+        "unsupported_apply_kind_count": unsupported_apply_kind_count,
+        "awaiting_explicit_execution_count": supported_apply_ready_count + unsupported_requires_execution_ticket_count,
+        "ticket_created_count": ticket_created_count,
+        "awaiting_typed_execution_plan_count": awaiting_typed_execution_plan_count,
+        "evidence_resolved_count": evidence_resolved_count,
         "policy_apply_count": policy_apply_count,
         "memory_sources_policy_apply_count": memory_sources_policy_apply_count,
         "legacy_template_cleanup_apply_count": legacy_cleanup_apply_count,
-        "execution_ticket_count": 0,
+        "execution_ticket_count": ticket_created_count,
         "actual_execute": False,
         "raw_body_included": False,
         "boundary": {
@@ -331,7 +376,13 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "overflow_count": report["overflow_count"],
         "awaiting_ops_gate_count": report["awaiting_ops_gate_count"],
         "ops_gate_reviewed_count": report["ops_gate_reviewed_count"],
+        "supported_apply_ready_count": report["supported_apply_ready_count"],
+        "unsupported_requires_execution_ticket_count": report["unsupported_requires_execution_ticket_count"],
+        "unsupported_apply_kind_count": report["unsupported_apply_kind_count"],
         "awaiting_explicit_execution_count": report["awaiting_explicit_execution_count"],
+        "ticket_created_count": report["ticket_created_count"],
+        "awaiting_typed_execution_plan_count": report["awaiting_typed_execution_plan_count"],
+        "evidence_resolved_count": report["evidence_resolved_count"],
         "policy_apply_count": report["policy_apply_count"],
         "memory_sources_policy_apply_count": report["memory_sources_policy_apply_count"],
         "legacy_template_cleanup_apply_count": report["legacy_template_cleanup_apply_count"],
@@ -604,14 +655,17 @@ def apply_approved_proposal_execution_decision(
     channel: str = "cli",
     owner_approved: bool = False,
     apply: bool = False,
+    evidence_refs: list[str] | None = None,
+    evidence_summary: str = "",
 ) -> dict[str, Any]:
     """Apply an owner-approved proposal after OpsGate review.
 
     This is the explicit apply step after ``approved_for_proposal`` and
-    OpsGate report-only review. v0 supports only concrete bounded policy
-    proposal kinds and writes local policy files consumed by Memory-OS runtime
-    surfaces. It does not run shell commands, send messages, or create
-    external execution tickets.
+    OpsGate report-only review. Bounded policy proposal kinds write local
+    policy files consumed by Memory-OS runtime surfaces. Unsupported but
+    recognized kinds create typed internal execution-plan tickets instead of
+    running a generic executor. This does not run shell commands or send
+    messages.
     """
 
     proposal = _find_proposal(store, proposal_id)
@@ -635,6 +689,47 @@ def apply_approved_proposal_execution_decision(
         )
     apply_kind = _explicit_proposal_apply_kind(proposal)
     if apply_kind not in {"expression_policy", "memory_sources_policy", "proposal_queue_legacy_template_cleanup"}:
+        ticket_kind = _unsupported_proposal_execution_ticket_kind(proposal)
+        if ticket_kind:
+            if apply and not owner_approved:
+                return _approved_proposal_execution_apply_error(
+                    store,
+                    proposal_id=proposal_id,
+                    owner_id=owner_id,
+                    channel=channel,
+                    reason="owner_explicit_apply_required",
+                    apply=apply,
+                )
+            ops_gate_review = _ops_gate_reviews_by_proposal(store).get(proposal_id, {})
+            if not ops_gate_review:
+                return _approved_proposal_execution_apply_error(
+                    store,
+                    proposal_id=proposal_id,
+                    owner_id=owner_id,
+                    channel=channel,
+                    reason="missing_ops_gate_review",
+                    apply=apply,
+                )
+            if str(ops_gate_review.get("decision") or "") != "would_allow":
+                return _approved_proposal_execution_apply_error(
+                    store,
+                    proposal_id=proposal_id,
+                    owner_id=owner_id,
+                    channel=channel,
+                    reason="ops_gate_not_allowing",
+                    apply=apply,
+                )
+            return _approved_proposal_execution_ticket_result(
+                store,
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                ticket_kind=ticket_kind,
+                ops_gate_review=ops_gate_review,
+                evidence_refs=evidence_refs or [],
+                evidence_summary=evidence_summary,
+            )
         return _approved_proposal_execution_apply_error(
             store,
             proposal_id=proposal_id,
@@ -2454,7 +2549,7 @@ def _proposal_apply_review_items(store: MemoryOSStore, closed: set[str]) -> list
         proposal_id = str(followup.get("proposal_id") or "")
         if not proposal_id:
             continue
-        if str(followup.get("followup_state") or "") != "ops_gate_reviewed_awaiting_explicit_execution":
+        if str(followup.get("followup_state") or "") != "supported_apply_ready":
             continue
         if not (followup.get("action_tokens") or {}).get("apply_proposal"):
             continue
@@ -3309,7 +3404,7 @@ def _attach_proposal_followup_apply_actions(report: dict[str, Any]) -> None:
     for item in items:
         if not isinstance(item, dict):
             continue
-        if str(item.get("followup_state") or "") != "ops_gate_reviewed_awaiting_explicit_execution":
+        if str(item.get("followup_state") or "") != "supported_apply_ready":
             continue
         if str(item.get("ops_gate_decision") or "") != "would_allow":
             continue
@@ -3885,6 +3980,99 @@ def _explicit_proposal_apply_kind(proposal: dict[str, Any]) -> str:
     return ""
 
 
+def _unsupported_proposal_execution_ticket_kind(proposal: dict[str, Any]) -> str:
+    kind = str(proposal.get("kind") or "").strip().lower()
+    title = str(proposal.get("title") or "").strip().lower()
+    if kind == "deep_reflection_self_evolution":
+        return "deep_reflection_policy_plan"
+    if kind == "weekly_consolidation":
+        return "weekly_consolidation_evidence"
+    if kind == "proposal" and "fresh deployment proposal queue validation" in title:
+        return "validation_evidence"
+    if kind == "proposal":
+        return "typed_execution_plan_required"
+    return ""
+
+
+def _proposal_followup_next_step(followup_state: str) -> str:
+    if followup_state == "supported_apply_ready":
+        return "owner can explicitly apply this bounded policy/projection after OpsGate would_allow"
+    if followup_state == "unsupported_requires_execution_ticket":
+        return "create a typed execution ticket; do not run a generic apply"
+    if followup_state == "awaiting_typed_execution_plan":
+        return "implement or review the typed adapter/evidence path named by the execution ticket"
+    if followup_state == "evidence_resolved":
+        return "closed by linked validation evidence; no runtime execution required"
+    if followup_state == "unsupported_apply_kind":
+        return "manual decomposition required; no supported apply or ticket adapter exists"
+    if followup_state == "awaiting_ops_gate_review":
+        return "route through OpsGate report-only before any explicit owner decision"
+    return "inspect bounded follow-up state"
+
+
+def _approved_proposal_execution_ticket_result(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    apply: bool,
+    ticket_kind: str,
+    ops_gate_review: dict[str, Any],
+    evidence_refs: list[str],
+    evidence_summary: str,
+) -> dict[str, Any]:
+    existing = _approved_proposal_execution_tickets_by_proposal(store).get(str(proposal.get("candidate_id") or ""), {})
+    if apply and existing:
+        return _approved_proposal_execution_ticket_apply_result(
+            store,
+            status="duplicate_ignored",
+            proposal=proposal,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            ticket_kind=ticket_kind,
+            ops_gate_review=ops_gate_review,
+            ticket=existing,
+        )
+    ticket: dict[str, Any] = {}
+    if apply:
+        ticket = _write_approved_proposal_execution_ticket(
+            store,
+            proposal=proposal,
+            owner_id=owner_id,
+            channel=channel,
+            ticket_kind=ticket_kind,
+            ops_gate_review=ops_gate_review,
+            evidence_refs=evidence_refs,
+            evidence_summary=evidence_summary,
+        )
+    else:
+        ticket = _planned_approved_proposal_execution_ticket(
+            proposal=proposal,
+            owner_id=owner_id,
+            channel=channel,
+            ticket_kind=ticket_kind,
+            ops_gate_review=ops_gate_review,
+            evidence_refs=evidence_refs,
+            evidence_summary=evidence_summary,
+        )
+    result_status = str(ticket.get("ticket_state") or "ticket_created") if apply else "ready"
+    if result_status == "awaiting_typed_execution_plan":
+        result_status = "ticket_created" if apply else "ready"
+    return _approved_proposal_execution_ticket_apply_result(
+        store,
+        status=result_status,
+        proposal=proposal,
+        owner_id=owner_id,
+        channel=channel,
+        apply=apply,
+        ticket_kind=ticket_kind,
+        ops_gate_review=ops_gate_review,
+        ticket=ticket,
+    )
+
+
 def _approved_proposal_legacy_template_cleanup_apply_result(
     store: MemoryOSStore,
     *,
@@ -4048,6 +4236,187 @@ def _approved_proposal_execution_apply_error(
     }
 
 
+def _approved_proposal_execution_ticket_apply_result(
+    store: MemoryOSStore,
+    *,
+    status: str,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    apply: bool,
+    ticket_kind: str,
+    ops_gate_review: dict[str, Any],
+    ticket: dict[str, Any],
+) -> dict[str, Any]:
+    proposal_id = str(proposal.get("candidate_id") or "")
+    return {
+        "schema_version": APPROVED_PROPOSAL_EXECUTION_APPLY_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": status,
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "proposal_state": str(proposal.get("state") or ""),
+        "proposal_kind": str(proposal.get("kind") or ""),
+        "apply_kind": "",
+        "ticket_type": ticket_kind,
+        "ticket_state": str(ticket.get("ticket_state") or ""),
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+        "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
+        "policy_write_planned": False,
+        "policy_written": False,
+        "ticket_write_planned": True,
+        "execution_ticket_created": apply,
+        "actual_policy_write": False,
+        "actual_execute": False,
+        "actual_send": False,
+        "raw_body_included": False,
+        "suggested_path": _bounded_text(str(ticket.get("suggested_path") or ""), 320),
+        "evidence_required": _safe_list(ticket.get("evidence_required")),
+        "evidence_refs": _safe_list(ticket.get("evidence_refs")),
+        "rollback": _bounded_text(str(ticket.get("rollback") or ""), 320),
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _planned_approved_proposal_execution_ticket(
+    *,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    ticket_kind: str,
+    ops_gate_review: dict[str, Any],
+    evidence_refs: list[str],
+    evidence_summary: str,
+) -> dict[str, Any]:
+    return _approved_proposal_execution_ticket_payload(
+        proposal=proposal,
+        owner_id=owner_id,
+        channel=channel,
+        ticket_kind=ticket_kind,
+        ops_gate_review=ops_gate_review,
+        evidence_refs=evidence_refs,
+        evidence_summary=evidence_summary,
+        ticket_id="",
+        created_at="",
+    )
+
+
+def _write_approved_proposal_execution_ticket(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    ticket_kind: str,
+    ops_gate_review: dict[str, Any],
+    evidence_refs: list[str],
+    evidence_summary: str,
+) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc)
+    ticket = _approved_proposal_execution_ticket_payload(
+        proposal=proposal,
+        owner_id=owner_id,
+        channel=channel,
+        ticket_kind=ticket_kind,
+        ops_gate_review=ops_gate_review,
+        evidence_refs=evidence_refs,
+        evidence_summary=evidence_summary,
+        ticket_id=f"apxt_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
+        created_at=created_at.isoformat().replace("+00:00", "Z"),
+    )
+    _append_jsonl(approved_proposal_execution_tickets_path(store.roots), ticket)
+    append_audit(
+        store.roots.audit_path,
+        action="approved_proposal_execution_ticket_created",
+        status="ok",
+        target=str(proposal.get("candidate_id") or ""),
+        details={
+            "ticket_id": ticket["ticket_id"],
+            "ticket_type": ticket["ticket_type"],
+            "ticket_state": ticket["ticket_state"],
+            "actual_execute": False,
+            "raw_body_included": False,
+        },
+    )
+    return ticket
+
+
+def _approved_proposal_execution_ticket_payload(
+    *,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    ticket_kind: str,
+    ops_gate_review: dict[str, Any],
+    evidence_refs: list[str],
+    evidence_summary: str,
+    ticket_id: str,
+    created_at: str,
+) -> dict[str, Any]:
+    proposal_id = str(proposal.get("candidate_id") or "")
+    ticket_state = "evidence_resolved" if ticket_kind == "validation_evidence" and evidence_refs else "awaiting_typed_execution_plan"
+    guidance = _approved_proposal_execution_ticket_guidance(ticket_kind)
+    return {
+        "schema_version": APPROVED_PROPOSAL_EXECUTION_TICKET_SCHEMA_VERSION,
+        "ticket_id": ticket_id,
+        "created_at": created_at,
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "proposal_kind": str(proposal.get("kind") or ""),
+        "title": _bounded_text(str(proposal.get("title") or "Approved proposal"), 140),
+        "safe_source_ids": _safe_list(proposal.get("source_refs")),
+        "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
+        "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
+        "ticket_type": ticket_kind,
+        "ticket_state": ticket_state,
+        "suggested_path": guidance["suggested_path"],
+        "evidence_required": guidance["evidence_required"],
+        "evidence_refs": _safe_list(evidence_refs),
+        "evidence_summary": _bounded_text(evidence_summary, 320),
+        "reversible": True,
+        "rollback": guidance["rollback"],
+        "policy_write_planned": False,
+        "policy_written": False,
+        "actual_policy_write": False,
+        "execution_ticket_created": True,
+        "actual_execute": False,
+        "actual_send": False,
+        "actual_identity_write": False,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _approved_proposal_execution_ticket_guidance(ticket_kind: str) -> dict[str, Any]:
+    if ticket_kind == "validation_evidence":
+        return {
+            "suggested_path": "bind public-checkout, closure, and monitor evidence; close as evidence-resolved without runtime execution",
+            "evidence_required": ["fresh_HEAD_archive", "closure_check", "monitor_FAIL_empty"],
+            "rollback": "append a superseding ticket if the linked release evidence is invalidated",
+        }
+    if ticket_kind == "weekly_consolidation_evidence":
+        return {
+            "suggested_path": "verify the digest/consolidation artifact and source event trace, then resolve by evidence",
+            "evidence_required": ["consolidation_artifact_present", "source_event_traceable", "raw_body_not_included"],
+            "rollback": "append a superseding ticket if the digest artifact is invalidated",
+        }
+    if ticket_kind == "deep_reflection_policy_plan":
+        return {
+            "suggested_path": "decompose into a bounded deep_reflection policy surface before any apply",
+            "evidence_required": ["bounded_policy_fields", "no_external_execution", "monitor_actual_execute_false"],
+            "rollback": "remove or supersede the proposed deep_reflection policy before enabling any acting surface",
+        }
+    return {
+        "suggested_path": "decompose into a typed adapter or evidence path; do not run a generic executor",
+        "evidence_required": ["typed_adapter_defined", "rollback_named", "monitor_actual_execute_false"],
+        "rollback": "append a superseding ticket that marks the plan withdrawn or replaced",
+    }
+
+
 def _right_brain_expression_policy_path(store: MemoryOSStore) -> Path:
     return store.roots.hermes_home / "system-modules" / "right_brain_expression_adapter" / "policy.json"
 
@@ -4058,6 +4427,15 @@ def _right_brain_expression_policy_applies_path(store: MemoryOSStore) -> Path:
 
 def _proposal_queue_legacy_template_cleanup_applies_path(store: MemoryOSStore) -> Path:
     return store.roots.hermes_home / "system-modules" / "proposal_queue" / "legacy_template_cleanup_applies.jsonl"
+
+
+def _approved_proposal_execution_tickets_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
+    tickets: dict[str, dict[str, Any]] = {}
+    for record in _read_jsonl(approved_proposal_execution_tickets_path(store.roots)):
+        proposal_id = str(record.get("proposal_id") or "")
+        if proposal_id:
+            tickets[proposal_id] = record
+    return tickets
 
 
 def _memory_sources_policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:

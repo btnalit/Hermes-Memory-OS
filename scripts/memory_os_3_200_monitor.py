@@ -1456,7 +1456,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             if proposal_followups.get("raw_body_included") is True:
                 fail.append({"code": "owner_review_proposal_followups_raw_body_included"})
             if int(proposal_followups.get("execution_ticket_count") or 0) > 0:
-                fail.append({"code": "owner_review_proposal_followups_execution_ticket_created"})
+                passed.append(
+                    {
+                        "code": "owner_review_proposal_followups_execution_tickets_visible",
+                        "value": proposal_followups.get("execution_ticket_count"),
+                    }
+                )
             if proposal_followups.get("actual_execute") is True:
                 fail.append({"code": "owner_review_proposal_followups_actual_execute_true"})
             boundary = proposal_followups.get("boundary") if isinstance(proposal_followups.get("boundary"), dict) else {}
@@ -1466,8 +1471,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             items = proposal_followups.get("items") if isinstance(proposal_followups.get("items"), list) else []
             if any(isinstance(item, dict) and item.get("actual_execute") is True for item in items):
                 fail.append({"code": "owner_review_proposal_followups_item_actual_execute_true"})
-            if any(isinstance(item, dict) and item.get("execution_ticket_created") is True for item in items):
-                fail.append({"code": "owner_review_proposal_followups_item_execution_ticket_created"})
+            if any(isinstance(item, dict) and item.get("raw_body_included") is True for item in items):
+                fail.append({"code": "owner_review_proposal_followups_item_raw_body_included"})
             awaiting_ops_gate_count = int(
                 proposal_followups.get("awaiting_ops_gate_count")
                 if proposal_followups.get("awaiting_ops_gate_count") is not None
@@ -2300,7 +2305,12 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
         "overflow": summary.get("overflow_count"),
         "awaiting_ops_gate": summary.get("awaiting_ops_gate_count"),
         "ops_gate_reviewed": summary.get("ops_gate_reviewed_count"),
+        "supported_apply_ready": summary.get("supported_apply_ready_count"),
+        "unsupported_requires_execution_ticket": summary.get("unsupported_requires_execution_ticket_count"),
         "awaiting_explicit_execution": summary.get("awaiting_explicit_execution_count"),
+        "ticket_created": summary.get("ticket_created_count"),
+        "awaiting_typed_execution_plan": summary.get("awaiting_typed_execution_plan_count"),
+        "evidence_resolved": summary.get("evidence_resolved_count"),
         "policy_apply_count": summary.get("policy_apply_count"),
         "memory_sources_policy_apply_count": summary.get("memory_sources_policy_apply_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
