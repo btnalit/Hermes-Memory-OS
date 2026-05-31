@@ -115,6 +115,14 @@ def approved_proposal_execution_tickets_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "approved_proposal_execution_tickets.jsonl"
 
 
+def deep_reflection_policy_path(roots: MemoryOSRoots) -> Path:
+    return roots.hermes_home / "system-modules" / "deep_reflection" / "policy.json"
+
+
+def deep_reflection_policy_applies_path(roots: MemoryOSRoots) -> Path:
+    return roots.hermes_home / "system-modules" / "deep_reflection" / "policy_applies.jsonl"
+
+
 def expression_feedback_ledger_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
 
@@ -228,6 +236,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     memory_sources_policy_applies = _memory_sources_policy_applies_by_proposal(store)
     legacy_cleanup_applies = _legacy_template_cleanup_applies_by_proposal(store)
     execution_tickets = _approved_proposal_execution_tickets_by_proposal(store)
+    deep_reflection_policy_applies = _deep_reflection_policy_applies_by_proposal(store)
     items: list[dict[str, Any]] = []
     for proposal in proposals:
         proposal_id = str(proposal.get("candidate_id") or "")
@@ -239,6 +248,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         memory_sources_policy_apply = memory_sources_policy_applies.get(proposal_id, {})
         legacy_cleanup_apply = legacy_cleanup_applies.get(proposal_id, {})
         execution_ticket = execution_tickets.get(proposal_id, {})
+        deep_reflection_policy_apply = deep_reflection_policy_applies.get(proposal_id, {})
         apply_kind = _explicit_proposal_apply_kind(proposal)
         ticket_kind = _unsupported_proposal_execution_ticket_kind(proposal)
         if policy_apply:
@@ -247,6 +257,8 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
             followup_state = "applied_memory_sources_policy"
         elif legacy_cleanup_apply:
             followup_state = "applied_legacy_template_cleanup"
+        elif deep_reflection_policy_apply:
+            followup_state = "bounded_policy_written"
         elif execution_ticket:
             followup_state = str(execution_ticket.get("ticket_state") or "awaiting_typed_execution_plan")
         elif ops_gate_review:
@@ -283,6 +295,9 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "memory_sources_policy_written": bool(memory_sources_policy_apply),
                 "legacy_template_cleanup_apply_id": str(legacy_cleanup_apply.get("apply_id") or ""),
                 "legacy_template_closed_count": int(legacy_cleanup_apply.get("closed_count") or 0),
+                "deep_reflection_policy_apply_id": str(deep_reflection_policy_apply.get("apply_id") or ""),
+                "deep_reflection_policy_version": int(deep_reflection_policy_apply.get("policy_version") or 0),
+                "deep_reflection_policy_written": bool(deep_reflection_policy_apply),
                 "execution_ticket_id": str(execution_ticket.get("ticket_id") or ""),
                 "execution_ticket_type": str(execution_ticket.get("ticket_type") or ticket_kind),
                 "execution_ticket_state": str(execution_ticket.get("ticket_state") or ""),
@@ -314,6 +329,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         1 for item in items if item.get("followup_state") == "awaiting_typed_execution_plan"
     )
     evidence_resolved_count = sum(1 for item in items if item.get("followup_state") == "evidence_resolved")
+    bounded_policy_written_count = sum(1 for item in items if item.get("followup_state") == "bounded_policy_written")
     policy_apply_count = sum(1 for item in items if item.get("followup_state") == "applied_expression_policy")
     memory_sources_policy_apply_count = sum(
         1 for item in items if item.get("followup_state") == "applied_memory_sources_policy"
@@ -336,6 +352,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "applied_memory_sources_policy",
                 "applied_legacy_template_cleanup",
                 "evidence_resolved",
+                "bounded_policy_written",
             }
         ),
         "shown_count": len(shown),
@@ -349,9 +366,11 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         "ticket_created_count": ticket_created_count,
         "awaiting_typed_execution_plan_count": awaiting_typed_execution_plan_count,
         "evidence_resolved_count": evidence_resolved_count,
+        "bounded_policy_written_count": bounded_policy_written_count,
         "policy_apply_count": policy_apply_count,
         "memory_sources_policy_apply_count": memory_sources_policy_apply_count,
         "legacy_template_cleanup_apply_count": legacy_cleanup_apply_count,
+        "deep_reflection_policy_apply_count": bounded_policy_written_count,
         "execution_ticket_count": ticket_created_count,
         "actual_execute": False,
         "raw_body_included": False,
@@ -383,9 +402,11 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "ticket_created_count": report["ticket_created_count"],
         "awaiting_typed_execution_plan_count": report["awaiting_typed_execution_plan_count"],
         "evidence_resolved_count": report["evidence_resolved_count"],
+        "bounded_policy_written_count": report["bounded_policy_written_count"],
         "policy_apply_count": report["policy_apply_count"],
         "memory_sources_policy_apply_count": report["memory_sources_policy_apply_count"],
         "legacy_template_cleanup_apply_count": report["legacy_template_cleanup_apply_count"],
+        "deep_reflection_policy_apply_count": report["deep_reflection_policy_apply_count"],
         "execution_ticket_count": report["execution_ticket_count"],
         "actual_execute": report["actual_execute"],
         "raw_body_included": report["raw_body_included"],
@@ -4024,6 +4045,76 @@ def _approved_proposal_execution_ticket_result(
 ) -> dict[str, Any]:
     existing = _approved_proposal_execution_tickets_by_proposal(store).get(str(proposal.get("candidate_id") or ""), {})
     if apply and existing:
+        if ticket_kind == "weekly_consolidation_evidence" and evidence_refs:
+            ticket = _write_approved_proposal_execution_ticket(
+                store,
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                ticket_kind=ticket_kind,
+                ops_gate_review=ops_gate_review,
+                evidence_refs=evidence_refs,
+                evidence_summary=evidence_summary,
+                ticket_state="evidence_resolved",
+                supersedes_ticket_id=str(existing.get("ticket_id") or ""),
+            )
+            return _approved_proposal_execution_ticket_apply_result(
+                store,
+                status="evidence_resolved",
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                ticket_kind=ticket_kind,
+                ops_gate_review=ops_gate_review,
+                ticket=ticket,
+            )
+        if ticket_kind == "deep_reflection_policy_plan":
+            if _deep_reflection_policy_applies_by_proposal(store).get(str(proposal.get("candidate_id") or "")):
+                return _approved_proposal_execution_ticket_apply_result(
+                    store,
+                    status="duplicate_ignored",
+                    proposal=proposal,
+                    owner_id=owner_id,
+                    channel=channel,
+                    apply=apply,
+                    ticket_kind=ticket_kind,
+                    ops_gate_review=ops_gate_review,
+                    ticket=existing,
+                )
+            policy_record = _write_deep_reflection_policy(
+                store,
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                ticket=existing,
+                evidence_refs=evidence_refs,
+                evidence_summary=evidence_summary,
+            )
+            ticket = _write_approved_proposal_execution_ticket(
+                store,
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                ticket_kind=ticket_kind,
+                ops_gate_review=ops_gate_review,
+                evidence_refs=evidence_refs,
+                evidence_summary=evidence_summary,
+                ticket_state="bounded_policy_written",
+                supersedes_ticket_id=str(existing.get("ticket_id") or ""),
+                policy_record=policy_record,
+            )
+            return _approved_proposal_execution_ticket_apply_result(
+                store,
+                status="bounded_policy_written",
+                proposal=proposal,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                ticket_kind=ticket_kind,
+                ops_gate_review=ops_gate_review,
+                ticket=ticket,
+            )
         return _approved_proposal_execution_ticket_apply_result(
             store,
             status="duplicate_ignored",
@@ -4265,11 +4356,14 @@ def _approved_proposal_execution_ticket_apply_result(
         "ticket_id": str(ticket.get("ticket_id") or ""),
         "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
         "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
-        "policy_write_planned": False,
-        "policy_written": False,
+        "policy_write_planned": bool(ticket.get("policy_write_planned")),
+        "policy_written": bool(ticket.get("policy_written")),
+        "policy_version": int(ticket.get("policy_version") or 0),
+        "policy_path": str(ticket.get("policy_path") or ""),
+        "deep_reflection_policy_apply_id": str(ticket.get("deep_reflection_policy_apply_id") or ""),
         "ticket_write_planned": True,
         "execution_ticket_created": apply,
-        "actual_policy_write": False,
+        "actual_policy_write": bool(ticket.get("actual_policy_write")),
         "actual_execute": False,
         "actual_send": False,
         "raw_body_included": False,
@@ -4314,6 +4408,9 @@ def _write_approved_proposal_execution_ticket(
     ops_gate_review: dict[str, Any],
     evidence_refs: list[str],
     evidence_summary: str,
+    ticket_state: str = "",
+    supersedes_ticket_id: str = "",
+    policy_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     created_at = datetime.now(timezone.utc)
     ticket = _approved_proposal_execution_ticket_payload(
@@ -4324,6 +4421,9 @@ def _write_approved_proposal_execution_ticket(
         ops_gate_review=ops_gate_review,
         evidence_refs=evidence_refs,
         evidence_summary=evidence_summary,
+        ticket_state=ticket_state,
+        supersedes_ticket_id=supersedes_ticket_id,
+        policy_record=policy_record or {},
         ticket_id=f"apxt_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
         created_at=created_at.isoformat().replace("+00:00", "Z"),
     )
@@ -4355,13 +4455,20 @@ def _approved_proposal_execution_ticket_payload(
     evidence_summary: str,
     ticket_id: str,
     created_at: str,
+    ticket_state: str = "",
+    supersedes_ticket_id: str = "",
+    policy_record: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     proposal_id = str(proposal.get("candidate_id") or "")
-    ticket_state = "evidence_resolved" if ticket_kind == "validation_evidence" and evidence_refs else "awaiting_typed_execution_plan"
+    resolved_state = ticket_state
+    if not resolved_state:
+        resolved_state = "evidence_resolved" if ticket_kind == "validation_evidence" and evidence_refs else "awaiting_typed_execution_plan"
     guidance = _approved_proposal_execution_ticket_guidance(ticket_kind)
+    policy_record = policy_record or {}
     return {
         "schema_version": APPROVED_PROPOSAL_EXECUTION_TICKET_SCHEMA_VERSION,
         "ticket_id": ticket_id,
+        "supersedes_ticket_id": supersedes_ticket_id,
         "created_at": created_at,
         "owner_id": owner_id,
         "channel": channel,
@@ -4372,16 +4479,19 @@ def _approved_proposal_execution_ticket_payload(
         "ops_gate_report_id": str(ops_gate_review.get("report_id") or ""),
         "ops_gate_decision": str(ops_gate_review.get("decision") or ""),
         "ticket_type": ticket_kind,
-        "ticket_state": ticket_state,
+        "ticket_state": resolved_state,
         "suggested_path": guidance["suggested_path"],
         "evidence_required": guidance["evidence_required"],
         "evidence_refs": _safe_list(evidence_refs),
         "evidence_summary": _bounded_text(evidence_summary, 320),
         "reversible": True,
         "rollback": guidance["rollback"],
-        "policy_write_planned": False,
-        "policy_written": False,
-        "actual_policy_write": False,
+        "policy_write_planned": ticket_kind == "deep_reflection_policy_plan",
+        "policy_written": bool(policy_record),
+        "policy_version": int(policy_record.get("policy_version") or 0),
+        "policy_path": str(policy_record.get("policy_path") or ""),
+        "deep_reflection_policy_apply_id": str(policy_record.get("apply_id") or ""),
+        "actual_policy_write": bool(policy_record),
         "execution_ticket_created": True,
         "actual_execute": False,
         "actual_send": False,
@@ -4417,6 +4527,135 @@ def _approved_proposal_execution_ticket_guidance(ticket_kind: str) -> dict[str, 
     }
 
 
+def _write_deep_reflection_policy(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    owner_id: str,
+    channel: str,
+    ticket: dict[str, Any],
+    evidence_refs: list[str],
+    evidence_summary: str,
+) -> dict[str, Any]:
+    path = deep_reflection_policy_path(store.roots)
+    previous = _read_json_dict(path)
+    previous_version = int(previous.get("policy_version") or 0)
+    proposal_id = str(proposal.get("candidate_id") or "")
+    proposal_class = _deep_reflection_policy_class(proposal)
+    applied_from = [
+        str(item)
+        for item in (previous.get("applied_from_proposal_ids") if isinstance(previous.get("applied_from_proposal_ids"), list) else [])
+        if str(item)
+    ]
+    if proposal_id and proposal_id not in applied_from:
+        applied_from.append(proposal_id)
+    policy = {
+        "schema_version": "memory-os.deep_reflection_policy.v0",
+        "policy_version": previous_version + 1,
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "active": True,
+        "advisory_only": True,
+        "live_applied": False,
+        "automation_allowed": False,
+        "applied_from_proposal_ids": applied_from,
+        "latest_proposal_id": proposal_id,
+        "latest_ticket_id": str(ticket.get("ticket_id") or ""),
+        "continuity_behavior": previous.get("continuity_behavior")
+        if isinstance(previous.get("continuity_behavior"), dict)
+        else _default_deep_reflection_policy_section("continuity_behavior"),
+        "ordinary_tone": previous.get("ordinary_tone")
+        if isinstance(previous.get("ordinary_tone"), dict)
+        else _default_deep_reflection_policy_section("ordinary_tone"),
+        "expired_working_handling": {
+            "mode": "skip_expired_working_inputs",
+            "live_applied": False,
+        },
+        "boundary": _owner_review_false_boundary(),
+        "actual_execute": False,
+        "actual_send": False,
+        "actual_identity_write": False,
+        "raw_body_included": False,
+    }
+    target_key = "ordinary_tone" if proposal_class == "deep_reflection:ordinary_tone" else "continuity_behavior"
+    policy[target_key] = {
+        "mode": "bounded_review_only",
+        "proposal_class": proposal_class,
+        "source_proposal_id": proposal_id,
+        "safe_source_ids": _safe_list(proposal.get("source_refs")),
+        "evidence_refs": _safe_list(evidence_refs),
+        "guidance": _deep_reflection_policy_guidance(proposal_class),
+        "live_applied": False,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(policy, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    apply_record = {
+        "schema_version": "memory-os.deep_reflection_policy_apply.v0",
+        "apply_id": f"drpol_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "owner_id": owner_id,
+        "channel": channel,
+        "proposal_id": proposal_id,
+        "proposal_kind": str(proposal.get("kind") or ""),
+        "proposal_class": proposal_class,
+        "ticket_id": str(ticket.get("ticket_id") or ""),
+        "policy_version": int(policy["policy_version"]),
+        "policy_path": str(path),
+        "previous_policy": previous,
+        "evidence_refs": _safe_list(evidence_refs),
+        "evidence_summary": _bounded_text(evidence_summary, 320),
+        "actual_execute": False,
+        "actual_send": False,
+        "actual_identity_write": False,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+    _append_jsonl(deep_reflection_policy_applies_path(store.roots), apply_record)
+    append_audit(
+        store.roots.audit_path,
+        action="deep_reflection_policy_written",
+        status="ok",
+        target=proposal_id,
+        details={
+            "apply_id": apply_record["apply_id"],
+            "policy_version": apply_record["policy_version"],
+            "actual_execute": False,
+            "raw_body_included": False,
+        },
+    )
+    return apply_record
+
+
+def _deep_reflection_policy_class(proposal: dict[str, Any]) -> str:
+    text = " ".join([str(proposal.get("title") or ""), str(proposal.get("body") or "")]).lower()
+    if any(marker in text for marker in ("tone", "report-like", "too formal", "normal chat", "正常聊天", "像报告")):
+        return "deep_reflection:ordinary_tone"
+    return "deep_reflection:continuity_behavior"
+
+
+def _default_deep_reflection_policy_section(kind: str) -> dict[str, Any]:
+    return {
+        "mode": "report_only",
+        "proposal_class": f"deep_reflection:{kind}",
+        "source_proposal_id": "",
+        "safe_source_ids": [],
+        "evidence_refs": [],
+        "guidance": [],
+        "live_applied": False,
+    }
+
+
+def _deep_reflection_policy_guidance(proposal_class: str) -> list[str]:
+    if proposal_class == "deep_reflection:ordinary_tone":
+        return [
+            "keep ordinary memory conversation tone out of report-like self-evolution phrasing",
+            "surface tone changes as bounded review guidance before runtime behavior changes",
+        ]
+    return [
+        "keep continuity behavior changes in bounded review until owner-visible evidence is linked",
+        "do not alter deep_reflection runtime selection without a later explicit apply gate",
+    ]
+
+
 def _right_brain_expression_policy_path(store: MemoryOSStore) -> Path:
     return store.roots.hermes_home / "system-modules" / "right_brain_expression_adapter" / "policy.json"
 
@@ -4436,6 +4675,15 @@ def _approved_proposal_execution_tickets_by_proposal(store: MemoryOSStore) -> di
         if proposal_id:
             tickets[proposal_id] = record
     return tickets
+
+
+def _deep_reflection_policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:
+    applies: dict[str, dict[str, Any]] = {}
+    for record in _read_jsonl(deep_reflection_policy_applies_path(store.roots)):
+        proposal_id = str(record.get("proposal_id") or "")
+        if proposal_id:
+            applies[proposal_id] = record
+    return applies
 
 
 def _memory_sources_policy_applies_by_proposal(store: MemoryOSStore) -> dict[str, dict[str, Any]]:

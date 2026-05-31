@@ -993,7 +993,14 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
                     sort_keys=True,
                 )
             )
-            return 0 if report.get("status") in {"ready", "applied", "duplicate_ignored", "ticket_created", "evidence_resolved"} else 1
+            return 0 if report.get("status") in {
+                "ready",
+                "applied",
+                "duplicate_ignored",
+                "ticket_created",
+                "evidence_resolved",
+                "bounded_policy_written",
+            } else 1
         if bool(getattr(args, "ops_gate", False)):
             if bool(getattr(args, "all_pending", False)):
                 report = route_pending_approved_proposal_followups_to_ops_gate(

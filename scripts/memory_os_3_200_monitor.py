@@ -1721,6 +1721,20 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "latest_skip_reason": str(deep_reflection.get("latest_skip_reason") or ""),
             }
         )
+    if deep_reflection.get("policy_present") is True:
+        passed.append(
+            {
+                "code": "deep_reflection_bounded_policy_visible",
+                "policy_version": deep_reflection.get("policy_version"),
+                "policy_apply_count": deep_reflection.get("policy_apply_count"),
+            }
+        )
+    if deep_reflection.get("policy_live_applied") is True:
+        fail.append({"code": "deep_reflection_policy_live_applied_true"})
+    if int(deep_reflection.get("policy_actual_execute_count") or 0) > 0:
+        fail.append({"code": "deep_reflection_policy_actual_execute_true"})
+    if int(deep_reflection.get("policy_raw_body_included_count") or 0) > 0:
+        fail.append({"code": "deep_reflection_policy_raw_body_included"})
 
     compaction = snapshot.get("compaction", {})
     if int(compaction.get("focus_none_count") or 0) > 0:
@@ -2021,6 +2035,10 @@ def _deep_reflection_summary(status: dict[str, Any]) -> dict[str, Any]:
         "active_working_input_count": status.get("latest_active_working_input_count"),
         "expired_working_skipped_count": status.get("latest_expired_working_skipped_count"),
         "expired_working_used_in_analysis_count": status.get("latest_expired_working_used_in_analysis_count"),
+        "policy_present": status.get("policy_present"),
+        "policy_version": status.get("policy_version"),
+        "policy_apply_count": status.get("policy_apply_count"),
+        "policy_live_applied": status.get("policy_live_applied"),
         "actual_send": status.get("actual_send"),
         "actual_execute": status.get("actual_execute"),
         "actual_identity_write": status.get("actual_identity_write"),
@@ -2311,8 +2329,10 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
         "ticket_created": summary.get("ticket_created_count"),
         "awaiting_typed_execution_plan": summary.get("awaiting_typed_execution_plan_count"),
         "evidence_resolved": summary.get("evidence_resolved_count"),
+        "bounded_policy_written": summary.get("bounded_policy_written_count"),
         "policy_apply_count": summary.get("policy_apply_count"),
         "memory_sources_policy_apply_count": summary.get("memory_sources_policy_apply_count"),
+        "deep_reflection_policy_apply_count": summary.get("deep_reflection_policy_apply_count"),
         "execution_tickets": summary.get("execution_ticket_count"),
         "actual_execute": summary.get("actual_execute"),
         "raw_body_included": summary.get("raw_body_included"),
@@ -2818,7 +2838,43 @@ keys = [
   "latest_expired_working_used_in_analysis_count",
   "latest_cadence_skipped","latest_skip_reason","cadence_skipped_count"
 ]
-print(json.dumps({k:status.get(k) for k in keys if k in status}, ensure_ascii=False, sort_keys=True))
+summary = {k:status.get(k) for k in keys if k in status}
+from pathlib import Path
+def read_json(path):
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        value = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+def read_jsonl(path):
+    p = Path(path)
+    if not p.exists():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            out.append(value)
+    return out
+policy = read_json("/root/.hermes/system-modules/deep_reflection/policy.json")
+policy_applies = read_jsonl("/root/.hermes/system-modules/deep_reflection/policy_applies.jsonl")
+summary.update({
+  "policy_present": bool(policy),
+  "policy_version": int(policy.get("policy_version") or 0) if policy else 0,
+  "policy_live_applied": bool(policy.get("live_applied")) if policy else False,
+  "policy_apply_count": len(policy_applies),
+  "policy_actual_execute_count": sum(1 for item in policy_applies if item.get("actual_execute") is True),
+  "policy_raw_body_included_count": sum(1 for item in policy_applies if item.get("raw_body_included") is True),
+})
+print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 """
     env = dict(os.environ)
     env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"

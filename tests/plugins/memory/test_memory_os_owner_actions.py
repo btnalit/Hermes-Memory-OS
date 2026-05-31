@@ -18,6 +18,8 @@ from plugins.memory.memory_os.owner_actions import (
     approved_proposal_followups_report,
     apply_owner_action,
     approved_proposal_execution_tickets_path,
+    deep_reflection_policy_applies_path,
+    deep_reflection_policy_path,
     deliver_owner_review_digest_once,
     expression_feedback_ledger_path,
     owner_actions_path,
@@ -1027,6 +1029,130 @@ def test_unsupported_approved_proposals_create_typed_execution_tickets_without_e
         "commit:73b8b33",
         "monitor:FAIL=[]",
     ]
+
+
+def test_typed_execution_tickets_close_weekly_and_deep_reflection_without_execution(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    specs = [
+        (
+            "deep_reflection_self_evolution",
+            "Review reflection continuity behavior",
+            "Use continuity behavior evidence only.",
+            "event:evt_gov_1",
+        ),
+        (
+            "weekly_consolidation",
+            "Weekly consolidation: foreground_conversation_turn",
+            "PRIVATE WEEKLY RAW BODY",
+            "event:evt_weekly_1",
+        ),
+        (
+            "deep_reflection_self_evolution",
+            "Tune ordinary memory conversation tone",
+            "Keep normal chat tone less report-like.",
+            "working:lingering:wrk_1",
+        ),
+    ]
+    proposal_ids: list[str] = []
+    for kind, title, body, source_ref in specs:
+        candidate = proposal_queue.create_candidate(
+            store=store,
+            title=title,
+            body=body,
+            source_refs=[source_ref],
+            kind=kind,
+        )
+        proposal_ids.append(candidate["candidate_id"])
+        apply_owner_action(
+            store,
+            action_type="approve_proposal",
+            target=f"proposal:{candidate['candidate_id']}",
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+        route_approved_proposal_followup_to_ops_gate(
+            store,
+            proposal_id=candidate["candidate_id"],
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+        created = apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=candidate["candidate_id"],
+            owner_id="owner",
+            channel="cli",
+            owner_approved=True,
+            apply=True,
+        )
+        assert created["status"] == "ticket_created"
+
+    resolved = [
+        apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=proposal_ids[0],
+            owner_id="owner",
+            channel="cli",
+            owner_approved=True,
+            apply=True,
+            evidence_refs=["deep_reflection_policy:bounded_fields", "monitor:actual_execute=false"],
+            evidence_summary="Continuity behavior policy surface written without runtime execution.",
+        ),
+        apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=proposal_ids[1],
+            owner_id="owner",
+            channel="cli",
+            owner_approved=True,
+            apply=True,
+            evidence_refs=[
+                "digest_consolidation:weekly/2026-W21.json",
+                "source_event:evt_weekly_1",
+                "raw_body_not_included",
+            ],
+            evidence_summary="Weekly artifact and source event are traceable without raw body exposure.",
+        ),
+        apply_approved_proposal_execution_decision(
+            store,
+            proposal_id=proposal_ids[2],
+            owner_id="owner",
+            channel="cli",
+            owner_approved=True,
+            apply=True,
+            evidence_refs=["deep_reflection_policy:bounded_fields", "monitor:actual_execute=false"],
+            evidence_summary="Ordinary tone policy surface written without runtime execution.",
+        ),
+    ]
+    policy = json.loads(deep_reflection_policy_path(store.roots).read_text(encoding="utf-8"))
+    applies = _jsonl(deep_reflection_policy_applies_path(store.roots))
+    tickets = _jsonl(approved_proposal_execution_tickets_path(store.roots))
+    report = approved_proposal_followups_report(store)
+
+    assert [item["status"] for item in resolved] == [
+        "bounded_policy_written",
+        "evidence_resolved",
+        "bounded_policy_written",
+    ]
+    assert all(item["actual_execute"] is False for item in resolved)
+    assert all(item["raw_body_included"] is False for item in resolved)
+    assert policy["schema_version"] == "memory-os.deep_reflection_policy.v0"
+    assert policy["policy_version"] == 2
+    assert policy["live_applied"] is False
+    assert policy["actual_execute"] is False
+    assert set(policy["applied_from_proposal_ids"]) == {proposal_ids[0], proposal_ids[2]}
+    assert policy["continuity_behavior"]["mode"] == "bounded_review_only"
+    assert policy["ordinary_tone"]["mode"] == "bounded_review_only"
+    assert len(applies) == 2
+    assert all(item["actual_execute"] is False for item in applies)
+    assert "PRIVATE WEEKLY RAW BODY" not in json.dumps(tickets, ensure_ascii=False)
+    assert report["open_followup_count"] == 0
+    assert report["awaiting_typed_execution_plan_count"] == 0
+    assert report["evidence_resolved_count"] == 1
+    assert report["bounded_policy_written_count"] == 2
+    assert report["deep_reflection_policy_apply_count"] == 2
+    assert report["actual_execute"] is False
 
 
 def test_mark_feedback_records_memory_source_feedback_without_route_mutation(tmp_path):

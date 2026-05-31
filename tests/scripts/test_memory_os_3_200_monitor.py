@@ -1176,6 +1176,26 @@ def test_classify_snapshot_tracks_deep_reflection_expired_working_hygiene():
     assert any(item["code"] == "deep_reflection_expired_working_used_in_analysis" for item in classification["warn"])
 
 
+def test_classify_snapshot_tracks_deep_reflection_bounded_policy():
+    snapshot = _healthy_snapshot()
+    snapshot["deep_reflection"]["policy_present"] = True
+    snapshot["deep_reflection"]["policy_version"] = 2
+    snapshot["deep_reflection"]["policy_apply_count"] = 2
+    snapshot["deep_reflection"]["policy_live_applied"] = False
+    snapshot["deep_reflection"]["policy_actual_execute_count"] = 0
+    snapshot["deep_reflection"]["policy_raw_body_included_count"] = 0
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "deep_reflection_bounded_policy_visible" for item in classification["pass"])
+
+    snapshot["deep_reflection"]["policy_actual_execute_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "deep_reflection_policy_actual_execute_true" for item in classification["fail"])
+
+
 def test_classify_snapshot_tracks_primary_feature_scoring_and_legacy_comparison():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
