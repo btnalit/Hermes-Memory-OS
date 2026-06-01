@@ -856,7 +856,9 @@ def _owner_review_reply_not_processed(reason: str, *, status: str = "ignored") -
 
 
 def _turn_summary(user_content: str, assistant_content: str) -> str:
-    return f"User: {_clip(user_content, 180)} | Assistant: {_clip(assistant_content, 180)}"
+    user_summary = _clip(_redact_secrets(user_content), 180)
+    assistant_summary = _clip(_redact_secrets(assistant_content), 180)
+    return f"User: {user_summary} | Assistant: {assistant_summary}"
 
 
 def _clip(value: str, limit: int) -> str:
@@ -876,6 +878,13 @@ _TASK_SECRET_PATTERNS = (
     re.compile(r"(?i)(secret\s*[:=]\s*)\S+"),
     re.compile(r"(?i)(password\s*[:=]\s*)\S+"),
 )
+
+
+def _redact_secrets(value: str) -> str:
+    redacted = str(value or "")
+    for pattern in _TASK_SECRET_PATTERNS:
+        redacted = pattern.sub(r"\1[redacted]", redacted)
+    return redacted
 
 
 def _build_current_task_anchor(messages: list[dict[str, Any]], *, session_id: str = "") -> str:
@@ -1237,10 +1246,7 @@ def _is_deferred_continue_query(text: str) -> bool:
 
 
 def _redact_task_text(value: str) -> str:
-    redacted = value
-    for pattern in _TASK_SECRET_PATTERNS:
-        redacted = pattern.sub(r"\1[redacted]", redacted)
-    return redacted
+    return _redact_secrets(value)
 
 
 def _clip_multiline(value: str, limit: int) -> str:

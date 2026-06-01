@@ -4,6 +4,7 @@ import time
 import plugins.memory.memory_os as memory_os_module
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.config import save_config
+from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.status_tool_contract import (
     MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
@@ -243,6 +244,48 @@ def test_sync_turn_enqueues_summary_only_event_and_returns_quickly(tmp_path):
     assert all(event.safe_ref["session_id"] == "session-1" for event in events)
     assert all(user_content not in event.summary for event in events)
     assert all(assistant_content not in event.summary for event in events)
+
+
+def test_sync_turn_redacts_secrets_before_persisting_summary_and_index(tmp_path):
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="memoryos-test")
+    user_secret = "sk-redaction-user-UNIQUE-20260601-aaaaaaaaaaaaaaaa"
+    assistant_secret = "assistant-redaction-UNIQUE-20260601-bbbbbbbbbbbbbbbb"
+    user_content = (
+        "u" * 150
+        + f" API_KEY={user_secret} password=RedactionPassword-UNIQUE-20260601 "
+        + "tail text"
+    )
+    assistant_content = (
+        f"Assistant summary with token: {assistant_secret} "
+        "and api-key=AssistantHyphenSecret-UNIQUE-20260601."
+    )
+
+    provider.sync_turn(user_content, assistant_content, session_id="session-1")
+    provider.shutdown()
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    events = MemoryOSStore(roots).read_events()
+    assert len(events) == 1
+    summary = events[0].summary
+    assert "API_KEY=[redacted]" in summary
+    assert "token: [redacted]" in summary
+    for leaked in (
+        user_secret,
+        assistant_secret,
+        "RedactionPassword-UNIQUE-20260601",
+        "AssistantHyphenSecret-UNIQUE-20260601",
+    ):
+        assert leaked not in summary
+
+    store = MemoryOSStore(roots)
+    index = MemoryOSIndex(roots)
+    index.sync_from_store(store)
+    indexed_text = json.dumps(index.search("redaction UNIQUE", limit=10), ensure_ascii=False)
+    assert user_secret not in indexed_text
+    assert assistant_secret not in indexed_text
+    assert "RedactionPassword-UNIQUE-20260601" not in indexed_text
+    assert "AssistantHyphenSecret-UNIQUE-20260601" not in indexed_text
 
 
 def test_sync_turn_drops_newest_when_queue_is_full_and_audits(tmp_path):
