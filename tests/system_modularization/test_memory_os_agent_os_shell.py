@@ -183,6 +183,18 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     feedback_history_args = parser.parse_args(["memory-sources", "feedback", "history", "--limit", "3"])
     assert feedback_history_args.memory_sources_feedback_command == "history"
     assert feedback_history_args.limit == 3
+    session_status_args = parser.parse_args(["session-mirror", "status"])
+    assert session_status_args.agent_os_command == "session-mirror"
+    assert session_status_args.session_mirror_command == "status"
+    session_apply_status_args = parser.parse_args(["session-mirror", "apply-status"])
+    assert session_apply_status_args.session_mirror_command == "apply-status"
+    session_scan_args = parser.parse_args(
+        ["session-mirror", "scan", "--apply", "--max-sessions", "1", "--platform", "telegram"]
+    )
+    assert session_scan_args.session_mirror_command == "scan"
+    assert session_scan_args.apply is True
+    assert session_scan_args.max_sessions == 1
+    assert session_scan_args.platform == ["telegram"]
     review_status_args = parser.parse_args(["review", "status"])
     assert review_status_args.agent_os_command == "review"
     assert review_status_args.review_command == "status"

@@ -24,6 +24,7 @@ _ALLOWED_ALIASES = {
     "hindsight",
     "low-clue-recall",
     "memory-sources",
+    "session-mirror",
     "metadata-retention",
     "review",
     "modules",
@@ -223,6 +224,16 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    session_parser = subs.add_parser("session-mirror")
+    session_subs = session_parser.add_subparsers(dest="session_mirror_command", required=True)
+    session_subs.add_parser("status")
+    session_subs.add_parser("doctor")
+    session_subs.add_parser("apply-status")
+    session_scan = session_subs.add_parser("scan")
+    session_scan.add_argument("--dry-run", action="store_true")
+    session_scan.add_argument("--apply", action="store_true")
+    session_scan.add_argument("--max-sessions", type=int, default=0)
+    session_scan.add_argument("--platform", action="append", default=[])
     review_parser = subs.add_parser("review")
     review_subs = review_parser.add_subparsers(dest="review_command", required=True)
     review_subs.add_parser("status")
