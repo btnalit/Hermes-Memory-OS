@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+from plugins.memory.memory_os.crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
 from plugins.memory.memory_os.substrates.projection import ProjectionLedger
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -201,6 +201,8 @@ def _crystallized_records(store: MemoryOSStore) -> list[dict[str, Any]]:
         return records
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
         for record in service.read_records(path.name):
+            if not is_active_crystallized_frontmatter(record.frontmatter):
+                continue
             record_id = str(record.frontmatter.get("id") or record.file_name)
             records.append(
                 {

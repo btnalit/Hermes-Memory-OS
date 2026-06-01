@@ -4,7 +4,12 @@ import json
 import sqlite3
 
 from plugins.memory.memory_os.config import save_config
-from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue, read_candidate_queue
+from plugins.memory.memory_os.crystallized import (
+    CrystallizedCandidate,
+    CrystallizedMemoryService,
+    append_candidate_queue,
+    read_candidate_queue,
+)
 from plugins.memory.memory_os import MemoryOSProvider
 from plugins.memory.memory_os.context_router import ContextSection
 from plugins.memory.memory_os.memory_sources import (
@@ -45,6 +50,8 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.substrates.local_artifact import LocalArtifactProvider
+from plugins.memory.memory_os.substrates.projection import ProjectionLedger, derive_projection_coherence
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
 
@@ -278,6 +285,66 @@ def test_owner_actions_status_counts_queue_and_owner_effects(tmp_path):
     assert status["owner_actions"]["owner_approved_crystallized_write_count"] == 1
     assert status["owner_actions"]["unapproved_crystallized_write_count"] == 0
     assert status["digest_burden"]["owner_active_period"] is True
+
+
+def test_revoke_crystallized_owner_action_marks_canonical_and_invalidates_projection(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand_public_revoke_001",
+            kind="preference",
+            body="User prefers Borealis summaries.",
+            source_event_ids=["evt_public_revoke_001"],
+            sensitivity="public",
+            tags=["owner-review"],
+        ),
+    )
+    approve = apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_public_revoke_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    assert approve["status"] == "ok"
+    record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    record_id = str(record.frontmatter["id"])
+    ledger = ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl")
+    ledger.record_retain(
+        provider="hindsight",
+        source_record_ref=record_id,
+        source_version="current",
+        substrate_record_id="hindsight-1",
+        substrate_snapshot_id="hindsight:bank:v1",
+    )
+
+    revoked = apply_owner_action(
+        store,
+        action_type="revoke_crystallized",
+        target=f"crystallized:{record_id}",
+        owner_id="owner",
+        channel="cli",
+        note="Owner revoked stale memory.",
+        apply=True,
+    )
+
+    assert revoked["status"] == "ok"
+    assert revoked["dry_run"] is False
+    assert revoked["record"]["boundary"]["actual_unapproved_crystallized_approval"] is False
+    assert revoked["record"]["owner_effect"]["owner_revoked_crystallized_record"] is True
+    assert revoked["record"]["owner_effect"]["projection_invalidation_recorded"] is True
+    assert revoked["result_ref"]["actual_delete"] is False
+    assert revoked["result_ref"]["projection_invalidated"] is True
+    refreshed = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    assert refreshed.frontmatter["canonical_state"] == "owner_revoked"
+    assert refreshed.frontmatter["revoked_by"] == "owner"
+    assert refreshed.body == "User prefers Borealis summaries."
+    coherence = derive_projection_coherence(ledger.read_all(), provider="hindsight")
+    assert coherence["active_projection_count"] == 0
+    assert coherence["retract_count"] == 1
+    assert LocalArtifactProvider(store).recall("Borealis", consumer="test") == []
 
 
 def test_proposal_actions_transition_without_execution_or_crystallized_approval(tmp_path):

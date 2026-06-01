@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import append_audit
-from .crystallized import read_candidate_queue
+from .crystallized import is_active_crystallized_frontmatter, read_candidate_queue
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
@@ -470,6 +470,8 @@ def _index_working_items(conn: sqlite3.Connection, working_root: Path) -> None:
 def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Path) -> None:
     for path in sorted(crystallized_root.glob("*.md")):
         for frontmatter, body in _markdown_records(path.read_text(encoding="utf-8")):
+            if not is_active_crystallized_frontmatter(frontmatter):
+                continue
             conn.execute(
                 """
                 insert or replace into crystallized_records

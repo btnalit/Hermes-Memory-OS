@@ -8,6 +8,7 @@ executes actions.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sys
@@ -296,6 +297,7 @@ def build_low_clue_recall_report(
         "candidate_count": len(candidates),
         "candidates": candidates,
         "llm_judge": _llm_judge_report(
+            query=query,
             candidates=candidates,
             config=normalized_config,
             llm_runner=llm_runner,
@@ -986,6 +988,7 @@ def _decision(candidates: list[dict[str, Any]]) -> tuple[str, list[str]]:
 
 def _llm_judge_report(
     *,
+    query: str,
     candidates: list[dict[str, Any]],
     config: dict[str, Any],
     llm_runner: LlmRunner | None,
@@ -1001,6 +1004,7 @@ def _llm_judge_report(
     payload = {
         "schema_version": "memory-os.low_clue_recall_judge_input.v0",
         "query_class": "ambiguous_recall",
+        "query_features": _bounded_query_features(query),
         "candidates": [
             {
                 "candidate_id": str(candidate.get("candidate_id") or ""),
@@ -1030,6 +1034,23 @@ def _llm_judge_report(
         "selected_candidate_id": str(result.get("selected_candidate_id") or ""),
         "confidence": result.get("confidence"),
         "reason_codes": [str(item) for item in result.get("reason_codes", []) if str(item)],
+    }
+
+
+def _bounded_query_features(query: str) -> dict[str, Any]:
+    clean = _strip_artifact_paths(_redact(" ".join(str(query or "").split())))
+    terms = _terms(clean)
+    specific_terms = sorted((terms - _GENERIC_RECALL_TERMS) - _ENGLISH_TOPIC_STOPWORDS)[:8]
+    generic_terms = sorted((terms & _GENERIC_RECALL_TERMS) | {term for term in _GENERIC_RECALL_TERMS if term in clean})[:8]
+    return {
+        "schema_version": "memory-os.low_clue_query_features.v0",
+        "query_hash": hashlib.sha256(clean.encode("utf-8")).hexdigest()[:16],
+        "char_count": min(len(clean), 240),
+        "specific_terms": specific_terms,
+        "generic_terms": generic_terms,
+        "has_specific_terms": bool(specific_terms),
+        "low_clue": not bool(specific_terms),
+        "correction_signal": any(term in clean for term in _CORRECTION_TERMS),
     }
 
 

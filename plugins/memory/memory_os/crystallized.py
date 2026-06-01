@@ -12,7 +12,10 @@ from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit
 from .ids import new_crystallized_id
 from .schema import CRYSTALLIZED_SCHEMA_VERSION
-from .store import MemoryOSStore
+from .store import MemoryOSStore, _format_frontmatter
+
+
+INACTIVE_CANONICAL_STATES = {"owner_revoked", "revoked", "demoted"}
 
 
 class CrystallizedApprovalError(ValueError):
@@ -94,6 +97,77 @@ class CrystallizedMemoryService:
             for frontmatter, body in _parse_markdown_records(path.read_text(encoding="utf-8"))
         ]
 
+    def find_record(self, record_id: str) -> CrystallizedRecord | None:
+        normalized = str(record_id or "").strip()
+        if not normalized or not self.store.roots.crystallized_root.exists():
+            return None
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            for record in self.read_records(path.name):
+                if str(record.frontmatter.get("id") or "") == normalized:
+                    return record
+        return None
+
+    def revoke_record(
+        self,
+        record_id: str,
+        *,
+        revoked_by: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(record_id or "").strip()
+        if not normalized:
+            raise KeyError("crystallized record id is required")
+        if not self.store.roots.crystallized_root.exists():
+            raise KeyError(normalized)
+
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            records = self.read_records(path.name)
+            rendered: list[str] = []
+            changed = False
+            matched: dict[str, Any] | None = None
+            for current in records:
+                frontmatter = dict(current.frontmatter)
+                if str(frontmatter.get("id") or "") == normalized:
+                    matched = {
+                        "record_id": normalized,
+                        "file_name": current.file_name,
+                        "already_revoked": not is_active_crystallized_frontmatter(frontmatter),
+                    }
+                    if is_active_crystallized_frontmatter(frontmatter):
+                        frontmatter["canonical_state"] = "owner_revoked"
+                        frontmatter["revoked_by"] = revoked_by
+                        frontmatter["revoked_at"] = _timestamp(now)
+                        frontmatter["revocation_reason"] = reason
+                        changed = True
+                rendered.append(_format_frontmatter(frontmatter))
+                rendered.append("")
+                rendered.append(current.body.rstrip())
+                rendered.append("")
+            if matched is None:
+                continue
+            if changed:
+                tmp_path = path.with_name(f"{path.name}.{normalized}.revoke.tmp")
+                try:
+                    tmp_path.write_text("\n".join(rendered).rstrip() + "\n", encoding="utf-8")
+                    tmp_path.replace(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="crystallized_record_revoked",
+                    status="ok",
+                    target=str(path),
+                    details={
+                        "record_id": normalized,
+                        "revoked_by": revoked_by,
+                    },
+                )
+            matched["canonical_state_changed"] = changed
+            return matched
+        raise KeyError(normalized)
+
     def _ensure_crystallized_approval(
         self,
         candidate: CrystallizedCandidate,
@@ -156,6 +230,11 @@ def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
             )
         )
     return candidates
+
+
+def is_active_crystallized_frontmatter(frontmatter: dict[str, Any]) -> bool:
+    state = str(frontmatter.get("canonical_state") or "active").strip().lower()
+    return state not in INACTIVE_CANONICAL_STATES
 
 
 def _parse_markdown_records(content: str) -> list[tuple[dict[str, Any], str]]:

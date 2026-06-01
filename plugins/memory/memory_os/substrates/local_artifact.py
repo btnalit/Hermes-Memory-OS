@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..crystallized import CrystallizedMemoryService
+from ..crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
 from .base import GroundingFact, ProviderHealth, SubstrateSnapshot
 
 
@@ -57,6 +57,8 @@ class LocalArtifactProvider:
         records: list[dict[str, Any]] = []
         for path in sorted(roots.crystallized_root.glob("*.md")):
             for record in service.read_records(path.name):
+                if not is_active_crystallized_frontmatter(record.frontmatter):
+                    continue
                 records.append(
                     {
                         "record_id": str(record.frontmatter.get("id") or ""),

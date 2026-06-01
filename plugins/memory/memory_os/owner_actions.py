@@ -74,6 +74,7 @@ EXPRESSION_FEEDBACK_DIGEST_ACTIONS = (
 ACTION_TYPES = {
     "approve_candidate",
     "reject_candidate",
+    "revoke_crystallized",
     "mark_feedback",
     "approve_proposal",
     "reject_proposal",
@@ -84,6 +85,7 @@ ACTION_TYPES = {
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "candidate": {"approve_candidate", "reject_candidate"},
+    "crystallized_record": {"revoke_crystallized"},
     "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
@@ -155,6 +157,9 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
     owner_approved_crystallized_write_count = sum(
         1 for record in actions if (record.get("owner_effect") or {}).get("owner_approved_crystallized_write")
     )
+    owner_revoked_crystallized_count = sum(
+        1 for record in actions if (record.get("owner_effect") or {}).get("owner_revoked_crystallized_record")
+    )
     unapproved_crystallized_write_count = sum(
         1
         for record in actions
@@ -190,10 +195,12 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
             "duplicate_action_ignored_count": duplicate_ignored_count,
             "error_count": error_count,
             "owner_approved_crystallized_write_count": owner_approved_crystallized_write_count,
+            "owner_revoked_crystallized_count": owner_revoked_crystallized_count,
             "unapproved_crystallized_write_count": unapproved_crystallized_write_count,
         },
         "candidate_approved_count": int(by_type.get("approve_candidate", 0)),
         "candidate_rejected_count": int(by_type.get("reject_candidate", 0)),
+        "crystallized_revoked_count": owner_revoked_crystallized_count,
         "proposal_approved_count": int(by_type.get("approve_proposal", 0)),
         "proposal_rejected_count": int(by_type.get("reject_proposal", 0)),
         "feedback_by_rating": _feedback_by_rating(actions),
@@ -2024,6 +2031,43 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         return {"crystallized_path": str(path), "candidate_id": target_id}
     if action_type == "reject_candidate":
         return {"candidate_id": target_id, "state": "owner_rejected"}
+    if action_type == "revoke_crystallized":
+        revoke_result = CrystallizedMemoryService(store).revoke_record(
+            target_id,
+            revoked_by=str(record["owner_id"]),
+            reason=_bounded_text(note or "owner_revoked", 240),
+        )
+        snapshot_id = _hindsight_snapshot_id_for_store(store)
+        from .substrates.ledger import SubstrateOperationLedger
+        from plugins.modules.governance.crystallized_revalidator import (
+            invalidate_hindsight_projection_for_canonical_change,
+        )
+
+        invalidate_hindsight_projection_for_canonical_change(
+            projection_ledger_path=store.roots.memory_os_root / "system" / "projection_ledger.jsonl",
+            record_id=target_id,
+            record_version="current",
+            reason="owner_revoked",
+            substrate_snapshot_id=snapshot_id,
+        )
+        SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl").append(
+            {
+                "provider": "hindsight",
+                "operation": "invalidate",
+                "source_record_ref": target_id,
+                "source_version": "current",
+                "reason": "owner_revoked",
+                "substrate_snapshot_id": snapshot_id,
+            }
+        )
+        record["owner_effect"]["owner_revoked_crystallized_record"] = True
+        record["owner_effect"]["projection_invalidation_recorded"] = True
+        return {
+            **revoke_result,
+            "actual_delete": False,
+            "projection_invalidated": True,
+            "substrate_snapshot_id": snapshot_id,
+        }
     if action_type in {"approve_proposal", "reject_proposal"}:
         from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
@@ -2074,6 +2118,11 @@ def _validate_action_target(
 ) -> str:
     if action_type in {"approve_candidate", "reject_candidate"} and not _find_candidate(store, target_id):
         return "candidate_not_found"
+    if action_type == "revoke_crystallized":
+        if target_type != "crystallized_record":
+            return "invalid_crystallized_record_target"
+        if not _find_crystallized_record(store, target_id):
+            return "crystallized_record_not_found"
     if action_type in {"approve_proposal", "reject_proposal"}:
         proposal = _find_proposal(store, target_id)
         if not proposal:
@@ -2231,7 +2280,7 @@ def _find_right_brain_expression_outcome(roots: MemoryOSRoots, target_id: str) -
 
 def _append_action_specific_ledger(store: MemoryOSStore, record: dict[str, Any]) -> None:
     action_type = str(record.get("action_type", ""))
-    if action_type in {"approve_candidate", "reject_candidate"}:
+    if action_type in {"approve_candidate", "reject_candidate", "revoke_crystallized"}:
         _append_jsonl(crystallization_approvals_path(store.roots), record)
     elif action_type in {"approve_proposal", "reject_proposal", "apply_proposal"}:
         _append_jsonl(proposal_action_ledger_path(store.roots), record)
@@ -2359,6 +2408,8 @@ def _base_action_record(
         },
         "owner_effect": {
             "owner_approved_crystallized_write": False,
+            "owner_revoked_crystallized_record": False,
+            "projection_invalidation_recorded": False,
         },
     }
 
@@ -3887,6 +3938,17 @@ def _find_candidate(store: MemoryOSStore, candidate_id: str) -> CrystallizedCand
     return None
 
 
+def _find_crystallized_record(store: MemoryOSStore, record_id: str) -> dict[str, Any] | None:
+    record = CrystallizedMemoryService(store).find_record(record_id)
+    if record is None:
+        return None
+    return {
+        "record_id": str(record.frontmatter.get("id") or ""),
+        "file_name": record.file_name,
+        "canonical_state": str(record.frontmatter.get("canonical_state") or "active"),
+    }
+
+
 def _find_proposal(store: MemoryOSStore, candidate_id: str) -> dict[str, Any] | None:
     for proposal in _read_proposal_queue(store):
         if str(proposal.get("candidate_id", "")) == candidate_id:
@@ -3899,6 +3961,17 @@ def _find_memory_source(store: MemoryOSStore, record_id: str) -> dict[str, Any] 
         if str(record.get("record_id", "")) == record_id:
             return record
     return None
+
+
+def _hindsight_snapshot_id_for_store(store: MemoryOSStore) -> str:
+    config = load_config(store.roots.hermes_home)
+    substrate_root = config.get("substrate_providers") if isinstance(config.get("substrate_providers"), dict) else {}
+    substrate = substrate_root.get("hindsight") if isinstance(substrate_root.get("hindsight"), dict) else {}
+    configured = str(substrate.get("substrate_snapshot_id") or "")
+    if configured:
+        return configured
+    bank_id = str(substrate.get("bank_id") or "unconfigured")
+    return f"hindsight:{bank_id}:vcurrent"
 
 
 def _read_proposal_queue(store: MemoryOSStore) -> list[dict[str, Any]]:
@@ -5592,6 +5665,10 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
             "cand": "candidate",
             "proposal": "proposal",
             "prop": "proposal",
+            "crystallized": "crystallized_record",
+            "crystallized_record": "crystallized_record",
+            "crystallized-record": "crystallized_record",
+            "cmem": "crystallized_record",
             "memory_source": "memory_source",
             "memory-source": "memory_source",
             "msrc": "memory_source",
@@ -5600,6 +5677,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return normalized_prefix, suffix.strip()
     if action_type in {"approve_candidate", "reject_candidate"}:
         return "candidate", value
+    if action_type == "revoke_crystallized":
+        return "crystallized_record", value
     if action_type in {"approve_proposal", "reject_proposal"}:
         return "proposal", value
     if action_type == "apply_proposal":

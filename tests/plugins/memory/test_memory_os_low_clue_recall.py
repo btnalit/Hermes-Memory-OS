@@ -261,6 +261,50 @@ def test_low_clue_recall_llm_judge_receives_normalized_titles(tmp_path):
     judge_labels = [candidate["label"] for candidate in captured["payload"]["candidates"]]
     assert any("Project Borealis" in label for label in judge_labels)
     assert all("User:" not in label and "Assistant:" not in label and "|" not in label for label in judge_labels)
+    assert captured["payload"]["query_features"]["low_clue"] is True
+    assert captured["payload"]["query_features"]["generic_terms"]
+    assert "继续昨天那个。" not in json.dumps(captured["payload"], ensure_ascii=False)
+
+
+def test_low_clue_recall_llm_judge_receives_bounded_query_features_without_raw_query(tmp_path):
+    store = _store(tmp_path)
+    _write_working(
+        store,
+        [
+            "Project Borealis collector layering：task spec, fetcher, parser, validator.",
+            "Episode render gate：composition inspection before final video export.",
+        ],
+    )
+    captured = {}
+
+    def runner(payload, config):
+        captured["payload"] = payload
+        return {
+            "status": "ok",
+            "selected_candidate_id": "",
+            "confidence": 0.2,
+            "reason_codes": ["bounded_query_features"],
+        }
+
+    query = "继续 Project Borealis 那个。api_key=secret C:\\Users\\owner\\private.txt"
+    build_low_clue_recall_report(
+        query,
+        store=store,
+        limit=4,
+        config={"enabled": True, "llm_judge": {"enabled": True, "mode": "report_only"}},
+        llm_runner=runner,
+    )
+
+    features = captured["payload"]["query_features"]
+    payload_text = json.dumps(captured["payload"], ensure_ascii=False)
+    assert features["schema_version"] == "memory-os.low_clue_query_features.v0"
+    assert features["has_specific_terms"] is True
+    assert features["low_clue"] is False
+    assert "project" in features["specific_terms"]
+    assert "borealis" in features["specific_terms"]
+    assert "api_key=secret" not in payload_text
+    assert "private.txt" not in payload_text
+    assert query not in payload_text
 
 
 def test_low_clue_recall_filters_system_note_candidates_and_keeps_titles_short(tmp_path):

@@ -355,6 +355,21 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_apply_proposal_args.action == "apply_proposal"
     assert review_apply_proposal_args.target == "proposal:prop_1"
     assert review_apply_proposal_args.apply is True
+    review_revoke_crystallized_args = parser.parse_args(
+        [
+            "review",
+            "apply",
+            "--action",
+            "revoke_crystallized",
+            "--target",
+            "crystallized:cmem_1",
+            "--apply",
+        ]
+    )
+    assert review_revoke_crystallized_args.review_command == "apply"
+    assert review_revoke_crystallized_args.action == "revoke_crystallized"
+    assert review_revoke_crystallized_args.target == "crystallized:cmem_1"
+    assert review_revoke_crystallized_args.apply is True
     expression_feedback_args = parser.parse_args(
         ["review", "apply", "--action", "too_mechanical", "--target", "expr_123"]
     )

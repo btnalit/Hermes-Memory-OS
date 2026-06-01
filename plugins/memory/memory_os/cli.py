@@ -879,6 +879,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         choices=[
             "approve_candidate",
             "reject_candidate",
+            "revoke_crystallized",
             "mark_feedback",
             "approve_proposal",
             "reject_proposal",

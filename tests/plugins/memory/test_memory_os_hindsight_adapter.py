@@ -164,6 +164,27 @@ def test_private_crystallized_body_is_not_exported_or_reported(tmp_path):
     assert service.read_records("insights.md")[0].frontmatter["hindsight_indexed"] is False
 
 
+def test_revoked_crystallized_record_is_not_exported(tmp_path):
+    service = _service(tmp_path)
+    record = _write_approved_record(service, sensitivity="public", body="Revoked memory must not export.")
+    service.revoke_record(
+        str(record.frontmatter["id"]),
+        revoked_by="owner",
+        reason="owner_revoked",
+        now=datetime(2026, 5, 20, 8, 2, tzinfo=timezone.utc),
+    )
+    client = FakeHindsightClient()
+    adapter = HindsightAdapter(service.store, config=HindsightAdapterConfig(enabled=True), client=client)
+
+    report = adapter.export_all()
+
+    assert report["exported_count"] == 0
+    assert report["skipped"] == [
+        {"record_id": record.frontmatter["id"], "file_name": "insights.md", "reason": "canonical_inactive"}
+    ]
+    assert client.payloads == []
+
+
 def test_client_failure_leaves_canonical_store_unmarked_except_audit(tmp_path):
     service = _service(tmp_path)
     _write_approved_record(service, sensitivity="public")

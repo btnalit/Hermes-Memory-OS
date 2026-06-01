@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from ..audit import append_audit
-from ..crystallized import CrystallizedMemoryService, CrystallizedRecord
+from ..crystallized import CrystallizedMemoryService, CrystallizedRecord, is_active_crystallized_frontmatter
 from ..store import MemoryOSStore, _format_frontmatter
 
 
@@ -50,6 +50,9 @@ class HindsightAdapter:
 
         report = _report(enabled=True)
         for record in self._records():
+            if not is_active_crystallized_frontmatter(record.frontmatter):
+                _skip(report, record, "canonical_inactive")
+                continue
             if record.frontmatter.get("hindsight_indexed") is True:
                 _skip(report, record, "already_indexed")
                 continue
@@ -148,6 +151,8 @@ class HindsightAdapter:
 
 
 def build_export_payload(record: CrystallizedRecord) -> dict[str, Any]:
+    if not is_active_crystallized_frontmatter(record.frontmatter):
+        raise HindsightExportRefused("record is not active canonical memory")
     if record.frontmatter.get("approval_purpose") != "approve_for_crystallized":
         raise HindsightExportRefused("record is not approved for crystallized export")
     if record.frontmatter.get("sensitivity") != "public":
