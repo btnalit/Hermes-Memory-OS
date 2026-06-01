@@ -345,6 +345,87 @@ def test_upgrade_profile_allows_preinstall_hindsight_status_gap_but_requires_pos
     assert classification["fail"] == []
 
 
+def test_upgrade_profile_allows_preinstall_fixable_shell_doctor_index_mismatch(tmp_path):
+    calls = []
+
+    def fake_runner(argv, *, host=None, timeout=30):
+        calls.append(tuple(argv))
+        command = " ".join(argv)
+        if "memory_os_upgrade_compat_check.py" in command and len(calls) == 1:
+            return {
+                "exit_code": 1,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.hermes_upgrade_compat.v0",
+                        "classification": {
+                            "pass": [{"code": "memory_provider_active"}],
+                            "warn": [],
+                            "fail": [
+                                {"code": "shell_doctor_command_failed", "exit_code": 1},
+                                {"code": "shell_doctor_missing_json"},
+                            ],
+                        },
+                        "commands": {
+                            "shell_doctor": {
+                                "exit_code": 1,
+                                "json": {
+                                    "schema_version": "memory-os.doctor.v0",
+                                    "status": "fail",
+                                    "findings": [
+                                        {
+                                            "code": "index_count_mismatch",
+                                            "severity": "error",
+                                            "details": {"count_key": "crystallized_records"},
+                                        }
+                                    ],
+                                },
+                            }
+                        },
+                    }
+                ),
+                "stderr": "",
+            }
+        if "install_memory_os.sh" in command:
+            is_dry_run = "--dry-run" in command
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps({"schema_version": "memory-os.install.v0", "dry_run": is_dry_run}),
+                "stderr": "",
+            }
+        if "memory_os_upgrade_compat_check.py" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.hermes_upgrade_compat.v0",
+                        "classification": {"pass": [{"code": "shell_doctor_ok"}], "warn": [], "fail": []},
+                    }
+                ),
+                "stderr": "",
+            }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
+        raise AssertionError(f"unexpected command: {command}")
+
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="operational",
+        hindsight_mode="auto",
+        phase="apply",
+        profile="upgrade",
+        run_command=fake_runner,
+    )
+
+    classification = classify_deploy_report(report)
+
+    assert report["preflight"]["status"] == "warn_expected_for_upgrade_preinstall"
+    assert report["apply"]["status"] == "applied"
+    assert report["postcheck"]["status"] == "pass"
+    assert {"code": "upgrade_preflight_shell_doctor_preinstall_fixable"} in classification["warn"]
+    assert classification["fail"] == []
+
+
 def test_upgrade_profile_allows_preinstall_provider_bank_evidence_gap_but_requires_postcheck(tmp_path):
     calls = []
 

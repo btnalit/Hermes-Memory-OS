@@ -280,7 +280,19 @@ def _classify_preflight(result: dict[str, Any], *, profile: str) -> dict[str, An
     if profile == "fresh" and _only_fresh_preinstall_memory_os_missing(fail):
         return {"status": "warn_expected_for_fresh", "compat": result.get("json"), "warn": fail}
     if profile == "upgrade" and _only_preinstall_hindsight_status_missing(fail):
-        return {"status": "warn_expected_for_upgrade_preinstall", "compat": result.get("json"), "warn": fail}
+        return {
+            "status": "warn_expected_for_upgrade_preinstall",
+            "compat": result.get("json"),
+            "warn": fail,
+            "warn_code": "upgrade_preflight_hindsight_status_pending_install",
+        }
+    if profile == "upgrade" and _only_upgrade_preinstall_fixable_shell_doctor(result, fail):
+        return {
+            "status": "warn_expected_for_upgrade_preinstall",
+            "compat": result.get("json"),
+            "warn": fail,
+            "warn_code": "upgrade_preflight_shell_doctor_preinstall_fixable",
+        }
     return {"status": "fail", "compat": result.get("json"), "fail": fail}
 
 
@@ -352,6 +364,29 @@ def _only_preinstall_hindsight_status_missing(fail: list[dict[str, Any]]) -> boo
     return bool(codes) and codes <= allowed
 
 
+def _only_upgrade_preinstall_fixable_shell_doctor(result: dict[str, Any], fail: list[dict[str, Any]]) -> bool:
+    codes = {str(item.get("code") or "") for item in fail}
+    if codes != {"shell_doctor_command_failed", "shell_doctor_missing_json"}:
+        return False
+    data = result.get("json")
+    if not isinstance(data, dict):
+        return False
+    commands = data.get("commands") if isinstance(data.get("commands"), dict) else {}
+    shell_doctor = commands.get("shell_doctor") if isinstance(commands.get("shell_doctor"), dict) else {}
+    doctor = shell_doctor.get("json") if isinstance(shell_doctor.get("json"), dict) else {}
+    findings = doctor.get("findings") if isinstance(doctor.get("findings"), list) else []
+    if not findings:
+        return False
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return False
+        code = str(finding.get("code") or finding.get("id") or "")
+        details = finding.get("details") if isinstance(finding.get("details"), dict) else {}
+        if code != "index_count_mismatch" or str(details.get("count_key") or "") != "crystallized_records":
+            return False
+    return True
+
+
 def _only_fresh_preinstall_memory_os_missing(fail: list[dict[str, Any]]) -> bool:
     allowed = {
         "memory_provider_not_memory_os",
@@ -401,7 +436,7 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
         elif status == "warn_expected_for_fresh":
             warn.append({"code": "fresh_preflight_memory_os_preinstall_expected"})
         elif status == "warn_expected_for_upgrade_preinstall":
-            warn.append({"code": "upgrade_preflight_hindsight_status_pending_install"})
+            warn.append({"code": str(section.get("warn_code") or "upgrade_preflight_preinstall_expected")})
         elif status == "blocked":
             fail.append({"code": str(section.get("reason") or f"{key}_blocked")})
         elif status == "fail":
