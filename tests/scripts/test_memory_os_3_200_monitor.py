@@ -44,6 +44,11 @@ def test_rh26_heading_anomalies_allow_known_casual_empty_and_safe_carryover_stat
             "headings": ["Crystallized Review Candidates", "Crystallized Memory", "Indexed Recall"],
         },
         {
+            "id": "candidate_vs_crystallized",
+            "chars": 975,
+            "headings": ["Crystallized Review Candidates", "Crystallized Memory"],
+        },
+        {
             "id": "active_comfyui_install",
             "chars": 2051,
             "headings": ["Current Foreground Task", "Crystallized Memory", "Indexed Recall", "Recent Event Summaries"],

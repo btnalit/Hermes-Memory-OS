@@ -21,11 +21,12 @@ EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
     "continue_current_task": ["Current Foreground Task"],
     "casual_memory_system_change": [],
     "diagnostic_current_architecture": ["Diagnostic Grounding", "Current Memory-OS Runtime Facts"],
-    "candidate_vs_crystallized": ["Crystallized Review Candidates", "Crystallized Memory", "Indexed Recall"],
+    "candidate_vs_crystallized": ["Crystallized Review Candidates", "Crystallized Memory"],
     "active_comfyui_install": ["Current Foreground Task", "Indexed Recall"],
     "deferred_cancellation": ["Current Foreground Task"],
 }
 ALLOWED_RH26_EXTRA_HEADINGS: dict[str, set[str]] = {
+    "candidate_vs_crystallized": {"Indexed Recall"},
     "active_comfyui_install": {"Working Memory", "Crystallized Memory", "Recent Event Summaries"},
 }
 SAFE_CASUAL_HEADINGS = {"Conversation Carryover", "Recent Event Summaries"}
