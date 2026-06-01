@@ -98,6 +98,16 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "right-brain speak preview is a product live lane, not a clean-host install blocker",
         "production_behavior": "warn_if_production",
     },
+    "index_not_healthy": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host can be inspected before indexed recall has warmed; production must keep the index healthy",
+        "production_behavior": "fail_if_production",
+    },
+    "doctor_warning_finding": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host can surface non-blocking doctor warnings during bootstrap compatibility checks",
+        "production_behavior": "warn_if_production",
+    },
     "context_router_not_apply": {
         "classification": "expected_clean_host",
         "reason": "clean-host compatibility may run without production apply routing",

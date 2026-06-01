@@ -487,6 +487,8 @@ def test_clean_host_warn_classification_table_covers_current_warn_codes():
         "grounded_expression_alternate_left_map_substrate_pending",
         "module_cadence_split_pending",
         "right_brain_review_speak_preview_missing",
+        "index_not_healthy",
+        "doctor_warning_finding",
         "context_router_not_apply",
         "memory_sources_feedback_volume_missing",
         "v7_memory_sources_feedback_volume_pending",
@@ -508,6 +510,43 @@ def test_clean_host_warns_include_classification_records():
         and item["classification"] == "expected_clean_host"
         and item["production_behavior"] == "fail_if_production"
         for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_clean_host_warns_classify_index_and_doctor_bootstrap_warnings():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["memory_status"]["index_health"] = {"state": "missing"}
+    snapshot["doctor"] = {"status": "ok", "findings": [("bootstrap_warning", "warning")]}
+
+    classification = classify_snapshot(snapshot)
+
+    assert not classification["fail"]
+    assert any(
+        item["code"] == "index_not_healthy"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+    assert any(
+        item["code"] == "doctor_warning_finding"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "warn_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_production_index_not_healthy_still_fails():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_status"]["index_health"] = {"state": "missing"}
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "index_not_healthy_in_production"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["fail"]
     )
 
 
