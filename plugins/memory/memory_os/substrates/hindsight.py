@@ -97,10 +97,12 @@ class GovernedHindsightSubstrate:
         *,
         client: HindsightSubstrateClient | None = None,
         live_guard: Any | None = None,
+        invalidated_source_refs: set[str] | None = None,
     ) -> None:
         self.config = config
         self.client = client
         self.live_guard = live_guard
+        self.invalidated_source_refs = set(invalidated_source_refs or set())
 
     def _kill_switch_enabled(self) -> bool:
         if isinstance(self.live_guard, dict):
@@ -190,13 +192,16 @@ class GovernedHindsightSubstrate:
             budget=self.config.recall_budget,
             max_tokens=self.config.recall_max_tokens,
         )
-        items = response.get("items", []) if isinstance(response, dict) else []
+        items = _recall_items(response)
         facts: list[GroundingFact] = []
         for item in items:
             if not isinstance(item, dict):
                 continue
             text = str(item.get("text") or item.get("summary") or "").strip()
             if not text:
+                continue
+            source_ref = _source_ref(item)
+            if source_ref and source_ref in self.invalidated_source_refs:
                 continue
             facts.append(
                 GroundingFact(
@@ -205,7 +210,7 @@ class GovernedHindsightSubstrate:
                     body_summary=text,
                     confidence=float(item.get("score") or item.get("confidence") or 0.5),
                     provenance="hindsight_recall",
-                    source_event_refs=[str(item.get("source") or "")],
+                    source_event_refs=[source_ref or str(item.get("source") or "")],
                     substrate_snapshot_id=self.config.snapshot_id,
                     consumer=consumer,
                     advisory_only=True,
@@ -255,3 +260,23 @@ class GovernedHindsightSubstrate:
         if self.client is None:
             return {"ok": False, "status": "unavailable", "operation": "invalidate", "payload": payload}
         return self.client.invalidate(payload)
+
+
+def _recall_items(response: Any) -> list[dict[str, Any]]:
+    if not isinstance(response, dict):
+        return []
+    for key in ("items", "results"):
+        items = response.get(key)
+        if isinstance(items, list):
+            return [dict(item) for item in items if isinstance(item, dict)]
+    return []
+
+
+def _source_ref(item: dict[str, Any]) -> str:
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    for key in ("source_record_ref", "record_id", "document_id"):
+        value = metadata.get(key) if key in metadata else item.get(key)
+        clean = str(value or "").strip()
+        if clean:
+            return clean
+    return ""

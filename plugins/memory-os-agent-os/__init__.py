@@ -58,7 +58,7 @@ def register(ctx: Any) -> None:
 
 _OWNER_ACTION_TOKEN_RE = re.compile(r"\boa_[0-9a-f]{8,32}\b", re.IGNORECASE)
 _OWNER_REVIEW_COMMAND_RE = re.compile(
-    r"\b(?:memory|mos)\s+(?:approve|reject|allow|feedback|apply)\s+oa_[0-9a-f]{8,32}\b",
+    r"\b(?:memory|mos)\s+(?:approve|reject|revoke|allow|feedback|apply)\s+oa_[0-9a-f]{8,32}\b",
     re.IGNORECASE,
 )
 _DIRECT_OWNER_ACTION_BYPASS_MARKERS = (
@@ -76,7 +76,7 @@ _TOKEN_OWNER_ACTION_BYPASS_MARKERS = (
 _OWNER_ACTION_BYPASS_TOOLS = {"terminal", "execute_code"}
 _OWNER_ACTION_BYPASS_BLOCK_MESSAGE = (
     "Memory-OS owner-action bypass blocked. Use the structured "
-    "memory_os_review_reply tool with action=approve|reject|allow|feedback|apply "
+    "memory_os_review_reply tool with action=approve|reject|revoke|allow|feedback|apply "
     "and the stable action_token, or use memory_os_review_surface for read-only "
     "context. Do not process Memory-OS owner-review tokens through terminal, "
     "execute_code, CLI fallback, or direct Python calls."

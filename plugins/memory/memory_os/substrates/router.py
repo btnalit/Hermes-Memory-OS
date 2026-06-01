@@ -66,7 +66,10 @@ class SubstrateRouter:
             capabilities = set(_health_value(health, "capabilities", []) or [])
             if _health_value(health, "status") != "ok" or "recall" not in capabilities:
                 continue
-            provider_facts = provider.recall(query, consumer=consumer)
+            try:
+                provider_facts = provider.recall(query, consumer=consumer)
+            except Exception:
+                continue
             if provider_facts:
                 facts.extend(_fact_to_dict(fact) for fact in provider_facts)
                 fallback_triggered = False

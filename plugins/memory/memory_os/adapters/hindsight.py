@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
@@ -25,11 +29,109 @@ class HindsightExportRefused(ValueError):
     """Raised when callers try to export non-approved canonical data."""
 
 
+class HindsightHttpClient:
+    """Minimal governed client for Hindsight's HTTP API."""
+
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        bank_id: str,
+        api_key: str = "",
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        self.api_url = str(api_url or "").rstrip("/")
+        self.bank_id = str(bank_id or "").strip()
+        self.api_key = str(api_key or "").strip()
+        self.timeout_seconds = timeout_seconds
+
+    def retain(self, payload: dict[str, Any]) -> dict[str, Any]:
+        metadata = _string_metadata(payload.get("metadata"))
+        record_id = str(payload.get("record_id") or "").strip()
+        item = {
+            "content": str(payload.get("text") or ""),
+            "context": "Memory-OS owner-approved crystallized memory",
+            "document_id": record_id or None,
+            "tags": _retain_tags(payload),
+            "metadata": metadata,
+            "timestamp": str(metadata.get("approved_at") or "unset"),
+        }
+        return self._post(
+            f"/v1/default/banks/{_quote_path(self.bank_id)}/memories",
+            {"async": False, "items": [item]},
+        )
+
+    def recall(self, *, bank_id: str, query: str, budget: str, max_tokens: int) -> dict[str, Any]:
+        return self._post(
+            f"/v1/default/banks/{_quote_path(bank_id or self.bank_id)}/memories/recall",
+            {
+                "query": str(query or ""),
+                "budget": _budget(budget, default="mid"),
+                "max_tokens": max(int(max_tokens or 1200), 1),
+                "types": ["world", "experience", "observation"],
+            },
+        )
+
+    def reflect(self, *, bank_id: str, query: str, budget: str) -> dict[str, Any]:
+        return self._post(
+            f"/v1/default/banks/{_quote_path(bank_id or self.bank_id)}/reflect",
+            {
+                "query": str(query or ""),
+                "budget": _budget(budget, default="low"),
+                "max_tokens": 1200,
+                "include": {"facts": {}},
+            },
+        )
+
+    def invalidate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "status": "invalidated_by_memory_os_projection",
+            "actual_delete": False,
+            "payload": {
+                "source_record_ref": str(payload.get("source_record_ref") or ""),
+                "source_version": str(payload.get("source_version") or ""),
+                "delete_policy": "invalidate_not_delete",
+            },
+        }
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.api_url:
+            raise RuntimeError("hindsight api_url not configured")
+        if not self.bank_id:
+            raise RuntimeError("hindsight bank_id not configured")
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.api_url + path,
+            data=data,
+            headers=self._headers(),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                body = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"hindsight HTTP {exc.code}: {detail}") from exc
+        if not body.strip():
+            return {}
+        loaded = json.loads(body)
+        if not isinstance(loaded, dict):
+            return {"value": loaded}
+        return loaded
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+
 class HindsightAdapter:
     """Export only safe, owner-approved crystallized records to Hindsight.
 
-    This adapter intentionally has no built-in network client. Tests and future
-    integration code must inject a client, keeping Slice 13 a smoke boundary.
+    Callers inject either a fake client for tests or HindsightHttpClient for
+    governed live projection writes.
     """
 
     def __init__(
@@ -170,6 +272,7 @@ def build_export_payload(record: CrystallizedRecord) -> dict[str, Any]:
             "approved_by": str(record.frontmatter.get("approved_by", "")),
             "approved_at": str(record.frontmatter.get("approved_at", "")),
             "sensitivity": str(record.frontmatter.get("sensitivity", "")),
+            "source_record_ref": _record_id(record),
         },
     }
 
@@ -205,3 +308,33 @@ def _substrate_record_id(retain_result: Any, *, fallback: str) -> str:
 
 def _substrate_snapshot_id(substrate_record_id: str) -> str:
     return f"hindsight:{substrate_record_id}:vcurrent"
+
+
+def _string_metadata(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    metadata: dict[str, str] = {}
+    for key, item in value.items():
+        clean_key = str(key or "").strip()
+        if not clean_key:
+            continue
+        metadata[clean_key] = str(item or "")
+    return metadata
+
+
+def _retain_tags(payload: dict[str, Any]) -> list[str]:
+    tags = ["memory-os", "crystallized"]
+    for tag in payload.get("tags") or []:
+        clean = str(tag or "").strip()
+        if clean and clean not in tags:
+            tags.append(clean)
+    return tags
+
+
+def _quote_path(value: str) -> str:
+    return urllib.parse.quote(str(value or ""), safe="")
+
+
+def _budget(value: str, *, default: str) -> str:
+    clean = str(value or "").strip()
+    return clean if clean in {"low", "mid", "high"} else default

@@ -589,6 +589,47 @@ def test_hindsight_reflect_dry_run_reports_disabled_by_default(tmp_path):
     assert report["actual_canonical_write"] is False
 
 
+def test_hindsight_reflect_apply_queues_owner_review_candidate(monkeypatch, tmp_path):
+    from plugins.memory.memory_os import cli as memory_cli
+    from plugins.memory.memory_os.config import save_config
+    from plugins.memory.memory_os.crystallized import read_candidate_queue
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    class FakeClient:
+        def reflect(self, *, bank_id, query, budget):
+            return {"text": "Hindsight synthesized a bounded pattern for owner review."}
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    save_config(
+        {
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://127.0.0.1:8888",
+                    "bank_id": "bank",
+                    "recall_mode": "active",
+                    "reflect_enabled": True,
+                }
+            }
+        },
+        tmp_path,
+    )
+    monkeypatch.setattr(memory_cli, "_hindsight_http_client_from_config", lambda substrate: FakeClient())
+
+    report = memory_cli.hindsight_reflect_report(store, query="what pattern matters?", apply=True)
+
+    candidates = read_candidate_queue(store)
+    assert report["status"] == "ok"
+    assert report["candidate_queued"] is True
+    assert report["actual_canonical_write"] is False
+    assert report["owner_gate_required"] is True
+    assert candidates[0].kind == "hindsight_reflect_candidate"
+    assert candidates[0].body == "Hindsight synthesized a bounded pattern for owner review."
+
+
 def test_shell_memory_sources_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
     module = load_shell_module()
     calls: list[argparse.Namespace] = []

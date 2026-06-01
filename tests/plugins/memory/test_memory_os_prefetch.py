@@ -72,6 +72,54 @@ def test_prefetch_records_substrate_shadow_recall_without_injecting_fact_or_quer
     assert ledger_record["substrate_snapshot_id"] == "hindsight:bank:v1"
 
 
+def test_prefetch_injects_active_substrate_recall_as_advisory_context(tmp_path):
+    store = _store(tmp_path)
+
+    context = build_prefetch(
+        "ACTIVE_QUERY_SHOULD_BE_HASHED",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        substrate_recall_report={
+            "schema_version": "memory-os.substrate_recall.v0",
+            "mode": "active",
+            "query_class": "active",
+            "selected_provider": "local_artifact",
+            "authoritative": True,
+            "external_authoritative_count": 0,
+            "local_first_authority_preserved": True,
+            "recall_llm_triggered": False,
+            "fallback_triggered": False,
+            "facts": [
+                {
+                    "provider": "local_artifact",
+                    "body_summary": "Local crystallized fact remains primary.",
+                    "advisory_only": False,
+                    "authority_class": "local_canonical",
+                    "recall_llm_triggered": False,
+                    "substrate_snapshot_id": "local_artifact:canonical:v1",
+                },
+                {
+                    "provider": "hindsight",
+                    "body_summary": "Hindsight active fact is advisory only.",
+                    "advisory_only": True,
+                    "authority_class": "derived_projection",
+                    "recall_llm_triggered": False,
+                    "substrate_snapshot_id": "hindsight:bank:v1",
+                },
+            ],
+        },
+    )
+
+    shadow_path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
+
+    assert "### Substrate Recall" in context
+    assert "Local crystallized fact remains primary." in context
+    assert "Hindsight active fact is advisory only." in context
+    assert "[hindsight advisory; authority=derived_projection]" in context
+    assert "ACTIVE_QUERY_SHOULD_BE_HASHED" not in shadow_path.read_text(encoding="utf-8")
+
+
 def test_prefetch_orders_layers_deterministically(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(build_event(seed=1, profile="memoryos-test"))

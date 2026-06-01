@@ -141,6 +141,7 @@ def test_public_approved_crystallized_record_exports_payload_and_marks_indexed_a
                 "approved_by": "owner",
                 "approved_at": "2026-05-20T08:00:00+00:00",
                 "sensitivity": "public",
+                "source_record_ref": record.frontmatter["id"],
             },
         }
     ]

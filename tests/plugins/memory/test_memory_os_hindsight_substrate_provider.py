@@ -150,6 +150,53 @@ def test_recall_shadow_returns_grounding_facts_without_hot_path_llm():
     assert facts[0].substrate_snapshot_id.startswith("hindsight:bank:")
 
 
+def test_recall_accepts_hindsight_results_response_shape():
+    class ResultsClient(FakeClient):
+        def recall(self, *, bank_id, query, budget, max_tokens):
+            return {
+                "results": [
+                    {
+                        "id": "h_fact_1",
+                        "text": "grounded result shape",
+                        "document_id": "cmem_1",
+                        "metadata": {"source_record_ref": "cmem_1"},
+                    }
+                ]
+            }
+
+    substrate = GovernedHindsightSubstrate(
+        GovernedHindsightConfig(enabled=True, bank_id="bank", recall_mode="active"),
+        client=ResultsClient(),
+    )
+
+    facts = substrate.recall("continue yesterday", consumer="prefetch")
+
+    assert facts[0].body_summary == "grounded result shape"
+    assert facts[0].source_event_refs == ["cmem_1"]
+    assert facts[0].advisory_only is True
+
+
+def test_recall_filters_invalidated_projection_source_refs():
+    class ResultsClient(FakeClient):
+        def recall(self, *, bank_id, query, budget, max_tokens):
+            return {
+                "results": [
+                    {"id": "h_stale", "text": "stale projection", "document_id": "cmem_revoked"},
+                    {"id": "h_active", "text": "active projection", "document_id": "cmem_active"},
+                ]
+            }
+
+    substrate = GovernedHindsightSubstrate(
+        GovernedHindsightConfig(enabled=True, bank_id="bank", recall_mode="active"),
+        client=ResultsClient(),
+        invalidated_source_refs={"cmem_revoked"},
+    )
+
+    facts = substrate.recall("projection", consumer="prefetch")
+
+    assert [fact.body_summary for fact in facts] == ["active projection"]
+
+
 def test_reflect_is_disabled_until_explicitly_enabled():
     client = FakeClient()
     substrate = GovernedHindsightSubstrate(

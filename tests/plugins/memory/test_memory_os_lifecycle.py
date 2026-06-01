@@ -1,7 +1,9 @@
 import json
 import time
 
+import plugins.memory.memory_os as memory_os_module
 from plugins.memory import load_memory_provider
+from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.status_tool_contract import (
     MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
@@ -32,6 +34,46 @@ def test_memory_os_provider_is_discoverable_without_initializing_storage():
     assert provider.prefetch("hello") == ""
 
 
+def test_provider_prefetch_runs_active_hindsight_recall_as_advisory_context(monkeypatch, tmp_path):
+    class FakeHindsightClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def recall(self, *, bank_id, query, budget, max_tokens):
+            return {
+                "results": [
+                    {
+                        "id": "h_fact_1",
+                        "text": "Hindsight active integration fact.",
+                        "document_id": "cmem_hindsight",
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(memory_os_module, "HindsightHttpClient", FakeHindsightClient)
+    save_config(
+        {
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://127.0.0.1:8888",
+                    "bank_id": "bank",
+                    "recall_mode": "active",
+                }
+            }
+        },
+        tmp_path,
+    )
+    provider = load_memory_provider("memory_os")
+    provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="memoryos-test")
+
+    context = provider.prefetch("active hindsight recall smoke")
+
+    assert "### Substrate Recall" in context
+    assert "Hindsight active integration fact." in context
+    assert "[hindsight advisory; authority=derived_projection]" in context
+
+
 def test_memory_os_status_tool_description_is_diagnostic_only():
     provider = load_memory_provider("memory_os")
 
@@ -54,8 +96,9 @@ def test_memory_os_review_reply_tool_prefers_structured_action_token():
 
     assert schema["description"] == MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION
     assert "Use structured arguments only" in schema["description"]
-    assert "action=`approve|reject|allow|feedback|apply`" in schema["description"]
+    assert "action=`approve|reject|revoke|allow|feedback|apply`" in schema["description"]
     assert "apply" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "revoke" in schema["parameters"]["properties"]["action"]["enum"]
     assert "Do not send a free-form command string" in schema["description"]
     assert "display anchors such as A1/R1 without resolving" in schema["description"]
     assert "reply" not in schema["parameters"]["properties"]
@@ -70,6 +113,7 @@ def test_memory_os_review_reply_tool_prefers_structured_action_token():
 def test_owner_review_reply_guard_accepts_expression_feedback_rating():
     assert _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanical")
     assert _looks_like_owner_review_reply("反馈 oa_12345678 off_voice")
+    assert _looks_like_owner_review_reply("memory revoke oa_12345678")
 
 
 def test_memory_os_review_surface_tool_is_read_only_agent_surface():

@@ -14,7 +14,12 @@ from uuid import uuid4
 from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit
 from .config import load_config
-from .crystallized import CrystallizedCandidate, CrystallizedMemoryService, read_candidate_queue
+from .crystallized import (
+    CrystallizedCandidate,
+    CrystallizedMemoryService,
+    is_active_crystallized_frontmatter,
+    read_candidate_queue,
+)
 from .memory_sources import (
     ALLOWED_FEEDBACK_RATINGS,
     POLICY_APPLY_SCHEMA_VERSION,
@@ -1114,6 +1119,7 @@ def owner_review_digest_preview(
     if not isinstance(config, dict):
         config = {}
     resolved_owner = str(owner_id or config.get("owner_id") or "owner")
+    actions_enabled = bool(config.get("actions_enabled"))
     action_limit = _positive_limit(max_action_required, config.get("max_action_required"), 3)
     if digest_mode == "agenda":
         suggested_limit = 0
@@ -1151,7 +1157,7 @@ def owner_review_digest_preview(
         "digest_mode": digest_mode,
         "will_send": False,
         "delivery_skipped": True,
-        "actions_enabled": False,
+        "actions_enabled": actions_enabled,
         "raw_body_included": False,
         "review_channel": channel,
         "limits": {
@@ -1238,7 +1244,7 @@ def render_owner_review_digest(
         "digest_mode": digest_mode,
         "will_send": False,
         "delivery_skipped": True,
-        "actions_enabled": False,
+        "actions_enabled": bool(preview.get("actions_enabled")),
         "raw_body_included": False,
         "delivery_binding": _owner_review_delivery_binding(store, channel),
         "review_channel": preview.get("review_channel"),
@@ -3054,6 +3060,8 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     if target_type == "proposal_apply":
         summary = _safe_review_summary(item.get("summary"), fallback="这个已批准 proposal")
         return _bounded_text(f"要把这个已批准 proposal 显式应用到运行时策略/投影吗？{summary}", 180)
+    if target_type == "crystallized_record":
+        return "要撤销这条 crystallized memory 吗？撤销后本地 canonical recall 不再返回它。"
     if target_type == "memory_source":
         return "这次注入的记忆/上下文对回答有帮助吗？"
     if target_type == "speak":
@@ -3107,6 +3115,8 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             f"{source_module} 已完成 OpsGate report-only review；report={report_id or 'unknown'}，decision=would_allow。",
             220,
         )
+    if target_type == "crystallized_record":
+        return _bounded_text(f"{source_module} 提供了 owner 显式撤销入口；record={item.get('target_id') or 'unknown'}。", 220)
     if target_type == "memory_source":
         route = str(item.get("route") or "unknown")
         query_class = str(item.get("query_class") or "unknown")
@@ -3137,6 +3147,8 @@ def _review_consequence(target_type: str) -> str:
         return "批准只表示允许进入人工 follow-up；不会执行任何工作。拒绝会降权/关闭该 proposal。"
     if target_type == "proposal_apply":
         return "应用只写入这个 bounded policy/projection 目标；不会创建 generic executor、execution ticket 或外部执行。"
+    if target_type == "crystallized_record":
+        return "撤销会把本地 crystallized 记录标为 owner_revoked，并记录 Hindsight 投影 invalidate；不会删除审计证据。"
     if target_type == "memory_source":
         return "反馈先作为证据入 ledger；不会直接改变 live routing，除非之后经过单独 apply gate。"
     if target_type == "speak":
@@ -3162,6 +3174,8 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
         ]
     if target_type == "proposal_apply":
         return [_review_action("apply", "apply_proposal", "proposal", target_id)]
+    if target_type == "crystallized_record":
+        return [_review_action("revoke", "revoke_crystallized", target_type, target_id)]
     if target_type == "memory_source":
         return [_review_action("feedback", "mark_feedback", target_type, target_id)]
     if target_type == "speak":
@@ -3461,6 +3475,49 @@ def _surface_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]
     result.update(_expression_feedback_action_token_map(roots))
     result.update(_memory_sources_feedback_action_token_map(roots))
     result.update(_proposal_followup_action_token_map(roots))
+    result.update(_crystallized_revoke_action_token_map(roots))
+    return result
+
+
+def _crystallized_revoke_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    store = MemoryOSStore(roots)
+    service = CrystallizedMemoryService(store)
+    if not roots.crystallized_root.exists():
+        return result
+    for path in sorted(roots.crystallized_root.glob("*.md")):
+        for record in service.read_records(path.name):
+            if not is_active_crystallized_frontmatter(record.frontmatter):
+                continue
+            record_id = str(record.frontmatter.get("id") or "").strip()
+            if not record_id:
+                continue
+            token = _action_token(
+                action_type="revoke_crystallized",
+                target_type="crystallized_record",
+                target_id=record_id,
+            )
+            item = {
+                "target_type": "crystallized_record",
+                "target_id": record_id,
+                "source_module": "crystallized_memory",
+                "summary": _bounded_text(record.body, 220),
+                "action_tokens": {"revoke_crystallized": token},
+                "action_targets": {
+                    "revoke_crystallized": {
+                        "target_type": "crystallized_record",
+                        "target_id": record_id,
+                    }
+                },
+                "safe_source_ids": [f"crystallized:{record_id}"],
+                "raw_body_included": False,
+            }
+            result[token] = {
+                "item": item,
+                "action_type": "revoke_crystallized",
+                "target_type": "crystallized_record",
+                "target_id": record_id,
+            }
     return result
 
 
@@ -3757,6 +3814,9 @@ def _normalize_reply_verb(value: str) -> str:
         "反馈": "feedback",
         "allow": "allow",
         "允许": "allow",
+        "revoke": "revoke",
+        "撤销": "revoke",
+        "撤回": "revoke",
         "apply": "apply",
         "应用": "apply",
         "执行": "apply",
@@ -3776,6 +3836,8 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "reject_proposal"
     if verb == "apply" and target_type == "proposal":
         return "apply_proposal"
+    if verb == "revoke" and target_type == "crystallized_record":
+        return "revoke_crystallized"
     if verb == "feedback" and target_type == "memory_source":
         return "mark_feedback"
     if verb == "allow" and target_type == "speak":
@@ -3794,6 +3856,8 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
         return action_type == "allow_speak_once"
     if verb == "apply":
         return action_type == "apply_proposal"
+    if verb == "revoke":
+        return action_type == "revoke_crystallized"
     return False
 
 

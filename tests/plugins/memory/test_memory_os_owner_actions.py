@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.crystallized import (
@@ -1873,6 +1874,52 @@ def test_digest_preview_is_bounded_no_send_and_no_raw_body(tmp_path):
     assert preview["review_aging"]["aged_to_review_suggested_count"] == 0
     assert "Candidate kind=" not in serialized
     assert "RAW PROPOSAL BODY" not in serialized
+
+
+def test_digest_actions_enabled_is_config_derived_without_auto_execute(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    save_config({"owner_review": {"enabled": True, "actions_enabled": True}}, tmp_path)
+
+    preview = owner_review_digest_preview(store)
+    rendered = render_owner_review_digest(store)
+
+    assert preview["actions_enabled"] is True
+    assert rendered["actions_enabled"] is True
+    assert rendered["boundary"]["actual_execute"] is False
+    assert rendered["sections"]["action_required"][0]["action_tokens"]["approve_candidate"].startswith("oa_")
+
+
+def test_owner_review_reply_can_revoke_crystallized_record_by_token(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    record_id = str(record.frontmatter["id"])
+    token = "oa_" + hashlib.sha256(
+        f"revoke_crystallized|crystallized_record|{record_id}".encode("utf-8")
+    ).hexdigest()[:14]
+
+    result = parse_owner_review_reply(store, f"memory revoke {token}", owner_id="owner", channel="cli", apply=True)
+    revoked = CrystallizedMemoryService(store).find_record(record_id)
+    projection = derive_projection_coherence(
+        ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl").read_all(),
+        provider="hindsight",
+    )
+
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "revoke_crystallized"
+    assert revoked is not None
+    assert revoked.frontmatter["canonical_state"] == "owner_revoked"
+    assert result["owner_action_result"]["result_ref"]["projection_invalidated"] is True
+    assert projection["retract_count"] == 1
 
 
 def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_path):

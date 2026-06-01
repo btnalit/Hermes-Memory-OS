@@ -144,7 +144,8 @@ Governance rules:
 - LocalArtifact remains primary authority. Hindsight facts must never outrank
   local crystallized or owner-approved facts, even in active recall mode.
 - Reflect is disabled by default, off the hot path, and never writes canonical
-  memory directly. Future reflect-to-candidate promotion must pass an owner gate.
+  memory directly. When explicitly enabled and applied, Hindsight reflect output
+  is queued only as a bounded crystallized candidate for owner review.
 - The global live guard kill switch forces optional external substrates
   disabled.
 
@@ -156,6 +157,7 @@ hermes memory-os-agent-os hindsight adopt --dry-run
 hermes memory-os-agent-os hindsight retain-pending --dry-run
 hermes memory-os-agent-os hindsight retract --record-id <id> --reason demoted --dry-run
 hermes memory-os-agent-os hindsight reflect --query "..." --dry-run
+hermes memory-os-agent-os review reply "memory revoke oa_<token>" --apply
 ```
 
 Automated deployment wrapper:

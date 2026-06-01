@@ -51,7 +51,8 @@ from .conversation_regression import (
 )
 from .cognitive_loop import CognitiveLoopRunner
 from .cron_mirror import CronMirror
-from .crystallized import read_candidate_queue
+from .crystallized import CrystallizedCandidate, append_candidate_queue, read_candidate_queue
+from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, HindsightHttpClient
 from .index import MemoryOSIndex
 from .low_clue_recall import build_low_clue_recall_report, low_clue_judge_availability
 from .memory_sources import (
@@ -97,6 +98,7 @@ from .session_mirror import SessionMirror
 from .shadow_journal import ShadowJournalIngestion
 from .state_source_mirror import StateSourceMirror
 from .store import MemoryOSStore
+from .substrates.hindsight import GovernedHindsightConfig, GovernedHindsightSubstrate
 from .working import WorkingMemoryService
 
 
@@ -239,10 +241,13 @@ def hindsight_retain_pending_report(store: MemoryOSStore, *, apply: bool = False
             "candidate_count": candidate_count,
         }
 
-    from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig
     from .substrates.ledger import SubstrateOperationLedger
 
-    adapter = HindsightAdapter(store, config=HindsightAdapterConfig(enabled=enabled), client=None)
+    adapter = HindsightAdapter(
+        store,
+        config=HindsightAdapterConfig(enabled=enabled),
+        client=_hindsight_http_client_from_config(substrate) if enabled else None,
+    )
     adapter_report = adapter.export_all()
     exported_records = (
         adapter_report.get("exported_records")
@@ -354,9 +359,29 @@ def hindsight_reflect_report(store: MemoryOSStore, *, query: str, apply: bool = 
             "actual_canonical_write": False,
             "query_sha256": query_hash,
         }
+    reflect_result: dict[str, Any] = {
+        "provider": "hindsight",
+        "capability": "reflect",
+        "status": "dry_run",
+        "advisory_only": True,
+        "substrate_snapshot_id": _hindsight_snapshot_id(substrate),
+    }
+    candidate_result = {"candidate_queued": False, "candidate_id": "", "duplicate_candidate": False}
     if apply:
         from .substrates.ledger import SubstrateOperationLedger
 
+        governed = GovernedHindsightSubstrate(
+            GovernedHindsightConfig.from_dict(substrate),
+            client=_hindsight_http_client_from_config(substrate),
+            live_guard=config,
+        )
+        reflect_result = governed.reflect(query, consumer="owner_review_candidate")
+        if reflect_result.get("status") == "ok":
+            candidate_result = _queue_hindsight_reflect_candidate(
+                store,
+                query=query,
+                reflect_result=reflect_result,
+            )
         SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl").append(
             {
                 "provider": "hindsight",
@@ -364,14 +389,22 @@ def hindsight_reflect_report(store: MemoryOSStore, *, query: str, apply: bool = 
                 "phase": "async",
                 "raw_body_included": False,
                 "substrate_snapshot_id": _hindsight_snapshot_id(substrate),
+                "status": str(reflect_result.get("status") or ""),
+                "candidate_queued": bool(candidate_result.get("candidate_queued")),
+                "candidate_id": str(candidate_result.get("candidate_id") or ""),
             }
         )
     return {
         "schema_version": "memory-os.hindsight_reflect.v0",
-        "status": "configured",
+        "status": str(reflect_result.get("status") or "configured") if apply else "configured",
         "dry_run": not apply,
         "off_hot_path": True,
         "actual_canonical_write": False,
+        "owner_gate_required": True,
+        "candidate_queued": bool(candidate_result.get("candidate_queued")),
+        "candidate_id": str(candidate_result.get("candidate_id") or ""),
+        "duplicate_candidate": bool(candidate_result.get("duplicate_candidate")),
+        "raw_body_included": False,
         "query_sha256": query_hash,
     }
 
@@ -449,6 +482,57 @@ def _sha256_text(value: str) -> str:
     import hashlib
 
     return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _hindsight_http_client_from_config(substrate: dict[str, Any]) -> HindsightHttpClient | None:
+    api_url = str(substrate.get("api_url") or "").strip()
+    bank_id = str(substrate.get("bank_id") or "").strip()
+    if not api_url or not bank_id:
+        return None
+    api_key = str(substrate.get("api_key") or "").strip()
+    env_var = str(substrate.get("api_key_env_var") or "HINDSIGHT_API_KEY").strip()
+    if not api_key and env_var:
+        api_key = str(os.environ.get(env_var) or "").strip()
+    return HindsightHttpClient(api_url=api_url, bank_id=bank_id, api_key=api_key)
+
+
+def _queue_hindsight_reflect_candidate(
+    store: MemoryOSStore,
+    *,
+    query: str,
+    reflect_result: dict[str, Any],
+) -> dict[str, Any]:
+    response = reflect_result.get("response") if isinstance(reflect_result.get("response"), dict) else {}
+    text = str(response.get("text") or "")
+    if not text and isinstance(response.get("structured_output"), dict):
+        structured = response["structured_output"]
+        text = str(structured.get("summary") or json.dumps(structured, ensure_ascii=False, sort_keys=True))
+    text = _bounded_candidate_body(text)
+    if not text:
+        return {"candidate_queued": False, "candidate_id": "", "reason": "empty_reflect_response"}
+    seed = _sha256_text(f"{query}\n{text}")[:16]
+    candidate_id = f"cand_hindsight_reflect_{seed}"
+    existing = {candidate.candidate_id for candidate in read_candidate_queue(store)}
+    if candidate_id in existing:
+        return {"candidate_queued": False, "candidate_id": candidate_id, "duplicate_candidate": True}
+    candidate = CrystallizedCandidate(
+        candidate_id=candidate_id,
+        kind="hindsight_reflect_candidate",
+        body=text,
+        source_event_ids=[f"hindsight_reflect:{_sha256_text(query)[:16]}"],
+        sensitivity="private",
+        tags=["hindsight_reflect", "owner_review"],
+        bridge_state="reflect_owner_review_candidate",
+    )
+    append_candidate_queue(store, candidate)
+    return {"candidate_queued": True, "candidate_id": candidate_id, "duplicate_candidate": False}
+
+
+def _bounded_candidate_body(value: str) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= 1200:
+        return text
+    return text[:1199].rstrip() + "..."
 
 
 def _hindsight_substrate_monitor(store: MemoryOSStore) -> dict[str, Any]:

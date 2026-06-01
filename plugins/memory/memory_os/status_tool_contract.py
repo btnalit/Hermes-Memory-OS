@@ -18,7 +18,7 @@ MEMORY_OS_STATUS_TOOL_DESCRIPTION = (
 MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION = (
     "Apply a Memory-OS owner review action after the Hermes agent has "
     "understood the owner's interactive approval intent. Use structured "
-    "arguments only: action=`approve|reject|allow|feedback|apply` plus action_token="
+    "arguments only: action=`approve|reject|revoke|allow|feedback|apply` plus action_token="
     "`oa_<token>` and, for feedback, rating. Do not send a free-form command "
     "string. Use only when the latest owner message clearly asks to apply a "
     "specific owner review token, or after the agent has clarified the target. "

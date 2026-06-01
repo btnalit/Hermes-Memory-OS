@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import re
 import sys
@@ -16,6 +17,7 @@ from typing import Any
 from agent.memory_provider import MemoryProvider
 
 from . import config as memory_os_config
+from .adapters.hindsight import HindsightHttpClient
 from .audit import append_audit, read_audit_entries
 from .crystallized import read_candidate_queue
 from .ids import new_event_id
@@ -37,6 +39,9 @@ from .status_tool_contract import (
     MEMORY_OS_STATUS_TOOL_DESCRIPTION,
 )
 from .store import MemoryOSStore
+from .substrates.hindsight import GovernedHindsightConfig, GovernedHindsightSubstrate
+from .substrates.local_artifact import LocalArtifactProvider
+from .substrates.router import SubstrateRouter
 
 
 class MemoryOSProvider(MemoryProvider):
@@ -88,6 +93,7 @@ class MemoryOSProvider(MemoryProvider):
         if self._last_owner_review_reply_result and query == self._last_owner_review_reply_query:
             return _owner_review_reply_context_block(self._last_owner_review_reply_result)
         self._refresh_current_task_anchor_from_query(query, session_id=session_id)
+        substrate_recall_report = self._substrate_recall_report(query)
         return build_prefetch(
             query,
             budget_chars=int(self._config.get("prefetch_char_budget", 2200)),
@@ -103,7 +109,37 @@ class MemoryOSProvider(MemoryProvider):
             context_router_config=self._config.get("context_router"),
             memory_sources_config=self._config.get("memory_sources"),
             low_clue_recall_config=self._config.get("low_clue_recall"),
+            substrate_recall_report=substrate_recall_report,
         )
+
+    def _substrate_recall_report(self, query: str) -> dict[str, Any] | None:
+        if self._store is None:
+            return None
+        substrate_root = self._config.get("substrate_providers")
+        if not isinstance(substrate_root, dict):
+            return None
+        hindsight_raw = substrate_root.get("hindsight")
+        if not isinstance(hindsight_raw, dict):
+            return None
+        recall_mode = str(hindsight_raw.get("recall_mode") or "off")
+        if not bool(hindsight_raw.get("enabled")) or recall_mode not in {"shadow", "active"}:
+            return None
+        config = GovernedHindsightConfig.from_dict(hindsight_raw)
+        providers: list[Any] = [LocalArtifactProvider(self._store)]
+        providers.append(
+            GovernedHindsightSubstrate(
+                config,
+                client=_hindsight_http_client(hindsight_raw),
+                live_guard=self._config,
+                invalidated_source_refs=_invalidated_hindsight_source_refs(self._store),
+            )
+        )
+        report = SubstrateRouter(
+            providers=providers,
+            mode="active" if recall_mode == "active" else "shadow",
+        ).recall(query, consumer="prefetch")
+        report["query_class"] = "active" if recall_mode == "active" else "shadow"
+        return report
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if self._owner_review_reply_processed(user_content):
@@ -232,7 +268,7 @@ class MemoryOSProvider(MemoryProvider):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["approve", "reject", "allow", "feedback", "apply"],
+                            "enum": ["approve", "reject", "revoke", "allow", "feedback", "apply"],
                             "description": "The owner review action resolved by Hermes agent.",
                         },
                         "action_token": {
@@ -755,7 +791,7 @@ def _owner_review_reply_tool_input(args: dict[str, Any]) -> tuple[str, dict[str,
     action = str(args.get("action") or "").strip().lower()
     action_token = str(args.get("action_token") or "").strip().lower()
     rating = str(args.get("rating") or "").strip()
-    if action not in {"approve", "reject", "allow", "feedback", "apply"}:
+    if action not in {"approve", "reject", "revoke", "allow", "feedback", "apply"}:
         return "", {
             "mode": "structured",
             "action": action,
@@ -1005,7 +1041,8 @@ def _looks_like_owner_review_reply(text: str) -> bool:
     prefix = r"(?:(?:memory|mos)\s+)?"
     return bool(
         re.fullmatch(
-            prefix + r"(?i:approve|reject|allow|apply|批准|通过|拒绝|允许|应用|执行)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?",
+            prefix
+            + r"(?i:approve|reject|revoke|allow|apply|批准|通过|拒绝|撤销|撤回|允许|应用|执行)\s+oa_[0-9a-f]{8,32}[：:,.，。!！?？]?",
             normalized,
         )
         or re.fullmatch(
@@ -1252,6 +1289,42 @@ def _tool_index_health(roots: Any, event_count: int, index_counts: dict[str, int
     if indexed_events > event_count:
         return "mismatch"
     return "healthy"
+
+
+def _hindsight_http_client(config: dict[str, Any]) -> HindsightHttpClient | None:
+    api_url = str(config.get("api_url") or "").strip()
+    bank_id = str(config.get("bank_id") or "").strip()
+    if not api_url or not bank_id:
+        return None
+    api_key = str(config.get("api_key") or "").strip()
+    env_var = str(config.get("api_key_env_var") or "HINDSIGHT_API_KEY").strip()
+    if not api_key and env_var:
+        api_key = str(os.environ.get(env_var) or "").strip()
+    return HindsightHttpClient(api_url=api_url, bank_id=bank_id, api_key=api_key)
+
+
+def _invalidated_hindsight_source_refs(store: MemoryOSStore) -> set[str]:
+    try:
+        from .substrates.projection import ProjectionLedger
+    except ModuleNotFoundError:
+        return set()
+    records = ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl").read_all()
+    active: set[str] = set()
+    invalidated: set[str] = set()
+    for record in records:
+        if str(record.get("provider") or "") != "hindsight":
+            continue
+        source = str(record.get("source_record_ref") or "").strip()
+        if not source:
+            continue
+        operation = str(record.get("operation") or "")
+        if operation == "retain":
+            active.add(source)
+            invalidated.discard(source)
+        elif operation in {"invalidate", "retract"}:
+            invalidated.add(source)
+            active.discard(source)
+    return invalidated
 
 
 def _forbidden_claims(*, adapter_enabled: bool, uses_hindsight_http_api: bool) -> list[str]:

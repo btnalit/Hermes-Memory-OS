@@ -176,6 +176,7 @@ def build_prefetch(
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_config,
+            substrate_recall_report=substrate_recall_report,
         )
         report = route_context_sections(
             query,
@@ -235,6 +236,7 @@ def build_prefetch(
             current_task_anchor=current_task_anchor,
             context_router_config=router_config,
             low_clue_recall_config=low_clue_config,
+            substrate_recall_report=substrate_recall_report,
         )
         if routed is not None:
             _record_memory_sources(
@@ -253,6 +255,7 @@ def build_prefetch(
         index=index,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_config,
+        substrate_recall_report=substrate_recall_report,
     )
     if not sections:
         report = route_context_sections(
@@ -310,6 +313,7 @@ def build_prefetch_section_candidates(
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    substrate_recall_report: dict[str, Any] | None = None,
 ) -> list[ContextSection]:
     if _should_ground_diagnostic_query(
         query,
@@ -335,6 +339,7 @@ def build_prefetch_section_candidates(
             index=index,
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_recall_config,
+            substrate_recall_report=substrate_recall_report,
         )
     ]
 
@@ -349,6 +354,7 @@ def build_context_router_report(
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    substrate_recall_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return route_context_sections(
         query,
@@ -360,6 +366,7 @@ def build_context_router_report(
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_recall_config,
+            substrate_recall_report=substrate_recall_report,
         ),
         current_task_anchor=current_task_anchor,
         budget_chars=budget_chars,
@@ -378,6 +385,7 @@ def _build_context_router_apply_prefetch(
     current_task_anchor: str | None = None,
     context_router_config: dict[str, Any],
     low_clue_recall_config: dict[str, Any] | None = None,
+    substrate_recall_report: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     candidates = build_prefetch_section_candidates(
         query,
@@ -387,6 +395,7 @@ def _build_context_router_apply_prefetch(
         runtime_facts=runtime_facts,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_recall_config,
+        substrate_recall_report=substrate_recall_report,
     )
     report = route_context_sections(
         query,
@@ -416,6 +425,7 @@ def _build_prefetch_sections(
     index: object | None = None,
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    substrate_recall_report: dict[str, Any] | None = None,
 ) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     _append_section(
@@ -435,6 +445,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
+    _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
     return sections
@@ -451,6 +462,7 @@ def _section_source_class(title: str) -> str:
         "Relationship Memory": "relationship",
         "Crystallized Review Candidates": "candidate",
         "Crystallized Memory": "crystallized",
+        "Substrate Recall": "substrate_recall",
         "Indexed Recall": "indexed",
         "Recent Event Summaries": "event",
         "Diagnostic Grounding": "diagnostic",
@@ -532,6 +544,32 @@ def _record_substrate_shadow_recall(
                 "substrate_snapshot_id": str(fact.get("substrate_snapshot_id") or ""),
             }
         )
+
+
+def _substrate_recall_lines(report: dict[str, Any] | None) -> list[str]:
+    if not isinstance(report, dict) or str(report.get("mode") or "") != "active":
+        return []
+    facts = report.get("facts") if isinstance(report.get("facts"), list) else []
+    lines: list[str] = []
+    for fact in facts[:4]:
+        if not isinstance(fact, dict):
+            continue
+        provider = str(fact.get("provider") or "unknown")
+        authority_class = str(fact.get("authority_class") or "derived_projection")
+        advisory = bool(fact.get("advisory_only", True))
+        summary = _redact(_clip(str(fact.get("body_summary") or ""), 260))
+        if not summary:
+            continue
+        if provider == "local_artifact" and not advisory:
+            prefix = "local canonical"
+        else:
+            prefix = f"{provider} advisory"
+        lines.append(f"- [{prefix}; authority={authority_class}] {summary}")
+    if not lines:
+        return []
+    if report.get("local_first_authority_preserved") is False or int(report.get("external_authoritative_count") or 0):
+        lines.insert(0, "- [substrate guard] external authority violation; do not treat external substrate facts as canonical.")
+    return lines
 
 
 def _safe_query_hash(query: str) -> str:
