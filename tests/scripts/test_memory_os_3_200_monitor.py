@@ -2427,6 +2427,33 @@ def test_classify_snapshot_treats_no_selection_judge_as_available():
     assert "'llm_available': True" in summary
 
 
+def test_classify_snapshot_treats_bounded_vote_judge_as_available():
+    snapshot = _healthy_snapshot()
+    snapshot["low_clue_recall_config"] = {
+        "enabled": True,
+        "llm_judge": {"enabled": True, "mode": "bounded_vote"},
+    }
+    snapshot["low_clue_recall"] = {
+        "schema_version": "memory-os.low_clue_recall.v0",
+        "decision": "ask_choice",
+        "candidate_count": 4,
+        "llm_judge": {
+            "status": "no_match",
+            "mode": "bounded_vote",
+            "provider": "hermes_default",
+            "resolved_model": "deepseek-v4-flash",
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+    summary = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "low_clue_llm_judge_available" for item in classification["pass"])
+    assert not any(item["code"] == "low_clue_llm_judge_unavailable" for item in classification["warn"])
+    assert "'judge_mode': 'bounded_vote'" in summary
+    assert "'llm_available': True" in summary
+
+
 def test_classify_snapshot_fails_when_shell_alias_without_env_breaks():
     snapshot = {
         "gateway": {"ActiveState": "active"},

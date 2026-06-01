@@ -2005,7 +2005,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             else {}
         )
         judge_status = judge.get("status")
-        if configured_judge.get("enabled") and configured_judge.get("mode") == "report_only":
+        if configured_judge.get("enabled") and configured_judge.get("mode") in {"report_only", "bounded_vote"}:
             if judge_status in {"ok", "no_clear_match", "no_match", "no_selection"}:
                 passed.append({"code": "low_clue_llm_judge_available"})
             elif judge_status in {"error", "skipped"}:
@@ -3472,7 +3472,7 @@ def low_clue_recall_probe():
     cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
     low_clue_cfg = cfg.get("low_clue_recall") if isinstance(cfg.get("low_clue_recall"), dict) else {}
     judge = low_clue_cfg.get("llm_judge") if isinstance(low_clue_cfg.get("llm_judge"), dict) else {}
-    judge_mode = "config" if judge.get("enabled") and judge.get("mode") == "report_only" else "none"
+    judge_mode = "config" if judge.get("enabled") and judge.get("mode") in {"report_only", "bounded_vote"} else "none"
     report = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", judge_mode])
     if isinstance(report, dict):
         internal_terms = (
