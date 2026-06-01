@@ -27,6 +27,26 @@ def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
         sys.path[:] = original_sys_path
 
 
+def _v7_component_records(*, exclude: set[str] | None = None) -> list[dict]:
+    excluded = set(exclude or set())
+    return [
+        {
+            "component": component,
+            "task_installed": True,
+            "pipeline_liveness": "live-shadow",
+            "autonomy_level": "shadow",
+            "live_guard_registered": True,
+            "live_applied": False,
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_crystallized_approval": False,
+        }
+        for component in monitor.V7_GOVERNANCE_COMPONENTS
+        if component not in excluded
+    ]
+
+
 def test_rh26_heading_anomalies_allow_known_casual_empty_and_safe_carryover_state():
     probes = [
         {"id": "cancel_failed_video", "chars": 134, "headings": ["Current Foreground Task"]},
@@ -395,6 +415,50 @@ def test_v7_governance_summary_defaults_to_missing_shadow_components():
     assert summary["component_status"]["cascade_routing_policy"] == "missing"
     assert summary["component_status"]["migration_controller"] == "missing"
     assert summary["component_status"]["abstraction_distillation"] == "missing"
+
+
+def test_v7_governance_summary_reports_required_and_optional_component_policy():
+    snapshot = _healthy_snapshot()
+
+    summary = summarize_v7_governance(snapshot)
+
+    assert summary["required_component_count"] == 17
+    assert summary["present_required_component_count"] == 0
+    assert "confidence_router" in summary["missing_required_components"]
+    assert "symbolic_offloader" not in summary["missing_required_components"]
+    assert summary["optional_components"]["symbolic_offloader"]["status"] == "missing"
+    assert summary["optional_components"]["symbolic_offloader"]["intentionally_absent"] is True
+    assert summary["optional_components"]["symbolic_offloader"]["absence_reason"] == "optional_audit_level_default_disabled"
+    assert summary["profile_expected_component_policy"] == "production"
+
+
+def test_classify_snapshot_fails_live_profile_when_required_v7_component_missing():
+    snapshot = _healthy_snapshot()
+    snapshot["v7_governance"] = {"components": _v7_component_records(exclude={"confidence_router"})}
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "v7_required_components_missing" and item["components"] == ["confidence_router"]
+        for item in classification["fail"]
+    )
+
+
+def test_classify_snapshot_warns_clean_host_when_optional_v7_component_is_absent_with_reason():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["v7_governance"] = {"components": _v7_component_records(exclude={"symbolic_offloader"})}
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "v7_required_components_missing" for item in classification["fail"])
+    assert any(
+        item["code"] == "clean_host_v7_optional_component_intentionally_absent"
+        and item["component"] == "symbolic_offloader"
+        and item["reason"] == "optional_audit_level_default_disabled"
+        for item in classification["warn"]
+    )
 
 
 def test_v7_governance_summary_uses_total_memory_sources_feedback_when_window_empty():

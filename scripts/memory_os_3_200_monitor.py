@@ -57,6 +57,12 @@ V7_GOVERNANCE_COMPONENTS = (
     "crystallized_revalidator",
     "grounded_expression_judge",
 )
+V7_OPTIONAL_COMPONENT_REASONS = {
+    "symbolic_offloader": "optional_audit_level_default_disabled",
+}
+V7_REQUIRED_COMPONENTS_PRODUCTION = tuple(
+    component for component in V7_GOVERNANCE_COMPONENTS if component not in V7_OPTIONAL_COMPONENT_REASONS
+)
 V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
 V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
 
@@ -286,9 +292,54 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         0,
     )
     component_status = {item["component"]: item["pipeline_liveness"] for item in components}
+    profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
+    policy = snapshot.get("v7_component_policy") if isinstance(snapshot.get("v7_component_policy"), dict) else {}
+    raw_enabled_optional = policy.get("enabled_optional_components")
+    if not isinstance(raw_enabled_optional, (list, tuple, set)):
+        raw_enabled_optional = []
+    enabled_optional = {
+        str(component)
+        for component in raw_enabled_optional
+        if str(component)
+    }
+    explicit_absence_reasons = _v7_explicit_absence_reasons(policy)
+    missing_required_components = [
+        component
+        for component in V7_REQUIRED_COMPONENTS_PRODUCTION
+        if not _v7_component_present(component_status.get(component))
+    ]
+    optional_components: dict[str, dict[str, Any]] = {}
+    intentionally_absent_components: list[dict[str, str]] = []
+    enabled_optional_missing_components: list[str] = []
+    for component, default_reason in V7_OPTIONAL_COMPONENT_REASONS.items():
+        status = str(component_status.get(component) or "missing")
+        enabled = component in enabled_optional
+        absence_reason = ""
+        intentionally_absent = False
+        if not _v7_component_present(status):
+            if enabled:
+                enabled_optional_missing_components.append(component)
+            else:
+                absence_reason = explicit_absence_reasons.get(component) or default_reason
+                intentionally_absent = True
+                intentionally_absent_components.append({"component": component, "reason": absence_reason})
+        optional_components[component] = {
+            "status": status,
+            "enabled": enabled,
+            "intentionally_absent": intentionally_absent,
+            "absence_reason": absence_reason,
+        }
     return {
         "schema_version": "memory-os.v7_governance_summary.v0",
         "component_count": len(components),
+        "profile_expected_component_policy": "clean_host" if profile == "clean_host" else "production",
+        "required_components": list(V7_REQUIRED_COMPONENTS_PRODUCTION),
+        "required_component_count": len(V7_REQUIRED_COMPONENTS_PRODUCTION),
+        "present_required_component_count": len(V7_REQUIRED_COMPONENTS_PRODUCTION) - len(missing_required_components),
+        "missing_required_components": missing_required_components,
+        "optional_components": optional_components,
+        "intentionally_absent_components": intentionally_absent_components,
+        "enabled_optional_missing_components": enabled_optional_missing_components,
         "shadow_live_component_count": sum(
             1 for item in components if item["pipeline_liveness"] == "live-shadow"
         ),
@@ -318,6 +369,27 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         "component_status": component_status,
         "components": components,
     }
+
+
+def _v7_component_present(status: Any) -> bool:
+    return str(status or "missing") != "missing"
+
+
+def _v7_explicit_absence_reasons(policy: dict[str, Any]) -> dict[str, str]:
+    raw = policy.get("intentionally_absent_components")
+    if isinstance(raw, dict):
+        return {str(component): str(reason) for component, reason in raw.items() if str(component)}
+    reasons: dict[str, str] = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                component = str(item.get("component") or "")
+                reason = str(item.get("reason") or "")
+                if component:
+                    reasons[component] = reason
+            elif str(item):
+                reasons[str(item)] = ""
+    return reasons
 
 
 def _infer_v7_components_from_artifacts(snapshot: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -1942,6 +2014,50 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "feedback_count": v7_governance["owner_signal_owner_approved_apply_count"],
             }
         )
+    enforce_expected_components = "v7_governance" in snapshot or bool(snapshot.get("v7_component_policy"))
+    missing_required_components = list(v7_governance.get("missing_required_components") or [])
+    enabled_optional_missing_components = list(v7_governance.get("enabled_optional_missing_components") or [])
+    if enforce_expected_components and clean_host:
+        if missing_required_components:
+            warn.append(
+                {
+                    "code": "clean_host_v7_required_components_missing",
+                    "components": missing_required_components,
+                }
+            )
+        for item in v7_governance.get("intentionally_absent_components") or []:
+            if not isinstance(item, dict):
+                continue
+            warn.append(
+                {
+                    "code": "clean_host_v7_optional_component_intentionally_absent",
+                    "component": str(item.get("component") or ""),
+                    "reason": str(item.get("reason") or ""),
+                }
+            )
+    elif enforce_expected_components:
+        if missing_required_components:
+            fail.append(
+                {
+                    "code": "v7_required_components_missing",
+                    "components": missing_required_components,
+                }
+            )
+        if enabled_optional_missing_components:
+            fail.append(
+                {
+                    "code": "v7_enabled_optional_components_missing",
+                    "components": enabled_optional_missing_components,
+                }
+            )
+        intentionally_absent_components = list(v7_governance.get("intentionally_absent_components") or [])
+        if intentionally_absent_components:
+            passed.append(
+                {
+                    "code": "v7_optional_components_intentionally_absent",
+                    "components": intentionally_absent_components,
+                }
+            )
     installed_components = [item for item in v7_governance["components"] if item["task_installed"]]
     if installed_components and not v7_governance["memory_sources_feedback_volume_ready"]:
         warn.append({"code": "v7_memory_sources_feedback_volume_pending"})
