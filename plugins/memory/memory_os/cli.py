@@ -51,7 +51,13 @@ from .conversation_regression import (
 )
 from .cognitive_loop import CognitiveLoopRunner
 from .cron_mirror import CronMirror
-from .crystallized import CrystallizedCandidate, append_candidate_queue, read_candidate_queue
+from .crystallized import (
+    CrystallizedCandidate,
+    _parse_markdown_records,
+    append_candidate_queue,
+    is_active_crystallized_frontmatter,
+    read_candidate_queue,
+)
 from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, HindsightHttpClient
 from .index import MemoryOSIndex
 from .low_clue_recall import build_low_clue_recall_report, low_clue_judge_availability
@@ -2686,13 +2692,23 @@ def _store_counts(store: MemoryOSStore) -> dict[str, int]:
             continue
         working_items += len(document.get("items", []))
     crystallized_records = 0
+    crystallized_records_total = 0
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
-        crystallized_records += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip() == "---") // 2
+        try:
+            records = _parse_markdown_records(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        crystallized_records_total += len(records)
+        crystallized_records += sum(
+            1 for frontmatter, _body in records if is_active_crystallized_frontmatter(frontmatter)
+        )
     return {
         "events": len(events),
         "working_items": working_items,
         "crystallized_candidates": len(read_candidate_queue(store.roots)),
         "crystallized_records": crystallized_records,
+        "crystallized_records_total": crystallized_records_total,
+        "crystallized_records_inactive": crystallized_records_total - crystallized_records,
         "audit_entries": len(read_audit_entries(store.roots.audit_path)),
     }
 

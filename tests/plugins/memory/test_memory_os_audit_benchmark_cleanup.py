@@ -157,6 +157,40 @@ def test_doctor_reports_appended_events_as_index_stale_not_mismatch(tmp_path):
     assert not any(finding["code"] == "index_count_mismatch" for finding in result["findings"])
 
 
+def test_doctor_does_not_count_revoked_crystallized_audit_records_as_index_mismatch(tmp_path):
+    store = _store(tmp_path)
+    active_frontmatter = {
+        "id": "cry_active",
+        "kind": "owner_approved",
+        "created_at": "2026-06-01T00:00:00Z",
+        "approved_by": "owner",
+        "approved_at": "2026-06-01T00:00:00Z",
+        "source_event_ids": [],
+        "tags": ["smoke"],
+        "sensitivity": "public",
+        "hindsight_indexed": False,
+    }
+    revoked_frontmatter = {
+        **active_frontmatter,
+        "id": "cry_revoked",
+        "canonical_state": "revoked",
+        "revoked_at": "2026-06-01T00:01:00Z",
+        "revoked_by": "owner",
+    }
+    store.append_crystallized_record("owner_approved.md", active_frontmatter, "Active memory.")
+    store.append_crystallized_record("owner_approved.md", revoked_frontmatter, "Revoked audit evidence.")
+    MemoryOSIndex(store.roots).sync_from_store(store)
+
+    status = build_status_report(store)
+    result = build_doctor_result(store)
+
+    assert status["counts"]["crystallized_records"] == 1
+    assert status["counts"]["crystallized_records_total"] == 2
+    assert status["counts"]["crystallized_records_inactive"] == 1
+    assert status["index_counts"]["crystallized_records"] == 1
+    assert not any(finding["code"] == "index_count_mismatch" for finding in result["findings"])
+
+
 def test_doctor_reports_sqlite_row_corruption_as_content_mismatch(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(build_event(seed=3, profile="memoryos-test"))
