@@ -1,5 +1,7 @@
 import json
+import subprocess
 import sys
+from pathlib import Path
 
 import scripts.memory_os_3_200_monitor as monitor
 from scripts.memory_os_3_200_monitor import (
@@ -11,6 +13,22 @@ from scripts.memory_os_3_200_monitor import (
     summarize_l4_guard,
     summarize_v7_governance,
 )
+
+
+def test_monitor_script_help_bootstraps_repo_import_path():
+    script = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_3_200_monitor.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout
+    assert "No module named 'plugins'" not in result.stderr
 
 
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
