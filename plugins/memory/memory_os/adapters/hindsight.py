@@ -81,6 +81,7 @@ class HindsightHttpClient:
                 "max_tokens": 1200,
                 "include": {"facts": {}},
             },
+            timeout_seconds=max(self.timeout_seconds, 120.0),
         )
 
     def invalidate(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -95,7 +96,13 @@ class HindsightHttpClient:
             },
         }
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         if not self.api_url:
             raise RuntimeError("hindsight api_url not configured")
         if not self.bank_id:
@@ -108,11 +115,13 @@ class HindsightHttpClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds or self.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:500]
             raise RuntimeError(f"hindsight HTTP {exc.code}: {detail}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise RuntimeError(f"hindsight request failed: {exc}") from exc
         if not body.strip():
             return {}
         loaded = json.loads(body)

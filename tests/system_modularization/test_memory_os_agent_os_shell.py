@@ -630,6 +630,51 @@ def test_hindsight_reflect_apply_queues_owner_review_candidate(monkeypatch, tmp_
     assert candidates[0].body == "Hindsight synthesized a bounded pattern for owner review."
 
 
+def test_hindsight_reflect_apply_reports_provider_error_without_candidate(monkeypatch, tmp_path):
+    from plugins.memory.memory_os import cli as memory_cli
+    from plugins.memory.memory_os.config import save_config
+    from plugins.memory.memory_os.crystallized import read_candidate_queue
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.substrates.ledger import SubstrateOperationLedger
+
+    class FailingClient:
+        def reflect(self, *, bank_id, query, budget):
+            raise RuntimeError("hindsight request failed: timed out")
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    save_config(
+        {
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://127.0.0.1:8888",
+                    "bank_id": "bank",
+                    "recall_mode": "active",
+                    "reflect_enabled": True,
+                }
+            }
+        },
+        tmp_path,
+    )
+    monkeypatch.setattr(memory_cli, "_hindsight_http_client_from_config", lambda substrate: FailingClient())
+
+    report = memory_cli.hindsight_reflect_report(store, query="what pattern matters?", apply=True)
+    records = SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl").read_all()
+
+    assert report["status"] == "error"
+    assert report["candidate_queued"] is False
+    assert report["actual_canonical_write"] is False
+    assert report["owner_gate_required"] is True
+    assert "timed out" in report["reason"]
+    assert read_candidate_queue(store) == []
+    assert records[-1]["operation"] == "reflect"
+    assert records[-1]["status"] == "error"
+    assert records[-1]["candidate_queued"] is False
+
+
 def test_shell_memory_sources_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
     module = load_shell_module()
     calls: list[argparse.Namespace] = []

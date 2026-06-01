@@ -375,7 +375,17 @@ def hindsight_reflect_report(store: MemoryOSStore, *, query: str, apply: bool = 
             client=_hindsight_http_client_from_config(substrate),
             live_guard=config,
         )
-        reflect_result = governed.reflect(query, consumer="owner_review_candidate")
+        try:
+            reflect_result = governed.reflect(query, consumer="owner_review_candidate")
+        except Exception as exc:
+            reflect_result = {
+                "provider": "hindsight",
+                "capability": "reflect",
+                "status": "error",
+                "reason": str(exc)[:240],
+                "advisory_only": True,
+                "substrate_snapshot_id": _hindsight_snapshot_id(substrate),
+            }
         if reflect_result.get("status") == "ok":
             candidate_result = _queue_hindsight_reflect_candidate(
                 store,
@@ -405,6 +415,7 @@ def hindsight_reflect_report(store: MemoryOSStore, *, query: str, apply: bool = 
         "candidate_id": str(candidate_result.get("candidate_id") or ""),
         "duplicate_candidate": bool(candidate_result.get("duplicate_candidate")),
         "raw_body_included": False,
+        "reason": str(reflect_result.get("reason") or ""),
         "query_sha256": query_hash,
     }
 
