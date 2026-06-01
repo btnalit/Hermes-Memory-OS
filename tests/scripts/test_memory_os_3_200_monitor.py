@@ -560,7 +560,7 @@ def test_classify_snapshot_tracks_memory_sources_feedback_canary_without_blockin
     assert not any(item["code"] == "v7_memory_sources_feedback_volume_pending" for item in classification["warn"])
 
 
-def test_v7_owner_signal_lane_promotes_only_retractable_label_miner_to_owner_approved_apply():
+def test_v7_owner_signal_lane_does_not_promote_until_canary_complete():
     snapshot = _healthy_snapshot()
     snapshot["memory_sources"] = {
         "schema_version": "memory-os.memory_sources_stats.v0",
@@ -588,21 +588,73 @@ def test_v7_owner_signal_lane_promotes_only_retractable_label_miner_to_owner_app
     other_acting = [
         item
         for item in summary["components"]
-        if item["component"] != "retractable_label_miner" and item["autonomy_level"] in {"owner_approved_apply", "autonomous_acting"}
+        if item["component"] != "retractable_label_miner"
+        and item["autonomy_level"] in {"owner_approved_apply", "autonomous_acting"}
     ]
 
-    assert summary["acting_component_count"] == 1
+    assert summary["acting_component_count"] == 0
     assert summary["owner_signal_lane"] == "memory_sources_feedback"
     assert summary["owner_signal_owner_approved_apply_count"] == 5
-    assert label_miner["autonomy_level"] == "owner_approved_apply"
+    assert summary["owner_signal_owner_approved_apply_ready"] is False
+    assert label_miner["autonomy_level"] == "shadow"
     assert label_miner["owner_signal_lane"] == "memory_sources_feedback"
     assert label_miner["owner_approved_apply_count"] == 5
+    assert label_miner["owner_approved_apply_ready"] is False
     assert other_acting == []
     assert any(
-        item["code"] == "v7_owner_signal_owner_approved_apply_visible" and item["feedback_count"] == 5
+        item["code"] == "v7_owner_signal_owner_approved_apply_visible"
+        and item["feedback_count"] == 5
+        and item["ready"] is False
         for item in classification["pass"]
     )
     assert not any(item["code"] == "v7_component_live_applied_without_acting_gate" for item in classification["fail"])
+
+
+def test_v7_owner_signal_lane_promotes_only_retractable_label_miner_after_canary_complete():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 0,
+        "feedback_count": 3,
+        "total_feedback_count": 20,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+    snapshot["module_artifacts"]["ground_truth_miner"] = {
+        "status": "ok",
+        "label_count": 0,
+        "run_count": 1,
+        "active_label_count": 0,
+        "retracted_label_count": 0,
+        "actual_execute": False,
+        "score_live_applied": False,
+        "route_live_applied": False,
+    }
+
+    summary = summarize_v7_governance(snapshot)
+    classification = classify_snapshot(snapshot)
+    label_miner = next(item for item in summary["components"] if item["component"] == "retractable_label_miner")
+    other_acting = [
+        item
+        for item in summary["components"]
+        if item["component"] != "retractable_label_miner"
+        and item["autonomy_level"] in {"owner_approved_apply", "autonomous_acting"}
+    ]
+
+    assert summary["acting_component_count"] == 1
+    assert summary["owner_signal_owner_approved_apply_ready"] is True
+    assert summary["owner_signal_selected_component"] == "retractable_label_miner"
+    assert label_miner["autonomy_level"] == "owner_approved_apply"
+    assert label_miner["owner_approved_apply_count"] == 20
+    assert label_miner["owner_approved_apply_ready"] is True
+    assert other_acting == []
+    assert any(
+        item["code"] == "v7_owner_signal_owner_approved_apply_visible"
+        and item["feedback_count"] == 20
+        and item["ready"] is True
+        for item in classification["pass"]
+    )
 
 
 def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():

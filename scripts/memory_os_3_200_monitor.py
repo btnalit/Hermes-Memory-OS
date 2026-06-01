@@ -304,6 +304,10 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
     memory_sources = snapshot.get("memory_sources") if isinstance(snapshot.get("memory_sources"), dict) else {}
     memory_sources_feedback_count = _memory_sources_feedback_count(memory_sources)
     owner_signal_owner_approved_apply_count = memory_sources_feedback_count
+    owner_signal_lane = "memory_sources_feedback" if owner_signal_owner_approved_apply_count > 0 else ""
+    owner_signal_owner_approved_apply_ready = (
+        owner_signal_owner_approved_apply_count >= V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET
+    )
     inferred_components = _infer_v7_components_from_artifacts(snapshot)
     components: list[dict[str, Any]] = []
     for component in V7_GOVERNANCE_COMPONENTS:
@@ -320,7 +324,7 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         if (
             component == "retractable_label_miner"
             and task_installed
-            and owner_signal_owner_approved_apply_count > 0
+            and owner_signal_owner_approved_apply_ready
             and autonomy_level != "autonomous_acting"
         ):
             autonomy_level = "owner_approved_apply"
@@ -330,12 +334,13 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "task_installed": task_installed,
                 "pipeline_liveness": pipeline_liveness,
                 "autonomy_level": autonomy_level,
-                "owner_signal_lane": "memory_sources_feedback"
-                if component == "retractable_label_miner" and owner_signal_owner_approved_apply_count > 0
-                else "",
+                "owner_signal_lane": owner_signal_lane if component == "retractable_label_miner" else "",
                 "owner_approved_apply_count": owner_signal_owner_approved_apply_count
                 if component == "retractable_label_miner"
                 else 0,
+                "owner_approved_apply_ready": owner_signal_owner_approved_apply_ready
+                if component == "retractable_label_miner"
+                else False,
                 "live_guard_registered": bool(item.get("live_guard_registered")),
                 "live_applied": bool(item.get("live_applied")),
                 "actual_send": bool(item.get("actual_send")),
@@ -414,8 +419,10 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         "memory_sources_feedback_canary_target": V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET,
         "memory_sources_feedback_canary_remaining": memory_sources_feedback_canary_remaining,
         "memory_sources_feedback_canary_complete": memory_sources_feedback_canary_remaining == 0,
-        "owner_signal_lane": "memory_sources_feedback" if owner_signal_owner_approved_apply_count > 0 else "",
+        "owner_signal_lane": owner_signal_lane,
         "owner_signal_owner_approved_apply_count": owner_signal_owner_approved_apply_count,
+        "owner_signal_owner_approved_apply_ready": owner_signal_owner_approved_apply_ready,
+        "owner_signal_selected_component": "retractable_label_miner" if owner_signal_lane else "",
         "confidence_router_status": component_status["confidence_router"],
         "judge_consistency_status": component_status["judge_calibration"],
         "review_accuracy_status": component_status["candidate_review"],
@@ -2117,9 +2124,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         passed.append(
             {
                 "code": "v7_owner_signal_owner_approved_apply_visible",
-                "component": "retractable_label_miner",
+                "component": v7_governance.get("owner_signal_selected_component") or "retractable_label_miner",
                 "lane": v7_governance.get("owner_signal_lane"),
                 "feedback_count": v7_governance["owner_signal_owner_approved_apply_count"],
+                "ready": bool(v7_governance.get("owner_signal_owner_approved_apply_ready")),
             }
         )
     enforce_expected_components = "v7_governance" in snapshot or bool(snapshot.get("v7_component_policy"))
