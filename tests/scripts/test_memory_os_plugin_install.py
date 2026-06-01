@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 from scripts.install_memory_os_plugin import SOURCE_AGENT_OS_SHELL_DIR, SOURCE_PLUGIN_DIR, install_plugin
 
 
@@ -96,6 +98,145 @@ def test_installer_cli_prints_json(tmp_path, capsys):
     output = json.loads(capsys.readouterr().out)
     assert output["schema_version"] == "memory-os.install.v0"
     assert output["provider"] == "memory_os"
+
+
+def test_installer_hindsight_off_leaves_substrate_disabled(tmp_path):
+    from plugins.memory.memory_os.config import load_config
+
+    home = tmp_path / "home"
+    report = install_plugin(hermes_home=home, hindsight_mode="off")
+
+    assert report["hindsight_mode"] == "off"
+    assert report["hindsight_adoption"]["status"] == "disabled"
+    hindsight = load_config(home)["substrate_providers"]["hindsight"]
+    assert hindsight["enabled"] is False
+
+
+def test_installer_cli_hindsight_config_imports_when_run_by_absolute_path(tmp_path):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "install_memory_os_plugin.py"
+    home = tmp_path / "home"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--hermes-home",
+            str(home),
+            "--hindsight",
+            "off",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    report = json.loads(result.stdout)
+
+    assert report["schema_version"] == "memory-os.install.v0"
+    assert report["hindsight_adoption"]["status"] == "disabled"
+    assert (home / "memory-os" / "config.json").is_file()
+
+
+def test_installer_hindsight_auto_adopts_existing_legacy_config_without_printing_secret(tmp_path):
+    from plugins.memory.memory_os.config import load_config
+
+    home = tmp_path / "home"
+    legacy = home / "hindsight"
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(
+        '{"api_url":"http://127.0.0.1:8888","bank_id":"hermes02","apiKey":"SECRET","auto_retain":false}',
+        encoding="utf-8",
+    )
+
+    report = install_plugin(hermes_home=home, hindsight_mode="auto")
+
+    serialized = json.dumps(report, ensure_ascii=False)
+    assert "SECRET" not in serialized
+    assert report["hindsight_mode"] == "auto"
+    assert report["hindsight_adoption"]["status"] == "adopted_shadow"
+    hindsight = load_config(home)["substrate_providers"]["hindsight"]
+    assert hindsight["enabled"] is True
+    assert hindsight["bank_id"] == "hermes02"
+    assert hindsight["recall_mode"] == "shadow"
+    assert hindsight["retain_enabled"] is False
+    assert hindsight["reflect_enabled"] is False
+    assert hindsight["api_key"] == ""
+    assert hindsight["provider_bank_id"] == "hermes02"
+    assert hindsight["bank_selection_reason"] == "top_level_provider_bank_id"
+
+
+def test_installer_hindsight_auto_uses_provider_bank_not_other_configured_banks(tmp_path):
+    from plugins.memory.memory_os.config import load_config
+
+    home = tmp_path / "home"
+    legacy = home / "hindsight"
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(
+        json.dumps(
+            {
+                "api_url": "http://127.0.0.1:8888",
+                "bank_id": "hermes02",
+                "apiKey": "SECRET",
+                "auto_retain": False,
+                "banks": {
+                    "opsevo-info": {"bankId": "opsevo-info", "enabled": True},
+                    "hermes02": {"bankId": "hermes02", "enabled": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = install_plugin(hermes_home=home, hindsight_mode="auto")
+
+    assert report["hindsight_adoption"]["status"] == "adopted_shadow"
+    detected = report["hindsight_adoption"]["detected"]
+    assert detected["provider_bank_id"] == "hermes02"
+    assert detected["bank_selection_reason"] == "top_level_provider_bank_id"
+    assert detected["non_provider_configured_bank_count"] == 1
+    assert "SECRET" not in json.dumps(report, ensure_ascii=False)
+    hindsight = load_config(home)["substrate_providers"]["hindsight"]
+    assert hindsight["bank_id"] == "hermes02"
+    assert hindsight["provider_bank_id"] == "hermes02"
+    assert hindsight["configured_provider_bank_ids"] == ["opsevo-info", "hermes02"]
+    assert hindsight["non_provider_configured_bank_count"] == 1
+
+
+def test_installer_hindsight_auto_refuses_ambiguous_provider_bank(tmp_path):
+    from plugins.memory.memory_os.config import load_config
+
+    home = tmp_path / "home"
+    legacy = home / "hindsight"
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(
+        json.dumps(
+            {
+                "api_url": "http://127.0.0.1:8888",
+                "banks": {
+                    "opsevo-info": {"bankId": "opsevo-info", "enabled": True},
+                    "hermes02": {"bankId": "hermes02", "enabled": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = install_plugin(hermes_home=home, hindsight_mode="auto")
+
+    assert report["hindsight_adoption"]["status"] == "ambiguous_provider_bank"
+    assert load_config(home)["substrate_providers"]["hindsight"]["enabled"] is False
+
+
+def test_installer_hindsight_auto_without_config_stays_disabled(tmp_path):
+    from plugins.memory.memory_os.config import load_config
+
+    home = tmp_path / "home"
+    report = install_plugin(hermes_home=home, hindsight_mode="auto")
+
+    assert report["hindsight_mode"] == "auto"
+    assert report["hindsight_adoption"]["status"] == "not_configured"
+    assert load_config(home)["substrate_providers"]["hindsight"]["enabled"] is False
 
 
 def test_installer_can_write_runtime_heartbeat_artifacts(tmp_path):
@@ -239,6 +380,52 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
     assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
+
+
+def test_installer_runs_owner_cron_onboarding_after_shell_enable(tmp_path, monkeypatch):
+    import scripts.install_memory_os_plugin as installer
+
+    home = tmp_path / "home"
+    config_path = home / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "plugins:\n"
+        "  disabled:\n"
+        "    - memory-os-agent-os\n",
+        encoding="utf-8",
+    )
+    order: list[str] = []
+    original_shell_enable = installer._enable_agent_os_shell
+
+    def fake_memory_provider(hermes_home, command):
+        order.append("provider")
+
+    def wrapped_shell_enable(hermes_home):
+        order.append("shell")
+        original_shell_enable(hermes_home)
+
+    def fake_onboarding(**kwargs):
+        order.append("onboarding")
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["plugins"]["enabled"] == ["memory-os-agent-os"]
+        assert "memory-os-agent-os" not in config["plugins"].get("disabled", [])
+        return {"status": "applied"}
+
+    monkeypatch.setattr(installer, "_enable_memory_provider", fake_memory_provider)
+    monkeypatch.setattr(installer, "_enable_agent_os_shell", wrapped_shell_enable)
+    monkeypatch.setattr(installer, "_run_owner_cron_onboarding", fake_onboarding)
+
+    report = install_plugin(
+        hermes_home=home,
+        enable=True,
+        enable_shell=True,
+        install_owner_cron_onboarding=True,
+        run_owner_cron_onboarding=True,
+        owner_cron_owner_approved=True,
+    )
+
+    assert order == ["provider", "shell", "onboarding"]
+    assert report["owner_cron_onboarding_run_status"] == "applied"
 
 
 def test_installer_can_install_system_module_runtime_package(tmp_path):
@@ -401,6 +588,26 @@ def test_installer_shell_enable_is_idempotent(tmp_path):
     enabled = _enabled_plugins_from_config_text(config_path.read_text(encoding="utf-8"))
     assert enabled.count("memory-os-agent-os") == 1
     assert "memory_os" not in enabled
+
+
+def test_installer_shell_enable_removes_stale_disabled_marker(tmp_path):
+    config_path = tmp_path / "home" / "config.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "plugins:\n"
+        "  enabled:\n"
+        "    - existing-plugin\n"
+        "  disabled:\n"
+        "    - memory-os-agent-os\n"
+        "    - other-plugin\n",
+        encoding="utf-8",
+    )
+
+    install_plugin(hermes_home=tmp_path / "home", enable_shell=True)
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config["plugins"]["enabled"] == ["existing-plugin", "memory-os-agent-os"]
+    assert config["plugins"]["disabled"] == ["other-plugin"]
 
 
 def test_installer_rejects_shell_enable_when_shell_was_not_installed_or_present(tmp_path):
@@ -579,6 +786,7 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "--production-safe" in text
     assert "--memory-sources-preset" in text
     assert "--llm-judge-preset" in text
+    assert "--hindsight" in text
     assert "report-only" in text
     assert "--yes" in text
     assert "--dry-run" in text
@@ -594,6 +802,7 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "runtime artifacts are not being installed" in text
     assert "normalize_shell_enablement" in text
     assert "require_hermes_for_selected_actions" in text
+    assert 'args+=("--hindsight" "${HINDSIGHT_MODE}")' in text
     assert "The script does not restart hermes-gateway.service" in text
     assert "hermes memory-os-agent-os status" in text
     assert "hermes memory-os-agent-os doctor" in text

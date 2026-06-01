@@ -27,6 +27,7 @@ OWNER_REVIEW_CRON_CHANNEL="${OWNER_REVIEW_CRON_CHANNEL:-auto}"
 DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
 MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-}"
 LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-}"
+HINDSIGHT_MODE="${HINDSIGHT_MODE:-auto}"
 
 INSTALL_SHELL=""
 ENABLE_PROVIDER=""
@@ -65,6 +66,9 @@ Options:
   --memory-sources-preset NAME none|production-safe|test-host|operational.
   --llm-judge-preset NAME      none|report-only|bounded-vote. Optional low-clue
                                 recall LLM judge; reuses Hermes provider/model config.
+  --hindsight MODE             auto|off|adopt|wizard. Default: auto.
+                                auto adopts an existing Hindsight config into
+                                Memory-OS shadow mode; no config stays off.
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
   --cognitive-loop-interval VALUE
                                 Cognitive-loop integration harness interval. Default: 6h.
@@ -162,6 +166,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --llm-judge-preset)
       LLM_JUDGE_PRESET="${2:?missing --llm-judge-preset value}"
+      shift 2
+      ;;
+    --hindsight)
+      HINDSIGHT_MODE="${2:?missing --hindsight value}"
       shift 2
       ;;
     --runtime-interval)
@@ -640,6 +648,7 @@ run_installer() {
   [[ -n "${DEEP_REFLECTION_PRESET}" && "${DEEP_REFLECTION_PRESET}" != "none" ]] && args+=("--deep-reflection-preset" "${DEEP_REFLECTION_PRESET}")
   [[ -n "${MEMORY_SOURCES_PRESET}" && "${MEMORY_SOURCES_PRESET}" != "none" ]] && args+=("--memory-sources-preset" "${MEMORY_SOURCES_PRESET}")
   [[ -n "${LLM_JUDGE_PRESET}" ]] && args+=("--llm-judge-preset" "${LLM_JUDGE_PRESET}")
+  args+=("--hindsight" "${HINDSIGHT_MODE}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
   echo "Running installer:"

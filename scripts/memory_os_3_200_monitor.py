@@ -647,6 +647,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "value": crystallized_record_count,
             }
         )
+    _classify_hindsight_substrate(snapshot, passed, fail)
 
     doctor = snapshot.get("doctor", {})
     if doctor.get("status") == "ok":
@@ -1954,6 +1955,42 @@ def _systemd_service_failed(service: dict[str, Any]) -> bool:
     if not service:
         return False
     return service.get("ActiveState") == "failed" or service.get("Result") not in {"", "success"}
+
+
+def _classify_hindsight_substrate(
+    snapshot: dict[str, Any],
+    passed: list[dict[str, Any]],
+    fail: list[dict[str, Any]],
+) -> None:
+    memory_status = snapshot.get("memory_status") if isinstance(snapshot.get("memory_status"), dict) else {}
+    status = snapshot.get("hindsight_substrate")
+    if not isinstance(status, dict):
+        status = memory_status.get("hindsight_substrate") if isinstance(memory_status.get("hindsight_substrate"), dict) else {}
+    if not status:
+        return
+    if status.get("schema_version") != "memory-os.hindsight_substrate_status.v0":
+        fail.append({"code": "hindsight_status_schema_mismatch"})
+        return
+    if status.get("enabled") is False and status.get("status") == "optional_not_configured":
+        passed.append({"code": "hindsight_optional_off_ok"})
+        return
+    if status.get("enabled") is not True:
+        fail.append({"code": "hindsight_status_invalid", "status": status.get("status")})
+        return
+    monitor = status.get("substrate_monitor") if isinstance(status.get("substrate_monitor"), dict) else {}
+    substrate_recall = snapshot.get("substrate_recall")
+    if isinstance(substrate_recall, dict):
+        monitor = {**monitor, **substrate_recall}
+    if int(monitor.get("raw_retained_count") or 0) > 0 or monitor.get("no_raw_retained") is False:
+        fail.append({"code": "hindsight_raw_retain_detected"})
+    if int(monitor.get("projection_stale_count") or 0) > 0:
+        fail.append({"code": "hindsight_projection_stale"})
+    if monitor.get("local_first_authority_preserved") is False or int(
+        monitor.get("external_authoritative_count") or 0
+    ) > 0:
+        fail.append({"code": "hindsight_overrode_local_authority"})
+    if not [item for item in fail if str(item.get("code", "")).startswith("hindsight_")]:
+        passed.append({"code": "hindsight_configured_ok"})
 
 
 def _counter_delta(current: Any, previous: Any) -> dict[str, int]:
@@ -4418,8 +4455,10 @@ print(json.dumps({
     "index_health": status.get("index_health") if isinstance(status, dict) else None,
     "prefetch_mode": status.get("prefetch_mode") if isinstance(status, dict) else None,
     "hindsight_adapter_enabled": status.get("hindsight_adapter_enabled") if isinstance(status, dict) else None,
+    "hindsight_substrate": status.get("hindsight_substrate") if isinstance(status, dict) else None,
     "queue_backlog": status.get("queue_backlog") if isinstance(status, dict) else None,
   },
+  "hindsight_substrate": status.get("hindsight_substrate") if isinstance(status, dict) else None,
   "doctor": {
     "status": doctor.get("status") if isinstance(doctor, dict) else None,
     "exit_code": doctor.get("exit_code") if isinstance(doctor, dict) else None,

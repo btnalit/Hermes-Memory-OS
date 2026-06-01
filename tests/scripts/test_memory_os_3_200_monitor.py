@@ -1,4 +1,5 @@
 import json
+import sys
 
 import scripts.memory_os_3_200_monitor as monitor
 from scripts.memory_os_3_200_monitor import (
@@ -10,6 +11,20 @@ from scripts.memory_os_3_200_monitor import (
     summarize_l4_guard,
     summarize_v7_governance,
 )
+
+
+def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
+    original_sys_path = list(sys.path)
+    try:
+        exec(
+            monitor._remote_probe_script().split(
+                '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+                1,
+            )[0],
+            namespace,
+        )
+    finally:
+        sys.path[:] = original_sys_path
 
 
 def test_rh26_heading_anomalies_allow_known_casual_empty_and_safe_carryover_state():
@@ -286,6 +301,67 @@ def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "rh31_eval_forbidden_fields" for item in classification["fail"])
+
+
+def test_classify_snapshot_accepts_optional_hindsight_off():
+    snapshot = _healthy_snapshot()
+    snapshot["hindsight_substrate"] = {
+        "schema_version": "memory-os.hindsight_substrate_status.v0",
+        "enabled": False,
+        "status": "optional_not_configured",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert {"code": "hindsight_optional_off_ok"} in classification["pass"]
+    assert not [item for item in classification["fail"] if item["code"].startswith("hindsight")]
+
+
+def test_classify_snapshot_accepts_nested_memory_status_hindsight_configured():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_status"]["hindsight_substrate"] = {
+        "schema_version": "memory-os.hindsight_substrate_status.v0",
+        "enabled": True,
+        "status": "configured",
+        "recall_mode": "shadow",
+        "substrate_monitor": {
+            "raw_retained_count": 0,
+            "no_raw_retained": True,
+            "projection_stale_count": 0,
+            "external_authoritative_count": 0,
+            "reflect_off_hot_path": True,
+            "recall_llm_triggered": False,
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert {"code": "hindsight_configured_ok"} in classification["pass"]
+    assert not [item for item in classification["fail"] if item["code"].startswith("hindsight")]
+
+
+def test_classify_snapshot_fails_on_hindsight_raw_retain_projection_or_authority():
+    snapshot = _healthy_snapshot()
+    snapshot["hindsight_substrate"] = {
+        "schema_version": "memory-os.hindsight_substrate_status.v0",
+        "enabled": True,
+        "status": "configured",
+        "recall_mode": "shadow",
+        "substrate_monitor": {
+            "raw_retained_count": 1,
+            "no_raw_retained": False,
+            "projection_stale_count": 1,
+            "local_first_authority_preserved": False,
+            "external_authoritative_count": 1,
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+    fail_codes = {item["code"] for item in classification["fail"]}
+
+    assert "hindsight_raw_retain_detected" in fail_codes
+    assert "hindsight_projection_stale" in fail_codes
+    assert "hindsight_overrode_local_authority" in fail_codes
 
 
 def test_v7_governance_summary_defaults_to_missing_shadow_components():
@@ -1540,13 +1616,7 @@ def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counte
         },
     }
     namespace: dict[str, object] = {}
-    exec(
-        monitor._remote_probe_script().split(
-            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
-            1,
-        )[0],
-        namespace,
-    )
+    _exec_remote_probe_prefix(namespace)
     monkeypatch.setitem(namespace, "_read_jsonl", lambda path: [report])
 
     summary = namespace["module_cadence_summary"]()
@@ -2119,15 +2189,8 @@ def test_classify_snapshot_uses_total_memory_sources_feedback_when_window_empty(
 
 
 def test_enrich_memory_sources_stats_preserves_window_and_total_feedback_counts(monkeypatch):
-    remote = monitor._remote_probe_script()
     namespace: dict[str, object] = {}
-    exec(
-        remote.split(
-            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
-            1,
-        )[0],
-        namespace,
-    )
+    _exec_remote_probe_prefix(namespace)
 
     def fake_read_jsonl(path):
         if str(path).endswith("memory_sources_feedback.jsonl"):

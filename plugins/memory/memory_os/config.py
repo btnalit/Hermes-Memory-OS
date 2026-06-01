@@ -14,6 +14,33 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hindsight_adapter_enabled": False,
     "allow_full_local_capture": False,
     "diagnostic_grounding_enabled": None,
+    "substrate_providers": {
+        "hindsight": {
+            "enabled": False,
+            "adoption_source": "none",
+            "api_url": "",
+            "bank_id": "",
+            "provider_config_path": "",
+            "provider_bank_id": "",
+            "bank_selection_reason": "not_selected",
+            "configured_provider_bank_ids": [],
+            "non_provider_configured_bank_count": 0,
+            "api_key": "",
+            "api_key_env_var": "HINDSIGHT_API_KEY",
+            "retain_enabled": False,
+            "recall_mode": "off",
+            "reflect_enabled": False,
+            "allowed_retain_sources": ["crystallized", "owner_approved"],
+            "reject_raw_turns": True,
+            "recall_budget": "mid",
+            "recall_max_tokens": 1200,
+            "legacy_provider_was_hindsight": False,
+            "legacy_auto_retain_observed_disabled": False,
+            "projection_coherence_window_seconds": 300,
+            "effective_config_source": "substrate_providers.hindsight",
+            "pollution_scan_status": "unknown",
+        },
+    },
     "context_router": {
         "enabled": False,
         "mode": "dry_run",
@@ -104,6 +131,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "default": DEFAULT_CONFIG["diagnostic_grounding_enabled"],
         },
         {
+            "key": "substrate_providers",
+            "description": "Optional governed memory substrates such as Hindsight",
+            "default": DEFAULT_CONFIG["substrate_providers"],
+        },
+        {
             "key": "context_router",
             "description": "Context Relevance Router mode and route allowlist",
             "default": DEFAULT_CONFIG["context_router"],
@@ -165,6 +197,7 @@ def save_config(values: dict[str, Any], hermes_home: str | Path) -> None:
 def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged = dict(DEFAULT_CONFIG)
     merged.update(_known_values(values))
+    merged["substrate_providers"] = _merge_substrate_providers_config(merged.get("substrate_providers"))
     merged["context_router"] = _merge_context_router_config(merged.get("context_router"))
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
@@ -175,6 +208,57 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
 
 def _known_values(values: dict[str, Any]) -> dict[str, Any]:
     return {key: values[key] for key in DEFAULT_CONFIG if key in values}
+
+
+def _merge_substrate_providers_config(value: Any) -> dict[str, Any]:
+    default = json.loads(json.dumps(DEFAULT_CONFIG["substrate_providers"]))
+    if not isinstance(value, dict):
+        return default
+    hindsight_value = value.get("hindsight")
+    if isinstance(hindsight_value, dict):
+        hindsight = dict(default["hindsight"])
+        for key in hindsight:
+            if key in hindsight_value:
+                hindsight[key] = hindsight_value[key]
+        if hindsight["adoption_source"] not in {"none", "hermes_hindsight_config", "wizard", "manual"}:
+            hindsight["adoption_source"] = "none"
+        if hindsight["recall_mode"] not in {"off", "shadow", "active"}:
+            hindsight["recall_mode"] = "off"
+        try:
+            hindsight["recall_max_tokens"] = max(int(hindsight.get("recall_max_tokens") or 1200), 1)
+        except (TypeError, ValueError):
+            hindsight["recall_max_tokens"] = 1200
+        try:
+            hindsight["projection_coherence_window_seconds"] = max(
+                int(hindsight.get("projection_coherence_window_seconds") or 300),
+                1,
+            )
+        except (TypeError, ValueError):
+            hindsight["projection_coherence_window_seconds"] = 300
+        if "legacy_auto_retain_hardened" in hindsight_value and "legacy_auto_retain_observed_disabled" not in hindsight_value:
+            hindsight["legacy_auto_retain_observed_disabled"] = bool(hindsight_value.get("legacy_auto_retain_hardened"))
+        if not isinstance(hindsight.get("allowed_retain_sources"), list):
+            hindsight["allowed_retain_sources"] = ["crystallized", "owner_approved"]
+        hindsight["allowed_retain_sources"] = [
+            str(item)
+            for item in hindsight["allowed_retain_sources"]
+            if str(item) in {"crystallized", "owner_approved", "distilled"}
+        ] or ["crystallized", "owner_approved"]
+        if not isinstance(hindsight.get("configured_provider_bank_ids"), list):
+            hindsight["configured_provider_bank_ids"] = []
+        hindsight["configured_provider_bank_ids"] = [
+            str(item) for item in hindsight["configured_provider_bank_ids"] if str(item)
+        ]
+        try:
+            hindsight["non_provider_configured_bank_count"] = max(
+                int(hindsight.get("non_provider_configured_bank_count") or 0),
+                0,
+            )
+        except (TypeError, ValueError):
+            hindsight["non_provider_configured_bank_count"] = 0
+        hindsight["effective_config_source"] = "substrate_providers.hindsight"
+        default["hindsight"] = hindsight
+    return default
 
 
 def _merge_context_router_config(value: Any) -> dict[str, Any]:

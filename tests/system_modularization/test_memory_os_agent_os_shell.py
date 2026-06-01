@@ -139,6 +139,30 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
 
     assert parser.parse_args(["status"]).agent_os_command == "status"
     assert parser.parse_args(["doctor"]).agent_os_command == "doctor"
+    hindsight_status_args = parser.parse_args(["hindsight", "status"])
+    assert hindsight_status_args.agent_os_command == "hindsight"
+    assert hindsight_status_args.hindsight_command == "status"
+    hindsight_adopt_args = parser.parse_args(["hindsight", "adopt", "--apply"])
+    assert hindsight_adopt_args.agent_os_command == "hindsight"
+    assert hindsight_adopt_args.hindsight_command == "adopt"
+    assert hindsight_adopt_args.apply is True
+    hindsight_retain_args = parser.parse_args(["hindsight", "retain-pending", "--apply"])
+    assert hindsight_retain_args.agent_os_command == "hindsight"
+    assert hindsight_retain_args.hindsight_command == "retain-pending"
+    assert hindsight_retain_args.apply is True
+    hindsight_retract_args = parser.parse_args(
+        ["hindsight", "retract", "--record-id", "cmem_1", "--reason", "owner_revoked", "--apply"]
+    )
+    assert hindsight_retract_args.agent_os_command == "hindsight"
+    assert hindsight_retract_args.hindsight_command == "retract"
+    assert hindsight_retract_args.record_id == "cmem_1"
+    assert hindsight_retract_args.reason == "owner_revoked"
+    assert hindsight_retract_args.apply is True
+    hindsight_reflect_args = parser.parse_args(["hindsight", "reflect", "--query", "what pattern matters?", "--apply"])
+    assert hindsight_reflect_args.agent_os_command == "hindsight"
+    assert hindsight_reflect_args.hindsight_command == "reflect"
+    assert hindsight_reflect_args.query == "what pattern matters?"
+    assert hindsight_reflect_args.apply is True
     low_clue_args = parser.parse_args(["low-clue-recall", "dry-run", "--query", "继续昨天那个"])
     assert low_clue_args.agent_os_command == "low-clue-recall"
     assert low_clue_args.low_clue_recall_command == "dry-run"
@@ -390,6 +414,164 @@ def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, cap
     assert calls[0].memory_os_command == "status"
     assert calls[0].passthrough == "kept"
     assert json.loads(capsys.readouterr().out) == {"delegated": "status"}
+
+
+def test_hindsight_status_reports_optional_off(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_status_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    report = hindsight_status_report(store)
+
+    assert report["schema_version"] == "memory-os.hindsight_substrate_status.v0"
+    assert report["enabled"] is False
+    assert report["status"] == "optional_not_configured"
+    assert report["direct_hermes_provider_active"] is False
+    assert report["substrate_monitor"]["no_raw_retained"] is True
+
+
+def test_hindsight_status_detects_direct_hermes_provider(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_status_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    (tmp_path / "config.yaml").write_text("memory:\n  provider: hindsight\n", encoding="utf-8")
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    report = hindsight_status_report(store)
+
+    assert report["direct_hermes_provider_active"] is True
+
+
+def test_hindsight_adopt_dry_run_reads_legacy_config_without_secrets(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_adopt_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    legacy_dir = tmp_path / "hindsight"
+    legacy_dir.mkdir()
+    (legacy_dir / "config.json").write_text(
+        '{"api_url":"http://127.0.0.1:8888","bank_id":"hermes","apiKey":"SECRET","auto_retain":false}',
+        encoding="utf-8",
+    )
+
+    report = hindsight_adopt_report(store, apply=False)
+
+    assert report["schema_version"] == "memory-os.hindsight_adopt.v0"
+    assert report["dry_run"] is True
+    assert report["detected"]["bank_id"] == "hermes"
+    assert report["detected"]["provider_bank_id"] == "hermes"
+    assert report["detected"]["bank_selection_reason"] == "top_level_provider_bank_id"
+    assert report["detected"]["api_key_configured"] is True
+    assert "SECRET" not in str(report)
+    assert report["planned_config"]["recall_mode"] == "shadow"
+    assert report["planned_config"]["retain_enabled"] is False
+    assert report["planned_config"]["legacy_auto_retain_observed_disabled"] is True
+
+
+def test_hindsight_adopt_apply_updates_substrate_config_without_secret(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_adopt_report
+    from plugins.memory.memory_os.config import load_config
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    legacy_dir = tmp_path / "hindsight"
+    legacy_dir.mkdir()
+    (legacy_dir / "config.json").write_text(
+        '{"api_url":"http://127.0.0.1:8888","bank_id":"hermes","apiKey":"SECRET","auto_retain":false}',
+        encoding="utf-8",
+    )
+
+    report = hindsight_adopt_report(store, apply=True)
+    hindsight = load_config(tmp_path)["substrate_providers"]["hindsight"]
+
+    assert report["dry_run"] is False
+    assert hindsight["enabled"] is True
+    assert hindsight["adoption_source"] == "hermes_hindsight_config"
+    assert hindsight["provider_bank_id"] == "hermes"
+    assert hindsight["bank_selection_reason"] == "top_level_provider_bank_id"
+    assert hindsight["recall_mode"] == "shadow"
+    assert hindsight["retain_enabled"] is False
+    assert hindsight["api_key"] == ""
+
+
+def test_doctor_does_not_warn_when_hindsight_is_optional_off(tmp_path):
+    from plugins.memory.memory_os.cli import build_doctor_result
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    result = build_doctor_result(store)
+    codes = {finding["code"] for finding in result["findings"]}
+
+    assert "hindsight_adapter_disabled" not in codes
+
+
+def test_hindsight_retain_pending_dry_run_is_no_write(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_retain_pending_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    report = hindsight_retain_pending_report(store, apply=False)
+
+    assert report["schema_version"] == "memory-os.hindsight_retain_pending.v0"
+    assert report["dry_run"] is True
+    assert report["actual_retain"] is False
+    assert report["raw_body_included"] is False
+    assert report["ledger_write"] is False
+
+
+def test_hindsight_retract_dry_run_is_no_delete(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_retract_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    report = hindsight_retract_report(store, record_id="cmem_1", reason="owner_revoked", apply=False)
+
+    assert report["schema_version"] == "memory-os.hindsight_retract.v0"
+    assert report["dry_run"] is True
+    assert report["actual_delete"] is False
+    assert report["invalidation_reason"] == "owner_revoked"
+
+
+def test_hindsight_reflect_dry_run_reports_disabled_by_default(tmp_path):
+    from plugins.memory.memory_os.cli import hindsight_reflect_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    report = hindsight_reflect_report(store, query="what pattern matters?", apply=False)
+
+    assert report["schema_version"] == "memory-os.hindsight_reflect.v0"
+    assert report["status"] == "disabled"
+    assert report["off_hot_path"] is True
+    assert report["actual_canonical_write"] is False
 
 
 def test_shell_memory_sources_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):

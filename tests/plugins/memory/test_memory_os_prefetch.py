@@ -1,3 +1,5 @@
+import json
+
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.fixtures import (
@@ -23,6 +25,51 @@ def test_prefetch_empty_store_returns_empty_string(tmp_path):
     store = _store(tmp_path)
 
     assert build_prefetch("anything", budget_chars=2200, store=store, index=None) == ""
+
+
+def test_prefetch_records_substrate_shadow_recall_without_injecting_fact_or_query(tmp_path):
+    store = _store(tmp_path)
+
+    context = build_prefetch(
+        "PRIVATE_QUERY_SHOULD_NOT_LEAK",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        substrate_recall_report={
+            "schema_version": "memory-os.substrate_recall.v0",
+            "query_class": "shadow",
+            "selected_provider": "hindsight",
+            "authoritative": False,
+            "external_authoritative_count": 0,
+            "local_first_authority_preserved": True,
+            "recall_llm_triggered": False,
+            "fallback_triggered": False,
+            "facts": [
+                {
+                    "provider": "hindsight",
+                    "body_summary": "HINDSIGHT_FACT_SHOULD_NOT_INJECT",
+                    "advisory_only": True,
+                    "authority_class": "derived_projection",
+                    "recall_llm_triggered": False,
+                    "substrate_snapshot_id": "hindsight:bank:v1",
+                }
+            ],
+        },
+    )
+
+    shadow_path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
+    ledger_path = store.roots.memory_os_root / "system" / "substrate_operations.jsonl"
+    shadow_record = json.loads(shadow_path.read_text(encoding="utf-8").splitlines()[-1])
+    ledger_record = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+
+    assert context == ""
+    assert "PRIVATE_QUERY_SHOULD_NOT_LEAK" not in shadow_path.read_text(encoding="utf-8")
+    assert shadow_record["query_sha256"]
+    assert shadow_record["selected_provider"] == "hindsight"
+    assert shadow_record["local_first_authority_preserved"] is True
+    assert ledger_record["operation"] == "recall"
+    assert ledger_record["provider"] == "hindsight"
+    assert ledger_record["substrate_snapshot_id"] == "hindsight:bank:v1"
 
 
 def test_prefetch_orders_layers_deterministically(tmp_path):

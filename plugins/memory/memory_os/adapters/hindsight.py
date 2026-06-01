@@ -69,7 +69,7 @@ class HindsightAdapter:
             try:
                 if self.client is None:
                     raise RuntimeError("hindsight client not configured")
-                self.client.retain(payload)
+                retain_result = self.client.retain(payload)
             except Exception as exc:
                 report["failed_count"] += 1
                 report["errors"].append({"record_id": _record_id(record), "reason": str(exc)})
@@ -81,8 +81,18 @@ class HindsightAdapter:
                 )
                 continue
             self._mark_indexed(record)
+            substrate_record_id = _substrate_record_id(retain_result, fallback=_record_id(record))
             report["exported_count"] += 1
             report["exported_record_ids"].append(_record_id(record))
+            report["exported_records"].append(
+                {
+                    "source_record_ref": _record_id(record),
+                    "source_version": "current",
+                    "source_class": "crystallized",
+                    "substrate_record_id": substrate_record_id,
+                    "substrate_snapshot_id": _substrate_snapshot_id(substrate_record_id),
+                }
+            )
             self._audit(
                 "hindsight_export_succeeded",
                 "ok",
@@ -150,6 +160,7 @@ def build_export_payload(record: CrystallizedRecord) -> dict[str, Any]:
         "tags": [str(tag) for tag in record.frontmatter.get("tags", [])],
         "source_event_ids": [str(item) for item in record.frontmatter.get("source_event_ids", [])],
         "metadata": {
+            "source_class": "crystallized",
             "candidate_id": str(record.frontmatter.get("candidate_id", "")),
             "approved_by": str(record.frontmatter.get("approved_by", "")),
             "approved_at": str(record.frontmatter.get("approved_at", "")),
@@ -166,6 +177,7 @@ def _report(*, enabled: bool) -> dict[str, Any]:
         "skipped_count": 0,
         "failed_count": 0,
         "exported_record_ids": [],
+        "exported_records": [],
         "skipped": [],
         "errors": [],
     }
@@ -178,3 +190,13 @@ def _skip(report: dict[str, Any], record: CrystallizedRecord, reason: str) -> No
 
 def _record_id(record: CrystallizedRecord) -> str:
     return str(record.frontmatter.get("id", ""))
+
+
+def _substrate_record_id(retain_result: Any, *, fallback: str) -> str:
+    if isinstance(retain_result, dict):
+        return str(retain_result.get("id") or retain_result.get("record_id") or fallback)
+    return fallback
+
+
+def _substrate_snapshot_id(substrate_record_id: str) -> str:
+    return f"hindsight:{substrate_record_id}:vcurrent"

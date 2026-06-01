@@ -73,6 +73,145 @@ def test_classify_report_fails_on_memory_sources_forbidden_fields():
     assert any(item["code"] == "memory_sources_stats_forbidden_fields" for item in classification["fail"])
 
 
+def test_upgrade_check_accepts_optional_hindsight_off():
+    results = _healthy_command_results()
+    results["hindsight_status"] = {
+        "exit_code": 0,
+        "json": {
+            "schema_version": "memory-os.hindsight_substrate_status.v0",
+            "enabled": False,
+            "status": "optional_not_configured",
+        },
+    }
+
+    classification = classify_report(results)
+
+    assert {"code": "hindsight_optional_off_ok"} in classification["pass"]
+    assert not [item for item in classification["fail"] if item["code"].startswith("hindsight")]
+
+
+def test_upgrade_check_fails_when_substrate_monitor_reports_raw_retain():
+    results = _healthy_command_results()
+    results["hindsight_status"] = {
+        "exit_code": 0,
+        "json": {
+            "schema_version": "memory-os.hindsight_substrate_status.v0",
+            "enabled": True,
+            "status": "configured",
+            "recall_mode": "shadow",
+            "substrate_monitor": {
+                "raw_retained_count": 1,
+                "no_raw_retained": False,
+                "projection_stale_count": 0,
+                "local_first_authority_preserved": True,
+            },
+        },
+    }
+
+    classification = classify_report(results)
+
+    assert {"code": "hindsight_raw_retain_detected"} in classification["fail"]
+
+
+def test_upgrade_check_requires_governed_hindsight_to_match_provider_bank():
+    results = _healthy_command_results()
+    results["hindsight_status"] = {
+        "exit_code": 0,
+        "json": {
+            "schema_version": "memory-os.hindsight_substrate_status.v0",
+            "enabled": True,
+            "status": "configured",
+            "adoption_source": "hermes_hindsight_config",
+            "bank_id": "opsevo-info",
+            "provider_bank_id": "hermes02",
+            "bank_selection_reason": "top_level_provider_bank_id",
+            "recall_mode": "shadow",
+            "substrate_monitor": {
+                "raw_retained_count": 0,
+                "projection_stale_count": 0,
+                "local_first_authority_preserved": True,
+            },
+        },
+    }
+
+    classification = classify_report(results)
+
+    assert {"code": "hindsight_provider_bank_mismatch", "bank_id": "opsevo-info", "provider_bank_id": "hermes02"} in classification["fail"]
+
+
+def test_upgrade_check_passes_when_governed_hindsight_uses_provider_bank():
+    results = _healthy_command_results()
+    results["hindsight_status"] = {
+        "exit_code": 0,
+        "json": {
+            "schema_version": "memory-os.hindsight_substrate_status.v0",
+            "enabled": True,
+            "status": "configured",
+            "adoption_source": "hermes_hindsight_config",
+            "bank_id": "hermes02",
+            "provider_bank_id": "hermes02",
+            "bank_selection_reason": "top_level_provider_bank_id",
+            "non_provider_configured_bank_count": 1,
+            "recall_mode": "shadow",
+            "substrate_monitor": {
+                "raw_retained_count": 0,
+                "projection_stale_count": 0,
+                "local_first_authority_preserved": True,
+            },
+        },
+    }
+
+    classification = classify_report(results)
+
+    assert classification["fail"] == []
+    assert any(item["code"] == "hindsight_provider_bank_selected" for item in classification["pass"])
+
+
+def test_upgrade_check_fails_when_projection_stale_count_is_positive():
+    results = _healthy_command_results()
+    results["hindsight_status"] = {
+        "exit_code": 0,
+        "json": {
+            "schema_version": "memory-os.hindsight_substrate_status.v0",
+            "enabled": True,
+            "status": "configured",
+            "recall_mode": "shadow",
+            "substrate_monitor": {
+                "raw_retained_count": 0,
+                "projection_stale_count": 1,
+                "local_first_authority_preserved": True,
+            },
+        },
+    }
+
+    classification = classify_report(results)
+
+    assert {"code": "hindsight_projection_stale"} in classification["fail"]
+
+
+def test_upgrade_check_fails_when_external_provider_claims_authority():
+    results = _healthy_command_results()
+    results["hindsight_status"] = {
+        "exit_code": 0,
+        "json": {
+            "schema_version": "memory-os.hindsight_substrate_status.v0",
+            "enabled": True,
+            "status": "configured",
+            "recall_mode": "active",
+            "substrate_monitor": {
+                "raw_retained_count": 0,
+                "projection_stale_count": 0,
+                "local_first_authority_preserved": False,
+                "external_authoritative_count": 1,
+            },
+        },
+    }
+
+    classification = classify_report(results)
+
+    assert {"code": "hindsight_overrode_local_authority"} in classification["fail"]
+
+
 def _fake_runner(outputs):
     def run_command(argv, host, hermes_home, timeout):
         command_name = _name_for_argv(tuple(argv))
@@ -91,6 +230,8 @@ def _name_for_argv(argv: tuple[str, ...]) -> str:
         return "shell_status"
     if argv == ("hermes", "memory-os-agent-os", "doctor"):
         return "shell_doctor"
+    if argv == ("hermes", "memory-os-agent-os", "hindsight", "status"):
+        return "hindsight_status"
     if argv == ("hermes", "memory-os-agent-os", "modules", "status"):
         return "modules_status"
     if argv == ("hermes", "memory-os-agent-os", "modules", "doctor"):
@@ -134,6 +275,14 @@ def _healthy_outputs():
         "shell_doctor": {
             "exit_code": 0,
             "stdout": '{"schema_version":"memory-os.doctor.v0","status":"ok","findings":[]}',
+            "stderr": "",
+        },
+        "hindsight_status": {
+            "exit_code": 0,
+            "stdout": (
+                '{"schema_version":"memory-os.hindsight_substrate_status.v0",'
+                '"enabled":false,"status":"optional_not_configured"}'
+            ),
             "stderr": "",
         },
         "modules_status": {
@@ -180,4 +329,16 @@ def _healthy_outputs():
             ),
             "stderr": "",
         },
+    }
+
+
+def _healthy_command_results():
+    return {
+        name: {
+            "exit_code": raw["exit_code"],
+            "stdout_preview": raw["stdout"],
+            "stderr_preview": raw["stderr"],
+            "json": __import__("json").loads(raw["stdout"]) if raw["stdout"].startswith("{") else None,
+        }
+        for name, raw in _healthy_outputs().items()
     }

@@ -1930,6 +1930,47 @@ def test_concrete_proposal_agenda_shows_bounded_detail(tmp_path):
     assert "memory approve oa_" in rendered["text"]
 
 
+def test_agenda_omits_ascii_chinese_transcript_markers_from_proposal_detail(tmp_path):
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(
+        store=store,
+        title="Review raw chat shaped proposal",
+        body="用户: 私密原始提问\n助手: 私密原始回答",
+        source_refs=["feedback:raw_chat"],
+        kind="memory_sources_policy",
+    )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    text = rendered["text"]
+
+    assert rendered["counts"]["action_required_shown"] == 1
+    assert "用户:" not in text
+    assert "助手:" not in text
+    assert "私密原始" not in text
+
+
+def test_agenda_omits_transcript_markers_from_proposal_summary(tmp_path):
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(
+        store=store,
+        title="User: raw user line | Assistant: raw assistant line",
+        body="具体改动: 只记录为人工处理候选，不直接执行。",
+        source_refs=["feedback:raw_title"],
+        kind="memory_sources_policy",
+    )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    text = rendered["text"]
+
+    assert rendered["counts"]["action_required_shown"] == 1
+    assert "User:" not in text
+    assert "Assistant:" not in text
+    assert "| Assistant:" not in text
+    assert "raw assistant" not in text
+
+
 def test_agenda_count_matches_rendered_items_when_proposals_are_long(tmp_path):
     store = _store(tmp_path)
     proposal = ProposalQueueModule(tmp_path, profile="main")

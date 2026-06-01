@@ -2745,7 +2745,18 @@ def _proposal_detail(proposal: dict[str, Any], *, requires_maturation: bool) -> 
 
 def _looks_like_raw_proposal_body(body: str) -> bool:
     lowered = body.lower()
-    raw_markers = ("raw ", "raw_", "private raw", "transcript:", "user:", "assistant:", "用户：", "助手：")
+    raw_markers = (
+        "raw ",
+        "raw_",
+        "private raw",
+        "transcript:",
+        "user:",
+        "assistant:",
+        "用户:",
+        "助手:",
+        "用户：",
+        "助手：",
+    )
     return any(marker in lowered for marker in raw_markers)
 
 
@@ -2985,12 +2996,12 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     if target_type == "candidate_cleanup":
         return "这条候选记忆还像原始对话片段，批准前需要先整理。"
     if target_type == "proposal":
-        summary = str(item.get("summary") or "this proposal")
+        summary = _safe_review_summary(item.get("summary"), fallback="这个 proposal")
         if item.get("requires_maturation"):
             return _bounded_text(f"这个 proposal 还不能审批，需要先变成具体方案：{summary}", 180)
         return _bounded_text(f"这个 proposal 要进入人工后续处理吗？{summary}", 180)
     if target_type == "proposal_apply":
-        summary = str(item.get("summary") or "this approved proposal")
+        summary = _safe_review_summary(item.get("summary"), fallback="这个已批准 proposal")
         return _bounded_text(f"要把这个已批准 proposal 显式应用到运行时策略/投影吗？{summary}", 180)
     if target_type == "memory_source":
         return "这次注入的记忆/上下文对回答有帮助吗？"
@@ -3032,7 +3043,7 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             220,
         )
     if target_type == "proposal":
-        summary = str(item.get("summary") or "proposal candidate")
+        summary = _safe_review_summary(item.get("summary"), fallback="proposal candidate")
         if item.get("requires_maturation"):
             return _bounded_text(
                 f"{source_module} 排入的 proposal 仍是模板/泛化建议，缺少具体动作、依据和验收口径：{summary}。",
@@ -3057,6 +3068,13 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             return _bounded_text(f"{source_module} 产生了一条可审阅的 would-send 主动发言草案。", 220)
         return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案，但当前只能看到安全引用。", 220)
     return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
+
+
+def _safe_review_summary(value: Any, *, fallback: str) -> str:
+    summary = str(value or "").strip()
+    if not summary or _looks_like_raw_proposal_body(summary):
+        return fallback
+    return summary
 
 
 def _review_consequence(target_type: str) -> str:

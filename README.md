@@ -32,7 +32,8 @@ Install into an existing Hermes profile:
 ```bash
 git clone <this-repo-url>
 cd Hermes-Memory-OS
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational \
+  --hindsight auto
 ```
 
 `--operational` is the normal open-source install path. It installs and enables:
@@ -52,6 +53,12 @@ Slack, Matrix, or another configured platform. Background jobs use
 `deliver=local` with no agent where appropriate; right-brain expression uses
 Hermes `deliver=origin`.
 
+Hindsight is optional and governed by Memory-OS, not by selecting Hermes'
+direct `memory.provider=hindsight` path. `--hindsight auto` adopts an existing
+Hermes Hindsight config into Memory-OS shadow mode when one is present; on a
+fresh profile with no Hindsight config, it stays disabled. Use `--hindsight off`
+to force the open-source default of no Hindsight integration.
+
 Interactive install is also available:
 
 ```bash
@@ -61,7 +68,8 @@ HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh
 Conservative install without the operational cron set:
 
 ```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe \
+  --hindsight off
 ```
 
 Install helpers but do not enable recurring cron jobs:
@@ -72,6 +80,31 @@ HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational 
 ```
 
 The installer does not restart `hermes-gateway.service`.
+
+For automated host rollout, use the deployment wrapper in phases. `plan`,
+`preflight`, and `dry-run` are safe gates; `apply` writes installer changes and
+still does not restart Hermes unless `--allow-restart` and an explicit restart
+command are provided.
+
+```bash
+# Fresh open-source profile, local execution on the target.
+python scripts/deploy_memory_os.py \
+  --hermes-home /root/.hermes \
+  --profile fresh \
+  --phase apply \
+  --mode production-safe \
+  --hindsight off
+
+# Existing Hermes + Hindsight profile, remote dry-run before apply.
+python scripts/deploy_memory_os.py \
+  --host hermes-media \
+  --remote-repo-root /opt/Hermes-Memory-OS \
+  --hermes-home /root/.hermes \
+  --profile upgrade \
+  --phase dry-run \
+  --mode operational \
+  --hindsight auto
+```
 
 ## What Gets Scheduled
 
@@ -155,11 +188,17 @@ Memory-OS keeps these boundaries by default:
 - no external execution;
 - no identity writes without explicit owner-approved path;
 - no unapproved crystallized memory writes;
-- no Hindsight export;
+- no ungoverned Hindsight export or raw-turn retain;
 - no cleanup or shadow-journal apply without a separate gate.
 
 Canonical data lives under the Hermes profile. SQLite indexes are rebuildable.
 Review, feedback, and apply operations are audited.
+
+Optional Hindsight support is a derived projection from governed canonical
+memory. It can retain only crystallized, owner-approved, or explicitly distilled
+records, tracks retain/retract in an append-only projection ledger, and returns
+recall facts as advisory `derived_projection` evidence. Local canonical
+artifacts remain the primary authority.
 
 ## Architecture
 
@@ -171,6 +210,10 @@ Hermes agent
 Memory-OS provider
   owns profile-local canonical memory, indexes, prefetch, sync_turn,
   working memory, crystallized candidates, and audit
+
+Memory-OS substrate providers
+  optionally expose governed derived projections such as Hindsight, with
+  LocalArtifact as primary authority and external facts always advisory
 
 Memory-OS Agent OS shell
   exposes operator status, doctor, module, feedback, and review tools

@@ -14,6 +14,16 @@ memory:
 
 Do not add `memory_os` to `plugins.enabled`. It is not a general Hermes plugin.
 
+Do not select Hermes' direct Hindsight provider when running Memory-OS:
+
+```yaml
+memory:
+  provider: memory_os
+```
+
+`memory.provider: hindsight` is a different, ungoverned Hermes provider path and
+is not the Memory-OS integration path.
+
 ## Optional Shell Plugin
 
 The official-style shell plugin gives operator aliases and lightweight session
@@ -78,6 +88,89 @@ platform. `local` is not accepted for owner-facing review delivery. The short
 digest anchors (`A1`, `R1`, `F1`) are display-only; the stable state identity is
 the printed `oa_` token.
 
+## Optional Governed Hindsight Substrate
+
+Hindsight is an optional Memory-OS substrate provider. It is not selected through
+Hermes `memory.provider=hindsight`, and Memory-OS does not reuse or fork the
+Hermes Hindsight plugin. Memory-OS keeps `memory.provider=memory_os` selected
+and, when configured, connects to Hindsight through its own governed client.
+
+Installer modes:
+
+| Mode | Use when | Effect |
+| --- | --- | --- |
+| `--hindsight auto` | normal upgrade path | adopts an existing `$HERMES_HOME/hindsight/config.json` into Memory-OS shadow mode; leaves Hindsight disabled when no legacy config exists |
+| `--hindsight off` | fresh open-source install or conservative profile | writes an explicit disabled Hindsight substrate config |
+| `--hindsight adopt` | controlled migration where Hindsight must already exist | fails if the legacy Hindsight config is absent |
+| `--hindsight wizard` | future guided setup | currently deferred; no live enablement |
+
+Config keys live under `substrate_providers.hindsight`:
+
+```json
+{
+  "substrate_providers": {
+    "hindsight": {
+      "enabled": false,
+      "adoption_source": "none",
+      "api_url": "",
+      "bank_id": "",
+      "api_key_env_var": "HINDSIGHT_API_KEY",
+      "retain_enabled": false,
+      "recall_mode": "off",
+      "reflect_enabled": false,
+      "allowed_retain_sources": ["crystallized", "owner_approved"],
+      "reject_raw_turns": true
+    }
+  }
+}
+```
+
+The legacy `hindsight_adapter_enabled` flag is compatibility-only. The effective
+configuration source is `substrate_providers.hindsight`.
+
+Governance rules:
+
+- Retain accepts only `crystallized`, `owner_approved`, or explicitly distilled
+  records. Raw turns and working transcript bodies are refused.
+- Hindsight is a derived projection of Memory-OS canonical data. Retain and
+  retract/invalidate events are recorded in append-only ledgers; stale
+  projection counts are monitor stop signals.
+- Recall is deterministic from Memory-OS' perspective and is recorded as
+  advisory `derived_projection` evidence with `substrate_snapshot_id`.
+- LocalArtifact remains primary authority. Hindsight facts must never outrank
+  local crystallized or owner-approved facts, even in active recall mode.
+- Reflect is disabled by default, off the hot path, and never writes canonical
+  memory directly. Future reflect-to-candidate promotion must pass an owner gate.
+- The global live guard kill switch forces optional external substrates
+  disabled.
+
+Operator commands:
+
+```bash
+hermes memory-os-agent-os hindsight status
+hermes memory-os-agent-os hindsight adopt --dry-run
+hermes memory-os-agent-os hindsight retain-pending --dry-run
+hermes memory-os-agent-os hindsight retract --record-id <id> --reason demoted --dry-run
+hermes memory-os-agent-os hindsight reflect --query "..." --dry-run
+```
+
+Automated deployment wrapper:
+
+```bash
+python scripts/deploy_memory_os.py \
+  --host hermes-media \
+  --remote-repo-root /opt/Hermes-Memory-OS \
+  --hermes-home /root/.hermes \
+  --profile upgrade \
+  --phase dry-run \
+  --mode operational \
+  --hindsight auto
+```
+
+The wrapper exposes `plan`, `preflight`, `dry-run`, `apply`, and `postcheck`
+phases. It does not restart Hermes unless explicitly invoked with
+`--allow-restart` and `--restart-command`.
+
 ## Runtime Loops
 
 Heartbeat:
@@ -115,5 +208,10 @@ actual_send = false
 actual_execute = false
 actual_identity_write = false
 actual_crystallized_approval = false
-hindsight_exported = false
+hindsight_substrate.no_raw_retained = true
+hindsight_substrate.recall_llm_triggered = false
+hindsight_substrate.reflect_off_hot_path = true
+hindsight_substrate.projection_stale_count = 0
+hindsight_substrate.local_first_authority_preserved != false
+hindsight_substrate.external_authoritative_count = 0
 ```

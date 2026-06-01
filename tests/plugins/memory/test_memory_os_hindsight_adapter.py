@@ -118,6 +118,15 @@ def test_public_approved_crystallized_record_exports_payload_and_marks_indexed_a
     assert report["enabled"] is True
     assert report["exported_count"] == 1
     assert report["failed_count"] == 0
+    assert report["exported_records"] == [
+        {
+            "source_record_ref": record.frontmatter["id"],
+            "source_version": "current",
+            "source_class": "crystallized",
+            "substrate_record_id": "hindsight-1",
+            "substrate_snapshot_id": "hindsight:hindsight-1:vcurrent",
+        }
+    ]
     assert client.payloads == [
         {
             "schema_version": "memory-os.hindsight_export.v0",
@@ -127,6 +136,7 @@ def test_public_approved_crystallized_record_exports_payload_and_marks_indexed_a
             "tags": ["memory-os", "adapter-smoke"],
             "source_event_ids": record.frontmatter["source_event_ids"],
             "metadata": {
+                "source_class": "crystallized",
                 "candidate_id": "candidate-51",
                 "approved_by": "owner",
                 "approved_at": "2026-05-20T08:00:00+00:00",

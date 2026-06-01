@@ -10,6 +10,7 @@ import os
 import stat
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,8 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 SOURCE_PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "memory_os"
 SOURCE_AGENT_OS_SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
 SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
@@ -208,6 +211,7 @@ def install_plugin(
     memory_sources_preset: str | None = None,
     llm_judge_preset: str | None = None,
     systemd_dir: Path | None = None,
+    hindsight_mode: str = "auto",
     dry_run: bool = False,
 ) -> dict[str, object]:
     source = source.expanduser().resolve()
@@ -266,6 +270,11 @@ def install_plugin(
             preset=llm_judge_preset,
             dry_run=dry_run,
         )
+    hindsight_adoption = _configure_hindsight_substrate(
+        hermes_home,
+        mode=hindsight_mode,
+        dry_run=dry_run,
+    )
     runtime_artifacts: list[Path] = []
     if install_runtime or enable_runtime:
         runtime_artifacts = _write_runtime_artifacts(
@@ -298,6 +307,21 @@ def install_plugin(
         module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
         operational_helper_paths = _write_operational_helper_scripts(hermes_home, dry_run=dry_run)
     owner_cron_onboarding_report: dict[str, object] = {}
+    enabled = False
+    enable_command: list[str] = []
+    if enable:
+        enable_command = ["hermes", "config", "set", "memory.provider", "memory_os"]
+        if not dry_run:
+            _enable_memory_provider(hermes_home, enable_command)
+            enabled = True
+
+    shell_enabled = False
+    shell_enable_action = ""
+    if enable_shell:
+        shell_enable_action = "config_yaml"
+        if not dry_run:
+            _enable_agent_os_shell(hermes_home)
+            shell_enabled = True
     if run_owner_cron_onboarding:
         if not owner_review_cron_helper:
             owner_review_cron_helper = _write_owner_review_cron_helper(hermes_home, dry_run=dry_run)
@@ -329,21 +353,6 @@ def install_plugin(
             )
         else:
             owner_cron_onboarding_report = {"status": "dry_run"}
-    enabled = False
-    enable_command: list[str] = []
-    if enable:
-        enable_command = ["hermes", "config", "set", "memory.provider", "memory_os"]
-        if not dry_run:
-            _enable_memory_provider(hermes_home, enable_command)
-            enabled = True
-
-    shell_enabled = False
-    shell_enable_action = ""
-    if enable_shell:
-        shell_enable_action = "config_yaml"
-        if not dry_run:
-            _enable_agent_os_shell(hermes_home)
-            shell_enabled = True
 
     runtime_enabled = False
     runtime_enable_command: list[str] = []
@@ -475,6 +484,8 @@ def install_plugin(
         "low_clue_recall_config_written": bool(low_clue_recall_config_path) and not dry_run,
         "low_clue_recall_config_path": str(low_clue_recall_config_path) if low_clue_recall_config_path else "",
         "low_clue_recall_config": low_clue_recall_config or {},
+        "hindsight_mode": hindsight_mode,
+        "hindsight_adoption": hindsight_adoption,
         "dry_run": dry_run,
     }
 
@@ -610,6 +621,17 @@ def _enable_agent_os_shell(hermes_home: Path) -> None:
     enabled = plugins_config.get("enabled")
     if not isinstance(enabled, list):
         enabled = []
+    disabled = plugins_config.get("disabled")
+    if isinstance(disabled, list):
+        disabled_normalized = [
+            str(item)
+            for item in disabled
+            if str(item) != AGENT_OS_SHELL_PLUGIN_NAME
+        ]
+        if disabled_normalized:
+            plugins_config["disabled"] = disabled_normalized
+        else:
+            plugins_config.pop("disabled", None)
     normalized: list[str] = []
     for item in enabled:
         value = str(item)
@@ -956,6 +978,172 @@ def _read_json_config(config_path: Path) -> dict[str, Any]:
     return dict(loaded)
 
 
+def _configure_hindsight_substrate(hermes_home: Path, *, mode: str, dry_run: bool) -> dict[str, Any]:
+    if mode not in {"auto", "off", "adopt", "wizard"}:
+        raise SystemExit("--hindsight must be one of: auto, off, adopt, wizard")
+    if mode == "off":
+        planned = _hindsight_disabled_config()
+        if not dry_run:
+            _save_memory_os_config({"substrate_providers": {"hindsight": planned}}, hermes_home)
+        return {"status": "disabled", "mode": mode, "planned_config": _redacted_hindsight_config(planned)}
+    if mode == "wizard":
+        return {"status": "wizard_deferred", "mode": mode}
+
+    provider_config = _load_hindsight_provider_config(hermes_home)
+    provider_path = provider_config["path"]
+    if not provider_config["exists"]:
+        if mode == "adopt":
+            raise SystemExit("Cannot adopt Hindsight: existing provider hindsight/config.json not found")
+        return {"status": "not_configured", "mode": mode}
+    raw = provider_config["raw"]
+    selection = provider_config["selection"]
+    selected_bank_id = str(selection.get("selected_bank_id") or "")
+    if not selected_bank_id:
+        if mode == "adopt":
+            raise SystemExit(f"Cannot adopt Hindsight: provider bank is ambiguous in {provider_path}")
+        return {
+            "status": "ambiguous_provider_bank",
+            "mode": mode,
+            "detected": _redacted_hindsight_detected(provider_config),
+        }
+
+    planned = {
+        "enabled": True,
+        "adoption_source": "hermes_hindsight_config",
+        "api_url": str(raw.get("api_url") or ""),
+        "bank_id": selected_bank_id,
+        "provider_config_path": str(provider_path),
+        "provider_bank_id": selected_bank_id,
+        "bank_selection_reason": str(selection.get("reason") or "provider_config"),
+        "configured_provider_bank_ids": list(selection.get("configured_bank_ids") or []),
+        "non_provider_configured_bank_count": int(selection.get("non_provider_configured_bank_count") or 0),
+        "api_key": "",
+        "api_key_env_var": "HINDSIGHT_API_KEY",
+        "retain_enabled": False,
+        "recall_mode": "shadow",
+        "reflect_enabled": False,
+        "legacy_provider_was_hindsight": _memory_provider_is_hindsight(hermes_home),
+        "legacy_auto_retain_observed_disabled": raw.get("auto_retain") is False,
+    }
+    if not dry_run:
+        _save_memory_os_config({"substrate_providers": {"hindsight": planned}}, hermes_home)
+    return {
+        "status": "adopted_shadow",
+        "mode": mode,
+        "detected": _redacted_hindsight_detected(provider_config),
+        "planned_config": _redacted_hindsight_config(planned),
+    }
+
+
+def _load_hindsight_provider_config(hermes_home: Path) -> dict[str, Any]:
+    path = hermes_home / "hindsight" / "config.json"
+    if not path.exists():
+        return {"exists": False, "path": path, "raw": {}, "selection": _select_hindsight_provider_bank({})}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Cannot adopt Hindsight: invalid JSON in {path}") from exc
+    if not isinstance(raw, dict):
+        raise SystemExit(f"Cannot adopt Hindsight: expected JSON object in {path}")
+    return {"exists": True, "path": path, "raw": raw, "selection": _select_hindsight_provider_bank(raw)}
+
+
+def _select_hindsight_provider_bank(raw: dict[str, Any]) -> dict[str, Any]:
+    banks = raw.get("banks") if isinstance(raw.get("banks"), dict) else {}
+    configured_bank_ids: list[str] = []
+    enabled_bank_ids: list[str] = []
+    for key, value in banks.items():
+        bank_id = str(key)
+        enabled = True
+        if isinstance(value, dict):
+            bank_id = str(value.get("bankId") or key)
+            enabled = value.get("enabled") is not False
+        if bank_id and bank_id not in configured_bank_ids:
+            configured_bank_ids.append(bank_id)
+        if enabled and bank_id and bank_id not in enabled_bank_ids:
+            enabled_bank_ids.append(bank_id)
+
+    top_level_bank_id = str(raw.get("bank_id") or "").strip()
+    selected_bank_id = ""
+    reason = "not_selected"
+    if top_level_bank_id:
+        selected_bank_id = top_level_bank_id
+        reason = "top_level_provider_bank_id"
+    elif len(enabled_bank_ids) == 1:
+        selected_bank_id = enabled_bank_ids[0]
+        reason = "single_enabled_provider_bank"
+    elif len(configured_bank_ids) == 1:
+        selected_bank_id = configured_bank_ids[0]
+        reason = "single_configured_provider_bank"
+    elif configured_bank_ids or enabled_bank_ids:
+        reason = "ambiguous_provider_bank"
+
+    return {
+        "selected_bank_id": selected_bank_id,
+        "reason": reason,
+        "configured_bank_ids": configured_bank_ids,
+        "enabled_bank_ids": enabled_bank_ids,
+        "non_provider_configured_bank_count": len(
+            [bank_id for bank_id in configured_bank_ids if bank_id != selected_bank_id]
+        ),
+    }
+
+
+def _redacted_hindsight_detected(provider_config: dict[str, Any]) -> dict[str, Any]:
+    raw = provider_config.get("raw") if isinstance(provider_config.get("raw"), dict) else {}
+    selection = provider_config.get("selection") if isinstance(provider_config.get("selection"), dict) else {}
+    return {
+        "provider_config_path": str(provider_config.get("path") or ""),
+        "api_url_configured": bool(raw.get("api_url")),
+        "bank_id": str(selection.get("selected_bank_id") or ""),
+        "provider_bank_id": str(selection.get("selected_bank_id") or ""),
+        "bank_selection_reason": str(selection.get("reason") or "not_selected"),
+        "configured_provider_bank_ids": list(selection.get("configured_bank_ids") or []),
+        "non_provider_configured_bank_count": int(selection.get("non_provider_configured_bank_count") or 0),
+        "auto_retain": raw.get("auto_retain"),
+        "api_key_configured": bool(raw.get("apiKey") or raw.get("api_key")),
+    }
+
+
+def _hindsight_disabled_config() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "adoption_source": "none",
+        "api_url": "",
+        "bank_id": "",
+        "provider_config_path": "",
+        "provider_bank_id": "",
+        "bank_selection_reason": "not_selected",
+        "configured_provider_bank_ids": [],
+        "non_provider_configured_bank_count": 0,
+        "api_key": "",
+        "api_key_env_var": "HINDSIGHT_API_KEY",
+        "retain_enabled": False,
+        "recall_mode": "off",
+        "reflect_enabled": False,
+        "legacy_provider_was_hindsight": False,
+        "legacy_auto_retain_observed_disabled": False,
+    }
+
+
+def _redacted_hindsight_config(config: dict[str, Any]) -> dict[str, Any]:
+    redacted = dict(config)
+    redacted.pop("api_key", None)
+    return redacted
+
+
+def _save_memory_os_config(values: dict[str, Any], hermes_home: Path) -> None:
+    from plugins.memory.memory_os.config import save_config
+
+    save_config(values, hermes_home)
+
+
+def _memory_provider_is_hindsight(hermes_home: Path) -> bool:
+    config = _read_yaml_config(hermes_home / "config.yaml")
+    memory = config.get("memory") if isinstance(config.get("memory"), dict) else {}
+    return str(memory.get("provider") or "") == "hindsight"
+
+
 def _shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -1038,6 +1226,12 @@ def main() -> int:
             "or bounded-vote only after a separate review gate."
         ),
     )
+    parser.add_argument(
+        "--hindsight",
+        choices=["auto", "off", "adopt", "wizard"],
+        default="auto",
+        help="Hindsight adoption mode. auto adopts an existing legacy config into shadow mode; no config stays off.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
     args = parser.parse_args()
 
@@ -1075,6 +1269,7 @@ def main() -> int:
         deep_reflection_preset=args.deep_reflection_preset,
         memory_sources_preset=args.memory_sources_preset,
         llm_judge_preset=args.llm_judge_preset,
+        hindsight_mode=args.hindsight,
         dry_run=args.dry_run,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

@@ -21,6 +21,7 @@ from typing import Any
 _ALLOWED_ALIASES = {
     "status",
     "doctor",
+    "hindsight",
     "low-clue-recall",
     "memory-sources",
     "metadata-retention",
@@ -185,6 +186,20 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="agent_os_command")
     subs.add_parser("status")
     subs.add_parser("doctor")
+    hindsight_parser = subs.add_parser("hindsight")
+    hindsight_subs = hindsight_parser.add_subparsers(dest="hindsight_command", required=True)
+    hindsight_subs.add_parser("status")
+    hindsight_adopt = hindsight_subs.add_parser("adopt")
+    hindsight_adopt.add_argument("--apply", action="store_true")
+    hindsight_retain = hindsight_subs.add_parser("retain-pending")
+    hindsight_retain.add_argument("--apply", action="store_true")
+    hindsight_retract = hindsight_subs.add_parser("retract")
+    hindsight_retract.add_argument("--record-id", required=True)
+    hindsight_retract.add_argument("--reason", required=True)
+    hindsight_retract.add_argument("--apply", action="store_true")
+    hindsight_reflect = hindsight_subs.add_parser("reflect")
+    hindsight_reflect.add_argument("--query", required=True)
+    hindsight_reflect.add_argument("--apply", action="store_true")
     low_clue_parser = subs.add_parser("low-clue-recall")
     low_clue_subs = low_clue_parser.add_subparsers(dest="low_clue_recall_command", required=True)
     low_clue_dry_run = low_clue_subs.add_parser("dry-run")

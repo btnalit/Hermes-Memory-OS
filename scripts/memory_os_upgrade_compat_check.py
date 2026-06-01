@@ -32,6 +32,7 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec("memory_provider", ("hermes", "memory"), json_output=False),
     CommandSpec("shell_status", ("hermes", "memory-os-agent-os", "status")),
     CommandSpec("shell_doctor", ("hermes", "memory-os-agent-os", "doctor")),
+    CommandSpec("hindsight_status", ("hermes", "memory-os-agent-os", "hindsight", "status")),
     CommandSpec("modules_status", ("hermes", "memory-os-agent-os", "modules", "status")),
     CommandSpec("modules_doctor", ("hermes", "memory-os-agent-os", "modules", "doctor")),
     CommandSpec(
@@ -140,6 +141,7 @@ def classify_report(command_results: dict[str, dict[str, Any]]) -> dict[str, lis
     _require_memory_provider(command_results, passed, fail)
     _require_schema(command_results, "shell_status", "memory-os.status.v0", passed, fail)
     _require_doctor_ok(command_results, "shell_doctor", passed, fail)
+    _require_hindsight_status(command_results, passed, fail)
     _require_schema(command_results, "modules_status", "memory-os.modules_status.v0", passed, fail)
     _require_doctor_ok(command_results, "modules_doctor", passed, fail)
     _require_schema(
@@ -288,6 +290,68 @@ def _require_doctor_ok(
         passed.append({"code": f"{name}_no_error_findings"})
     else:
         fail.append({"code": f"{name}_has_error_findings"})
+
+
+def _require_hindsight_status(
+    results: dict[str, dict[str, Any]],
+    passed: list[dict[str, Any]],
+    fail: list[dict[str, Any]],
+) -> None:
+    data = results.get("hindsight_status", {}).get("json")
+    if not isinstance(data, dict):
+        fail.append({"code": "hindsight_status_missing_json"})
+        return
+    if data.get("schema_version") != "memory-os.hindsight_substrate_status.v0":
+        fail.append({"code": "hindsight_status_schema_mismatch"})
+        return
+    _classify_hindsight_status_payload(data, passed, fail)
+
+
+def _classify_hindsight_status_payload(
+    data: dict[str, Any],
+    passed: list[dict[str, Any]],
+    fail: list[dict[str, Any]],
+) -> None:
+    if data.get("enabled") is False and data.get("status") == "optional_not_configured":
+        passed.append({"code": "hindsight_optional_off_ok"})
+        return
+    if data.get("enabled") is True and data.get("recall_mode") in {"shadow", "active", "off"}:
+        provider_bank_id = str(data.get("provider_bank_id") or "")
+        bank_id = str(data.get("bank_id") or "")
+        if data.get("adoption_source") == "hermes_hindsight_config":
+            if not provider_bank_id:
+                fail.append({"code": "hindsight_provider_bank_evidence_missing"})
+            elif bank_id != provider_bank_id:
+                fail.append(
+                    {
+                        "code": "hindsight_provider_bank_mismatch",
+                        "bank_id": bank_id,
+                        "provider_bank_id": provider_bank_id,
+                    }
+                )
+            elif str(data.get("bank_selection_reason") or "") == "ambiguous_provider_bank":
+                fail.append({"code": "hindsight_provider_bank_selection_ambiguous"})
+            else:
+                passed.append(
+                    {
+                        "code": "hindsight_provider_bank_selected",
+                        "bank_selection_reason": data.get("bank_selection_reason"),
+                        "non_provider_configured_bank_count": data.get("non_provider_configured_bank_count"),
+                    }
+                )
+        monitor = data.get("substrate_monitor") if isinstance(data.get("substrate_monitor"), dict) else {}
+        if int(monitor.get("raw_retained_count") or 0) > 0 or monitor.get("no_raw_retained") is False:
+            fail.append({"code": "hindsight_raw_retain_detected"})
+        if int(monitor.get("projection_stale_count") or 0) > 0:
+            fail.append({"code": "hindsight_projection_stale"})
+        if monitor.get("local_first_authority_preserved") is False or int(
+            monitor.get("external_authoritative_count") or 0
+        ) > 0:
+            fail.append({"code": "hindsight_overrode_local_authority"})
+        if not [item for item in fail if str(item.get("code", "")).startswith("hindsight_")]:
+            passed.append({"code": "hindsight_configured_ok"})
+        return
+    fail.append({"code": "hindsight_status_invalid", "status": data.get("status")})
 
 
 def _require_false_boundaries(

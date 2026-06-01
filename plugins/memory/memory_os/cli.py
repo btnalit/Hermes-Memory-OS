@@ -43,7 +43,7 @@ _ensure_user_plugin_package()
 from .audit import last_audit_age_seconds, read_audit_entries
 from .benchmark import BenchmarkConfig, run_benchmark
 from .cleanup import CleanupPolicy, cleanup_plan
-from .config import load_config
+from .config import load_config, save_config
 from .conversation_regression import (
     evaluate_transcript_file,
     prompt_set_report,
@@ -125,6 +125,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
             for event in sorted(events, key=lambda item: item.ts)[-5:]
         ],
         "hindsight_adapter_enabled": bool(config.get("hindsight_adapter_enabled")),
+        "hindsight_substrate": hindsight_status_report(store),
         "low_clue_recall": {
             "enabled": bool((config.get("low_clue_recall") or {}).get("enabled"))
             if isinstance(config.get("low_clue_recall"), dict)
@@ -133,6 +134,378 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         },
         "owner_review": owner_review_status_report(store),
     }
+
+
+def hindsight_status_report(store: MemoryOSStore) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home)
+    substrate_root = config.get("substrate_providers") if isinstance(config.get("substrate_providers"), dict) else {}
+    substrate = substrate_root.get("hindsight") if isinstance(substrate_root.get("hindsight"), dict) else {}
+    enabled = bool(substrate.get("enabled"))
+    api_key_env_var = str(substrate.get("api_key_env_var") or "")
+    return {
+        "schema_version": "memory-os.hindsight_substrate_status.v0",
+        "enabled": enabled,
+        "status": "configured" if enabled else "optional_not_configured",
+        "adoption_source": str(substrate.get("adoption_source") or "none"),
+        "bank_id": str(substrate.get("bank_id") or ""),
+        "provider_config_path": str(substrate.get("provider_config_path") or ""),
+        "provider_bank_id": str(substrate.get("provider_bank_id") or ""),
+        "bank_selection_reason": str(substrate.get("bank_selection_reason") or "not_selected"),
+        "configured_provider_bank_ids": list(substrate.get("configured_provider_bank_ids") or [])
+        if isinstance(substrate.get("configured_provider_bank_ids"), list)
+        else [],
+        "non_provider_configured_bank_count": int(substrate.get("non_provider_configured_bank_count") or 0),
+        "api_url_configured": bool(substrate.get("api_url")),
+        "api_key_configured": bool(substrate.get("api_key") or (api_key_env_var and os.environ.get(api_key_env_var))),
+        "retain_enabled": bool(substrate.get("retain_enabled")),
+        "recall_mode": str(substrate.get("recall_mode") or "off"),
+        "reflect_enabled": bool(substrate.get("reflect_enabled")),
+        "direct_hermes_provider_active": _direct_hermes_provider_active(store.roots.hermes_home),
+        "legacy_provider_was_hindsight": bool(substrate.get("legacy_provider_was_hindsight")),
+        "legacy_auto_retain_observed_disabled": bool(substrate.get("legacy_auto_retain_observed_disabled")),
+        "substrate_monitor": _hindsight_substrate_monitor(store),
+    }
+
+
+def hindsight_adopt_report(store: MemoryOSStore, *, apply: bool = False) -> dict[str, Any]:
+    provider_config_path = store.roots.hermes_home / "hindsight" / "config.json"
+    detected: dict[str, Any] = {"exists": provider_config_path.exists(), "provider_config_path": str(provider_config_path)}
+    planned = _default_hindsight_adopt_config()
+    if provider_config_path.exists():
+        try:
+            raw = json.loads(provider_config_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        selection = _select_hindsight_provider_bank(raw)
+        selected_bank_id = str(selection.get("selected_bank_id") or "")
+        detected = {
+            "exists": True,
+            "provider_config_path": str(provider_config_path),
+            "api_url_configured": bool(raw.get("api_url")),
+            "bank_id": selected_bank_id,
+            "provider_bank_id": selected_bank_id,
+            "bank_selection_reason": str(selection.get("reason") or "not_selected"),
+            "configured_provider_bank_ids": list(selection.get("configured_bank_ids") or []),
+            "non_provider_configured_bank_count": int(selection.get("non_provider_configured_bank_count") or 0),
+            "auto_retain": raw.get("auto_retain"),
+            "api_key_configured": bool(raw.get("apiKey") or raw.get("api_key")),
+        }
+        if selected_bank_id:
+            planned.update(
+                {
+                    "enabled": True,
+                    "adoption_source": "hermes_hindsight_config",
+                    "api_url": str(raw.get("api_url") or ""),
+                    "bank_id": selected_bank_id,
+                    "provider_config_path": str(provider_config_path),
+                    "provider_bank_id": selected_bank_id,
+                    "bank_selection_reason": str(selection.get("reason") or "provider_config"),
+                    "configured_provider_bank_ids": list(selection.get("configured_bank_ids") or []),
+                    "non_provider_configured_bank_count": int(selection.get("non_provider_configured_bank_count") or 0),
+                    "retain_enabled": False,
+                    "recall_mode": "shadow",
+                    "reflect_enabled": False,
+                    "legacy_provider_was_hindsight": _direct_hermes_provider_active(store.roots.hermes_home),
+                    "legacy_auto_retain_observed_disabled": raw.get("auto_retain") is False,
+                }
+            )
+    if apply:
+        save_config({"substrate_providers": {"hindsight": planned}}, store.roots.hermes_home)
+    return {
+        "schema_version": "memory-os.hindsight_adopt.v0",
+        "dry_run": not apply,
+        "detected": detected,
+        "planned_config": planned,
+        "applied": bool(apply),
+    }
+
+
+def hindsight_retain_pending_report(store: MemoryOSStore, *, apply: bool = False) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home)
+    substrate_root = config.get("substrate_providers") if isinstance(config.get("substrate_providers"), dict) else {}
+    substrate = substrate_root.get("hindsight") if isinstance(substrate_root.get("hindsight"), dict) else {}
+    enabled = bool(substrate.get("enabled")) and bool(substrate.get("retain_enabled"))
+    candidate_count = len(read_candidate_queue(store))
+    if not apply:
+        return {
+            "schema_version": "memory-os.hindsight_retain_pending.v0",
+            "dry_run": True,
+            "enabled": enabled,
+            "actual_retain": False,
+            "raw_body_included": False,
+            "ledger_write": False,
+            "candidate_count": candidate_count,
+        }
+
+    from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig
+    from .substrates.ledger import SubstrateOperationLedger
+
+    adapter = HindsightAdapter(store, config=HindsightAdapterConfig(enabled=enabled), client=None)
+    adapter_report = adapter.export_all()
+    exported_records = (
+        adapter_report.get("exported_records")
+        if isinstance(adapter_report.get("exported_records"), list)
+        else []
+    )
+    operation_ledger = SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl")
+    projection_ledger = None
+    if exported_records:
+        from .substrates.projection import ProjectionLedger
+
+        projection_ledger = ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl")
+    for exported in exported_records:
+        if not isinstance(exported, dict):
+            continue
+        operation_ledger.append(
+            {
+                "provider": "hindsight",
+                "operation": "retain",
+                "source_class": str(exported.get("source_class") or ""),
+                "raw_body_included": False,
+                "source_record_ref": str(exported.get("source_record_ref") or ""),
+                "substrate_record_id": str(exported.get("substrate_record_id") or ""),
+                "substrate_snapshot_id": str(exported.get("substrate_snapshot_id") or ""),
+            }
+        )
+        if projection_ledger is not None:
+            projection_ledger.record_retain(
+                provider="hindsight",
+                source_record_ref=str(exported.get("source_record_ref") or ""),
+                source_version=str(exported.get("source_version") or "current"),
+                substrate_record_id=str(exported.get("substrate_record_id") or ""),
+                substrate_snapshot_id=str(exported.get("substrate_snapshot_id") or ""),
+            )
+    return {
+        "schema_version": "memory-os.hindsight_retain_pending.v0",
+        "dry_run": False,
+        "enabled": enabled,
+        "actual_retain": bool(adapter_report.get("exported_count")),
+        "raw_body_included": False,
+        "ledger_write": bool(exported_records),
+        "candidate_count": candidate_count,
+        "adapter_report": adapter_report,
+    }
+
+
+def hindsight_retract_report(
+    store: MemoryOSStore,
+    *,
+    record_id: str,
+    reason: str,
+    apply: bool = False,
+) -> dict[str, Any]:
+    from .substrates.ledger import SubstrateOperationLedger
+    from .substrates.projection import ProjectionLedger
+
+    config = load_config(store.roots.hermes_home)
+    substrate_root = config.get("substrate_providers") if isinstance(config.get("substrate_providers"), dict) else {}
+    substrate = substrate_root.get("hindsight") if isinstance(substrate_root.get("hindsight"), dict) else {}
+    snapshot_id = _hindsight_snapshot_id(substrate)
+    planned = {
+        "provider": "hindsight",
+        "source_record_ref": record_id,
+        "source_version": "current",
+        "reason": reason,
+        "substrate_snapshot_id": snapshot_id,
+        "delete_policy": "invalidate_not_delete",
+    }
+    if apply:
+        ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl").record_invalidate(
+            provider="hindsight",
+            source_record_ref=record_id,
+            source_version="current",
+            reason=reason,
+            substrate_snapshot_id=snapshot_id,
+        )
+        SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl").append(
+            {
+                "provider": "hindsight",
+                "operation": "invalidate",
+                "source_record_ref": record_id,
+                "source_version": "current",
+                "reason": reason,
+                "substrate_snapshot_id": snapshot_id,
+            }
+        )
+    return {
+        "schema_version": "memory-os.hindsight_retract.v0",
+        "dry_run": not apply,
+        "enabled": bool(substrate.get("enabled")),
+        "actual_delete": False,
+        "actual_invalidate": bool(apply),
+        "invalidation_reason": reason,
+        "planned": planned,
+    }
+
+
+def hindsight_reflect_report(store: MemoryOSStore, *, query: str, apply: bool = False) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home)
+    substrate_root = config.get("substrate_providers") if isinstance(config.get("substrate_providers"), dict) else {}
+    substrate = substrate_root.get("hindsight") if isinstance(substrate_root.get("hindsight"), dict) else {}
+    query_hash = _sha256_text(query)
+    if not bool(substrate.get("reflect_enabled")):
+        return {
+            "schema_version": "memory-os.hindsight_reflect.v0",
+            "status": "disabled",
+            "dry_run": not apply,
+            "off_hot_path": True,
+            "actual_canonical_write": False,
+            "query_sha256": query_hash,
+        }
+    if apply:
+        from .substrates.ledger import SubstrateOperationLedger
+
+        SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl").append(
+            {
+                "provider": "hindsight",
+                "operation": "reflect",
+                "phase": "async",
+                "raw_body_included": False,
+                "substrate_snapshot_id": _hindsight_snapshot_id(substrate),
+            }
+        )
+    return {
+        "schema_version": "memory-os.hindsight_reflect.v0",
+        "status": "configured",
+        "dry_run": not apply,
+        "off_hot_path": True,
+        "actual_canonical_write": False,
+        "query_sha256": query_hash,
+    }
+
+
+def _default_hindsight_adopt_config() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "adoption_source": "none",
+        "api_url": "",
+        "bank_id": "",
+        "provider_config_path": "",
+        "provider_bank_id": "",
+        "bank_selection_reason": "not_selected",
+        "configured_provider_bank_ids": [],
+        "non_provider_configured_bank_count": 0,
+        "api_key": "",
+        "api_key_env_var": "HINDSIGHT_API_KEY",
+        "retain_enabled": False,
+        "recall_mode": "off",
+        "reflect_enabled": False,
+        "legacy_provider_was_hindsight": False,
+        "legacy_auto_retain_observed_disabled": False,
+    }
+
+
+def _select_hindsight_provider_bank(raw: dict[str, Any]) -> dict[str, Any]:
+    banks = raw.get("banks") if isinstance(raw.get("banks"), dict) else {}
+    configured_bank_ids: list[str] = []
+    enabled_bank_ids: list[str] = []
+    for key, value in banks.items():
+        bank_id = str(key)
+        enabled = True
+        if isinstance(value, dict):
+            bank_id = str(value.get("bankId") or key)
+            enabled = value.get("enabled") is not False
+        if bank_id and bank_id not in configured_bank_ids:
+            configured_bank_ids.append(bank_id)
+        if enabled and bank_id and bank_id not in enabled_bank_ids:
+            enabled_bank_ids.append(bank_id)
+
+    top_level_bank_id = str(raw.get("bank_id") or "").strip()
+    selected_bank_id = ""
+    reason = "not_selected"
+    if top_level_bank_id:
+        selected_bank_id = top_level_bank_id
+        reason = "top_level_provider_bank_id"
+    elif len(enabled_bank_ids) == 1:
+        selected_bank_id = enabled_bank_ids[0]
+        reason = "single_enabled_provider_bank"
+    elif len(configured_bank_ids) == 1:
+        selected_bank_id = configured_bank_ids[0]
+        reason = "single_configured_provider_bank"
+    elif configured_bank_ids or enabled_bank_ids:
+        reason = "ambiguous_provider_bank"
+    return {
+        "selected_bank_id": selected_bank_id,
+        "reason": reason,
+        "configured_bank_ids": configured_bank_ids,
+        "enabled_bank_ids": enabled_bank_ids,
+        "non_provider_configured_bank_count": len(
+            [bank_id for bank_id in configured_bank_ids if bank_id != selected_bank_id]
+        ),
+    }
+
+
+def _hindsight_snapshot_id(substrate: dict[str, Any]) -> str:
+    configured = str(substrate.get("substrate_snapshot_id") or "")
+    if configured:
+        return configured
+    bank_id = str(substrate.get("bank_id") or "unconfigured")
+    return f"hindsight:{bank_id}:vcurrent"
+
+
+def _sha256_text(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _hindsight_substrate_monitor(store: MemoryOSStore) -> dict[str, Any]:
+    from .substrates.ledger import SubstrateOperationLedger, derive_substrate_monitor_fields
+
+    operation_ledger = SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl")
+    operation_fields = derive_substrate_monitor_fields(operation_ledger.read_all(), provider="hindsight")
+    projection_fields = {
+        "projection_stale_count": 0,
+        "projection_retract_missing_count": 0,
+    }
+    try:
+        from .substrates.projection import ProjectionLedger, derive_projection_coherence
+    except ModuleNotFoundError:
+        pass
+    else:
+        projection_ledger = ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl")
+        projection_fields = derive_projection_coherence(projection_ledger.read_all(), provider="hindsight")
+    shadow = _latest_substrate_shadow_recall(store)
+    return {
+        **operation_fields,
+        **projection_fields,
+        "local_first_authority_preserved": shadow.get("local_first_authority_preserved") if shadow else None,
+        "external_authoritative_count": int(shadow.get("external_authoritative_count") or 0) if shadow else 0,
+    }
+
+
+def _latest_substrate_shadow_recall(store: MemoryOSStore) -> dict[str, Any]:
+    path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
+    if not path.exists():
+        return {}
+    latest: dict[str, Any] = {}
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                latest = value
+    return latest
+
+
+def _direct_hermes_provider_active(hermes_home: Path) -> bool:
+    config_path = hermes_home / "config.yaml"
+    if not config_path.exists():
+        return False
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    memory = data.get("memory") if isinstance(data.get("memory"), dict) else {}
+    return str(memory.get("provider") or "") == "hindsight"
 
 
 def build_doctor_result(store: MemoryOSStore) -> dict[str, Any]:
@@ -169,8 +542,15 @@ def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
                 "Prefetch is using bounded filesystem fallback because the SQLite index is unavailable.",
             )
         )
-    if not bool(load_config(store.roots.hermes_home).get("hindsight_adapter_enabled")):
-        findings.append(_finding("hindsight_adapter_disabled", "warning", "Hindsight adapter is disabled."))
+    hindsight_status = status.get("hindsight_substrate") if isinstance(status.get("hindsight_substrate"), dict) else {}
+    if bool(hindsight_status.get("enabled")) and not str(hindsight_status.get("bank_id") or ""):
+        findings.append(
+            _finding(
+                "hindsight_substrate_missing_bank_id",
+                "warning",
+                "Hindsight substrate is enabled but no bank_id is configured.",
+            )
+        )
     judge_availability = status.get("low_clue_recall", {}).get("judge_availability", {})
     if (
         isinstance(judge_availability, dict)
@@ -296,6 +676,20 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="memory_os_command")
     subs.add_parser("status")
     subs.add_parser("doctor")
+    hindsight_parser = subs.add_parser("hindsight")
+    hindsight_subs = hindsight_parser.add_subparsers(dest="hindsight_command", required=True)
+    hindsight_subs.add_parser("status")
+    hindsight_adopt = hindsight_subs.add_parser("adopt")
+    hindsight_adopt.add_argument("--apply", action="store_true")
+    hindsight_retain = hindsight_subs.add_parser("retain-pending")
+    hindsight_retain.add_argument("--apply", action="store_true")
+    hindsight_retract = hindsight_subs.add_parser("retract")
+    hindsight_retract.add_argument("--record-id", required=True)
+    hindsight_retract.add_argument("--reason", required=True)
+    hindsight_retract.add_argument("--apply", action="store_true")
+    hindsight_reflect = hindsight_subs.add_parser("reflect")
+    hindsight_reflect.add_argument("--query", required=True)
+    hindsight_reflect.add_argument("--apply", action="store_true")
     heartbeat_parser = subs.add_parser("heartbeat")
     heartbeat_parser.add_argument("--max-events", type=int, default=100)
     inspect_parser = subs.add_parser("inspect")
@@ -648,6 +1042,56 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return 1 if report.get("status") == "error" else 0
     if command == "modules":
         return _modules_command(args, store)
+    if command == "hindsight":
+        if args.hindsight_command == "status":
+            print(json.dumps(hindsight_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.hindsight_command == "adopt":
+            print(
+                json.dumps(
+                    hindsight_adopt_report(store, apply=bool(args.apply)),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.hindsight_command == "retain-pending":
+            print(
+                json.dumps(
+                    hindsight_retain_pending_report(store, apply=bool(args.apply)),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.hindsight_command == "retract":
+            print(
+                json.dumps(
+                    hindsight_retract_report(
+                        store,
+                        record_id=str(args.record_id),
+                        reason=str(args.reason),
+                        apply=bool(args.apply),
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        if args.hindsight_command == "reflect":
+            print(
+                json.dumps(
+                    hindsight_reflect_report(store, query=str(args.query), apply=bool(args.apply)),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0
+        return 2
     if command == "status":
         print(json.dumps(build_status_report(store), ensure_ascii=False, indent=2, sort_keys=True))
         return 0

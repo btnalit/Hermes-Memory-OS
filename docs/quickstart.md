@@ -19,7 +19,8 @@ target explicit.
 One-command operational install for an existing Hermes profile:
 
 ```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational \
+  --hindsight auto
 ```
 
 This installs and enables the Memory-OS provider, the Hermes Agent OS shell,
@@ -43,7 +44,37 @@ tokens, state transitions, audit, and monitor evidence.
 Production-safe install:
 
 ```bash
-HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe
+HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe \
+  --hindsight off
+```
+
+Hindsight adoption is explicit. Use `--hindsight off` for a fresh open-source
+install. Use `--hindsight auto` when an existing Hermes profile already has a
+Hindsight config and you want Memory-OS to adopt it into governed shadow mode.
+The direct Hermes `memory.provider=hindsight` path is not used by Memory-OS.
+Hindsight, when enabled, is a Memory-OS governed substrate with raw-turn retain
+disabled and recall kept advisory.
+
+Automated deployment wrapper examples:
+
+```bash
+# Fresh host, local execution on the target:
+python scripts/deploy_memory_os.py \
+  --hermes-home /root/.hermes \
+  --profile fresh \
+  --phase apply \
+  --mode production-safe \
+  --hindsight off
+
+# Existing Hermes + Hindsight host, remote orchestration:
+python scripts/deploy_memory_os.py \
+  --host hermes-media \
+  --remote-repo-root /opt/Hermes-Memory-OS \
+  --hermes-home /root/.hermes \
+  --profile upgrade \
+  --phase dry-run \
+  --mode operational \
+  --hindsight auto
 ```
 
 The installer does not restart `hermes-gateway.service`.

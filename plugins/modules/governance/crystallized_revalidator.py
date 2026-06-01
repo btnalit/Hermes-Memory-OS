@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+from plugins.memory.memory_os.substrates.projection import ProjectionLedger
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -33,6 +34,23 @@ def crystallized_revalidator_manifest() -> dict[str, Any]:
             "profile_scope": "per-profile",
         },
     }
+
+
+def invalidate_hindsight_projection_for_canonical_change(
+    *,
+    projection_ledger_path: Path,
+    record_id: str,
+    record_version: str,
+    reason: str,
+    substrate_snapshot_id: str,
+) -> None:
+    ProjectionLedger(projection_ledger_path).record_invalidate(
+        provider="hindsight",
+        source_record_ref=record_id,
+        source_version=record_version,
+        reason=reason,
+        substrate_snapshot_id=substrate_snapshot_id,
+    )
 
 
 class CrystallizedRevalidatorModule:

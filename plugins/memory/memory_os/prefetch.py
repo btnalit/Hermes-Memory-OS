@@ -6,6 +6,7 @@ import json
 import re
 from collections import Counter
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -150,10 +151,17 @@ def build_prefetch(
     context_router_config: dict[str, Any] | None = None,
     memory_sources_config: dict[str, Any] | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
+    substrate_recall_report: dict[str, Any] | None = None,
 ) -> str:
     router_config = _normalize_context_router_config(context_router_config)
     source_config = normalize_memory_sources_config(memory_sources_config)
     low_clue_config = normalize_low_clue_recall_config(low_clue_recall_config)
+    if isinstance(substrate_recall_report, dict):
+        _record_substrate_shadow_recall(
+            store=store,
+            query=query,
+            report=substrate_recall_report,
+        )
     router_apply_enabled = _context_router_apply_enabled(router_config)
     if _should_ground_diagnostic_query(
         query,
@@ -477,6 +485,57 @@ def _record_memory_sources(
         prefetch_mode=prefetch_mode,
     )
     append_memory_source_record(store.roots, record)
+
+
+def _record_substrate_shadow_recall(
+    *,
+    store: MemoryOSStore,
+    query: str,
+    report: dict[str, Any],
+) -> None:
+    facts = report.get("facts") if isinstance(report.get("facts"), list) else []
+    if not facts:
+        return
+    path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": "memory-os.substrate_recall_shadow.v0",
+        "query_class": str(report.get("query_class") or ""),
+        "query_sha256": _safe_query_hash(query),
+        "selected_provider": str(report.get("selected_provider") or ""),
+        "fact_count": len(facts),
+        "authoritative": bool(report.get("authoritative")),
+        "external_authoritative_count": int(report.get("external_authoritative_count") or 0),
+        "local_first_authority_preserved": bool(report.get("local_first_authority_preserved")),
+        "recall_llm_triggered": bool(report.get("recall_llm_triggered")),
+        "fallback_triggered": bool(report.get("fallback_triggered")),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    from .substrates.ledger import SubstrateOperationLedger
+
+    operation_ledger = SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl")
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        provider = str(fact.get("provider") or "")
+        if provider != "hindsight":
+            continue
+        operation_ledger.append(
+            {
+                "provider": "hindsight",
+                "operation": "recall",
+                "recall_llm_triggered": bool(fact.get("recall_llm_triggered")),
+                "advisory_only": bool(fact.get("advisory_only")),
+                "authority_class": str(fact.get("authority_class") or ""),
+                "substrate_snapshot_id": str(fact.get("substrate_snapshot_id") or ""),
+            }
+        )
+
+
+def _safe_query_hash(query: str) -> str:
+    return sha256(str(query or "").encode("utf-8")).hexdigest()
 
 
 def _prefetch_mode(index: object | None) -> str:
