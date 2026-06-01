@@ -54,6 +54,22 @@ def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     assert "SECRET" not in json.dumps(report, ensure_ascii=False)
 
 
+def test_plan_phase_allows_hindsight_active_cutover(tmp_path):
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="operational",
+        hindsight_mode="active",
+        phase="plan",
+        profile="upgrade",
+    )
+
+    rendered = render_deploy_plan(report)
+
+    assert report["hindsight_mode"] == "active"
+    assert "--hindsight active" in rendered
+
+
 def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
     def fake_runner(argv, *, host=None, timeout=30):
         command = " ".join(argv)

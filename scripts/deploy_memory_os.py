@@ -41,8 +41,8 @@ def deploy_memory_os(
         raise SystemExit("--profile must be fresh or upgrade")
     if mode not in {"production-safe", "test-host", "operational"}:
         raise SystemExit("--mode must be production-safe, test-host, or operational")
-    if hindsight_mode not in {"auto", "off", "adopt", "wizard"}:
-        raise SystemExit("--hindsight must be auto, off, adopt, or wizard")
+    if hindsight_mode not in {"auto", "off", "adopt", "active", "wizard"}:
+        raise SystemExit("--hindsight must be auto, off, adopt, active, or wizard")
     if llm_judge_preset not in {"none", "report-only", "bounded-vote"}:
         raise SystemExit("--llm-judge-preset must be none, report-only, or bounded-vote")
 
@@ -449,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="")
     parser.add_argument("--hermes-home", required=True)
     parser.add_argument("--mode", choices=["production-safe", "test-host", "operational"], default="production-safe")
-    parser.add_argument("--hindsight", choices=["auto", "off", "adopt", "wizard"], default="auto")
+    parser.add_argument("--hindsight", choices=["auto", "off", "adopt", "active", "wizard"], default="auto")
     parser.add_argument("--llm-judge-preset", choices=["none", "report-only", "bounded-vote"], default="report-only")
     parser.add_argument("--phase", choices=["plan", "preflight", "dry-run", "apply", "postcheck"], default="plan")
     parser.add_argument("--profile", choices=["fresh", "upgrade"], default="upgrade")

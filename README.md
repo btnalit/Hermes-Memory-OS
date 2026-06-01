@@ -54,10 +54,12 @@ Slack, Matrix, or another configured platform. Background jobs use
 Hermes `deliver=origin`.
 
 Hindsight is optional and governed by Memory-OS, not by selecting Hermes'
-direct `memory.provider=hindsight` path. `--hindsight auto` adopts an existing
-Hermes Hindsight config into Memory-OS shadow mode when one is present; on a
-fresh profile with no Hindsight config, it stays disabled. Use `--hindsight off`
-to force the open-source default of no Hindsight integration.
+direct `memory.provider=hindsight` path. `--hindsight auto` adopts a new
+Hermes Hindsight config into Memory-OS shadow mode, preserves an already-active
+Memory-OS Hindsight adoption for the same provider bank, and stays disabled on
+a fresh profile with no Hindsight config. Use `--hindsight active` only for a
+controlled live cutover where retain, advisory active recall, and reflect
+candidate generation should all be enabled.
 
 Interactive install is also available:
 

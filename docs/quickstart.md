@@ -50,7 +50,9 @@ HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-s
 
 Hindsight adoption is explicit. Use `--hindsight off` for a fresh open-source
 install. Use `--hindsight auto` when an existing Hermes profile already has a
-Hindsight config and you want Memory-OS to adopt it into governed shadow mode.
+Hindsight config and you want Memory-OS to adopt it into governed shadow mode,
+or to preserve an already-active adoption for the same provider bank during
+later upgrades. Use `--hindsight active` only for a controlled live cutover.
 The direct Hermes `memory.provider=hindsight` path is not used by Memory-OS.
 Hindsight, when enabled, is a Memory-OS governed substrate with raw-turn retain
 disabled and recall kept advisory.

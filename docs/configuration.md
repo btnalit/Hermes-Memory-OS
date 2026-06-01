@@ -103,9 +103,10 @@ Installer modes:
 
 | Mode | Use when | Effect |
 | --- | --- | --- |
-| `--hindsight auto` | normal upgrade path | adopts an existing `$HERMES_HOME/hindsight/config.json` into Memory-OS shadow mode; leaves Hindsight disabled when no legacy config exists |
+| `--hindsight auto` | normal upgrade path | adopts a new `$HERMES_HOME/hindsight/config.json` into Memory-OS shadow mode, preserves an already-active Memory-OS Hindsight adoption for the same provider bank, and leaves Hindsight disabled when no legacy config exists |
 | `--hindsight off` | fresh open-source install or conservative profile | writes an explicit disabled Hindsight substrate config |
 | `--hindsight adopt` | controlled migration where Hindsight must already exist | fails if the legacy Hindsight config is absent |
+| `--hindsight active` | controlled live cutover after operator approval | adopts the provider bank with `retain_enabled=true`, `recall_mode=active`, and `reflect_enabled=true`; recall remains advisory and LocalArtifact-first |
 | `--hindsight wizard` | future guided setup | currently deferred; no live enablement |
 
 Config keys live under `substrate_providers.hindsight`:

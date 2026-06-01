@@ -979,8 +979,8 @@ def _read_json_config(config_path: Path) -> dict[str, Any]:
 
 
 def _configure_hindsight_substrate(hermes_home: Path, *, mode: str, dry_run: bool) -> dict[str, Any]:
-    if mode not in {"auto", "off", "adopt", "wizard"}:
-        raise SystemExit("--hindsight must be one of: auto, off, adopt, wizard")
+    if mode not in {"auto", "off", "adopt", "active", "wizard"}:
+        raise SystemExit("--hindsight must be one of: auto, off, adopt, active, wizard")
     if mode == "off":
         planned = _hindsight_disabled_config()
         if not dry_run:
@@ -1007,6 +1007,22 @@ def _configure_hindsight_substrate(hermes_home: Path, *, mode: str, dry_run: boo
             "detected": _redacted_hindsight_detected(provider_config),
         }
 
+    existing_config = _read_json_config(hermes_home / "memory-os" / "config.json")
+    existing_substrates = (
+        existing_config.get("substrate_providers") if isinstance(existing_config.get("substrate_providers"), dict) else {}
+    )
+    existing_hindsight = (
+        existing_substrates.get("hindsight") if isinstance(existing_substrates.get("hindsight"), dict) else {}
+    )
+    same_adopted_bank = (
+        bool(existing_hindsight.get("enabled"))
+        and str(existing_hindsight.get("adoption_source") or "") == "hermes_hindsight_config"
+        and str(existing_hindsight.get("bank_id") or "") == selected_bank_id
+        and str(existing_hindsight.get("provider_bank_id") or selected_bank_id) == selected_bank_id
+    )
+    preserve_existing_active = mode == "auto" and same_adopted_bank and str(existing_hindsight.get("recall_mode") or "") == "active"
+    active_requested = mode == "active"
+
     planned = {
         "enabled": True,
         "adoption_source": "hermes_hindsight_config",
@@ -1019,16 +1035,17 @@ def _configure_hindsight_substrate(hermes_home: Path, *, mode: str, dry_run: boo
         "non_provider_configured_bank_count": int(selection.get("non_provider_configured_bank_count") or 0),
         "api_key": "",
         "api_key_env_var": "HINDSIGHT_API_KEY",
-        "retain_enabled": False,
-        "recall_mode": "shadow",
-        "reflect_enabled": False,
+        "retain_enabled": True if active_requested else bool(existing_hindsight.get("retain_enabled")) if preserve_existing_active else False,
+        "recall_mode": "active" if active_requested or preserve_existing_active else "shadow",
+        "reflect_enabled": True if active_requested else bool(existing_hindsight.get("reflect_enabled")) if preserve_existing_active else False,
         "legacy_provider_was_hindsight": _memory_provider_is_hindsight(hermes_home),
         "legacy_auto_retain_observed_disabled": raw.get("auto_retain") is False,
     }
     if not dry_run:
         _save_memory_os_config({"substrate_providers": {"hindsight": planned}}, hermes_home)
+    status = "adopted_active" if active_requested else "preserved_active" if preserve_existing_active else "adopted_shadow"
     return {
-        "status": "adopted_shadow",
+        "status": status,
         "mode": mode,
         "detected": _redacted_hindsight_detected(provider_config),
         "planned_config": _redacted_hindsight_config(planned),
@@ -1228,9 +1245,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--hindsight",
-        choices=["auto", "off", "adopt", "wizard"],
+        choices=["auto", "off", "adopt", "active", "wizard"],
         default="auto",
-        help="Hindsight adoption mode. auto adopts an existing legacy config into shadow mode; no config stays off.",
+        help=(
+            "Hindsight adoption mode. auto adopts new configs into shadow mode and preserves an already-active "
+            "Memory-OS adoption; active adopts an existing provider bank with retain/recall/reflect enabled."
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
     args = parser.parse_args()

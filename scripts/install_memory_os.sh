@@ -66,9 +66,11 @@ Options:
   --memory-sources-preset NAME none|production-safe|test-host|operational.
   --llm-judge-preset NAME      none|report-only|bounded-vote. Optional low-clue
                                 recall LLM judge; reuses Hermes provider/model config.
-  --hindsight MODE             auto|off|adopt|wizard. Default: auto.
-                                auto adopts an existing Hindsight config into
-                                Memory-OS shadow mode; no config stays off.
+  --hindsight MODE             auto|off|adopt|active|wizard. Default: auto.
+                                auto adopts a new Hindsight config into shadow
+                                mode and preserves an already-active adoption;
+                                active enables retain/recall/reflect for a
+                                controlled live cutover.
   --runtime-interval VALUE      Heartbeat timer interval. Default: 5min.
   --cognitive-loop-interval VALUE
                                 Cognitive-loop integration harness interval. Default: 6h.

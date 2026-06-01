@@ -166,6 +166,71 @@ def test_installer_hindsight_auto_adopts_existing_legacy_config_without_printing
     assert hindsight["bank_selection_reason"] == "top_level_provider_bank_id"
 
 
+def test_installer_hindsight_active_adopts_existing_provider_with_live_flags(tmp_path):
+    from plugins.memory.memory_os.config import load_config
+
+    home = tmp_path / "home"
+    legacy = home / "hindsight"
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(
+        '{"api_url":"http://127.0.0.1:8888","bank_id":"hermes02","apiKey":"SECRET","auto_retain":false}',
+        encoding="utf-8",
+    )
+
+    report = install_plugin(hermes_home=home, hindsight_mode="active")
+
+    assert "SECRET" not in json.dumps(report, ensure_ascii=False)
+    assert report["hindsight_mode"] == "active"
+    assert report["hindsight_adoption"]["status"] == "adopted_active"
+    hindsight = load_config(home)["substrate_providers"]["hindsight"]
+    assert hindsight["enabled"] is True
+    assert hindsight["bank_id"] == "hermes02"
+    assert hindsight["recall_mode"] == "active"
+    assert hindsight["retain_enabled"] is True
+    assert hindsight["reflect_enabled"] is True
+    assert hindsight["provider_bank_id"] == "hermes02"
+
+
+def test_installer_hindsight_auto_preserves_existing_active_adoption(tmp_path):
+    from plugins.memory.memory_os.config import load_config, save_config
+
+    home = tmp_path / "home"
+    legacy = home / "hindsight"
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(
+        '{"api_url":"http://127.0.0.1:8888","bank_id":"hermes02","apiKey":"SECRET","auto_retain":false}',
+        encoding="utf-8",
+    )
+    save_config(
+        {
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "adoption_source": "hermes_hindsight_config",
+                    "api_url": "http://127.0.0.1:8888",
+                    "bank_id": "hermes02",
+                    "provider_bank_id": "hermes02",
+                    "retain_enabled": True,
+                    "recall_mode": "active",
+                    "reflect_enabled": True,
+                }
+            }
+        },
+        home,
+    )
+
+    report = install_plugin(hermes_home=home, hindsight_mode="auto")
+
+    assert report["hindsight_mode"] == "auto"
+    assert report["hindsight_adoption"]["status"] == "preserved_active"
+    hindsight = load_config(home)["substrate_providers"]["hindsight"]
+    assert hindsight["enabled"] is True
+    assert hindsight["bank_id"] == "hermes02"
+    assert hindsight["recall_mode"] == "active"
+    assert hindsight["retain_enabled"] is True
+    assert hindsight["reflect_enabled"] is True
+
+
 def test_installer_hindsight_auto_uses_provider_bank_not_other_configured_banks(tmp_path):
     from plugins.memory.memory_os.config import load_config
 
@@ -788,6 +853,7 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "--memory-sources-preset" in text
     assert "--llm-judge-preset" in text
     assert "--hindsight" in text
+    assert "active enables retain/recall/reflect" in text
     assert "report-only" in text
     assert "--yes" in text
     assert "--dry-run" in text
