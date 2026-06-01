@@ -6,7 +6,7 @@ from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
-from plugins.memory.memory_os.session_mirror import SessionMirror
+from plugins.memory.memory_os.session_mirror import SessionMirror, read_session_mirror_apply_records
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -98,6 +98,55 @@ def test_session_mirror_state_db_primary_writes_bounded_summary_without_raw_tool
     assert "U" * 120 not in rendered
     assert "A" * 120 not in rendered
     assert "PCDN" in event.summary
+
+
+def test_session_mirror_apply_is_bounded_by_platform_and_redacts_secrets(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="telegram-session", platform="telegram")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
+            ("discord-session", "discord", "2026-05-21T09:00:00+00:00", "2026-05-21T09:01:00+00:00"),
+        )
+        conn.executemany(
+            "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
+            [
+                (
+                    "telegram-session",
+                    "user",
+                    "请记住 api_key=sk-sessionmirror-UNIQUE-20260601-aaaaaaaaaaaaaaaa",
+                    "2026-05-21T08:00:04+00:00",
+                ),
+                (
+                    "discord-session",
+                    "user",
+                    "Discord session should remain pending",
+                    "2026-05-21T09:00:01+00:00",
+                ),
+            ],
+        )
+    mirror = SessionMirror(store)
+
+    report = mirror.scan(dry_run=False, max_sessions=1, platform_allowlist=["telegram"])
+    repeated = mirror.scan(dry_run=False, max_sessions=1, platform_allowlist=["telegram"])
+
+    assert report["status"] == "ok"
+    assert report["apply_bounded"] is True
+    assert report["candidate_session_count"] == 2
+    assert report["selected_session_count"] == 1
+    assert report["skipped_by_platform_count"] == 1
+    assert report["skipped_by_limit_count"] == 0
+    assert report["written_event_ids_count"] == 1
+    assert report["raw_private_body_printed"] is False
+    assert repeated["written_event_ids_count"] == 0
+    event = store.read_events()[0]
+    serialized = json.dumps(event.to_dict(), ensure_ascii=False)
+    assert "sk-sessionmirror-UNIQUE" not in serialized
+    assert "[REDACTED]" in serialized
+    apply_records = read_session_mirror_apply_records(store.roots)
+    assert apply_records[-1]["written_event_ids_count"] == 0
+    assert apply_records[0]["written_event_ids_count"] == 1
+    assert apply_records[0]["platform_allowlist"] == ["telegram"]
 
 
 def test_session_mirror_skips_provider_captured_session(tmp_path):

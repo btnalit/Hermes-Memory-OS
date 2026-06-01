@@ -1339,6 +1339,33 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "value": session_mirror.get("written_event_ids_count"),
                 }
             )
+        if session_mirror.get("latest_apply_status"):
+            latest_apply_written = int(session_mirror.get("latest_apply_written_event_ids_count") or 0)
+            latest_apply_duplicates = int(session_mirror.get("latest_apply_duplicate_ignored_count") or 0)
+            if session_mirror.get("latest_apply_raw_private_body_printed") is True:
+                fail.append({"code": "session_mirror_apply_raw_private_body_printed"})
+            if latest_apply_duplicates > 0:
+                fail.append(
+                    {
+                        "code": "session_mirror_apply_duplicate_ignored",
+                        "value": latest_apply_duplicates,
+                    }
+                )
+            if latest_apply_written > 0 and session_mirror.get("latest_apply_bounded") is not True:
+                fail.append({"code": "session_mirror_apply_unbounded_write", "value": latest_apply_written})
+            if (
+                session_mirror.get("latest_apply_status") == "ok"
+                and session_mirror.get("latest_apply_bounded") is True
+                and latest_apply_written > 0
+                and latest_apply_duplicates == 0
+                and session_mirror.get("latest_apply_raw_private_body_printed") is not True
+            ):
+                passed.append(
+                    {
+                        "code": "session_mirror_apply_bounded_ok",
+                        "written_event_ids_count": latest_apply_written,
+                    }
+                )
         if session_mirror.get("dry_run_status") == "ok" and int(session_mirror.get("dry_run_written_event_ids_count") or 0) == 0:
             passed.append({"code": "session_mirror_dry_run_ok"})
         else:
@@ -2591,6 +2618,10 @@ def _session_mirror_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "dry_run_written_event_ids_count": summary.get("dry_run_written_event_ids_count"),
         "dry_run_findings_count": summary.get("dry_run_findings_count"),
         "correlation_status": summary.get("correlation_status"),
+        "apply_count": summary.get("apply_count"),
+        "latest_apply_status": summary.get("latest_apply_status"),
+        "latest_apply_bounded": summary.get("latest_apply_bounded"),
+        "latest_apply_written_event_ids_count": summary.get("latest_apply_written_event_ids_count"),
         "pending_only_groups": summary.get("pending_only_groups"),
         "internet_data_collection_pending_count": summary.get("internet_data_collection_pending_count"),
         "internet_data_collection_provider_count": summary.get("internet_data_collection_provider_count"),
@@ -4181,6 +4212,7 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 def session_mirror_summary():
     status_report = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     dry_run = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "run-once", "--module", "session_mirror", "--dry-run"])
+    apply_status = load_json_cmd(["hermes", "memory-os-agent-os", "session-mirror", "apply-status"])
     correlation = session_mirror_correlation_summary()
     session_status = {}
     if isinstance(status_report, dict):
@@ -4188,6 +4220,11 @@ def session_mirror_summary():
             if isinstance(item, dict) and item.get("module") == "session_mirror":
                 session_status = item.get("status") if isinstance(item.get("status"), dict) else {}
                 break
+    latest_apply = (
+        apply_status.get("latest_apply")
+        if isinstance(apply_status, dict) and isinstance(apply_status.get("latest_apply"), dict)
+        else {}
+    )
     written_ids = dry_run.get("written_event_ids") if isinstance(dry_run, dict) and isinstance(dry_run.get("written_event_ids"), list) else []
     findings = dry_run.get("findings") if isinstance(dry_run, dict) and isinstance(dry_run.get("findings"), list) else []
     return {
@@ -4208,6 +4245,16 @@ def session_mirror_summary():
       "correlation_finding_count": correlation.get("finding_count") if isinstance(correlation, dict) else None,
       "raw_private_body_printed": correlation.get("raw_private_body_printed") if isinstance(correlation, dict) else None,
       "written_event_ids_count": correlation.get("written_event_ids_count") if isinstance(correlation, dict) else None,
+      "apply_status_schema_version": apply_status.get("schema_version") if isinstance(apply_status, dict) else None,
+      "apply_count": apply_status.get("apply_count") if isinstance(apply_status, dict) else None,
+      "latest_apply_status": latest_apply.get("status"),
+      "latest_apply_bounded": latest_apply.get("apply_bounded"),
+      "latest_apply_written_event_ids_count": latest_apply.get("written_event_ids_count"),
+      "latest_apply_duplicate_ignored_count": latest_apply.get("duplicate_ignored_count"),
+      "latest_apply_raw_private_body_printed": latest_apply.get("raw_private_body_printed"),
+      "latest_apply_selected_session_count": latest_apply.get("selected_session_count"),
+      "latest_apply_skipped_by_platform_count": latest_apply.get("skipped_by_platform_count"),
+      "latest_apply_skipped_by_limit_count": latest_apply.get("skipped_by_limit_count"),
       "pending_platform_counts": correlation.get("pending_platform_counts") if isinstance(correlation, dict) else {},
       "pending_event_kind_counts": correlation.get("pending_event_kind_counts") if isinstance(correlation, dict) else {},
       "topic_group_counts": correlation.get("topic_group_counts") if isinstance(correlation, dict) else {},

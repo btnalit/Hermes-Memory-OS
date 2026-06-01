@@ -840,9 +840,12 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     session_subs = session_parser.add_subparsers(dest="session_mirror_command", required=True)
     session_subs.add_parser("status")
     session_subs.add_parser("doctor")
+    session_subs.add_parser("apply-status")
     session_scan = session_subs.add_parser("scan")
     session_scan.add_argument("--dry-run", action="store_true")
     session_scan.add_argument("--apply", action="store_true")
+    session_scan.add_argument("--max-sessions", type=int, default=0)
+    session_scan.add_argument("--platform", action="append", default=[])
     state_source_parser = subs.add_parser("state-source-mirror")
     state_source_parser.add_argument("--state-root", action="append", default=[])
     state_source_subs = state_source_parser.add_subparsers(dest="state_source_mirror_command", required=True)
@@ -1325,9 +1328,23 @@ def _session_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         result = mirror.doctor()
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 1 if result["status"] == "error" else 0
+    if command == "apply-status":
+        print(json.dumps(mirror.apply_status(), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
     if command == "scan":
         dry_run = not bool(getattr(args, "apply", False))
-        print(json.dumps(mirror.scan(dry_run=dry_run), ensure_ascii=False, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                mirror.scan(
+                    dry_run=dry_run,
+                    max_sessions=max(int(getattr(args, "max_sessions", 0) or 0), 0),
+                    platform_allowlist=list(getattr(args, "platform", []) or []),
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     return 2
 

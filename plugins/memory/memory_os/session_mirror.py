@@ -1,9 +1,10 @@
-"""Read-only SessionMirror scanner for Memory-OS source coverage."""
+"""SessionMirror scanner and bounded apply path for Memory-OS source coverage."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,8 +12,24 @@ from typing import Any
 
 from .audit import append_audit
 from .ids import new_event_id
+from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
+
+
+SESSION_MIRROR_APPLY_SCHEMA_VERSION = "memory-os.session_mirror_apply.v0"
+SESSION_SECRET_PATTERNS = (
+    re.compile(r"(?i)\b(api[-_\s]?key|token|password|secret)\s*[:=]\s*([^\s;,)\]}]+)"),
+)
+
+
+def session_mirror_apply_records_path(roots: MemoryOSRoots) -> Path:
+    return roots.memory_os_root / "system" / "session_mirror_applies.jsonl"
+
+
+def read_session_mirror_apply_records(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
+    records = _read_jsonl(session_mirror_apply_records_path(roots))
+    return records[-max(limit, 0):] if limit else records
 
 
 class SessionMirror:
@@ -76,7 +93,13 @@ class SessionMirror:
             "findings": findings,
         }
 
-    def scan(self, *, dry_run: bool = True) -> dict[str, Any]:
+    def scan(
+        self,
+        *,
+        dry_run: bool = True,
+        max_sessions: int = 0,
+        platform_allowlist: list[str] | tuple[str, ...] | None = None,
+    ) -> dict[str, Any]:
         if not dry_run:
             self.store.initialize()
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
@@ -87,9 +110,19 @@ class SessionMirror:
             for session in sessions
             if session["session_id"] not in covered and session["dedup_key"] not in state["seen_sessions"]
         ]
+        platforms = _normalize_platform_allowlist(platform_allowlist)
+        platform_filtered = [
+            session for session in new_sessions if not platforms or str(session.get("platform") or "").lower() in platforms
+        ]
+        limit = max(int(max_sessions or 0), 0)
+        if not dry_run and limit == 0:
+            limit = 1
+        selected_sessions = platform_filtered[:limit] if limit else platform_filtered
+        skipped_by_platform_count = len(new_sessions) - len(platform_filtered)
+        skipped_by_limit_count = max(len(platform_filtered) - len(selected_sessions), 0)
         written_events: list[str] = []
         if not dry_run:
-            for session in new_sessions:
+            for session in selected_sessions:
                 event = self._event_for_session(session)
                 self.store.append_event(event)
                 state["seen_sessions"][session["dedup_key"]] = {
@@ -107,9 +140,22 @@ class SessionMirror:
                 details={
                     "dry_run": False,
                     "new_event_count": len(written_events),
+                    "candidate_session_count": len(new_sessions),
+                    "selected_session_count": len(selected_sessions),
                     "covered_session_count": len(covered),
                     "state_rebuilt": state_rebuilt,
                 },
+            )
+            self._append_apply_record(
+                candidate_session_count=len(new_sessions),
+                selected_session_count=len(selected_sessions),
+                skipped_by_platform_count=skipped_by_platform_count,
+                skipped_by_limit_count=skipped_by_limit_count,
+                platform_allowlist=platforms,
+                max_sessions=limit,
+                written_event_ids=written_events,
+                status="ok" if not findings else "warning",
+                findings=findings,
             )
         return {
             "schema_version": self.report_schema_version,
@@ -117,11 +163,31 @@ class SessionMirror:
             "profile": self.store.roots.profile,
             "session_count": len(sessions),
             "covered_session_count": sum(1 for session in sessions if session["session_id"] in covered),
-            "new_event_count": len(new_sessions),
+            "candidate_session_count": len(new_sessions),
+            "selected_session_count": len(selected_sessions),
+            "skipped_by_platform_count": skipped_by_platform_count,
+            "skipped_by_limit_count": skipped_by_limit_count,
+            "new_event_count": len(selected_sessions),
             "dry_run": dry_run,
+            "apply_bounded": not dry_run or bool(limit or platforms),
+            "max_sessions": limit,
+            "platform_allowlist": platforms,
             "state_rebuilt": state_rebuilt,
             "written_event_ids": written_events,
+            "written_event_ids_count": len(written_events),
+            "duplicate_ignored_count": 0,
+            "raw_private_body_printed": False,
             "findings": findings,
+        }
+
+    def apply_status(self) -> dict[str, Any]:
+        records = read_session_mirror_apply_records(self.store.roots)
+        latest = records[-1] if records else {}
+        return {
+            "schema_version": "memory-os.session_mirror_apply_status.v0",
+            "profile": self.store.roots.profile,
+            "apply_count": len(records),
+            "latest_apply": _bounded_apply_record(latest) if latest else {},
         }
 
     def _discover_sessions(self) -> list[dict[str, Any]]:
@@ -245,6 +311,47 @@ class SessionMirror:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+    def _append_apply_record(
+        self,
+        *,
+        candidate_session_count: int,
+        selected_session_count: int,
+        skipped_by_platform_count: int,
+        skipped_by_limit_count: int,
+        platform_allowlist: list[str],
+        max_sessions: int,
+        written_event_ids: list[str],
+        status: str,
+        findings: list[dict[str, Any]],
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        record = {
+            "schema_version": SESSION_MIRROR_APPLY_SCHEMA_VERSION,
+            "apply_id": f"smap_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{hashlib.sha256('|'.join(written_event_ids).encode('utf-8')).hexdigest()[:8]}",
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+            "profile": self.store.roots.profile or "default",
+            "status": status,
+            "apply_bounded": bool(max_sessions or platform_allowlist),
+            "max_sessions": max_sessions,
+            "platform_allowlist": platform_allowlist,
+            "candidate_session_count": candidate_session_count,
+            "selected_session_count": selected_session_count,
+            "skipped_by_platform_count": skipped_by_platform_count,
+            "skipped_by_limit_count": skipped_by_limit_count,
+            "written_event_ids": written_event_ids,
+            "written_event_ids_count": len(written_event_ids),
+            "duplicate_ignored_count": 0,
+            "raw_private_body_printed": False,
+            "finding_count": len(findings),
+            "boundary": {
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_unapproved_crystallized_approval": False,
+            },
+        }
+        _append_jsonl(session_mirror_apply_records_path(self.store.roots), record)
+
     def _event_for_session(self, session: dict[str, Any]) -> EventEnvelope:
         now = datetime.now(timezone.utc)
         unique = hashlib.sha256(str(session["dedup_key"]).encode("utf-8")).hexdigest()[:10]
@@ -318,8 +425,8 @@ def _session_record(
     tool_count = sum(1 for item in messages if str(item.get("role", "")).lower() == "tool")
     raw_material = json.dumps(messages, ensure_ascii=False, sort_keys=True)
     content_sha256 = hashlib.sha256(raw_material.encode("utf-8")).hexdigest()
-    last_user = _clip(user_messages[-1]) if user_messages else ""
-    last_assistant = _clip(assistant_messages[-1]) if assistant_messages else ""
+    last_user = _clip(_redact_secrets(user_messages[-1])) if user_messages else ""
+    last_assistant = _clip(_redact_secrets(assistant_messages[-1])) if assistant_messages else ""
     if last_user or last_assistant:
         event_kind = "conversation_turn_mirrored"
         drive_policy = "eligible"
@@ -352,6 +459,43 @@ def _clip(value: str, limit: int = 80) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[:limit].rstrip() + "..."
+
+
+def _redact_secrets(value: str) -> str:
+    text = str(value or "")
+    for pattern in SESSION_SECRET_PATTERNS:
+        text = pattern.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
+    return text
+
+
+def _normalize_platform_allowlist(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    normalized: list[str] = []
+    for value in values or []:
+        clean = str(value or "").strip().lower().replace("-", "_")
+        if clean and clean not in normalized:
+            normalized.append(clean)
+    return normalized
+
+
+def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": record.get("schema_version"),
+        "apply_id": record.get("apply_id"),
+        "created_at": record.get("created_at"),
+        "status": record.get("status"),
+        "apply_bounded": bool(record.get("apply_bounded")),
+        "max_sessions": record.get("max_sessions"),
+        "platform_allowlist": record.get("platform_allowlist") if isinstance(record.get("platform_allowlist"), list) else [],
+        "candidate_session_count": record.get("candidate_session_count"),
+        "selected_session_count": record.get("selected_session_count"),
+        "skipped_by_platform_count": record.get("skipped_by_platform_count"),
+        "skipped_by_limit_count": record.get("skipped_by_limit_count"),
+        "written_event_ids_count": record.get("written_event_ids_count"),
+        "duplicate_ignored_count": record.get("duplicate_ignored_count"),
+        "raw_private_body_printed": record.get("raw_private_body_printed"),
+        "finding_count": record.get("finding_count"),
+        "boundary": record.get("boundary") if isinstance(record.get("boundary"), dict) else {},
+    }
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -387,6 +531,28 @@ def _read_event_records(store: MemoryOSStore) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            records.append(parsed)
+    return records
+
+
+def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
