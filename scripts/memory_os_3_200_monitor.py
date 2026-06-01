@@ -1257,6 +1257,25 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "delivery_mode": right_brain_adapter.get("latest_delivery_mode"),
                     }
                 )
+        speak_permission = (
+            module_artifacts.get("speak_permission")
+            if isinstance(module_artifacts.get("speak_permission"), dict)
+            else {}
+        )
+        if speak_permission:
+            if int(speak_permission.get("raw_body_included_count") or 0) > 0:
+                fail.append({"code": "right_brain_allow_speak_once_raw_body_included", "value": speak_permission})
+            elif int(speak_permission.get("unapproved_send_count") or 0) > 0:
+                fail.append({"code": "right_brain_allow_speak_once_unapproved_send", "value": speak_permission})
+            elif int(speak_permission.get("error_count") or 0) > 0:
+                warn.append({"code": "right_brain_allow_speak_once_errors", "value": speak_permission})
+            elif int(speak_permission.get("sent_count") or 0) > 0:
+                passed.append(
+                    {
+                        "code": "right_brain_allow_speak_once_sent",
+                        "sent_count": speak_permission.get("sent_count"),
+                    }
+                )
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
@@ -2595,6 +2614,8 @@ def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "right_brain_adapter_latest_delivery_mode": summary.get("right_brain_adapter_latest_delivery_mode"),
         "right_brain_adapter_latest_actual_send": summary.get("right_brain_adapter_latest_actual_send"),
         "right_brain_adapter_raw_body_included_count": summary.get("right_brain_adapter_raw_body_included_count"),
+        "speak_permission_sent_count": summary.get("speak_permission_sent_count"),
+        "speak_permission_error_count": summary.get("speak_permission_error_count"),
         "right_brain_adapter_policy_present": summary.get("right_brain_adapter_policy_present"),
         "right_brain_adapter_policy_version": summary.get("right_brain_adapter_policy_version"),
         "right_brain_adapter_policy_apply_count": summary.get("right_brain_adapter_policy_apply_count"),
@@ -3479,6 +3500,7 @@ def module_artifact_summary():
     grounded_expression_judge = status("grounded_expression_judge")
     mailbox = status("mailbox")
     expression_feedback = _read_jsonl("/root/.hermes/memory-os/system/expression_feedback_ledger.jsonl")
+    speak_permission_tickets = _read_jsonl("/root/.hermes/memory-os/system/speak_permission_tickets.jsonl")
     right_brain_expression_requests = _read_jsonl(
         "/root/.hermes/system-modules/right_brain_expression_adapter/requests.jsonl"
     )
@@ -3519,6 +3541,11 @@ def module_artifact_summary():
     latest_right_brain_expression_outcome = (
         right_brain_expression_outcomes[-1]
         if right_brain_expression_outcomes and isinstance(right_brain_expression_outcomes[-1], dict)
+        else {}
+    )
+    latest_speak_permission_ticket = (
+        speak_permission_tickets[-1]
+        if speak_permission_tickets and isinstance(speak_permission_tickets[-1], dict)
         else {}
     )
     right_brain_outcome_ids = {
@@ -3932,6 +3959,42 @@ def module_artifact_summary():
         "latest_outcome_feedback_count": latest_right_brain_outcome_feedback_count,
         "outcome_feedback_missing_count": len(expression_feedback_linked_missing),
       },
+      "speak_permission": {
+        "ticket_count": len(speak_permission_tickets),
+        "sent_count": sum(
+            1
+            for item in speak_permission_tickets
+            if isinstance(item, dict) and item.get("status") == "sent" and item.get("actual_send") is True
+        ),
+        "pending_count": sum(
+            1
+            for item in speak_permission_tickets
+            if isinstance(item, dict) and item.get("status") == "pending"
+        ),
+        "error_count": sum(
+            1
+            for item in speak_permission_tickets
+            if isinstance(item, dict) and item.get("status") == "error"
+        ),
+        "unapproved_send_count": sum(
+            1
+            for item in speak_permission_tickets
+            if isinstance(item, dict) and item.get("actual_unapproved_send") is True
+        ),
+        "raw_body_included_count": sum(
+            1
+            for item in speak_permission_tickets
+            if isinstance(item, dict) and item.get("raw_body_included") is True
+        ),
+        "latest_ticket_id": latest_speak_permission_ticket.get("ticket_id"),
+        "latest_status": latest_speak_permission_ticket.get("status"),
+        "latest_actual_send": latest_speak_permission_ticket.get("actual_send"),
+        "latest_delivery_target_class": (
+            latest_speak_permission_ticket.get("delivery_ref", {}).get("target_class")
+            if isinstance(latest_speak_permission_ticket.get("delivery_ref"), dict)
+            else None
+        ),
+      },
       "mailbox": {
         "mailbox_exists": mailbox.get("mailbox_exists"),
         "would_send_count": mailbox.get("would_send_count"),
@@ -3948,6 +4011,7 @@ def expression_artifact_summary():
         if isinstance(modules.get("right_brain_expression_adapter"), dict)
         else {}
     )
+    speak_permission = modules.get("speak_permission") if isinstance(modules.get("speak_permission"), dict) else {}
     reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
     wandering_result_count = 0
     wandering_would_send_result_count = 0
@@ -4041,6 +4105,8 @@ def expression_artifact_summary():
       "right_brain_adapter_outcome_internal_marker_count": right_brain_adapter.get("outcome_internal_marker_count"),
       "right_brain_adapter_outcome_feedback_count": right_brain_adapter.get("outcome_feedback_count"),
       "right_brain_adapter_latest_outcome_feedback_count": right_brain_adapter.get("latest_outcome_feedback_count"),
+      "speak_permission_sent_count": speak_permission.get("sent_count"),
+      "speak_permission_error_count": speak_permission.get("error_count"),
     }
 
 def module_cadence_summary():

@@ -1606,6 +1606,25 @@ def test_classify_snapshot_tracks_right_brain_expression_outcomes():
     assert any(item["code"] == "right_brain_expression_outcome_internal_marker" for item in classification["fail"])
 
 
+def test_classify_snapshot_passes_owner_approved_right_brain_speak_once_send():
+    snapshot = _healthy_snapshot()
+    snapshot["module_artifacts"]["speak_permission"] = {
+        "ticket_count": 1,
+        "sent_count": 1,
+        "latest_status": "sent",
+        "latest_actual_send": True,
+        "unapproved_send_count": 0,
+        "raw_body_included_count": 0,
+        "error_count": 0,
+    }
+    snapshot["expression_artifacts"]["speak_permission_sent_count"] = 1
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "right_brain_allow_speak_once_sent" for item in classification["pass"])
+    assert not any(item["code"].startswith("right_brain_allow_speak_once_") for item in classification["fail"])
+
+
 def test_classify_snapshot_fails_when_expression_feedback_links_missing_outcome():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["right_brain_expression_adapter"]["outcome_count"] = 1

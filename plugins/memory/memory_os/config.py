@@ -97,6 +97,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_review_suggested": 5,
         "max_fyi": 5,
     },
+    "right_brain_expression": {
+        "recurring_delivery_enabled": False,
+        "recurring_delivery_mode": "disabled",
+        "recurring_delivery_channel": "unknown",
+        "recurring_delivery_target_class": "missing",
+        "speak_once_delivery_enabled": False,
+        "delivery_adapter": "none",
+        "target_ref": "",
+        "hermes_bin": "hermes",
+    },
     "l4": {
         "kill_switch_enabled": False,
     },
@@ -157,6 +167,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "default": DEFAULT_CONFIG["owner_review"],
         },
         {
+            "key": "right_brain_expression",
+            "description": "Right-brain expression delivery and owner-approved speak-once settings",
+            "default": DEFAULT_CONFIG["right_brain_expression"],
+        },
+        {
             "key": "l4",
             "description": "V7 L4 live-shadow and acting safety settings",
             "default": DEFAULT_CONFIG["l4"],
@@ -203,6 +218,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
     merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
+    merged["right_brain_expression"] = _merge_right_brain_expression_config(merged.get("right_brain_expression"))
     merged["l4"] = _merge_l4_config(merged.get("l4"))
     return merged
 
@@ -360,6 +376,25 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["recurring_delivery_target_class"] = str(merged.get("recurring_delivery_target_class") or "missing")
     merged["cron_job_name"] = str(merged.get("cron_job_name") or "memory-os-owner-review-digest")
     merged["aging_enabled"] = bool(merged.get("aging_enabled"))
+    return merged
+
+
+def _merge_right_brain_expression_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["right_brain_expression"])
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in default:
+        if key in value:
+            merged[key] = value[key]
+    merged["recurring_delivery_enabled"] = bool(merged.get("recurring_delivery_enabled"))
+    merged["recurring_delivery_mode"] = str(merged.get("recurring_delivery_mode") or "disabled")
+    merged["recurring_delivery_channel"] = str(merged.get("recurring_delivery_channel") or "unknown")
+    merged["recurring_delivery_target_class"] = str(merged.get("recurring_delivery_target_class") or "missing")
+    merged["speak_once_delivery_enabled"] = bool(merged.get("speak_once_delivery_enabled"))
+    merged["delivery_adapter"] = str(merged.get("delivery_adapter") or "none")
+    merged["target_ref"] = str(merged.get("target_ref") or "")
+    merged["hermes_bin"] = str(merged.get("hermes_bin") or "hermes")
     return merged
 
 

@@ -1760,6 +1760,13 @@ def read_owner_review_rendered_digest_records(roots: MemoryOSRoots, *, limit: in
     return records
 
 
+def read_speak_permission_tickets(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
+    records = _read_jsonl(speak_permission_tickets_path(roots))
+    if limit > 0:
+        return records[-limit:]
+    return records
+
+
 def _resolve_reply_digest(
     store: MemoryOSStore,
     *,
@@ -2135,7 +2142,14 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         return {"feedback_id": feedback["feedback_id"], "memory_source_record_id": target_id}
     if action_type == "allow_speak_once":
         ticket = _append_speak_ticket(store, record)
-        return {"ticket_id": ticket["ticket_id"], "target_id": target_id}
+        return {
+            "ticket_id": ticket["ticket_id"],
+            "target_id": target_id,
+            "status": ticket.get("status"),
+            "actual_send": bool(ticket.get("actual_send")),
+            "delivery_ref": ticket.get("delivery_ref") if isinstance(ticket.get("delivery_ref"), dict) else {},
+            "error_code": str(ticket.get("error_code") or ""),
+        }
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         feedback = _append_expression_feedback(store, record, note=note)
         return {
@@ -2185,8 +2199,11 @@ def _validate_action_target(
             return "invalid_feedback_rating"
         if not _find_memory_source(store, target_id):
             return "memory_source_not_found"
-    if action_type == "allow_speak_once" and target_type != "speak":
-        return "invalid_speak_target"
+    if action_type == "allow_speak_once":
+        if target_type != "speak":
+            return "invalid_speak_target"
+        if not _find_speak_would_send(store, target_id):
+            return "speak_target_not_found"
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES and target_type != "expression":
         return "invalid_expression_target"
     return ""
@@ -2229,6 +2246,10 @@ def _append_feedback(store: MemoryOSStore, record: dict[str, Any], *, rating: st
 def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
     created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(hours=24)
+    target_id = str(record["target_id"])
+    would_send = _find_speak_would_send(store, target_id) or {}
+    payload_ref = str(would_send.get("payload_ref") or "")
+    expression_text = _expression_preview_for_payload_ref(store, payload_ref)
     ticket = {
         "schema_version": SPEAK_PERMISSION_SCHEMA_VERSION,
         "ticket_id": f"spt_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
@@ -2236,10 +2257,49 @@ def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[s
         "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
         "profile": store.roots.profile or "default",
         "owner_action_id": record["owner_action_id"],
-        "payload_ref": str(record["target_id"]),
+        "payload_ref": payload_ref or target_id,
+        "would_send_id": target_id,
         "status": "pending",
         "actual_send": False,
+        "actual_unapproved_send": False,
+        "raw_body_included": False,
+        "text_char_count": len(expression_text),
+        "delivery_ref": {},
     }
+    config = _right_brain_speak_once_config(store)
+    if bool(config.get("speak_once_delivery_enabled")):
+        adapter = str(config.get("delivery_adapter") or "none")
+        target_ref = str(config.get("target_ref") or "")
+        target_class = _delivery_target_class(target_ref)
+        if adapter not in OWNER_REVIEW_DELIVERY_ADAPTERS:
+            ticket["status"] = "error"
+            ticket["error_code"] = "right_brain_delivery_adapter_unsupported"
+            record["result"] = "error"
+        elif target_class not in {"explicit_target", "platform_home"}:
+            ticket["status"] = "error"
+            ticket["error_code"] = "right_brain_delivery_target_not_owner_channel"
+            record["result"] = "error"
+        elif not expression_text:
+            ticket["status"] = "error"
+            ticket["error_code"] = "right_brain_expression_empty"
+            record["result"] = "error"
+        else:
+            send_result = _send_owner_review_digest_via_hermes(
+                hermes_bin=str(config.get("hermes_bin") or "hermes"),
+                target_ref=target_ref,
+                message=expression_text,
+            )
+            ticket["delivery_ref"] = (
+                send_result.get("delivery_ref") if isinstance(send_result.get("delivery_ref"), dict) else {}
+            )
+            if send_result.get("ok") is True:
+                ticket["status"] = "sent"
+                ticket["actual_send"] = True
+                record["boundary"]["actual_send"] = True
+            else:
+                ticket["status"] = "error"
+                ticket["error_code"] = str(send_result.get("code") or "right_brain_hermes_send_failed")
+                record["result"] = "error"
     _append_jsonl(speak_permission_tickets_path(store.roots), ticket)
     return ticket
 
@@ -2860,6 +2920,25 @@ def _expression_preview_for_payload_ref(store: MemoryOSStore, payload_ref: str) 
         if str(record.get("id") or "") == output_id:
             return _bounded_text(str(record.get("output") or ""), 360)
     return ""
+
+
+def _find_speak_would_send(store: MemoryOSStore, target_id: str) -> dict[str, Any] | None:
+    clean = str(target_id or "")
+    if not clean:
+        return None
+    for module_name in ("wandering_mind", "speak_gate"):
+        path = store.roots.hermes_home / "system-modules" / module_name / "would_send.jsonl"
+        for record in _read_jsonl(path):
+            if str(record.get("id") or record.get("payload_ref") or "") == clean:
+                item = dict(record)
+                item["source_module"] = module_name
+                return item
+    return None
+
+
+def _right_brain_speak_once_config(store: MemoryOSStore) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home).get("right_brain_expression", {})
+    return dict(config) if isinstance(config, dict) else {}
 
 
 def _proposal_requires_maturation(proposal: dict[str, Any]) -> bool:

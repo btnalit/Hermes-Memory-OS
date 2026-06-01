@@ -44,6 +44,7 @@ from plugins.memory.memory_os.owner_actions import (
     parse_owner_review_reply,
     render_owner_review_digest,
     resolve_owner_review_channel,
+    speak_permission_tickets_path,
     apply_approved_proposal_execution_decision,
     route_approved_proposal_followup_to_ops_gate,
     route_pending_approved_proposal_followups_to_ops_gate,
@@ -2222,6 +2223,93 @@ def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
     assert feedback["action_type"] == "too_mechanical"
     assert feedback["live_policy_changed"] is False
     assert feedback["raw_body_included"] is False
+
+
+def test_allow_speak_once_sends_once_when_explicit_delivery_enabled(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    module_root = tmp_path / "system-modules" / "wandering_mind"
+    module_root.mkdir(parents=True)
+    output_record = {
+        "schema_version": "hermes.wandering_mind_output.v0",
+        "id": "wout_live_001",
+        "ts": "2026-05-26T00:00:00+00:00",
+        "profile": "main",
+        "module": "wandering_mind",
+        "output": "今晚别忘了给自己留一点安静的时间。",
+        "output_ref": "local://wandering_mind/wout_live_001",
+    }
+    would_send = {
+        "schema_version": "hermes.delivery_would_send.v0",
+        "id": "wsend_live_001",
+        "ts": "2026-05-26T00:00:01+00:00",
+        "profile": "main",
+        "module": "wandering_mind",
+        "mode": "would_send",
+        "actual_send": False,
+        "channel": "origin",
+        "payload_ref": "local://wandering_mind/wout_live_001",
+        "reason": "wandering_mind_no_send",
+    }
+    (module_root / "outputs.jsonl").write_text(json.dumps(output_record, ensure_ascii=False) + "\n", encoding="utf-8")
+    (module_root / "would_send.jsonl").write_text(json.dumps(would_send, ensure_ascii=False) + "\n", encoding="utf-8")
+    save_config(
+        {
+            "right_brain_expression": {
+                "speak_once_delivery_enabled": True,
+                "delivery_adapter": "hermes_send",
+                "target_ref": "telegram:12345",
+                "hermes_bin": "fake-hermes",
+            }
+        },
+        tmp_path,
+    )
+    calls = []
+
+    def fake_send(*, hermes_bin, target_ref, message):
+        calls.append({"hermes_bin": hermes_bin, "target_ref": target_ref, "message": message})
+        return {
+            "ok": True,
+            "delivery_ref": {
+                "adapter": "hermes_send",
+                "message_id": "rb-speak-001",
+                "target_class": "explicit_target",
+            },
+        }
+
+    monkeypatch.setattr(owner_actions_module, "_send_owner_review_digest_via_hermes", fake_send)
+
+    result = apply_owner_action(
+        store,
+        action_type="allow_speak_once",
+        target="speak:wsend_live_001",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    duplicate = apply_owner_action(
+        store,
+        action_type="allow_speak_once",
+        target="speak:wsend_live_001",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    tickets = _jsonl(speak_permission_tickets_path(store.roots))
+    assert result["status"] == "ok"
+    assert duplicate["status"] == "duplicate_ignored"
+    assert len(calls) == 1
+    assert calls[0]["hermes_bin"] == "fake-hermes"
+    assert calls[0]["target_ref"] == "telegram:12345"
+    assert calls[0]["message"] == output_record["output"]
+    assert result["record"]["boundary"]["actual_send"] is True
+    assert result["record"]["boundary"].get("actual_unapproved_send") is not True
+    assert result["result_ref"]["actual_send"] is True
+    assert result["result_ref"]["delivery_ref"]["message_id"] == "rb-speak-001"
+    assert tickets[0]["status"] == "sent"
+    assert tickets[0]["actual_send"] is True
+    assert tickets[0]["delivery_ref"]["message_id"] == "rb-speak-001"
+    assert tickets[0]["raw_body_included"] is False
 
 
 def test_review_surface_next_page_uses_latest_owner_home_digest_offsets(tmp_path):
