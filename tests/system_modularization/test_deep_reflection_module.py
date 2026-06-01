@@ -879,6 +879,23 @@ def test_deep_reflection_collect_inputs_skips_expired_working_items(tmp_path):
     assert hygiene["skipped_by_status"] == {"expired": 1}
 
 
+def test_deep_reflection_collect_inputs_counts_malformed_inputs(tmp_path):
+    store = _store(tmp_path)
+    store.roots.working_root.mkdir(parents=True, exist_ok=True)
+    (store.roots.working_root / "broken.json").write_text("{not-json", encoding="utf-8")
+    digest_root = tmp_path / "system-modules" / "digest_consolidation" / "daily"
+    digest_root.mkdir(parents=True, exist_ok=True)
+    (digest_root / "broken.json").write_text("{not-json", encoding="utf-8")
+    module = DeepReflectionModule(tmp_path, profile="main")
+
+    snapshot = module.collect_inputs(store=store, max_working_items=8)
+
+    assert snapshot["working_item_hygiene"]["malformed_document_count"] == 1
+    assert snapshot["digest_artifact_hygiene"]["malformed_document_count"] == 1
+    assert snapshot["working_items"] == []
+    assert snapshot["digest_artifacts"] == []
+
+
 def test_deep_reflection_run_once_reports_expired_working_hygiene(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

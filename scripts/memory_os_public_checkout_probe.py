@@ -7,7 +7,6 @@ import argparse
 import json
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
 from pathlib import Path

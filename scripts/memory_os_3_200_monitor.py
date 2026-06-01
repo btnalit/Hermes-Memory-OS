@@ -1073,7 +1073,6 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         feature_count = int(evidence.get("feature_score_count") or 0)
         legacy_count = int(evidence.get("hash_score_legacy_count") or 0)
         legacy_comparison_count = int(evidence.get("legacy_hash_comparison_count") or evidence.get("comparison_count") or 0)
-        comparison_count = int(evidence.get("comparison_count") or 0)
         if legacy_count > 0:
             fail.append({"code": "left_brain_legacy_hash_scores_still_primary", "value": evidence})
         elif feature_count > 0:

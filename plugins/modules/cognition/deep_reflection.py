@@ -568,7 +568,7 @@ class DeepReflectionModule:
             if _is_governance_event(event)
         ][:max_events]
         working_items, working_hygiene = self._collect_working_items_with_hygiene(store=store, limit=max_working_items)
-        digest_artifacts = self._collect_digest_artifacts(limit=max_digest_artifacts)
+        digest_artifacts, digest_hygiene = self._collect_digest_artifacts_with_hygiene(limit=max_digest_artifacts)
         evidence_scores = self._collect_evidence_scores(evidence=evidence, limit=max_scores)
         proposal_backlog = self._collect_proposal_backlog(proposal_queue=proposal_queue, limit=max_proposals)
         input_refs = _dedupe(
@@ -588,6 +588,7 @@ class DeepReflectionModule:
             "working_items": working_items,
             "working_item_hygiene": working_hygiene,
             "digest_artifacts": digest_artifacts,
+            "digest_artifact_hygiene": digest_hygiene,
             "evidence_scores": evidence_scores,
             "proposal_backlog": proposal_backlog,
             "governance_feedback": governance_feedback,
@@ -611,10 +612,12 @@ class DeepReflectionModule:
         items: list[dict[str, Any]] = []
         skipped_by_status: dict[str, int] = {}
         status_counts: dict[str, int] = {}
+        malformed_document_count = 0
         for path in sorted(store.roots.working_root.glob("*.json")):
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
+                malformed_document_count += 1
                 continue
             for raw_item in document.get("items", []):
                 if not isinstance(raw_item, dict):
@@ -646,19 +649,26 @@ class DeepReflectionModule:
             "active_input_count": sum(1 for item in selected if item.get("status") == "active"),
             "expired_skipped_count": skipped_by_status.get("expired", 0),
             "expired_used_in_analysis_count": sum(1 for item in selected if item.get("status") == "expired"),
+            "malformed_document_count": malformed_document_count,
             "skipped_count": sum(skipped_by_status.values()),
             "skipped_by_status": skipped_by_status,
             "status_counts": status_counts,
         }
 
     def _collect_digest_artifacts(self, *, limit: int) -> list[dict[str, Any]]:
+        artifacts, _hygiene = self._collect_digest_artifacts_with_hygiene(limit=limit)
+        return artifacts
+
+    def _collect_digest_artifacts_with_hygiene(self, *, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         digest_root = self.hermes_home / "system-modules" / "digest_consolidation"
         artifacts: list[dict[str, Any]] = []
+        malformed_document_count = 0
         for kind in ("daily", "weekly"):
             for path in sorted((digest_root / kind).glob("*.json"), reverse=True):
                 try:
                     document = json.loads(path.read_text(encoding="utf-8"))
                 except Exception:
+                    malformed_document_count += 1
                     continue
                 artifacts.append(
                     {
@@ -670,7 +680,7 @@ class DeepReflectionModule:
                         "group_summaries": _digest_group_summaries(document),
                     }
                 )
-        return artifacts[:limit]
+        return artifacts[:limit], {"malformed_document_count": malformed_document_count}
 
     def _collect_evidence_scores(self, *, evidence: Any | None, limit: int) -> list[dict[str, Any]]:
         if evidence is None:
