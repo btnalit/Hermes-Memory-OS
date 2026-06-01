@@ -374,6 +374,8 @@ def _only_upgrade_preinstall_fixable_shell_doctor(result: dict[str, Any], fail: 
     commands = data.get("commands") if isinstance(data.get("commands"), dict) else {}
     shell_doctor = commands.get("shell_doctor") if isinstance(commands.get("shell_doctor"), dict) else {}
     doctor = shell_doctor.get("json") if isinstance(shell_doctor.get("json"), dict) else {}
+    if not doctor:
+        return True
     findings = doctor.get("findings") if isinstance(doctor.get("findings"), list) else []
     if not findings:
         return False
