@@ -384,7 +384,8 @@ def low_clue_judge_availability(config: dict[str, Any] | None) -> dict[str, Any]
     if not enabled:
         report.update({"status": "disabled", "code": "judge_disabled"})
         return report
-    if mode != "report_only":
+    supported_live_modes = {"report_only", "bounded_vote"}
+    if mode not in supported_live_modes:
         report.update({"status": "skipped", "code": "bounded_vote_not_enabled_in_rh28"})
         return report
     resolved = _resolve_hermes_default_runtime(judge)
@@ -997,7 +998,8 @@ def _llm_judge_report(
     if not bool(judge.get("enabled")) or str(judge.get("mode") or "none") == "none":
         return {"status": "disabled", "mode": "none"}
     mode = str(judge.get("mode") or "")
-    if mode != "report_only":
+    supported_live_modes = {"report_only", "bounded_vote"}
+    if mode not in supported_live_modes:
         return {"status": "skipped", "mode": mode, "code": "bounded_vote_not_enabled_in_rh28"}
     if not candidates:
         return {"status": "skipped", "mode": mode, "code": "no_candidates"}

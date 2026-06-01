@@ -758,6 +758,37 @@ def test_low_clue_recall_report_only_llm_judge_uses_injected_runner_without_chan
     assert report["llm_judge"]["selected_candidate_id"] == report["candidates"][0]["candidate_id"]
 
 
+def test_low_clue_recall_bounded_vote_llm_judge_uses_injected_runner_without_changing_decision(tmp_path):
+    store = _store(tmp_path)
+    _write_working(store, ["互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。"])
+
+    report = build_low_clue_recall_report(
+        "继续那个互联网设计",
+        store=store,
+        limit=4,
+        config={
+            "enabled": True,
+            "llm_judge": {
+                "enabled": True,
+                "mode": "bounded_vote",
+                "provider": "hermes_default",
+                "model": None,
+            },
+        },
+        llm_runner=lambda payload, cfg: {
+            "status": "no_match",
+            "selected_candidate_id": "",
+            "confidence": 0.0,
+            "reason_codes": ["ambiguous_recall_low_clue"],
+        },
+    )
+
+    assert report["decision"] == "direct_resume"
+    assert report["llm_judge"]["status"] == "no_match"
+    assert report["llm_judge"]["mode"] == "bounded_vote"
+    assert report["llm_judge"]["selected_candidate_id"] == ""
+
+
 def test_low_clue_recall_llm_judge_reports_resolved_runtime_model(tmp_path):
     store = _store(tmp_path)
     _write_working(store, ["互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。"])
@@ -876,6 +907,36 @@ def test_low_clue_judge_availability_degrades_for_unsupported_provider():
     assert report["status"] == "unavailable"
     assert report["code"] == "unsupported_provider"
     assert report["degrades_to"] == "deterministic_fallback"
+
+
+def test_low_clue_judge_availability_accepts_bounded_vote_mode(monkeypatch):
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "_resolve_hermes_default_runtime",
+        lambda config: {
+            "ok": True,
+            "api_mode": "chat_completions",
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "credential_present": True,
+        },
+    )
+
+    report = low_clue_judge_availability(
+        {
+            "enabled": True,
+            "llm_judge": {
+                "enabled": True,
+                "mode": "bounded_vote",
+                "provider": "hermes_default",
+            },
+        }
+    )
+
+    assert report["available"] is True
+    assert report["status"] == "available"
+    assert report["mode"] == "bounded_vote"
+    assert report["resolved_model"] == "deepseek-v4-flash"
 
 
 def test_status_and_doctor_report_low_clue_judge_unavailable_as_warning(tmp_path, monkeypatch, capsys):
