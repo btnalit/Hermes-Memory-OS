@@ -766,6 +766,7 @@ def test_installer_writes_low_clue_recall_llm_judge_report_only_config(tmp_path)
     assert config["low_clue_recall"]["llm_judge"]["mode"] == "report_only"
     assert config["low_clue_recall"]["llm_judge"]["provider"] == "hermes_default"
     assert config["low_clue_recall"]["llm_judge"]["model"] is None
+    assert config["low_clue_recall"]["llm_judge"]["max_tokens"] == 1024
 
 
 def test_test_host_install_shell_wraps_full_agent_os_install():

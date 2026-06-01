@@ -714,6 +714,76 @@ def test_low_clue_recall_report_only_llm_judge_uses_injected_runner_without_chan
     assert report["llm_judge"]["selected_candidate_id"] == report["candidates"][0]["candidate_id"]
 
 
+def test_low_clue_recall_llm_judge_reports_resolved_runtime_model(tmp_path):
+    store = _store(tmp_path)
+    _write_working(store, ["互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。"])
+
+    report = build_low_clue_recall_report(
+        "继续那个互联网设计",
+        store=store,
+        limit=4,
+        config={
+            "enabled": True,
+            "llm_judge": {
+                "enabled": True,
+                "mode": "report_only",
+                "provider": "hermes_default",
+                "model": None,
+            },
+        },
+        llm_runner=lambda payload, cfg: {
+            "status": "ok",
+            "selected_candidate_id": payload["candidates"][0]["candidate_id"],
+            "confidence": 0.8,
+            "reason_codes": ["clear_match"],
+            "resolved_provider": "deepseek",
+            "resolved_model": "deepseek-v4-flash",
+            "api_mode": "chat_completions",
+        },
+    )
+
+    assert report["llm_judge"]["model"] == "deepseek-v4-flash"
+    assert report["llm_judge"]["resolved_model"] == "deepseek-v4-flash"
+    assert report["llm_judge"]["resolved_provider"] == "deepseek"
+    assert report["llm_judge"]["api_mode"] == "chat_completions"
+
+
+def test_run_hermes_default_judge_prechecks_runtime_and_classifies_empty_response(monkeypatch):
+    monkeypatch.setattr(
+        low_clue_recall_module,
+        "low_clue_judge_availability",
+        lambda config: {
+            "available": True,
+            "resolved_provider": "deepseek",
+            "resolved_model": "deepseek-v4-flash",
+            "api_mode": "chat_completions",
+        },
+    )
+    monkeypatch.setattr(low_clue_recall_module, "_call_hermes_runtime_model", lambda prompt, config: "")
+
+    result = low_clue_recall_module._run_hermes_default_judge(
+        {
+            "schema_version": "memory-os.low_clue_recall_judge_input.v0",
+            "query_class": "ambiguous_recall",
+            "candidates": [
+                {
+                    "candidate_id": "c1",
+                    "label": "Project Borealis",
+                    "source_class": "working",
+                    "score": 0.8,
+                    "reason_codes": ["topic_term"],
+                }
+            ],
+        },
+        {"enabled": True, "mode": "report_only", "provider": "hermes_default"},
+    )
+
+    assert result["status"] == "skipped"
+    assert result["reason_codes"] == ["judge_empty_response"]
+    assert result["resolved_model"] == "deepseek-v4-flash"
+    assert result["api_mode"] == "chat_completions"
+
+
 def test_low_clue_recall_prefetch_disables_report_only_judge_to_avoid_turn_latency(tmp_path, monkeypatch):
     store = _store(tmp_path)
     _write_working(store, ["互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。"])

@@ -84,7 +84,10 @@ The installer does not restart `hermes-gateway.service`.
 For automated host rollout, use the deployment wrapper in phases. `plan`,
 `preflight`, and `dry-run` are safe gates; `apply` writes installer changes and
 still does not restart Hermes unless `--allow-restart` and an explicit restart
-command are provided.
+command are provided. Automated installs default `--llm-judge-preset` to
+`report-only`, which reuses the current Hermes provider/model and is checked by
+a post-install low-clue judge probe. Use `--llm-judge-preset none` to keep the
+LLM judge disabled.
 
 ```bash
 # Fresh open-source profile, local execution on the target.

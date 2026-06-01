@@ -135,7 +135,7 @@ while [[ $# -gt 0 ]]; do
       YES=1
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-operational}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-operational}"
-      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-none}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-report-only}"
       ENABLE_OWNER_CRON_ONBOARDING=1
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
       INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
@@ -146,14 +146,14 @@ while [[ $# -gt 0 ]]; do
       YES=1
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-test-host}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-test-host}"
-      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-none}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-report-only}"
       shift
       ;;
     --production-safe)
       MODE="production-safe"
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-production-safe}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-production-safe}"
-      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-none}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-report-only}"
       shift
       ;;
     --deep-reflection-preset)
@@ -524,7 +524,7 @@ select_options() {
   local default_right_brain_expression_cron_helper="yes"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
-  local default_llm_judge_preset="none"
+  local default_llm_judge_preset="report-only"
 
   if [[ "${MODE}" == "test-host" || "${MODE}" == "operational" ]]; then
     default_preset="${MODE}"

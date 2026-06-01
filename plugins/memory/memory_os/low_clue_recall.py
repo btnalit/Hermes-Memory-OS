@@ -31,8 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "provider": "hermes_default",
         "model": None,
         "temperature": 0,
-        "timeout_ms": 1500,
-        "max_tokens": 160,
+        "timeout_ms": 8000,
+        "max_tokens": 1024,
         "max_candidates": 4,
         "on_error": "deterministic_fallback",
     },
@@ -251,9 +251,9 @@ def normalize_low_clue_recall_config(config: dict[str, Any] | None) -> dict[str,
     judge["mode"] = str(judge.get("mode") or "none")
     judge["provider"] = str(judge.get("provider") or "hermes_default")
     try:
-        judge["timeout_ms"] = max(int(judge.get("timeout_ms") or 1500), 100)
+        judge["timeout_ms"] = max(int(judge.get("timeout_ms") or 8000), 100)
     except (TypeError, ValueError):
-        judge["timeout_ms"] = 1500
+        judge["timeout_ms"] = 8000
     try:
         judge["max_candidates"] = max(int(judge.get("max_candidates") or 4), 1)
     except (TypeError, ValueError):
@@ -1023,7 +1023,10 @@ def _llm_judge_report(
         "status": str(result.get("status") or "ok"),
         "mode": mode,
         "provider": str(judge.get("provider") or "hermes_default"),
-        "model": judge.get("model"),
+        "model": judge.get("model") or result.get("resolved_model"),
+        "resolved_provider": result.get("resolved_provider"),
+        "resolved_model": result.get("resolved_model"),
+        "api_mode": result.get("api_mode"),
         "selected_candidate_id": str(result.get("selected_candidate_id") or ""),
         "confidence": result.get("confidence"),
         "reason_codes": [str(item) for item in result.get("reason_codes", []) if str(item)],
@@ -1033,6 +1036,14 @@ def _llm_judge_report(
 def _run_hermes_default_judge(payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     if str(config.get("provider") or "hermes_default") != "hermes_default":
         return {"status": "skipped", "reason_codes": ["unsupported_provider"]}
+    availability = _judge_call_availability(config)
+    runtime_fields = _judge_runtime_fields(availability)
+    if not availability.get("available"):
+        return {
+            "status": "skipped",
+            "reason_codes": [str(availability.get("code") or "judge_runtime_unavailable")],
+            **runtime_fields,
+        }
     prompt = (
         "You are a report-only relevance judge for an ambiguous recall request. "
         "Choose the best candidate id if one clearly matches, otherwise return an empty selected_candidate_id. "
@@ -1041,11 +1052,27 @@ def _run_hermes_default_judge(payload: dict[str, Any], config: dict[str, Any]) -
     )
     response_text = _call_hermes_runtime_model(prompt, config)
     if not response_text:
-        return {"status": "skipped", "reason_codes": ["hermes_runtime_adapter_unavailable"]}
+        return {"status": "skipped", "reason_codes": ["judge_empty_response"], **runtime_fields}
     parsed = _extract_json_object(response_text)
     if not isinstance(parsed, dict):
-        return {"status": "error", "reason_codes": ["judge_non_json"]}
+        return {"status": "error", "reason_codes": ["judge_non_json"], **runtime_fields}
+    parsed.update({key: value for key, value in runtime_fields.items() if value})
     return parsed
+
+
+def _judge_call_availability(config: dict[str, Any]) -> dict[str, Any]:
+    judge = dict(config)
+    judge["enabled"] = True
+    judge["mode"] = "report_only"
+    return low_clue_judge_availability({"enabled": True, "llm_judge": judge})
+
+
+def _judge_runtime_fields(availability: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "resolved_provider": availability.get("resolved_provider"),
+        "resolved_model": availability.get("resolved_model") or availability.get("configured_model"),
+        "api_mode": availability.get("api_mode"),
+    }
 
 
 def _call_hermes_runtime_model(prompt: str, config: dict[str, Any]) -> str:
@@ -1059,7 +1086,7 @@ def _call_hermes_runtime_model(prompt: str, config: dict[str, Any]) -> str:
         if not model:
             return ""
         timeout = max(float(config.get("timeout_ms") or 8000) / 1000.0, 0.1)
-        max_tokens = int(config.get("max_tokens") or 160)
+        max_tokens = int(config.get("max_tokens") or 1024)
         if api_mode == "chat_completions":
             return _call_openai_chat(runtime, model=model, prompt=prompt, timeout=timeout, max_tokens=max_tokens)
         if api_mode == "codex_responses":

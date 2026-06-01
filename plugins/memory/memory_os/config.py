@@ -65,7 +65,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "model": None,
             "temperature": 0,
             "timeout_ms": 8000,
-            "max_tokens": 160,
+            "max_tokens": 1024,
             "max_candidates": 4,
             "on_error": "deterministic_fallback",
         },

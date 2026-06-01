@@ -57,6 +57,10 @@ disabled and recall kept advisory.
 
 Automated deployment wrapper examples:
 
+The wrapper defaults `--llm-judge-preset` to `report-only`, reusing the current
+Hermes provider/model and running a post-install judge probe. Pass
+`--llm-judge-preset none` when the target should keep the judge disabled.
+
 ```bash
 # Fresh host, local execution on the target:
 python scripts/deploy_memory_os.py \

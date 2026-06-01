@@ -7,6 +7,31 @@ from scripts.deploy_memory_os import (
 )
 
 
+def _llm_judge_probe_result():
+    return {
+        "exit_code": 0,
+        "stdout": json.dumps(
+            {
+                "schema_version": "memory-os.low_clue_recall.v0",
+                "candidate_count": 1,
+                "llm_judge": {
+                    "status": "ok",
+                    "mode": "report_only",
+                    "provider": "hermes_default",
+                    "resolved_model": "deepseek-v4-flash",
+                    "api_mode": "chat_completions",
+                },
+                "boundaries": {
+                    "actual_send": False,
+                    "actual_execute": False,
+                    "actual_canonical_write": False,
+                },
+            }
+        ),
+        "stderr": "",
+    }
+
+
 def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     report = deploy_memory_os(
         repo_root=tmp_path,
@@ -24,6 +49,7 @@ def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     assert report["profile"] == "fresh"
     assert report["restart_requested"] is False
     assert "--hindsight auto" in rendered
+    assert "--llm-judge-preset report-only" in rendered
     assert "--production-safe" in rendered
     assert "SECRET" not in json.dumps(report, ensure_ascii=False)
 
@@ -46,6 +72,8 @@ def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -121,6 +149,8 @@ def test_fresh_profile_allows_preinstall_provider_mismatch_but_requires_postchec
                 ),
                 "stderr": "",
             }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -211,6 +241,8 @@ def test_fresh_profile_allows_missing_memory_os_shell_before_install(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -274,6 +306,8 @@ def test_upgrade_profile_allows_preinstall_hindsight_status_gap_but_requires_pos
                 ),
                 "stderr": "",
             }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -351,6 +385,8 @@ def test_upgrade_profile_allows_preinstall_provider_bank_evidence_gap_but_requir
                 ),
                 "stderr": "",
             }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -423,6 +459,8 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -438,5 +476,6 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
     rendered = render_deploy_plan(report)
 
     assert report["postcheck"]["status"] == "pass"
-    assert "classification: pass=postcheck_pass warn=[] fail=[]" in rendered
+    assert "classification: pass=postcheck_pass,llm_judge_probe_pass warn=[] fail=[]" in rendered
     assert "postcheck_status=pass" in rendered
+    assert "llm_judge_probe_status=pass" in rendered

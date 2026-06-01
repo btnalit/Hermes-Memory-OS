@@ -25,6 +25,7 @@ def deploy_memory_os(
     hermes_home: str,
     mode: str,
     hindsight_mode: str,
+    llm_judge_preset: str = "report-only",
     phase: str,
     profile: str,
     host: str = "",
@@ -42,6 +43,8 @@ def deploy_memory_os(
         raise SystemExit("--mode must be production-safe, test-host, or operational")
     if hindsight_mode not in {"auto", "off", "adopt", "wizard"}:
         raise SystemExit("--hindsight must be auto, off, adopt, or wizard")
+    if llm_judge_preset not in {"none", "report-only", "bounded-vote"}:
+        raise SystemExit("--llm-judge-preset must be none, report-only, or bounded-vote")
 
     runner = run_command or _run_command
     repo_root = repo_root.expanduser().resolve()
@@ -52,6 +55,7 @@ def deploy_memory_os(
         hermes_home=hermes_home,
         mode=mode,
         hindsight_mode=hindsight_mode,
+        llm_judge_preset=llm_judge_preset,
         host=host,
         python_bin=effective_python_bin,
         allow_restart=allow_restart,
@@ -65,12 +69,14 @@ def deploy_memory_os(
         "hermes_home": hermes_home,
         "mode": mode,
         "hindsight_mode": hindsight_mode,
+        "llm_judge_preset": llm_judge_preset,
         "restart_requested": bool(allow_restart and restart_command),
         "commands": commands,
         "preflight": {"status": "not_run"},
         "dry_run": {"status": "not_run"},
         "apply": {"status": "not_run"},
         "postcheck": {"status": "not_run"},
+        "llm_judge_probe": {"status": "not_run"},
         "rollback_hint": "rerun installer with previous config backup or disable substrate_providers.hindsight.enabled",
     }
     if phase == "plan":
@@ -84,6 +90,13 @@ def deploy_memory_os(
             expected_schema="memory-os.hermes_upgrade_compat.v0",
         )
         report["postcheck"] = _classify_postcheck(postcheck)
+        report["llm_judge_probe"] = _run_llm_judge_probe(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+            enabled=llm_judge_preset != "none",
+        )
         return report
 
     preflight = _run_json(
@@ -137,6 +150,13 @@ def deploy_memory_os(
             expected_schema="memory-os.hermes_upgrade_compat.v0",
         )
         report["postcheck"] = _classify_postcheck(postcheck)
+        report["llm_judge_probe"] = _run_llm_judge_probe(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+            enabled=llm_judge_preset != "none",
+        )
         return report
 
     return report
@@ -148,6 +168,7 @@ def _build_commands(
     hermes_home: str,
     mode: str,
     hindsight_mode: str,
+    llm_judge_preset: str,
     host: str,
     python_bin: str,
     allow_restart: bool,
@@ -163,6 +184,8 @@ def _build_commands(
         hermes_home,
         "--hindsight",
         hindsight_mode,
+        "--llm-judge-preset",
+        llm_judge_preset,
         "--skip-verify",
     ]
     compat = [
@@ -177,6 +200,16 @@ def _build_commands(
         "compat": compat,
         "install_dry_run": install_base + ["--dry-run"],
         "install_apply": install_base,
+        "llm_judge_probe": [
+            "hermes",
+            "memory-os-agent-os",
+            "low-clue-recall",
+            "dry-run",
+            "--query",
+            "继续昨天那个。",
+            "--llm-judge",
+            "config",
+        ],
     }
     if allow_restart and restart_command:
         commands["restart"] = shlex.split(restart_command)
@@ -269,6 +302,37 @@ def _classify_postcheck(result: dict[str, Any]) -> dict[str, Any]:
     return {"status": "pass", "compat": result.get("json")}
 
 
+def _run_llm_judge_probe(
+    commands: dict[str, list[str]],
+    *,
+    runner: Runner,
+    host: str,
+    timeout: int,
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"status": "skipped", "reason": "llm_judge_preset_none"}
+    result = _run_json(
+        commands["llm_judge_probe"],
+        runner=runner,
+        host=host,
+        timeout=timeout,
+        expected_schema="memory-os.low_clue_recall.v0",
+    )
+    return _classify_llm_judge_probe(result)
+
+
+def _classify_llm_judge_probe(result: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("json")
+    if not isinstance(data, dict) or data.get("schema_version") != "memory-os.low_clue_recall.v0":
+        return {"status": "warn", "reason": "llm_judge_probe_json_invalid", "probe": result}
+    judge = data.get("llm_judge") if isinstance(data.get("llm_judge"), dict) else {}
+    status = str(judge.get("status") or "")
+    if status in {"ok", "selected", "no_match", "no_clear_match", "no_selection"}:
+        return {"status": "pass", "probe": data}
+    return {"status": "warn", "reason": str(judge.get("code") or status or "llm_judge_probe_unavailable"), "probe": data}
+
+
 def _classification_failures(result: dict[str, Any]) -> list[dict[str, Any]]:
     data = result.get("json")
     if not isinstance(data, dict):
@@ -325,11 +389,15 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
     fail: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     passed: list[dict[str, Any]] = []
-    for key in ("preflight", "dry_run", "apply", "postcheck"):
+    for key in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe"):
         section = report.get(key) if isinstance(report.get(key), dict) else {}
         status = section.get("status")
         if status in {"pass", "applied"}:
             passed.append({"code": f"{key}_{status}"})
+        elif status == "warn":
+            warn.append({"code": str(section.get("reason") or f"{key}_warn")})
+        elif status == "skipped":
+            warn.append({"code": str(section.get("reason") or f"{key}_skipped")})
         elif status == "warn_expected_for_fresh":
             warn.append({"code": "fresh_preflight_memory_os_preinstall_expected"})
         elif status == "warn_expected_for_upgrade_preinstall":
@@ -354,7 +422,7 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
             f"warn={_codes(classification['warn']) or '[]'} "
             f"fail={_codes(classification['fail']) or '[]'}"
         )
-    for name in ("preflight", "dry_run", "apply", "postcheck"):
+    for name in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe"):
         section = report.get(name) if isinstance(report.get(name), dict) else {}
         status = section.get("status")
         if status and status != "not_run":
@@ -382,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hermes-home", required=True)
     parser.add_argument("--mode", choices=["production-safe", "test-host", "operational"], default="production-safe")
     parser.add_argument("--hindsight", choices=["auto", "off", "adopt", "wizard"], default="auto")
+    parser.add_argument("--llm-judge-preset", choices=["none", "report-only", "bounded-vote"], default="report-only")
     parser.add_argument("--phase", choices=["plan", "preflight", "dry-run", "apply", "postcheck"], default="plan")
     parser.add_argument("--profile", choices=["fresh", "upgrade"], default="upgrade")
     parser.add_argument("--timeout", type=int, default=60)
@@ -402,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
         hermes_home=args.hermes_home,
         mode=args.mode,
         hindsight_mode=args.hindsight,
+        llm_judge_preset=args.llm_judge_preset,
         phase=args.phase,
         profile=args.profile,
         timeout=args.timeout,

@@ -62,9 +62,13 @@ Optional preset flags:
 ```
 
 `--llm-judge-preset report-only` reuses the existing Hermes provider/model
-configuration. If the adapter becomes unavailable after a Hermes upgrade,
-Memory-OS should report degraded judge availability and continue with the
-deterministic guard path.
+configuration and is the default for automated installs. The resolved provider
+and model are checked dynamically at judge-call time, so changing the Hermes
+default model is picked up without writing a Memory-OS model override. If the
+adapter becomes unavailable after a Hermes upgrade or model change, Memory-OS
+reports degraded judge availability and continues with the deterministic guard
+path. The default judge response budget is sized for reasoning models that may
+emit `reasoning_content` before final JSON.
 
 Operational Hermes cron onboarding:
 
