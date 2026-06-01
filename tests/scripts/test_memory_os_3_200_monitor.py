@@ -1981,6 +1981,48 @@ def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counte
     assert summary["module_current_window_error_counts"]["self_evolution"] == 0
 
 
+def test_module_cadence_summary_derives_missing_current_window_total_from_modules(monkeypatch):
+    report = {
+        "schema_version": "memory-os.module_cadence_report.v0",
+        "report_id": "cadence_legacy_aggregate",
+        "status": "ok",
+        "module_count": 2,
+        "error_count": 15,
+        "historical_error_count": 15,
+        "modules": [
+            {
+                "module": "self_evolution",
+                "cadence_counters": {"error_count": 0},
+                "current_window_error_count": 0,
+            },
+            {
+                "module": "speak_gate",
+                "cadence_counters": {"error_count": 15},
+                "current_window_error_count": 0,
+            },
+        ],
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "cron_modified": False,
+        },
+    }
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    monkeypatch.setitem(namespace, "_read_jsonl", lambda path: [report])
+
+    summary = namespace["module_cadence_summary"]()
+
+    assert summary["historical_error_count"] == 15
+    assert summary["current_window_error_count"] == 0
+    assert summary["module_current_window_error_counts"] == {
+        "self_evolution": 0,
+        "speak_gate": 0,
+    }
+
+
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():
     snapshot = _healthy_snapshot()
     snapshot["session_activity"] = {"total_session_events": 12}

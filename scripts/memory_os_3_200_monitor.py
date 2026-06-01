@@ -4175,6 +4175,9 @@ def module_cadence_summary():
         if module_id and counters:
             module_counters[module_id] = counters
             module_current_window_error_counts[module_id] = int(item.get("current_window_error_count") or 0)
+    current_window_error_count = latest.get("current_window_error_count")
+    if current_window_error_count is None and module_current_window_error_counts:
+        current_window_error_count = sum(module_current_window_error_counts.values())
     return {
       "schema_version": "memory-os.module_cadence_monitor_summary.v0",
       "report_count": len(reports),
@@ -4191,7 +4194,7 @@ def module_cadence_summary():
       "skipped_count": latest.get("skipped_count"),
       "error_count": latest.get("error_count"),
       "historical_error_count": latest.get("historical_error_count", latest.get("error_count")),
-      "current_window_error_count": latest.get("current_window_error_count"),
+      "current_window_error_count": current_window_error_count,
       "duplicate_count": latest.get("duplicate_count"),
       "counter_coverage_count": latest.get("counter_coverage_count"),
       "module_counters": module_counters,
