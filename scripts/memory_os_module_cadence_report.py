@@ -226,6 +226,7 @@ def build_cadence_report(*, hermes_home: Path, profile: str = DEFAULT_PROFILE, a
                 "production_split_recommended": split_recommended,
                 "module_local_skip_gate_visible": module_local_skip_gate_visible,
                 "cadence_counters": module_counters,
+                "current_window_error_count": _current_window_error_count(module_counters),
                 "finding_codes": finding_codes,
                 "notes": target.get("notes"),
             }
@@ -288,6 +289,8 @@ def render_summary(report: dict[str, Any]) -> str:
             f"generated_count={report.get('generated_count')}",
             f"skipped_count={report.get('skipped_count')}",
             f"error_count={report.get('error_count')}",
+            f"historical_error_count={report.get('historical_error_count')}",
+            f"current_window_error_count={report.get('current_window_error_count')}",
             f"duplicate_count={report.get('duplicate_count')}",
             f"actual_send={report.get('boundary', {}).get('actual_send')}",
             f"actual_execute={report.get('boundary', {}).get('actual_execute')}",
@@ -496,6 +499,10 @@ def _module_local_skip_gate_visible(counters: dict[str, Any]) -> bool:
     return int(counters.get("skipped_count") or 0) > 0 or int(counters.get("duplicate_count") or 0) > 0
 
 
+def _current_window_error_count(counters: dict[str, Any]) -> int:
+    return int(str(counters.get("last_status") or "").lower() == "error")
+
+
 def _modules_for_step(step_name: str) -> tuple[str, ...]:
     if step_name in {"heartbeat_pre", "heartbeat_post"}:
         return ("heartbeat_inner_drive",)
@@ -634,6 +641,8 @@ def _aggregate_counters(modules: list[dict[str, Any]]) -> dict[str, int]:
         "generated_count": 0,
         "skipped_count": 0,
         "error_count": 0,
+        "historical_error_count": 0,
+        "current_window_error_count": 0,
         "duplicate_count": 0,
         "counter_coverage_count": 0,
     }
@@ -643,6 +652,8 @@ def _aggregate_counters(modules: list[dict[str, Any]]) -> dict[str, int]:
             totals["counter_coverage_count"] += 1
         for key in ("generated_count", "skipped_count", "error_count", "duplicate_count"):
             totals[key] += int(counters.get(key) or 0)
+        totals["current_window_error_count"] += int(module.get("current_window_error_count") or 0)
+    totals["historical_error_count"] = totals["error_count"]
     return totals
 
 

@@ -1798,6 +1798,8 @@ def test_classify_snapshot_tracks_module_cadence_report():
         "generated_count": 17,
         "skipped_count": 3,
         "error_count": 1,
+        "historical_error_count": 1,
+        "current_window_error_count": 0,
         "duplicate_count": 2,
         "counter_coverage_count": 18,
         "module_counters": {
@@ -1811,6 +1813,7 @@ def test_classify_snapshot_tracks_module_cadence_report():
                 "last_status": "ok",
             }
         },
+        "module_current_window_error_counts": {"self_evolution": 0},
         "boundary": {
             "actual_send": False,
             "actual_execute": False,
@@ -1824,7 +1827,9 @@ def test_classify_snapshot_tracks_module_cadence_report():
     rendered = render_chinese_summary({**snapshot, "classification": classification})
 
     assert any(item["code"] == "module_cadence_report_visible" for item in classification["pass"])
+    assert any(item["code"] == "module_cadence_historical_errors_visible" for item in classification["pass"])
     assert any(item["code"] == "module_cadence_split_pending" for item in classification["warn"])
+    assert not any(item["code"] == "module_cadence_current_window_errors" for item in classification["fail"])
     assert "ModuleCadence" in rendered
     assert snapshot["module_cadence"]["module_counters"]["self_evolution"]["duplicate_count"] == 1
 
@@ -1842,6 +1847,63 @@ def test_classify_snapshot_tracks_module_cadence_report():
     assert any(item["code"] == "module_cadence_boundary_true" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_current_window_module_cadence_errors():
+    snapshot = _healthy_snapshot()
+    snapshot["module_cadence"] = {
+        "schema_version": "memory-os.module_cadence_monitor_summary.v0",
+        "report_count": 1,
+        "latest_report_id": "cadence_error",
+        "latest_status": "warning",
+        "finding_count": 0,
+        "expected_hermes_cron_missing_count": 0,
+        "error_count": 9,
+        "historical_error_count": 9,
+        "current_window_error_count": 1,
+        "module_current_window_error_counts": {"evidence_scoring": 1},
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "cron_modified": False,
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "module_cadence_current_window_errors"
+        and item["current_window_error_count"] == 1
+        and item["module_counts"] == {"evidence_scoring": 1}
+        for item in classification["fail"]
+    )
+
+
+def test_classify_snapshot_warns_when_module_cadence_error_window_is_legacy_unknown():
+    snapshot = _healthy_snapshot()
+    snapshot["module_cadence"] = {
+        "schema_version": "memory-os.module_cadence_monitor_summary.v0",
+        "report_count": 1,
+        "latest_report_id": "cadence_legacy",
+        "latest_status": "warning",
+        "finding_count": 0,
+        "expected_hermes_cron_missing_count": 0,
+        "error_count": 2,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "cron_modified": False,
+        },
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "module_cadence_error_window_unknown" for item in classification["warn"])
+
+
 def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counters(monkeypatch):
     report = {
         "schema_version": "memory-os.module_cadence_report.v0",
@@ -1857,6 +1919,8 @@ def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counte
         "generated_count": 17,
         "skipped_count": 3,
         "error_count": 1,
+        "historical_error_count": 1,
+        "current_window_error_count": 0,
         "duplicate_count": 2,
         "counter_coverage_count": 18,
         "modules": [
@@ -1871,6 +1935,7 @@ def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counte
                     "last_run_at": "2026-05-26T02:00:00+00:00",
                     "last_status": "ok",
                 },
+                "current_window_error_count": 0,
             }
         ],
         "boundary": {
@@ -1890,9 +1955,12 @@ def test_module_cadence_summary_exposes_generated_skipped_error_duplicate_counte
     assert summary["generated_count"] == 17
     assert summary["skipped_count"] == 3
     assert summary["error_count"] == 1
+    assert summary["historical_error_count"] == 1
+    assert summary["current_window_error_count"] == 0
     assert summary["duplicate_count"] == 2
     assert summary["counter_coverage_count"] == 18
     assert summary["module_counters"]["self_evolution"]["duplicate_count"] == 1
+    assert summary["module_current_window_error_counts"]["self_evolution"] == 0
 
 
 def test_classify_snapshot_warns_when_session_activity_has_no_hook_marker_delta():

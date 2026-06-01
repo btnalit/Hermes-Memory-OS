@@ -1305,6 +1305,30 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 passed.append({"code": "module_cadence_report_visible"})
             if int(module_cadence.get("expected_hermes_cron_missing_count") or 0) > 0:
                 warn.append({"code": "module_cadence_expected_cron_missing", "value": module_cadence})
+            has_current_window_field = module_cadence.get("current_window_error_count") is not None
+            current_window_error_count = int(module_cadence.get("current_window_error_count") or 0)
+            historical_error_count = int(
+                module_cadence.get("historical_error_count")
+                if module_cadence.get("historical_error_count") is not None
+                else module_cadence.get("error_count") or 0
+            )
+            if not has_current_window_field and int(module_cadence.get("error_count") or 0) > 0:
+                warn.append({"code": "module_cadence_error_window_unknown", "value": module_cadence})
+            elif current_window_error_count > 0:
+                fail.append(
+                    {
+                        "code": "module_cadence_current_window_errors",
+                        "current_window_error_count": current_window_error_count,
+                        "module_counts": module_cadence.get("module_current_window_error_counts") or {},
+                    }
+                )
+            elif historical_error_count > 0:
+                passed.append(
+                    {
+                        "code": "module_cadence_historical_errors_visible",
+                        "historical_error_count": historical_error_count,
+                    }
+                )
             if int(module_cadence.get("finding_count") or 0) > 0:
                 warn.append({"code": "module_cadence_split_pending", "value": module_cadence})
         else:
@@ -4138,6 +4162,7 @@ def module_cadence_summary():
     latest = reports[-1] if reports and isinstance(reports[-1], dict) else {}
     boundary = latest.get("boundary") if isinstance(latest.get("boundary"), dict) else {}
     module_counters = {}
+    module_current_window_error_counts = {}
     for item in latest.get("modules", []) if isinstance(latest.get("modules"), list) else []:
         if not isinstance(item, dict):
             continue
@@ -4145,6 +4170,7 @@ def module_cadence_summary():
         module_id = str(item.get("module") or "")
         if module_id and counters:
             module_counters[module_id] = counters
+            module_current_window_error_counts[module_id] = int(item.get("current_window_error_count") or 0)
     return {
       "schema_version": "memory-os.module_cadence_monitor_summary.v0",
       "report_count": len(reports),
@@ -4160,9 +4186,12 @@ def module_cadence_summary():
       "generated_count": latest.get("generated_count"),
       "skipped_count": latest.get("skipped_count"),
       "error_count": latest.get("error_count"),
+      "historical_error_count": latest.get("historical_error_count", latest.get("error_count")),
+      "current_window_error_count": latest.get("current_window_error_count"),
       "duplicate_count": latest.get("duplicate_count"),
       "counter_coverage_count": latest.get("counter_coverage_count"),
       "module_counters": module_counters,
+      "module_current_window_error_counts": module_current_window_error_counts,
       "boundary": {
         "actual_send": boundary.get("actual_send"),
         "actual_execute": boundary.get("actual_execute"),

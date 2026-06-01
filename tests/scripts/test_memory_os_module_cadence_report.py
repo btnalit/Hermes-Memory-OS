@@ -211,6 +211,8 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
         "last_run_at": "2026-05-26T02:00:00+00:00",
         "last_status": "ok",
     }
+    assert by_module["self_evolution"]["current_window_error_count"] == 0
+    assert by_module["evidence_scoring"]["current_window_error_count"] == 1
     assert by_module["digest_consolidation"]["cadence_counters"]["generated_count"] == 1
     assert by_module["evidence_scoring"]["cadence_counters"]["error_count"] == 1
     assert by_module["evidence_scoring"]["cadence_counters"]["skipped_count"] == 1
@@ -225,6 +227,8 @@ def test_module_cadence_report_is_report_only_and_detects_split_candidates(tmp_p
     assert report["generated_count"] >= 2
     assert report["skipped_count"] >= 2
     assert report["error_count"] >= 1
+    assert report["historical_error_count"] == report["error_count"]
+    assert report["current_window_error_count"] >= 1
     assert report["duplicate_count"] >= 1
 
 
