@@ -168,6 +168,67 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    def demote_record(
+        self,
+        record_id: str,
+        *,
+        demoted_by: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(record_id or "").strip()
+        if not normalized:
+            raise KeyError("crystallized record id is required")
+        if not self.store.roots.crystallized_root.exists():
+            raise KeyError(normalized)
+
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            records = self.read_records(path.name)
+            rendered: list[str] = []
+            changed = False
+            matched: dict[str, Any] | None = None
+            for current in records:
+                frontmatter = dict(current.frontmatter)
+                if str(frontmatter.get("id") or "") == normalized:
+                    matched = {
+                        "record_id": normalized,
+                        "file_name": current.file_name,
+                        "already_demoted": not is_active_crystallized_frontmatter(frontmatter),
+                    }
+                    if is_active_crystallized_frontmatter(frontmatter):
+                        frontmatter["canonical_state"] = "demoted"
+                        frontmatter["demoted_by"] = demoted_by
+                        frontmatter["demoted_at"] = _timestamp(now)
+                        frontmatter["demotion_reason"] = reason
+                        changed = True
+                rendered.append(_format_frontmatter(frontmatter))
+                rendered.append("")
+                rendered.append(current.body.rstrip())
+                rendered.append("")
+            if matched is None:
+                continue
+            if changed:
+                tmp_path = path.with_name(f"{path.name}.{normalized}.demote.tmp")
+                try:
+                    tmp_path.write_text("\n".join(rendered).rstrip() + "\n", encoding="utf-8")
+                    tmp_path.replace(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="crystallized_record_demoted",
+                    status="ok",
+                    target=str(path),
+                    details={
+                        "record_id": normalized,
+                        "demoted_by": demoted_by,
+                    },
+                )
+            matched["canonical_state_changed"] = changed
+            return matched
+        raise KeyError(normalized)
+
     def _ensure_crystallized_approval(
         self,
         candidate: CrystallizedCandidate,

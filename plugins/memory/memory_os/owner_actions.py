@@ -82,6 +82,7 @@ ACTION_TYPES = {
     "approve_candidate",
     "reject_candidate",
     "revoke_crystallized",
+    "demote_crystallized",
     "mark_feedback",
     "approve_proposal",
     "reject_proposal",
@@ -92,7 +93,7 @@ ACTION_TYPES = {
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "candidate": {"approve_candidate", "reject_candidate"},
-    "crystallized_record": {"revoke_crystallized"},
+    "crystallized_record": {"revoke_crystallized", "demote_crystallized"},
     "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
@@ -167,6 +168,9 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
     owner_revoked_crystallized_count = sum(
         1 for record in actions if (record.get("owner_effect") or {}).get("owner_revoked_crystallized_record")
     )
+    owner_demoted_crystallized_count = sum(
+        1 for record in actions if (record.get("owner_effect") or {}).get("owner_demoted_crystallized_record")
+    )
     unapproved_crystallized_write_count = sum(
         1
         for record in actions
@@ -203,11 +207,13 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
             "error_count": error_count,
             "owner_approved_crystallized_write_count": owner_approved_crystallized_write_count,
             "owner_revoked_crystallized_count": owner_revoked_crystallized_count,
+            "owner_demoted_crystallized_count": owner_demoted_crystallized_count,
             "unapproved_crystallized_write_count": unapproved_crystallized_write_count,
         },
         "candidate_approved_count": int(by_type.get("approve_candidate", 0)),
         "candidate_rejected_count": int(by_type.get("reject_candidate", 0)),
         "crystallized_revoked_count": owner_revoked_crystallized_count,
+        "crystallized_demoted_count": owner_demoted_crystallized_count,
         "proposal_approved_count": int(by_type.get("approve_proposal", 0)),
         "proposal_rejected_count": int(by_type.get("reject_proposal", 0)),
         "feedback_by_rating": _feedback_by_rating(actions),
@@ -2115,6 +2121,43 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "projection_invalidated": True,
             "substrate_snapshot_id": snapshot_id,
         }
+    if action_type == "demote_crystallized":
+        demote_result = CrystallizedMemoryService(store).demote_record(
+            target_id,
+            demoted_by=str(record["owner_id"]),
+            reason=_bounded_text(note or "owner_demoted", 240),
+        )
+        snapshot_id = _hindsight_snapshot_id_for_store(store)
+        from .substrates.ledger import SubstrateOperationLedger
+        from plugins.modules.governance.crystallized_revalidator import (
+            invalidate_hindsight_projection_for_canonical_change,
+        )
+
+        invalidate_hindsight_projection_for_canonical_change(
+            projection_ledger_path=store.roots.memory_os_root / "system" / "projection_ledger.jsonl",
+            record_id=target_id,
+            record_version="current",
+            reason="owner_demoted",
+            substrate_snapshot_id=snapshot_id,
+        )
+        SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl").append(
+            {
+                "provider": "hindsight",
+                "operation": "invalidate",
+                "source_record_ref": target_id,
+                "source_version": "current",
+                "reason": "owner_demoted",
+                "substrate_snapshot_id": snapshot_id,
+            }
+        )
+        record["owner_effect"]["owner_demoted_crystallized_record"] = True
+        record["owner_effect"]["projection_invalidation_recorded"] = True
+        return {
+            **demote_result,
+            "actual_delete": False,
+            "projection_invalidated": True,
+            "substrate_snapshot_id": snapshot_id,
+        }
     if action_type in {"approve_proposal", "reject_proposal"}:
         from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
@@ -2172,7 +2215,7 @@ def _validate_action_target(
 ) -> str:
     if action_type in {"approve_candidate", "reject_candidate"} and not _find_candidate(store, target_id):
         return "candidate_not_found"
-    if action_type == "revoke_crystallized":
+    if action_type in {"revoke_crystallized", "demote_crystallized"}:
         if target_type != "crystallized_record":
             return "invalid_crystallized_record_target"
         if not _find_crystallized_record(store, target_id):
@@ -2380,7 +2423,7 @@ def _find_right_brain_expression_outcome(roots: MemoryOSRoots, target_id: str) -
 
 def _append_action_specific_ledger(store: MemoryOSStore, record: dict[str, Any]) -> None:
     action_type = str(record.get("action_type", ""))
-    if action_type in {"approve_candidate", "reject_candidate", "revoke_crystallized"}:
+    if action_type in {"approve_candidate", "reject_candidate", "revoke_crystallized", "demote_crystallized"}:
         _append_jsonl(crystallization_approvals_path(store.roots), record)
     elif action_type in {"approve_proposal", "reject_proposal", "apply_proposal"}:
         _append_jsonl(proposal_action_ledger_path(store.roots), record)
@@ -2509,6 +2552,7 @@ def _base_action_record(
         "owner_effect": {
             "owner_approved_crystallized_write": False,
             "owner_revoked_crystallized_record": False,
+            "owner_demoted_crystallized_record": False,
             "projection_invalidation_recorded": False,
         },
     }
@@ -3234,7 +3278,7 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
         summary = _safe_review_summary(item.get("summary"), fallback="这个已批准 proposal")
         return _bounded_text(f"要把这个已批准 proposal 显式应用到运行时策略/投影吗？{summary}", 180)
     if target_type == "crystallized_record":
-        return "要撤销这条 crystallized memory 吗？撤销后本地 canonical recall 不再返回它。"
+        return "要撤销或降级这条 crystallized memory 吗？处理后本地 canonical recall 不再返回它。"
     if target_type == "memory_source":
         return "这次注入的记忆/上下文对回答有帮助吗？"
     if target_type == "speak":
@@ -3250,6 +3294,8 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
         return examples[0]
     if target_type == "proposal" and not examples:
         return "不进入今日审批；等待 SelfEvolution 生成具体方案后再进入 owner decision"
+    if target_type == "crystallized_record" and examples:
+        return " or ".join(examples[:2])
     if target_type == "memory_source" and examples:
         return examples[0]
     if target_type == "speak" and examples:
@@ -3289,7 +3335,10 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             220,
         )
     if target_type == "crystallized_record":
-        return _bounded_text(f"{source_module} 提供了 owner 显式撤销入口；record={item.get('target_id') or 'unknown'}。", 220)
+        return _bounded_text(
+            f"{source_module} 提供了 owner 显式撤销/降级入口；record={item.get('target_id') or 'unknown'}。",
+            220,
+        )
     if target_type == "memory_source":
         route = str(item.get("route") or "unknown")
         query_class = str(item.get("query_class") or "unknown")
@@ -3321,7 +3370,7 @@ def _review_consequence(target_type: str) -> str:
     if target_type == "proposal_apply":
         return "应用只写入这个 bounded policy/projection 目标；不会创建 generic executor、execution ticket 或外部执行。"
     if target_type == "crystallized_record":
-        return "撤销会把本地 crystallized 记录标为 owner_revoked，并记录 Hindsight 投影 invalidate；不会删除审计证据。"
+        return "撤销或降级会让本地 crystallized 记录退出 active canonical，并记录 Hindsight 投影 invalidate；不会删除审计证据。"
     if target_type == "memory_source":
         return "反馈先作为证据入 ledger；不会直接改变 live routing，除非之后经过单独 apply gate。"
     if target_type == "speak":
@@ -3348,7 +3397,10 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
     if target_type == "proposal_apply":
         return [_review_action("apply", "apply_proposal", "proposal", target_id)]
     if target_type == "crystallized_record":
-        return [_review_action("revoke", "revoke_crystallized", target_type, target_id)]
+        return [
+            _review_action("demote", "demote_crystallized", target_type, target_id),
+            _review_action("revoke", "revoke_crystallized", target_type, target_id),
+        ]
     if target_type == "memory_source":
         return [_review_action("feedback", "mark_feedback", target_type, target_id)]
     if target_type == "speak":
@@ -3670,13 +3722,22 @@ def _crystallized_revoke_action_token_map(roots: MemoryOSRoots) -> dict[str, dic
                 target_type="crystallized_record",
                 target_id=record_id,
             )
+            demote_token = _action_token(
+                action_type="demote_crystallized",
+                target_type="crystallized_record",
+                target_id=record_id,
+            )
             item = {
                 "target_type": "crystallized_record",
                 "target_id": record_id,
                 "source_module": "crystallized_memory",
                 "summary": _bounded_text(record.body, 220),
-                "action_tokens": {"revoke_crystallized": token},
+                "action_tokens": {"demote_crystallized": demote_token, "revoke_crystallized": token},
                 "action_targets": {
+                    "demote_crystallized": {
+                        "target_type": "crystallized_record",
+                        "target_id": record_id,
+                    },
                     "revoke_crystallized": {
                         "target_type": "crystallized_record",
                         "target_id": record_id,
@@ -3688,6 +3749,12 @@ def _crystallized_revoke_action_token_map(roots: MemoryOSRoots) -> dict[str, dic
             result[token] = {
                 "item": item,
                 "action_type": "revoke_crystallized",
+                "target_type": "crystallized_record",
+                "target_id": record_id,
+            }
+            result[demote_token] = {
+                "item": item,
+                "action_type": "demote_crystallized",
                 "target_type": "crystallized_record",
                 "target_id": record_id,
             }
@@ -3987,6 +4054,9 @@ def _normalize_reply_verb(value: str) -> str:
         "反馈": "feedback",
         "allow": "allow",
         "允许": "allow",
+        "demote": "demote",
+        "降级": "demote",
+        "降权": "demote",
         "revoke": "revoke",
         "撤销": "revoke",
         "撤回": "revoke",
@@ -4009,6 +4079,8 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "reject_proposal"
     if verb == "apply" and target_type == "proposal":
         return "apply_proposal"
+    if verb == "demote" and target_type == "crystallized_record":
+        return "demote_crystallized"
     if verb == "revoke" and target_type == "crystallized_record":
         return "revoke_crystallized"
     if verb == "feedback" and target_type == "memory_source":
@@ -4029,6 +4101,8 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
         return action_type == "allow_speak_once"
     if verb == "apply":
         return action_type == "apply_proposal"
+    if verb == "demote":
+        return action_type == "demote_crystallized"
     if verb == "revoke":
         return action_type == "revoke_crystallized"
     return False
@@ -5928,7 +6002,7 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return normalized_prefix, suffix.strip()
     if action_type in {"approve_candidate", "reject_candidate"}:
         return "candidate", value
-    if action_type == "revoke_crystallized":
+    if action_type in {"revoke_crystallized", "demote_crystallized"}:
         return "crystallized_record", value
     if action_type in {"approve_proposal", "reject_proposal"}:
         return "proposal", value

@@ -567,7 +567,13 @@ def _hindsight_substrate_monitor(store: MemoryOSStore) -> dict[str, Any]:
         pass
     else:
         projection_ledger = ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl")
-        projection_fields = derive_projection_coherence(projection_ledger.read_all(), provider="hindsight")
+        inactive_source_refs = _inactive_crystallized_source_refs(store)
+        projection_fields = derive_projection_coherence(
+            projection_ledger.read_all(),
+            provider="hindsight",
+            demoted_source_refs=inactive_source_refs,
+        )
+        projection_fields["inactive_canonical_source_ref_count"] = len(inactive_source_refs)
     shadow = _latest_substrate_shadow_recall(store)
     return {
         **operation_fields,
@@ -575,6 +581,18 @@ def _hindsight_substrate_monitor(store: MemoryOSStore) -> dict[str, Any]:
         "local_first_authority_preserved": shadow.get("local_first_authority_preserved") if shadow else None,
         "external_authoritative_count": int(shadow.get("external_authoritative_count") or 0) if shadow else 0,
     }
+
+
+def _inactive_crystallized_source_refs(store: MemoryOSStore) -> set[str]:
+    refs: set[str] = set()
+    if not store.roots.crystallized_root.exists():
+        return refs
+    for path in sorted(store.roots.crystallized_root.glob("*.md")):
+        for frontmatter, _body in _parse_markdown_records(path.read_text(encoding="utf-8")):
+            record_id = str(frontmatter.get("id") or "").strip()
+            if record_id and not is_active_crystallized_frontmatter(frontmatter):
+                refs.add(record_id)
+    return refs
 
 
 def _latest_substrate_shadow_recall(store: MemoryOSStore) -> dict[str, Any]:

@@ -464,6 +464,50 @@ def test_hindsight_status_detects_direct_hermes_provider(tmp_path):
     assert report["direct_hermes_provider_active"] is True
 
 
+def test_hindsight_status_marks_retained_inactive_crystallized_projection_stale(tmp_path):
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.cli import hindsight_status_report
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.substrates.projection import ProjectionLedger
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    service = CrystallizedMemoryService(store)
+    service.write_approved_record(
+        CrystallizedCandidate(
+            candidate_id="cand-stale-projection",
+            kind="preference",
+            body="User prefers projection stale checks.",
+            source_event_ids=["evt-stale-projection"],
+            sensitivity="public",
+        ),
+        ApprovalDecision(
+            candidate_id="cand-stale-projection",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="owner",
+            reviewed_at="2026-06-01T00:00:00+00:00",
+        ),
+        file_name="owner_approved.md",
+    )
+    record_id = str(service.read_records("owner_approved.md")[0].frontmatter["id"])
+    ProjectionLedger(roots.memory_os_root / "system" / "projection_ledger.jsonl").record_retain(
+        provider="hindsight",
+        source_record_ref=record_id,
+        source_version="current",
+        substrate_record_id="hindsight-stale-1",
+        substrate_snapshot_id="hindsight:bank:v1",
+    )
+    service.demote_record(record_id, demoted_by="owner", reason="test direct demotion")
+
+    report = hindsight_status_report(store)
+
+    assert report["substrate_monitor"]["inactive_canonical_source_ref_count"] == 1
+    assert report["substrate_monitor"]["projection_stale_count"] == 1
+
+
 def test_hindsight_adopt_dry_run_reads_legacy_config_without_secrets(tmp_path):
     from plugins.memory.memory_os.cli import hindsight_adopt_report
     from plugins.memory.memory_os.roots import MemoryOSRoots

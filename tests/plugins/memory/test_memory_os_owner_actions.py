@@ -54,6 +54,7 @@ from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.substrates.local_artifact import LocalArtifactProvider
+from plugins.memory.memory_os.substrates.ledger import SubstrateOperationLedger
 from plugins.memory.memory_os.substrates.projection import ProjectionLedger, derive_projection_coherence
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
@@ -348,6 +349,71 @@ def test_revoke_crystallized_owner_action_marks_canonical_and_invalidates_projec
     assert coherence["active_projection_count"] == 0
     assert coherence["retract_count"] == 1
     assert LocalArtifactProvider(store).recall("Borealis", consumer="test") == []
+
+
+def test_demote_crystallized_owner_action_marks_canonical_and_invalidates_projection(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(
+        store,
+        CrystallizedCandidate(
+            candidate_id="cand_public_demote_001",
+            kind="preference",
+            body="User prefers Meridian summaries.",
+            source_event_ids=["evt_public_demote_001"],
+            sensitivity="public",
+            tags=["owner-review"],
+        ),
+    )
+    approve = apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_public_demote_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    assert approve["status"] == "ok"
+    record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    record_id = str(record.frontmatter["id"])
+    ledger = ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl")
+    ledger.record_retain(
+        provider="hindsight",
+        source_record_ref=record_id,
+        source_version="current",
+        substrate_record_id="hindsight-demote-1",
+        substrate_snapshot_id="hindsight:bank:v1",
+    )
+
+    demoted = apply_owner_action(
+        store,
+        action_type="demote_crystallized",
+        target=f"crystallized:{record_id}",
+        owner_id="owner",
+        channel="cli",
+        note="Owner demoted stale memory.",
+        apply=True,
+    )
+
+    assert demoted["status"] == "ok"
+    assert demoted["record"]["owner_effect"]["owner_demoted_crystallized_record"] is True
+    assert demoted["record"]["owner_effect"]["projection_invalidation_recorded"] is True
+    assert demoted["result_ref"]["actual_delete"] is False
+    assert demoted["result_ref"]["projection_invalidated"] is True
+    refreshed = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    assert refreshed.frontmatter["canonical_state"] == "demoted"
+    assert refreshed.frontmatter["demoted_by"] == "owner"
+    assert refreshed.frontmatter["demotion_reason"] == "Owner demoted stale memory."
+    assert refreshed.body == "User prefers Meridian summaries."
+    coherence = derive_projection_coherence(ledger.read_all(), provider="hindsight", demoted_source_refs={record_id})
+    assert coherence["active_projection_count"] == 0
+    assert coherence["projection_stale_count"] == 0
+    assert coherence["retract_count"] == 1
+    substrate_records = SubstrateOperationLedger(
+        store.roots.memory_os_root / "system" / "substrate_operations.jsonl"
+    ).read_all()
+    assert substrate_records[-1]["operation"] == "invalidate"
+    assert substrate_records[-1]["reason"] == "owner_demoted"
+    assert LocalArtifactProvider(store).recall("Meridian", consumer="test") == []
 
 
 def test_proposal_actions_transition_without_execution_or_crystallized_approval(tmp_path):
@@ -1922,6 +1988,40 @@ def test_owner_review_reply_can_revoke_crystallized_record_by_token(tmp_path):
     assert revoked.frontmatter["canonical_state"] == "owner_revoked"
     assert result["owner_action_result"]["result_ref"]["projection_invalidated"] is True
     assert projection["retract_count"] == 1
+
+
+def test_owner_review_reply_can_demote_crystallized_record_by_token(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    record_id = str(record.frontmatter["id"])
+    token = "oa_" + hashlib.sha256(
+        f"demote_crystallized|crystallized_record|{record_id}".encode("utf-8")
+    ).hexdigest()[:14]
+
+    result = parse_owner_review_reply(store, f"memory demote {token}", owner_id="owner", channel="cli", apply=True)
+    demoted = CrystallizedMemoryService(store).find_record(record_id)
+    projection = derive_projection_coherence(
+        ProjectionLedger(store.roots.memory_os_root / "system" / "projection_ledger.jsonl").read_all(),
+        provider="hindsight",
+        demoted_source_refs={record_id},
+    )
+
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "demote_crystallized"
+    assert demoted is not None
+    assert demoted.frontmatter["canonical_state"] == "demoted"
+    assert result["owner_action_result"]["result_ref"]["projection_invalidated"] is True
+    assert projection["retract_count"] == 1
+    assert projection["projection_stale_count"] == 0
 
 
 def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_path):
