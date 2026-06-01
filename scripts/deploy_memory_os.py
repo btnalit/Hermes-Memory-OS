@@ -309,9 +309,46 @@ def _classify_install(result: dict[str, Any], *, expected_dry_run: bool) -> dict
 
 def _classify_postcheck(result: dict[str, Any]) -> dict[str, Any]:
     fail = _classification_failures(result)
+    data = result.get("json")
+    timer = _postcheck_cognitive_loop_timer(data if isinstance(data, dict) else {})
     if fail:
-        return {"status": "fail", "compat": result.get("json"), "fail": fail}
-    return {"status": "pass", "compat": result.get("json")}
+        report = {"status": "fail", "compat": data, "fail": fail}
+        if timer:
+            report["cognitive_loop_timer"] = timer
+        return report
+    report = {"status": "pass", "compat": data}
+    if timer:
+        report["cognitive_loop_timer"] = timer
+    return report
+
+
+def _postcheck_cognitive_loop_timer(data: dict[str, Any]) -> dict[str, str]:
+    commands = data.get("commands") if isinstance(data.get("commands"), dict) else {}
+    timer = commands.get("cognitive_loop_timer") if isinstance(commands.get("cognitive_loop_timer"), dict) else {}
+    properties = _parse_key_value_lines(str(timer.get("stdout_preview") or ""))
+    active_state = properties.get("ActiveState", "")
+    unit_file_state = properties.get("UnitFileState", "")
+    if not active_state and not unit_file_state:
+        classification = data.get("classification") if isinstance(data.get("classification"), dict) else {}
+        for item in classification.get("fail") or []:
+            if not isinstance(item, dict) or str(item.get("code") or "") != "cognitive_loop_timer_inactive":
+                continue
+            active_state = str(item.get("active_state") or "")
+            unit_file_state = str(item.get("unit_file_state") or "")
+            break
+    if not active_state and not unit_file_state:
+        return {}
+    return {"active_state": active_state, "unit_file_state": unit_file_state}
+
+
+def _parse_key_value_lines(output: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
 
 
 def _run_llm_judge_probe(
@@ -464,6 +501,14 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
         status = section.get("status")
         if status and status != "not_run":
             lines.append(f"{name}_status={status}")
+        if name == "postcheck" and section.get("fail"):
+            lines.append(f"postcheck_fail_codes={_codes(section.get('fail') or [])}")
+        timer = section.get("cognitive_loop_timer") if isinstance(section.get("cognitive_loop_timer"), dict) else {}
+        if name == "postcheck" and timer:
+            lines.append(
+                "postcheck_cognitive_loop_timer="
+                f"{timer.get('active_state', '')}/{timer.get('unit_file_state', '')}"
+            )
     commands = report.get("commands") if isinstance(report.get("commands"), dict) else {}
     for name, argv in commands.items():
         lines.append(f"{name}: {shlex.join(argv)}")

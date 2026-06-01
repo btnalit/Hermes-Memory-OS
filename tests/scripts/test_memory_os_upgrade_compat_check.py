@@ -212,6 +212,20 @@ def test_upgrade_check_fails_when_external_provider_claims_authority():
     assert {"code": "hindsight_overrode_local_authority"} in classification["fail"]
 
 
+def test_upgrade_check_fails_when_cognitive_loop_timer_is_inactive():
+    outputs = _healthy_outputs()
+    outputs["cognitive_loop_timer"] = {
+        "exit_code": 0,
+        "stdout": "ActiveState=inactive\nUnitFileState=disabled\n",
+        "stderr": "",
+    }
+
+    report = run_upgrade_compat_check(run_command=_fake_runner(outputs))
+
+    assert any(item["code"] == "cognitive_loop_timer_inactive" for item in report["classification"]["fail"])
+    assert "cognitive_loop_timer" in render_summary(report)
+
+
 def _fake_runner(outputs):
     def run_command(argv, host, hermes_home, timeout):
         command_name = _name_for_argv(tuple(argv))
@@ -252,6 +266,8 @@ def _name_for_argv(argv: tuple[str, ...]) -> str:
         return "low_clue_recall"
     if argv[:3] == ("hermes", "memory-os-agent-os", "memory-sources"):
         return "memory_sources_stats"
+    if argv[:4] == ("systemctl", "--user", "show", "hermes-memory-os-cognitive-loop.timer"):
+        return "cognitive_loop_timer"
     raise AssertionError(f"unexpected command: {argv}")
 
 
@@ -327,6 +343,11 @@ def _healthy_outputs():
                 '{"schema_version":"memory-os.memory_sources_stats.v0",'
                 '"boundary_true_count":0,"forbidden_field_findings":[]}'
             ),
+            "stderr": "",
+        },
+        "cognitive_loop_timer": {
+            "exit_code": 0,
+            "stdout": "ActiveState=active\nUnitFileState=enabled\n",
             "stderr": "",
         },
     }

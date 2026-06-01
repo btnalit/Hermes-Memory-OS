@@ -48,6 +48,20 @@ COMMANDS: tuple[CommandSpec, ...] = (
         "memory_sources_stats",
         ("hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"),
     ),
+    CommandSpec(
+        "cognitive_loop_timer",
+        (
+            "systemctl",
+            "--user",
+            "show",
+            "hermes-memory-os-cognitive-loop.timer",
+            "--property=ActiveState",
+            "--property=UnitFileState",
+            "--no-pager",
+        ),
+        json_output=False,
+        required=False,
+    ),
 )
 
 
@@ -167,6 +181,7 @@ def classify_report(command_results: dict[str, dict[str, Any]]) -> dict[str, lis
     _require_schema(command_results, "memory_sources_stats", "memory-os.memory_sources_stats.v0", passed, fail)
     _require_json_field(command_results, "memory_sources_stats", ("boundary_true_count",), 0, "memory_sources_boundary_true", passed, fail)
     _require_no_forbidden_fields(command_results, "memory_sources_stats", passed, fail)
+    _require_cognitive_loop_timer_active(command_results, passed, fail)
 
     return {"pass": _dedupe(passed), "warn": _dedupe(warn), "fail": _dedupe(fail)}
 
@@ -410,6 +425,40 @@ def _require_no_forbidden_fields(
         fail.append({"code": f"{name}_forbidden_fields", "count": len(findings)})
     else:
         passed.append({"code": f"{name}_forbidden_fields_ok"})
+
+
+def _require_cognitive_loop_timer_active(
+    results: dict[str, dict[str, Any]],
+    passed: list[dict[str, Any]],
+    fail: list[dict[str, Any]],
+) -> None:
+    result = results.get("cognitive_loop_timer", {})
+    if int(result.get("exit_code", 1)) != 0:
+        fail.append({"code": "cognitive_loop_timer_status_command_failed", "exit_code": result.get("exit_code")})
+        return
+    properties = _parse_systemd_show(str(result.get("stdout_preview") or ""))
+    active_state = properties.get("ActiveState", "")
+    unit_file_state = properties.get("UnitFileState", "")
+    if active_state == "active" and unit_file_state == "enabled":
+        passed.append({"code": "cognitive_loop_timer_active"})
+        return
+    fail.append(
+        {
+            "code": "cognitive_loop_timer_inactive",
+            "active_state": active_state,
+            "unit_file_state": unit_file_state,
+        }
+    )
+
+
+def _parse_systemd_show(output: str) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        properties[key.strip()] = value.strip()
+    return properties
 
 
 def _dedupe(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

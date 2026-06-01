@@ -637,3 +637,55 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
     assert "classification: pass=postcheck_pass,llm_judge_probe_pass warn=[] fail=[]" in rendered
     assert "postcheck_status=pass" in rendered
     assert "llm_judge_probe_status=pass" in rendered
+
+
+def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
+    def fake_runner(argv, *, host=None, timeout=30):
+        command = " ".join(argv)
+        if "memory_os_upgrade_compat_check.py" in command:
+            return {
+                "exit_code": 1,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.hermes_upgrade_compat.v0",
+                        "commands": {
+                            "cognitive_loop_timer": {
+                                "exit_code": 0,
+                                "stdout_preview": "ActiveState=inactive\nUnitFileState=disabled\n",
+                            }
+                        },
+                        "classification": {
+                            "pass": [],
+                            "warn": [],
+                            "fail": [
+                                {
+                                    "code": "cognitive_loop_timer_inactive",
+                                    "active_state": "inactive",
+                                    "unit_file_state": "disabled",
+                                }
+                            ],
+                        },
+                    }
+                ),
+                "stderr": "",
+            }
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
+        raise AssertionError(f"unexpected command: {command}")
+
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="operational",
+        hindsight_mode="auto",
+        phase="postcheck",
+        profile="upgrade",
+        run_command=fake_runner,
+    )
+
+    rendered = render_deploy_plan(report)
+
+    assert report["postcheck"]["status"] == "fail"
+    assert {"code": "postcheck_failed"} in classify_deploy_report(report)["fail"]
+    assert "postcheck_fail_codes=cognitive_loop_timer_inactive" in rendered
+    assert "postcheck_cognitive_loop_timer=inactive/disabled" in rendered
