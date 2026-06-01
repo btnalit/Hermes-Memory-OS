@@ -12,6 +12,7 @@ from plugins.memory.memory_os.crystallized import (
     read_candidate_queue,
 )
 from plugins.memory.memory_os import MemoryOSProvider
+from plugins.memory.memory_os import owner_actions as owner_actions_module
 from plugins.memory.memory_os.context_router import ContextSection
 from plugins.memory.memory_os.memory_sources import (
     append_memory_source_record,
@@ -3031,7 +3032,9 @@ def test_deliver_once_requires_owner_trigger_and_does_not_send_by_default(tmp_pa
     assert status["unapproved_send_count"] == 0
 
 
-def test_deliver_once_is_legacy_smoke_only_even_when_gate_ready_and_owner_triggered(tmp_path):
+def test_deliver_once_sends_bounded_digest_through_hermes_owner_channel_when_owner_triggered(
+    tmp_path, monkeypatch
+):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
     proposal = ProposalQueueModule(tmp_path, profile="main")
@@ -3047,10 +3050,26 @@ def test_deliver_once_is_legacy_smoke_only_even_when_gate_ready_and_owner_trigge
                 "direct_message": True,
                 "delivery_enabled": True,
                 "delivery_adapter": "hermes_owner_channel",
+                "hermes_bin": "fake-hermes",
             }
         },
         tmp_path,
     )
+    calls = []
+
+    def fake_send(*, hermes_bin, target_ref, message):
+        calls.append({"hermes_bin": hermes_bin, "target_ref": target_ref, "message": message})
+        return {
+            "ok": True,
+            "delivery_ref": {
+                "adapter": "hermes_send",
+                "message_id": "msg-owner-review-001",
+                "target_class": "explicit_target",
+            },
+        }
+
+    monkeypatch.setattr(owner_actions_module, "_send_owner_review_digest_via_hermes", fake_send)
+
     result = deliver_owner_review_digest_once(
         store,
         owner_id="owner",
@@ -3066,17 +3085,89 @@ def test_deliver_once_is_legacy_smoke_only_even_when_gate_ready_and_owner_trigge
         apply=True,
     )
 
-    assert result["status"] == "smoke_only"
+    assert result["status"] == "sent"
     assert duplicate["status"] == "duplicate_ignored"
-    assert "legacy_smoke_only_use_hermes_cron" in result["record"]["blocked_reasons"]
+    assert result["record"]["blocked_reasons"] == []
+    assert result["record"]["boundary"]["actual_send"] is True
+    assert result["record"]["boundary"]["actual_unapproved_send"] is False
+    assert result["record"]["owner_effect"]["owner_approved_digest_delivery"] is True
+    assert result["record"]["delivery_ref"]["message_id"] == "msg-owner-review-001"
+    assert calls[0]["hermes_bin"] == "fake-hermes"
+    assert calls[0]["target_ref"] == "telegram:12345"
+    assert "Memory-OS 审批摘要" in calls[0]["message"]
+    assert "RAW PROPOSAL BODY" not in calls[0]["message"]
 
     status = owner_review_delivery_status_report(store)
     assert status["delivery_count"] == 2
-    assert status["sent_count"] == 0
+    assert status["sent_count"] == 1
     assert status["duplicate_ignored_count"] == 1
-    assert status["owner_approved_digest_delivery_count"] == 0
+    assert status["owner_approved_digest_delivery_count"] == 1
     assert status["unapproved_send_count"] == 0
     assert status["raw_body_included_count"] == 0
+    sent_records = [record for record in _jsonl(owner_review_deliveries_path(store.roots)) if record["result"] == "sent"]
+    assert sent_records[0]["delivery_ref"]["message_id"] == "msg-owner-review-001"
+
+
+def test_deliver_once_dry_run_returns_ready_without_sending(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "mode": "dry_run",
+                "owner_id": "owner",
+                "channel": "telegram",
+                "target_ref": "telegram:12345",
+                "direct_message": True,
+                "delivery_enabled": True,
+                "delivery_adapter": "hermes_owner_channel",
+            }
+        },
+        tmp_path,
+    )
+
+    def fail_send(**_kwargs):
+        raise AssertionError("dry-run must not call Hermes send")
+
+    monkeypatch.setattr(owner_actions_module, "_send_owner_review_digest_via_hermes", fail_send)
+
+    result = deliver_owner_review_digest_once(
+        store,
+        owner_id="owner",
+        delivery_key="rh34d-dry-run",
+        owner_triggered=True,
+        apply=False,
+    )
+
+    assert result["status"] == "ready"
+    assert result["dry_run"] is True
+    assert result["record"]["boundary"]["actual_send"] is False
+    assert not owner_review_deliveries_path(store.roots).exists()
+
+
+def test_delivery_gate_blocks_unsupported_delivery_adapter(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "channel": "telegram",
+                "target_ref": "telegram:12345",
+                "direct_message": True,
+                "delivery_enabled": True,
+                "delivery_adapter": "custom_shell",
+            }
+        },
+        tmp_path,
+    )
+
+    gate = owner_review_delivery_gate_report(store)
+
+    assert gate["status"] == "blocked"
+    assert "delivery_adapter_unsupported" in gate["blocked_reasons"]
+    assert gate["boundary"]["actual_send"] is False
 
 
 def test_cron_integration_status_reports_helper_and_redacted_delivery_target(tmp_path):

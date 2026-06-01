@@ -84,6 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "reply_ingress_enabled": True,
         "delivery_enabled": False,
         "delivery_adapter": "none",
+        "hermes_bin": "hermes",
         "recurring_delivery_enabled": False,
         "recurring_delivery_mode": "disabled",
         "recurring_delivery_channel": "unknown",
@@ -352,6 +353,7 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["reply_ingress_enabled"] = bool(merged.get("reply_ingress_enabled"))
     merged["delivery_enabled"] = bool(merged.get("delivery_enabled"))
     merged["delivery_adapter"] = str(merged.get("delivery_adapter") or "none")
+    merged["hermes_bin"] = str(merged.get("hermes_bin") or "hermes")
     merged["recurring_delivery_enabled"] = bool(merged.get("recurring_delivery_enabled"))
     merged["recurring_delivery_mode"] = str(merged.get("recurring_delivery_mode") or "disabled")
     merged["recurring_delivery_channel"] = str(merged.get("recurring_delivery_channel") or "unknown")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import hashlib
+import subprocess
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
 SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 EXPRESSION_FEEDBACK_SCHEMA_VERSION = "memory-os.expression_feedback.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
+OWNER_REVIEW_DELIVERY_ADAPTERS = {"hermes_owner_channel", "hermes_send"}
 
 EXPRESSION_FEEDBACK_ACTION_TYPES = {
     "like_expression",
@@ -1443,11 +1445,18 @@ def owner_review_delivery_gate_report(store: MemoryOSStore, *, owner_id: str = "
     preview = owner_review_digest_preview(store, owner_id=resolved_owner)
     delivery_enabled = bool(config.get("delivery_enabled"))
     delivery_adapter = str(config.get("delivery_adapter") or "none")
+    delivery_target_class = _delivery_target_class(str(channel.get("target_ref") or ""))
     blocked_reasons: list[str] = []
     if not delivery_enabled:
         blocked_reasons.append("delivery_not_enabled")
     if delivery_adapter in {"", "none", "disabled"}:
         blocked_reasons.append("delivery_adapter_not_configured")
+    elif delivery_adapter not in OWNER_REVIEW_DELIVERY_ADAPTERS:
+        blocked_reasons.append("delivery_adapter_unsupported")
+    elif delivery_target_class == "missing":
+        blocked_reasons.append("delivery_target_missing")
+    elif delivery_target_class in {"auto", "local", "origin"}:
+        blocked_reasons.append("delivery_target_not_owner_channel")
     if channel.get("status") != "selected":
         blocked_reasons.append("review_channel_not_selected")
     if not channel.get("configured_by_owner"):
@@ -1467,6 +1476,7 @@ def owner_review_delivery_gate_report(store: MemoryOSStore, *, owner_id: str = "
         "ready_for_delivery": status == "ready",
         "delivery_enabled": delivery_enabled,
         "delivery_adapter": delivery_adapter,
+        "delivery_target_class": delivery_target_class,
         "blocked_reasons": blocked_reasons,
         "review_channel": {
             "status": channel.get("status"),
@@ -1576,9 +1586,33 @@ def deliver_owner_review_digest_once(
 
     message = _delivery_message_from_preview(preview)
     record["text_char_count"] = len(message)
-    record["result"] = "smoke_only"
-    record["blocked_reasons"] = ["legacy_smoke_only_use_hermes_cron"]
-    status = "smoke_only"
+    if not apply:
+        record["result"] = "ready"
+        return {
+            "schema_version": OWNER_REVIEW_DELIVERY_SCHEMA_VERSION,
+            "profile": store.roots.profile or "default",
+            "status": "ready",
+            "dry_run": True,
+            "record": record,
+            "gate": gate,
+        }
+
+    send_result = _send_owner_review_digest_via_hermes(
+        hermes_bin=str(config.get("hermes_bin") or "hermes"),
+        target_ref=str(channel.get("target_ref") or ""),
+        message=message,
+    )
+    record["delivery_ref"] = send_result.get("delivery_ref") if isinstance(send_result.get("delivery_ref"), dict) else {}
+    if send_result.get("ok") is True:
+        record["result"] = "sent"
+        record["boundary"]["actual_send"] = True
+        record["owner_effect"]["owner_approved_digest_delivery"] = True
+        status = "sent"
+    else:
+        record["result"] = "error"
+        record["code"] = str(send_result.get("code") or "hermes_send_failed")
+        record["blocked_reasons"] = [record["code"]]
+        status = "error"
     if apply:
         _append_owner_review_delivery(store, record)
     return {
@@ -2448,6 +2482,7 @@ def _base_delivery_record(
         "digest": {},
         "delivery_ref": {},
         "boundary": {
+            "actual_send": False,
             "actual_unapproved_send": False,
             "actual_execute": False,
             "actual_identity_write": False,
@@ -2497,9 +2532,68 @@ def _bounded_delivery_record(record: dict[str, Any]) -> dict[str, Any]:
         "blocked_reasons": record.get("blocked_reasons") or [],
         "raw_body_included": record.get("raw_body_included"),
         "text_char_count": record.get("text_char_count"),
+        "delivery_ref": record.get("delivery_ref") if isinstance(record.get("delivery_ref"), dict) else {},
         "boundary": record.get("boundary") if isinstance(record.get("boundary"), dict) else {},
         "owner_effect": record.get("owner_effect") if isinstance(record.get("owner_effect"), dict) else {},
     }
+
+
+def _send_owner_review_digest_via_hermes(
+    *,
+    hermes_bin: str,
+    target_ref: str,
+    message: str,
+) -> dict[str, Any]:
+    command = [str(hermes_bin or "hermes"), "send", "--to", str(target_ref), "--json", str(message)]
+    try:
+        completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "code": "hermes_send_command_missing",
+            "delivery_ref": {
+                "adapter": "hermes_send",
+                "target_class": _delivery_target_class(target_ref),
+                "returncode": 127,
+            },
+        }
+
+    parsed: dict[str, Any] = {}
+    if completed.stdout.strip():
+        try:
+            loaded = json.loads(completed.stdout)
+            if isinstance(loaded, dict):
+                parsed = loaded
+        except json.JSONDecodeError:
+            parsed = {}
+    delivery_ref = {
+        "adapter": "hermes_send",
+        "target_class": _delivery_target_class(target_ref),
+        "returncode": completed.returncode,
+    }
+    delivery_ref.update(_bounded_hermes_send_response(parsed))
+    if completed.returncode != 0:
+        delivery_ref["stderr_preview"] = _bounded_text(completed.stderr or completed.stdout or "", 320)
+        return {"ok": False, "code": "hermes_send_failed", "delivery_ref": delivery_ref}
+    return {"ok": True, "delivery_ref": delivery_ref}
+
+
+def _bounded_hermes_send_response(response: dict[str, Any]) -> dict[str, Any]:
+    bounded: dict[str, Any] = {}
+    for key in ("ok", "status", "platform", "backend", "message_id", "id"):
+        value = response.get(key)
+        if value not in (None, ""):
+            bounded[key] = _bounded_text(str(value), 160) if isinstance(value, str) else value
+    result = response.get("result")
+    if isinstance(result, dict):
+        for key in ("message_id", "id", "status", "platform", "backend"):
+            value = result.get(key)
+            if value not in (None, "") and key not in bounded:
+                bounded[key] = _bounded_text(str(value), 160) if isinstance(value, str) else value
+    error = response.get("error")
+    if error not in (None, ""):
+        bounded["error"] = _bounded_text(str(error), 240)
+    return bounded
 
 
 def _duplicate_record(
@@ -3950,7 +4044,21 @@ def _digest_id() -> str:
 
 def _safe_channel(value: str) -> str:
     channel = str(value or "").strip().lower().replace("-", "_")
-    allowed = {"telegram", "cli", "web", "slack", "whatsapp", "wecom", "matrix", "discord", "origin", "unknown"}
+    allowed = {
+        "telegram",
+        "cli",
+        "web",
+        "slack",
+        "whatsapp",
+        "wecom",
+        "wechat",
+        "weixin",
+        "matrix",
+        "discord",
+        "signal",
+        "origin",
+        "unknown",
+    }
     return channel if channel in allowed else "unknown"
 
 
