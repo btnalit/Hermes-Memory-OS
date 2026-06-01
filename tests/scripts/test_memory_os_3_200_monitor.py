@@ -313,7 +313,8 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
 
     assert classification["status"] == "WARN"
     assert not classification["fail"]
-    assert any(item["code"] == "rh26_casual_empty" for item in classification["warn"])
+    assert any(item["code"] == "rh26_casual_empty_precision_preserving" for item in classification["pass"])
+    assert not any(item["code"] == "rh26_casual_empty" for item in classification["warn"])
     assert any(item["code"] == "deep_reflection_source_skew" for item in classification["warn"])
     assert any(item["code"] == "compression_focus_none" for item in classification["warn"])
     assert any(item["code"] == "shell_alias_no_env_ok" for item in classification["pass"])

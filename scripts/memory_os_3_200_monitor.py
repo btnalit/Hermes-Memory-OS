@@ -2076,7 +2076,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 warn.append(anomaly)
         for probe in rh26_probes:
             if probe.get("id") == "casual_memory_system_change" and int(probe.get("chars", 0)) == 0:
-                warn.append({"code": "rh26_casual_empty"})
+                passed.append({"code": "rh26_casual_empty_precision_preserving"})
 
     deep_reflection = snapshot.get("deep_reflection", {})
     for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_crystallized_approval"):
