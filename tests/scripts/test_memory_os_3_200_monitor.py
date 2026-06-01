@@ -916,8 +916,43 @@ def test_l4_guard_summary_tracks_kill_switch_and_live_apply_findings():
         "schema_version": "memory-os.l4_guard_summary.v0",
         "kill_switch_enabled": True,
         "registered_component_count": 1,
+        "missing_registration_count": 0,
+        "missing_registration_components": [],
         "live_applied_finding_count": 1,
     }
+
+
+def test_classify_snapshot_fails_unregistered_v7_acting_component():
+    snapshot = _healthy_snapshot()
+    snapshot["v7_governance"] = {
+        "schema_version": "memory-os.v7_governance_summary.v0",
+        "components": [
+            {
+                "component": "confidence_router",
+                "task_installed": True,
+                "pipeline_liveness": "live-shadow",
+                "autonomy_level": "owner_approved_apply",
+                "live_guard_registered": False,
+                "live_applied": False,
+                "actual_send": False,
+                "actual_execute": True,
+                "actual_identity_write": False,
+                "actual_crystallized_approval": False,
+            }
+        ],
+    }
+
+    summary = summarize_v7_governance(snapshot)
+    classification = classify_snapshot(snapshot)
+
+    assert summary["live_guard_missing_registration_count"] == 1
+    assert summary["live_guard_missing_registration_components"][0]["component"] == "confidence_router"
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "l4_guard_missing_registration"
+        and item["components"][0]["component"] == "confidence_router"
+        for item in classification["fail"]
+    )
 
 
 def test_classify_snapshot_fails_v7_live_apply_without_acting_gate():

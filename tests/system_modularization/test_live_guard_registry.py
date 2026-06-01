@@ -1,4 +1,4 @@
-from plugins.modules.governance.live_guard import LiveGuardRegistry
+from plugins.modules.governance.live_guard import LiveGuardRegistry, live_guard_registration_report
 from plugins.memory.memory_os.audit import read_audit_entries
 
 
@@ -86,3 +86,49 @@ def test_live_guard_keeps_requested_mode_when_kill_switch_is_off(tmp_path):
     assert decision["actual_send"] is False
     assert decision["actual_execute"] is False
     assert not audit_path.exists()
+
+
+def test_live_guard_registration_report_flags_unregistered_acting_component():
+    report = live_guard_registration_report(
+        [
+            {
+                "component": "unregistered_sender",
+                "autonomy_level": "owner_approved_apply",
+                "actual_send": True,
+                "live_guard_registered": False,
+            }
+        ]
+    )
+
+    assert report["missing_registration_count"] == 1
+    assert report["missing_registration_components"] == [
+        {
+            "component": "unregistered_sender",
+            "markers": ["actual_send", "autonomy_level:owner_approved_apply"],
+        }
+    ]
+
+
+def test_live_guard_registration_report_accepts_registered_or_exempted_acting_components():
+    report = live_guard_registration_report(
+        [
+            {
+                "component": "registered_sender",
+                "autonomy_level": "owner_approved_apply",
+                "actual_send": True,
+                "live_guard_registered": True,
+            },
+            {
+                "component": "legacy_manual_tool",
+                "autonomy_level": "shadow",
+                "actual_execute": True,
+                "live_guard_registered": False,
+            },
+        ],
+        exemptions={"legacy_manual_tool": "manual operator-only tool outside V7 runtime"},
+    )
+
+    assert report["missing_registration_count"] == 0
+    assert report["exempted_components"] == [
+        {"component": "legacy_manual_tool", "reason": "manual operator-only tool outside V7 runtime"}
+    ]

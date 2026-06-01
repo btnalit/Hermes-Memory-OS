@@ -15,6 +15,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from plugins.modules.governance.live_guard import live_guard_registration_report
+
 
 EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
     "cancel_failed_video": ["Current Foreground Task"],
@@ -396,6 +398,7 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
             "intentionally_absent": intentionally_absent,
             "absence_reason": absence_reason,
         }
+    live_guard_report = live_guard_registration_report(components)
     return {
         "schema_version": "memory-os.v7_governance_summary.v0",
         "component_count": len(components),
@@ -414,6 +417,10 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
             1 for item in components if str(item["autonomy_level"]) in V7_ACTING_AUTONOMY_LEVELS
         ),
         "live_guard_registered_count": sum(1 for item in components if item["live_guard_registered"]),
+        "live_guard_missing_registration_count": live_guard_report["missing_registration_count"],
+        "live_guard_missing_registration_components": live_guard_report["missing_registration_components"],
+        "live_guard_exempted_component_count": live_guard_report["exempted_component_count"],
+        "live_guard_exempted_components": live_guard_report["exempted_components"],
         "memory_sources_feedback_volume_ready": memory_sources_feedback_volume_ready,
         "memory_sources_feedback_count": memory_sources_feedback_count,
         "memory_sources_feedback_canary_target": V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET,
@@ -730,6 +737,8 @@ def summarize_l4_guard(snapshot: dict[str, Any]) -> dict[str, Any]:
         "schema_version": "memory-os.l4_guard_summary.v0",
         "kill_switch_enabled": bool(l4.get("kill_switch_enabled")),
         "registered_component_count": max(1, int(v7_governance.get("live_guard_registered_count") or 0)),
+        "missing_registration_count": int(v7_governance.get("live_guard_missing_registration_count") or 0),
+        "missing_registration_components": list(v7_governance.get("live_guard_missing_registration_components") or []),
         "live_applied_finding_count": live_applied_finding_count,
     }
 
@@ -2102,6 +2111,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     l4_guard = summarize_l4_guard(snapshot)
     if int(l4_guard.get("registered_component_count") or 0) > 0:
         passed.append({"code": "l4_guard_visible", "registered_component_count": l4_guard["registered_component_count"]})
+    if int(l4_guard.get("missing_registration_count") or 0) > 0:
+        fail.append(
+            {
+                "code": "l4_guard_missing_registration",
+                "components": l4_guard.get("missing_registration_components") or [],
+            }
+        )
     if l4_guard.get("kill_switch_enabled") is True:
         warn.append({"code": "l4_kill_switch_enabled"})
 

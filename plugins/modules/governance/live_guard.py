@@ -10,6 +10,22 @@ from typing import Any
 from plugins.memory.memory_os.audit import append_audit
 
 
+ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
+ACTING_MARKER_FIELDS = (
+    "actual_send",
+    "actual_execute",
+    "actual_identity_write",
+    "actual_crystallized_approval",
+    "live_applied",
+    "demotion_live_applied",
+    "delete",
+    "delete_live_applied",
+    "write_apply",
+    "write_live_applied",
+)
+LIVE_GUARD_REGISTRATION_EXEMPTIONS: dict[str, str] = {}
+
+
 @dataclass(frozen=True)
 class LiveGuardRule:
     component: str
@@ -101,3 +117,41 @@ def _fields(value: str | Iterable[str]) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
     return tuple(str(item) for item in value if str(item))
+
+
+def live_guard_registration_report(
+    components: Iterable[dict[str, Any]],
+    *,
+    exemptions: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    exemption_map = dict(LIVE_GUARD_REGISTRATION_EXEMPTIONS)
+    exemption_map.update(exemptions or {})
+    missing: list[dict[str, Any]] = []
+    exempted: list[dict[str, str]] = []
+    for component in components:
+        name = str(component.get("component") or "").strip()
+        if not name:
+            continue
+        markers = _acting_markers(component)
+        if not markers or component.get("live_guard_registered") is True:
+            continue
+        reason = str(exemption_map.get(name) or "").strip()
+        if reason:
+            exempted.append({"component": name, "reason": reason})
+            continue
+        missing.append({"component": name, "markers": markers})
+    return {
+        "schema_version": "memory-os.live_guard_registration_report.v0",
+        "missing_registration_count": len(missing),
+        "missing_registration_components": missing,
+        "exempted_component_count": len(exempted),
+        "exempted_components": exempted,
+    }
+
+
+def _acting_markers(component: dict[str, Any]) -> list[str]:
+    markers = [field for field in ACTING_MARKER_FIELDS if component.get(field) is True]
+    autonomy_level = str(component.get("autonomy_level") or "")
+    if autonomy_level in ACTING_AUTONOMY_LEVELS:
+        markers.append(f"autonomy_level:{autonomy_level}")
+    return markers
