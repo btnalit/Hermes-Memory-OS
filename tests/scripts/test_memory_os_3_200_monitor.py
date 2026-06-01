@@ -450,6 +450,51 @@ def test_classify_snapshot_tracks_memory_sources_feedback_canary_without_blockin
     assert not any(item["code"] == "v7_memory_sources_feedback_volume_pending" for item in classification["warn"])
 
 
+def test_v7_owner_signal_lane_promotes_only_retractable_label_miner_to_owner_approved_apply():
+    snapshot = _healthy_snapshot()
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "ledger_exists": True,
+        "record_count": 0,
+        "feedback_count": 1,
+        "total_feedback_count": 5,
+        "boundary_true_count": 0,
+        "forbidden_field_findings": [],
+    }
+    snapshot["module_artifacts"]["ground_truth_miner"] = {
+        "status": "ok",
+        "label_count": 0,
+        "run_count": 1,
+        "active_label_count": 0,
+        "retracted_label_count": 0,
+        "actual_execute": False,
+        "score_live_applied": False,
+        "route_live_applied": False,
+    }
+
+    summary = summarize_v7_governance(snapshot)
+    classification = classify_snapshot(snapshot)
+    label_miner = next(item for item in summary["components"] if item["component"] == "retractable_label_miner")
+    other_acting = [
+        item
+        for item in summary["components"]
+        if item["component"] != "retractable_label_miner" and item["autonomy_level"] in {"owner_approved_apply", "autonomous_acting"}
+    ]
+
+    assert summary["acting_component_count"] == 1
+    assert summary["owner_signal_lane"] == "memory_sources_feedback"
+    assert summary["owner_signal_owner_approved_apply_count"] == 5
+    assert label_miner["autonomy_level"] == "owner_approved_apply"
+    assert label_miner["owner_signal_lane"] == "memory_sources_feedback"
+    assert label_miner["owner_approved_apply_count"] == 5
+    assert other_acting == []
+    assert any(
+        item["code"] == "v7_owner_signal_owner_approved_apply_visible" and item["feedback_count"] == 5
+        for item in classification["pass"]
+    )
+    assert not any(item["code"] == "v7_component_live_applied_without_acting_gate" for item in classification["fail"])
+
+
 def test_v7_governance_summary_infers_wave1_live_shadow_from_module_artifacts():
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["evidence"] = {
@@ -1984,6 +2029,36 @@ def test_classify_snapshot_clean_host_does_not_fail_on_live_host_assumptions():
     assert any(item["code"] == "clean_host_rh26_probe_contract_not_required" for item in classification["pass"])
 
 
+def test_classify_snapshot_clean_host_accepts_system_gateway_from_hermes_status():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["gateway"] = {"ActiveState": "inactive", "MainPID": "0"}
+    snapshot["hermes_status"] = {
+        "ok": True,
+        "code": 0,
+        "gateway_running": True,
+        "gateway_manager": "systemd (system)",
+        "gateway_pids": "787558",
+        "weixin_configured": True,
+        "telegram_configured": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert classification["status"] != "FAIL"
+    assert not any(item["code"] == "gateway_inactive" for item in classification["fail"])
+    assert any(
+        item["code"] == "clean_host_gateway_active_via_hermes_status"
+        and item["manager"] == "systemd (system)"
+        and item["pids"] == "787558"
+        for item in classification["pass"]
+    )
+    assert not any(item["code"] == "clean_host_gateway_inactive_expected" for item in classification["pass"])
+    assert "hermes_gateway_running=True" in rendered
+    assert "manager=systemd (system)" in rendered
+
+
 def test_classify_snapshot_fails_when_low_clue_candidate_uses_internal_label():
     snapshot = _healthy_snapshot()
     snapshot["low_clue_recall"] = {
@@ -2231,6 +2306,54 @@ def test_enrich_memory_sources_stats_preserves_window_and_total_feedback_counts(
         "missing_context": 1,
         "useful": 1,
     }
+
+
+def test_hermes_status_summary_detects_system_gateway_without_raw_status(monkeypatch):
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+
+    def fake_run(cmd, env=None):
+        assert env is None
+        if cmd == ["hermes", "status"]:
+            return {
+                "ok": True,
+                "code": 0,
+                "out": "\n".join(
+                    [
+                        "Hermes Agent v0.15.1",
+                        "◆ Environment",
+                        "Model: deepseek-v4-flash",
+                        "Provider: DeepSeek",
+                        "◆ Messaging Platforms",
+                        "Telegram      ✗ not configured",
+                        "Weixin        ✓ configured (home: wxid)",
+                        "◆ Gateway Service",
+                        "Status:       ✓ running",
+                        "Manager:      systemd (system)",
+                        "PID(s):       787558",
+                        "API key: sk-redacted",
+                    ]
+                ),
+            }
+        return {"ok": False, "code": 1, "out": ""}
+
+    monkeypatch.setitem(namespace, "run", fake_run)
+
+    summary = namespace["hermes_status_summary"]()
+
+    assert summary == {
+        "ok": True,
+        "code": 0,
+        "gateway_running": True,
+        "gateway_manager": "systemd (system)",
+        "gateway_pids": "787558",
+        "weixin_configured": True,
+        "telegram_configured": False,
+        "model": "deepseek-v4-flash",
+        "provider": "DeepSeek",
+    }
+    assert "out" not in summary
+    assert "API key" not in json.dumps(summary)
 
 
 def test_classify_snapshot_tracks_memory_sources_policy_apply():

@@ -233,6 +233,9 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         for item in existing.get("components", [])
         if isinstance(item, dict) and item.get("component")
     }
+    memory_sources = snapshot.get("memory_sources") if isinstance(snapshot.get("memory_sources"), dict) else {}
+    memory_sources_feedback_count = _memory_sources_feedback_count(memory_sources)
+    owner_signal_owner_approved_apply_count = memory_sources_feedback_count
     inferred_components = _infer_v7_components_from_artifacts(snapshot)
     components: list[dict[str, Any]] = []
     for component in V7_GOVERNANCE_COMPONENTS:
@@ -246,12 +249,25 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         pipeline_liveness = str(item.get("pipeline_liveness") or "missing")
         autonomy_level = str(item.get("autonomy_level") or "none")
         task_installed = bool(item.get("task_installed")) or pipeline_liveness != "missing"
+        if (
+            component == "retractable_label_miner"
+            and task_installed
+            and owner_signal_owner_approved_apply_count > 0
+            and autonomy_level != "autonomous_acting"
+        ):
+            autonomy_level = "owner_approved_apply"
         components.append(
             {
                 "component": component,
                 "task_installed": task_installed,
                 "pipeline_liveness": pipeline_liveness,
                 "autonomy_level": autonomy_level,
+                "owner_signal_lane": "memory_sources_feedback"
+                if component == "retractable_label_miner" and owner_signal_owner_approved_apply_count > 0
+                else "",
+                "owner_approved_apply_count": owner_signal_owner_approved_apply_count
+                if component == "retractable_label_miner"
+                else 0,
                 "live_guard_registered": bool(item.get("live_guard_registered")),
                 "live_applied": bool(item.get("live_applied")),
                 "actual_send": bool(item.get("actual_send")),
@@ -261,8 +277,6 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    memory_sources = snapshot.get("memory_sources") if isinstance(snapshot.get("memory_sources"), dict) else {}
-    memory_sources_feedback_count = _memory_sources_feedback_count(memory_sources)
     memory_sources_feedback_volume_ready = bool(existing.get("memory_sources_feedback_volume_ready"))
     memory_sources_feedback_volume_ready = (
         memory_sources_feedback_volume_ready or memory_sources_feedback_count > 0
@@ -287,6 +301,8 @@ def summarize_v7_governance(snapshot: dict[str, Any]) -> dict[str, Any]:
         "memory_sources_feedback_canary_target": V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET,
         "memory_sources_feedback_canary_remaining": memory_sources_feedback_canary_remaining,
         "memory_sources_feedback_canary_complete": memory_sources_feedback_canary_remaining == 0,
+        "owner_signal_lane": "memory_sources_feedback" if owner_signal_owner_approved_apply_count > 0 else "",
+        "owner_signal_owner_approved_apply_count": owner_signal_owner_approved_apply_count,
         "confidence_router_status": component_status["confidence_router"],
         "judge_consistency_status": component_status["judge_calibration"],
         "review_accuracy_status": component_status["candidate_review"],
@@ -583,9 +599,21 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     fail: list[dict[str, Any]] = []
     monitor_profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
     clean_host = monitor_profile == "clean_host"
+    hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
+    hermes_gateway_running = hermes_status.get("gateway_running") is True
 
     if snapshot.get("gateway", {}).get("ActiveState") == "active":
         passed.append({"code": "gateway_active"})
+    elif hermes_gateway_running:
+        passed.append(
+            {
+                "code": "clean_host_gateway_active_via_hermes_status"
+                if clean_host
+                else "gateway_active_via_hermes_status",
+                "manager": hermes_status.get("gateway_manager"),
+                "pids": hermes_status.get("gateway_pids"),
+            }
+        )
     elif clean_host:
         passed.append({"code": "clean_host_gateway_inactive_expected", "value": snapshot.get("gateway")})
     else:
@@ -1905,6 +1933,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "acting_component_count": v7_governance["acting_component_count"],
             }
         )
+    if int(v7_governance.get("owner_signal_owner_approved_apply_count") or 0) > 0:
+        passed.append(
+            {
+                "code": "v7_owner_signal_owner_approved_apply_visible",
+                "component": "retractable_label_miner",
+                "lane": v7_governance.get("owner_signal_lane"),
+                "feedback_count": v7_governance["owner_signal_owner_approved_apply_count"],
+            }
+        )
     installed_components = [item for item in v7_governance["components"] if item["task_installed"]]
     if installed_components and not v7_governance["memory_sources_feedback_volume_ready"]:
         warn.append({"code": "v7_memory_sources_feedback_volume_pending"})
@@ -2055,11 +2092,18 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     router = snapshot.get("context_router", {})
     deltas = snapshot.get("deltas", {})
     counts_delta = deltas.get("counts_delta", {})
+    hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     lines = [
         f"监控结果: {classification['status']}",
         "",
         f"- host={snapshot.get('hostname')} profile={snapshot.get('monitor_profile', 'live')} time={snapshot.get('date_utc')}",
-        f"- gateway={snapshot.get('gateway', {}).get('ActiveState')} pid={snapshot.get('gateway', {}).get('MainPID')}",
+        (
+            f"- gateway={snapshot.get('gateway', {}).get('ActiveState')} "
+            f"pid={snapshot.get('gateway', {}).get('MainPID')} "
+            f"hermes_gateway_running={hermes_status.get('gateway_running')} "
+            f"manager={hermes_status.get('gateway_manager')} "
+            f"pids={hermes_status.get('gateway_pids')}"
+        ),
         (
             f"- heartbeat={snapshot.get('heartbeat_timer', {}).get('ActiveState')}/"
             f"{snapshot.get('heartbeat_timer', {}).get('UnitFileState')} "
@@ -2691,6 +2735,48 @@ def system_show(unit):
         if "=" in line:
             key, value = line.split("=", 1)
             data[key] = value
+    return data
+
+def hermes_status_summary():
+    r = run(["hermes", "status"])
+    text = r["out"] or ""
+    data = {
+        "ok": r["ok"],
+        "code": r["code"],
+        "gateway_running": False,
+        "gateway_manager": "",
+        "gateway_pids": "",
+        "weixin_configured": False,
+        "telegram_configured": False,
+        "model": "",
+        "provider": "",
+    }
+    if not r["ok"]:
+        return data
+    section = ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if stripped.startswith("◆"):
+            section = stripped.lstrip("◆ ").strip().lower()
+            continue
+        if section == "gateway service" and lower.startswith("status:"):
+            value = stripped.split(":", 1)[1].strip().lower()
+            data["gateway_running"] = "running" in value or "active" in value
+        elif section == "gateway service" and lower.startswith("manager:"):
+            data["gateway_manager"] = stripped.split(":", 1)[1].strip()
+        elif section == "gateway service" and lower.startswith("pid(s):"):
+            data["gateway_pids"] = stripped.split(":", 1)[1].strip()
+        elif section == "messaging platforms" and lower.startswith("weixin"):
+            value = stripped.lower()
+            data["weixin_configured"] = "configured" in value and "not configured" not in value
+        elif section == "messaging platforms" and lower.startswith("telegram"):
+            value = stripped.lower()
+            data["telegram_configured"] = "configured" in value and "not configured" not in value
+        elif lower.startswith("model:"):
+            data["model"] = stripped.split(":", 1)[1].strip()
+        elif lower.startswith("provider:"):
+            data["provider"] = stripped.split(":", 1)[1].strip()
     return data
 
 def load_json_cmd(cmd, env=None):
@@ -4444,6 +4530,7 @@ print(json.dumps({
   "date_utc": run(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"])["out"],
   "date_local": run(["date", "+%Y-%m-%d %H:%M:%S %Z"])["out"],
   "gateway": system_show("hermes-gateway.service"),
+  "hermes_status": hermes_status_summary(),
   "heartbeat_timer": system_show("hermes-memory-os-heartbeat.timer"),
   "heartbeat_service": system_show("hermes-memory-os-heartbeat.service"),
   "heartbeat_state": heartbeat_state(),
