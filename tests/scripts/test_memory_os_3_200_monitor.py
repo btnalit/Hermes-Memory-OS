@@ -461,6 +461,52 @@ def test_classify_snapshot_warns_clean_host_when_optional_v7_component_is_absent
     )
 
 
+def test_clean_host_warn_classification_table_covers_current_warn_codes():
+    expected_codes = {
+        "left_brain_pipeline_check_warn",
+        "left_brain_proposal_agenda_trace_missing",
+        "grounded_expression_alternate_left_map_substrate_pending",
+        "module_cadence_split_pending",
+        "right_brain_review_speak_preview_missing",
+        "context_router_not_apply",
+        "memory_sources_feedback_volume_missing",
+        "v7_memory_sources_feedback_volume_pending",
+    }
+
+    assert expected_codes <= set(monitor.CLEAN_HOST_WARN_CLASSIFICATIONS)
+
+
+def test_clean_host_warns_include_classification_records():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["context_router"] = {"enabled": False, "mode": "off", "apply_routes": []}
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "context_router_not_apply" for item in classification["warn"])
+    assert any(
+        item["code"] == "context_router_not_apply"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_production_clean_host_only_warn_escalates_by_policy():
+    snapshot = _healthy_snapshot()
+    snapshot["context_router"] = {"enabled": False, "mode": "off", "apply_routes": []}
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "context_router_not_apply" for item in classification["warn"])
+    assert any(
+        item["code"] == "context_router_not_apply_in_production"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["fail"]
+    )
+
+
 def test_v7_governance_summary_uses_total_memory_sources_feedback_when_window_empty():
     snapshot = _healthy_snapshot()
     snapshot["memory_sources"] = {

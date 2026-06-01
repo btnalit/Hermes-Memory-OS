@@ -65,6 +65,68 @@ V7_REQUIRED_COMPONENTS_PRODUCTION = tuple(
 )
 V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
 V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
+CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
+    "left_brain_pipeline_check_warn": {
+        "classification": "next_lane",
+        "reason": "left_brain_pipeline is present but still reports warning on clean-host warmup",
+        "production_behavior": "warn_if_production",
+    },
+    "left_brain_proposal_agenda_trace_missing": {
+        "classification": "next_lane",
+        "reason": "agenda trace coverage is a V7 quality lane, not a clean-host install blocker",
+        "production_behavior": "warn_if_production",
+    },
+    "grounded_expression_alternate_left_map_substrate_pending": {
+        "classification": "next_lane",
+        "reason": "alternate-left-map substrate evidence can be pending before clean-host traffic warms up",
+        "production_behavior": "warn_if_production",
+    },
+    "module_cadence_split_pending": {
+        "classification": "next_lane",
+        "reason": "module cadence split evidence is historical/current semantics cleanup",
+        "production_behavior": "warn_if_production",
+    },
+    "right_brain_review_speak_preview_missing": {
+        "classification": "next_lane",
+        "reason": "right-brain speak preview is a product live lane, not a clean-host install blocker",
+        "production_behavior": "warn_if_production",
+    },
+    "context_router_not_apply": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host compatibility may run without production apply routing",
+        "production_behavior": "fail_if_production",
+    },
+    "memory_sources_feedback_volume_missing": {
+        "classification": "next_lane",
+        "reason": "MemorySources owner feedback volume is accumulated through owner-channel activation",
+        "production_behavior": "warn_if_production",
+    },
+    "v7_memory_sources_feedback_volume_pending": {
+        "classification": "next_lane",
+        "reason": "V7 owner-signal canary volume is a promotion lane, not a clean-host install blocker",
+        "production_behavior": "warn_if_production",
+    },
+    "memory_sources_stats_unavailable": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host may not have MemorySources stats before live traffic and feedback are generated",
+        "production_behavior": "warn_if_production",
+    },
+    "low_clue_recall_probe_unavailable": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host compatibility does not require the low-clue recall probe to be warmed",
+        "production_behavior": "warn_if_production",
+    },
+    "clean_host_v7_required_components_missing": {
+        "classification": "fail_if_production",
+        "reason": "clean-host can surface missing V7 required components, production must not hide them",
+        "production_behavior": "fail_if_production",
+    },
+    "clean_host_v7_optional_component_intentionally_absent": {
+        "classification": "expected_clean_host",
+        "reason": "optional V7 component is intentionally absent with an explicit reason",
+        "production_behavior": "warn_if_production",
+    },
+}
 
 
 def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2101,8 +2163,36 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
 
+    clean_host_warn_classification: list[dict[str, str]] = []
+    if clean_host:
+        for item in warn:
+            code = str(item.get("code") or "")
+            policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
+            if policy is None:
+                fail.append({"code": "clean_host_warn_unclassified", "warn_code": code})
+                continue
+            clean_host_warn_classification.append({"code": code, **policy})
+    else:
+        for item in warn:
+            code = str(item.get("code") or "")
+            policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
+            if policy and policy.get("production_behavior") == "fail_if_production":
+                fail.append(
+                    {
+                        "code": f"{code}_in_production",
+                        "reason": policy["reason"],
+                        "production_behavior": policy["production_behavior"],
+                    }
+                )
+
     status = "FAIL" if fail else "WARN" if warn else "PASS"
-    return {"status": status, "pass": passed, "warn": warn, "fail": fail}
+    return {
+        "status": status,
+        "pass": passed,
+        "warn": warn,
+        "fail": fail,
+        "clean_host_warn_classification": clean_host_warn_classification,
+    }
 
 
 def _systemd_service_failed(service: dict[str, Any]) -> bool:
