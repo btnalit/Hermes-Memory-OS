@@ -850,13 +850,7 @@ def validate_session_mirror_apply_governance(
             require_execution_gate=require_execution_gate,
         )
     if governance.get("test_host"):
-        if (
-            governance.get("test_host_config_allowed")
-            and str(governance.get("test_host_marker") or "") in {"install_preset:test-host", "manual:test-host"}
-            and bool(governance.get("evidence_refs"))
-        ):
-            return _governance_validation("valid", "", governance_class="test_host_resolved")
-        return _governance_validation("invalid", "session_mirror_apply_governance_invalid")
+        return _validate_test_host_governance(store, governance)
     if governance.get("approval_ref"):
         return _validate_owner_resolved_governance(
             store,
@@ -866,6 +860,21 @@ def validate_session_mirror_apply_governance(
             selected_session_fingerprints=selected_session_fingerprints,
         )
     return _governance_validation("invalid", "session_mirror_apply_owner_or_test_or_auto_missing")
+
+
+def _validate_test_host_governance(store: MemoryOSStore, governance: dict[str, Any]) -> dict[str, Any]:
+    config = load_config(store.roots.hermes_home)
+    session_mirror_config = config.get("session_mirror") if isinstance(config.get("session_mirror"), dict) else {}
+    marker = str(session_mirror_config.get("test_host_marker") or "")
+    evidence_refs = governance.get("evidence_refs") if isinstance(governance.get("evidence_refs"), list) else []
+    evidence_refs = [str(item) for item in evidence_refs if str(item or "").strip()]
+    if (
+        bool(session_mirror_config.get("test_host_apply_allowed"))
+        and marker in {"install_preset:test-host", "manual:test-host"}
+        and evidence_refs
+    ):
+        return _governance_validation("valid", "", governance_class="test_host_resolved")
+    return _governance_validation("invalid", "session_mirror_apply_test_host_not_verified")
 
 
 def _validate_owner_resolved_governance(

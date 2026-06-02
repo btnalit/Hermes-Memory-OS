@@ -135,6 +135,18 @@ def _test_host_governance():
     }
 
 
+def _enable_test_host_apply(store):
+    save_config(
+        {
+            "session_mirror": {
+                "test_host_apply_allowed": True,
+                "test_host_marker": "install_preset:test-host",
+            }
+        },
+        store.roots.hermes_home,
+    )
+
+
 def test_session_mirror_empty_environment_is_ok_and_dry_run_writes_nothing(tmp_path):
     store = _store(tmp_path)
     mirror = SessionMirror(store)
@@ -151,6 +163,7 @@ def test_session_mirror_empty_environment_is_ok_and_dry_run_writes_nothing(tmp_p
 
 def test_session_mirror_state_db_primary_writes_bounded_summary_without_raw_tool_body(tmp_path):
     store = _store(tmp_path)
+    _enable_test_host_apply(store)
     _create_state_db(tmp_path / "state.db")
     mirror = SessionMirror(store)
 
@@ -183,6 +196,7 @@ def test_session_mirror_state_db_primary_writes_bounded_summary_without_raw_tool
 
 def test_session_mirror_apply_is_bounded_by_platform_and_redacts_secrets(tmp_path):
     store = _store(tmp_path)
+    _enable_test_host_apply(store)
     _create_state_db(tmp_path / "state.db", session_id="telegram-session", platform="telegram")
     with sqlite3.connect(tmp_path / "state.db") as conn:
         conn.execute(
@@ -259,6 +273,7 @@ def test_session_mirror_skips_provider_captured_session(tmp_path):
 
 def test_session_mirror_uses_session_json_fallback_when_state_db_missing(tmp_path):
     store = _store(tmp_path)
+    _enable_test_host_apply(store)
     sessions_root = tmp_path / "sessions"
     sessions_root.mkdir()
     (sessions_root / "session_json_1.json").write_text(
@@ -289,6 +304,7 @@ def test_session_mirror_uses_session_json_fallback_when_state_db_missing(tmp_pat
 
 def test_session_mirror_uses_session_json_fallback_when_state_db_has_no_sessions(tmp_path):
     store = _store(tmp_path)
+    _enable_test_host_apply(store)
     with sqlite3.connect(tmp_path / "state.db") as conn:
         conn.execute("create table unrelated(id text)")
     sessions_root = tmp_path / "sessions"
@@ -552,6 +568,28 @@ def test_session_mirror_direct_scan_apply_rejects_forged_owner_metadata(tmp_path
 
     assert report["status"] == "blocked"
     assert report["reason"] == "session_mirror_apply_owner_ref_not_found"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+
+
+def test_session_mirror_direct_scan_apply_rejects_forged_test_host_metadata(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="forged-test-host-session", platform="telegram")
+
+    report = SessionMirror(store).scan(
+        dry_run=False,
+        max_sessions=1,
+        platform_allowlist=["telegram"],
+        apply_governance={
+            "test_host": True,
+            "test_host_config_allowed": True,
+            "test_host_marker": "install_preset:test-host",
+            "evidence_refs": ["test:forged-direct-api"],
+        },
+    )
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "session_mirror_apply_test_host_not_verified"
     assert report["written_event_ids_count"] == 0
     assert store.read_events() == []
 

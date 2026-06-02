@@ -1589,11 +1589,27 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             helper_boundary_unobserved = int(execution_gate_cron.get("helper_boundary_unobserved_count") or 0)
             helper_missing = int(execution_gate_cron.get("helper_completion_missing_count") or 0)
             helper_stale = int(execution_gate_cron.get("helper_completion_stale_count") or 0)
+            helper_error = int(execution_gate_cron.get("helper_completion_error_count") or 0)
+            if str(execution_gate_cron.get("registry_snapshot_status") or "ok") != "ok":
+                fail.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_registry_snapshot_missing_or_invalid",
+                        "status": str(execution_gate_cron.get("registry_snapshot_status") or ""),
+                    }
+                )
             if helper_boundary_true > 0:
                 fail.append(
                     {
                         "code": "execution_gate_memory_os_cron_helper_boundary_true",
                         "count": helper_boundary_true,
+                    }
+                )
+            if helper_error > 0:
+                fail.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_completion_error",
+                        "count": helper_error,
+                        "lanes": execution_gate_cron.get("helper_completion_error_lanes") or [],
                     }
                 )
             if helper_missing > 0:
@@ -4641,37 +4657,6 @@ def _boundary_true_count(value):
         return sum(_boundary_true_count(item) for item in value)
     return 0
 
-MEMORY_OS_CRON_REGISTRY = {
-    "memory-os-owner-review-digest": {
-        "wrapper_script": "memory_os_cron_owner_review_digest_gate.py",
-        "raw_script": "memory_os_owner_review_digest.py",
-    },
-    "memory-os-right-brain-expression": {
-        "wrapper_script": "memory_os_cron_right_brain_expression_gate.py",
-        "raw_script": "memory_os_right_brain_expression.py",
-    },
-    "memory-os-module-cadence-report": {
-        "wrapper_script": "memory_os_cron_module_cadence_report_gate.py",
-        "raw_script": "memory_os_module_cadence_report_cron.py",
-    },
-    "memory-os-right-brain-expression-outcome": {
-        "wrapper_script": "memory_os_cron_right_brain_expression_outcome_gate.py",
-        "raw_script": "memory_os_right_brain_expression_outcome_cron.py",
-    },
-    "memory-os-proposal-followups-opsgate": {
-        "wrapper_script": "memory_os_cron_proposal_followups_opsgate_gate.py",
-        "raw_script": "memory_os_proposal_followups_ops_gate.py",
-    },
-    "memory-os-expression-feedback-request": {
-        "wrapper_script": "memory_os_cron_expression_feedback_request_gate.py",
-        "raw_script": "memory_os_expression_feedback_prompt.py",
-    },
-    "memory-os-memory-sources-feedback-request": {
-        "wrapper_script": "memory_os_cron_memory_sources_feedback_request_gate.py",
-        "raw_script": "memory_os_memory_sources_feedback_prompt.py",
-    },
-}
-
 def execution_gate_cron_summary():
     specs = _memory_os_cron_specs_from_snapshot()
     specs_by_name = {str(item.get("name") or ""): item for item in specs}
@@ -4733,7 +4718,8 @@ def execution_gate_cron_summary():
     summary = {
         "schema_version": "memory-os.execution_gate_cron_summary.v0",
         "status": "ok",
-        "classification_source": "embedded_fallback",
+        "registry_snapshot_status": "ok" if specs else "missing_or_invalid",
+        "classification_source": "registry_snapshot",
         "adapter_probe_status": str(adapter_probe.get("status") or ""),
         "memory_os_owned_expected_count": len(specs_by_name),
         "memory_os_owned_wrapped_count": len(wrapped),
@@ -4783,15 +4769,6 @@ def _execution_gate_cron_adapter_probe_summary():
 
 def _memory_os_cron_specs_from_snapshot():
     snapshot_path = Path("/root/.hermes/memory-os/system/memory_os_cron_registry.json")
-    fallback = [
-        {
-            "key": name.replace("memory-os-", "").replace("-", "_"),
-            "name": name,
-            "lane_id": value.get("raw_script", "").removeprefix("memory_os_").removesuffix(".py"),
-            **value,
-        }
-        for name, value in MEMORY_OS_CRON_REGISTRY.items()
-    ]
     try:
         loaded = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
     except Exception:
@@ -4799,7 +4776,7 @@ def _memory_os_cron_specs_from_snapshot():
     specs = loaded.get("specs") if isinstance(loaded, dict) else []
     if isinstance(specs, list) and specs:
         return [dict(item) for item in specs if isinstance(item, dict)]
-    return fallback
+    return []
 
 def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     records_path = Path("/root/.hermes/memory-os/system/execution_gate_envelopes.jsonl")
@@ -4824,6 +4801,7 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     missing = []
     stale = []
     not_due = []
+    error = []
     boundary_true = 0
     boundary_observed = 0
     boundary_unobserved = 0
@@ -4847,6 +4825,12 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         else:
             not_due.append(lane)
         postcheck = record.get("postcheck") if isinstance(record.get("postcheck"), dict) else {}
+        try:
+            returncode = int(postcheck.get("returncode") or 0)
+        except Exception:
+            returncode = 0
+        if str(record.get("execution_status") or "") != "ok" or returncode != 0:
+            error.append(lane)
         if record.get("postcheck_boundary_true") is True:
             boundary_true += 1
         if postcheck.get("postcheck_boundary_observed") is True:
@@ -4858,11 +4842,13 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         "helper_completion_completed_count": len(completed),
         "helper_completion_missing_count": len(missing),
         "helper_completion_stale_count": len(stale),
+        "helper_completion_error_count": len(error),
         "helper_completion_not_due_count": len(not_due),
         "helper_completion_due_count": len(missing) + len(stale),
         "helper_completion_completed_lanes": completed,
         "helper_completion_missing_lanes": missing,
         "helper_completion_stale_lanes": stale,
+        "helper_completion_error_lanes": error,
         "helper_completion_not_due_lanes": not_due,
         "helper_boundary_true_count": boundary_true,
         "helper_boundary_observed_count": boundary_observed,

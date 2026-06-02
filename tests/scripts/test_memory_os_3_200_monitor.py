@@ -2476,6 +2476,45 @@ def test_classify_snapshot_warns_on_memory_os_cron_helper_stale_completion():
     assert any(item["code"] == "execution_gate_memory_os_cron_helper_completion_stale" for item in classification["warn"])
 
 
+def test_classify_snapshot_fails_memory_os_cron_helper_error_completion():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "memory_os_owned_expected_count": 7,
+        "memory_os_owned_wrapped_count": 7,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "helper_completion_expected_count": 7,
+        "helper_completion_completed_count": 7,
+        "helper_completion_missing_count": 0,
+        "helper_completion_error_count": 1,
+        "helper_completion_error_lanes": ["module_cadence_report"],
+        "helper_boundary_true_count": 0,
+        "helper_boundary_unobserved_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "execution_gate_memory_os_cron_helper_completion_error" for item in classification["fail"])
+
+
+def test_memory_os_cron_specs_missing_snapshot_does_not_use_private_fallback(monkeypatch, tmp_path):
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    real_path = Path
+
+    def fake_path(value):
+        if str(value) == "/root/.hermes/memory-os/system/memory_os_cron_registry.json":
+            return tmp_path / "missing-memory-os-cron-registry.json"
+        return real_path(value)
+
+    monkeypatch.setitem(namespace, "Path", fake_path)
+
+    assert namespace["_memory_os_cron_specs_from_snapshot"]() == []
+
+
 def test_classify_snapshot_fails_session_mirror_owner_approved_without_owner_channel_binding():
     snapshot = _healthy_snapshot()
     snapshot["session_mirror"] = {
