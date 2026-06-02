@@ -111,6 +111,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "test_host_apply_allowed": False,
         "test_host_marker": "",
         "production_apply_owner_ref_required": True,
+        "auto_apply_after_owner_home_graduation": True,
+        "auto_apply_max_sessions_per_run": 1,
     },
     "l4": {
         "kill_switch_enabled": False,

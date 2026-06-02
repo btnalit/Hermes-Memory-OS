@@ -11,6 +11,7 @@ from .audit import append_audit
 from .crystallized import append_candidate_queue, read_candidate_queue
 from .index import MemoryOSIndex
 from .inner_drive import InnerDriveEngine, select_events_for_inner_drive
+from .session_mirror import auto_apply_graduated_session_mirror
 from .store import MemoryOSStore
 from .working import ALLOWED_WORKING_KINDS, WorkingMemoryService
 
@@ -55,6 +56,7 @@ class MemoryOSRuntime:
     ) -> dict[str, Any]:
         already_processed_ids = {str(event_id) for event_id in state.get("processed_event_ids", [])}
         processed_ids = set(already_processed_ids)
+        session_mirror_auto_apply = auto_apply_graduated_session_mirror(self.store)
         events = sorted(self.store.read_events(), key=lambda event: event.ts)
         pending, cap_deferred = select_events_for_inner_drive(
             events,
@@ -122,6 +124,10 @@ class MemoryOSRuntime:
             "index_counts": index_counts,
             "decayed_documents": decayed_documents,
             "runtime_state_path": str(self._state_path),
+            "session_mirror_auto_apply": _bounded_session_mirror_auto_apply(session_mirror_auto_apply),
+            "session_mirror_auto_apply_written_event_ids_count": int(
+                session_mirror_auto_apply.get("written_event_ids_count") or 0
+            ),
         }
         if _heartbeat_has_meaningful_audit(report):
             append_audit(
@@ -190,6 +196,35 @@ def _working_item_count(store: MemoryOSStore) -> int:
     return count
 
 
+def _bounded_session_mirror_auto_apply(report: dict[str, Any]) -> dict[str, Any]:
+    policy = report.get("policy") if isinstance(report.get("policy"), dict) else {}
+    auto_policy = report.get("auto_apply_policy") if isinstance(report.get("auto_apply_policy"), dict) else {}
+    active_policy = auto_policy or policy
+    return {
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "reason": str(report.get("reason") or ""),
+        "written_event_ids_count": int(report.get("written_event_ids_count") or 0),
+        "selected_session_count": int(report.get("selected_session_count") or 0),
+        "raw_private_body_printed": bool(report.get("raw_private_body_printed")),
+        "policy_status": str(active_policy.get("status") or ""),
+        "approval_ref": str(active_policy.get("approval_ref") or ""),
+        "approval_source": str(active_policy.get("approval_source") or ""),
+        "owner_channel_bound": bool(active_policy.get("owner_channel_bound")),
+        "stable_scope_id": str(active_policy.get("stable_scope_id") or ""),
+        "max_sessions_per_run": int(active_policy.get("max_sessions_per_run") or 0),
+        "platform_allowlist": [
+            str(item)
+            for item in (
+                active_policy.get("platform_allowlist")
+                if isinstance(active_policy.get("platform_allowlist"), list)
+                else []
+            )
+        ][:10],
+        "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
+    }
+
+
 def _crystallized_record_count(store: MemoryOSStore) -> int:
     count = 0
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
@@ -206,5 +241,6 @@ def _heartbeat_has_meaningful_audit(report: dict[str, Any]) -> bool:
             "cap_deferred_event_count",
             "working_created_count",
             "candidate_created_count",
+            "session_mirror_auto_apply_written_event_ids_count",
         )
     )

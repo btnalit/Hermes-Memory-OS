@@ -1458,12 +1458,26 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 and latest_approval_resolved
                 and latest_owner_channel_bound
                 and latest_owner_approved
-                and session_mirror.get("latest_apply_approval_source") == "owner_action_ledger"
+                and session_mirror.get("latest_apply_approval_source")
+                in {"owner_action_ledger", "owner_action_lane_graduation"}
                 and session_mirror.get("latest_apply_reused_approval_ref") is not True
             ):
                 passed.append(
                     {
                         "code": "session_mirror_apply_governed_owner_ref_ok",
+                        "stable_scope_id": session_mirror.get("latest_apply_stable_scope_id") or "",
+                    }
+                )
+            if (
+                latest_apply_written > 0
+                and latest_approval_resolved
+                and latest_owner_channel_bound
+                and latest_owner_approved
+                and session_mirror.get("latest_apply_approval_source") == "owner_action_lane_graduation"
+            ):
+                passed.append(
+                    {
+                        "code": "session_mirror_apply_lane_graduated_auto_ok",
                         "stable_scope_id": session_mirror.get("latest_apply_stable_scope_id") or "",
                     }
                 )
@@ -4483,6 +4497,8 @@ def session_mirror_summary():
       "latest_apply_approval_ref": latest_governance.get("approval_ref"),
       "latest_apply_owner_channel_bound": latest_governance.get("owner_channel_bound"),
       "latest_apply_stable_scope_id": latest_governance.get("stable_scope_id"),
+      "latest_apply_auto_apply": latest_governance.get("auto_apply"),
+      "latest_apply_lane_graduated": latest_governance.get("lane_graduated"),
       "latest_apply_reused_approval_ref": False,
       "pending_platform_counts": correlation.get("pending_platform_counts") if isinstance(correlation, dict) else {},
       "pending_event_kind_counts": correlation.get("pending_event_kind_counts") if isinstance(correlation, dict) else {},

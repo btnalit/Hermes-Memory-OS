@@ -8,7 +8,13 @@ from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
-from plugins.memory.memory_os.session_mirror import SessionMirror, read_session_mirror_apply_records
+from plugins.memory.memory_os.runtime import MemoryOSRuntime
+from plugins.memory.memory_os.session_mirror import (
+    SessionMirror,
+    auto_apply_graduated_session_mirror,
+    read_session_mirror_apply_records,
+    session_mirror_graduation_policy,
+)
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -102,6 +108,8 @@ def _owner_action_record(store, *, owner_action_id="oact_session_mirror_ok", fin
             "boundary_contract_version": "session-mirror-governed-apply.v1",
             "max_sessions": 1,
             "platform_allowlist": ["telegram"],
+            "auto_apply_after_graduation": True,
+            "auto_apply_max_sessions_per_run": 1,
             "expires_at": "2099-01-01T00:00:00Z",
             "actual_send": False,
             "actual_execute": False,
@@ -550,3 +558,58 @@ def test_session_mirror_cli_scan_apply_rejects_owner_ref_without_owner_home_bind
     report = json.loads(capsys.readouterr().out)
     assert report["reason"] == "session_mirror_apply_owner_ref_not_owner_channel_bound"
     assert report["written_event_ids_count"] == 0
+
+
+def test_session_mirror_auto_apply_ignores_one_shot_owner_smoke_without_graduation(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="auto-session-1", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    owner_record = _owner_action_record(store, fingerprint=dry_run["selected_session_fingerprints"][0])
+    owner_record["result_ref"]["auto_apply_after_graduation"] = False
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+
+    policy = session_mirror_graduation_policy(store)
+    report = auto_apply_graduated_session_mirror(store)
+
+    assert policy["status"] == "absent"
+    assert report["status"] == "skipped"
+    assert report["reason"] == "no_owner_home_graduation_policy"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+
+
+def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_graduation(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="auto-session-1", platform="telegram")
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        conn.execute(
+            "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
+            ("auto-session-2", "telegram", "2026-05-21T09:00:00+00:00", "2026-05-21T09:01:00+00:00"),
+        )
+        conn.execute(
+            "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
+            ("auto-session-2", "user", "第二条 SessionMirror 自动导入测试", "2026-05-21T09:00:01+00:00"),
+        )
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    owner_record = _owner_action_record(store, fingerprint=dry_run["selected_session_fingerprints"][0])
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+
+    first = MemoryOSRuntime(store).heartbeat(max_events=10)
+    second = MemoryOSRuntime(store).heartbeat(max_events=10)
+
+    assert first["session_mirror_auto_apply"]["status"] == "ok"
+    assert first["session_mirror_auto_apply"]["written_event_ids_count"] == 1
+    assert first["session_mirror_auto_apply"]["approval_source"] == "latest_owner_home_digest"
+    assert first["session_mirror_auto_apply"]["owner_channel_bound"] is True
+    assert first["session_mirror_auto_apply_written_event_ids_count"] == 1
+    assert second["session_mirror_auto_apply"]["status"] == "ok"
+    assert second["session_mirror_auto_apply"]["written_event_ids_count"] == 1
+    events = store.read_events()
+    assert len(events) == 2
+    assert {event.safe_ref["session_id"] for event in events} == {"auto-session-1", "auto-session-2"}
+    apply_records = read_session_mirror_apply_records(store.roots)
+    assert len(apply_records) == 2
+    assert apply_records[0]["apply_governance"]["approval_source"] == "owner_action_lane_graduation"
+    assert apply_records[0]["apply_governance"]["auto_apply"] is True
+    assert apply_records[0]["apply_governance"]["lane_graduated"] is True
+    assert apply_records[1]["apply_governance"]["approval_ref"] == owner_record["owner_action_id"]

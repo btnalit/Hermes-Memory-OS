@@ -96,6 +96,15 @@ specific lane graduation that removes per-item owner approval from an
 apply-capable path. In particular, `apply_proposal` is a boundary action, while
 safe proposal follow-up routing is not.
 
+SessionMirror is a data-ingress lane. A production apply is fail-closed until an
+owner-home digest approval records `approve_session_mirror_apply`. That approval
+graduates the bounded lane, not each individual session: after graduation, the
+runtime heartbeat may automatically import at most the approved
+`auto_apply_max_sessions_per_run` sessions per run from the approved platform
+allowlist. SessionMirror still writes only bounded `conversation_turn_mirrored`
+events, never crystallized memory, policy, identity, route/score authority, or
+external sends.
+
 `auto` reads Hermes `channel_directory.json` and selects the configured owner
 home channel for owner-facing jobs. Depending on the installed profile, it may
 resolve to Telegram, Discord, Signal, Slack, Matrix, or another configured

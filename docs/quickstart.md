@@ -180,3 +180,11 @@ explicitly graduated.
 
 Shell/CLI paths are operator/debug fallbacks only. They are not the owner-facing
 approval workflow.
+
+For SessionMirror, the approval is a lane-graduation decision. Once the owner
+approves the `approve_session_mirror_apply` item from the owner-home digest,
+Memory-OS can let heartbeat auto-import one bounded session per run inside the
+approved platform allowlist. This reduces repeat approvals while keeping the
+hard boundary intact: the lane does not write crystallized memory, mutate
+policy, change route/score authority, write identity/relationships, or send
+external messages.

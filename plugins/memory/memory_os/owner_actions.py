@@ -2434,6 +2434,8 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "platform_allowlist": approval.get("platform_allowlist")
             if isinstance(approval.get("platform_allowlist"), list)
             else [],
+            "auto_apply_after_graduation": bool(approval.get("auto_apply_after_graduation")),
+            "auto_apply_max_sessions_per_run": max(int(approval.get("auto_apply_max_sessions_per_run") or 1), 1),
             "expires_at": str(approval.get("expires_at") or ""),
             "actual_send": False,
             "actual_execute": False,
@@ -3181,6 +3183,8 @@ def _session_mirror_apply_review_items(store: MemoryOSStore, closed: set[str]) -
         "boundary_contract_version": SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION,
         "max_sessions": 1,
         "platform_allowlist": [platform] if platform else [],
+        "auto_apply_after_graduation": True,
+        "auto_apply_max_sessions_per_run": 1,
         "expires_at": "",
         "actual_send": False,
         "actual_execute": False,
@@ -3569,6 +3573,8 @@ def _bounded_session_mirror_approval(value: dict[str, Any]) -> dict[str, Any]:
         "boundary_contract_version": _bounded_text(str(value.get("boundary_contract_version") or ""), 80),
         "max_sessions": max(int(value.get("max_sessions") or 0), 0),
         "platform_allowlist": [str(item)[:80] for item in platform_allowlist[:10]],
+        "auto_apply_after_graduation": bool(value.get("auto_apply_after_graduation")),
+        "auto_apply_max_sessions_per_run": max(int(value.get("auto_apply_max_sessions_per_run") or 0), 0),
         "expires_at": _bounded_text(str(value.get("expires_at") or ""), 80),
         "actual_send": bool(value.get("actual_send")),
         "actual_execute": bool(value.get("actual_execute")),

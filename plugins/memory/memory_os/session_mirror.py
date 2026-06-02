@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .audit import append_audit
+from .config import load_config
 from .ids import new_event_id
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -22,6 +23,32 @@ SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION = "session-mirror-governed-apply.v1"
 SESSION_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(api[-_\s]?key|token|password|secret)\s*[:=]\s*([^\s;,)\]}]+)"),
 )
+_BOUNDARY_KEYS = (
+    "actual_send",
+    "actual_execute",
+    "actual_identity_write",
+    "actual_unapproved_crystallized_approval",
+)
+
+
+def _false_boundary() -> dict[str, bool]:
+    return {key: False for key in _BOUNDARY_KEYS}
+
+
+def _bounded_auto_apply_dry_run(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": str(report.get("schema_version") or ""),
+        "status": str(report.get("status") or ""),
+        "candidate_session_count": int(report.get("candidate_session_count") or 0),
+        "selected_session_count": int(report.get("selected_session_count") or 0),
+        "skipped_by_platform_count": int(report.get("skipped_by_platform_count") or 0),
+        "skipped_by_limit_count": int(report.get("skipped_by_limit_count") or 0),
+        "selected_session_fingerprints": [
+            str(item)
+            for item in (report.get("selected_session_fingerprints") if isinstance(report.get("selected_session_fingerprints"), list) else [])
+        ][:10],
+        "raw_private_body_printed": bool(report.get("raw_private_body_printed")),
+    }
 
 
 def session_mirror_apply_records_path(roots: MemoryOSRoots) -> Path:
@@ -54,6 +81,147 @@ def session_mirror_stable_scope_id(
         ]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def session_mirror_graduation_policy(store: MemoryOSStore) -> dict[str, Any]:
+    """Return the active owner-approved SessionMirror auto-apply policy, if any."""
+    config = load_config(store.roots.hermes_home)
+    session_config = config.get("session_mirror") if isinstance(config.get("session_mirror"), dict) else {}
+    if session_config.get("auto_apply_after_owner_home_graduation") is False:
+        return {
+            "schema_version": "memory-os.session_mirror_graduation_policy.v0",
+            "status": "disabled",
+            "reason": "auto_apply_after_owner_home_graduation_disabled",
+            "owner_approved": False,
+        }
+    try:
+        from .owner_actions import read_owner_action_records
+    except Exception as exc:
+        return {
+            "schema_version": "memory-os.session_mirror_graduation_policy.v0",
+            "status": "error",
+            "reason": "owner_action_records_unavailable",
+            "error": str(exc)[:200],
+            "owner_approved": False,
+        }
+    for record in reversed(read_owner_action_records(store.roots)):
+        result_ref = record.get("result_ref") if isinstance(record.get("result_ref"), dict) else {}
+        token_binding = record.get("token_binding") if isinstance(record.get("token_binding"), dict) else {}
+        owner_effect = record.get("owner_effect") if isinstance(record.get("owner_effect"), dict) else {}
+        if record.get("schema_version") != "memory-os.owner_action.v0":
+            continue
+        if record.get("action_type") != "approve_session_mirror_apply":
+            continue
+        if record.get("target_type") != "session_mirror_apply":
+            continue
+        if record.get("result") != "applied":
+            continue
+        if record.get("source") != "latest_owner_home_digest":
+            continue
+        if token_binding.get("scope") != "owner_home":
+            continue
+        if owner_effect.get("owner_approved_session_mirror_apply") is not True:
+            continue
+        if result_ref.get("approval_scope") != "session_mirror_production_bounded_apply":
+            continue
+        if result_ref.get("auto_apply_after_graduation") is not True:
+            continue
+        if any(bool(result_ref.get(key)) for key in _BOUNDARY_KEYS):
+            continue
+        platforms = [
+            str(item).lower().replace("-", "_")
+            for item in (result_ref.get("platform_allowlist") if isinstance(result_ref.get("platform_allowlist"), list) else [])
+            if str(item or "").strip()
+        ][:10]
+        configured_max = max(int(session_config.get("auto_apply_max_sessions_per_run") or 1), 1)
+        approved_max = max(int(result_ref.get("auto_apply_max_sessions_per_run") or result_ref.get("max_sessions") or 1), 1)
+        max_sessions = min(configured_max, approved_max)
+        return {
+            "schema_version": "memory-os.session_mirror_graduation_policy.v0",
+            "status": "active",
+            "owner_approved": True,
+            "approval_ref": str(record.get("owner_action_id") or ""),
+            "approval_source": "latest_owner_home_digest",
+            "owner_channel_bound": True,
+            "stable_scope_id": str(result_ref.get("stable_scope_id") or ""),
+            "approved_max_sessions": approved_max,
+            "max_sessions_per_run": max_sessions,
+            "platform_allowlist": platforms,
+            "boundary_contract_version": str(result_ref.get("boundary_contract_version") or ""),
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        }
+    return {
+        "schema_version": "memory-os.session_mirror_graduation_policy.v0",
+        "status": "absent",
+        "reason": "no_owner_home_graduation_policy",
+        "owner_approved": False,
+    }
+
+
+def auto_apply_graduated_session_mirror(
+    store: MemoryOSStore,
+    *,
+    operator: str = "runtime_heartbeat",
+) -> dict[str, Any]:
+    """Apply one bounded SessionMirror batch after owner-approved lane graduation."""
+    policy = session_mirror_graduation_policy(store)
+    if policy.get("status") != "active":
+        return {
+            "schema_version": "memory-os.session_mirror_auto_apply.v0",
+            "status": "skipped",
+            "reason": policy.get("reason") or policy.get("status") or "policy_not_active",
+            "policy": policy,
+            "written_event_ids_count": 0,
+            "boundary": _false_boundary(),
+        }
+    mirror = SessionMirror(store)
+    dry_run = mirror.scan(
+        dry_run=True,
+        max_sessions=int(policy.get("max_sessions_per_run") or 1),
+        platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+    )
+    if int(dry_run.get("selected_session_count") or 0) <= 0:
+        return {
+            "schema_version": "memory-os.session_mirror_auto_apply.v0",
+            "status": "skipped",
+            "reason": "no_matching_pending_session",
+            "policy": policy,
+            "dry_run": _bounded_auto_apply_dry_run(dry_run),
+            "written_event_ids_count": 0,
+            "boundary": _false_boundary(),
+        }
+    apply_governance = {
+        "owner_approved": True,
+        "approval_ref": str(policy.get("approval_ref") or ""),
+        "approval_resolved": True,
+        "approval_source": "owner_action_lane_graduation",
+        "approval_target_type": "session_mirror_apply",
+        "approval_target_id": f"production_bounded:{policy.get('stable_scope_id') or ''}",
+        "approved_max_sessions": int(policy.get("approved_max_sessions") or 1),
+        "owner_channel_bound": True,
+        "stable_scope_id": str(policy.get("stable_scope_id") or ""),
+        "operator": operator,
+        "evidence_refs": [f"session_mirror_lane_graduation:{policy.get('approval_ref') or ''}"],
+        "auto_apply": True,
+        "lane_graduated": True,
+        "historical_bounded_smoke_attested": True,
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+    result = mirror.scan(
+        dry_run=False,
+        max_sessions=int(policy.get("max_sessions_per_run") or 1),
+        platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+        apply_governance=apply_governance,
+    )
+    result["schema_version"] = "memory-os.session_mirror_auto_apply.v0"
+    result["auto_apply_policy"] = policy
+    return result
 
 
 class SessionMirror:
@@ -602,6 +770,8 @@ def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
         "test_host_marker": str(value.get("test_host_marker") or "")[:160],
         "operator": str(value.get("operator") or "")[:120],
         "evidence_refs": [str(item)[:160] for item in evidence_refs[:10] if str(item or "").strip()],
+        "auto_apply": bool(value.get("auto_apply")),
+        "lane_graduated": bool(value.get("lane_graduated")),
         "historical_bounded_smoke_attested": bool(value.get("historical_bounded_smoke_attested")),
         "historical_bounded_smoke_unattested": bool(value.get("historical_bounded_smoke_unattested")),
     }
