@@ -377,21 +377,22 @@ def _classify_llm_judge_probe(result: dict[str, Any]) -> dict[str, Any]:
         return {"status": "warn", "reason": "llm_judge_probe_json_invalid", "probe": result}
     judge = data.get("llm_judge") if isinstance(data.get("llm_judge"), dict) else {}
     boundaries = data.get("boundaries") if isinstance(data.get("boundaries"), dict) else {}
-    if any(
-        bool(boundaries.get(key))
-        for key in (
-            "actual_send",
-            "actual_execute",
-            "actual_canonical_write",
-            "actual_unapproved_crystallized_approval",
-            "actual_identity_write",
-        )
-    ):
+    if _any_boundary_true(boundaries):
         return {"status": "fail", "reason": "llm_judge_probe_boundary_true", "probe": data}
     status = str(judge.get("status") or "")
     if status in {"ok", "success", "selected", "no_match", "no_clear_match", "no_selection", "insufficient_context"}:
         return {"status": "pass", "probe": data}
     return {"status": "warn", "reason": str(judge.get("code") or status or "llm_judge_probe_unavailable"), "probe": data}
+
+
+def _any_boundary_true(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value is True
+    if isinstance(value, dict):
+        return any(_any_boundary_true(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_any_boundary_true(item) for item in value)
+    return False
 
 
 def _classification_failures(result: dict[str, Any]) -> list[dict[str, Any]]:

@@ -2312,13 +2312,120 @@ def test_classify_snapshot_passes_session_mirror_lane_graduated_auto_apply():
         "latest_apply_stable_scope_id": "scope-auto",
         "latest_apply_auto_apply": True,
         "latest_apply_lane_graduated": True,
+        "latest_apply_execution_gate_envelope_id": "xgate_session_mirror",
+        "session_mirror_auto_apply_execution_gate_bound": True,
+        "latest_apply_boundary_true_count": 0,
     }
 
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "session_mirror_apply_governed_owner_ref_ok" for item in classification["pass"])
     assert any(item["code"] == "session_mirror_apply_lane_graduated_auto_ok" for item in classification["pass"])
+    assert any(item["code"] == "session_mirror_auto_apply_execution_gate_bound" for item in classification["pass"])
     assert not any(item["code"].startswith("session_mirror_apply_") for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_session_mirror_auto_apply_without_execution_gate():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 30,
+        "pending_session_count": 24,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 24,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 0,
+        "pending_only_groups": [],
+        "raw_private_body_printed": False,
+        "latest_apply_status": "ok",
+        "latest_apply_bounded": True,
+        "latest_apply_written_event_ids_count": 1,
+        "latest_apply_duplicate_ignored_count": 0,
+        "latest_apply_raw_private_body_printed": False,
+        "latest_apply_approval_resolved": True,
+        "latest_apply_owner_channel_bound": True,
+        "latest_apply_owner_approved": True,
+        "latest_apply_approval_source": "owner_action_lane_graduation",
+        "latest_apply_auto_apply": True,
+        "latest_apply_lane_graduated": True,
+        "latest_apply_execution_gate_envelope_id": "",
+        "session_mirror_auto_apply_execution_gate_bound": False,
+        "latest_apply_boundary_true_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "session_mirror_auto_apply_execution_gate_missing" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_session_mirror_apply_boundary_true():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 1,
+        "covered_session_count": 0,
+        "pending_session_count": 0,
+        "dry_run_status": "ok",
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "raw_private_body_printed": False,
+        "latest_apply_status": "ok",
+        "latest_apply_bounded": True,
+        "latest_apply_written_event_ids_count": 1,
+        "latest_apply_duplicate_ignored_count": 0,
+        "latest_apply_raw_private_body_printed": False,
+        "latest_apply_boundary_true_count": 1,
+        "latest_apply_boundary": {"actual_send": True},
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "session_mirror_apply_boundary_true" for item in classification["fail"])
+
+
+def test_classify_snapshot_passes_memory_os_cron_execution_gate_coverage():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "memory_os_owned_expected_count": 7,
+        "memory_os_owned_wrapped_count": 7,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "hermes_host_owned_count": 3,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "execution_gate_memory_os_cron_wrapped_ok" for item in classification["pass"])
+    assert not any(item["code"].startswith("execution_gate_memory_os_cron") for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_memory_os_cron_naked_or_unregistered_like_jobs():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "memory_os_owned_expected_count": 7,
+        "memory_os_owned_wrapped_count": 5,
+        "memory_os_owned_naked_count": 1,
+        "memory_os_like_unregistered_count": 1,
+        "unclassified_count": 0,
+        "naked_jobs": [{"name": "memory-os-module-cadence-report", "script": "memory_os_module_cadence_report_cron.py"}],
+        "unregistered_like_jobs": [{"name": "memory-os-new-helper", "script": "memory_os_new_helper.py"}],
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "execution_gate_memory_os_cron_naked_job" for item in classification["fail"])
+    assert any(item["code"] == "execution_gate_memory_os_cron_unregistered_like_job" for item in classification["fail"])
 
 
 def test_classify_snapshot_fails_session_mirror_owner_approved_without_owner_channel_binding():

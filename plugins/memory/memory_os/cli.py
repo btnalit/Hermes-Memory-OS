@@ -1483,6 +1483,11 @@ def _resolve_session_mirror_owner_apply_governance(
     result_ref = record.get("result_ref") if isinstance(record.get("result_ref"), dict) else {}
     if str(result_ref.get("approval_scope") or "") != "session_mirror_production_bounded_apply":
         return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_scope_mismatch")
+    expiry_status = _session_mirror_owner_ref_expiry_status(result_ref.get("expires_at"))
+    if expiry_status == "expired":
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_expired")
+    if expiry_status == "invalid":
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_expiry_invalid")
     if _session_mirror_owner_ref_consumed(store, approval_ref):
         return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_already_consumed")
     approved_max = max(int(result_ref.get("max_sessions") or 0), 0)
@@ -1539,6 +1544,21 @@ def _resolve_session_mirror_owner_apply_governance(
         }
     )
     return {"status": "ok", "metadata": metadata}
+
+
+def _session_mirror_owner_ref_expiry_status(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "none"
+    try:
+        expires_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return "invalid"
+    if expires_at.tzinfo is None:
+        return "invalid"
+    if expires_at.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return "expired"
+    return "valid"
 
 
 def _find_owner_action_record(store: MemoryOSStore, owner_action_id: str) -> dict[str, Any] | None:

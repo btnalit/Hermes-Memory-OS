@@ -9,6 +9,7 @@ from typing import Any
 
 from .audit import append_audit
 from .crystallized import append_candidate_queue, read_candidate_queue
+from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
 from .index import MemoryOSIndex
 from .inner_drive import InnerDriveEngine, select_events_for_inner_drive
 from .session_mirror import auto_apply_graduated_session_mirror
@@ -56,6 +57,22 @@ class MemoryOSRuntime:
     ) -> dict[str, Any]:
         already_processed_ids = {str(event_id) for event_id in state.get("processed_event_ids", [])}
         processed_ids = set(already_processed_ids)
+        runtime_gate = start_execution_gate_envelope(
+            self.store,
+            lane_id="runtime_heartbeat_core",
+            trigger_surface="runtime_heartbeat",
+            risk_class="deterministic_maintenance",
+            human_approval_required=False,
+            why_no_human_approval="deterministic heartbeat maintenance; no external send or owner-boundary action",
+            scope={"max_events": max_events, "max_events_per_source_class": max_events_per_source_class},
+            boundary={
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_unapproved_crystallized_approval": False,
+            },
+            precheck={"already_processed_event_count": len(already_processed_ids)},
+        )
         session_mirror_auto_apply = auto_apply_graduated_session_mirror(self.store)
         events = sorted(self.store.read_events(), key=lambda event: event.ts)
         pending, cap_deferred = select_events_for_inner_drive(
@@ -128,7 +145,33 @@ class MemoryOSRuntime:
             "session_mirror_auto_apply_written_event_ids_count": int(
                 session_mirror_auto_apply.get("written_event_ids_count") or 0
             ),
+            "runtime_heartbeat_core_execution_gate_envelope_id": str(
+                runtime_gate.get("execution_gate_envelope_id") or ""
+            ),
         }
+        complete_execution_gate_envelope(
+            self.store,
+            envelope_id=str(runtime_gate.get("execution_gate_envelope_id") or ""),
+            lane_id="runtime_heartbeat_core",
+            execution_status="ok",
+            postcheck={
+                "processed_event_count": len(processed_now),
+                "working_created_count": working_created_count,
+                "candidate_created_count": candidate_created_count,
+                "boundary": {
+                    "actual_send": False,
+                    "actual_execute": False,
+                    "actual_identity_write": False,
+                    "actual_unapproved_crystallized_approval": False,
+                },
+            },
+            result_summary={
+                "processed_event_count": len(processed_now),
+                "session_mirror_auto_apply_written_event_ids_count": int(
+                    session_mirror_auto_apply.get("written_event_ids_count") or 0
+                ),
+            },
+        )
         if _heartbeat_has_meaningful_audit(report):
             append_audit(
                 self.store.roots.audit_path,
@@ -222,6 +265,7 @@ def _bounded_session_mirror_auto_apply(report: dict[str, Any]) -> dict[str, Any]
             )
         ][:10],
         "boundary": report.get("boundary") if isinstance(report.get("boundary"), dict) else {},
+        "execution_gate_envelope_id": str(report.get("execution_gate_envelope_id") or ""),
     }
 
 

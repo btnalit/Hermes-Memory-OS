@@ -471,6 +471,42 @@ def test_session_mirror_cli_scan_apply_accepts_owner_channel_approval_once(tmp_p
     assert report["apply_governance"]["stable_scope_id"] == owner_record["result_ref"]["stable_scope_id"]
 
 
+def test_session_mirror_cli_scan_apply_rejects_expired_owner_ref(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="expired-session", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    owner_record = _owner_action_record(store, fingerprint=dry_run["selected_session_fingerprints"][0])
+    owner_record["result_ref"]["expires_at"] = "2000-01-01T00:00:00Z"
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--owner-approved",
+            "--approval-ref",
+            owner_record["owner_action_id"],
+            "--evidence-ref",
+            "full_lane_b:owner_channel:expired",
+            "--max-sessions",
+            "1",
+            "--platform",
+            "telegram",
+        ]
+    )
+
+    exit_code = memory_os_command(args)
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["reason"] == "session_mirror_apply_owner_ref_expired"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+
+
 def test_session_mirror_cli_scan_apply_rejects_consumed_owner_ref(tmp_path, monkeypatch, capsys):
     store = _store(tmp_path)
     _create_state_db(tmp_path / "state.db", session_id="governed-session", platform="telegram")
@@ -601,6 +637,7 @@ def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_gr
     assert first["session_mirror_auto_apply"]["written_event_ids_count"] == 1
     assert first["session_mirror_auto_apply"]["approval_source"] == "latest_owner_home_digest"
     assert first["session_mirror_auto_apply"]["owner_channel_bound"] is True
+    assert first["session_mirror_auto_apply"]["execution_gate_envelope_id"]
     assert first["session_mirror_auto_apply_written_event_ids_count"] == 1
     assert second["session_mirror_auto_apply"]["status"] == "ok"
     assert second["session_mirror_auto_apply"]["written_event_ids_count"] == 1
@@ -612,4 +649,5 @@ def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_gr
     assert apply_records[0]["apply_governance"]["approval_source"] == "owner_action_lane_graduation"
     assert apply_records[0]["apply_governance"]["auto_apply"] is True
     assert apply_records[0]["apply_governance"]["lane_graduated"] is True
+    assert apply_records[0]["apply_governance"]["execution_gate_envelope_id"] == first["session_mirror_auto_apply"]["execution_gate_envelope_id"]
     assert apply_records[1]["apply_governance"]["approval_ref"] == owner_record["owner_action_id"]

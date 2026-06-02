@@ -12,6 +12,7 @@ from typing import Any
 
 from .audit import append_audit
 from .config import load_config
+from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
 from .ids import new_event_id
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -193,6 +194,42 @@ def auto_apply_graduated_session_mirror(
             "written_event_ids_count": 0,
             "boundary": _false_boundary(),
         }
+    gate = start_execution_gate_envelope(
+        store,
+        lane_id="session_mirror_auto_apply",
+        trigger_surface="runtime_heartbeat",
+        risk_class="bounded_append_only_data_ingress",
+        human_approval_required=False,
+        why_no_human_approval="owner-home approved lane graduation; per-run bounded max_sessions/platform scope",
+        scope={
+            "approval_ref": str(policy.get("approval_ref") or ""),
+            "stable_scope_id": str(policy.get("stable_scope_id") or ""),
+            "max_sessions_per_run": int(policy.get("max_sessions_per_run") or 1),
+            "platform_allowlist": policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+            "selected_session_fingerprints": dry_run.get("selected_session_fingerprints")
+            if isinstance(dry_run.get("selected_session_fingerprints"), list)
+            else [],
+        },
+        boundary=_false_boundary(),
+        precheck={
+            "policy_status": str(policy.get("status") or ""),
+            "owner_channel_bound": bool(policy.get("owner_channel_bound")),
+            "dry_run_selected_session_count": int(dry_run.get("selected_session_count") or 0),
+            "raw_private_body_printed": bool(dry_run.get("raw_private_body_printed")),
+        },
+        evidence_refs=[f"session_mirror_lane_graduation:{policy.get('approval_ref') or ''}"],
+    )
+    if gate.get("permit_decision") != "allowed":
+        return {
+            "schema_version": "memory-os.session_mirror_auto_apply.v0",
+            "status": "skipped",
+            "reason": "execution_gate_blocked",
+            "policy": policy,
+            "dry_run": _bounded_auto_apply_dry_run(dry_run),
+            "written_event_ids_count": 0,
+            "execution_gate_envelope_id": str(gate.get("execution_gate_envelope_id") or ""),
+            "boundary": _false_boundary(),
+        }
     apply_governance = {
         "owner_approved": True,
         "approval_ref": str(policy.get("approval_ref") or ""),
@@ -205,6 +242,7 @@ def auto_apply_graduated_session_mirror(
         "stable_scope_id": str(policy.get("stable_scope_id") or ""),
         "operator": operator,
         "evidence_refs": [f"session_mirror_lane_graduation:{policy.get('approval_ref') or ''}"],
+        "execution_gate_envelope_id": str(gate.get("execution_gate_envelope_id") or ""),
         "auto_apply": True,
         "lane_graduated": True,
         "historical_bounded_smoke_attested": True,
@@ -221,6 +259,23 @@ def auto_apply_graduated_session_mirror(
     )
     result["schema_version"] = "memory-os.session_mirror_auto_apply.v0"
     result["auto_apply_policy"] = policy
+    result["execution_gate_envelope_id"] = str(gate.get("execution_gate_envelope_id") or "")
+    complete_execution_gate_envelope(
+        store,
+        envelope_id=str(gate.get("execution_gate_envelope_id") or ""),
+        lane_id="session_mirror_auto_apply",
+        execution_status=str(result.get("status") or ""),
+        postcheck={
+            "written_event_ids_count": int(result.get("written_event_ids_count") or 0),
+            "selected_session_count": int(result.get("selected_session_count") or 0),
+            "raw_private_body_printed": bool(result.get("raw_private_body_printed")),
+            "boundary": result.get("boundary") if isinstance(result.get("boundary"), dict) else _false_boundary(),
+        },
+        result_summary={
+            "apply_status": str(result.get("status") or ""),
+            "written_event_ids_count": int(result.get("written_event_ids_count") or 0),
+        },
+    )
     return result
 
 
@@ -774,6 +829,7 @@ def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
         "lane_graduated": bool(value.get("lane_graduated")),
         "historical_bounded_smoke_attested": bool(value.get("historical_bounded_smoke_attested")),
         "historical_bounded_smoke_unattested": bool(value.get("historical_bounded_smoke_unattested")),
+        "execution_gate_envelope_id": str(value.get("execution_gate_envelope_id") or "")[:120],
     }
 
 

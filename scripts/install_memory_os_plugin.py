@@ -37,6 +37,7 @@ SOURCE_EXPRESSION_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_expressio
 SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
 SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE = REPO_ROOT / "scripts" / "memory_os_proposal_followups_ops_gate.py"
 SOURCE_OWNER_CRON_ONBOARDING = REPO_ROOT / "scripts" / "memory_os_owner_cron_onboarding.py"
+SOURCE_EXECUTION_GATE_RUNNER = REPO_ROOT / "scripts" / "memory_os_execution_gate_runner.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -838,12 +839,17 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
 def _write_owner_cron_onboarding_script(hermes_home: Path, *, dry_run: bool) -> Path:
     if not SOURCE_OWNER_CRON_ONBOARDING.is_file():
         raise SystemExit(f"Owner cron onboarding source is missing: {SOURCE_OWNER_CRON_ONBOARDING}")
+    if not SOURCE_EXECUTION_GATE_RUNNER.is_file():
+        raise SystemExit(f"Execution gate runner source is missing: {SOURCE_EXECUTION_GATE_RUNNER}")
     target = hermes_home / "scripts" / SOURCE_OWNER_CRON_ONBOARDING.name
     if dry_run:
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SOURCE_OWNER_CRON_ONBOARDING, target)
     target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    runner_target = hermes_home / "scripts" / SOURCE_EXECUTION_GATE_RUNNER.name
+    shutil.copy2(SOURCE_EXECUTION_GATE_RUNNER, runner_target)
+    runner_target.chmod(runner_target.stat().st_mode | stat.S_IXUSR)
     return target
 
 

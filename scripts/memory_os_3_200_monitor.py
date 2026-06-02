@@ -1431,9 +1431,25 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 )
             if latest_apply_written > 0 and session_mirror.get("latest_apply_bounded") is not True:
                 fail.append({"code": "session_mirror_apply_unbounded_write", "value": latest_apply_written})
+            if int(session_mirror.get("latest_apply_boundary_true_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "session_mirror_apply_boundary_true",
+                        "boundary": session_mirror.get("latest_apply_boundary") or {},
+                    }
+                )
             latest_owner_approved = session_mirror.get("latest_apply_owner_approved") is True
             latest_approval_resolved = session_mirror.get("latest_apply_approval_resolved") is True
             latest_owner_channel_bound = session_mirror.get("latest_apply_owner_channel_bound") is True
+            latest_auto_apply = session_mirror.get("latest_apply_auto_apply") is True
+            latest_lane_graduated = session_mirror.get("latest_apply_lane_graduated") is True
+            if (
+                latest_apply_written > 0
+                and latest_auto_apply
+                and latest_lane_graduated
+                and session_mirror.get("session_mirror_auto_apply_execution_gate_bound") is not True
+            ):
+                fail.append({"code": "session_mirror_auto_apply_execution_gate_missing"})
             if latest_owner_approved and not latest_approval_resolved:
                 fail.append({"code": "session_mirror_apply_owner_approved_without_resolver"})
             if latest_approval_resolved and not latest_owner_channel_bound:
@@ -1481,6 +1497,18 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "stable_scope_id": session_mirror.get("latest_apply_stable_scope_id") or "",
                     }
                 )
+            if (
+                latest_apply_written > 0
+                and latest_auto_apply
+                and latest_lane_graduated
+                and session_mirror.get("session_mirror_auto_apply_execution_gate_bound") is True
+            ):
+                passed.append(
+                    {
+                        "code": "session_mirror_auto_apply_execution_gate_bound",
+                        "execution_gate_envelope_id": session_mirror.get("latest_apply_execution_gate_envelope_id") or "",
+                    }
+                )
         if session_mirror.get("dry_run_status") == "ok" and int(session_mirror.get("dry_run_written_event_ids_count") or 0) == 0:
             passed.append({"code": "session_mirror_dry_run_ok"})
         else:
@@ -1512,6 +1540,55 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 )
     elif session_mirror:
         warn.append({"code": "session_mirror_summary_unavailable", "value": session_mirror})
+
+    execution_gate_cron = snapshot.get("execution_gate_cron", {})
+    if execution_gate_cron:
+        if execution_gate_cron.get("schema_version") == "memory-os.execution_gate_cron_summary.v0":
+            expected = int(execution_gate_cron.get("memory_os_owned_expected_count") or 0)
+            wrapped = int(execution_gate_cron.get("memory_os_owned_wrapped_count") or 0)
+            naked = int(execution_gate_cron.get("memory_os_owned_naked_count") or 0)
+            unregistered_like = int(execution_gate_cron.get("memory_os_like_unregistered_count") or 0)
+            if naked > 0:
+                fail.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_naked_job",
+                        "count": naked,
+                        "jobs": execution_gate_cron.get("naked_jobs") or [],
+                    }
+                )
+            if unregistered_like > 0:
+                fail.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_unregistered_like_job",
+                        "count": unregistered_like,
+                        "jobs": execution_gate_cron.get("unregistered_like_jobs") or [],
+                    }
+                )
+            if expected and wrapped < expected:
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_wrapper_coverage_incomplete",
+                        "expected": expected,
+                        "wrapped": wrapped,
+                    }
+                )
+            if expected and wrapped >= expected and naked == 0 and unregistered_like == 0:
+                passed.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_wrapped_ok",
+                        "expected": expected,
+                        "wrapped": wrapped,
+                    }
+                )
+            if int(execution_gate_cron.get("unclassified_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "execution_gate_cron_unclassified_jobs",
+                        "count": execution_gate_cron.get("unclassified_count"),
+                    }
+                )
+        else:
+            warn.append({"code": "execution_gate_cron_summary_unavailable", "value": execution_gate_cron})
 
     owner_review = snapshot.get("owner_review", {})
     if owner_review:
@@ -4461,6 +4538,7 @@ def session_mirror_summary():
         if isinstance(latest_apply.get("apply_governance"), dict)
         else {}
     )
+    latest_boundary = latest_apply.get("boundary") if isinstance(latest_apply.get("boundary"), dict) else {}
     written_ids = dry_run.get("written_event_ids") if isinstance(dry_run, dict) and isinstance(dry_run.get("written_event_ids"), list) else []
     findings = dry_run.get("findings") if isinstance(dry_run, dict) and isinstance(dry_run.get("findings"), list) else []
     return {
@@ -4499,6 +4577,14 @@ def session_mirror_summary():
       "latest_apply_stable_scope_id": latest_governance.get("stable_scope_id"),
       "latest_apply_auto_apply": latest_governance.get("auto_apply"),
       "latest_apply_lane_graduated": latest_governance.get("lane_graduated"),
+      "latest_apply_execution_gate_envelope_id": latest_governance.get("execution_gate_envelope_id"),
+      "session_mirror_auto_apply_execution_gate_bound": bool(
+          latest_governance.get("auto_apply")
+          and latest_governance.get("lane_graduated")
+          and latest_governance.get("execution_gate_envelope_id")
+      ),
+      "latest_apply_boundary": latest_boundary,
+      "latest_apply_boundary_true_count": _boundary_true_count(latest_boundary),
       "latest_apply_reused_approval_ref": False,
       "pending_platform_counts": correlation.get("pending_platform_counts") if isinstance(correlation, dict) else {},
       "pending_event_kind_counts": correlation.get("pending_event_kind_counts") if isinstance(correlation, dict) else {},
@@ -4507,6 +4593,113 @@ def session_mirror_summary():
       "pending_only_group_count": correlation.get("pending_only_group_count") if isinstance(correlation, dict) else None,
       "internet_data_collection_pending_count": correlation.get("internet_data_collection_pending_count") if isinstance(correlation, dict) else None,
       "internet_data_collection_provider_count": correlation.get("internet_data_collection_provider_count") if isinstance(correlation, dict) else None,
+    }
+
+def _boundary_true_count(value):
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, dict):
+        return sum(_boundary_true_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_boundary_true_count(item) for item in value)
+    return 0
+
+MEMORY_OS_CRON_REGISTRY = {
+    "memory-os-owner-review-digest": {
+        "wrapper_script": "memory_os_cron_owner_review_digest_gate.py",
+        "raw_script": "memory_os_owner_review_digest.py",
+    },
+    "memory-os-right-brain-expression": {
+        "wrapper_script": "memory_os_cron_right_brain_expression_gate.py",
+        "raw_script": "memory_os_right_brain_expression.py",
+    },
+    "memory-os-module-cadence-report": {
+        "wrapper_script": "memory_os_cron_module_cadence_report_gate.py",
+        "raw_script": "memory_os_module_cadence_report_cron.py",
+    },
+    "memory-os-right-brain-expression-outcome": {
+        "wrapper_script": "memory_os_cron_right_brain_expression_outcome_gate.py",
+        "raw_script": "memory_os_right_brain_expression_outcome_cron.py",
+    },
+    "memory-os-proposal-followups-opsgate": {
+        "wrapper_script": "memory_os_cron_proposal_followups_opsgate_gate.py",
+        "raw_script": "memory_os_proposal_followups_ops_gate.py",
+    },
+    "memory-os-expression-feedback-request": {
+        "wrapper_script": "memory_os_cron_expression_feedback_request_gate.py",
+        "raw_script": "memory_os_expression_feedback_prompt.py",
+    },
+    "memory-os-memory-sources-feedback-request": {
+        "wrapper_script": "memory_os_cron_memory_sources_feedback_request_gate.py",
+        "raw_script": "memory_os_memory_sources_feedback_prompt.py",
+    },
+}
+
+def execution_gate_cron_summary():
+    jobs_path = Path("/root/.hermes/cron/jobs.json")
+    try:
+        loaded = json.loads(jobs_path.read_text(encoding="utf-8")) if jobs_path.exists() else {"jobs": []}
+    except Exception as exc:
+        return {
+            "schema_version": "memory-os.execution_gate_cron_summary.v0",
+            "status": "warning",
+            "error": str(exc)[:200],
+            "memory_os_owned_expected_count": len(MEMORY_OS_CRON_REGISTRY),
+            "memory_os_owned_wrapped_count": 0,
+            "memory_os_owned_naked_count": 0,
+            "memory_os_like_unregistered_count": 0,
+            "hermes_host_owned_count": 0,
+            "external_unmanaged_count": 0,
+            "unclassified_count": 0,
+        }
+    jobs = loaded.get("jobs", loaded) if isinstance(loaded, dict) else loaded
+    jobs = [dict(item) for item in jobs if isinstance(item, dict)] if isinstance(jobs, list) else []
+    wrapped = []
+    naked = []
+    unregistered_like = []
+    hermes_host_owned = []
+    external_unmanaged = []
+    unclassified = []
+    for job in jobs:
+        name = str(job.get("name") or "")
+        script = str(job.get("script") or "")
+        spec = MEMORY_OS_CRON_REGISTRY.get(name)
+        safe = {
+            "name": name,
+            "script": script,
+            "enabled": bool(job.get("enabled")),
+            "deliver": str(job.get("deliver") or ""),
+            "no_agent": bool(job.get("no_agent")),
+        }
+        if spec:
+            if script == spec["wrapper_script"]:
+                wrapped.append(safe)
+            else:
+                naked.append(safe)
+            continue
+        if name.startswith("memory-os-") or script.startswith("memory_os_"):
+            unregistered_like.append(safe)
+            continue
+        if name.startswith("hermes-") or script.startswith("hermes_"):
+            hermes_host_owned.append(safe)
+            continue
+        if name or script:
+            external_unmanaged.append(safe)
+        else:
+            unclassified.append(safe)
+    return {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "status": "ok",
+        "memory_os_owned_expected_count": len(MEMORY_OS_CRON_REGISTRY),
+        "memory_os_owned_wrapped_count": len(wrapped),
+        "memory_os_owned_naked_count": len(naked),
+        "memory_os_like_unregistered_count": len(unregistered_like),
+        "hermes_host_owned_count": len(hermes_host_owned),
+        "external_unmanaged_count": len(external_unmanaged),
+        "unclassified_count": len(unclassified),
+        "wrapped_jobs": wrapped,
+        "naked_jobs": naked,
+        "unregistered_like_jobs": unregistered_like,
     }
 
 def shell_alias_no_env():
@@ -5064,6 +5257,7 @@ print(json.dumps({
   "owner_review_delivery_gate": owner_review_delivery_gate,
   "owner_review_proposal_followups": owner_review_proposal_followups,
   "owner_review_proposal_auto_route": owner_review_proposal_auto_route,
+  "execution_gate_cron": execution_gate_cron_summary(),
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,
   "owner_review_agenda_digest": owner_review_agenda_digest,

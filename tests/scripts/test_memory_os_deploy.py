@@ -76,6 +76,24 @@ def test_llm_judge_probe_fails_when_boundary_true_even_if_judge_status_is_valid(
     assert classified["reason"] == "llm_judge_probe_boundary_true"
 
 
+def test_llm_judge_probe_fails_on_any_true_boundary_key_from_report_schema():
+    classified = _classify_llm_judge_probe(
+        _probe_json(
+            status="success",
+            boundaries={
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_crystallized_approval": True,
+                "actual_relationship_write": False,
+                "hindsight_exported": False,
+            },
+        )
+    )
+
+    assert classified["status"] == "fail"
+    assert classified["reason"] == "llm_judge_probe_boundary_true"
+
+
 def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     report = deploy_memory_os(
         repo_root=tmp_path,

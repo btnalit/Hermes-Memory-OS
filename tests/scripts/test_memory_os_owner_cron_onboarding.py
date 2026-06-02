@@ -237,27 +237,87 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-memory-sources-feedback-request",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "telegram"
-    assert by_name["memory-os-owner-review-digest"]["script"] == "memory_os_owner_review_digest.py"
+    assert by_name["memory-os-owner-review-digest"]["script"] == "memory_os_cron_owner_review_digest_gate.py"
     assert by_name["memory-os-owner-review-digest"]["no_agent"] is False
     assert by_name["memory-os-right-brain-expression"]["deliver"] == "origin"
-    assert by_name["memory-os-right-brain-expression"]["script"] == "memory_os_right_brain_expression.py"
+    assert by_name["memory-os-right-brain-expression"]["script"] == "memory_os_cron_right_brain_expression_gate.py"
     assert by_name["memory-os-right-brain-expression"]["no_agent"] is False
     assert by_name["memory-os-module-cadence-report"]["deliver"] == "local"
+    assert by_name["memory-os-module-cadence-report"]["script"] == "memory_os_cron_module_cadence_report_gate.py"
     assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
     assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
+    assert by_name["memory-os-right-brain-expression-outcome"]["script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
     assert by_name["memory-os-right-brain-expression-outcome"]["no_agent"] is True
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
+    assert by_name["memory-os-proposal-followups-opsgate"]["script"] == "memory_os_cron_proposal_followups_opsgate_gate.py"
     assert by_name["memory-os-proposal-followups-opsgate"]["no_agent"] is True
     assert by_name["memory-os-expression-feedback-request"]["deliver"] == "telegram"
+    assert by_name["memory-os-expression-feedback-request"]["script"] == "memory_os_cron_expression_feedback_request_gate.py"
     assert by_name["memory-os-expression-feedback-request"]["no_agent"] is False
     assert by_name["memory-os-memory-sources-feedback-request"]["deliver"] == "telegram"
+    assert by_name["memory-os-memory-sources-feedback-request"]["script"] == "memory_os_cron_memory_sources_feedback_request_gate.py"
     assert by_name["memory-os-memory-sources-feedback-request"]["no_agent"] is False
+    assert (home / "scripts" / "memory_os_execution_gate_runner.py").is_file()
+    assert (home / "scripts" / "memory_os_cron_module_cadence_report_gate.py").is_file()
     memory_sources_prompt = by_name["memory-os-memory-sources-feedback-request"]["prompt"]
     assert "不要写 Cron Run Report" in memory_sources_prompt
     assert "只输出 OWNER_MESSAGE_BEGIN 和 OWNER_MESSAGE_END 之间的内容" in memory_sources_prompt
     config = json.loads(home.joinpath("memory-os", "config.json").read_text(encoding="utf-8"))
     assert config["owner_review"]["recurring_delivery_enabled"] is True
     assert config["right_brain_expression"]["recurring_delivery_enabled"] is True
+
+
+def test_onboarding_migrates_existing_memory_os_raw_helper_to_gate_wrapper(tmp_path):
+    module = _load_module()
+    home = _home_with_helpers(
+        tmp_path,
+        platforms={"telegram": [{"id": "6808688675", "type": "dm", "name": "owner"}]},
+    )
+    jobs_path = home / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True)
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job_memory_os_module_cadence_report",
+                        "name": "memory-os-module-cadence-report",
+                        "enabled": True,
+                        "deliver": "local",
+                        "script": "memory_os_module_cadence_report_cron.py",
+                        "no_agent": True,
+                        "prompt": "",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--hermes-home",
+            str(home),
+            "--hermes-bin",
+            str(_fake_hermes(tmp_path)),
+            "--owner-review-deliver",
+            "auto",
+            "--right-brain-deliver",
+            "origin",
+            "--apply",
+            "--owner-approved",
+        ]
+    )
+
+    report = module.run_onboarding(args)
+
+    jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
+    cadence = next(job for job in jobs if job["name"] == "memory-os-module-cadence-report")
+    assert report["status"] in {"applied", "updated"}
+    assert cadence["script"] == "memory_os_cron_module_cadence_report_gate.py"
+    assert any(
+        item["name"] == "memory-os-module-cadence-report" and item["status"] == "updated"
+        for item in report["operational_cron_jobs"]
+    )
 
 
 def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypatch):
