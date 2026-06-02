@@ -94,10 +94,11 @@ def _review_command(rendered, anchor: str, action_type: str) -> str:
                     "approve_proposal": "approve",
                     "reject_proposal": "reject",
                     "mark_feedback": "feedback",
-                    "allow_speak_once": "allow",
-                    "like_expression": "feedback",
-                    "too_mechanical": "feedback",
-                    "too_frequent": "feedback",
+                "allow_speak_once": "allow",
+                "approve_session_mirror_apply": "approve",
+                "like_expression": "feedback",
+                "too_mechanical": "feedback",
+                "too_frequent": "feedback",
                     "boundary_private": "feedback",
                     "off_voice": "feedback",
                     "mute_period": "feedback",
@@ -115,6 +116,49 @@ def _review_command(rendered, anchor: str, action_type: str) -> str:
                     return f"memory {verb} {token} {action_type}"
                 return f"memory {verb} {token}"
     raise AssertionError(f"missing anchor {anchor}")
+
+
+def _session_mirror_review_command(rendered) -> str:
+    for item in (rendered.get("sections") or {}).get("action_required", []):
+        if item.get("target_type") == "session_mirror_apply":
+            return f"memory approve {item['action_tokens']['approve_session_mirror_apply']}"
+    raise AssertionError("missing SessionMirror approval item")
+
+
+def _create_session_state_db(path, *, session_id="session-owner-1", platform="telegram"):
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            create table sessions (
+                id text primary key,
+                source text,
+                created_at text,
+                updated_at text
+            )
+            """
+        )
+        conn.execute(
+            """
+            create table messages (
+                id integer primary key autoincrement,
+                session_id text,
+                role text,
+                content text,
+                created_at text
+            )
+            """
+        )
+        conn.execute(
+            "insert into sessions(id, source, created_at, updated_at) values (?, ?, ?, ?)",
+            (session_id, platform, "2026-06-02T08:00:00+00:00", "2026-06-02T08:01:00+00:00"),
+        )
+        conn.executemany(
+            "insert into messages(session_id, role, content, created_at) values (?, ?, ?, ?)",
+            [
+                (session_id, "user", "SessionMirror owner approval smoke uses safe public text", "2026-06-02T08:00:01+00:00"),
+                (session_id, "assistant", "Safe bounded summary response", "2026-06-02T08:00:02+00:00"),
+            ],
+        )
 
 
 def test_review_queue_lists_bounded_candidates_without_raw_body(tmp_path):
@@ -2780,6 +2824,62 @@ def test_reply_parser_uses_latest_recorded_digest_without_rerendering_current_qu
     assert result["active_digest"]["binding"] == "latest_recorded_digest"
     assert result["parsed"]["action_type"] == "reject_candidate"
     assert result["parsed"]["target_id"] == "cand_owner_001"
+
+
+def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(tmp_path):
+    store = _store(tmp_path)
+    _create_session_state_db(tmp_path / "state.db")
+    save_config(
+        {
+            "owner_review": {
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": "telegram",
+                "recurring_delivery_target_class": "explicit_target",
+            }
+        },
+        tmp_path,
+    )
+    rendered = render_owner_review_digest(
+        store,
+        channel="telegram",
+        max_action_required=10,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+    command = _session_mirror_review_command(rendered)
+
+    result = parse_owner_review_reply(
+        store,
+        command,
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    assert result["status"] == "ok"
+    assert result["active_digest"]["delivery_scope"] == "owner_home"
+    assert result["parsed"]["action_type"] == "approve_session_mirror_apply"
+    record = result["owner_action_result"]["record"]
+    assert record["action_type"] == "approve_session_mirror_apply"
+    assert record["target_type"] == "session_mirror_apply"
+    assert record["target_id"].startswith("production_bounded:")
+    assert record["source"] == "latest_owner_home_digest"
+    assert record["channel"] == "telegram"
+    assert record["digest_id"] == rendered["digest_id"]
+    assert record["reply_ingress_id"]
+    assert record["token_binding"]["scope"] == "owner_home"
+    assert record["token_binding"]["digest_id"] == rendered["digest_id"]
+    assert record["token_binding"]["review_item_id"].startswith("review:session_mirror_apply:")
+    assert record["token_binding"]["action_token_hash"]
+    assert record["owner_effect"]["owner_approved_session_mirror_apply"] is True
+    assert record["result_ref"]["approval_scope"] == "session_mirror_production_bounded_apply"
+    assert record["result_ref"]["max_sessions"] == 1
+    assert record["result_ref"]["stable_scope_id"]
+    assert record["result_ref"]["selected_pending_session_fingerprint"]
+    assert record["result_ref"]["actual_send"] is False
+    assert record["result_ref"]["actual_execute"] is False
 
 
 def test_provider_owner_review_reply_tool_processes_recorded_digest_before_prefetch(tmp_path):

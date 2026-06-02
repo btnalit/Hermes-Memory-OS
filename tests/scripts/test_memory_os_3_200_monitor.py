@@ -2248,6 +2248,74 @@ def test_classify_snapshot_passes_bounded_session_mirror_apply_evidence():
     assert not any(item["code"].startswith("session_mirror_apply_") for item in classification["fail"])
 
 
+def test_classify_snapshot_passes_governed_session_mirror_apply_evidence():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 30,
+        "pending_session_count": 24,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 24,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 0,
+        "pending_only_groups": [],
+        "raw_private_body_printed": False,
+        "latest_apply_status": "ok",
+        "latest_apply_bounded": True,
+        "latest_apply_written_event_ids_count": 1,
+        "latest_apply_duplicate_ignored_count": 0,
+        "latest_apply_raw_private_body_printed": False,
+        "latest_apply_approval_resolved": True,
+        "latest_apply_owner_channel_bound": True,
+        "latest_apply_owner_approved": True,
+        "latest_apply_approval_source": "owner_action_ledger",
+        "latest_apply_reused_approval_ref": False,
+        "latest_apply_stable_scope_id": "scope-ok",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "session_mirror_apply_governed_owner_ref_ok" for item in classification["pass"])
+    assert not any(item["code"] == "session_mirror_apply_owner_approved_without_resolver" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_session_mirror_owner_approved_without_owner_channel_binding():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 30,
+        "pending_session_count": 24,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 24,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 0,
+        "pending_only_groups": [],
+        "raw_private_body_printed": False,
+        "latest_apply_status": "ok",
+        "latest_apply_bounded": True,
+        "latest_apply_written_event_ids_count": 1,
+        "latest_apply_duplicate_ignored_count": 0,
+        "latest_apply_raw_private_body_printed": False,
+        "latest_apply_approval_resolved": True,
+        "latest_apply_owner_channel_bound": False,
+        "latest_apply_owner_approved": True,
+        "latest_apply_approval_source": "owner_action_ledger",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "session_mirror_apply_owner_ref_not_owner_channel_bound" for item in classification["fail"])
+
+
 def test_compact_rh31_eval_summary_strips_scores_from_monitor_snapshot():
     summary = {
         "schema_version": "memory-os.rh31_summary.v0",

@@ -127,6 +127,7 @@ ACTION_TYPES = {
     "reject_proposal",
     "apply_proposal",
     "allow_speak_once",
+    "approve_session_mirror_apply",
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
@@ -136,6 +137,7 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
+    "session_mirror_apply": {"approve_session_mirror_apply"},
     "expression": EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
@@ -1230,6 +1232,7 @@ def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
     items = _candidate_review_items(store, closed)
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
+    items.extend(_session_mirror_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     return _review_aging_summary(aged_items, aging)
@@ -1629,6 +1632,13 @@ def parse_owner_review_reply(
         note=f"owner command: {action_token or anchor}",
         rating=str(parsed.get("rating") or ""),
         apply=apply,
+        reply_context=_owner_reply_action_context(
+            rendered=rendered,
+            binding=binding,
+            item=item,
+            action_token=action_token,
+            reply_text=reply_text,
+        ),
     )
     return _reply_result(
         status="ok" if action_result.get("status") in {"ok", "duplicate_ignored"} else "error",
@@ -1839,6 +1849,7 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
     items = _candidate_review_items(store, closed)
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
+    items.extend(_session_mirror_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     sorted_items = sorted(
@@ -1872,6 +1883,7 @@ def apply_owner_action(
     note: str = "",
     rating: str = "",
     apply: bool = False,
+    reply_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if action_type not in ACTION_TYPES:
         return _action_error(store, action_type, target, owner_id, channel, "invalid_action_type", apply=apply)
@@ -1929,6 +1941,7 @@ def apply_owner_action(
         note=note,
         rating=rating,
     )
+    _attach_owner_reply_context(record, reply_context or {})
     if original_target_id != target_id:
         record["original_target_id"] = original_target_id
     result_ref: dict[str, Any] = {}
@@ -2203,6 +2216,7 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         return {}
     return {
         "anchor": str(item.get("anchor") or ""),
+        "review_item_id": str(item.get("review_item_id") or ""),
         "target_type": str(item.get("target_type") or ""),
         "target_id": str(item.get("target_id") or ""),
         "source_module": str(item.get("source_module") or ""),
@@ -2218,6 +2232,9 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
         "expression_preview_suppressed": bool(item.get("expression_preview_suppressed")),
+        "session_mirror_approval": _bounded_session_mirror_approval(
+            item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
+        ),
         "action_tokens": {
             str(key): str(value)
             for key, value in (item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}).items()
@@ -2397,6 +2414,32 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "delivery_ref": ticket.get("delivery_ref") if isinstance(ticket.get("delivery_ref"), dict) else {},
             "error_code": str(ticket.get("error_code") or ""),
         }
+    if action_type == "approve_session_mirror_apply":
+        context = record.pop("action_context", {})
+        approval = (
+            context.get("session_mirror_approval")
+            if isinstance(context.get("session_mirror_approval"), dict)
+            else {}
+        )
+        record["owner_effect"]["owner_approved_session_mirror_apply"] = True
+        return {
+            "approval_scope": "session_mirror_production_bounded_apply",
+            "stable_scope_id": str(approval.get("stable_scope_id") or ""),
+            "digest_item_id": str(approval.get("digest_item_id") or ""),
+            "selected_pending_session_fingerprint": str(
+                approval.get("selected_pending_session_fingerprint") or ""
+            ),
+            "boundary_contract_version": str(approval.get("boundary_contract_version") or ""),
+            "max_sessions": max(int(approval.get("max_sessions") or 1), 1),
+            "platform_allowlist": approval.get("platform_allowlist")
+            if isinstance(approval.get("platform_allowlist"), list)
+            else [],
+            "expires_at": str(approval.get("expires_at") or ""),
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        }
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         feedback = _append_expression_feedback(store, record, note=note)
         return {
@@ -2460,6 +2503,11 @@ def _validate_action_target(
             return "speak_payload_transcript_marker"
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES and target_type != "expression":
         return "invalid_expression_target"
+    if action_type == "approve_session_mirror_apply":
+        if target_type != "session_mirror_apply":
+            return "invalid_session_mirror_apply_target"
+        if not target_id.startswith("production_bounded:"):
+            return "invalid_session_mirror_apply_scope"
     return ""
 
 
@@ -2764,6 +2812,7 @@ def _base_action_record(
             "owner_approved_crystallized_write": False,
             "owner_revoked_crystallized_record": False,
             "owner_demoted_crystallized_record": False,
+            "owner_approved_session_mirror_apply": False,
             "projection_invalidation_recorded": False,
         },
     }
@@ -2935,6 +2984,26 @@ def _duplicate_record(
     return record
 
 
+def _attach_owner_reply_context(record: dict[str, Any], context: dict[str, Any]) -> None:
+    if not context:
+        return
+    record["source"] = str(context.get("source") or "")
+    record["digest_id"] = str(context.get("digest_id") or "")
+    record["reply_ingress_id"] = str(context.get("reply_ingress_id") or "")
+    token_binding = context.get("token_binding") if isinstance(context.get("token_binding"), dict) else {}
+    record["token_binding"] = {
+        "scope": str(token_binding.get("scope") or ""),
+        "digest_id": str(token_binding.get("digest_id") or ""),
+        "review_item_id": str(token_binding.get("review_item_id") or ""),
+        "action_token_hash": str(token_binding.get("action_token_hash") or ""),
+    }
+    session_mirror_approval = context.get("session_mirror_approval")
+    if isinstance(session_mirror_approval, dict) and session_mirror_approval:
+        record["action_context"] = {
+            "session_mirror_approval": _bounded_session_mirror_approval(session_mirror_approval),
+        }
+
+
 def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for candidate in read_candidate_queue(store.roots):
@@ -3073,6 +3142,74 @@ def _proposal_apply_review_items(store: MemoryOSStore, closed: set[str]) -> list
             }
         )
     return items
+
+
+def _session_mirror_apply_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    from .session_mirror import (
+        SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION,
+        SessionMirror,
+        session_mirror_stable_scope_id,
+    )
+
+    try:
+        report = SessionMirror(store).scan(dry_run=True, max_sessions=1)
+    except Exception:
+        return []
+    selected = report.get("selected_sessions") if isinstance(report.get("selected_sessions"), list) else []
+    if not selected:
+        return []
+    first = selected[0] if isinstance(selected[0], dict) else {}
+    fingerprint = str(first.get("fingerprint") or "")
+    if not fingerprint:
+        return []
+    platform = str(first.get("platform") or "").lower().replace("-", "_")
+    digest_item_id = f"session_mirror_apply:{fingerprint}"
+    stable_scope_id = session_mirror_stable_scope_id(
+        digest_item_id=digest_item_id,
+        selected_pending_session_fingerprint=fingerprint,
+        max_sessions=1,
+        platform_allowlist=[platform] if platform else [],
+    )
+    target_id = f"production_bounded:{stable_scope_id}"
+    if f"session_mirror_apply:{target_id}" in closed:
+        return []
+    approval = {
+        "approval_scope": "session_mirror_production_bounded_apply",
+        "stable_scope_id": stable_scope_id,
+        "digest_item_id": digest_item_id,
+        "selected_pending_session_fingerprint": fingerprint,
+        "boundary_contract_version": SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION,
+        "max_sessions": 1,
+        "platform_allowlist": [platform] if platform else [],
+        "expires_at": "",
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_identity_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return [
+        {
+            "schema_version": "memory-os.review_item.v0",
+            "review_item_id": f"review:session_mirror_apply:{stable_scope_id}",
+            "target_type": "session_mirror_apply",
+            "target_id": target_id,
+            "source_module": "session_mirror",
+            "priority": "action_required",
+            "created_at": created_at,
+            "created_at_source": "scan_pending",
+            "status": "pending_lane_graduation",
+            "summary": _bounded_text(
+                f"SessionMirror bounded production lane approval: platform={platform or 'unknown'}; "
+                f"fingerprint={fingerprint}; max_sessions=1",
+                180,
+            ),
+            "safe_source_ids": [f"session_mirror:{fingerprint}"],
+            "session_mirror_approval": approval,
+            "selected_sessions": [first],
+            "raw_body_included": False,
+        }
+    ]
 
 
 def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
@@ -3391,6 +3528,7 @@ def _digest_items(items: list[dict[str, Any]], priority: str, limit: int) -> lis
 def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
     return {
         "anchor": item.get("anchor"),
+        "review_item_id": item.get("review_item_id"),
         "target_type": item.get("target_type"),
         "target_id": item.get("target_id"),
         "source_module": item.get("source_module"),
@@ -3408,8 +3546,34 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
         "expression_preview_suppressed": bool(item.get("expression_preview_suppressed")),
         "payload_ref": _bounded_text(str(item.get("payload_ref") or ""), 220),
+        "session_mirror_approval": _bounded_session_mirror_approval(
+            item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
+        ),
         "safe_source_ids": item.get("safe_source_ids") or [],
         "raw_body_included": False,
+    }
+
+
+def _bounded_session_mirror_approval(value: dict[str, Any]) -> dict[str, Any]:
+    if not value:
+        return {}
+    platform_allowlist = value.get("platform_allowlist") if isinstance(value.get("platform_allowlist"), list) else []
+    return {
+        "approval_scope": _bounded_text(str(value.get("approval_scope") or ""), 80),
+        "stable_scope_id": _bounded_text(str(value.get("stable_scope_id") or ""), 80),
+        "digest_item_id": _bounded_text(str(value.get("digest_item_id") or ""), 120),
+        "selected_pending_session_fingerprint": _bounded_text(
+            str(value.get("selected_pending_session_fingerprint") or ""),
+            120,
+        ),
+        "boundary_contract_version": _bounded_text(str(value.get("boundary_contract_version") or ""), 80),
+        "max_sessions": max(int(value.get("max_sessions") or 0), 0),
+        "platform_allowlist": [str(item)[:80] for item in platform_allowlist[:10]],
+        "expires_at": _bounded_text(str(value.get("expires_at") or ""), 80),
+        "actual_send": bool(value.get("actual_send")),
+        "actual_execute": bool(value.get("actual_execute")),
+        "actual_identity_write": bool(value.get("actual_identity_write")),
+        "actual_unapproved_crystallized_approval": bool(value.get("actual_unapproved_crystallized_approval")),
     }
 
 
@@ -3462,6 +3626,7 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         consequence = "这条表达草案像原始对话片段，摘要不展示原文，也不提供 allow；表达反馈只入 ledger 并参与后续 proposal。"
     return {
         "anchor": anchor,
+        "review_item_id": str(item.get("review_item_id") or ""),
         "target_type": target_type,
         "target_id": target_id,
         "source_module": source_module,
@@ -3483,6 +3648,11 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "expression_preview_suppressed": bool(item.get("expression_preview_suppressed"))
         if target_type == "speak"
         else False,
+        "session_mirror_approval": _bounded_session_mirror_approval(
+            item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
+        )
+        if target_type == "session_mirror_apply"
+        else {},
         "action_tokens": {action["action_type"]: action["token"] for action in actions},
         "action_targets": {
             action["action_type"]: {
@@ -3525,6 +3695,8 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
         return "这次注入的记忆/上下文对回答有帮助吗？"
     if target_type == "speak":
         return "这条右脑表达草案要允许一次，还是给表达质量反馈？"
+    if target_type == "session_mirror_apply":
+        return "要批准 SessionMirror 这个 bounded 生产导入 lane 毕业并执行一次真实 smoke 吗？"
     return "请看一下这条 Memory-OS 状态信号。"
 
 
@@ -3542,6 +3714,8 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
         return examples[0]
     if target_type == "speak" and examples:
         return f"{examples[0]}；如果内容不合适，让 Hermes 记录具体表达反馈"
+    if target_type == "session_mirror_apply" and examples:
+        return examples[0]
     if target_type == "candidate_cleanup":
         return "这次摘要里不需要操作；等待后续整理或 review queue 清理"
     return "不需要操作"
@@ -3597,6 +3771,14 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
         if item.get("expression_preview"):
             return _bounded_text(f"{source_module} 产生了一条可审阅的 would-send 主动发言草案。", 220)
         return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案，但当前只能看到安全引用。", 220)
+    if target_type == "session_mirror_apply":
+        approval = item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
+        return _bounded_text(
+            "SessionMirror 检测到一个可安全导入的 pending 会话。"
+            f"fingerprint={approval.get('selected_pending_session_fingerprint') or 'unknown'}; "
+            f"max_sessions={approval.get('max_sessions') or 1}。",
+            220,
+        )
     return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
 
 
@@ -3622,6 +3804,11 @@ def _review_consequence(target_type: str) -> str:
         return "反馈先作为证据入 ledger；不会直接改变 live routing，除非之后经过单独 apply gate。"
     if target_type == "speak":
         return "允许会创建一个会过期的一次性许可；表达反馈只入 ledger 并参与后续 proposal，不会直接改策略。"
+    if target_type == "session_mirror_apply":
+        return (
+            "批准会授权一个 bounded SessionMirror 生产导入 scope 并允许一次真实 smoke；"
+            "不写长期记忆、不发送消息、不执行工具、不改 identity/route/score。"
+        )
     return "仅供了解；不需要状态变更。"
 
 
@@ -3657,6 +3844,8 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
             for action_type in EXPRESSION_FEEDBACK_DIGEST_ACTIONS
         )
         return actions
+    if target_type == "session_mirror_apply":
+        return [_review_action("approve", "approve_session_mirror_apply", target_type, target_id)]
     return []
 
 
@@ -4334,12 +4523,14 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "mark_feedback"
     if verb == "allow" and target_type == "speak":
         return "allow_speak_once"
+    if verb == "approve" and target_type == "session_mirror_apply":
+        return "approve_session_mirror_apply"
     return ""
 
 
 def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
     if verb == "approve":
-        return action_type in {"approve_candidate", "approve_proposal"}
+        return action_type in {"approve_candidate", "approve_proposal", "approve_session_mirror_apply"}
     if verb == "reject":
         return action_type in {"reject_candidate", "reject_proposal"}
     if verb == "feedback":
@@ -4363,6 +4554,38 @@ def _target_for_action_item(action_type: str, item: dict[str, Any]) -> tuple[str
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         return "expression", str(item.get("target_id") or "")
     return str(item.get("target_type") or ""), str(item.get("target_id") or "")
+
+
+def _owner_reply_action_context(
+    *,
+    rendered: dict[str, Any],
+    binding: str,
+    item: dict[str, Any],
+    action_token: str,
+    reply_text: str,
+) -> dict[str, Any]:
+    delivery_binding = rendered.get("delivery_binding") if isinstance(rendered.get("delivery_binding"), dict) else {}
+    digest_id = str(rendered.get("digest_id") or "")
+    token = str(action_token or "").lower()
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest() if token else ""
+    reply_ingress_id = "reply_" + hashlib.sha256(
+        "|".join([digest_id, token, str(reply_text or "")]).encode("utf-8")
+    ).hexdigest()[:16]
+    owner_home_bound = str(delivery_binding.get("scope") or "") == "owner_home"
+    return {
+        "source": "latest_owner_home_digest" if owner_home_bound else binding,
+        "digest_id": digest_id,
+        "reply_ingress_id": reply_ingress_id,
+        "token_binding": {
+            "scope": str(delivery_binding.get("scope") or ""),
+            "digest_id": digest_id,
+            "review_item_id": str(item.get("review_item_id") or f"{item.get('target_type')}:{item.get('target_id')}"),
+            "action_token_hash": token_hash,
+        },
+        "session_mirror_approval": _bounded_session_mirror_approval(
+            item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
+        ),
+    }
 
 
 def _reply_result(
@@ -6245,6 +6468,9 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
             "memory-source": "memory_source",
             "msrc": "memory_source",
             "speak": "speak",
+            "session_mirror_apply": "session_mirror_apply",
+            "session-mirror-apply": "session_mirror_apply",
+            "smap": "session_mirror_apply",
         }.get(prefix.strip(), prefix.strip())
         return normalized_prefix, suffix.strip()
     if action_type in {"approve_candidate", "reject_candidate"}:
@@ -6259,6 +6485,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return "memory_source", value
     if action_type == "allow_speak_once":
         return "speak", value
+    if action_type == "approve_session_mirror_apply":
+        return "session_mirror_apply", value
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         return "expression", value
     return "unknown", value

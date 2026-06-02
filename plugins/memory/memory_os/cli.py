@@ -91,6 +91,7 @@ from .owner_actions import (
     owner_review_surface_report,
     owner_review_status_report,
     parse_owner_review_reply,
+    read_owner_action_records,
     render_owner_review_digest,
     resolve_owner_review_channel,
     route_approved_proposal_followup_to_ops_gate,
@@ -102,6 +103,7 @@ from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
 from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
 from .session_mirror import SessionMirror
+from .session_mirror import read_session_mirror_apply_records
 from .shadow_journal import ShadowJournalIngestion
 from .state_source_mirror import StateSourceMirror
 from .store import MemoryOSStore
@@ -1423,15 +1425,7 @@ def _session_mirror_apply_governance(args: argparse.Namespace, store: MemoryOSSt
             ),
         }
     if metadata["owner_approved"] and metadata["approval_ref"] and evidence_refs:
-        return {
-            "status": "blocked",
-            "metadata": metadata,
-            "report": _session_mirror_apply_gate_report(
-                store,
-                reason="session_mirror_apply_owner_ref_not_validated",
-                metadata=metadata,
-            ),
-        }
+        return _resolve_session_mirror_owner_apply_governance(args, store, metadata)
     return {
         "status": "blocked",
         "metadata": metadata,
@@ -1446,6 +1440,134 @@ def _session_mirror_apply_governance(args: argparse.Namespace, store: MemoryOSSt
 def _session_mirror_test_host_apply_verified(*, env_allowed: bool, config_allowed: bool, marker: str) -> bool:
     trusted_markers = {"install_preset:test-host", "manual:test-host"}
     return env_allowed and config_allowed and str(marker or "") in trusted_markers
+
+
+def _resolve_session_mirror_owner_apply_governance(
+    args: argparse.Namespace,
+    store: MemoryOSStore,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    approval_ref = str(metadata.get("approval_ref") or "")
+    record = _find_owner_action_record(store, approval_ref)
+    if not record:
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_not_found")
+    checks = [
+        (record.get("schema_version") == "memory-os.owner_action.v0", "session_mirror_apply_owner_ref_wrong_schema"),
+        (record.get("action_type") == "approve_session_mirror_apply", "session_mirror_apply_owner_ref_wrong_action"),
+        (record.get("target_type") == "session_mirror_apply", "session_mirror_apply_owner_ref_scope_mismatch"),
+        (record.get("result") == "applied", "session_mirror_apply_owner_ref_not_applied"),
+        (
+            (record.get("owner_effect") or {}).get("owner_approved_session_mirror_apply") is True,
+            "session_mirror_apply_owner_ref_not_applied",
+        ),
+    ]
+    for ok, reason in checks:
+        if not ok:
+            return _blocked_session_mirror_owner_apply(store, metadata, reason)
+    token_binding = record.get("token_binding") if isinstance(record.get("token_binding"), dict) else {}
+    if (
+        str(record.get("source") or "") != "latest_owner_home_digest"
+        or str(record.get("channel") or "") in {"", "cli"}
+        or not str(record.get("digest_id") or "")
+        or not str(record.get("reply_ingress_id") or "")
+        or str(token_binding.get("scope") or "") != "owner_home"
+        or str(token_binding.get("digest_id") or "") != str(record.get("digest_id") or "")
+        or not str(token_binding.get("review_item_id") or "")
+        or not str(token_binding.get("action_token_hash") or "")
+    ):
+        return _blocked_session_mirror_owner_apply(
+            store,
+            metadata,
+            "session_mirror_apply_owner_ref_not_owner_channel_bound",
+        )
+    result_ref = record.get("result_ref") if isinstance(record.get("result_ref"), dict) else {}
+    if str(result_ref.get("approval_scope") or "") != "session_mirror_production_bounded_apply":
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_scope_mismatch")
+    if _session_mirror_owner_ref_consumed(store, approval_ref):
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_already_consumed")
+    approved_max = max(int(result_ref.get("max_sessions") or 0), 0)
+    requested_max = max(int(getattr(args, "max_sessions", 0) or 0), 0)
+    if requested_max == 0:
+        requested_max = 1
+    if approved_max <= 0 or requested_max > approved_max:
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_max_sessions_exceeded")
+    approved_platforms = {
+        str(item).strip().lower().replace("-", "_")
+        for item in (result_ref.get("platform_allowlist") if isinstance(result_ref.get("platform_allowlist"), list) else [])
+        if str(item).strip()
+    }
+    requested_platforms = {
+        str(item).strip().lower().replace("-", "_")
+        for item in list(getattr(args, "platform", []) or [])
+        if str(item).strip()
+    }
+    if approved_platforms and (not requested_platforms or not requested_platforms <= approved_platforms):
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_platform_not_allowed")
+    if any(
+        bool(result_ref.get(key))
+        for key in (
+            "actual_send",
+            "actual_execute",
+            "actual_identity_write",
+            "actual_unapproved_crystallized_approval",
+        )
+    ):
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_boundary_true")
+    dry_run = SessionMirror(store).scan(
+        dry_run=True,
+        max_sessions=requested_max,
+        platform_allowlist=list(requested_platforms or approved_platforms),
+    )
+    fingerprints = dry_run.get("selected_session_fingerprints") if isinstance(dry_run.get("selected_session_fingerprints"), list) else []
+    expected_fingerprint = str(result_ref.get("selected_pending_session_fingerprint") or "")
+    if fingerprints and expected_fingerprint and str(fingerprints[0]) != expected_fingerprint:
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_scope_mismatch")
+    stable_scope_id = str(result_ref.get("stable_scope_id") or "")
+    if stable_scope_id and str(record.get("target_id") or "") != f"production_bounded:{stable_scope_id}":
+        return _blocked_session_mirror_owner_apply(store, metadata, "session_mirror_apply_owner_ref_scope_mismatch")
+    metadata.update(
+        {
+            "owner_approved": True,
+            "approval_resolved": True,
+            "approval_source": "owner_action_ledger",
+            "approval_target_type": str(record.get("target_type") or ""),
+            "approval_target_id": str(record.get("target_id") or ""),
+            "approved_max_sessions": approved_max,
+            "owner_channel_bound": True,
+            "stable_scope_id": stable_scope_id,
+            "selected_pending_session_fingerprint": expected_fingerprint,
+        }
+    )
+    return {"status": "ok", "metadata": metadata}
+
+
+def _find_owner_action_record(store: MemoryOSStore, owner_action_id: str) -> dict[str, Any] | None:
+    for record in reversed(read_owner_action_records(store.roots)):
+        if str(record.get("owner_action_id") or "") == str(owner_action_id or ""):
+            return record
+    return None
+
+
+def _session_mirror_owner_ref_consumed(store: MemoryOSStore, approval_ref: str) -> bool:
+    for record in read_session_mirror_apply_records(store.roots):
+        governance = record.get("apply_governance") if isinstance(record.get("apply_governance"), dict) else {}
+        if str(governance.get("approval_ref") or "") != str(approval_ref or ""):
+            continue
+        if int(record.get("written_event_ids_count") or 0) > 0:
+            return True
+    return False
+
+
+def _blocked_session_mirror_owner_apply(
+    store: MemoryOSStore,
+    metadata: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "metadata": metadata,
+        "report": _session_mirror_apply_gate_report(store, reason=reason, metadata=metadata),
+    }
 
 
 def _session_mirror_apply_gate_report(

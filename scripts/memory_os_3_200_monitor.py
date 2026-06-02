@@ -1431,6 +1431,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 )
             if latest_apply_written > 0 and session_mirror.get("latest_apply_bounded") is not True:
                 fail.append({"code": "session_mirror_apply_unbounded_write", "value": latest_apply_written})
+            latest_owner_approved = session_mirror.get("latest_apply_owner_approved") is True
+            latest_approval_resolved = session_mirror.get("latest_apply_approval_resolved") is True
+            latest_owner_channel_bound = session_mirror.get("latest_apply_owner_channel_bound") is True
+            if latest_owner_approved and not latest_approval_resolved:
+                fail.append({"code": "session_mirror_apply_owner_approved_without_resolver"})
+            if latest_approval_resolved and not latest_owner_channel_bound:
+                fail.append({"code": "session_mirror_apply_owner_ref_not_owner_channel_bound"})
+            if session_mirror.get("latest_apply_reused_approval_ref") is True:
+                fail.append({"code": "session_mirror_apply_approval_ref_reused"})
             if (
                 session_mirror.get("latest_apply_status") == "ok"
                 and session_mirror.get("latest_apply_bounded") is True
@@ -1442,6 +1451,20 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     {
                         "code": "session_mirror_apply_bounded_ok",
                         "written_event_ids_count": latest_apply_written,
+                    }
+                )
+            if (
+                latest_apply_written > 0
+                and latest_approval_resolved
+                and latest_owner_channel_bound
+                and latest_owner_approved
+                and session_mirror.get("latest_apply_approval_source") == "owner_action_ledger"
+                and session_mirror.get("latest_apply_reused_approval_ref") is not True
+            ):
+                passed.append(
+                    {
+                        "code": "session_mirror_apply_governed_owner_ref_ok",
+                        "stable_scope_id": session_mirror.get("latest_apply_stable_scope_id") or "",
                     }
                 )
         if session_mirror.get("dry_run_status") == "ok" and int(session_mirror.get("dry_run_written_event_ids_count") or 0) == 0:
@@ -4419,6 +4442,11 @@ def session_mirror_summary():
         if isinstance(apply_status, dict) and isinstance(apply_status.get("latest_apply"), dict)
         else {}
     )
+    latest_governance = (
+        latest_apply.get("apply_governance")
+        if isinstance(latest_apply.get("apply_governance"), dict)
+        else {}
+    )
     written_ids = dry_run.get("written_event_ids") if isinstance(dry_run, dict) and isinstance(dry_run.get("written_event_ids"), list) else []
     findings = dry_run.get("findings") if isinstance(dry_run, dict) and isinstance(dry_run.get("findings"), list) else []
     return {
@@ -4449,6 +4477,13 @@ def session_mirror_summary():
       "latest_apply_selected_session_count": latest_apply.get("selected_session_count"),
       "latest_apply_skipped_by_platform_count": latest_apply.get("skipped_by_platform_count"),
       "latest_apply_skipped_by_limit_count": latest_apply.get("skipped_by_limit_count"),
+      "latest_apply_owner_approved": latest_governance.get("owner_approved"),
+      "latest_apply_approval_resolved": latest_governance.get("approval_resolved"),
+      "latest_apply_approval_source": latest_governance.get("approval_source"),
+      "latest_apply_approval_ref": latest_governance.get("approval_ref"),
+      "latest_apply_owner_channel_bound": latest_governance.get("owner_channel_bound"),
+      "latest_apply_stable_scope_id": latest_governance.get("stable_scope_id"),
+      "latest_apply_reused_approval_ref": False,
       "pending_platform_counts": correlation.get("pending_platform_counts") if isinstance(correlation, dict) else {},
       "pending_event_kind_counts": correlation.get("pending_event_kind_counts") if isinstance(correlation, dict) else {},
       "topic_group_counts": correlation.get("topic_group_counts") if isinstance(correlation, dict) else {},

@@ -18,6 +18,7 @@ from .store import MemoryOSStore
 
 
 SESSION_MIRROR_APPLY_SCHEMA_VERSION = "memory-os.session_mirror_apply.v0"
+SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION = "session-mirror-governed-apply.v1"
 SESSION_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(api[-_\s]?key|token|password|secret)\s*[:=]\s*([^\s;,)\]}]+)"),
 )
@@ -30,6 +31,29 @@ def session_mirror_apply_records_path(roots: MemoryOSRoots) -> Path:
 def read_session_mirror_apply_records(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
     records = _read_jsonl(session_mirror_apply_records_path(roots))
     return records[-max(limit, 0):] if limit else records
+
+
+def session_mirror_stable_scope_id(
+    *,
+    digest_item_id: str,
+    selected_pending_session_fingerprint: str,
+    max_sessions: int,
+    platform_allowlist: list[str] | tuple[str, ...] | None,
+    expires_at: str = "",
+    boundary_contract_version: str = SESSION_MIRROR_BOUNDARY_CONTRACT_VERSION,
+) -> str:
+    platforms = ",".join(_normalize_platform_allowlist(platform_allowlist))
+    material = "|".join(
+        [
+            str(digest_item_id or ""),
+            str(selected_pending_session_fingerprint or ""),
+            str(max(int(max_sessions or 0), 0)),
+            platforms,
+            str(expires_at or ""),
+            str(boundary_contract_version or ""),
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
 
 class SessionMirror:
@@ -119,6 +143,8 @@ class SessionMirror:
         if not dry_run and limit == 0:
             limit = 1
         selected_sessions = platform_filtered[:limit] if limit else platform_filtered
+        selected_safe_sessions = [_safe_pending_session(session) for session in selected_sessions]
+        selected_fingerprints = [str(item["fingerprint"]) for item in selected_safe_sessions]
         skipped_by_platform_count = len(new_sessions) - len(platform_filtered)
         skipped_by_limit_count = max(len(platform_filtered) - len(selected_sessions), 0)
         written_events: list[str] = []
@@ -154,6 +180,8 @@ class SessionMirror:
                 skipped_by_limit_count=skipped_by_limit_count,
                 platform_allowlist=platforms,
                 max_sessions=limit,
+                selected_sessions=selected_safe_sessions,
+                selected_session_fingerprints=selected_fingerprints,
                 written_event_ids=written_events,
                 status="ok" if not findings else "warning",
                 findings=findings,
@@ -178,6 +206,8 @@ class SessionMirror:
             "state_rebuilt": state_rebuilt,
             "written_event_ids": written_events,
             "written_event_ids_count": len(written_events),
+            "selected_sessions": selected_safe_sessions,
+            "selected_session_fingerprints": selected_fingerprints,
             "duplicate_ignored_count": 0,
             "raw_private_body_printed": False,
             "apply_governance": governance,
@@ -324,6 +354,8 @@ class SessionMirror:
         skipped_by_limit_count: int,
         platform_allowlist: list[str],
         max_sessions: int,
+        selected_sessions: list[dict[str, Any]],
+        selected_session_fingerprints: list[str],
         written_event_ids: list[str],
         status: str,
         findings: list[dict[str, Any]],
@@ -346,6 +378,8 @@ class SessionMirror:
             "skipped_by_limit_count": skipped_by_limit_count,
             "written_event_ids": written_event_ids,
             "written_event_ids_count": len(written_event_ids),
+            "selected_sessions": selected_sessions,
+            "selected_session_fingerprints": selected_session_fingerprints,
             "duplicate_ignored_count": 0,
             "raw_private_body_printed": False,
             "finding_count": len(findings),
@@ -458,6 +492,13 @@ def _session_record(
         "event_kind": event_kind,
         "drive_policy": drive_policy,
         "summary": summary,
+        "fingerprint": _session_fingerprint(
+            source_kind=source_kind,
+            session_id=session_id,
+            platform=platform,
+            updated_at=updated_at,
+            event_kind=event_kind,
+        ),
     }
 
 
@@ -484,6 +525,37 @@ def _normalize_platform_allowlist(values: list[str] | tuple[str, ...] | None) ->
     return normalized
 
 
+def _session_fingerprint(*, source_kind: str, session_id: str, platform: str, updated_at: str, event_kind: str) -> str:
+    session_hash = hashlib.sha256(str(session_id or "").encode("utf-8")).hexdigest()[:16]
+    timestamp_bucket = str(updated_at or "").split("T", 1)[0]
+    material = "|".join(
+        [
+            str(platform or "").lower().replace("-", "_"),
+            str(source_kind or ""),
+            session_hash,
+            timestamp_bucket,
+            str(event_kind or ""),
+        ]
+    )
+    return "smfp_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def _safe_pending_session(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "fingerprint": str(session.get("fingerprint") or ""),
+        "platform": str(session.get("platform") or ""),
+        "source_kind": str(session.get("source_kind") or ""),
+        "source_group_id": str(session.get("session_id") or ""),
+        "summary": _clip(str(session.get("summary") or ""), limit=180),
+        "summary_length": len(str(session.get("summary") or "")),
+        "raw_private_body_printed": False,
+        "secret_redaction_applied": True,
+        "body_material_class": "metadata_or_redacted_summary",
+        "message_count": int(session.get("message_count") or 0),
+        "tool_count": int(session.get("tool_count") or 0),
+    }
+
+
 def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:
     return {
         "schema_version": record.get("schema_version"),
@@ -498,6 +570,10 @@ def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:
         "skipped_by_platform_count": record.get("skipped_by_platform_count"),
         "skipped_by_limit_count": record.get("skipped_by_limit_count"),
         "written_event_ids_count": record.get("written_event_ids_count"),
+        "selected_session_fingerprints": [
+            str(item)
+            for item in (record.get("selected_session_fingerprints") if isinstance(record.get("selected_session_fingerprints"), list) else [])
+        ][:10],
         "duplicate_ignored_count": record.get("duplicate_ignored_count"),
         "raw_private_body_printed": record.get("raw_private_body_printed"),
         "finding_count": record.get("finding_count"),
@@ -513,6 +589,14 @@ def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
     return {
         "owner_approved": bool(value.get("owner_approved")),
         "approval_ref": str(value.get("approval_ref") or "")[:160],
+        "approval_resolved": bool(value.get("approval_resolved")),
+        "approval_source": str(value.get("approval_source") or "")[:80],
+        "approval_target_type": str(value.get("approval_target_type") or "")[:80],
+        "approval_target_id": str(value.get("approval_target_id") or "")[:180],
+        "approved_max_sessions": int(value.get("approved_max_sessions") or 0),
+        "owner_channel_bound": bool(value.get("owner_channel_bound")),
+        "stable_scope_id": str(value.get("stable_scope_id") or "")[:80],
+        "selected_pending_session_fingerprint": str(value.get("selected_pending_session_fingerprint") or "")[:120],
         "test_host": bool(value.get("test_host")),
         "test_host_config_allowed": bool(value.get("test_host_config_allowed")),
         "test_host_marker": str(value.get("test_host_marker") or "")[:160],

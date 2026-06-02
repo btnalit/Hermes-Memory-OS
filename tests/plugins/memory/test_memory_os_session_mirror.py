@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import sqlite3
 
@@ -53,6 +54,68 @@ def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
                 (session_id, "tool", "PRIVATE_TOOL_TRACE_SHOULD_NOT_APPEAR", "2026-05-21T08:00:03+00:00"),
             ],
         )
+
+
+def _append_owner_action(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _owner_action_record(store, *, owner_action_id="oact_session_mirror_ok", fingerprint=""):
+    stable_scope_id = hashlib.sha256(
+        "|".join(
+            [
+                "session_mirror_apply",
+                fingerprint or "fp_session_mirror_ok",
+                "1",
+                "telegram",
+                "",
+                "session-mirror-governed-apply.v1",
+            ]
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "schema_version": "memory-os.owner_action.v0",
+        "owner_action_id": owner_action_id,
+        "idempotency_key": f"owner|session_mirror_apply|production_bounded:{stable_scope_id}|approve_session_mirror_apply",
+        "action_type": "approve_session_mirror_apply",
+        "target_type": "session_mirror_apply",
+        "target_id": f"production_bounded:{stable_scope_id}",
+        "owner_id": "owner",
+        "channel": "telegram",
+        "created_at": "2026-06-02T08:02:00Z",
+        "result": "applied",
+        "source": "latest_owner_home_digest",
+        "digest_id": "odig_session_mirror_ok",
+        "reply_ingress_id": "audit_reply_ingress_ok",
+        "token_binding": {
+            "scope": "owner_home",
+            "digest_id": "odig_session_mirror_ok",
+            "review_item_id": "session_mirror_apply",
+            "action_token_hash": "hash_ok",
+        },
+        "result_ref": {
+            "approval_scope": "session_mirror_production_bounded_apply",
+            "stable_scope_id": stable_scope_id,
+            "selected_pending_session_fingerprint": fingerprint or "fp_session_mirror_ok",
+            "boundary_contract_version": "session-mirror-governed-apply.v1",
+            "max_sessions": 1,
+            "platform_allowlist": ["telegram"],
+            "expires_at": "2099-01-01T00:00:00Z",
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+        "owner_effect": {"owner_approved_session_mirror_apply": True},
+    }
 
 
 def test_session_mirror_empty_environment_is_ok_and_dry_run_writes_nothing(tmp_path):
@@ -286,7 +349,7 @@ def test_session_mirror_cli_scan_apply_rejects_forged_owner_metadata(tmp_path, m
     report = json.loads(capsys.readouterr().out)
     assert report["schema_version"] == "memory-os.session_mirror_apply_gate.v0"
     assert report["status"] == "blocked"
-    assert report["reason"] == "session_mirror_apply_owner_ref_not_validated"
+    assert report["reason"] == "session_mirror_apply_owner_ref_not_found"
     store_events = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path)).read_events()
     assert store_events == []
 
@@ -341,3 +404,149 @@ def test_session_mirror_cli_scan_apply_allows_verified_test_host_gate(tmp_path, 
     assert report["apply_governance"]["test_host_marker"] == "install_preset:test-host"
     assert report["apply_governance"]["evidence_refs"] == ["test:smoke"]
     assert report["apply_governance"]["historical_bounded_smoke_unattested"] is False
+
+
+def test_session_mirror_dry_run_exposes_safe_pending_fingerprint_without_raw_body(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="fingerprint-session", platform="telegram")
+    mirror = SessionMirror(store)
+
+    report = mirror.scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+
+    assert report["selected_session_fingerprints"]
+    selected = report["selected_sessions"][0]
+    assert selected["fingerprint"] == report["selected_session_fingerprints"][0]
+    assert selected["raw_private_body_printed"] is False
+    assert selected["secret_redaction_applied"] is True
+    serialized = json.dumps(selected, ensure_ascii=False)
+    assert "PCDN" in serialized
+    assert "PRIVATE_TOOL_TRACE_SHOULD_NOT_APPEAR" not in serialized
+
+
+def test_session_mirror_cli_scan_apply_accepts_owner_channel_approval_once(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="governed-session", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    fingerprint = dry_run["selected_session_fingerprints"][0]
+    owner_record = _owner_action_record(store, fingerprint=fingerprint)
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--owner-approved",
+            "--approval-ref",
+            owner_record["owner_action_id"],
+            "--evidence-ref",
+            "full_lane_b:owner_channel:odig_session_mirror_ok",
+            "--max-sessions",
+            "1",
+            "--platform",
+            "telegram",
+        ]
+    )
+
+    exit_code = memory_os_command(args)
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["written_event_ids_count"] == 1
+    assert report["apply_governance"]["owner_approved"] is True
+    assert report["apply_governance"]["approval_resolved"] is True
+    assert report["apply_governance"]["approval_source"] == "owner_action_ledger"
+    assert report["apply_governance"]["approval_ref"] == owner_record["owner_action_id"]
+    assert report["apply_governance"]["owner_channel_bound"] is True
+    assert report["apply_governance"]["stable_scope_id"] == owner_record["result_ref"]["stable_scope_id"]
+
+
+def test_session_mirror_cli_scan_apply_rejects_consumed_owner_ref(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="governed-session", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    owner_record = _owner_action_record(store, fingerprint=dry_run["selected_session_fingerprints"][0])
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    first = parser.parse_args(
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--owner-approved",
+            "--approval-ref",
+            owner_record["owner_action_id"],
+            "--evidence-ref",
+            "full_lane_b:owner_channel:odig_session_mirror_ok",
+            "--max-sessions",
+            "1",
+            "--platform",
+            "telegram",
+        ]
+    )
+    assert memory_os_command(first) == 0
+    capsys.readouterr()
+    second = parser.parse_args(
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--owner-approved",
+            "--approval-ref",
+            owner_record["owner_action_id"],
+            "--evidence-ref",
+            "full_lane_b:owner_channel:odig_session_mirror_ok",
+            "--max-sessions",
+            "1",
+            "--platform",
+            "telegram",
+        ]
+    )
+
+    exit_code = memory_os_command(second)
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["reason"] == "session_mirror_apply_owner_ref_already_consumed"
+    assert report["written_event_ids_count"] == 0
+    assert len(read_session_mirror_apply_records(store.roots)) == 1
+
+
+def test_session_mirror_cli_scan_apply_rejects_owner_ref_without_owner_home_binding(tmp_path, monkeypatch, capsys):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="governed-session", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    owner_record = _owner_action_record(store, fingerprint=dry_run["selected_session_fingerprints"][0])
+    owner_record["source"] = "cli"
+    owner_record["token_binding"]["scope"] = "cli"
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--owner-approved",
+            "--approval-ref",
+            owner_record["owner_action_id"],
+            "--evidence-ref",
+            "full_lane_b:owner_channel:odig_session_mirror_ok",
+            "--max-sessions",
+            "1",
+            "--platform",
+            "telegram",
+        ]
+    )
+
+    exit_code = memory_os_command(args)
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["reason"] == "session_mirror_apply_owner_ref_not_owner_channel_bound"
+    assert report["written_event_ids_count"] == 0

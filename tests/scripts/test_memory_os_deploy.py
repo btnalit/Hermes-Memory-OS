@@ -1,6 +1,7 @@
 import json
 
 from scripts.deploy_memory_os import (
+    _classify_llm_judge_probe,
     classify_deploy_report,
     deploy_memory_os,
     render_deploy_plan,
@@ -30,6 +31,49 @@ def _llm_judge_probe_result():
         ),
         "stderr": "",
     }
+
+
+def _probe_json(*, status="ok", boundaries=None):
+    return {
+        "json": {
+            "schema_version": "memory-os.low_clue_recall.v0",
+            "candidate_count": 0,
+            "llm_judge": {
+                "status": status,
+                "mode": "report_only",
+                "provider": "hermes_default",
+            },
+            "boundaries": boundaries
+            if boundaries is not None
+            else {
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_canonical_write": False,
+            },
+        }
+    }
+
+
+def test_llm_judge_probe_classifies_insufficient_context_as_pass_when_boundaries_false():
+    classified = _classify_llm_judge_probe(_probe_json(status="insufficient_context"))
+
+    assert classified["status"] == "pass"
+
+
+def test_llm_judge_probe_fails_when_boundary_true_even_if_judge_status_is_valid():
+    classified = _classify_llm_judge_probe(
+        _probe_json(
+            status="success",
+            boundaries={
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_canonical_write": True,
+            },
+        )
+    )
+
+    assert classified["status"] == "fail"
+    assert classified["reason"] == "llm_judge_probe_boundary_true"
 
 
 def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
