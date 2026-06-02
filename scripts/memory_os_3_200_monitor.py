@@ -4781,6 +4781,7 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
     boundary_false = permit.get("boundary_true") is not True and _boundary_true_count(permit.get("boundary")) == 0
     unused_before_apply = stored_resolution.get("unused_before_apply") is True
     consumed_after_apply = len(completions) > 0
+    completion_count_exactly_one = len(completions) == 1
     status = (
       "ok"
       if lane_match
@@ -4789,7 +4790,7 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
       and boundary_false
       and scope_match
       and unused_before_apply
-      and consumed_after_apply
+      and completion_count_exactly_one
       else "invalid"
     )
     reason = ""
@@ -4806,8 +4807,8 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
             reason = "execution_gate_scope_mismatch"
         elif not unused_before_apply:
             reason = "execution_gate_permit_not_unused_before_apply"
-        elif not consumed_after_apply:
-            reason = "execution_gate_completion_missing"
+        elif not completion_count_exactly_one:
+            reason = "execution_gate_completion_missing" if not consumed_after_apply else "execution_gate_completion_count_not_one"
         else:
             reason = "execution_gate_permit_integrity_invalid"
     return {
@@ -4820,6 +4821,7 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
       "completion_created_at": completion_time.isoformat() if completion_time is not None else "",
       "unused_before_apply": unused_before_apply,
       "consumed_after_apply": consumed_after_apply,
+      "completion_count_exactly_one": completion_count_exactly_one,
       "scope_match": scope_match,
       "expected_scope_hash": expected_scope_hash,
       "permit_scope_hash": permit_scope_hash,

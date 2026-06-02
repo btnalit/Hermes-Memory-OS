@@ -2481,6 +2481,69 @@ def test_session_mirror_permit_integrity_accepts_completed_permit_after_ttl(monk
     assert integrity["consumed_after_apply"] is True
 
 
+def test_session_mirror_permit_integrity_rejects_multiple_completions(monkeypatch):
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    latest_apply = {
+        "max_sessions": 1,
+        "platform_allowlist": ["telegram"],
+        "selected_session_fingerprints": ["smfp_done"],
+    }
+    latest_governance = {
+        "approval_ref": "oa_graduated",
+        "stable_scope_id": "lane:telegram",
+        "execution_gate_envelope_id": "xgate_completed_twice",
+        "execution_gate_permit_resolution": {"unused_before_apply": True},
+    }
+    scope = {
+        "approval_ref": "oa_graduated",
+        "stable_scope_id": "lane:telegram",
+        "max_sessions_per_run": 1,
+        "platform_allowlist": ["telegram"],
+        "selected_session_fingerprints": ["smfp_done"],
+    }
+    records = [
+        {
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_completed_twice",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "boundary_true": False,
+            "boundary": {
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_unapproved_crystallized_approval": False,
+            },
+            "scope": scope,
+            "scope_hash": namespace["_execution_gate_scope_hash"](scope),
+            "created_at": "2000-01-01T00:00:00Z",
+            "expires_at": "2000-01-01T00:15:00Z",
+        },
+        {
+            "stage": "completion",
+            "execution_gate_envelope_id": "xgate_completed_twice",
+            "lane_id": "session_mirror_auto_apply",
+            "created_at": "2000-01-01T00:00:05Z",
+            "execution_status": "ok",
+        },
+        {
+            "stage": "completion",
+            "execution_gate_envelope_id": "xgate_completed_twice",
+            "lane_id": "session_mirror_auto_apply",
+            "created_at": "2000-01-01T00:00:06Z",
+            "execution_status": "ok",
+        },
+    ]
+    monkeypatch.setitem(namespace, "_read_jsonl", lambda path: records)
+
+    integrity = namespace["session_mirror_auto_apply_permit_integrity"](latest_apply, latest_governance)
+
+    assert integrity["status"] == "invalid"
+    assert integrity["reason"] == "execution_gate_completion_count_not_one"
+    assert integrity["completion_count"] == 2
+
+
 def test_classify_snapshot_fails_session_mirror_apply_boundary_true():
     snapshot = _healthy_snapshot()
     snapshot["session_mirror"] = {
