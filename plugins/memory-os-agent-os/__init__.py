@@ -29,6 +29,11 @@ _ALLOWED_ALIASES = {
     "review",
     "modules",
     "eval",
+    "cognitive-loop",
+    "host-probe",
+    "signal-sources",
+    "projection",
+    "left-brain",
 }
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
@@ -351,6 +356,29 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     metadata_retention_parser.add_argument("--suggestion-report-root", default="")
     metadata_retention_parser.add_argument("--suggestion-report-days", type=int, default=30)
     metadata_retention_parser.add_argument("--suggestion-report-keep-latest", type=int, default=20)
+    cognitive_loop_parser = subs.add_parser("cognitive-loop")
+    cognitive_loop_subs = cognitive_loop_parser.add_subparsers(dest="cognitive_loop_command", required=True)
+    cognitive_loop_subs.add_parser("status")
+    cognitive_loop_run_once = cognitive_loop_subs.add_parser("run-once")
+    cognitive_loop_run_once.add_argument("--test-host", action="store_true")
+    cognitive_loop_run_once.add_argument("--dry-run", action="store_true")
+    cognitive_loop_run_once.add_argument("--apply", action="store_true")
+    host_probe_parser = subs.add_parser("host-probe")
+    host_probe_parser.add_argument("--json", action="store_true")
+    signal_sources_parser = subs.add_parser("signal-sources")
+    signal_sources_parser.add_argument("--json", action="store_true")
+    signal_sources_parser.add_argument("--collect", action="store_true")
+    projection_parser = subs.add_parser("projection")
+    projection_subs = projection_parser.add_subparsers(dest="projection_command", required=True)
+    projection_subs.add_parser("status")
+    projection_collect = projection_subs.add_parser("collect")
+    projection_collect.add_argument("--manual-run-ref", default="manual_cli")
+    left_brain_parser = subs.add_parser("left-brain")
+    left_brain_subs = left_brain_parser.add_subparsers(dest="left_brain_command", required=True)
+    left_brain_subs.add_parser("status")
+    left_brain_advise = left_brain_subs.add_parser("advise")
+    left_brain_advise.add_argument("--max-findings", type=int, default=20)
+    left_brain_advise.add_argument("--no-write", action="store_true")
     modules_parser = subs.add_parser("modules")
     modules_subs = modules_parser.add_subparsers(dest="modules_command", required=True)
     modules_subs.add_parser("status")

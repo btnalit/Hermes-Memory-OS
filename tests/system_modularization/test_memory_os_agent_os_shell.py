@@ -434,6 +434,26 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert eval_run_args.rh31_command == "run"
     assert eval_run_args.fixture == "synthetic"
     assert eval_run_args.adapter == ["grep"]
+    cognitive_loop_args = parser.parse_args(["cognitive-loop", "run-once", "--test-host", "--apply"])
+    assert cognitive_loop_args.agent_os_command == "cognitive-loop"
+    assert cognitive_loop_args.cognitive_loop_command == "run-once"
+    assert cognitive_loop_args.test_host is True
+    assert cognitive_loop_args.apply is True
+    host_probe_args = parser.parse_args(["host-probe", "--json"])
+    assert host_probe_args.agent_os_command == "host-probe"
+    assert host_probe_args.json is True
+    signal_sources_args = parser.parse_args(["signal-sources", "--json"])
+    assert signal_sources_args.agent_os_command == "signal-sources"
+    assert signal_sources_args.json is True
+    projection_args = parser.parse_args(["projection", "collect", "--manual-run-ref", "agent-shell-test"])
+    assert projection_args.agent_os_command == "projection"
+    assert projection_args.projection_command == "collect"
+    assert projection_args.manual_run_ref == "agent-shell-test"
+    left_brain_args = parser.parse_args(["left-brain", "advise", "--max-findings", "5", "--no-write"])
+    assert left_brain_args.agent_os_command == "left-brain"
+    assert left_brain_args.left_brain_command == "advise"
+    assert left_brain_args.max_findings == 5
+    assert left_brain_args.no_write is True
 
 
 def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
