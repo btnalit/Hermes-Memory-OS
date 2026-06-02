@@ -11,7 +11,9 @@ from uuid import uuid4
 
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import read_candidate_queue
+from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
+from plugins.memory.memory_os.signal_source_registry import signal_source_specs
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.system.scheduler import ScheduleCoordinator
 
@@ -199,6 +201,10 @@ class CognitiveLoopRunner:
             ("grounded_expression_judge", self._grounded_expression_judge),
             ("self_evolution", self._self_evolution),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
+            ("host_capability_probe", self._host_capability_probe),
+            ("signal_collection", self._signal_collection),
+            ("memory_projection", self._memory_projection),
+            ("left_brain_advisor", self._left_brain_advisor),
             ("governance_feedback", lambda context: self._governance_feedback(context, apply=apply)),
             ("deep_reflection", lambda context: self._deep_reflection(context, apply=apply)),
             ("heartbeat_post", lambda context: self._heartbeat(max_events=max_events)),
@@ -612,6 +618,92 @@ class CognitiveLoopRunner:
             write=True,
         )
 
+    def _host_capability_probe(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.memory.memory_os.host_capability_probe import probe_host_capabilities
+
+        result = probe_host_capabilities(self.store.roots)
+        context["host_capability_probe_result"] = result
+        return result
+
+    def _signal_collection(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.memory.memory_os.signal_collectors import collect_signal_sources
+
+        capabilities = context.get("host_capability_probe_result")
+        if not isinstance(capabilities, dict):
+            return {
+                "schema_version": "memory-os.cognitive_loop.signal_collection.v0",
+                "status": "skipped_dependency_failed",
+                "reason": "host_capability_probe_missing",
+                "raw_body_included": False,
+                "actual_send": False,
+                "actual_execute": False,
+            }
+        result = collect_signal_sources(
+            self.store.roots,
+            host_capabilities=capabilities,
+            trigger_type="cognitive_loop",
+        )
+        context["signal_collection_result"] = result
+        return result
+
+    def _memory_projection(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.memory.memory_os.memory_projection import collect_and_project_signals
+
+        capabilities = context.get("host_capability_probe_result")
+        if not isinstance(capabilities, dict):
+            return {
+                "schema_version": "memory-os.cognitive_loop.memory_projection.v0",
+                "status": "skipped_dependency_failed",
+                "reason": "host_capability_probe_missing",
+                "raw_body_included": False,
+                "actual_send": False,
+                "actual_execute": False,
+            }
+        scope = {"source_count": len(signal_source_specs()), "profile": self.profile}
+        permit = start_execution_gate_envelope(
+            self.store,
+            lane_id="memory_projection_collect",
+            trigger_surface="cognitive_loop",
+            risk_class="governance_projection",
+            human_approval_required=False,
+            why_no_human_approval="read-only signal projection; no apply/send/policy/canonical writes",
+            scope=scope,
+            boundary=dict(BOUNDARIES),
+        )
+        result = collect_and_project_signals(
+            self.store,
+            host_capabilities=capabilities,
+            trigger_type="cognitive_loop",
+            execution_envelope_id=str(permit.get("execution_gate_envelope_id") or ""),
+            expected_scope=scope,
+        )
+        context["memory_projection_result"] = result
+        return result
+
+    def _left_brain_advisor(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.memory.memory_os.left_brain_advisor import run_left_brain_advisor
+
+        scope = {"projection_count": int((context.get("memory_projection_result") or {}).get("summary", {}).get("projection_count") or 0), "profile": self.profile}
+        permit = start_execution_gate_envelope(
+            self.store,
+            lane_id="left_brain_advisor_report",
+            trigger_surface="cognitive_loop",
+            risk_class="governance_projection",
+            human_approval_required=False,
+            why_no_human_approval="report-only left-brain advisor; no apply/send/policy/canonical writes",
+            scope=scope,
+            boundary=dict(BOUNDARIES),
+        )
+        result = run_left_brain_advisor(
+            self.store,
+            write=True,
+            trigger_type="cognitive_loop",
+            execution_envelope_id=str(permit.get("execution_gate_envelope_id") or ""),
+            expected_scope=scope,
+        )
+        context["left_brain_advisor_result"] = result
+        return result
+
     def _governance_feedback(self, context: dict[str, Any], *, apply: bool) -> dict[str, Any]:
         from plugins.modules.evidence.scoring import EvidenceScoringModule
         from plugins.modules.governance.feedback_bridge import GovernanceFeedbackBridgeModule
@@ -756,6 +848,10 @@ def _bounded_report(report: dict[str, Any]) -> dict[str, Any]:
                 and str(step.get("step") or "")
                 in {
                     "left_brain_pipeline_check",
+                    "host_capability_probe",
+                    "signal_collection",
+                    "memory_projection",
+                    "left_brain_advisor",
                     "governance_feedback",
                     "deep_reflection",
                     "heartbeat_post",

@@ -884,6 +884,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             fail.append({"code": "cognitive_loop_step_evidence_missing"})
 
+    _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, clean_host=clean_host)
+
     memory_status = snapshot.get("memory_status", {})
     if memory_status.get("index_health", {}).get("state") == "healthy":
         passed.append({"code": "index_healthy"})
@@ -937,6 +939,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         and shell_alias.get("review_digest_ok", True) is True
         and shell_alias.get("review_render_ok", True) is True
         and shell_alias.get("review_reply_ok", True) is True
+        and shell_alias.get("host_probe_ok", True) is True
+        and shell_alias.get("signal_sources_ok", True) is True
+        and shell_alias.get("memory_projection_ok", True) is True
+        and shell_alias.get("left_brain_ok", True) is True
         and shell_alias.get("review_surface_ok", True) is True
     ):
         passed.append({"code": "shell_alias_no_env_ok"})
@@ -2622,6 +2628,132 @@ def _classify_hindsight_substrate(
         passed.append({"code": "hindsight_configured_ok"})
 
 
+def _classify_left_brain_signal_weaving(
+    snapshot: dict[str, Any],
+    passed: list[dict[str, Any]],
+    warn: list[dict[str, Any]],
+    fail: list[dict[str, Any]],
+    *,
+    clean_host: bool,
+) -> None:
+    if not _left_brain_signal_weaving_expected(snapshot):
+        return
+
+    host_probe = snapshot.get("host_capability_probe") if isinstance(snapshot.get("host_capability_probe"), dict) else {}
+    if host_probe.get("schema_version") == "memory-os.host_capability_probe.v0":
+        if host_probe.get("raw_body_included") is True or host_probe.get("secret_values_included") is True:
+            fail.append({"code": "host_capability_probe_sensitive_payload"})
+        else:
+            passed.append(
+                {
+                    "code": "host_capability_probe_ok",
+                    "capability_count": len(host_probe.get("capabilities") or {}),
+                }
+            )
+    elif clean_host:
+        warn.append({"code": "host_capability_probe_missing", "value": host_probe})
+    else:
+        fail.append({"code": "host_capability_probe_missing", "value": host_probe})
+
+    requirements = (
+        snapshot.get("signal_source_requirements")
+        if isinstance(snapshot.get("signal_source_requirements"), dict)
+        else {}
+    )
+    if requirements.get("schema_version") == "memory-os.signal_source_requirement_report.v0":
+        required_missing = int(requirements.get("required_missing_count") or 0)
+        if required_missing:
+            target = warn if clean_host else fail
+            target.append(
+                {
+                    "code": "signal_source_required_missing",
+                    "required_missing_count": required_missing,
+                    "sources": [
+                        item.get("source_key")
+                        for item in requirements.get("sources", [])
+                        if isinstance(item, dict) and item.get("required_missing")
+                    ],
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "signal_source_requirements_ok",
+                    "source_count": requirements.get("source_count"),
+                    "optional_missing_count": requirements.get("optional_missing_count"),
+                }
+            )
+    elif clean_host:
+        warn.append({"code": "signal_source_requirements_missing", "value": requirements})
+    else:
+        fail.append({"code": "signal_source_requirements_missing", "value": requirements})
+
+    projection = snapshot.get("memory_projection") if isinstance(snapshot.get("memory_projection"), dict) else {}
+    if projection.get("schema_version") == "memory-os.memory_projection_status.v0":
+        if projection.get("raw_body_included") is True:
+            fail.append({"code": "memory_projection_raw_body_included"})
+        boundary_true_count = int(projection.get("boundary_true_count") or 0)
+        if boundary_true_count:
+            fail.append({"code": "memory_projection_boundary_true", "count": boundary_true_count})
+        projection_count = int(projection.get("projection_count") or 0)
+        if projection_count > 0 and not boundary_true_count and projection.get("raw_body_included") is not True:
+            passed.append({"code": "memory_projection_online", "projection_count": projection_count})
+        else:
+            target = warn if clean_host else fail
+            target.append({"code": "memory_projection_missing_or_empty", "value": projection})
+    elif clean_host:
+        warn.append({"code": "memory_projection_status_missing", "value": projection})
+    else:
+        fail.append({"code": "memory_projection_status_missing", "value": projection})
+
+    advisor = snapshot.get("left_brain_advisor") if isinstance(snapshot.get("left_brain_advisor"), dict) else {}
+    if advisor.get("schema_version") == "memory-os.left_brain_advisor_status.v0":
+        if advisor.get("raw_body_included") is True:
+            fail.append({"code": "left_brain_advisor_raw_body_included"})
+        boundary_true_count = int(advisor.get("boundary_true_count") or 0)
+        if boundary_true_count:
+            fail.append({"code": "left_brain_advisor_boundary_true", "count": boundary_true_count})
+        report_count = int(advisor.get("report_count") or 0)
+        if report_count > 0 and not boundary_true_count and advisor.get("raw_body_included") is not True:
+            passed.append(
+                {
+                    "code": "left_brain_advisor_report_only_online",
+                    "report_count": report_count,
+                    "finding_count": advisor.get("finding_count"),
+                }
+            )
+        else:
+            target = warn if clean_host else fail
+            target.append({"code": "left_brain_advisor_missing_or_empty", "value": advisor})
+    elif clean_host:
+        warn.append({"code": "left_brain_advisor_status_missing", "value": advisor})
+    else:
+        fail.append({"code": "left_brain_advisor_status_missing", "value": advisor})
+
+
+def _left_brain_signal_weaving_expected(snapshot: dict[str, Any]) -> bool:
+    marker_steps = {"host_capability_probe", "signal_collection", "memory_projection", "left_brain_advisor"}
+    evidence = snapshot.get("cognitive_loop_step_evidence")
+    if isinstance(evidence, dict):
+        for key in ("required_steps", "latest_step_names"):
+            values = evidence.get(key)
+            if isinstance(values, list) and marker_steps.intersection(str(item) for item in values):
+                return True
+        summary = evidence.get("latest_step_summary") if isinstance(evidence.get("latest_step_summary"), dict) else {}
+        tail = summary.get("tail_step_statuses") if isinstance(summary.get("tail_step_statuses"), dict) else {}
+        if marker_steps.intersection(str(key) for key in tail.keys()):
+            return True
+    return any(
+        isinstance(snapshot.get(key), dict) and bool(snapshot.get(key))
+        for key in (
+            "host_capability_probe",
+            "signal_source_requirements",
+            "memory_projection",
+            "left_brain_advisor",
+        )
+    )
+
+
 def _counter_delta(current: Any, previous: Any) -> dict[str, int]:
     if not isinstance(current, dict):
         current = {}
@@ -2751,6 +2883,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerIngressGuard={_owner_ingress_guard_summary(snapshot.get('owner_review_ingress_guard') or {})}",
         f"- OwnerProposalFollowups={_owner_proposal_followups_summary(snapshot.get('owner_review_proposal_followups') or {})}",
         f"- OwnerProposalAutoRoute={_owner_proposal_auto_route_summary(snapshot.get('owner_review_proposal_auto_route') or {})}",
+        f"- LeftBrainSignals={_left_brain_signal_summary(snapshot)}",
         f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
         f"- OwnerDeliveryGate={_owner_delivery_gate_summary(snapshot.get('owner_review_delivery_gate') or {})}",
         f"- OwnerCronIntegration={_owner_cron_integration_summary(snapshot.get('owner_review_cron_integration') or {})}",
@@ -3182,6 +3315,31 @@ def _owner_proposal_auto_route_summary(summary: dict[str, Any]) -> dict[str, Any
         "boundary_rejected": summary.get("auto_followup_boundary_rejected_count"),
         "dry_run": summary.get("dry_run"),
         "actual_execute": summary.get("actual_execute"),
+    }
+
+
+def _left_brain_signal_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    host_probe = snapshot.get("host_capability_probe") if isinstance(snapshot.get("host_capability_probe"), dict) else {}
+    requirements = (
+        snapshot.get("signal_source_requirements")
+        if isinstance(snapshot.get("signal_source_requirements"), dict)
+        else {}
+    )
+    projection = snapshot.get("memory_projection") if isinstance(snapshot.get("memory_projection"), dict) else {}
+    advisor = snapshot.get("left_brain_advisor") if isinstance(snapshot.get("left_brain_advisor"), dict) else {}
+    return {
+        "host_probe_schema": host_probe.get("schema_version"),
+        "capability_count": len(host_probe.get("capabilities") or {}),
+        "source_count": requirements.get("source_count"),
+        "required_missing_count": requirements.get("required_missing_count"),
+        "optional_missing_count": requirements.get("optional_missing_count"),
+        "projection_status": projection.get("status"),
+        "projection_count": projection.get("projection_count"),
+        "projection_boundary_true_count": projection.get("boundary_true_count"),
+        "advisor_status": advisor.get("status"),
+        "advisor_report_count": advisor.get("report_count"),
+        "advisor_finding_count": advisor.get("finding_count"),
+        "advisor_boundary_true_count": advisor.get("boundary_true_count"),
     }
 
 
@@ -4466,6 +4624,10 @@ def expression_artifact_summary():
 def cognitive_loop_step_evidence():
     required_steps = [
       "left_brain_pipeline_check",
+      "host_capability_probe",
+      "signal_collection",
+      "memory_projection",
+      "left_brain_advisor",
       "governance_feedback",
       "deep_reflection",
       "heartbeat_post",
@@ -5185,6 +5347,10 @@ def shell_alias_no_env():
     review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
     review_render = load_json_cmd(["hermes", "memory-os-agent-os", "review", "render-digest"])
     review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "memory", "approve", "oa_deadbeef"])
+    host_probe = load_json_cmd(["hermes", "memory-os-agent-os", "host-probe", "--json"])
+    signal_sources = load_json_cmd(["hermes", "memory-os-agent-os", "signal-sources", "--json"])
+    memory_projection = load_json_cmd(["hermes", "memory-os-agent-os", "projection", "status"])
+    left_brain = load_json_cmd(["hermes", "memory-os-agent-os", "left-brain", "status"])
     review_surface = load_json_cmd([
         "hermes",
         "memory-os-agent-os",
@@ -5215,6 +5381,10 @@ def shell_alias_no_env():
       "review_digest_ok": isinstance(review_digest, dict) and review_digest.get("schema_version") == "memory-os.owner_review_digest_preview.v0",
       "review_render_ok": isinstance(review_render, dict) and review_render.get("schema_version") == "memory-os.owner_review_rendered_digest.v0",
       "review_reply_ok": isinstance(review_reply, dict) and review_reply.get("schema_version") == "memory-os.owner_review_reply.v0",
+      "host_probe_ok": isinstance(host_probe, dict) and host_probe.get("schema_version") == "memory-os.host_capability_probe.v0",
+      "signal_sources_ok": isinstance(signal_sources, dict) and signal_sources.get("schema_version") == "memory-os.signal_source_requirement_report.v0",
+      "memory_projection_ok": isinstance(memory_projection, dict) and memory_projection.get("schema_version") == "memory-os.memory_projection_status.v0",
+      "left_brain_ok": isinstance(left_brain, dict) and left_brain.get("schema_version") == "memory-os.left_brain_advisor_status.v0",
       "review_surface_ok": isinstance(review_surface, dict) and review_surface.get("schema_version") == "memory-os.owner_review_surface.v0",
       "status_error": status.get("_error") if isinstance(status, dict) else None,
       "doctor_error": doctor.get("_error") if isinstance(doctor, dict) else None,
@@ -5233,6 +5403,10 @@ def shell_alias_no_env():
       "review_digest_error": review_digest.get("_error") if isinstance(review_digest, dict) else None,
       "review_render_error": review_render.get("_error") if isinstance(review_render, dict) else None,
       "review_reply_error": review_reply.get("_error") if isinstance(review_reply, dict) else None,
+      "host_probe_error": host_probe.get("_error") if isinstance(host_probe, dict) else None,
+      "signal_sources_error": signal_sources.get("_error") if isinstance(signal_sources, dict) else None,
+      "memory_projection_error": memory_projection.get("_error") if isinstance(memory_projection, dict) else None,
+      "left_brain_error": left_brain.get("_error") if isinstance(left_brain, dict) else None,
       "review_surface_error": review_surface.get("_error") if isinstance(review_surface, dict) else None,
     }
 
@@ -5670,6 +5844,10 @@ owner_review_delivery_status = memory_os_cli(["review", "delivery-status"])
 owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups", "--limit", "10"])
 owner_review_proposal_auto_route = memory_os_cli(["review", "proposal-followups", "--auto-route", "--limit", "10"])
+host_capability_probe = memory_os_cli(["host-probe", "--json"])
+signal_source_requirements = memory_os_cli(["signal-sources", "--json"])
+memory_projection = memory_os_cli(["projection", "status"])
+left_brain_advisor = memory_os_cli(["left-brain", "status"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
 owner_review_agenda_digest = owner_review_agenda_digest_summary()
@@ -5723,6 +5901,10 @@ print(json.dumps({
   "owner_review_delivery_gate": owner_review_delivery_gate,
   "owner_review_proposal_followups": owner_review_proposal_followups,
   "owner_review_proposal_auto_route": owner_review_proposal_auto_route,
+  "host_capability_probe": host_capability_probe,
+  "signal_source_requirements": signal_source_requirements,
+  "memory_projection": memory_projection,
+  "left_brain_advisor": left_brain_advisor,
   "execution_gate_cron": execution_gate_cron_summary(),
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,

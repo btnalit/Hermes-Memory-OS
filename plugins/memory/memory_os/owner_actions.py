@@ -1234,6 +1234,7 @@ def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
     items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_session_mirror_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
+    items.extend(_left_brain_advisor_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     return _review_aging_summary(aged_items, aging)
 
@@ -1851,6 +1852,7 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
     items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_session_mirror_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
+    items.extend(_left_brain_advisor_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     sorted_items = sorted(
         aged_items,
@@ -3254,6 +3256,42 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
     return items
 
 
+def _left_brain_advisor_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    from .left_brain_advisor import read_left_brain_advisor_reports
+
+    reports = read_left_brain_advisor_reports(store.roots, limit=1)
+    if not reports:
+        return []
+    latest = reports[-1]
+    findings = latest.get("findings") if isinstance(latest.get("findings"), list) else []
+    items: list[dict[str, Any]] = []
+    for finding in findings:
+        if not isinstance(finding, dict) or not bool(finding.get("owner_visible")):
+            continue
+        target_id = str(finding.get("finding_id") or finding.get("target_id") or "")
+        if not target_id or f"left_brain_advisor_finding:{target_id}" in closed:
+            continue
+        items.append(
+            {
+                "schema_version": "memory-os.review_item.v0",
+                "review_item_id": f"review:left_brain_advisor_finding:{target_id}",
+                "target_type": "left_brain_advisor_finding",
+                "target_id": target_id,
+                "source_module": "left_brain_advisor",
+                "priority": str(finding.get("priority") or "review_suggested"),
+                "created_at": str(latest.get("created_at") or ""),
+                "created_at_source": "left_brain_advisor_report",
+                "status": "report_only",
+                "summary": _bounded_text(str(finding.get("summary") or finding.get("title") or ""), 220),
+                "reason": _bounded_text(str(finding.get("reason") or ""), 240),
+                "safe_source_ids": _safe_list(finding.get("safe_source_ids")),
+                "actions_suppressed": True,
+                "raw_body_included": False,
+            }
+        )
+    return items
+
+
 def _created_at_with_source(
     record: dict[str, Any],
     *,
@@ -3703,6 +3741,9 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
         return "这条右脑表达草案要允许一次，还是给表达质量反馈？"
     if target_type == "session_mirror_apply":
         return "要批准 SessionMirror 这个 bounded 生产导入 lane 毕业并执行一次真实 smoke 吗？"
+    if target_type == "left_brain_advisor_finding":
+        summary = _safe_review_summary(item.get("summary"), fallback="左脑信号诊断")
+        return _bounded_text(f"左脑发现一个需要关注的治理信号：{summary}", 180)
     return "请看一下这条 Memory-OS 状态信号。"
 
 
@@ -3785,6 +3826,11 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             f"max_sessions={approval.get('max_sessions') or 1}。",
             220,
         )
+    if target_type == "left_brain_advisor_finding":
+        return _bounded_text(
+            str(item.get("reason") or "LeftBrainAdvisor 只做 report-only 诊断，不执行任何动作。"),
+            220,
+        )
     return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
 
 
@@ -3815,6 +3861,8 @@ def _review_consequence(target_type: str) -> str:
             "批准会授权一个 bounded SessionMirror 生产导入 scope 并允许一次真实 smoke；"
             "不写长期记忆、不发送消息、不执行工具、不改 identity/route/score。"
         )
+    if target_type == "left_brain_advisor_finding":
+        return "仅进入 owner digest 可见面；不会创建审批 token、不会 apply、不会改策略或长期记忆。"
     return "仅供了解；不需要状态变更。"
 
 
@@ -3856,7 +3904,9 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
 
 
 def _review_item_suppresses_actions(item: dict[str, Any]) -> bool:
-    return str(item.get("target_type") or "") == "proposal" and bool(item.get("requires_maturation"))
+    return bool(item.get("actions_suppressed")) or (
+        str(item.get("target_type") or "") == "proposal" and bool(item.get("requires_maturation"))
+    )
 
 
 def _review_action(verb: str, action_type: str, target_type: str, target_id: str) -> dict[str, str]:

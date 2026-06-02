@@ -51,6 +51,10 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "grounded_expression_judge",
         "self_evolution",
         "left_brain_pipeline_check",
+        "host_capability_probe",
+        "signal_collection",
+        "memory_projection",
+        "left_brain_advisor",
         "governance_feedback",
         "deep_reflection",
         "heartbeat_post",
@@ -94,6 +98,8 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert (tmp_path / "system-modules" / "migration_controller" / "runs.jsonl").is_file()
     assert (tmp_path / "system-modules" / "abstraction_distillation" / "items.jsonl").is_file()
     assert (tmp_path / "system-modules" / "grounded_expression_judge" / "verdicts.jsonl").is_file()
+    assert (tmp_path / "memory-os" / "system" / "memory_projections.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "left_brain_advisor" / "reports.jsonl").is_file()
     assert (tmp_path / "system-modules" / "governance_feedback" / "state.json").is_file()
     assert (tmp_path / "system-modules" / "deep_reflection" / "injection" / "current.json").is_file()
     steps = {step["step"]: step for step in result["steps"]}
@@ -114,6 +120,8 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert steps["migration_controller"]["result"]["migration_live_applied"] is False
     assert steps["abstraction_distillation"]["result"]["distillation_live_applied"] is False
     assert steps["grounded_expression_judge"]["result"]["policy_live_applied"] is False
+    assert steps["memory_projection"]["result"]["execution_gate_resolution"]["status"] == "valid"
+    assert steps["left_brain_advisor"]["result"]["execution_gate_resolution"]["status"] == "valid"
 
 
 def test_cognitive_loop_passes_owner_feedback_signals_to_migration_controller(tmp_path):

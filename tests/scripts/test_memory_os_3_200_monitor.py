@@ -278,7 +278,15 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
             "eval_ok": True,
             "review_ok": True,
             "review_aging_ok": True,
+            "host_probe_ok": True,
+            "signal_sources_ok": True,
+            "memory_projection_ok": True,
+            "left_brain_ok": True,
         },
+        "host_capability_probe": _healthy_host_capability_probe(),
+        "signal_source_requirements": _healthy_signal_source_requirements(),
+        "memory_projection": _healthy_memory_projection(),
+        "left_brain_advisor": _healthy_left_brain_advisor(),
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
         "deep_reflection": {
@@ -319,6 +327,52 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
     assert any(item["code"] == "deep_reflection_source_skew" for item in classification["warn"])
     assert any(item["code"] == "compression_focus_none" for item in classification["warn"])
     assert any(item["code"] == "shell_alias_no_env_ok" for item in classification["pass"])
+
+
+def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundaries():
+    snapshot = _healthy_snapshot()
+
+    classification = classify_snapshot(snapshot)
+    pass_codes = {item["code"] for item in classification["pass"]}
+
+    assert "host_capability_probe_ok" in pass_codes
+    assert "signal_source_requirements_ok" in pass_codes
+    assert "memory_projection_online" in pass_codes
+    assert "left_brain_advisor_report_only_online" in pass_codes
+
+    snapshot["signal_source_requirements"]["required_missing_count"] = 1
+    snapshot["signal_source_requirements"]["sources"] = [
+        {"source_key": "execution_gate_envelopes", "required_missing": True}
+    ]
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "signal_source_required_missing" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["raw_body_included"] = True
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_raw_body_included" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["left_brain_advisor"]["boundary_true_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "left_brain_advisor_boundary_true" for item in classification["fail"])
+
+
+def test_classify_snapshot_clean_host_warns_on_missing_left_brain_signal_sources():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["signal_source_requirements"]["required_missing_count"] = 1
+    snapshot["signal_source_requirements"]["sources"] = [
+        {"source_key": "execution_gate_envelopes", "required_missing": True}
+    ]
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "signal_source_required_missing" for item in classification["warn"])
+    assert not any(item["code"] == "signal_source_required_missing" for item in classification["fail"])
 
 
 def test_classify_snapshot_tracks_rh31_eval_safety_and_status():
@@ -3735,6 +3789,10 @@ def _healthy_cognitive_loop() -> dict:
 def _healthy_cognitive_loop_step_evidence() -> dict:
     required_steps = [
         "left_brain_pipeline_check",
+        "host_capability_probe",
+        "signal_collection",
+        "memory_projection",
+        "left_brain_advisor",
         "governance_feedback",
         "deep_reflection",
         "heartbeat_post",
@@ -3752,6 +3810,10 @@ def _healthy_cognitive_loop_step_evidence() -> dict:
             "prefetch",
             "self_evolution",
             "left_brain_pipeline_check",
+            "host_capability_probe",
+            "signal_collection",
+            "memory_projection",
+            "left_brain_advisor",
             "governance_feedback",
             "deep_reflection",
             "heartbeat_post",
@@ -3803,8 +3865,16 @@ def _healthy_snapshot() -> dict:
             "review_digest_ok": True,
             "review_render_ok": True,
             "review_reply_ok": True,
+            "host_probe_ok": True,
+            "signal_sources_ok": True,
+            "memory_projection_ok": True,
+            "left_brain_ok": True,
             "review_surface_ok": True,
         },
+        "host_capability_probe": _healthy_host_capability_probe(),
+        "signal_source_requirements": _healthy_signal_source_requirements(),
+        "memory_projection": _healthy_memory_projection(),
+        "left_brain_advisor": _healthy_left_brain_advisor(),
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
         "deep_reflection": {
@@ -3830,6 +3900,48 @@ def _healthy_snapshot() -> dict:
         "owner_review_ingress_guard": _healthy_owner_ingress_guard(),
         "owner_review_proposal_followups": _healthy_owner_proposal_followups(),
         "owner_review_proposal_auto_route": _healthy_owner_proposal_auto_route(),
+    }
+
+
+def _healthy_host_capability_probe() -> dict:
+    return {
+        "schema_version": "memory-os.host_capability_probe.v0",
+        "capabilities": {"memory_os_core": {"status": "present"}, "execution_gate": {"status": "present"}},
+        "raw_body_included": False,
+        "secret_values_included": False,
+    }
+
+
+def _healthy_signal_source_requirements() -> dict:
+    return {
+        "schema_version": "memory-os.signal_source_requirement_report.v0",
+        "status": "ok",
+        "source_count": 14,
+        "required_missing_count": 0,
+        "optional_missing_count": 3,
+        "sources": [],
+    }
+
+
+def _healthy_memory_projection() -> dict:
+    return {
+        "schema_version": "memory-os.memory_projection_status.v0",
+        "status": "ok",
+        "projection_count": 14,
+        "boundary_true_count": 0,
+        "raw_body_included": False,
+    }
+
+
+def _healthy_left_brain_advisor() -> dict:
+    return {
+        "schema_version": "memory-os.left_brain_advisor_status.v0",
+        "status": "ok",
+        "report_count": 1,
+        "finding_count": 0,
+        "owner_visible_finding_count": 0,
+        "boundary_true_count": 0,
+        "raw_body_included": False,
     }
 
 

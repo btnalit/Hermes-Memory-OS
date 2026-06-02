@@ -58,9 +58,12 @@ from .crystallized import (
     is_active_crystallized_frontmatter,
     read_candidate_queue,
 )
+from .host_capability_probe import probe_host_capabilities
 from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, HindsightHttpClient
 from .index import MemoryOSIndex
+from .left_brain_advisor import left_brain_advisor_status, run_left_brain_advisor
 from .low_clue_recall import build_low_clue_recall_report, low_clue_judge_availability
+from .memory_projection import collect_and_project_signals, memory_projection_status
 from .memory_sources import (
     memory_sources_feedback_history_report,
     memory_sources_feedback_last_report,
@@ -107,6 +110,8 @@ from .session_mirror import read_session_mirror_apply_records
 from .shadow_journal import ShadowJournalIngestion
 from .state_source_mirror import StateSourceMirror
 from .store import MemoryOSStore
+from .signal_collectors import collect_signal_sources
+from .signal_source_registry import evaluate_signal_source_requirements, signal_source_specs, validate_signal_source_specs
 from .substrates.hindsight import GovernedHindsightConfig, GovernedHindsightSubstrate
 from .working import WorkingMemoryService
 
@@ -1056,6 +1061,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     cognitive_loop_run_once.add_argument("--test-host", action="store_true")
     cognitive_loop_run_once.add_argument("--apply", action="store_true")
     cognitive_loop_run_once.add_argument("--max-events", type=int, default=100)
+    host_probe_parser = subs.add_parser("host-probe")
+    host_probe_parser.add_argument("--json", action="store_true")
+    signal_sources_parser = subs.add_parser("signal-sources")
+    signal_sources_parser.add_argument("--json", action="store_true")
+    signal_sources_parser.add_argument("--collect", action="store_true")
+    projection_parser = subs.add_parser("projection")
+    projection_subs = projection_parser.add_subparsers(dest="projection_command", required=True)
+    projection_subs.add_parser("status")
+    projection_collect = projection_subs.add_parser("collect")
+    projection_collect.add_argument("--manual-run-ref", default="manual_cli")
+    left_brain_parser = subs.add_parser("left-brain")
+    left_brain_subs = left_brain_parser.add_subparsers(dest="left_brain_command", required=True)
+    left_brain_subs.add_parser("status")
+    left_brain_advise = left_brain_subs.add_parser("advise")
+    left_brain_advise.add_argument("--max-findings", type=int, default=20)
+    left_brain_advise.add_argument("--no-write", action="store_true")
     validate_parser = subs.add_parser("validate")
     validate_parser.add_argument("--profile", default="")
     validate_parser.add_argument("--no-send", action="store_true")
@@ -1168,6 +1189,52 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _eval_command(args)
     if command == "cognitive-loop":
         return _cognitive_loop_command(args, store)
+    if command == "host-probe":
+        print(json.dumps(probe_host_capabilities(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "signal-sources":
+        probe = probe_host_capabilities(store.roots)
+        if bool(getattr(args, "collect", False)):
+            report = collect_signal_sources(
+                store.roots,
+                host_capabilities=probe,
+                trigger_type="manual_cli",
+                manual_run_ref="manual_cli",
+            )
+        else:
+            validate_signal_source_specs(signal_source_specs())
+            report = evaluate_signal_source_requirements(signal_source_specs(), probe)
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 1 if report.get("status") == "error" else 0
+    if command == "projection":
+        if args.projection_command == "status":
+            print(json.dumps(memory_projection_status(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.projection_command == "collect":
+            report = collect_and_project_signals(
+                store,
+                host_capabilities=probe_host_capabilities(store.roots),
+                trigger_type="manual_cli",
+                manual_run_ref=str(args.manual_run_ref or "manual_cli"),
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 1 if report.get("status") == "blocked" else 0
+        return 2
+    if command == "left-brain":
+        if args.left_brain_command == "status":
+            print(json.dumps(left_brain_advisor_status(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.left_brain_command == "advise":
+            report = run_left_brain_advisor(
+                store,
+                write=not bool(args.no_write),
+                max_findings=max(int(args.max_findings), 0),
+                trigger_type="manual_cli",
+                manual_run_ref="manual_cli",
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 1 if report.get("status") == "blocked" else 0
+        return 2
     if command == "validate":
         report = _host_validation_report(store, no_send=bool(args.no_send), write_report=bool(args.write_report))
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
