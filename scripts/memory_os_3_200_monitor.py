@@ -98,6 +98,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "right-brain speak preview is a product live lane, not a clean-host install blocker",
         "production_behavior": "warn_if_production",
     },
+    "right_brain_expression_outcome_missing": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host can render right-brain prompts before a Hermes-delivered outcome exists",
+        "production_behavior": "warn_if_production",
+    },
     "index_not_healthy": {
         "classification": "expected_clean_host",
         "reason": "clean-host can be inspected before indexed recall has warmed; production must keep the index healthy",
