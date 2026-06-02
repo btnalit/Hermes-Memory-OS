@@ -656,6 +656,43 @@ def test_auto_route_safe_proposal_followups_to_ops_gate_without_owner_action(tmp
     assert proposal_queue.read_queue()["items"][0]["state"] == "owner_declined"
 
 
+def test_auto_route_safe_proposal_followups_rejects_boundary_and_apply_kind_proposals(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    safe = proposal_queue.create_candidate(store=store, title="Report-only process motion", body="Bounded proposal")
+    unsafe_send = proposal_queue.create_candidate(store=store, title="Unsafe send", body="Should stay pending")
+    unsafe_identity = proposal_queue.create_candidate(store=store, title="Unsafe identity", body="Should stay pending")
+    unsafe_policy = proposal_queue.create_candidate(
+        store=store,
+        title="Unsafe policy",
+        body="Should stay pending",
+        kind="expression_policy",
+        proposal_class="expression_policy:too_frequent",
+    )
+    unsafe_ticket = proposal_queue.create_candidate(store=store, title="Unsafe ticket", body="Should stay pending")
+    queue = proposal_queue.read_queue()
+    by_id = {item["candidate_id"]: item for item in queue["items"]}
+    by_id[unsafe_send["candidate_id"]]["actual_send"] = True
+    by_id[unsafe_identity["candidate_id"]]["boundary"] = {"actual_identity_write": True}
+    by_id[unsafe_ticket["candidate_id"]]["execution_ticket_count"] = 1
+    proposal_queue._write_queue(queue)
+
+    report = auto_route_safe_proposal_followups_to_ops_gate(store, apply=True)
+    updated = {item["candidate_id"]: item for item in proposal_queue.read_queue()["items"]}
+
+    assert report["eligible_count"] == 1
+    assert report["auto_followup_routed_count"] == 1
+    assert report["owner_action_required_boundary_count"] == 4
+    assert report["auto_followup_boundary_rejected_count"] == 4
+    assert report["auto_followup_actual_execute_count"] == 0
+    assert report["auto_followup_policy_write_count"] == 0
+    assert updated[safe["candidate_id"]]["state"] == "approved_for_proposal"
+    assert updated[unsafe_send["candidate_id"]]["state"] == "candidate"
+    assert updated[unsafe_identity["candidate_id"]]["state"] == "candidate"
+    assert updated[unsafe_policy["candidate_id"]]["state"] == "candidate"
+    assert updated[unsafe_ticket["candidate_id"]]["state"] == "candidate"
+
+
 def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops_gate(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")

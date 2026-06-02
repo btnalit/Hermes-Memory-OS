@@ -603,6 +603,11 @@ def test_installer_can_write_memory_sources_test_host_preset(tmp_path):
     assert config["memory_sources"]["retention_days"] == 30
     assert config["memory_sources"]["record_live_prefetch"] is True
     assert config["memory_sources"]["record_dry_run"] is False
+    assert report["session_mirror_preset"] == "test-host"
+    assert report["session_mirror_config_written"] is True
+    assert config["session_mirror"]["test_host_apply_allowed"] is True
+    assert config["session_mirror"]["test_host_marker"] == "install_preset:test-host"
+    assert config["session_mirror"]["production_apply_owner_ref_required"] is True
 
 
 def test_installer_memory_sources_production_safe_preset_is_explicitly_off(tmp_path):
@@ -615,6 +620,11 @@ def test_installer_memory_sources_production_safe_preset_is_explicitly_off(tmp_p
     assert report["memory_sources_config_written"] is True
     assert config["memory_sources"]["enabled"] is False
     assert config["memory_sources"]["record_live_prefetch"] is True
+    assert report["session_mirror_preset"] == "production-safe"
+    assert report["session_mirror_config_written"] is True
+    assert config["session_mirror"]["test_host_apply_allowed"] is False
+    assert config["session_mirror"]["test_host_marker"] == ""
+    assert config["session_mirror"]["production_apply_owner_ref_required"] is True
 
 
 def test_installer_can_enable_shell_without_enabling_memory_os_as_general_plugin(tmp_path):

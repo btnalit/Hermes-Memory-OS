@@ -61,6 +61,44 @@ SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 EXPRESSION_FEEDBACK_SCHEMA_VERSION = "memory-os.expression_feedback.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
 OWNER_REVIEW_DELIVERY_ADAPTERS = {"hermes_owner_channel", "hermes_send"}
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAFE_KINDS = {"proposal"}
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_TRUE_BLOCK_KEYS = {
+    "actual_send",
+    "actual_execute",
+    "actual_identity_write",
+    "actual_relationship_write",
+    "actual_unapproved_crystallized_approval",
+    "actual_crystallized_approval",
+    "crystallized_approved",
+    "execution_ticket_created",
+    "requires_execution_ticket",
+    "policy_written",
+    "memory_sources_policy_written",
+    "legacy_template_cleanup_written",
+    "deep_reflection_policy_written",
+    "relationship_written",
+    "identity_written",
+    "canonical_memory_written",
+}
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_COUNT_BLOCK_KEYS = {
+    "execution_ticket_count",
+    "ticket_created_count",
+    "policy_apply_count",
+    "memory_sources_policy_apply_count",
+    "legacy_template_cleanup_apply_count",
+    "deep_reflection_policy_apply_count",
+    "relationship_write_count",
+    "identity_write_count",
+    "canonical_memory_write_count",
+}
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_BOUNDARY_KEYS = {
+    "actual_send",
+    "actual_execute",
+    "actual_identity_write",
+    "actual_relationship_write",
+    "actual_unapproved_crystallized_approval",
+    "actual_crystallized_approval",
+}
 
 EXPRESSION_FEEDBACK_ACTION_TYPES = {
     "like_expression",
@@ -709,11 +747,9 @@ def auto_route_safe_proposal_followups_to_ops_gate(
 
     module = ProposalQueueModule(store.roots.hermes_home, profile=store.roots.profile or "default")
     queue = module.read_queue()
-    candidates = [
-        item
-        for item in queue.get("items", [])
-        if isinstance(item, dict) and _proposal_followup_auto_route_eligible(item)
-    ]
+    queue_items = [item for item in queue.get("items", []) if isinstance(item, dict)]
+    candidates = [item for item in queue_items if _proposal_followup_auto_route_eligible(item)]
+    boundary_rejected_count = sum(1 for item in queue_items if _proposal_auto_route_boundary_rejected(item))
     bounded_limit = max(min(int(limit or 50), 200), 0)
     selected = candidates[:bounded_limit]
     promoted_ids: list[str] = []
@@ -768,6 +804,8 @@ def auto_route_safe_proposal_followups_to_ops_gate(
         "auto_followup_policy_write_count": 0 if not apply else 0,
         "existing_policy_write_count": policy_write_count,
         "owner_action_required_count": 0,
+        "owner_action_required_boundary_count": boundary_rejected_count,
+        "auto_followup_boundary_rejected_count": boundary_rejected_count,
         "execution_ticket_created": False,
         "actual_execute": False,
         "raw_body_included": False,
@@ -784,6 +822,7 @@ def auto_route_safe_proposal_followups_to_ops_gate(
             details={
                 "eligible_count": result["eligible_count"],
                 "auto_followup_routed_count": result["auto_followup_routed_count"],
+                "owner_action_required_boundary_count": result["owner_action_required_boundary_count"],
                 "ops_gate_report_written_count": ops_gate.get("ops_gate_report_written_count"),
                 "actual_execute": False,
                 "policy_write_count": 0,
@@ -798,13 +837,49 @@ def _proposal_followup_auto_route_eligible(proposal: dict[str, Any]) -> bool:
         return False
     if str(proposal.get("approval_purpose") or "") != "proposal_queue_only":
         return False
-    if bool(proposal.get("crystallized_approved")) or bool(proposal.get("actual_execute")):
-        return False
-    if int(proposal.get("execution_ticket_count") or 0) > 0:
+    if not proposal_auto_route_boundary_clean(proposal):
         return False
     if _proposal_requires_maturation(proposal):
         return False
     return True
+
+
+def proposal_auto_route_boundary_clean(proposal: dict[str, Any]) -> bool:
+    """Return true only for report-only process-motion proposals.
+
+    Lane E may automatically move a proposal into OpsGate follow-up, but it
+    must never carry send, execution, identity, policy, relationship, or
+    canonical-memory write authority across that boundary.
+    """
+
+    kind = str(proposal.get("kind") or "proposal").strip().lower()
+    if kind not in PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAFE_KINDS:
+        return False
+    if _explicit_proposal_apply_kind(proposal):
+        return False
+    for key in PROPOSAL_FOLLOWUP_AUTO_ROUTE_TRUE_BLOCK_KEYS:
+        if bool(proposal.get(key)):
+            return False
+    for key in PROPOSAL_FOLLOWUP_AUTO_ROUTE_COUNT_BLOCK_KEYS:
+        try:
+            if int(proposal.get(key) or 0) > 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    boundary = proposal.get("boundary") if isinstance(proposal.get("boundary"), dict) else {}
+    for key in PROPOSAL_FOLLOWUP_AUTO_ROUTE_BOUNDARY_KEYS:
+        if bool(boundary.get(key)):
+            return False
+    return True
+
+
+def _proposal_auto_route_boundary_rejected(proposal: dict[str, Any]) -> bool:
+    state = str(proposal.get("state") or "")
+    if state not in {"candidate", "owner_eligible", "owner_defer"}:
+        return False
+    if str(proposal.get("approval_purpose") or "") != "proposal_queue_only":
+        return False
+    return not proposal_auto_route_boundary_clean(proposal)
 
 
 def _proposal_policy_write_count(report: dict[str, Any]) -> int:

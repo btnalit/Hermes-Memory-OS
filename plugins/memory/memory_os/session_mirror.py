@@ -514,6 +514,8 @@ def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
         "owner_approved": bool(value.get("owner_approved")),
         "approval_ref": str(value.get("approval_ref") or "")[:160],
         "test_host": bool(value.get("test_host")),
+        "test_host_config_allowed": bool(value.get("test_host_config_allowed")),
+        "test_host_marker": str(value.get("test_host_marker") or "")[:160],
         "operator": str(value.get("operator") or "")[:120],
         "evidence_refs": [str(item)[:160] for item in evidence_refs[:10] if str(item or "").strip()],
         "historical_bounded_smoke_attested": bool(value.get("historical_bounded_smoke_attested")),

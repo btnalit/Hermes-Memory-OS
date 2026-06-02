@@ -262,6 +262,18 @@ def install_plugin(
             preset=memory_sources_preset,
             dry_run=dry_run,
         )
+    session_mirror_config: dict[str, object] | None = None
+    session_mirror_config_path: Path | None = None
+    session_mirror_preset = _session_mirror_preset_for_install(
+        deep_reflection_preset=deep_reflection_preset,
+        memory_sources_preset=memory_sources_preset,
+    )
+    if session_mirror_preset is not None:
+        session_mirror_config_path, session_mirror_config = _write_session_mirror_config(
+            hermes_home,
+            preset=session_mirror_preset,
+            dry_run=dry_run,
+        )
     low_clue_recall_config: dict[str, object] | None = None
     low_clue_recall_config_path: Path | None = None
     if llm_judge_preset is not None:
@@ -480,6 +492,10 @@ def install_plugin(
         "memory_sources_config_written": bool(memory_sources_config_path) and not dry_run,
         "memory_sources_config_path": str(memory_sources_config_path) if memory_sources_config_path else "",
         "memory_sources_config": memory_sources_config or {},
+        "session_mirror_preset": session_mirror_preset,
+        "session_mirror_config_written": bool(session_mirror_config_path) and not dry_run,
+        "session_mirror_config_path": str(session_mirror_config_path) if session_mirror_config_path else "",
+        "session_mirror_config": session_mirror_config or {},
         "llm_judge_preset": llm_judge_preset,
         "low_clue_recall_config_written": bool(low_clue_recall_config_path) and not dry_run,
         "low_clue_recall_config_path": str(low_clue_recall_config_path) if low_clue_recall_config_path else "",
@@ -942,6 +958,45 @@ def _write_memory_sources_config(
             encoding="utf-8",
         )
     return config_path, memory_sources_config
+
+
+def _session_mirror_preset_for_install(
+    *,
+    deep_reflection_preset: str | None,
+    memory_sources_preset: str | None,
+) -> str | None:
+    presets = {str(item) for item in (deep_reflection_preset, memory_sources_preset) if item}
+    if "test-host" in presets:
+        return "test-host"
+    if "production-safe" in presets:
+        return "production-safe"
+    return None
+
+
+def _write_session_mirror_config(
+    hermes_home: Path,
+    *,
+    preset: str,
+    dry_run: bool,
+) -> tuple[Path, dict[str, object]]:
+    if preset not in {"production-safe", "test-host"}:
+        raise SystemExit(f"Unsupported SessionMirror preset: {preset}. Choices: production-safe, test-host")
+    config_path = hermes_home / "memory-os" / "config.json"
+    config = _read_json_config(config_path)
+    session_mirror_config = {
+        "preset": preset,
+        "test_host_apply_allowed": preset == "test-host",
+        "test_host_marker": "install_preset:test-host" if preset == "test-host" else "",
+        "production_apply_owner_ref_required": True,
+    }
+    config["session_mirror"] = session_mirror_config
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return config_path, session_mirror_config
 
 
 def _write_low_clue_recall_config(

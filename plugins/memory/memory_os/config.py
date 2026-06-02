@@ -107,6 +107,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "target_ref": "",
         "hermes_bin": "hermes",
     },
+    "session_mirror": {
+        "test_host_apply_allowed": False,
+        "test_host_marker": "",
+        "production_apply_owner_ref_required": True,
+    },
     "l4": {
         "kill_switch_enabled": False,
     },
@@ -172,6 +177,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "default": DEFAULT_CONFIG["right_brain_expression"],
         },
         {
+            "key": "session_mirror",
+            "description": "SessionMirror bounded apply governance gates",
+            "default": DEFAULT_CONFIG["session_mirror"],
+        },
+        {
             "key": "l4",
             "description": "V7 L4 live-shadow and acting safety settings",
             "default": DEFAULT_CONFIG["l4"],
@@ -219,6 +229,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
     merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
     merged["right_brain_expression"] = _merge_right_brain_expression_config(merged.get("right_brain_expression"))
+    merged["session_mirror"] = _merge_session_mirror_config(merged.get("session_mirror"))
     merged["l4"] = _merge_l4_config(merged.get("l4"))
     return merged
 
@@ -395,6 +406,20 @@ def _merge_right_brain_expression_config(value: Any) -> dict[str, Any]:
     merged["delivery_adapter"] = str(merged.get("delivery_adapter") or "none")
     merged["target_ref"] = str(merged.get("target_ref") or "")
     merged["hermes_bin"] = str(merged.get("hermes_bin") or "hermes")
+    return merged
+
+
+def _merge_session_mirror_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["session_mirror"])
+    if not isinstance(value, dict):
+        return default
+    merged = dict(default)
+    for key in default:
+        if key in value:
+            merged[key] = value[key]
+    merged["test_host_apply_allowed"] = bool(merged.get("test_host_apply_allowed"))
+    merged["test_host_marker"] = str(merged.get("test_host_marker") or "")
+    merged["production_apply_owner_ref_required"] = bool(merged.get("production_apply_owner_ref_required"))
     return merged
 
 

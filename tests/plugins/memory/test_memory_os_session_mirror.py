@@ -3,6 +3,7 @@ import json
 import sqlite3
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
+from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
@@ -290,8 +291,38 @@ def test_session_mirror_cli_scan_apply_rejects_forged_owner_metadata(tmp_path, m
     assert store_events == []
 
 
-def test_session_mirror_cli_scan_apply_allows_explicit_test_host_gate(tmp_path, monkeypatch, capsys):
+def test_session_mirror_cli_scan_apply_rejects_env_only_test_host_gate(tmp_path, monkeypatch, capsys):
     _create_state_db(tmp_path / "state.db", session_id="cli-session")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MEMORY_OS_ALLOW_TEST_HOST_APPLY", "1")
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(["session-mirror", "scan", "--apply", "--test-host", "--evidence-ref", "test:smoke"])
+
+    exit_code = memory_os_command(args)
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "memory-os.session_mirror_apply_gate.v0"
+    assert report["status"] == "blocked"
+    assert report["reason"] == "session_mirror_apply_test_host_not_verified"
+    assert report["apply_governance"]["test_host"] is True
+    assert report["apply_governance"]["test_host_config_allowed"] is False
+    store_events = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path)).read_events()
+    assert store_events == []
+
+
+def test_session_mirror_cli_scan_apply_allows_verified_test_host_gate(tmp_path, monkeypatch, capsys):
+    _create_state_db(tmp_path / "state.db", session_id="cli-session")
+    save_config(
+        {
+            "session_mirror": {
+                "test_host_apply_allowed": True,
+                "test_host_marker": "install_preset:test-host",
+            }
+        },
+        tmp_path,
+    )
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.setenv("MEMORY_OS_ALLOW_TEST_HOST_APPLY", "1")
     parser = argparse.ArgumentParser()
@@ -306,5 +337,7 @@ def test_session_mirror_cli_scan_apply_allows_explicit_test_host_gate(tmp_path, 
     assert report["dry_run"] is False
     assert report["new_event_count"] == 1
     assert report["apply_governance"]["test_host"] is True
+    assert report["apply_governance"]["test_host_config_allowed"] is True
+    assert report["apply_governance"]["test_host_marker"] == "install_preset:test-host"
     assert report["apply_governance"]["evidence_refs"] == ["test:smoke"]
     assert report["apply_governance"]["historical_bounded_smoke_unattested"] is False

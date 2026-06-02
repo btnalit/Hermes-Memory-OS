@@ -1146,6 +1146,7 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert "latest_memory_source_id" in rendered
     assert any(item["code"] == "owner_review_ingress_guard_token_only" for item in classification["pass"])
     assert any(item["code"] == "owner_review_proposal_followups_ok" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_proposal_auto_route_ok" for item in classification["pass"])
     assert any(item["code"] == "owner_review_cron_integration_status_ok" for item in classification["pass"])
     assert "OwnerReviewAging" in rendered
     assert "OwnerReviewChannel" in rendered
@@ -1365,6 +1366,36 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     classification = classify_snapshot(snapshot)
 
     assert not any(item["code"] == "owner_review_approved_proposals_pending_followup" for item in classification["warn"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_auto_route"]["auto_followup_actual_execute_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "owner_review_proposal_auto_route_actual_execute_count_nonzero"
+        for item in classification["fail"]
+    )
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_auto_route"]["auto_followup_policy_write_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "owner_review_proposal_auto_route_policy_write_count_nonzero"
+        for item in classification["fail"]
+    )
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_auto_route"]["owner_action_required_boundary_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(
+        item["code"] == "owner_review_proposal_auto_route_boundary_requires_owner"
+        for item in classification["warn"]
+    )
 
     snapshot = _healthy_snapshot()
     snapshot["module_artifacts"]["ops_gate"]["duplicate_proposal_followup_count"] = 1
@@ -3244,6 +3275,7 @@ def _healthy_snapshot() -> dict:
         "owner_review_surface": _healthy_owner_review_surface(),
         "owner_review_ingress_guard": _healthy_owner_ingress_guard(),
         "owner_review_proposal_followups": _healthy_owner_proposal_followups(),
+        "owner_review_proposal_auto_route": _healthy_owner_proposal_auto_route(),
     }
 
 
@@ -3537,6 +3569,31 @@ def _healthy_owner_proposal_followups() -> dict:
             "actual_unapproved_crystallized_approval": False,
         },
         "items": [],
+    }
+
+
+def _healthy_owner_proposal_auto_route() -> dict:
+    return {
+        "schema_version": "memory-os.proposal_followup_auto_route.v0",
+        "status": "ok",
+        "dry_run": True,
+        "eligible_count": 0,
+        "selected_count": 0,
+        "auto_followup_routed_count": 0,
+        "auto_followup_actual_execute_count": 0,
+        "auto_followup_policy_write_count": 0,
+        "owner_action_required_count": 0,
+        "owner_action_required_boundary_count": 0,
+        "auto_followup_boundary_rejected_count": 0,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "raw_body_included": False,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
     }
 
 

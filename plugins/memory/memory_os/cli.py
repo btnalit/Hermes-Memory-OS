@@ -1381,16 +1381,26 @@ def _session_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> i
 
 def _session_mirror_apply_governance(args: argparse.Namespace, store: MemoryOSStore) -> dict[str, Any]:
     evidence_refs = [str(item) for item in list(getattr(args, "evidence_ref", []) or []) if str(item or "").strip()]
+    config = load_config(store.roots.hermes_home)
+    session_mirror_config = config.get("session_mirror") if isinstance(config.get("session_mirror"), dict) else {}
+    test_host_marker = str(session_mirror_config.get("test_host_marker") or "")
+    test_host_config_allowed = bool(session_mirror_config.get("test_host_apply_allowed"))
     metadata = {
         "owner_approved": bool(getattr(args, "owner_approved", False)),
         "approval_ref": str(getattr(args, "approval_ref", "") or ""),
         "test_host": bool(getattr(args, "test_host", False)),
+        "test_host_config_allowed": test_host_config_allowed,
+        "test_host_marker": test_host_marker,
         "operator": str(getattr(args, "operator", "") or os.environ.get("USERNAME") or os.environ.get("USER") or ""),
         "evidence_refs": evidence_refs,
         "historical_bounded_smoke_attested": False,
         "historical_bounded_smoke_unattested": False,
     }
-    if metadata["test_host"] and os.environ.get("MEMORY_OS_ALLOW_TEST_HOST_APPLY") != "1":
+    if metadata["test_host"] and not _session_mirror_test_host_apply_verified(
+        env_allowed=os.environ.get("MEMORY_OS_ALLOW_TEST_HOST_APPLY") == "1",
+        config_allowed=test_host_config_allowed,
+        marker=test_host_marker,
+    ):
         return {
             "status": "blocked",
             "metadata": metadata,
@@ -1402,6 +1412,16 @@ def _session_mirror_apply_governance(args: argparse.Namespace, store: MemoryOSSt
         }
     if metadata["test_host"] and evidence_refs:
         return {"status": "ok", "metadata": metadata}
+    if metadata["test_host"]:
+        return {
+            "status": "blocked",
+            "metadata": metadata,
+            "report": _session_mirror_apply_gate_report(
+                store,
+                reason="session_mirror_apply_test_host_evidence_required",
+                metadata=metadata,
+            ),
+        }
     if metadata["owner_approved"] and metadata["approval_ref"] and evidence_refs:
         return {
             "status": "blocked",
@@ -1421,6 +1441,11 @@ def _session_mirror_apply_governance(args: argparse.Namespace, store: MemoryOSSt
             metadata=metadata,
         ),
     }
+
+
+def _session_mirror_test_host_apply_verified(*, env_allowed: bool, config_allowed: bool, marker: str) -> bool:
+    trusted_markers = {"install_preset:test-host", "manual:test-host"}
+    return env_allowed and config_allowed and str(marker or "") in trusted_markers
 
 
 def _session_mirror_apply_gate_report(

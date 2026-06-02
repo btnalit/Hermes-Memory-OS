@@ -1803,6 +1803,44 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             warn.append({"code": "owner_review_proposal_followups_unavailable", "value": proposal_followups})
 
+    proposal_auto_route = snapshot.get("owner_review_proposal_auto_route", {})
+    if proposal_auto_route:
+        if proposal_auto_route.get("schema_version") == "memory-os.proposal_followup_auto_route.v0":
+            passed.append({"code": "owner_review_proposal_auto_route_ok"})
+            if proposal_auto_route.get("actual_execute") is True:
+                fail.append({"code": "owner_review_proposal_auto_route_actual_execute_true"})
+            if int(proposal_auto_route.get("auto_followup_actual_execute_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_actual_execute_count_nonzero",
+                        "value": proposal_auto_route.get("auto_followup_actual_execute_count"),
+                    }
+                )
+            if int(proposal_auto_route.get("auto_followup_policy_write_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_policy_write_count_nonzero",
+                        "value": proposal_auto_route.get("auto_followup_policy_write_count"),
+                    }
+                )
+            if int(proposal_auto_route.get("owner_action_required_boundary_count") or 0) > 0:
+                warn.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_boundary_requires_owner",
+                        "value": proposal_auto_route.get("owner_action_required_boundary_count"),
+                    }
+                )
+            boundary = (
+                proposal_auto_route.get("boundary")
+                if isinstance(proposal_auto_route.get("boundary"), dict)
+                else {}
+            )
+            for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_unapproved_crystallized_approval"):
+                if boundary.get(key) is True:
+                    fail.append({"code": f"owner_review_proposal_auto_route_{key}_true"})
+        else:
+            warn.append({"code": "owner_review_proposal_auto_route_unavailable", "value": proposal_auto_route})
+
     cron_integration = snapshot.get("owner_review_cron_integration", {})
     if cron_integration:
         if cron_integration.get("schema_version") == "memory-os.owner_review_cron_integration.v0":
@@ -2478,6 +2516,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- OwnerReviewSurface={_owner_review_surface_summary(snapshot.get('owner_review_surface') or {})}",
         f"- OwnerIngressGuard={_owner_ingress_guard_summary(snapshot.get('owner_review_ingress_guard') or {})}",
         f"- OwnerProposalFollowups={_owner_proposal_followups_summary(snapshot.get('owner_review_proposal_followups') or {})}",
+        f"- OwnerProposalAutoRoute={_owner_proposal_auto_route_summary(snapshot.get('owner_review_proposal_auto_route') or {})}",
         f"- OwnerDeliveryStatus={_owner_delivery_status_summary(snapshot.get('owner_review_delivery_status') or {})}",
         f"- OwnerDeliveryGate={_owner_delivery_gate_summary(snapshot.get('owner_review_delivery_gate') or {})}",
         f"- OwnerCronIntegration={_owner_cron_integration_summary(snapshot.get('owner_review_cron_integration') or {})}",
@@ -2895,6 +2934,20 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
         "execution_tickets": summary.get("execution_ticket_count"),
         "actual_execute": summary.get("actual_execute"),
         "raw_body_included": summary.get("raw_body_included"),
+    }
+
+
+def _owner_proposal_auto_route_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "eligible": summary.get("eligible_count"),
+        "selected": summary.get("selected_count"),
+        "routed": summary.get("auto_followup_routed_count"),
+        "actual_execute_count": summary.get("auto_followup_actual_execute_count"),
+        "policy_write_count": summary.get("auto_followup_policy_write_count"),
+        "owner_boundary_count": summary.get("owner_action_required_boundary_count"),
+        "boundary_rejected": summary.get("auto_followup_boundary_rejected_count"),
+        "dry_run": summary.get("dry_run"),
+        "actual_execute": summary.get("actual_execute"),
     }
 
 
@@ -4907,6 +4960,7 @@ owner_review_cron_integration = memory_os_cli(["review", "cron-status"])
 owner_review_delivery_status = memory_os_cli(["review", "delivery-status"])
 owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups", "--limit", "10"])
+owner_review_proposal_auto_route = memory_os_cli(["review", "proposal-followups", "--auto-route", "--limit", "10"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
 owner_review_agenda_digest = owner_review_agenda_digest_summary()
@@ -4958,6 +5012,7 @@ print(json.dumps({
   "owner_review_delivery_status": owner_review_delivery_status,
   "owner_review_delivery_gate": owner_review_delivery_gate,
   "owner_review_proposal_followups": owner_review_proposal_followups,
+  "owner_review_proposal_auto_route": owner_review_proposal_auto_route,
   "owner_review_digest_preview": owner_review_digest_preview,
   "owner_review_rendered_digest": owner_review_rendered_digest,
   "owner_review_agenda_digest": owner_review_agenda_digest,
