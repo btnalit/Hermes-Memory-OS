@@ -168,8 +168,15 @@ is not unambiguous, Hermes should ask you to clarify instead of guessing.
 
 Memory-OS itself does not execute display anchors. `A1/R1/F1` are UI labels
 only; the plugin/state-machine layer applies only stable `oa_` action tokens.
-A proposal approval only marks the proposal as approved for human-controlled
-follow-up; it does not execute work.
+
+Owner approval is reserved for trust-boundary actions, not every workflow step.
+Proposal follow-up routing is report-only process motion: it may move a proposal
+into OpsGate review, but it does not execute work, write policy, mutate routing,
+send messages, or write crystallized memory. The actual boundary action
+(`apply_proposal`, crystallized write, revoke/demote/delete, route/score
+authority, identity/relationship write, external send, or unbounded autonomous
+acting) remains owner-gated unless that specific low-risk lane has been
+explicitly graduated.
 
 Shell/CLI paths are operator/debug fallbacks only. They are not the owner-facing
 approval workflow.

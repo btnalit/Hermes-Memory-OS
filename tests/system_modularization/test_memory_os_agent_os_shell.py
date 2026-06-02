@@ -189,12 +189,25 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     session_apply_status_args = parser.parse_args(["session-mirror", "apply-status"])
     assert session_apply_status_args.session_mirror_command == "apply-status"
     session_scan_args = parser.parse_args(
-        ["session-mirror", "scan", "--apply", "--max-sessions", "1", "--platform", "telegram"]
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--max-sessions",
+            "1",
+            "--platform",
+            "telegram",
+            "--test-host",
+            "--evidence-ref",
+            "test:session-mirror",
+        ]
     )
     assert session_scan_args.session_mirror_command == "scan"
     assert session_scan_args.apply is True
     assert session_scan_args.max_sessions == 1
     assert session_scan_args.platform == ["telegram"]
+    assert session_scan_args.test_host is True
+    assert session_scan_args.evidence_ref == ["test:session-mirror"]
     review_status_args = parser.parse_args(["review", "status"])
     assert review_status_args.agent_os_command == "review"
     assert review_status_args.review_command == "status"
@@ -220,6 +233,12 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_followups_all_args.ops_gate is True
     assert review_followups_all_args.all_pending is True
     assert review_followups_all_args.apply is True
+    review_followups_auto_args = parser.parse_args(
+        ["review", "proposal-followups", "--auto-route", "--apply"]
+    )
+    assert review_followups_auto_args.review_command == "proposal-followups"
+    assert review_followups_auto_args.auto_route is True
+    assert review_followups_auto_args.apply is True
     review_followups_apply_args = parser.parse_args(
         [
             "review",

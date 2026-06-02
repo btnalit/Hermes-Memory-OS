@@ -492,6 +492,7 @@ def test_clean_host_warn_classification_table_covers_current_warn_codes():
         "context_router_not_apply",
         "memory_sources_feedback_volume_missing",
         "v7_memory_sources_feedback_volume_pending",
+        "session_mirror_pending_source_gap",
     }
 
     assert expected_codes <= set(monitor.CLEAN_HOST_WARN_CLASSIFICATIONS)
@@ -509,6 +510,30 @@ def test_clean_host_warns_include_classification_records():
         item["code"] == "context_router_not_apply"
         and item["classification"] == "expected_clean_host"
         and item["production_behavior"] == "fail_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_clean_host_warns_classify_session_mirror_pending_source_gap():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "dry_run_status": "ok",
+        "dry_run_written_event_ids_count": 0,
+        "pending_session_count": 2,
+        "pending_only_group_count": 2,
+        "correlation_status": "ok",
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert any(item["code"] == "session_mirror_pending_source_gap" for item in classification["warn"])
+    assert any(
+        item["code"] == "session_mirror_pending_source_gap"
+        and item["classification"] == "next_lane"
+        and item["production_behavior"] == "warn_if_production"
         for item in classification["clean_host_warn_classification"]
     )
 

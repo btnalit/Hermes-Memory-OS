@@ -123,6 +123,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "V7 owner-signal canary volume is a promotion lane, not a clean-host install blocker",
         "production_behavior": "warn_if_production",
     },
+    "session_mirror_pending_source_gap": {
+        "classification": "next_lane",
+        "reason": "clean-host pending-only sessions need owner decision or bounded apply only if tied to recall/candidate gaps",
+        "production_behavior": "warn_if_production",
+    },
     "memory_sources_stats_unavailable": {
         "classification": "expected_clean_host",
         "reason": "clean-host may not have MemorySources stats before live traffic and feedback are generated",

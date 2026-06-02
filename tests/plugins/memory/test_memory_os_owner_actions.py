@@ -45,6 +45,7 @@ from plugins.memory.memory_os.owner_actions import (
     render_owner_review_digest,
     resolve_owner_review_channel,
     speak_permission_tickets_path,
+    auto_route_safe_proposal_followups_to_ops_gate,
     apply_approved_proposal_execution_decision,
     route_approved_proposal_followup_to_ops_gate,
     route_pending_approved_proposal_followups_to_ops_gate,
@@ -604,6 +605,55 @@ def test_approved_proposal_followup_batch_routes_pending_to_ops_gate_without_exe
     assert followups["execution_ticket_count"] == 0
     assert followups["actual_execute"] is False
     assert "PRIVATE RAW BODY" not in json.dumps(applied, ensure_ascii=False)
+
+
+def test_auto_route_safe_proposal_followups_to_ops_gate_without_owner_action(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    safe = proposal_queue.create_candidate(store=store, title="Adjust report-only follow-up", body="Bounded proposal")
+    mature_later = proposal_queue.create_candidate(
+        store=store,
+        title="self-evolution dry-run proposal",
+        body="use the highest evidence signal to prepare a reviewed governance improvement.",
+    )
+
+    dry_run = auto_route_safe_proposal_followups_to_ops_gate(store, apply=False)
+    applied = auto_route_safe_proposal_followups_to_ops_gate(store, apply=True)
+    queue = {item["candidate_id"]: item for item in proposal_queue.read_queue()["items"]}
+    reports = _jsonl(tmp_path / "system-modules" / "ops_gate" / "reports.jsonl")
+    owner_record_path = owner_actions_path(store.roots)
+    owner_records = _jsonl(owner_record_path) if owner_record_path.exists() else []
+
+    assert dry_run["schema_version"] == "memory-os.proposal_followup_auto_route.v0"
+    assert dry_run["dry_run"] is True
+    assert dry_run["eligible_count"] == 1
+    assert dry_run["auto_followup_routed_count"] == 0
+    assert applied["status"] == "ok"
+    assert applied["dry_run"] is False
+    assert applied["eligible_count"] == 1
+    assert applied["auto_followup_routed_count"] == 1
+    assert applied["auto_followup_actual_execute_count"] == 0
+    assert applied["auto_followup_policy_write_count"] == 0
+    assert applied["boundary"]["actual_execute"] is False
+    assert applied["ops_gate"]["ops_gate_report_written_count"] == 1
+    assert queue[safe["candidate_id"]]["state"] == "approved_for_proposal"
+    assert queue[safe["candidate_id"]]["followup_state"] == "awaiting_ops_gate"
+    assert queue[mature_later["candidate_id"]]["state"] == "candidate"
+    assert len(reports) == 1
+    assert reports[0]["actual_execute"] is False
+    assert owner_records == []
+    assert "Bounded proposal" not in json.dumps(applied, ensure_ascii=False)
+
+    veto = apply_owner_action(
+        store,
+        action_type="reject_proposal",
+        target=f"proposal:{safe['candidate_id']}",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    assert veto["status"] == "ok"
+    assert proposal_queue.read_queue()["items"][0]["state"] == "owner_declined"
 
 
 def test_approved_expression_policy_proposal_can_be_explicitly_applied_after_ops_gate(tmp_path):

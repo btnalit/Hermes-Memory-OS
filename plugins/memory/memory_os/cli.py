@@ -78,6 +78,7 @@ from .migrator import (
 )
 from .owner_actions import (
     approved_proposal_followups_report,
+    auto_route_safe_proposal_followups_to_ops_gate,
     apply_approved_proposal_execution_decision,
     apply_owner_action,
     deliver_owner_review_digest_once,
@@ -864,6 +865,11 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     session_scan.add_argument("--apply", action="store_true")
     session_scan.add_argument("--max-sessions", type=int, default=0)
     session_scan.add_argument("--platform", action="append", default=[])
+    session_scan.add_argument("--owner-approved", action="store_true")
+    session_scan.add_argument("--approval-ref", default="")
+    session_scan.add_argument("--evidence-ref", action="append", default=[])
+    session_scan.add_argument("--operator", default="")
+    session_scan.add_argument("--test-host", action="store_true")
     state_source_parser = subs.add_parser("state-source-mirror")
     state_source_parser.add_argument("--state-root", action="append", default=[])
     state_source_subs = state_source_parser.add_subparsers(dest="state_source_mirror_command", required=True)
@@ -961,6 +967,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_followups.add_argument("--limit", type=int, default=20)
     review_followups.add_argument("--proposal-id", default="")
     review_followups.add_argument("--ops-gate", action="store_true")
+    review_followups.add_argument("--auto-route", action="store_true")
     review_followups.add_argument("--all-pending", action="store_true")
     review_followups.add_argument("--execution-apply", action="store_true")
     review_followups.add_argument("--owner-approved", action="store_true")
@@ -1351,12 +1358,17 @@ def _session_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         return 0
     if command == "scan":
         dry_run = not bool(getattr(args, "apply", False))
+        apply_governance = _session_mirror_apply_governance(args, store)
+        if not dry_run and apply_governance.get("status") == "blocked":
+            print(json.dumps(apply_governance["report"], ensure_ascii=False, indent=2, sort_keys=True))
+            return 1
         print(
             json.dumps(
                 mirror.scan(
                     dry_run=dry_run,
                     max_sessions=max(int(getattr(args, "max_sessions", 0) or 0), 0),
                     platform_allowlist=list(getattr(args, "platform", []) or []),
+                    apply_governance=apply_governance.get("metadata", {}),
                 ),
                 ensure_ascii=False,
                 indent=2,
@@ -1365,6 +1377,74 @@ def _session_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         )
         return 0
     return 2
+
+
+def _session_mirror_apply_governance(args: argparse.Namespace, store: MemoryOSStore) -> dict[str, Any]:
+    evidence_refs = [str(item) for item in list(getattr(args, "evidence_ref", []) or []) if str(item or "").strip()]
+    metadata = {
+        "owner_approved": bool(getattr(args, "owner_approved", False)),
+        "approval_ref": str(getattr(args, "approval_ref", "") or ""),
+        "test_host": bool(getattr(args, "test_host", False)),
+        "operator": str(getattr(args, "operator", "") or os.environ.get("USERNAME") or os.environ.get("USER") or ""),
+        "evidence_refs": evidence_refs,
+        "historical_bounded_smoke_attested": False,
+        "historical_bounded_smoke_unattested": False,
+    }
+    if metadata["test_host"] and os.environ.get("MEMORY_OS_ALLOW_TEST_HOST_APPLY") != "1":
+        return {
+            "status": "blocked",
+            "metadata": metadata,
+            "report": _session_mirror_apply_gate_report(
+                store,
+                reason="session_mirror_apply_test_host_not_verified",
+                metadata=metadata,
+            ),
+        }
+    if metadata["test_host"] and evidence_refs:
+        return {"status": "ok", "metadata": metadata}
+    if metadata["owner_approved"] and metadata["approval_ref"] and evidence_refs:
+        return {
+            "status": "blocked",
+            "metadata": metadata,
+            "report": _session_mirror_apply_gate_report(
+                store,
+                reason="session_mirror_apply_owner_ref_not_validated",
+                metadata=metadata,
+            ),
+        }
+    return {
+        "status": "blocked",
+        "metadata": metadata,
+        "report": _session_mirror_apply_gate_report(
+            store,
+            reason="session_mirror_apply_owner_metadata_required",
+            metadata=metadata,
+        ),
+    }
+
+
+def _session_mirror_apply_gate_report(
+    store: MemoryOSStore,
+    *,
+    reason: str,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": "memory-os.session_mirror_apply_gate.v0",
+        "profile": store.roots.profile or "default",
+        "status": "blocked",
+        "reason": reason,
+        "dry_run": True,
+        "apply_governance": metadata,
+        "actual_execute": False,
+        "written_event_ids_count": 0,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        },
+    }
 
 
 def _state_source_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
@@ -1582,6 +1662,23 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
                 "evidence_resolved",
                 "bounded_policy_written",
             } else 1
+        if bool(getattr(args, "auto_route", False)):
+            report = auto_route_safe_proposal_followups_to_ops_gate(
+                store,
+                owner_id=str(args.owner),
+                channel=str(args.channel),
+                limit=max(int(args.limit), 0),
+                apply=bool(args.apply),
+            )
+            print(
+                json.dumps(
+                    report,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0 if report.get("status") == "ok" else 1
         if bool(getattr(args, "ops_gate", False)):
             if bool(getattr(args, "all_pending", False)):
                 report = route_pending_approved_proposal_followups_to_ops_gate(

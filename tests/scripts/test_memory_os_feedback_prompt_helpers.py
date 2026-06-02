@@ -258,7 +258,8 @@ def test_proposal_followups_ops_gate_helper_accepts_report_only(monkeypatch):
     with redirect_stdout(buffer):
         assert proposal_followups.main() == 0
 
-    assert "--ops-gate" in captured["command"]
-    assert "--all-pending" in captured["command"]
+    assert "--auto-route" in captured["command"]
+    assert "--ops-gate" not in captured["command"]
+    assert "--all-pending" not in captured["command"]
     assert "--apply" in captured["command"]
     assert "hermes_cron" in captured["command"]

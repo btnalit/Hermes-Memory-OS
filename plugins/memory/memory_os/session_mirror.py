@@ -99,6 +99,7 @@ class SessionMirror:
         dry_run: bool = True,
         max_sessions: int = 0,
         platform_allowlist: list[str] | tuple[str, ...] | None = None,
+        apply_governance: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not dry_run:
             self.store.initialize()
@@ -156,7 +157,9 @@ class SessionMirror:
                 written_event_ids=written_events,
                 status="ok" if not findings else "warning",
                 findings=findings,
+                apply_governance=apply_governance or {},
             )
+        governance = _bounded_apply_governance(apply_governance or {})
         return {
             "schema_version": self.report_schema_version,
             "status": "ok" if not findings else "warning",
@@ -177,6 +180,7 @@ class SessionMirror:
             "written_event_ids_count": len(written_events),
             "duplicate_ignored_count": 0,
             "raw_private_body_printed": False,
+            "apply_governance": governance,
             "findings": findings,
         }
 
@@ -323,8 +327,10 @@ class SessionMirror:
         written_event_ids: list[str],
         status: str,
         findings: list[dict[str, Any]],
+        apply_governance: dict[str, Any],
     ) -> None:
         now = datetime.now(timezone.utc)
+        governance = _bounded_apply_governance(apply_governance)
         record = {
             "schema_version": SESSION_MIRROR_APPLY_SCHEMA_VERSION,
             "apply_id": f"smap_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{hashlib.sha256('|'.join(written_event_ids).encode('utf-8')).hexdigest()[:8]}",
@@ -343,6 +349,7 @@ class SessionMirror:
             "duplicate_ignored_count": 0,
             "raw_private_body_printed": False,
             "finding_count": len(findings),
+            "apply_governance": governance,
             "boundary": {
                 "actual_send": False,
                 "actual_execute": False,
@@ -494,7 +501,23 @@ def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:
         "duplicate_ignored_count": record.get("duplicate_ignored_count"),
         "raw_private_body_printed": record.get("raw_private_body_printed"),
         "finding_count": record.get("finding_count"),
+        "apply_governance": _bounded_apply_governance(
+            record.get("apply_governance") if isinstance(record.get("apply_governance"), dict) else {}
+        ),
         "boundary": record.get("boundary") if isinstance(record.get("boundary"), dict) else {},
+    }
+
+
+def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
+    evidence_refs = value.get("evidence_refs") if isinstance(value.get("evidence_refs"), list) else []
+    return {
+        "owner_approved": bool(value.get("owner_approved")),
+        "approval_ref": str(value.get("approval_ref") or "")[:160],
+        "test_host": bool(value.get("test_host")),
+        "operator": str(value.get("operator") or "")[:120],
+        "evidence_refs": [str(item)[:160] for item in evidence_refs[:10] if str(item or "").strip()],
+        "historical_bounded_smoke_attested": bool(value.get("historical_bounded_smoke_attested")),
+        "historical_bounded_smoke_unattested": bool(value.get("historical_bounded_smoke_unattested")),
     }
 
 

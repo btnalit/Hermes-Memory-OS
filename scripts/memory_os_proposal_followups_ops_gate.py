@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Route approved proposal follow-ups through OpsGate report-only.
+"""Auto-route safe proposal follow-ups through OpsGate report-only.
 
 Hermes owns scheduling. This helper only invokes the Memory-OS structured
-surface to move approved proposals to the report-only OpsGate follow-up state.
-It never creates execution tickets and never executes external work.
+surface to move safe proposal_queue_only items to the report-only OpsGate
+follow-up state. It never creates execution tickets and never executes external
+work.
 """
 
 from __future__ import annotations
@@ -20,11 +21,10 @@ def main() -> int:
             "memory-os-agent-os",
             "review",
             "proposal-followups",
-            "--ops-gate",
-            "--all-pending",
+            "--auto-route",
             "--apply",
             "--owner",
-            "owner",
+            "memory_os_auto",
             "--channel",
             "hermes_cron",
         ]

@@ -242,7 +242,7 @@ def test_session_mirror_dry_run_does_not_repair_corrupt_state_file(tmp_path):
     assert mirror.state_path.read_text(encoding="utf-8") == "{not json}"
 
 
-def test_session_mirror_cli_scan_apply_outputs_json_report(tmp_path, monkeypatch, capsys):
+def test_session_mirror_cli_scan_apply_requires_governance_metadata(tmp_path, monkeypatch, capsys):
     _create_state_db(tmp_path / "state.db", session_id="cli-session")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     parser = argparse.ArgumentParser()
@@ -251,8 +251,60 @@ def test_session_mirror_cli_scan_apply_outputs_json_report(tmp_path, monkeypatch
 
     exit_code = memory_os_command(args)
 
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "memory-os.session_mirror_apply_gate.v0"
+    assert report["status"] == "blocked"
+    assert report["reason"] == "session_mirror_apply_owner_metadata_required"
+    assert report["dry_run"] is True
+    store_events = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path)).read_events()
+    assert store_events == []
+
+
+def test_session_mirror_cli_scan_apply_rejects_forged_owner_metadata(tmp_path, monkeypatch, capsys):
+    _create_state_db(tmp_path / "state.db", session_id="cli-session")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(
+        [
+            "session-mirror",
+            "scan",
+            "--apply",
+            "--owner-approved",
+            "--approval-ref",
+            "fake-ticket",
+            "--evidence-ref",
+            "test:smoke",
+        ]
+    )
+
+    exit_code = memory_os_command(args)
+
+    assert exit_code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == "memory-os.session_mirror_apply_gate.v0"
+    assert report["status"] == "blocked"
+    assert report["reason"] == "session_mirror_apply_owner_ref_not_validated"
+    store_events = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path)).read_events()
+    assert store_events == []
+
+
+def test_session_mirror_cli_scan_apply_allows_explicit_test_host_gate(tmp_path, monkeypatch, capsys):
+    _create_state_db(tmp_path / "state.db", session_id="cli-session")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MEMORY_OS_ALLOW_TEST_HOST_APPLY", "1")
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+    args = parser.parse_args(["session-mirror", "scan", "--apply", "--test-host", "--evidence-ref", "test:smoke"])
+
+    exit_code = memory_os_command(args)
+
     assert exit_code == 0
     report = json.loads(capsys.readouterr().out)
     assert report["schema_version"] == "memory-os.session_mirror_report.v0"
     assert report["dry_run"] is False
     assert report["new_event_count"] == 1
+    assert report["apply_governance"]["test_host"] is True
+    assert report["apply_governance"]["evidence_refs"] == ["test:smoke"]
+    assert report["apply_governance"]["historical_bounded_smoke_unattested"] is False

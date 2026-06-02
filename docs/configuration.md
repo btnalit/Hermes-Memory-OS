@@ -85,6 +85,17 @@ proposal follow-up routing, expression feedback request, and MemorySources
 feedback request. Memory-OS provides bounded helper scripts; Hermes owns cron,
 agent turns, platform transport, origin/local delivery, retry, and cooldown.
 
+The approval boundary is trust-boundary based, not process-step based. Memory-OS
+may automate reversible/report-only workflow such as signal collection,
+shadow scoring, proposal creation, proposal follow-up routing, OpsGate
+report-only review, stale/duplicate queue closure, digest rendering, and
+owner-channel delivery. Owner approval remains required for crystallized writes,
+revoke/demote/delete, route/score authority, identity/relationship writes,
+third-party or public external sends, unbounded autonomous acting, and any
+specific lane graduation that removes per-item owner approval from an
+apply-capable path. In particular, `apply_proposal` is a boundary action, while
+safe proposal follow-up routing is not.
+
 `auto` reads Hermes `channel_directory.json` and selects the configured owner
 home channel for owner-facing jobs. Depending on the installed profile, it may
 resolve to Telegram, Discord, Signal, Slack, Matrix, or another configured

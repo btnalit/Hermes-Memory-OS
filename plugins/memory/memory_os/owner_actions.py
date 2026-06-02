@@ -53,6 +53,7 @@ OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_inte
 APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_followups.v0"
 APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate.v0"
 APPROVED_PROPOSAL_OPS_GATE_BATCH_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate_batch.v0"
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_SCHEMA_VERSION = "memory-os.proposal_followup_auto_route.v0"
 APPROVED_PROPOSAL_EXECUTION_APPLY_SCHEMA_VERSION = "memory-os.approved_proposal_execution_apply.v0"
 APPROVED_PROPOSAL_EXECUTION_TICKET_SCHEMA_VERSION = "memory-os.approved_proposal_execution_ticket.v0"
 OWNER_ACTION_RESULT_SCHEMA_VERSION = "memory-os.owner_action_result.v0"
@@ -686,6 +687,133 @@ def route_pending_approved_proposal_followups_to_ops_gate(
         "boundary": _owner_review_false_boundary(),
         "results": results[:20],
     }
+
+
+def auto_route_safe_proposal_followups_to_ops_gate(
+    store: MemoryOSStore,
+    *,
+    owner_id: str = "memory_os_auto",
+    channel: str = "automation",
+    limit: int = 50,
+    apply: bool = False,
+) -> dict[str, Any]:
+    """Graduate safe proposal follow-up process motion to OpsGate report-only.
+
+    This is Lane E: it moves only low-risk ``proposal_queue_only`` candidates
+    into follow-up and immediately reuses the existing OpsGate report-only path.
+    It is not an owner action, does not create execution tickets, and never
+    applies proposal policy.
+    """
+
+    from plugins.modules.governance.proposal_queue import ProposalQueueModule
+
+    module = ProposalQueueModule(store.roots.hermes_home, profile=store.roots.profile or "default")
+    queue = module.read_queue()
+    candidates = [
+        item
+        for item in queue.get("items", [])
+        if isinstance(item, dict) and _proposal_followup_auto_route_eligible(item)
+    ]
+    bounded_limit = max(min(int(limit or 50), 200), 0)
+    selected = candidates[:bounded_limit]
+    promoted_ids: list[str] = []
+    if apply:
+        for item in selected:
+            proposal_id = str(item.get("candidate_id") or "")
+            if not proposal_id:
+                continue
+            module.transition(
+                store=store,
+                candidate_id=proposal_id,
+                decision="approve",
+                reviewer=owner_id,
+                note="auto_route_to_ops_gate_report_only",
+            )
+            promoted_ids.append(proposal_id)
+    ops_gate = route_pending_approved_proposal_followups_to_ops_gate(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        limit=bounded_limit,
+        apply=apply,
+    ) if apply else {
+        "schema_version": APPROVED_PROPOSAL_OPS_GATE_BATCH_SCHEMA_VERSION,
+        "status": "ok",
+        "dry_run": True,
+        "eligible_count": len(selected),
+        "selected_count": len(selected),
+        "overflow_count": max(len(candidates) - bounded_limit, 0),
+        "ops_gate_report_written_count": 0,
+        "duplicate_ignored_count": 0,
+        "error_count": 0,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "raw_body_included": False,
+        "boundary": _owner_review_false_boundary(),
+        "results": [],
+    }
+    policy_write_count = _proposal_policy_write_count(approved_proposal_followups_report(store, limit=1_000_000))
+    result = {
+        "schema_version": PROPOSAL_FOLLOWUP_AUTO_ROUTE_SCHEMA_VERSION,
+        "profile": store.roots.profile or "default",
+        "status": "ok" if ops_gate.get("status") in {"ok", "warning"} else "error",
+        "dry_run": not apply,
+        "owner_id": owner_id,
+        "channel": channel,
+        "eligible_count": len(candidates),
+        "selected_count": len(selected),
+        "overflow_count": max(len(candidates) - bounded_limit, 0),
+        "auto_followup_routed_count": len(promoted_ids),
+        "auto_followup_actual_execute_count": 0,
+        "auto_followup_policy_write_count": 0 if not apply else 0,
+        "existing_policy_write_count": policy_write_count,
+        "owner_action_required_count": 0,
+        "execution_ticket_created": False,
+        "actual_execute": False,
+        "raw_body_included": False,
+        "promoted_proposal_ids": promoted_ids[:20],
+        "ops_gate": ops_gate,
+        "boundary": _owner_review_false_boundary(),
+    }
+    if apply:
+        append_audit(
+            store.roots.audit_path,
+            action="proposal_followup_auto_route_to_ops_gate",
+            status=result["status"],
+            target=str(_proposal_queue_path(store)),
+            details={
+                "eligible_count": result["eligible_count"],
+                "auto_followup_routed_count": result["auto_followup_routed_count"],
+                "ops_gate_report_written_count": ops_gate.get("ops_gate_report_written_count"),
+                "actual_execute": False,
+                "policy_write_count": 0,
+            },
+        )
+    return result
+
+
+def _proposal_followup_auto_route_eligible(proposal: dict[str, Any]) -> bool:
+    state = str(proposal.get("state") or "")
+    if state not in {"candidate", "owner_eligible", "owner_defer"}:
+        return False
+    if str(proposal.get("approval_purpose") or "") != "proposal_queue_only":
+        return False
+    if bool(proposal.get("crystallized_approved")) or bool(proposal.get("actual_execute")):
+        return False
+    if int(proposal.get("execution_ticket_count") or 0) > 0:
+        return False
+    if _proposal_requires_maturation(proposal):
+        return False
+    return True
+
+
+def _proposal_policy_write_count(report: dict[str, Any]) -> int:
+    return (
+        int(report.get("policy_apply_count") or 0)
+        + int(report.get("memory_sources_policy_apply_count") or 0)
+        + int(report.get("legacy_template_cleanup_apply_count") or 0)
+        + int(report.get("deep_reflection_policy_apply_count") or 0)
+    )
 
 
 def apply_approved_proposal_execution_decision(
@@ -2224,7 +2352,10 @@ def _validate_action_target(
         proposal = _find_proposal(store, target_id)
         if not proposal:
             return "proposal_not_found"
-        if str(proposal.get("state", "")) not in {"candidate", "owner_eligible", "owner_defer"}:
+        allowed_states = {"candidate", "owner_eligible", "owner_defer"}
+        if action_type == "reject_proposal":
+            allowed_states.add("approved_for_proposal")
+        if str(proposal.get("state", "")) not in allowed_states:
             return "proposal_not_pending"
     if action_type == "apply_proposal":
         report = apply_approved_proposal_execution_decision(
