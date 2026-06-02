@@ -2833,7 +2833,7 @@ def test_owner_channel_reply_approves_session_mirror_apply_with_digest_binding(t
         {
             "owner_review": {
                 "recurring_delivery_enabled": True,
-                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_mode": "hermes_cron_agent",
                 "recurring_delivery_channel": "telegram",
                 "recurring_delivery_target_class": "explicit_target",
             }

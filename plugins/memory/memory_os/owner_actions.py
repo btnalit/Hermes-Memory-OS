@@ -2199,7 +2199,7 @@ def _owner_review_delivery_binding(store: MemoryOSStore, channel: str) -> dict[s
     recurring_enabled = bool(config.get("recurring_delivery_enabled"))
     recurring_mode = str(config.get("recurring_delivery_mode") or "")
     scope = "channel"
-    if recurring_enabled and recurring_mode == "hermes_cron" and recurring_channel == safe_channel:
+    if recurring_enabled and recurring_mode in {"hermes_cron", "hermes_cron_agent"} and recurring_channel == safe_channel:
         scope = "owner_home"
     return {
         "schema_version": "memory-os.owner_review_delivery_binding.v0",
