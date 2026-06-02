@@ -14,6 +14,7 @@ from .store import MemoryOSStore
 
 
 EXECUTION_GATE_SCHEMA_VERSION = "memory-os.execution_gate_envelope.v0"
+DEFAULT_PERMIT_TTL_SECONDS = 900
 
 
 def execution_gate_records_path(roots: MemoryOSRoots) -> Path:
@@ -23,6 +24,157 @@ def execution_gate_records_path(roots: MemoryOSRoots) -> Path:
 def read_execution_gate_records(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
     records = _read_jsonl(execution_gate_records_path(roots))
     return records[-max(limit, 0):] if limit else records
+
+
+def resolve_execution_gate_permit(
+    roots: MemoryOSRoots,
+    *,
+    envelope_id: str,
+    lane_id: str = "",
+    risk_class: str = "",
+    require_fresh: bool = False,
+    require_unused: bool = False,
+    expected_scope: dict[str, Any] | None = None,
+    expected_scope_hash: str = "",
+    limit: int = 2000,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Resolve whether an execution-gate permit is valid for a caller.
+
+    This is intentionally stricter than checking that an envelope id exists:
+    callers can require lane/risk match and get a machine-readable rejection
+    reason when the permit is missing, blocked, expired, or ambiguous.
+    """
+
+    target = str(envelope_id or "").strip()
+    if not target or not target.startswith("xgate_"):
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_envelope_id_invalid",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+        )
+    records = read_execution_gate_records(roots, limit=limit)
+    permits = [
+        record
+        for record in records
+        if record.get("stage") == "permit" and str(record.get("execution_gate_envelope_id") or "") == target
+    ]
+    completions = [
+        record
+        for record in records
+        if record.get("stage") == "completion" and str(record.get("execution_gate_envelope_id") or "") == target
+    ]
+    if not permits:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_permit_not_found",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+        )
+    if len(permits) > 1:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_permit_conflict",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit_count=len(permits),
+        )
+    permit = permits[0]
+    if lane_id and str(permit.get("lane_id") or "") != lane_id:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_lane_mismatch",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=permit,
+        )
+    if risk_class and str(permit.get("risk_class") or "") != risk_class:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_risk_class_mismatch",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=permit,
+        )
+    if str(permit.get("permit_decision") or "") != "allowed":
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_permit_not_allowed",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=permit,
+        )
+    if permit.get("boundary_true") is True or any_boundary_true(permit.get("boundary")):
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_boundary_true",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=permit,
+            completion_count=len(completions),
+        )
+    expiry = _expiry_status(permit.get("expires_at"), now=now, require_present=require_fresh)
+    if expiry != "valid":
+        return _permit_resolution(
+            status="invalid",
+            reason=f"execution_gate_permit_{expiry}",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=permit,
+            completion_count=len(completions),
+        )
+    if require_unused and completions:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_permit_already_completed",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=permit,
+            completion_count=len(completions),
+        )
+    expected_hash = str(expected_scope_hash or "").strip()
+    if expected_scope is not None:
+        expected_hash = execution_gate_scope_hash(expected_scope)
+    if expected_hash:
+        permit_scope_hash = str(permit.get("scope_hash") or "").strip()
+        if not permit_scope_hash:
+            permit_scope_hash = execution_gate_scope_hash(permit.get("scope") if isinstance(permit.get("scope"), dict) else {})
+        if permit_scope_hash != expected_hash:
+            return _permit_resolution(
+                status="invalid",
+                reason="execution_gate_scope_mismatch",
+                envelope_id=target,
+                lane_id=lane_id,
+                risk_class=risk_class,
+                permit=permit,
+                completion_count=len(completions),
+                scope_match=False,
+            )
+    return _permit_resolution(
+        status="valid",
+        reason="",
+        envelope_id=target,
+        lane_id=str(permit.get("lane_id") or ""),
+        risk_class=str(permit.get("risk_class") or ""),
+        permit=permit,
+        completion_count=len(completions),
+        scope_match=True if expected_hash else None,
+    )
+
+
+def execution_gate_scope_hash(scope: dict[str, Any] | None) -> str:
+    encoded = json.dumps(scope or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def any_boundary_true(value: Any) -> bool:
@@ -60,8 +212,10 @@ def start_execution_gate_envelope(
     boundary: dict[str, Any],
     precheck: dict[str, Any] | None = None,
     evidence_refs: list[str] | None = None,
+    ttl_seconds: int = DEFAULT_PERMIT_TTL_SECONDS,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=max(int(ttl_seconds or 0), 1))
     boundary_true = any_boundary_true(boundary)
     lane = str(lane_id or "unknown")
     material = json.dumps(
@@ -81,6 +235,7 @@ def start_execution_gate_envelope(
         "stage": "permit",
         "execution_gate_envelope_id": envelope_id,
         "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
         "profile": store.roots.profile or "default",
         "lane_id": lane,
         "trigger_surface": str(trigger_surface or ""),
@@ -88,6 +243,7 @@ def start_execution_gate_envelope(
         "human_approval_required": bool(human_approval_required),
         "why_no_human_approval": str(why_no_human_approval or "")[:240],
         "scope": _bounded_json(scope),
+        "scope_hash": execution_gate_scope_hash(scope),
         "boundary": _bounded_json(boundary),
         "boundary_true": boundary_true,
         "precheck": _bounded_json(precheck or {}),
@@ -232,6 +388,57 @@ def _record_created_at(record: dict[str, Any]) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _expiry_status(value: Any, *, now: datetime | None = None, require_present: bool = False) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "expiry_missing" if require_present else "valid"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return "expiry_invalid"
+    if parsed.tzinfo is None:
+        return "expiry_invalid"
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if parsed.astimezone(timezone.utc) <= current:
+        return "expired"
+    return "valid"
+
+
+def _permit_resolution(
+    *,
+    status: str,
+    reason: str,
+    envelope_id: str,
+    lane_id: str,
+    risk_class: str,
+    permit: dict[str, Any] | None = None,
+    permit_count: int = 0,
+    completion_count: int = 0,
+    scope_match: bool | None = None,
+) -> dict[str, Any]:
+    record = permit or {}
+    expiry_status = "missing" if permit and not str(record.get("expires_at") or "").strip() else _expiry_status(record.get("expires_at"), require_present=False)
+    return {
+        "schema_version": "memory-os.execution_gate_permit_resolution.v0",
+        "status": status,
+        "reason": reason,
+        "execution_gate_envelope_id": envelope_id,
+        "lane_id": str(lane_id or record.get("lane_id") or ""),
+        "risk_class": str(risk_class or record.get("risk_class") or ""),
+        "permit_decision": str(record.get("permit_decision") or ""),
+        "boundary_true": record.get("boundary_true") is True or any_boundary_true(record.get("boundary")),
+        "permit_count": permit_count or (1 if permit else 0),
+        "completion_count": completion_count,
+        "permit_created_at": str(record.get("created_at") or ""),
+        "expires_at": str(record.get("expires_at") or ""),
+        "expires_at_status": expiry_status,
+        "scope_hash": str(record.get("scope_hash") or ""),
+        "scope_match": scope_match,
+        "unused_before_apply": completion_count == 0,
+        "consumed_after_apply": completion_count > 0,
+    }
 
 
 def _bounded_json(value: Any) -> Any:

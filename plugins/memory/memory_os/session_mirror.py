@@ -12,7 +12,12 @@ from typing import Any
 
 from .audit import append_audit
 from .config import load_config
-from .execution_gate import complete_execution_gate_envelope, read_execution_gate_records, start_execution_gate_envelope
+from .execution_gate import (
+    complete_execution_gate_envelope,
+    execution_gate_scope_hash,
+    resolve_execution_gate_permit,
+    start_execution_gate_envelope,
+)
 from .ids import new_event_id
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -194,6 +199,18 @@ def auto_apply_graduated_session_mirror(
             "written_event_ids_count": 0,
             "boundary": _false_boundary(),
         }
+    selected_fingerprints = (
+        dry_run.get("selected_session_fingerprints")
+        if isinstance(dry_run.get("selected_session_fingerprints"), list)
+        else []
+    )
+    auto_apply_scope = _session_mirror_auto_apply_scope(
+        approval_ref=str(policy.get("approval_ref") or ""),
+        stable_scope_id=str(policy.get("stable_scope_id") or ""),
+        max_sessions_per_run=int(policy.get("max_sessions_per_run") or 1),
+        platform_allowlist=policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
+        selected_session_fingerprints=selected_fingerprints,
+    )
     gate = start_execution_gate_envelope(
         store,
         lane_id="session_mirror_auto_apply",
@@ -201,15 +218,7 @@ def auto_apply_graduated_session_mirror(
         risk_class="bounded_append_only_data_ingress",
         human_approval_required=False,
         why_no_human_approval="owner-home approved lane graduation; per-run bounded max_sessions/platform scope",
-        scope={
-            "approval_ref": str(policy.get("approval_ref") or ""),
-            "stable_scope_id": str(policy.get("stable_scope_id") or ""),
-            "max_sessions_per_run": int(policy.get("max_sessions_per_run") or 1),
-            "platform_allowlist": policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else [],
-            "selected_session_fingerprints": dry_run.get("selected_session_fingerprints")
-            if isinstance(dry_run.get("selected_session_fingerprints"), list)
-            else [],
-        },
+        scope=auto_apply_scope,
         boundary=_false_boundary(),
         precheck={
             "policy_status": str(policy.get("status") or ""),
@@ -371,14 +380,15 @@ class SessionMirror:
         skipped_by_platform_count = len(new_sessions) - len(platform_filtered)
         skipped_by_limit_count = max(len(platform_filtered) - len(selected_sessions), 0)
         written_events: list[str] = []
+        resolved_apply_governance = dict(apply_governance or {})
         if not dry_run and selected_sessions:
             governance_validation = validate_session_mirror_apply_governance(
                 self.store,
-                apply_governance or {},
+                resolved_apply_governance,
                 requested_platform_allowlist=platforms,
                 requested_max_sessions=limit,
                 selected_session_fingerprints=selected_fingerprints,
-                require_execution_gate=bool((apply_governance or {}).get("auto_apply")),
+                require_execution_gate=bool(resolved_apply_governance.get("auto_apply")),
             )
             if governance_validation.get("status") != "valid":
                 append_audit(
@@ -418,6 +428,12 @@ class SessionMirror:
                     "governance_validation": governance_validation,
                     "findings": findings,
                 }
+            if isinstance(governance_validation.get("execution_gate_permit_resolution"), dict):
+                resolved_apply_governance["execution_gate_permit_resolution"] = governance_validation[
+                    "execution_gate_permit_resolution"
+                ]
+            if governance_validation.get("execution_gate_scope_hash"):
+                resolved_apply_governance["execution_gate_scope_hash"] = str(governance_validation.get("execution_gate_scope_hash") or "")
         if not dry_run:
             for session in selected_sessions:
                 event = self._event_for_session(session)
@@ -455,9 +471,9 @@ class SessionMirror:
                 written_event_ids=written_events,
                 status="ok" if not findings else "warning",
                 findings=findings,
-                apply_governance=apply_governance or {},
+                apply_governance=resolved_apply_governance,
             )
-        governance = _bounded_apply_governance(apply_governance or {})
+        governance = _bounded_apply_governance(resolved_apply_governance)
         return {
             "schema_version": self.report_schema_version,
             "status": "ok" if not findings else "warning",
@@ -936,19 +952,71 @@ def _validate_lane_graduated_governance(
     envelope_id = str(governance.get("execution_gate_envelope_id") or "")
     if require_execution_gate and not envelope_id:
         return _governance_validation("invalid", "session_mirror_apply_execution_gate_missing")
-    if envelope_id and not _execution_gate_permit_exists(store, envelope_id, lane_id="session_mirror_auto_apply"):
-        return _governance_validation("invalid", "session_mirror_apply_execution_gate_not_found")
+    if envelope_id:
+        expected_scope = _session_mirror_auto_apply_scope(
+            approval_ref=str(policy.get("approval_ref") or ""),
+            stable_scope_id=str(policy.get("stable_scope_id") or ""),
+            max_sessions_per_run=int(requested_max_sessions or 0),
+            platform_allowlist=requested_platforms,
+            selected_session_fingerprints=selected_session_fingerprints,
+        )
+        resolution = resolve_execution_gate_permit(
+            store.roots,
+            envelope_id=envelope_id,
+            lane_id="session_mirror_auto_apply",
+            risk_class="bounded_append_only_data_ingress",
+            require_fresh=True,
+            require_unused=True,
+            expected_scope=expected_scope,
+        )
+        if resolution.get("status") != "valid":
+            return _governance_validation("invalid", str(resolution.get("reason") or "session_mirror_apply_execution_gate_not_found"))
+    else:
+        expected_scope = {}
+        resolution = {}
     if not selected_session_fingerprints:
         return _governance_validation("invalid", "session_mirror_apply_scope_mismatch")
-    return _governance_validation("valid", "", governance_class="lane_graduated_auto_apply")
+    return _governance_validation(
+        "valid",
+        "",
+        governance_class="lane_graduated_auto_apply",
+        execution_gate_permit_resolution=resolution if isinstance(resolution, dict) else {},
+        execution_gate_scope_hash=execution_gate_scope_hash(expected_scope) if expected_scope else "",
+    )
 
 
-def _governance_validation(status: str, reason: str, *, governance_class: str = "") -> dict[str, Any]:
+def _session_mirror_auto_apply_scope(
+    *,
+    approval_ref: str,
+    stable_scope_id: str,
+    max_sessions_per_run: int,
+    platform_allowlist: set[str] | list[str] | tuple[str, ...],
+    selected_session_fingerprints: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "approval_ref": str(approval_ref or ""),
+        "stable_scope_id": str(stable_scope_id or ""),
+        "max_sessions_per_run": int(max_sessions_per_run or 0),
+        "platform_allowlist": sorted(_normalize_platform_allowlist(list(platform_allowlist or []))),
+        "selected_session_fingerprints": [str(item) for item in selected_session_fingerprints],
+    }
+
+
+def _governance_validation(
+    status: str,
+    reason: str,
+    *,
+    governance_class: str = "",
+    execution_gate_permit_resolution: dict[str, Any] | None = None,
+    execution_gate_scope_hash: str = "",
+) -> dict[str, Any]:
     return {
         "schema_version": "memory-os.session_mirror_apply_governance_validation.v0",
         "status": status,
         "governance_class": governance_class,
         "reason": reason,
+        "execution_gate_permit_resolution": execution_gate_permit_resolution or {},
+        "execution_gate_scope_hash": str(execution_gate_scope_hash or ""),
     }
 
 
@@ -965,18 +1033,6 @@ def _approval_ref_consumed(store: MemoryOSStore, approval_ref: str) -> bool:
     for record in read_session_mirror_apply_records(store.roots):
         governance = record.get("apply_governance") if isinstance(record.get("apply_governance"), dict) else {}
         if str(governance.get("approval_ref") or "") == str(approval_ref or "") and int(record.get("written_event_ids_count") or 0) > 0:
-            return True
-    return False
-
-
-def _execution_gate_permit_exists(store: MemoryOSStore, envelope_id: str, *, lane_id: str) -> bool:
-    for record in reversed(read_execution_gate_records(store.roots, limit=2000)):
-        if (
-            record.get("stage") == "permit"
-            and str(record.get("execution_gate_envelope_id") or "") == str(envelope_id or "")
-            and str(record.get("lane_id") or "") == lane_id
-            and str(record.get("permit_decision") or "") == "allowed"
-        ):
             return True
     return False
 
@@ -1026,6 +1082,7 @@ def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:
 
 def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
     evidence_refs = value.get("evidence_refs") if isinstance(value.get("evidence_refs"), list) else []
+    resolution = value.get("execution_gate_permit_resolution") if isinstance(value.get("execution_gate_permit_resolution"), dict) else {}
     return {
         "owner_approved": bool(value.get("owner_approved")),
         "approval_ref": str(value.get("approval_ref") or "")[:160],
@@ -1047,6 +1104,18 @@ def _bounded_apply_governance(value: dict[str, Any]) -> dict[str, Any]:
         "historical_bounded_smoke_attested": bool(value.get("historical_bounded_smoke_attested")),
         "historical_bounded_smoke_unattested": bool(value.get("historical_bounded_smoke_unattested")),
         "execution_gate_envelope_id": str(value.get("execution_gate_envelope_id") or "")[:120],
+        "execution_gate_scope_hash": str(value.get("execution_gate_scope_hash") or "")[:96],
+        "execution_gate_permit_resolution": {
+            "status": str(resolution.get("status") or "")[:40],
+            "reason": str(resolution.get("reason") or "")[:120],
+            "execution_gate_envelope_id": str(resolution.get("execution_gate_envelope_id") or "")[:120],
+            "lane_id": str(resolution.get("lane_id") or "")[:80],
+            "risk_class": str(resolution.get("risk_class") or "")[:80],
+            "expires_at_status": str(resolution.get("expires_at_status") or "")[:40],
+            "unused_before_apply": bool(resolution.get("unused_before_apply")),
+            "scope_match": resolution.get("scope_match"),
+            "completion_count": int(resolution.get("completion_count") or 0),
+        },
     }
 
 

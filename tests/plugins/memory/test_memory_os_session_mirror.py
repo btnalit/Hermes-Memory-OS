@@ -5,6 +5,7 @@ import sqlite3
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.config import save_config
+from plugins.memory.memory_os.execution_gate import execution_gate_records_path, execution_gate_scope_hash
 from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
@@ -64,6 +65,29 @@ def _create_state_db(path, *, session_id="session-db-1", platform="telegram"):
 
 def _append_owner_action(path, record):
     path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _append_execution_gate_permit(store, *, envelope_id, risk_class, scope):
+    path = execution_gate_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": "memory-os.execution_gate_envelope.v0",
+        "stage": "permit",
+        "execution_gate_envelope_id": envelope_id,
+        "created_at": "2026-06-01T00:00:00Z",
+        "expires_at": "2099-01-01T00:00:00Z",
+        "profile": store.roots.profile or "default",
+        "lane_id": "session_mirror_auto_apply",
+        "trigger_surface": "runtime_heartbeat",
+        "risk_class": risk_class,
+        "permit_decision": "allowed",
+        "boundary_true": False,
+        "boundary": {"actual_send": False, "actual_execute": False},
+        "scope": scope,
+        "scope_hash": execution_gate_scope_hash(scope),
+    }
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
@@ -701,6 +725,94 @@ def test_session_mirror_auto_apply_ignores_one_shot_owner_smoke_without_graduati
     assert store.read_events() == []
 
 
+def test_session_mirror_auto_apply_rejects_same_lane_wrong_risk_execution_gate(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="wrong-risk-session", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    fingerprint = dry_run["selected_session_fingerprints"][0]
+    owner_record = _owner_action_record(store, fingerprint=fingerprint)
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+    scope = {
+        "approval_ref": owner_record["owner_action_id"],
+        "stable_scope_id": owner_record["result_ref"]["stable_scope_id"],
+        "max_sessions_per_run": 1,
+        "platform_allowlist": ["telegram"],
+        "selected_session_fingerprints": [fingerprint],
+    }
+    _append_execution_gate_permit(
+        store,
+        envelope_id="xgate_wrong_risk",
+        risk_class="route_score_modification",
+        scope=scope,
+    )
+
+    report = SessionMirror(store).scan(
+        dry_run=False,
+        max_sessions=1,
+        platform_allowlist=["telegram"],
+        apply_governance={
+            "owner_approved": True,
+            "approval_ref": owner_record["owner_action_id"],
+            "approval_resolved": True,
+            "approval_source": "owner_action_lane_graduation",
+            "owner_channel_bound": True,
+            "stable_scope_id": owner_record["result_ref"]["stable_scope_id"],
+            "execution_gate_envelope_id": "xgate_wrong_risk",
+            "auto_apply": True,
+            "lane_graduated": True,
+        },
+    )
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "execution_gate_risk_class_mismatch"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+
+
+def test_session_mirror_auto_apply_rejects_execution_gate_scope_mismatch(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="scope-mismatch-session", platform="telegram")
+    dry_run = SessionMirror(store).scan(dry_run=True, max_sessions=1, platform_allowlist=["telegram"])
+    fingerprint = dry_run["selected_session_fingerprints"][0]
+    owner_record = _owner_action_record(store, fingerprint=fingerprint)
+    _append_owner_action(store.roots.memory_os_root / "system" / "owner_actions.jsonl", owner_record)
+    permit_scope = {
+        "approval_ref": owner_record["owner_action_id"],
+        "stable_scope_id": owner_record["result_ref"]["stable_scope_id"],
+        "max_sessions_per_run": 1,
+        "platform_allowlist": ["telegram"],
+        "selected_session_fingerprints": ["fp_different_session"],
+    }
+    _append_execution_gate_permit(
+        store,
+        envelope_id="xgate_scope_mismatch",
+        risk_class="bounded_append_only_data_ingress",
+        scope=permit_scope,
+    )
+
+    report = SessionMirror(store).scan(
+        dry_run=False,
+        max_sessions=1,
+        platform_allowlist=["telegram"],
+        apply_governance={
+            "owner_approved": True,
+            "approval_ref": owner_record["owner_action_id"],
+            "approval_resolved": True,
+            "approval_source": "owner_action_lane_graduation",
+            "owner_channel_bound": True,
+            "stable_scope_id": owner_record["result_ref"]["stable_scope_id"],
+            "execution_gate_envelope_id": "xgate_scope_mismatch",
+            "auto_apply": True,
+            "lane_graduated": True,
+        },
+    )
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "execution_gate_scope_mismatch"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+
+
 def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_graduation(tmp_path):
     store = _store(tmp_path)
     _create_state_db(tmp_path / "state.db", session_id="auto-session-1", platform="telegram")
@@ -737,4 +849,9 @@ def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_gr
     assert apply_records[0]["apply_governance"]["auto_apply"] is True
     assert apply_records[0]["apply_governance"]["lane_graduated"] is True
     assert apply_records[0]["apply_governance"]["execution_gate_envelope_id"] == first["session_mirror_auto_apply"]["execution_gate_envelope_id"]
+    assert apply_records[0]["apply_governance"]["execution_gate_scope_hash"]
+    assert apply_records[0]["apply_governance"]["execution_gate_permit_resolution"]["status"] == "valid"
+    assert apply_records[0]["apply_governance"]["execution_gate_permit_resolution"]["risk_class"] == "bounded_append_only_data_ingress"
+    assert apply_records[0]["apply_governance"]["execution_gate_permit_resolution"]["unused_before_apply"] is True
+    assert apply_records[0]["apply_governance"]["execution_gate_permit_resolution"]["scope_match"] is True
     assert apply_records[1]["apply_governance"]["approval_ref"] == owner_record["owner_action_id"]

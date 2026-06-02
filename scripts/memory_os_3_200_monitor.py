@@ -133,6 +133,16 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host pending-only sessions need owner decision or bounded apply only if tied to recall/candidate gaps",
         "production_behavior": "warn_if_production",
     },
+    "owner_review_proposal_auto_route_boundary_requires_owner": {
+        "classification": "expected_clean_host",
+        "reason": "proposal follow-up auto-route correctly stops at owner-boundary items on clean-host",
+        "production_behavior": "warn_if_production",
+    },
+    "cognitive_loop_step_evidence_missing": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host may be inspected before a persisted cognitive-loop report exists",
+        "production_behavior": "fail_if_production",
+    },
     "memory_sources_stats_unavailable": {
         "classification": "expected_clean_host",
         "reason": "clean-host may not have MemorySources stats before live traffic and feedback are generated",
@@ -835,6 +845,44 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     for key in ("actual_send", "actual_execute", "actual_identity_write", "actual_crystallized_approval"):
         if (cognitive_loop.get("boundaries") or {}).get(key) is True:
             fail.append({"code": f"cognitive_loop_{key}_true"})
+    cognitive_loop_step_evidence = snapshot.get("cognitive_loop_step_evidence")
+    if isinstance(cognitive_loop_step_evidence, dict) and cognitive_loop_step_evidence:
+        evidence_status = str(cognitive_loop_step_evidence.get("status") or "")
+        if evidence_status == "ok":
+            missing_required_steps = cognitive_loop_step_evidence.get("missing_required_steps") or []
+            if missing_required_steps:
+                fail.append(
+                    {
+                        "code": "cognitive_loop_required_step_missing",
+                        "missing_required_steps": missing_required_steps,
+                    }
+                )
+            omitted_step_count = int(cognitive_loop_step_evidence.get("omitted_step_count") or 0)
+            tail_step_omitted_count = int(cognitive_loop_step_evidence.get("tail_step_omitted_count") or 0)
+            if omitted_step_count or tail_step_omitted_count:
+                fail.append(
+                    {
+                        "code": "cognitive_loop_tail_step_omitted_by_bounded_report",
+                        "omitted_step_count": omitted_step_count,
+                        "tail_step_omitted_count": tail_step_omitted_count,
+                    }
+                )
+            if not missing_required_steps and not omitted_step_count and not tail_step_omitted_count:
+                passed.append(
+                    {
+                        "code": "cognitive_loop_required_steps_visible",
+                        "latest_step_count": cognitive_loop_step_evidence.get("latest_step_count"),
+                    }
+                )
+        elif clean_host:
+            warn.append({"code": "cognitive_loop_step_evidence_missing", "value": cognitive_loop_step_evidence})
+        else:
+            fail.append({"code": "cognitive_loop_step_evidence_missing", "value": cognitive_loop_step_evidence})
+    elif cognitive_loop.get("last_cycle_id"):
+        if clean_host:
+            warn.append({"code": "cognitive_loop_step_evidence_missing"})
+        else:
+            fail.append({"code": "cognitive_loop_step_evidence_missing"})
 
     memory_status = snapshot.get("memory_status", {})
     if memory_status.get("index_health", {}).get("state") == "healthy":
@@ -1508,12 +1556,31 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 and latest_lane_graduated
                 and session_mirror.get("session_mirror_auto_apply_execution_gate_bound") is True
             ):
-                passed.append(
-                    {
-                        "code": "session_mirror_auto_apply_execution_gate_bound",
-                        "execution_gate_envelope_id": session_mirror.get("latest_apply_execution_gate_envelope_id") or "",
-                    }
+                permit_integrity = (
+                    session_mirror.get("session_mirror_auto_apply_permit_integrity")
+                    if isinstance(session_mirror.get("session_mirror_auto_apply_permit_integrity"), dict)
+                    else {}
                 )
+                if permit_integrity.get("status") == "ok":
+                    passed.append(
+                        {
+                            "code": "session_mirror_auto_apply_execution_gate_bound",
+                            "execution_gate_envelope_id": session_mirror.get("latest_apply_execution_gate_envelope_id") or "",
+                        }
+                    )
+                    passed.append(
+                        {
+                            "code": "session_mirror_auto_apply_permit_integrity_ok",
+                            "execution_gate_envelope_id": permit_integrity.get("execution_gate_envelope_id") or "",
+                        }
+                    )
+                else:
+                    fail.append(
+                        {
+                            "code": "session_mirror_auto_apply_permit_integrity_invalid",
+                            "value": permit_integrity,
+                        }
+                    )
         if session_mirror.get("dry_run_status") == "ok" and int(session_mirror.get("dry_run_written_event_ids_count") or 0) == 0:
             passed.append({"code": "session_mirror_dry_run_ok"})
         else:
@@ -3257,7 +3324,7 @@ def _ssh_json(host: str, script: str) -> dict[str, Any]:
 
 def _remote_probe_script() -> str:
     return r'''
-import json, os, re, subprocess, sys
+import hashlib, json, os, re, subprocess, sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -4396,6 +4463,60 @@ def expression_artifact_summary():
       "speak_permission_error_count": speak_permission.get("error_count"),
     }
 
+def cognitive_loop_step_evidence():
+    required_steps = [
+      "left_brain_pipeline_check",
+      "governance_feedback",
+      "deep_reflection",
+      "heartbeat_post",
+      "doctor_boundary_report",
+    ]
+    reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
+    latest = reports[-1] if reports and isinstance(reports[-1], dict) else {}
+    if not latest:
+        return {
+          "schema_version": "memory-os.cognitive_loop_step_evidence.v0",
+          "status": "missing",
+          "required_steps": required_steps,
+          "report_count": len(reports),
+          "missing_required_steps": required_steps,
+        }
+    steps = latest.get("steps") if isinstance(latest.get("steps"), list) else []
+    step_names = [
+      str(step.get("step") or "")
+      for step in steps
+      if isinstance(step, dict) and step.get("step")
+    ]
+    step_summary = latest.get("step_summary") if isinstance(latest.get("step_summary"), dict) else {}
+    tail_step_statuses = (
+      step_summary.get("tail_step_statuses")
+      if isinstance(step_summary.get("tail_step_statuses"), dict)
+      else {}
+    )
+    visible_or_summarized = set(step_names) | set(tail_step_statuses.keys())
+    missing_required_steps = [step for step in required_steps if step not in visible_or_summarized]
+    omitted_step_count = int(step_summary.get("omitted_step_count") or 0)
+    tail_step_omitted = [
+      step
+      for step, status in tail_step_statuses.items()
+      if isinstance(status, dict) and status.get("status") == "omitted"
+    ]
+    return {
+      "schema_version": "memory-os.cognitive_loop_step_evidence.v0",
+      "status": "ok",
+      "required_steps": required_steps,
+      "report_count": len(reports),
+      "latest_cycle_id": latest.get("cycle_id"),
+      "latest_status": latest.get("status"),
+      "latest_step_count": len(step_names),
+      "latest_step_names": step_names,
+      "latest_step_summary": step_summary,
+      "missing_required_steps": missing_required_steps,
+      "omitted_step_count": omitted_step_count,
+      "tail_step_omitted": tail_step_omitted,
+      "tail_step_omitted_count": len(tail_step_omitted),
+    }
+
 def module_cadence_summary():
     reports = _read_jsonl("/root/.hermes/system-modules/module_cadence/reports.jsonl")
     latest = reports[-1] if reports and isinstance(reports[-1], dict) else {}
@@ -4570,6 +4691,142 @@ print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         report.setdefault("status", "error")
     return report
 
+def _execution_gate_scope_hash(scope):
+    try:
+        encoded = json.dumps(scope or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        encoded = "{}"
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+def _parse_aware_utc(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+def _execution_gate_expiry_status(value, reference_time=None):
+    raw = str(value or "").strip()
+    if not raw:
+        return "missing"
+    expires_at = _parse_aware_utc(raw)
+    if expires_at is None:
+        return "invalid"
+    if reference_time is not None:
+        return "expired_before_completion" if expires_at < reference_time else "valid_at_completion"
+    return "expired" if expires_at <= datetime.now(timezone.utc) else "valid"
+
+def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
+    envelope_id = str(latest_governance.get("execution_gate_envelope_id") or "")
+    if not envelope_id:
+        return {"status": "missing", "reason": "execution_gate_envelope_id_missing"}
+    stored_resolution = (
+      latest_governance.get("execution_gate_permit_resolution")
+      if isinstance(latest_governance.get("execution_gate_permit_resolution"), dict)
+      else {}
+    )
+    records = _read_jsonl("/root/.hermes/memory-os/system/execution_gate_envelopes.jsonl")
+    permits = [
+      record for record in records
+      if isinstance(record, dict)
+      and record.get("stage") == "permit"
+      and str(record.get("execution_gate_envelope_id") or "") == envelope_id
+    ]
+    completions = [
+      record for record in records
+      if isinstance(record, dict)
+      and record.get("stage") == "completion"
+      and str(record.get("execution_gate_envelope_id") or "") == envelope_id
+    ]
+    expected_scope = {
+      "approval_ref": str(latest_governance.get("approval_ref") or ""),
+      "stable_scope_id": str(latest_governance.get("stable_scope_id") or ""),
+      "max_sessions_per_run": int(latest_apply.get("max_sessions") or 0),
+      "platform_allowlist": sorted([str(item).lower() for item in latest_apply.get("platform_allowlist", []) if str(item or "").strip()])
+          if isinstance(latest_apply.get("platform_allowlist"), list)
+          else [],
+      "selected_session_fingerprints": [
+        str(item)
+        for item in (latest_apply.get("selected_session_fingerprints") if isinstance(latest_apply.get("selected_session_fingerprints"), list) else [])
+      ],
+    }
+    expected_scope_hash = _execution_gate_scope_hash(expected_scope)
+    if len(permits) != 1:
+        return {
+          "status": "invalid",
+          "reason": "execution_gate_permit_missing_or_conflict",
+          "execution_gate_envelope_id": envelope_id,
+          "permit_count": len(permits),
+          "completion_count": len(completions),
+          "expected_scope_hash": expected_scope_hash,
+        }
+    permit = permits[0]
+    completion_times = [
+      parsed for parsed in (_parse_aware_utc(record.get("created_at")) for record in completions)
+      if parsed is not None
+    ]
+    completion_time = min(completion_times) if completion_times else None
+    expires_at_status = _execution_gate_expiry_status(permit.get("expires_at"), completion_time)
+    permit_scope_hash = str(permit.get("scope_hash") or "")
+    if not permit_scope_hash:
+        permit_scope_hash = _execution_gate_scope_hash(permit.get("scope") if isinstance(permit.get("scope"), dict) else {})
+    scope_match = permit_scope_hash == expected_scope_hash
+    lane_match = str(permit.get("lane_id") or "") == "session_mirror_auto_apply"
+    risk_match = str(permit.get("risk_class") or "") == "bounded_append_only_data_ingress"
+    boundary_false = permit.get("boundary_true") is not True and _boundary_true_count(permit.get("boundary")) == 0
+    unused_before_apply = stored_resolution.get("unused_before_apply") is True
+    consumed_after_apply = len(completions) > 0
+    status = (
+      "ok"
+      if lane_match
+      and risk_match
+      and expires_at_status in {"valid", "valid_at_completion"}
+      and boundary_false
+      and scope_match
+      and unused_before_apply
+      and consumed_after_apply
+      else "invalid"
+    )
+    reason = ""
+    if status != "ok":
+        if not lane_match:
+            reason = "execution_gate_lane_mismatch"
+        elif not risk_match:
+            reason = "execution_gate_risk_class_mismatch"
+        elif expires_at_status not in {"valid", "valid_at_completion"}:
+            reason = f"execution_gate_permit_expiry_{expires_at_status}"
+        elif not boundary_false:
+            reason = "execution_gate_boundary_true"
+        elif not scope_match:
+            reason = "execution_gate_scope_mismatch"
+        elif not unused_before_apply:
+            reason = "execution_gate_permit_not_unused_before_apply"
+        elif not consumed_after_apply:
+            reason = "execution_gate_completion_missing"
+        else:
+            reason = "execution_gate_permit_integrity_invalid"
+    return {
+      "status": status,
+      "reason": reason,
+      "execution_gate_envelope_id": envelope_id,
+      "lane_id": str(permit.get("lane_id") or ""),
+      "risk_class": str(permit.get("risk_class") or ""),
+      "expires_at_status": expires_at_status,
+      "completion_created_at": completion_time.isoformat() if completion_time is not None else "",
+      "unused_before_apply": unused_before_apply,
+      "consumed_after_apply": consumed_after_apply,
+      "scope_match": scope_match,
+      "expected_scope_hash": expected_scope_hash,
+      "permit_scope_hash": permit_scope_hash,
+      "permit_count": len(permits),
+      "completion_count": len(completions),
+    }
+
 def session_mirror_summary():
     status_report = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     dry_run = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "run-once", "--module", "session_mirror", "--dry-run"])
@@ -4636,6 +4893,9 @@ def session_mirror_summary():
           and latest_governance.get("lane_graduated")
           and latest_governance.get("execution_gate_envelope_id")
       ),
+      "session_mirror_auto_apply_permit_integrity": session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance)
+          if latest_governance.get("auto_apply") and latest_governance.get("lane_graduated")
+          else {},
       "latest_apply_boundary": latest_boundary,
       "latest_apply_boundary_true_count": _boundary_true_count(latest_boundary),
       "latest_apply_reused_approval_ref": False,
@@ -5450,6 +5710,7 @@ print(json.dumps({
   "status_tool_contract": contract.get("validation") if isinstance(contract, dict) else contract,
   "shell_alias_no_env": shell_alias_no_env(),
   "cognitive_loop": memory_os_cli(["cognitive-loop", "status"]),
+  "cognitive_loop_step_evidence": cognitive_loop_step_evidence(),
   "memory_sources": memory_sources,
   "rh31_eval": rh31_eval,
   "owner_review": owner_review,

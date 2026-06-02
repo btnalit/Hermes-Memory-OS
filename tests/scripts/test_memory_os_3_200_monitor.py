@@ -260,6 +260,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
         "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
         "cognitive_loop_listed": True,
         "cognitive_loop": _healthy_cognitive_loop(),
+        "cognitive_loop_step_evidence": _healthy_cognitive_loop_step_evidence(),
         "memory_status": {
             "counts": {"crystallized_records": 0},
             "index_health": {"state": "healthy"},
@@ -493,6 +494,7 @@ def test_clean_host_warn_classification_table_covers_current_warn_codes():
         "memory_sources_feedback_volume_missing",
         "v7_memory_sources_feedback_volume_pending",
         "session_mirror_pending_source_gap",
+        "owner_review_proposal_auto_route_boundary_requires_owner",
     }
 
     assert expected_codes <= set(monitor.CLEAN_HOST_WARN_CLASSIFICATIONS)
@@ -2314,6 +2316,16 @@ def test_classify_snapshot_passes_session_mirror_lane_graduated_auto_apply():
         "latest_apply_lane_graduated": True,
         "latest_apply_execution_gate_envelope_id": "xgate_session_mirror",
         "session_mirror_auto_apply_execution_gate_bound": True,
+        "session_mirror_auto_apply_permit_integrity": {
+            "status": "ok",
+            "execution_gate_envelope_id": "xgate_session_mirror",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "expires_at_status": "valid",
+            "unused_before_apply": True,
+            "consumed_after_apply": True,
+            "scope_match": True,
+        },
         "latest_apply_boundary_true_count": 0,
     }
 
@@ -2322,6 +2334,7 @@ def test_classify_snapshot_passes_session_mirror_lane_graduated_auto_apply():
     assert any(item["code"] == "session_mirror_apply_governed_owner_ref_ok" for item in classification["pass"])
     assert any(item["code"] == "session_mirror_apply_lane_graduated_auto_ok" for item in classification["pass"])
     assert any(item["code"] == "session_mirror_auto_apply_execution_gate_bound" for item in classification["pass"])
+    assert any(item["code"] == "session_mirror_auto_apply_permit_integrity_ok" for item in classification["pass"])
     assert not any(item["code"].startswith("session_mirror_apply_") for item in classification["fail"])
 
 
@@ -2361,6 +2374,111 @@ def test_classify_snapshot_fails_session_mirror_auto_apply_without_execution_gat
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "session_mirror_auto_apply_execution_gate_missing" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_session_mirror_auto_apply_permit_integrity_mismatch():
+    snapshot = _healthy_snapshot()
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "status": "ok",
+        "session_count": 54,
+        "covered_session_count": 30,
+        "pending_session_count": 24,
+        "dry_run_status": "ok",
+        "dry_run_new_event_count": 24,
+        "dry_run_written_event_ids_count": 0,
+        "dry_run_findings_count": 0,
+        "correlation_status": "ok",
+        "pending_only_group_count": 0,
+        "pending_only_groups": [],
+        "raw_private_body_printed": False,
+        "latest_apply_status": "ok",
+        "latest_apply_bounded": True,
+        "latest_apply_written_event_ids_count": 1,
+        "latest_apply_duplicate_ignored_count": 0,
+        "latest_apply_raw_private_body_printed": False,
+        "latest_apply_approval_resolved": True,
+        "latest_apply_owner_channel_bound": True,
+        "latest_apply_owner_approved": True,
+        "latest_apply_approval_source": "owner_action_lane_graduation",
+        "latest_apply_auto_apply": True,
+        "latest_apply_lane_graduated": True,
+        "latest_apply_execution_gate_envelope_id": "xgate_scope_mismatch",
+        "session_mirror_auto_apply_execution_gate_bound": True,
+        "session_mirror_auto_apply_permit_integrity": {
+            "status": "invalid",
+            "reason": "execution_gate_scope_mismatch",
+            "execution_gate_envelope_id": "xgate_scope_mismatch",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "expires_at_status": "valid",
+            "unused_before_apply": True,
+            "consumed_after_apply": True,
+            "scope_match": False,
+        },
+        "latest_apply_boundary_true_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "session_mirror_auto_apply_permit_integrity_invalid" for item in classification["fail"])
+
+
+def test_session_mirror_permit_integrity_accepts_completed_permit_after_ttl(monkeypatch):
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    latest_apply = {
+        "max_sessions": 1,
+        "platform_allowlist": ["telegram"],
+        "selected_session_fingerprints": ["smfp_done"],
+    }
+    latest_governance = {
+        "approval_ref": "oa_graduated",
+        "stable_scope_id": "lane:telegram",
+        "execution_gate_envelope_id": "xgate_completed",
+        "execution_gate_permit_resolution": {"unused_before_apply": True},
+    }
+    scope = {
+        "approval_ref": "oa_graduated",
+        "stable_scope_id": "lane:telegram",
+        "max_sessions_per_run": 1,
+        "platform_allowlist": ["telegram"],
+        "selected_session_fingerprints": ["smfp_done"],
+    }
+    records = [
+        {
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_completed",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "boundary_true": False,
+            "boundary": {
+                "actual_send": False,
+                "actual_execute": False,
+                "actual_identity_write": False,
+                "actual_unapproved_crystallized_approval": False,
+            },
+            "scope": scope,
+            "scope_hash": namespace["_execution_gate_scope_hash"](scope),
+            "created_at": "2000-01-01T00:00:00Z",
+            "expires_at": "2000-01-01T00:15:00Z",
+        },
+        {
+            "stage": "completion",
+            "execution_gate_envelope_id": "xgate_completed",
+            "lane_id": "session_mirror_auto_apply",
+            "created_at": "2000-01-01T00:00:05Z",
+            "execution_status": "ok",
+        },
+    ]
+    monkeypatch.setitem(namespace, "_read_jsonl", lambda path: records)
+
+    integrity = namespace["session_mirror_auto_apply_permit_integrity"](latest_apply, latest_governance)
+
+    assert integrity["status"] == "ok"
+    assert integrity["expires_at_status"] == "valid_at_completion"
+    assert integrity["consumed_after_apply"] is True
 
 
 def test_classify_snapshot_fails_session_mirror_apply_boundary_true():
@@ -3298,6 +3416,42 @@ def test_classify_snapshot_fails_when_cognitive_loop_is_not_active_or_violates_b
     assert any(item["code"] == "cognitive_loop_actual_send_true" for item in classification["fail"])
 
 
+def test_classify_snapshot_tracks_cognitive_loop_required_step_evidence():
+    snapshot = _healthy_snapshot()
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "cognitive_loop_required_steps_visible" for item in classification["pass"])
+
+
+def test_classify_snapshot_fails_when_cognitive_loop_persisted_report_omits_tail_steps():
+    snapshot = _healthy_snapshot()
+    snapshot["cognitive_loop_step_evidence"] = {
+        "schema_version": "memory-os.cognitive_loop_step_evidence.v0",
+        "status": "ok",
+        "required_steps": [
+            "left_brain_pipeline_check",
+            "governance_feedback",
+            "deep_reflection",
+            "heartbeat_post",
+            "doctor_boundary_report",
+        ],
+        "report_count": 1,
+        "latest_step_count": 20,
+        "latest_step_names": ["self_evolution"],
+        "latest_step_summary": {"omitted_step_count": 5, "tail_step_statuses": {}},
+        "missing_required_steps": ["left_brain_pipeline_check", "doctor_boundary_report"],
+        "omitted_step_count": 5,
+        "tail_step_omitted_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "cognitive_loop_required_step_missing" for item in classification["fail"])
+    assert any(item["code"] == "cognitive_loop_tail_step_omitted_by_bounded_report" for item in classification["fail"])
+
+
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     snapshot = _healthy_snapshot()
     snapshot["deltas"] = {
@@ -3515,6 +3669,42 @@ def _healthy_cognitive_loop() -> dict:
     }
 
 
+def _healthy_cognitive_loop_step_evidence() -> dict:
+    required_steps = [
+        "left_brain_pipeline_check",
+        "governance_feedback",
+        "deep_reflection",
+        "heartbeat_post",
+        "doctor_boundary_report",
+    ]
+    return {
+        "schema_version": "memory-os.cognitive_loop_step_evidence.v0",
+        "status": "ok",
+        "required_steps": required_steps,
+        "report_count": 3,
+        "latest_cycle_id": "cloop_test",
+        "latest_status": "ok",
+        "latest_step_count": 25,
+        "latest_step_names": [
+            "prefetch",
+            "self_evolution",
+            "left_brain_pipeline_check",
+            "governance_feedback",
+            "deep_reflection",
+            "heartbeat_post",
+            "doctor_boundary_report",
+        ],
+        "latest_step_summary": {
+            "step_count": 25,
+            "omitted_step_count": 0,
+            "tail_step_statuses": {step: {"status": "ok"} for step in required_steps},
+        },
+        "missing_required_steps": [],
+        "omitted_step_count": 0,
+        "tail_step_omitted_count": 0,
+    }
+
+
 def _healthy_snapshot() -> dict:
     return {
         "hostname": "debian",
@@ -3525,6 +3715,7 @@ def _healthy_snapshot() -> dict:
         "cognitive_loop_timer": {"ActiveState": "active", "UnitFileState": "enabled"},
         "cognitive_loop_listed": True,
         "cognitive_loop": _healthy_cognitive_loop(),
+        "cognitive_loop_step_evidence": _healthy_cognitive_loop_step_evidence(),
         "memory_status": {
             "counts": {"audit_entries": 110, "events": 12, "working_items": 7, "crystallized_records": 0},
             "index_health": {"state": "healthy"},

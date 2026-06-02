@@ -4,9 +4,13 @@ from datetime import datetime, timezone
 from plugins.memory.memory_os.execution_gate import (
     boundary_true_paths,
     execution_gate_records_path,
+    execution_gate_scope_hash,
+    resolve_execution_gate_permit,
     rotate_execution_gate_records,
+    start_execution_gate_envelope,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.store import MemoryOSStore
 
 
 def test_boundary_true_paths_reports_nested_unknown_boundary_keys():
@@ -65,3 +69,213 @@ def test_rotate_execution_gate_records_keeps_union_of_recent_and_latest(tmp_path
     assert [record["execution_gate_envelope_id"] for record in kept] == ["recent-keep", "latest-keep"]
     rotated_files = list((roots.memory_os_root / "system" / "execution_gate").glob("envelopes-*.jsonl"))
     assert len(rotated_files) == 1
+
+
+def test_resolve_execution_gate_permit_validates_lane_risk_and_boundary(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="memory_projection",
+        trigger_surface="cognitive_loop",
+        risk_class="governance_projection",
+        human_approval_required=False,
+        why_no_human_approval="report-only governance projection",
+        scope={"limit": 10},
+        boundary={"actual_send": False, "actual_execute": False},
+    )
+    envelope_id = permit["execution_gate_envelope_id"]
+
+    valid = resolve_execution_gate_permit(
+        store.roots,
+        envelope_id=envelope_id,
+        lane_id="memory_projection",
+        risk_class="governance_projection",
+    )
+    wrong_risk = resolve_execution_gate_permit(
+        store.roots,
+        envelope_id=envelope_id,
+        lane_id="memory_projection",
+        risk_class="bounded_append_only_data_ingress",
+    )
+    manual = resolve_execution_gate_permit(store.roots, envelope_id="manual_cli_explicit")
+
+    assert valid["status"] == "valid"
+    assert valid["permit_decision"] == "allowed"
+    assert wrong_risk["status"] == "invalid"
+    assert wrong_risk["reason"] == "execution_gate_risk_class_mismatch"
+    assert manual["status"] == "invalid"
+    assert manual["reason"] == "execution_gate_envelope_id_invalid"
+
+
+def test_resolve_execution_gate_permit_rejects_boundary_true_and_expired(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    records_path = execution_gate_records_path(roots)
+    records_path.parent.mkdir(parents=True)
+    records = [
+        {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_boundary_true",
+            "created_at": "2026-06-01T00:00:00Z",
+            "lane_id": "memory_projection",
+            "risk_class": "governance_projection",
+            "permit_decision": "allowed",
+            "boundary_true": False,
+            "boundary": {"future_boundary": True},
+        },
+        {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_expired",
+            "created_at": "2026-06-01T00:00:00Z",
+            "expires_at": "2026-06-01T00:10:00Z",
+            "lane_id": "memory_projection",
+            "risk_class": "governance_projection",
+            "permit_decision": "allowed",
+            "boundary_true": False,
+            "boundary": {"actual_send": False},
+        },
+    ]
+    records_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    boundary = resolve_execution_gate_permit(
+        roots,
+        envelope_id="xgate_boundary_true",
+        lane_id="memory_projection",
+        risk_class="governance_projection",
+    )
+    expired = resolve_execution_gate_permit(
+        roots,
+        envelope_id="xgate_expired",
+        lane_id="memory_projection",
+        risk_class="governance_projection",
+        now=datetime(2026, 6, 1, 0, 20, tzinfo=timezone.utc),
+    )
+
+    assert boundary["status"] == "invalid"
+    assert boundary["reason"] == "execution_gate_boundary_true"
+    assert expired["status"] == "invalid"
+    assert expired["reason"] == "execution_gate_permit_expired"
+
+
+def test_start_execution_gate_envelope_records_ttl_and_scope_hash(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    scope = {"max_sessions_per_run": 1, "platform_allowlist": ["telegram"]}
+
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="session_mirror_auto_apply",
+        trigger_surface="runtime_heartbeat",
+        risk_class="bounded_append_only_data_ingress",
+        human_approval_required=False,
+        why_no_human_approval="owner-approved graduated lane",
+        scope=scope,
+        boundary={"actual_send": False},
+    )
+
+    assert permit["expires_at"]
+    assert permit["scope_hash"] == execution_gate_scope_hash(scope)
+
+
+def test_resolve_execution_gate_permit_requires_fresh_unused_and_scope(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    records_path = execution_gate_records_path(roots)
+    records_path.parent.mkdir(parents=True)
+    good_scope = {"max_sessions_per_run": 1, "platform_allowlist": ["telegram"]}
+    other_scope = {"max_sessions_per_run": 1, "platform_allowlist": ["discord"]}
+    records = [
+        {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_no_expiry",
+            "created_at": "2026-06-01T00:00:00Z",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "permit_decision": "allowed",
+            "boundary_true": False,
+            "boundary": {"actual_send": False},
+            "scope": good_scope,
+            "scope_hash": execution_gate_scope_hash(good_scope),
+        },
+        {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_scope",
+            "created_at": "2026-06-01T00:00:00Z",
+            "expires_at": "2026-06-01T00:10:00Z",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "permit_decision": "allowed",
+            "boundary_true": False,
+            "boundary": {"actual_send": False},
+            "scope": other_scope,
+            "scope_hash": execution_gate_scope_hash(other_scope),
+        },
+        {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "permit",
+            "execution_gate_envelope_id": "xgate_used",
+            "created_at": "2026-06-01T00:00:00Z",
+            "expires_at": "2026-06-01T00:10:00Z",
+            "lane_id": "session_mirror_auto_apply",
+            "risk_class": "bounded_append_only_data_ingress",
+            "permit_decision": "allowed",
+            "boundary_true": False,
+            "boundary": {"actual_send": False},
+            "scope": good_scope,
+            "scope_hash": execution_gate_scope_hash(good_scope),
+        },
+        {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "completion",
+            "execution_gate_envelope_id": "xgate_used",
+            "created_at": "2026-06-01T00:01:00Z",
+            "lane_id": "session_mirror_auto_apply",
+            "execution_status": "ok",
+        },
+    ]
+    records_path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+        encoding="utf-8",
+    )
+
+    no_expiry = resolve_execution_gate_permit(
+        roots,
+        envelope_id="xgate_no_expiry",
+        lane_id="session_mirror_auto_apply",
+        risk_class="bounded_append_only_data_ingress",
+        require_fresh=True,
+        expected_scope=good_scope,
+        now=datetime(2026, 6, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    scope_mismatch = resolve_execution_gate_permit(
+        roots,
+        envelope_id="xgate_scope",
+        lane_id="session_mirror_auto_apply",
+        risk_class="bounded_append_only_data_ingress",
+        require_fresh=True,
+        expected_scope=good_scope,
+        now=datetime(2026, 6, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    reused = resolve_execution_gate_permit(
+        roots,
+        envelope_id="xgate_used",
+        lane_id="session_mirror_auto_apply",
+        risk_class="bounded_append_only_data_ingress",
+        require_fresh=True,
+        require_unused=True,
+        expected_scope=good_scope,
+        now=datetime(2026, 6, 1, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert no_expiry["status"] == "invalid"
+    assert no_expiry["reason"] == "execution_gate_permit_expiry_missing"
+    assert scope_mismatch["status"] == "invalid"
+    assert scope_mismatch["reason"] == "execution_gate_scope_mismatch"
+    assert reused["status"] == "invalid"
+    assert reused["reason"] == "execution_gate_permit_already_completed"

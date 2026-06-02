@@ -65,6 +65,18 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "hindsight_exported": False,
     }
     assert (tmp_path / "system-modules" / "cognitive_loop" / "reports.jsonl").is_file()
+    persisted = [
+        json.loads(line)
+        for line in (tmp_path / "system-modules" / "cognitive_loop" / "reports.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ][-1]
+    assert [step["step"] for step in persisted["steps"]] == [step["step"] for step in result["steps"]]
+    assert persisted["step_summary"]["step_count"] == len(result["steps"])
+    assert persisted["step_summary"]["omitted_step_count"] == 0
+    assert persisted["step_summary"]["tail_step_statuses"]["left_brain_pipeline_check"] in {"ok", "warning", "skipped"}
+    assert persisted["step_summary"]["tail_step_statuses"]["doctor_boundary_report"] in {"ok", "warning"}
     assert (tmp_path / "system-modules" / "household_digest" / "household_digest.md").is_file()
     assert (tmp_path / "system-modules" / "wandering_mind" / "outputs.jsonl").is_file()
     assert (tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl").is_file()

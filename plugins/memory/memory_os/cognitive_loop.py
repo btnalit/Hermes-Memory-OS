@@ -680,7 +680,7 @@ class CognitiveLoopRunner:
     def _append_report(self, report: dict[str, Any]) -> None:
         self.reports_path.parent.mkdir(parents=True, exist_ok=True)
         with self.reports_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(_bounded(report), ensure_ascii=False, sort_keys=True))
+            handle.write(json.dumps(_bounded_report(report), ensure_ascii=False, sort_keys=True))
             handle.write("\n")
 
     @staticmethod
@@ -739,6 +739,31 @@ def _bounded(payload: Any) -> Any:
     if isinstance(payload, str):
         return _clip(payload, 500)
     return payload
+
+
+def _bounded_report(report: dict[str, Any]) -> dict[str, Any]:
+    bounded = _bounded(report)
+    steps = report.get("steps") if isinstance(report.get("steps"), list) else []
+    if steps:
+        bounded["steps"] = [_bounded(step) for step in steps]
+        bounded["step_summary"] = {
+            "step_count": len(steps),
+            "omitted_step_count": 0,
+            "tail_step_statuses": {
+                str(step.get("step") or ""): str(step.get("status") or "")
+                for step in steps
+                if isinstance(step, dict)
+                and str(step.get("step") or "")
+                in {
+                    "left_brain_pipeline_check",
+                    "governance_feedback",
+                    "deep_reflection",
+                    "heartbeat_post",
+                    "doctor_boundary_report",
+                }
+            },
+        }
+    return bounded
 
 
 def _clip(value: str, limit: int) -> str:
