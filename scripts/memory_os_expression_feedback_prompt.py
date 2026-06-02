@@ -11,6 +11,11 @@ import json
 import subprocess
 import sys
 
+try:
+    from memory_os_execution_report import write_helper_execution_report
+except ModuleNotFoundError:
+    from scripts.memory_os_execution_report import write_helper_execution_report
+
 
 def main() -> int:
     report = _run_json(
@@ -100,4 +105,6 @@ def _run_json(command: list[str]) -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    result = main()
+    write_helper_execution_report(result_summary={"returncode": result, "helper": "expression_feedback_request"})
+    raise SystemExit(result)

@@ -36,6 +36,7 @@ SOURCE_MODULE_CADENCE_REPORT_CRON = REPO_ROOT / "scripts" / "memory_os_module_ca
 SOURCE_EXPRESSION_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_expression_feedback_prompt.py"
 SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT = REPO_ROOT / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
 SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE = REPO_ROOT / "scripts" / "memory_os_proposal_followups_ops_gate.py"
+SOURCE_EXECUTION_REPORT_HELPER = REPO_ROOT / "scripts" / "memory_os_execution_report.py"
 SOURCE_OWNER_CRON_ONBOARDING = REPO_ROOT / "scripts" / "memory_os_owner_cron_onboarding.py"
 SOURCE_EXECUTION_GATE_RUNNER = REPO_ROOT / "scripts" / "memory_os_execution_gate_runner.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
@@ -820,6 +821,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "expression_feedback_prompt": SOURCE_EXPRESSION_FEEDBACK_PROMPT,
         "memory_sources_feedback_prompt": SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT,
         "proposal_followups_ops_gate": SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE,
+        "execution_report_helper": SOURCE_EXECUTION_REPORT_HELPER,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():

@@ -15,6 +15,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from memory_os_execution_report import write_helper_execution_report
+except ModuleNotFoundError:
+    from scripts.memory_os_execution_report import write_helper_execution_report
+
 
 def main() -> int:
     owner = os.environ.get("MEMORY_OS_OWNER_REVIEW_OWNER", "owner")
@@ -133,4 +138,6 @@ def _run_text(command: list[str]) -> str:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    result = main()
+    write_helper_execution_report(result_summary={"returncode": result, "helper": "owner_review_digest"})
+    raise SystemExit(result)

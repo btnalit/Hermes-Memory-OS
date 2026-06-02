@@ -13,6 +13,11 @@ import json
 import subprocess
 import sys
 
+try:
+    from memory_os_execution_report import write_helper_execution_report
+except ModuleNotFoundError:
+    from scripts.memory_os_execution_report import write_helper_execution_report
+
 
 def main() -> int:
     result = _run_json(
@@ -30,6 +35,20 @@ def main() -> int:
         ]
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    boundary = {
+        "actual_execute": result.get("actual_execute") is True or result.get("execution_ticket_created") is True,
+        "actual_send": result.get("actual_send") is True,
+        "actual_identity_write": result.get("actual_identity_write") is True,
+        "actual_unapproved_crystallized_approval": result.get("actual_unapproved_crystallized_approval") is True,
+    }
+    write_helper_execution_report(
+        boundary=boundary,
+        result_summary={
+            "status": result.get("status"),
+            "routed_count": result.get("routed_count"),
+            "eligible_count": result.get("eligible_count"),
+        },
+    )
     if result.get("actual_execute") is True or result.get("execution_ticket_created") is True:
         return 2
     if result.get("status") not in {"ok", "warning"}:

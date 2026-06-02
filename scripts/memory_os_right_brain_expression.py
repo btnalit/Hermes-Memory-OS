@@ -16,6 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from memory_os_execution_report import write_helper_execution_report
+except ModuleNotFoundError:
+    from scripts.memory_os_execution_report import write_helper_execution_report
+
 
 SCHEMA_VERSION = "memory-os.right_brain_expression_adapter_request.v0"
 
@@ -170,4 +175,6 @@ def _render_prompt(
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    result = main()
+    write_helper_execution_report(result_summary={"returncode": result, "helper": "right_brain_expression"})
+    raise SystemExit(result)

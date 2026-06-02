@@ -14,6 +14,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+try:
+    from memory_os_execution_report import write_helper_execution_report
+except ModuleNotFoundError:
+    from scripts.memory_os_execution_report import write_helper_execution_report
+
 CANARY_TARGET = 20
 STATUS_SCHEMA_VERSION = "memory-os.memory_sources_feedback_prompt_status.v0"
 
@@ -195,4 +200,6 @@ def _feedback_total(stats: dict[str, object] | None) -> tuple[int, str]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    result = main(sys.argv[1:])
+    write_helper_execution_report(result_summary={"returncode": result, "helper": "memory_sources_feedback_request"})
+    raise SystemExit(result)
