@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 from scripts.deploy_memory_os import (
     _classify_cron_adapter_probe,
@@ -7,6 +10,31 @@ from scripts.deploy_memory_os import (
     deploy_memory_os,
     render_deploy_plan,
 )
+
+
+def test_deploy_script_plan_bootstraps_repo_import_path(tmp_path):
+    script = Path(__file__).resolve().parents[2] / "scripts" / "deploy_memory_os.py"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--repo-root",
+            str(tmp_path),
+            "--hermes-home",
+            "/root/.hermes",
+            "--phase",
+            "plan",
+            "--output",
+            "json",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["schema_version"] == "memory-os.deploy.v0"
 
 
 def _llm_judge_probe_result():

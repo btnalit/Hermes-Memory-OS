@@ -11,8 +11,13 @@ import argparse
 import json
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Callable
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.memory.memory_os.execution_gate import boundary_true_paths
 
