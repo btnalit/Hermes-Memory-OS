@@ -2375,6 +2375,63 @@ def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
     assert feedback["raw_body_included"] is False
 
 
+def test_render_digest_hides_transcript_like_speak_expression_preview(tmp_path):
+    store = _store(tmp_path)
+    module_root = tmp_path / "system-modules" / "wandering_mind"
+    module_root.mkdir(parents=True)
+    output_record = {
+        "schema_version": "hermes.wandering_mind_output.v0",
+        "id": "wout_raw_preview_001",
+        "ts": "2026-05-26T00:00:00+00:00",
+        "profile": "main",
+        "module": "wandering_mind",
+        "source_event_id": "evt_preview_001",
+        "output": "User: private owner question | Assistant: private assistant answer",
+        "output_ref": "local://wandering_mind/wout_raw_preview_001",
+    }
+    would_send = {
+        "schema_version": "hermes.delivery_would_send.v0",
+        "id": "wsend_raw_preview_001",
+        "ts": "2026-05-26T00:00:01+00:00",
+        "profile": "main",
+        "module": "wandering_mind",
+        "mode": "would_send",
+        "actual_send": False,
+        "channel": "origin",
+        "payload_ref": "local://wandering_mind/wout_raw_preview_001",
+        "reason": "wandering_mind_no_send",
+    }
+    (module_root / "outputs.jsonl").write_text(json.dumps(output_record, ensure_ascii=False) + "\n", encoding="utf-8")
+    (module_root / "would_send.jsonl").write_text(json.dumps(would_send, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    rendered = render_owner_review_digest(store, max_action_required=0, max_review_suggested=1, max_fyi=0)
+    item = rendered["sections"]["review_suggested"][0]
+    text = rendered["text"]
+
+    assert item["target_type"] == "speak"
+    assert item["expression_preview_suppressed"] is True
+    assert "User:" not in item["expression_preview"]
+    assert "Assistant:" not in item["expression_preview"]
+    assert "private owner question" not in text
+    assert "private assistant answer" not in text
+    assert "摘要已隐藏" in text
+    assert "memory allow" not in text
+    assert "allow_speak_once" not in item["action_tokens"]
+    assert "memory feedback" in text
+
+    blocked = apply_owner_action(
+        store,
+        action_type="allow_speak_once",
+        target="speak:wsend_raw_preview_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    assert blocked["status"] == "error"
+    assert blocked["code"] == "speak_payload_transcript_marker"
+    assert not speak_permission_tickets_path(store.roots).exists()
+
+
 def test_allow_speak_once_sends_once_when_explicit_delivery_enabled(tmp_path, monkeypatch):
     store = _store(tmp_path)
     module_root = tmp_path / "system-modules" / "wandering_mind"

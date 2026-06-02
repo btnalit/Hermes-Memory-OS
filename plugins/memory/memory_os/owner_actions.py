@@ -2142,6 +2142,7 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "ops_gate_report_id": _bounded_text(str(item.get("ops_gate_report_id") or ""), 120),
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
+        "expression_preview_suppressed": bool(item.get("expression_preview_suppressed")),
         "action_tokens": {
             str(key): str(value)
             for key, value in (item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}).items()
@@ -2376,8 +2377,12 @@ def _validate_action_target(
     if action_type == "allow_speak_once":
         if target_type != "speak":
             return "invalid_speak_target"
-        if not _find_speak_would_send(store, target_id):
+        would_send = _find_speak_would_send(store, target_id)
+        if not would_send:
             return "speak_target_not_found"
+        payload_ref = str(would_send.get("payload_ref") or "")
+        if _contains_transcript_marker(_expression_text_for_payload_ref(store, payload_ref)):
+            return "speak_payload_transcript_marker"
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES and target_type != "expression":
         return "invalid_expression_target"
     return ""
@@ -2423,7 +2428,7 @@ def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[s
     target_id = str(record["target_id"])
     would_send = _find_speak_would_send(store, target_id) or {}
     payload_ref = str(would_send.get("payload_ref") or "")
-    expression_text = _expression_preview_for_payload_ref(store, payload_ref)
+    expression_text = _expression_text_for_payload_ref(store, payload_ref)
     ticket = {
         "schema_version": SPEAK_PERMISSION_SCHEMA_VERSION,
         "ticket_id": f"spt_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
@@ -3004,7 +3009,7 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
             if not target_id or f"speak:{target_id}" in closed:
                 continue
             payload_ref = str(record.get("payload_ref") or "")
-            expression_preview = _expression_preview_for_payload_ref(store, payload_ref)
+            expression_preview, expression_preview_suppressed = _safe_expression_preview_for_payload_ref(store, payload_ref)
             created_at, created_at_source = _created_at_with_source(
                 record,
                 primary_key="created_at",
@@ -3025,6 +3030,7 @@ def _speak_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str
                     "summary": "右脑 would-send 主动发言草案",
                     "payload_ref": payload_ref,
                     "expression_preview": expression_preview,
+                    "expression_preview_suppressed": expression_preview_suppressed,
                     "safe_source_ids": [],
                     "raw_body_included": False,
                 }
@@ -3084,7 +3090,7 @@ def _memory_source_fyi_items(store: MemoryOSStore, *, limit: int, start: int = 1
     return selected
 
 
-def _expression_preview_for_payload_ref(store: MemoryOSStore, payload_ref: str) -> str:
+def _expression_text_for_payload_ref(store: MemoryOSStore, payload_ref: str) -> str:
     prefix = "local://wandering_mind/"
     if not payload_ref.startswith(prefix):
         return ""
@@ -3093,8 +3099,20 @@ def _expression_preview_for_payload_ref(store: MemoryOSStore, payload_ref: str) 
         return ""
     for record in _read_jsonl(store.roots.hermes_home / "system-modules" / "wandering_mind" / "outputs.jsonl"):
         if str(record.get("id") or "") == output_id:
-            return _bounded_text(str(record.get("output") or ""), 360)
+            return str(record.get("output") or "")
     return ""
+
+
+def _safe_expression_preview_for_payload_ref(store: MemoryOSStore, payload_ref: str) -> tuple[str, bool]:
+    text = _expression_text_for_payload_ref(store, payload_ref)
+    if not text:
+        return "", False
+    if _contains_transcript_marker(text):
+        return (
+            "这条右脑表达草案包含原始对话样式片段，摘要已隐藏；请给表达反馈或要求重新生成，不建议直接允许发送。",
+            True,
+        )
+    return _bounded_text(text, 360), False
 
 
 def _find_speak_would_send(store: MemoryOSStore, target_id: str) -> dict[str, Any] | None:
@@ -3155,14 +3173,23 @@ def _looks_like_raw_proposal_body(body: str) -> bool:
         "raw_",
         "private raw",
         "transcript:",
+    )
+    return any(marker in lowered for marker in raw_markers) or _contains_transcript_marker(body)
+
+
+def _contains_transcript_marker(value: str) -> bool:
+    lowered = str(value or "").lower()
+    transcript_markers = (
         "user:",
         "assistant:",
         "用户:",
-        "助手:",
         "用户：",
+        "助手:",
         "助手：",
+        "| assistant:",
+        "| user:",
     )
-    return any(marker in lowered for marker in raw_markers)
+    return any(marker in lowered for marker in transcript_markers)
 
 
 def _channel_report(
@@ -3304,6 +3331,7 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         "ops_gate_report_id": _bounded_text(str(item.get("ops_gate_report_id") or ""), 120),
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
+        "expression_preview_suppressed": bool(item.get("expression_preview_suppressed")),
         "payload_ref": _bounded_text(str(item.get("payload_ref") or ""), 220),
         "safe_source_ids": item.get("safe_source_ids") or [],
         "raw_body_included": False,
@@ -3350,8 +3378,13 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
     anchor = str(item.get("anchor") or "")
     target_id = str(item.get("target_id") or item.get("kind") or "")
     actions = [] if _review_item_suppresses_actions(item) else _review_actions(target_type, target_id)
+    if target_type == "speak" and bool(item.get("expression_preview_suppressed")):
+        actions = [action for action in actions if action.get("action_type") != "allow_speak_once"]
     question = _review_question(target_type, item)
     suggested_action = _review_suggested_action(actions, target_type)
+    consequence = _review_consequence(target_type)
+    if target_type == "speak" and bool(item.get("expression_preview_suppressed")):
+        consequence = "这条表达草案像原始对话片段，摘要不展示原文，也不提供 allow；表达反馈只入 ledger 并参与后续 proposal。"
     return {
         "anchor": anchor,
         "target_type": target_type,
@@ -3361,7 +3394,7 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "question": question,
         "suggested_action": suggested_action,
         "reason": _review_reason(target_type, item),
-        "consequence": _review_consequence(target_type),
+        "consequence": consequence,
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360)
         if target_type == "candidate"
         else "",
@@ -3372,6 +3405,9 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360)
         if target_type == "speak"
         else "",
+        "expression_preview_suppressed": bool(item.get("expression_preview_suppressed"))
+        if target_type == "speak"
+        else False,
         "action_tokens": {action["action_type"]: action["token"] for action in actions},
         "action_targets": {
             action["action_type"]: {
@@ -3478,6 +3514,11 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             220,
         )
     if target_type == "speak":
+        if item.get("expression_preview_suppressed"):
+            return _bounded_text(
+                f"{source_module} 产生了一条 would-send 草案，但它像原始对话片段，摘要已隐藏原文。",
+                220,
+            )
         if item.get("expression_preview"):
             return _bounded_text(f"{source_module} 产生了一条可审阅的 would-send 主动发言草案。", 220)
         return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案，但当前只能看到安全引用。", 220)
