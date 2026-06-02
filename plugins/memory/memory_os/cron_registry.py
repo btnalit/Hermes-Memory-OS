@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -13,6 +16,26 @@ class MemoryOSCronSpec:
     wrapper_script: str
     lane_id: str
     helper_kind: str
+    schedule_arg: str
+    deliver_role: str
+    prompt_ref: str
+    no_agent: bool
+    requires_boundary_report: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "name": self.name,
+            "raw_script": self.raw_script,
+            "wrapper_script": self.wrapper_script,
+            "lane_id": self.lane_id,
+            "helper_kind": self.helper_kind,
+            "schedule_arg": self.schedule_arg,
+            "deliver_role": self.deliver_role,
+            "prompt_ref": self.prompt_ref,
+            "no_agent": self.no_agent,
+            "requires_boundary_report": self.requires_boundary_report,
+        }
 
 
 MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
@@ -23,6 +46,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_owner_review_digest_gate.py",
         lane_id="owner_review_digest_render",
         helper_kind="owner_channel_render",
+        schedule_arg="owner_review_schedule",
+        deliver_role="owner",
+        prompt_ref="owner_review_agent_prompt",
+        no_agent=False,
     ),
     MemoryOSCronSpec(
         key="right_brain_expression",
@@ -31,6 +58,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_right_brain_expression_gate.py",
         lane_id="right_brain_expression_render",
         helper_kind="owner_channel_render",
+        schedule_arg="right_brain_schedule",
+        deliver_role="right_brain",
+        prompt_ref="right_brain_agent_prompt",
+        no_agent=False,
     ),
     MemoryOSCronSpec(
         key="module_cadence_report",
@@ -39,6 +70,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_module_cadence_report_gate.py",
         lane_id="module_cadence_report",
         helper_kind="local_helper",
+        schedule_arg="module_cadence_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
     ),
     MemoryOSCronSpec(
         key="right_brain_expression_outcome",
@@ -47,6 +82,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_right_brain_expression_outcome_gate.py",
         lane_id="right_brain_expression_outcome",
         helper_kind="local_helper",
+        schedule_arg="right_brain_outcome_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
     ),
     MemoryOSCronSpec(
         key="proposal_followups_opsgate",
@@ -55,6 +94,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_proposal_followups_opsgate_gate.py",
         lane_id="proposal_followups_opsgate",
         helper_kind="local_helper",
+        schedule_arg="proposal_followups_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
     ),
     MemoryOSCronSpec(
         key="expression_feedback_request",
@@ -63,6 +106,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_expression_feedback_request_gate.py",
         lane_id="expression_feedback_request",
         helper_kind="owner_channel_render",
+        schedule_arg="expression_feedback_schedule",
+        deliver_role="owner",
+        prompt_ref="expression_feedback_agent_prompt",
+        no_agent=False,
     ),
     MemoryOSCronSpec(
         key="memory_sources_feedback_request",
@@ -71,6 +118,10 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         wrapper_script="memory_os_cron_memory_sources_feedback_request_gate.py",
         lane_id="memory_sources_feedback_request",
         helper_kind="owner_channel_render",
+        schedule_arg="memory_sources_feedback_schedule",
+        deliver_role="owner",
+        prompt_ref="memory_sources_feedback_agent_prompt",
+        no_agent=False,
     ),
 )
 
@@ -91,3 +142,41 @@ def memory_os_cron_spec_by_name(name: str) -> MemoryOSCronSpec | None:
         if spec.name == name:
             return spec
     return None
+
+
+def cron_registry_snapshot(*, source_commit: str = "") -> dict[str, Any]:
+    return {
+        "schema_version": "memory-os.cron_registry.v0",
+        "source_commit": str(source_commit or ""),
+        "specs": [spec.to_json() for spec in MEMORY_OS_CRON_SPECS],
+    }
+
+
+def write_cron_registry_snapshot(path: Path, *, source_commit: str = "") -> dict[str, Any]:
+    snapshot = cron_registry_snapshot(source_commit=source_commit)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return snapshot
+
+
+def specs_from_snapshot(value: dict[str, Any]) -> tuple[MemoryOSCronSpec, ...]:
+    specs = []
+    for item in value.get("specs", []) if isinstance(value.get("specs"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        specs.append(
+            MemoryOSCronSpec(
+                key=str(item.get("key") or ""),
+                name=str(item.get("name") or ""),
+                raw_script=str(item.get("raw_script") or ""),
+                wrapper_script=str(item.get("wrapper_script") or ""),
+                lane_id=str(item.get("lane_id") or ""),
+                helper_kind=str(item.get("helper_kind") or "local_helper"),
+                schedule_arg=str(item.get("schedule_arg") or ""),
+                deliver_role=str(item.get("deliver_role") or "local"),
+                prompt_ref=str(item.get("prompt_ref") or "empty"),
+                no_agent=bool(item.get("no_agent")),
+                requires_boundary_report=bool(item.get("requires_boundary_report")),
+            )
+        )
+    return tuple(spec for spec in specs if spec.key and spec.name and spec.raw_script and spec.wrapper_script)

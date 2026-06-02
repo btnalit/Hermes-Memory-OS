@@ -12,7 +12,7 @@ from typing import Any
 
 from .audit import append_audit
 from .config import load_config
-from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
+from .execution_gate import complete_execution_gate_envelope, read_execution_gate_records, start_execution_gate_envelope
 from .ids import new_event_id
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
@@ -371,6 +371,53 @@ class SessionMirror:
         skipped_by_platform_count = len(new_sessions) - len(platform_filtered)
         skipped_by_limit_count = max(len(platform_filtered) - len(selected_sessions), 0)
         written_events: list[str] = []
+        if not dry_run and selected_sessions:
+            governance_validation = validate_session_mirror_apply_governance(
+                self.store,
+                apply_governance or {},
+                requested_platform_allowlist=platforms,
+                requested_max_sessions=limit,
+                selected_session_fingerprints=selected_fingerprints,
+                require_execution_gate=bool((apply_governance or {}).get("auto_apply")),
+            )
+            if governance_validation.get("status") != "valid":
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="session_mirror_apply_blocked",
+                    status="blocked",
+                    target=str(self.store.roots.hermes_home),
+                    details={
+                        "reason": str(governance_validation.get("reason") or "session_mirror_apply_governance_invalid"),
+                        "selected_session_count": len(selected_sessions),
+                    },
+                )
+                return {
+                    "schema_version": self.report_schema_version,
+                    "status": "blocked",
+                    "reason": str(governance_validation.get("reason") or "session_mirror_apply_governance_invalid"),
+                    "profile": self.store.roots.profile,
+                    "session_count": len(sessions),
+                    "covered_session_count": sum(1 for session in sessions if session["session_id"] in covered),
+                    "candidate_session_count": len(new_sessions),
+                    "selected_session_count": len(selected_sessions),
+                    "skipped_by_platform_count": skipped_by_platform_count,
+                    "skipped_by_limit_count": skipped_by_limit_count,
+                    "new_event_count": 0,
+                    "dry_run": False,
+                    "apply_bounded": True,
+                    "max_sessions": limit,
+                    "platform_allowlist": platforms,
+                    "state_rebuilt": state_rebuilt,
+                    "written_event_ids": [],
+                    "written_event_ids_count": 0,
+                    "selected_sessions": selected_safe_sessions,
+                    "selected_session_fingerprints": selected_fingerprints,
+                    "duplicate_ignored_count": 0,
+                    "raw_private_body_printed": False,
+                    "apply_governance": _bounded_apply_governance(apply_governance or {}),
+                    "governance_validation": governance_validation,
+                    "findings": findings,
+                }
         if not dry_run:
             for session in selected_sessions:
                 event = self._event_for_session(session)
@@ -777,6 +824,167 @@ def _safe_pending_session(session: dict[str, Any]) -> dict[str, Any]:
         "message_count": int(session.get("message_count") or 0),
         "tool_count": int(session.get("tool_count") or 0),
     }
+
+
+def validate_session_mirror_apply_governance(
+    store: MemoryOSStore,
+    value: dict[str, Any],
+    *,
+    requested_platform_allowlist: list[str] | tuple[str, ...],
+    requested_max_sessions: int,
+    selected_session_fingerprints: list[str] | tuple[str, ...],
+    require_execution_gate: bool,
+) -> dict[str, Any]:
+    governance = value if isinstance(value, dict) else {}
+    if not governance:
+        return _governance_validation("invalid", "session_mirror_apply_governance_missing")
+    if any(bool(governance.get(key)) for key in _BOUNDARY_KEYS):
+        return _governance_validation("invalid", "session_mirror_apply_boundary_true")
+    if governance.get("auto_apply") and governance.get("lane_graduated"):
+        return _validate_lane_graduated_governance(
+            store,
+            governance,
+            requested_platform_allowlist=requested_platform_allowlist,
+            requested_max_sessions=requested_max_sessions,
+            selected_session_fingerprints=selected_session_fingerprints,
+            require_execution_gate=require_execution_gate,
+        )
+    if governance.get("test_host"):
+        if (
+            governance.get("test_host_config_allowed")
+            and str(governance.get("test_host_marker") or "") in {"install_preset:test-host", "manual:test-host"}
+            and bool(governance.get("evidence_refs"))
+        ):
+            return _governance_validation("valid", "", governance_class="test_host_resolved")
+        return _governance_validation("invalid", "session_mirror_apply_governance_invalid")
+    if governance.get("approval_ref"):
+        return _validate_owner_resolved_governance(
+            store,
+            governance,
+            requested_platform_allowlist=requested_platform_allowlist,
+            requested_max_sessions=requested_max_sessions,
+            selected_session_fingerprints=selected_session_fingerprints,
+        )
+    return _governance_validation("invalid", "session_mirror_apply_owner_or_test_or_auto_missing")
+
+
+def _validate_owner_resolved_governance(
+    store: MemoryOSStore,
+    governance: dict[str, Any],
+    *,
+    requested_platform_allowlist: list[str] | tuple[str, ...],
+    requested_max_sessions: int,
+    selected_session_fingerprints: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    approval_ref = str(governance.get("approval_ref") or "")
+    record = _find_owner_action_record(store, approval_ref)
+    if not record:
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_not_found")
+    if str(record.get("source") or "") != "latest_owner_home_digest":
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_not_owner_channel_bound")
+    if record.get("action_type") != "approve_session_mirror_apply" or record.get("target_type") != "session_mirror_apply":
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_scope_mismatch")
+    result_ref = record.get("result_ref") if isinstance(record.get("result_ref"), dict) else {}
+    if _expiry_status(result_ref.get("expires_at")) == "expired":
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_expired")
+    if _expiry_status(result_ref.get("expires_at")) == "invalid":
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_expiry_invalid")
+    if _approval_ref_consumed(store, approval_ref):
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_already_consumed")
+    approved_max = max(int(result_ref.get("max_sessions") or result_ref.get("auto_apply_max_sessions_per_run") or 0), 0)
+    if approved_max and max(int(requested_max_sessions or 0), 0) > approved_max:
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_max_sessions_exceeded")
+    approved_platforms = set(_normalize_platform_allowlist(result_ref.get("platform_allowlist") if isinstance(result_ref.get("platform_allowlist"), list) else []))
+    requested_platforms = set(_normalize_platform_allowlist(requested_platform_allowlist))
+    if approved_platforms and (not requested_platforms or not requested_platforms <= approved_platforms):
+        return _governance_validation("invalid", "session_mirror_apply_owner_ref_platform_not_allowed")
+    expected_fingerprint = str(result_ref.get("selected_pending_session_fingerprint") or "")
+    if expected_fingerprint and selected_session_fingerprints and str(selected_session_fingerprints[0]) != expected_fingerprint:
+        return _governance_validation("invalid", "session_mirror_apply_scope_mismatch")
+    return _governance_validation("valid", "", governance_class="owner_resolved")
+
+
+def _validate_lane_graduated_governance(
+    store: MemoryOSStore,
+    governance: dict[str, Any],
+    *,
+    requested_platform_allowlist: list[str] | tuple[str, ...],
+    requested_max_sessions: int,
+    selected_session_fingerprints: list[str] | tuple[str, ...],
+    require_execution_gate: bool,
+) -> dict[str, Any]:
+    policy = session_mirror_graduation_policy(store)
+    if policy.get("status") != "active":
+        return _governance_validation("invalid", "session_mirror_apply_governance_invalid")
+    if str(governance.get("approval_ref") or "") != str(policy.get("approval_ref") or ""):
+        return _governance_validation("invalid", "session_mirror_apply_scope_mismatch")
+    if max(int(requested_max_sessions or 0), 0) > max(int(policy.get("max_sessions_per_run") or 1), 0):
+        return _governance_validation("invalid", "session_mirror_apply_scope_mismatch")
+    policy_platforms = set(_normalize_platform_allowlist(policy.get("platform_allowlist") if isinstance(policy.get("platform_allowlist"), list) else []))
+    requested_platforms = set(_normalize_platform_allowlist(requested_platform_allowlist))
+    if policy_platforms and (not requested_platforms or not requested_platforms <= policy_platforms):
+        return _governance_validation("invalid", "session_mirror_apply_scope_mismatch")
+    envelope_id = str(governance.get("execution_gate_envelope_id") or "")
+    if require_execution_gate and not envelope_id:
+        return _governance_validation("invalid", "session_mirror_apply_execution_gate_missing")
+    if envelope_id and not _execution_gate_permit_exists(store, envelope_id, lane_id="session_mirror_auto_apply"):
+        return _governance_validation("invalid", "session_mirror_apply_execution_gate_not_found")
+    if not selected_session_fingerprints:
+        return _governance_validation("invalid", "session_mirror_apply_scope_mismatch")
+    return _governance_validation("valid", "", governance_class="lane_graduated_auto_apply")
+
+
+def _governance_validation(status: str, reason: str, *, governance_class: str = "") -> dict[str, Any]:
+    return {
+        "schema_version": "memory-os.session_mirror_apply_governance_validation.v0",
+        "status": status,
+        "governance_class": governance_class,
+        "reason": reason,
+    }
+
+
+def _find_owner_action_record(store: MemoryOSStore, owner_action_id: str) -> dict[str, Any] | None:
+    from .owner_actions import read_owner_action_records
+
+    for record in reversed(read_owner_action_records(store.roots)):
+        if str(record.get("owner_action_id") or "") == str(owner_action_id or ""):
+            return record
+    return None
+
+
+def _approval_ref_consumed(store: MemoryOSStore, approval_ref: str) -> bool:
+    for record in read_session_mirror_apply_records(store.roots):
+        governance = record.get("apply_governance") if isinstance(record.get("apply_governance"), dict) else {}
+        if str(governance.get("approval_ref") or "") == str(approval_ref or "") and int(record.get("written_event_ids_count") or 0) > 0:
+            return True
+    return False
+
+
+def _execution_gate_permit_exists(store: MemoryOSStore, envelope_id: str, *, lane_id: str) -> bool:
+    for record in reversed(read_execution_gate_records(store.roots, limit=2000)):
+        if (
+            record.get("stage") == "permit"
+            and str(record.get("execution_gate_envelope_id") or "") == str(envelope_id or "")
+            and str(record.get("lane_id") or "") == lane_id
+            and str(record.get("permit_decision") or "") == "allowed"
+        ):
+            return True
+    return False
+
+
+def _expiry_status(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "none"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return "invalid"
+    if parsed.tzinfo is None:
+        return "invalid"
+    if parsed.astimezone(timezone.utc) <= datetime.now(timezone.utc):
+        return "expired"
+    return "valid"
 
 
 def _bounded_apply_record(record: dict[str, Any]) -> dict[str, Any]:

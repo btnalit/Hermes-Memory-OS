@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,13 +27,25 @@ def read_execution_gate_records(roots: MemoryOSRoots, *, limit: int = 0) -> list
 
 def any_boundary_true(value: Any) -> bool:
     """Return true when any boundary-shaped object contains a boolean true."""
+    return bool(boundary_true_paths(value))
+
+
+def boundary_true_paths(value: Any, *, prefix: str = "") -> list[str]:
     if isinstance(value, bool):
-        return value is True
+        return [prefix or "$"] if value is True else []
     if isinstance(value, dict):
-        return any(any_boundary_true(item) for item in value.values())
+        paths: list[str] = []
+        for key, item in value.items():
+            child_prefix = f"{prefix}.{key}" if prefix else str(key)
+            paths.extend(boundary_true_paths(item, prefix=child_prefix))
+        return paths
     if isinstance(value, list):
-        return any(any_boundary_true(item) for item in value)
-    return False
+        paths = []
+        for index, item in enumerate(value):
+            child_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            paths.extend(boundary_true_paths(item, prefix=child_prefix))
+        return paths
+    return []
 
 
 def start_execution_gate_envelope(
@@ -130,7 +143,95 @@ def execution_gate_summary(roots: MemoryOSRoots) -> dict[str, Any]:
         "latest_lane_id": str(latest.get("lane_id") or ""),
         "latest_permit_decision": str(latest.get("permit_decision") or ""),
         "lane_counts": lane_counts,
+        "retention": execution_gate_retention_status(roots),
     }
+
+
+def execution_gate_retention_status(roots: MemoryOSRoots) -> dict[str, Any]:
+    path = execution_gate_records_path(roots)
+    rotated_dir = roots.memory_os_root / "system" / "execution_gate"
+    return {
+        "schema_version": "memory-os.execution_gate_retention.v0",
+        "active_path": str(path),
+        "active_size_bytes": path.stat().st_size if path.exists() else 0,
+        "rotated_file_count": len(list(rotated_dir.glob("envelopes-*.jsonl"))) if rotated_dir.exists() else 0,
+        "lock_path": str(rotated_dir / "rotation.lock"),
+    }
+
+
+def rotate_execution_gate_records(
+    roots: MemoryOSRoots,
+    *,
+    max_records: int = 20000,
+    max_age_days: int = 14,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current_now = now or datetime.now(timezone.utc)
+    path = execution_gate_records_path(roots)
+    records = read_execution_gate_records(roots)
+    cutoff = current_now - timedelta(days=max_age_days)
+    recent_indexes = {
+        index
+        for index, record in enumerate(records)
+        if _record_created_at(record) and _record_created_at(record) >= cutoff
+    }
+    latest_start = max(len(records) - max(max_records, 0), 0)
+    latest_indexes = set(range(latest_start, len(records)))
+    keep_indexes = recent_indexes | latest_indexes
+    kept = [record for index, record in enumerate(records) if index in keep_indexes]
+    rotated = [record for index, record in enumerate(records) if index not in keep_indexes]
+    lock_path = roots.memory_os_root / "system" / "execution_gate" / "rotation.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return {
+            "schema_version": "memory-os.execution_gate_rotation.v0",
+            "status": "locked",
+            "before_count": len(records),
+            "after_count": len(records),
+            "rotated_count": 0,
+        }
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(current_now.isoformat())
+        if rotated:
+            rotated_path = lock_path.parent / f"envelopes-{current_now.strftime('%Y%m%d')}.jsonl"
+            with rotated_path.open("a", encoding="utf-8") as handle:
+                for record in rotated:
+                    handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for record in kept:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+    return {
+        "schema_version": "memory-os.execution_gate_rotation.v0",
+        "status": "ok",
+        "before_count": len(records),
+        "after_count": len(kept),
+        "rotated_count": len(rotated),
+        "active_size_bytes": path.stat().st_size if path.exists() else 0,
+    }
+
+
+def _record_created_at(record: dict[str, Any]) -> datetime | None:
+    raw = str(record.get("created_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _bounded_json(value: Any) -> Any:

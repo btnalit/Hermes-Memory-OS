@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, write_cron_registry_snapshot
+from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
+
 
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
@@ -219,83 +222,52 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _operational_specs(args: argparse.Namespace, owner_deliver: str, right_brain_deliver: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "registry_key": "owner_review_digest",
-            "name": "memory-os-owner-review-digest",
-            "schedule": str(args.owner_review_schedule),
-            "deliver": owner_deliver,
-            "script": "memory_os_cron_owner_review_digest_gate.py",
-            "raw_script": "memory_os_owner_review_digest.py",
-            "no_agent": False,
-            "prompt": _load_script_module("memory_os_owner_review_cron_gate.py").OWNER_REVIEW_AGENT_PROMPT,
-        },
-        {
-            "registry_key": "right_brain_expression",
-            "name": "memory-os-right-brain-expression",
-            "schedule": str(args.right_brain_schedule),
-            "deliver": right_brain_deliver,
-            "script": "memory_os_cron_right_brain_expression_gate.py",
-            "raw_script": "memory_os_right_brain_expression.py",
-            "no_agent": False,
-            "prompt": _load_script_module("memory_os_right_brain_expression_cron_gate.py").RIGHT_BRAIN_AGENT_PROMPT,
-        },
-        {
-            "registry_key": "module_cadence_report",
-            "name": "memory-os-module-cadence-report",
-            "schedule": str(args.module_cadence_schedule),
-            "deliver": "local",
-            "script": "memory_os_cron_module_cadence_report_gate.py",
-            "raw_script": "memory_os_module_cadence_report_cron.py",
-            "no_agent": True,
-            "prompt": "",
-        },
-        {
-            "registry_key": "right_brain_expression_outcome",
-            "name": "memory-os-right-brain-expression-outcome",
-            "schedule": str(args.right_brain_outcome_schedule),
-            "deliver": "local",
-            "script": "memory_os_cron_right_brain_expression_outcome_gate.py",
-            "raw_script": "memory_os_right_brain_expression_outcome_cron.py",
-            "no_agent": True,
-            "prompt": "",
-        },
-        {
-            "registry_key": "proposal_followups_opsgate",
-            "name": "memory-os-proposal-followups-opsgate",
-            "schedule": str(args.proposal_followups_schedule),
-            "deliver": "local",
-            "script": "memory_os_cron_proposal_followups_opsgate_gate.py",
-            "raw_script": "memory_os_proposal_followups_ops_gate.py",
-            "no_agent": True,
-            "prompt": "",
-        },
-        {
-            "registry_key": "expression_feedback_request",
-            "name": "memory-os-expression-feedback-request",
-            "schedule": str(args.expression_feedback_schedule),
-            "deliver": owner_deliver,
-            "script": "memory_os_cron_expression_feedback_request_gate.py",
-            "raw_script": "memory_os_expression_feedback_prompt.py",
-            "no_agent": False,
-            "prompt": EXPRESSION_FEEDBACK_AGENT_PROMPT,
-        },
-        {
-            "registry_key": "memory_sources_feedback_request",
-            "name": "memory-os-memory-sources-feedback-request",
-            "schedule": str(args.memory_sources_feedback_schedule),
-            "deliver": owner_deliver,
-            "script": "memory_os_cron_memory_sources_feedback_request_gate.py",
-            "raw_script": "memory_os_memory_sources_feedback_prompt.py",
-            "no_agent": False,
-            "prompt": MEMORY_SOURCES_FEEDBACK_AGENT_PROMPT,
-        },
-    ]
+    specs: list[dict[str, Any]] = []
+    for cron_spec in memory_os_cron_specs():
+        specs.append(
+            {
+                "_cron_spec": cron_spec,
+                "registry_key": cron_spec.key,
+                "name": cron_spec.name,
+                "schedule": _schedule_for_spec(args, cron_spec.schedule_arg),
+                "deliver": _deliver_for_spec(cron_spec.deliver_role, owner_deliver, right_brain_deliver),
+                "script": cron_spec.wrapper_script,
+                "raw_script": cron_spec.raw_script,
+                "no_agent": cron_spec.no_agent,
+                "prompt": _prompt_for_spec(cron_spec.prompt_ref),
+            }
+        )
+    return specs
+
+
+def _schedule_for_spec(args: argparse.Namespace, schedule_arg: str) -> str:
+    return str(getattr(args, schedule_arg))
+
+
+def _deliver_for_spec(role: str, owner_deliver: str, right_brain_deliver: str) -> str:
+    if role == "owner":
+        return owner_deliver
+    if role == "right_brain":
+        return right_brain_deliver
+    return "local"
+
+
+def _prompt_for_spec(prompt_ref: str) -> str:
+    if prompt_ref == "owner_review_agent_prompt":
+        return _load_script_module("memory_os_owner_review_cron_gate.py").OWNER_REVIEW_AGENT_PROMPT
+    if prompt_ref == "right_brain_agent_prompt":
+        return _load_script_module("memory_os_right_brain_expression_cron_gate.py").RIGHT_BRAIN_AGENT_PROMPT
+    if prompt_ref == "expression_feedback_agent_prompt":
+        return EXPRESSION_FEEDBACK_AGENT_PROMPT
+    if prompt_ref == "memory_sources_feedback_agent_prompt":
+        return MEMORY_SOURCES_FEEDBACK_AGENT_PROMPT
+    return ""
 
 
 def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any]]) -> None:
     scripts_dir = hermes_home / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
+    write_cron_registry_snapshot(hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json")
     runner_target = scripts_dir / "memory_os_execution_gate_runner.py"
     if SOURCE_EXECUTION_GATE_RUNNER.is_file():
         shutil.copy2(SOURCE_EXECUTION_GATE_RUNNER, runner_target)
@@ -324,13 +296,20 @@ def _spec_by_key(specs: list[dict[str, Any]], key: str) -> dict[str, Any]:
 
 
 def _ensure_cron_job(*, hermes_home: Path, hermes_bin: str, spec: dict[str, Any]) -> dict[str, Any]:
-    existing = _find_job_by_name(_read_jobs(hermes_home / "cron" / "jobs.json"), str(spec["name"]))
+    adapter = HermesCronAdapter(hermes_home=hermes_home, hermes_bin=hermes_bin)
+    existing = _find_job_by_name(adapter.read_jobs(), str(spec["name"]))
+    desired = adapter.desired_job(
+        spec["_cron_spec"],
+        schedule=str(spec["schedule"]),
+        deliver=str(spec["deliver"]),
+        prompt=str(spec["prompt"]),
+    )
+    plan = adapter.plan_upsert(desired, existing_job=existing)
     if existing:
-        update_command = _cron_job_update_command(hermes_bin=hermes_bin, existing=existing, spec=spec)
-        if update_command:
+        if plan.status == "edit":
             env = dict(os.environ)
             env["HERMES_HOME"] = str(hermes_home)
-            completed = subprocess.run(update_command, check=False, text=True, capture_output=True, env=env)
+            completed = subprocess.run(plan.command, check=False, text=True, capture_output=True, env=env)
             if completed.returncode != 0:
                 return {
                     "name": spec["name"],
@@ -342,13 +321,27 @@ def _ensure_cron_job(*, hermes_home: Path, hermes_bin: str, spec: dict[str, Any]
                 "raw_script": str(spec["raw_script"]),
                 "registry_key": str(spec["registry_key"]),
                 "no_agent": bool(spec.get("no_agent")),
+                "migration_fields": list(plan.migration_fields),
             }
-            existing = _find_job_by_name(_read_jobs(hermes_home / "cron" / "jobs.json"), str(spec["name"])) or existing
+            existing = _find_job_by_name(adapter.read_jobs(), str(spec["name"])) or existing
             return {
                 "name": spec["name"],
                 "job_id": str(existing.get("id") or existing.get("job_id") or ""),
                 "status": "updated",
                 "deliver": str(existing.get("deliver") or spec["deliver"]),
+                "script": str(existing.get("script") or spec["script"]),
+                "raw_script": str(spec["raw_script"]),
+                "registry_key": str(spec["registry_key"]),
+                "no_agent": bool(existing.get("no_agent")),
+                "migration_fields": list(plan.migration_fields),
+            }
+        if plan.status == "blocked":
+            return {
+                "name": spec["name"],
+                "job_id": str(existing.get("id") or existing.get("job_id") or ""),
+                "status": "error",
+                "stderr": plan.reason,
+                "deliver": str(spec["deliver"]),
                 "script": str(existing.get("script") or spec["script"]),
                 "raw_script": str(spec["raw_script"]),
                 "registry_key": str(spec["registry_key"]),
@@ -364,25 +357,9 @@ def _ensure_cron_job(*, hermes_home: Path, hermes_bin: str, spec: dict[str, Any]
             "registry_key": str(spec["registry_key"]),
             "no_agent": bool(existing.get("no_agent")),
         }
-    command = [
-        hermes_bin,
-        "cron",
-        "create",
-        "--name",
-        str(spec["name"]),
-        "--deliver",
-        str(spec["deliver"]),
-        "--script",
-        str(spec["script"]),
-    ]
-    if spec.get("no_agent"):
-        command.append("--no-agent")
-    command.append(str(spec["schedule"]))
-    if spec.get("prompt"):
-        command.append(str(spec["prompt"]))
     env = dict(os.environ)
     env["HERMES_HOME"] = str(hermes_home)
-    completed = subprocess.run(command, check=False, text=True, capture_output=True, env=env)
+    completed = subprocess.run(plan.command, check=False, text=True, capture_output=True, env=env)
     if completed.returncode != 0:
         return {
             "name": spec["name"],

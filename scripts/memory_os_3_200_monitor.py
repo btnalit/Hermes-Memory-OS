@@ -1580,6 +1580,38 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "wrapped": wrapped,
                     }
                 )
+            helper_boundary_true = int(execution_gate_cron.get("helper_boundary_true_count") or 0)
+            helper_boundary_unobserved = int(execution_gate_cron.get("helper_boundary_unobserved_count") or 0)
+            helper_missing = int(execution_gate_cron.get("helper_completion_missing_count") or 0)
+            helper_stale = int(execution_gate_cron.get("helper_completion_stale_count") or 0)
+            if helper_boundary_true > 0:
+                fail.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_boundary_true",
+                        "count": helper_boundary_true,
+                    }
+                )
+            if helper_missing > 0:
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_completion_missing",
+                        "count": helper_missing,
+                    }
+                )
+            if helper_stale > 0:
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_completion_stale",
+                        "count": helper_stale,
+                    }
+                )
+            if helper_boundary_unobserved > 0:
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_boundary_unobserved",
+                        "count": helper_boundary_unobserved,
+                    }
+                )
             if int(execution_gate_cron.get("unclassified_count") or 0) > 0:
                 warn.append(
                     {
@@ -3206,7 +3238,7 @@ def _remote_probe_script() -> str:
     return r'''
 import json, os, re, subprocess, sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 for _path in ("/root/.hermes/memory-os/runtime/python", "/root/.hermes/plugins/memory_os"):
@@ -4636,6 +4668,10 @@ MEMORY_OS_CRON_REGISTRY = {
 }
 
 def execution_gate_cron_summary():
+    specs = _memory_os_cron_specs_from_snapshot()
+    specs_by_name = {str(item.get("name") or ""): item for item in specs}
+    specs_by_lane = {str(item.get("lane_id") or ""): item for item in specs}
+    adapter_probe = _execution_gate_cron_adapter_probe_summary()
     jobs_path = Path("/root/.hermes/cron/jobs.json")
     try:
         loaded = json.loads(jobs_path.read_text(encoding="utf-8")) if jobs_path.exists() else {"jobs": []}
@@ -4644,7 +4680,7 @@ def execution_gate_cron_summary():
             "schema_version": "memory-os.execution_gate_cron_summary.v0",
             "status": "warning",
             "error": str(exc)[:200],
-            "memory_os_owned_expected_count": len(MEMORY_OS_CRON_REGISTRY),
+            "memory_os_owned_expected_count": len(specs_by_name),
             "memory_os_owned_wrapped_count": 0,
             "memory_os_owned_naked_count": 0,
             "memory_os_like_unregistered_count": 0,
@@ -4663,7 +4699,7 @@ def execution_gate_cron_summary():
     for job in jobs:
         name = str(job.get("name") or "")
         script = str(job.get("script") or "")
-        spec = MEMORY_OS_CRON_REGISTRY.get(name)
+        spec = specs_by_name.get(name)
         safe = {
             "name": name,
             "script": script,
@@ -4687,10 +4723,14 @@ def execution_gate_cron_summary():
             external_unmanaged.append(safe)
         else:
             unclassified.append(safe)
-    return {
+    jobs_by_name = {str(job.get("name") or ""): job for job in jobs}
+    completion_summary = _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name)
+    summary = {
         "schema_version": "memory-os.execution_gate_cron_summary.v0",
         "status": "ok",
-        "memory_os_owned_expected_count": len(MEMORY_OS_CRON_REGISTRY),
+        "classification_source": "embedded_fallback",
+        "adapter_probe_status": str(adapter_probe.get("status") or ""),
+        "memory_os_owned_expected_count": len(specs_by_name),
         "memory_os_owned_wrapped_count": len(wrapped),
         "memory_os_owned_naked_count": len(naked),
         "memory_os_like_unregistered_count": len(unregistered_like),
@@ -4701,6 +4741,178 @@ def execution_gate_cron_summary():
         "naked_jobs": naked,
         "unregistered_like_jobs": unregistered_like,
     }
+    adapter_classification = (
+        adapter_probe.get("classification") if isinstance(adapter_probe.get("classification"), dict) else {}
+    )
+    if adapter_probe.get("schema_version") == "memory-os.hermes_cron_adapter_probe.v0" and adapter_classification:
+        for key in (
+            "memory_os_owned_expected_count",
+            "memory_os_owned_wrapped_count",
+            "memory_os_owned_naked_count",
+            "memory_os_like_unregistered_count",
+            "hermes_host_owned_count",
+            "external_unmanaged_count",
+            "unclassified_count",
+            "wrapped_jobs",
+            "naked_jobs",
+            "unregistered_like_jobs",
+        ):
+            if key in adapter_classification:
+                summary[key] = adapter_classification.get(key)
+        summary["classification_source"] = "hermes_cron_adapter_probe"
+    summary.update(completion_summary)
+    return summary
+
+def _execution_gate_cron_adapter_probe_summary():
+    script = Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py")
+    if not script.exists():
+        return {"status": "unavailable", "reason": "probe_script_missing"}
+    result = run(["python3", str(script), "--hermes-home", "/root/.hermes", "--output", "json"])
+    if not result.get("ok"):
+        return {"status": "error", "reason": "probe_command_failed", "code": result.get("code")}
+    try:
+        loaded = json.loads(result.get("out") or "{}")
+    except Exception:
+        return {"status": "error", "reason": "probe_json_invalid"}
+    return loaded if isinstance(loaded, dict) else {"status": "error", "reason": "probe_json_not_object"}
+
+def _memory_os_cron_specs_from_snapshot():
+    snapshot_path = Path("/root/.hermes/memory-os/system/memory_os_cron_registry.json")
+    fallback = [
+        {
+            "key": name.replace("memory-os-", "").replace("-", "_"),
+            "name": name,
+            "lane_id": value.get("raw_script", "").removeprefix("memory_os_").removesuffix(".py"),
+            **value,
+        }
+        for name, value in MEMORY_OS_CRON_REGISTRY.items()
+    ]
+    try:
+        loaded = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
+    except Exception:
+        loaded = {}
+    specs = loaded.get("specs") if isinstance(loaded, dict) else []
+    if isinstance(specs, list) and specs:
+        return [dict(item) for item in specs if isinstance(item, dict)]
+    return fallback
+
+def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
+    records_path = Path("/root/.hermes/memory-os/system/execution_gate_envelopes.jsonl")
+    completions = {}
+    if records_path.exists():
+        try:
+            lines = records_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            lines = []
+        for line in lines[-5000:]:
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(record, dict) or record.get("stage") != "completion":
+                continue
+            lane = str(record.get("lane_id") or "")
+            if lane in specs_by_lane:
+                completions[lane] = record
+    expected_lanes = set(specs_by_lane)
+    completed = []
+    missing = []
+    stale = []
+    not_due = []
+    boundary_true = 0
+    boundary_observed = 0
+    boundary_unobserved = 0
+    now = datetime.now(timezone.utc)
+    jobs_by_name = jobs_by_name or {}
+    for lane in sorted(expected_lanes):
+        record = completions.get(lane)
+        if not record:
+            missing.append(lane)
+            continue
+        completed.append(lane)
+        spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
+        schedule = ""
+        job = jobs_by_name.get(str(spec.get("name") or "")) if isinstance(jobs_by_name, dict) else {}
+        if isinstance(job, dict):
+            schedule = _cron_schedule_display(job)
+        record_time = _parse_monitor_timestamp(str(record.get("created_at") or ""))
+        freshness = _helper_completion_freshness_window(schedule)
+        if record_time and now - record_time > freshness:
+            stale.append(lane)
+        else:
+            not_due.append(lane)
+        postcheck = record.get("postcheck") if isinstance(record.get("postcheck"), dict) else {}
+        if record.get("postcheck_boundary_true") is True:
+            boundary_true += 1
+        if postcheck.get("postcheck_boundary_observed") is True:
+            boundary_observed += 1
+        else:
+            boundary_unobserved += 1
+    return {
+        "helper_completion_expected_count": len(expected_lanes),
+        "helper_completion_completed_count": len(completed),
+        "helper_completion_missing_count": len(missing),
+        "helper_completion_stale_count": len(stale),
+        "helper_completion_not_due_count": len(not_due),
+        "helper_completion_due_count": len(missing) + len(stale),
+        "helper_completion_completed_lanes": completed,
+        "helper_completion_missing_lanes": missing,
+        "helper_completion_stale_lanes": stale,
+        "helper_completion_not_due_lanes": not_due,
+        "helper_boundary_true_count": boundary_true,
+        "helper_boundary_observed_count": boundary_observed,
+        "helper_boundary_unobserved_count": boundary_unobserved,
+    }
+
+def _parse_monitor_timestamp(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+def _cron_schedule_display(job):
+    if not isinstance(job, dict):
+        return ""
+    if str(job.get("schedule_display") or ""):
+        return str(job.get("schedule_display") or "")
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        return str(schedule.get("expr") or schedule.get("display") or "")
+    return str(schedule or "")
+
+def _helper_completion_freshness_window(schedule):
+    interval = _cron_schedule_interval(str(schedule or ""))
+    minimum = timedelta(hours=12)
+    grace = timedelta(hours=6)
+    return max(interval * 2 + grace, minimum)
+
+def _cron_schedule_interval(schedule):
+    fields = str(schedule or "").split()
+    if len(fields) != 5:
+        return timedelta(hours=24)
+    minute, hour, day_of_month, month, day_of_week = fields
+    if day_of_week != "*":
+        return timedelta(days=7)
+    if day_of_month != "*" or month != "*":
+        return timedelta(days=30)
+    if minute.startswith("*/") and hour == "*":
+        try:
+            return timedelta(minutes=max(int(minute[2:]), 1))
+        except ValueError:
+            return timedelta(hours=1)
+    if hour.startswith("*/"):
+        try:
+            return timedelta(hours=max(int(hour[2:]), 1))
+        except ValueError:
+            return timedelta(hours=24)
+    if minute != "*" and hour != "*":
+        return timedelta(days=1)
+    return timedelta(hours=1)
 
 def shell_alias_no_env():
     status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])

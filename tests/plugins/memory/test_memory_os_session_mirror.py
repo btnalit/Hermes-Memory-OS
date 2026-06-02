@@ -126,6 +126,15 @@ def _owner_action_record(store, *, owner_action_id="oact_session_mirror_ok", fin
     }
 
 
+def _test_host_governance():
+    return {
+        "test_host": True,
+        "test_host_config_allowed": True,
+        "test_host_marker": "install_preset:test-host",
+        "evidence_refs": ["test:session_mirror_fixture_apply"],
+    }
+
+
 def test_session_mirror_empty_environment_is_ok_and_dry_run_writes_nothing(tmp_path):
     store = _store(tmp_path)
     mirror = SessionMirror(store)
@@ -146,7 +155,7 @@ def test_session_mirror_state_db_primary_writes_bounded_summary_without_raw_tool
     mirror = SessionMirror(store)
 
     dry_run = mirror.scan(dry_run=True)
-    applied = mirror.scan(dry_run=False)
+    applied = mirror.scan(dry_run=False, apply_governance=_test_host_governance())
     repeated = mirror.scan(dry_run=False)
 
     assert dry_run["new_event_count"] == 1
@@ -199,7 +208,12 @@ def test_session_mirror_apply_is_bounded_by_platform_and_redacts_secrets(tmp_pat
         )
     mirror = SessionMirror(store)
 
-    report = mirror.scan(dry_run=False, max_sessions=1, platform_allowlist=["telegram"])
+    report = mirror.scan(
+        dry_run=False,
+        max_sessions=1,
+        platform_allowlist=["telegram"],
+        apply_governance=_test_host_governance(),
+    )
     repeated = mirror.scan(dry_run=False, max_sessions=1, platform_allowlist=["telegram"])
 
     assert report["status"] == "ok"
@@ -264,7 +278,7 @@ def test_session_mirror_uses_session_json_fallback_when_state_db_missing(tmp_pat
     )
     mirror = SessionMirror(store)
 
-    report = mirror.scan(dry_run=False)
+    report = mirror.scan(dry_run=False, apply_governance=_test_host_governance())
 
     assert report["session_count"] == 1
     event = store.read_events()[0]
@@ -294,7 +308,7 @@ def test_session_mirror_uses_session_json_fallback_when_state_db_has_no_sessions
     )
     mirror = SessionMirror(store)
 
-    report = mirror.scan(dry_run=False)
+    report = mirror.scan(dry_run=False, apply_governance=_test_host_governance())
 
     assert report["new_event_count"] == 1
     assert store.read_events()[0].safe_ref["session_id"] == "session-json-2"
@@ -503,6 +517,41 @@ def test_session_mirror_cli_scan_apply_rejects_expired_owner_ref(tmp_path, monke
     assert exit_code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["reason"] == "session_mirror_apply_owner_ref_expired"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+
+
+def test_session_mirror_direct_scan_apply_without_governance_is_blocked(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="ungoverned-direct-session", platform="telegram")
+
+    report = SessionMirror(store).scan(dry_run=False, max_sessions=1, platform_allowlist=["telegram"])
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "session_mirror_apply_governance_missing"
+    assert report["written_event_ids_count"] == 0
+    assert store.read_events() == []
+    assert read_session_mirror_apply_records(store.roots) == []
+
+
+def test_session_mirror_direct_scan_apply_rejects_forged_owner_metadata(tmp_path):
+    store = _store(tmp_path)
+    _create_state_db(tmp_path / "state.db", session_id="forged-direct-session", platform="telegram")
+
+    report = SessionMirror(store).scan(
+        dry_run=False,
+        max_sessions=1,
+        platform_allowlist=["telegram"],
+        apply_governance={
+            "owner_approved": True,
+            "approval_resolved": True,
+            "approval_ref": "oact_forged",
+            "owner_channel_bound": True,
+        },
+    )
+
+    assert report["status"] == "blocked"
+    assert report["reason"] == "session_mirror_apply_owner_ref_not_found"
     assert report["written_event_ids_count"] == 0
     assert store.read_events() == []
 

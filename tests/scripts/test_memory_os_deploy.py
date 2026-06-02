@@ -1,6 +1,7 @@
 import json
 
 from scripts.deploy_memory_os import (
+    _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
     classify_deploy_report,
     deploy_memory_os,
@@ -26,6 +27,25 @@ def _llm_judge_probe_result():
                     "actual_send": False,
                     "actual_execute": False,
                     "actual_canonical_write": False,
+                },
+            }
+        ),
+        "stderr": "",
+    }
+
+
+def _cron_adapter_probe_result():
+    return {
+        "exit_code": 0,
+        "stdout": json.dumps(
+            {
+                "schema_version": "memory-os.hermes_cron_adapter_probe.v0",
+                "status": "ok",
+                "capabilities": {"status": "ok"},
+                "classification": {
+                    "memory_os_owned_naked_count": 0,
+                    "memory_os_like_unregistered_count": 0,
+                    "unclassified_count": 0,
                 },
             }
         ),
@@ -74,6 +94,7 @@ def test_llm_judge_probe_fails_when_boundary_true_even_if_judge_status_is_valid(
 
     assert classified["status"] == "fail"
     assert classified["reason"] == "llm_judge_probe_boundary_true"
+    assert classified["boundary_true_paths"] == ["actual_canonical_write"]
 
 
 def test_llm_judge_probe_fails_on_any_true_boundary_key_from_report_schema():
@@ -92,6 +113,46 @@ def test_llm_judge_probe_fails_on_any_true_boundary_key_from_report_schema():
 
     assert classified["status"] == "fail"
     assert classified["reason"] == "llm_judge_probe_boundary_true"
+    assert classified["boundary_true_paths"] == ["actual_crystallized_approval"]
+
+
+def test_cron_adapter_probe_fails_on_naked_memory_os_jobs():
+    classified = _classify_cron_adapter_probe(
+        {
+            "json": {
+                "schema_version": "memory-os.hermes_cron_adapter_probe.v0",
+                "status": "ok",
+                "capabilities": {"status": "ok"},
+                "classification": {
+                    "memory_os_owned_naked_count": 1,
+                    "memory_os_like_unregistered_count": 0,
+                    "unclassified_count": 0,
+                },
+            }
+        }
+    )
+
+    assert classified["status"] == "fail"
+    assert "cron_adapter_memory_os_naked_jobs" in classified["reason"]
+
+
+def test_cron_adapter_probe_passes_on_wrapped_jobs():
+    classified = _classify_cron_adapter_probe(
+        {
+            "json": {
+                "schema_version": "memory-os.hermes_cron_adapter_probe.v0",
+                "status": "ok",
+                "capabilities": {"status": "ok"},
+                "classification": {
+                    "memory_os_owned_naked_count": 0,
+                    "memory_os_like_unregistered_count": 0,
+                    "unclassified_count": 0,
+                },
+            }
+        }
+    )
+
+    assert classified["status"] == "pass"
 
 
 def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
@@ -150,6 +211,8 @@ def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -227,6 +290,8 @@ def test_fresh_profile_allows_preinstall_provider_mismatch_but_requires_postchec
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -319,6 +384,8 @@ def test_fresh_profile_allows_missing_memory_os_shell_before_install(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -384,6 +451,8 @@ def test_upgrade_profile_allows_preinstall_hindsight_status_gap_but_requires_pos
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -465,6 +534,8 @@ def test_upgrade_profile_allows_preinstall_fixable_shell_doctor_index_mismatch(t
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -530,6 +601,8 @@ def test_upgrade_profile_allows_preinstall_shell_doctor_gap_when_postcheck_repai
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -605,6 +678,8 @@ def test_upgrade_profile_allows_preinstall_provider_bank_evidence_gap_but_requir
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -679,6 +754,8 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -696,7 +773,7 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
     rendered = render_deploy_plan(report)
 
     assert report["postcheck"]["status"] == "pass"
-    assert "classification: pass=postcheck_pass,llm_judge_probe_pass warn=[] fail=[]" in rendered
+    assert "classification: pass=postcheck_pass,llm_judge_probe_pass,cron_adapter_probe_pass warn=[] fail=[]" in rendered
     assert "postcheck_status=pass" in rendered
     assert "llm_judge_probe_status=pass" in rendered
 
@@ -731,6 +808,8 @@ def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         raise AssertionError(f"unexpected command: {command}")

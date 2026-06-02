@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from plugins.memory.memory_os.execution_gate import boundary_true_paths
+
 
 Runner = Callable[..., dict[str, Any]]
 
@@ -77,6 +79,7 @@ def deploy_memory_os(
         "apply": {"status": "not_run"},
         "postcheck": {"status": "not_run"},
         "llm_judge_probe": {"status": "not_run"},
+        "cron_adapter_probe": {"status": "not_run"},
         "rollback_hint": "rerun installer with previous config backup or disable substrate_providers.hindsight.enabled",
     }
     if phase == "plan":
@@ -97,6 +100,7 @@ def deploy_memory_os(
             timeout=timeout,
             enabled=llm_judge_preset != "none",
         )
+        report["cron_adapter_probe"] = _run_cron_adapter_probe(commands, runner=runner, host=host, timeout=timeout)
         return report
 
     preflight = _run_json(
@@ -157,6 +161,7 @@ def deploy_memory_os(
             timeout=timeout,
             enabled=llm_judge_preset != "none",
         )
+        report["cron_adapter_probe"] = _run_cron_adapter_probe(commands, runner=runner, host=host, timeout=timeout)
         return report
 
     return report
@@ -209,6 +214,14 @@ def _build_commands(
             "继续昨天那个。",
             "--llm-judge",
             "config",
+        ],
+        "cron_adapter_probe": [
+            python_bin,
+            f"{repo}/scripts/memory_os_cron_adapter_probe.py",
+            "--hermes-home",
+            hermes_home,
+            "--output",
+            "json",
         ],
     }
     if allow_restart and restart_command:
@@ -377,22 +390,55 @@ def _classify_llm_judge_probe(result: dict[str, Any]) -> dict[str, Any]:
         return {"status": "warn", "reason": "llm_judge_probe_json_invalid", "probe": result}
     judge = data.get("llm_judge") if isinstance(data.get("llm_judge"), dict) else {}
     boundaries = data.get("boundaries") if isinstance(data.get("boundaries"), dict) else {}
-    if _any_boundary_true(boundaries):
-        return {"status": "fail", "reason": "llm_judge_probe_boundary_true", "probe": data}
+    true_paths = boundary_true_paths(boundaries)
+    if true_paths:
+        return {
+            "status": "fail",
+            "reason": "llm_judge_probe_boundary_true",
+            "boundary_true_paths": true_paths,
+            "probe": data,
+        }
     status = str(judge.get("status") or "")
     if status in {"ok", "success", "selected", "no_match", "no_clear_match", "no_selection", "insufficient_context"}:
         return {"status": "pass", "probe": data}
     return {"status": "warn", "reason": str(judge.get("code") or status or "llm_judge_probe_unavailable"), "probe": data}
 
 
-def _any_boundary_true(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value is True
-    if isinstance(value, dict):
-        return any(_any_boundary_true(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_any_boundary_true(item) for item in value)
-    return False
+def _run_cron_adapter_probe(
+    commands: dict[str, list[str]],
+    *,
+    runner: Runner,
+    host: str,
+    timeout: int,
+) -> dict[str, Any]:
+    result = _run_json(
+        commands["cron_adapter_probe"],
+        runner=runner,
+        host=host,
+        timeout=timeout,
+        expected_schema="memory-os.hermes_cron_adapter_probe.v0",
+    )
+    return _classify_cron_adapter_probe(result)
+
+
+def _classify_cron_adapter_probe(result: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("json")
+    if not isinstance(data, dict) or data.get("schema_version") != "memory-os.hermes_cron_adapter_probe.v0":
+        return {"status": "warn", "reason": "cron_adapter_probe_json_invalid", "probe": result}
+    classification = data.get("classification") if isinstance(data.get("classification"), dict) else {}
+    fail_codes = []
+    if int(classification.get("memory_os_owned_naked_count") or 0) > 0:
+        fail_codes.append("cron_adapter_memory_os_naked_jobs")
+    if int(classification.get("memory_os_like_unregistered_count") or 0) > 0:
+        fail_codes.append("cron_adapter_memory_os_unregistered_like_jobs")
+    if int(classification.get("unclassified_count") or 0) > 0:
+        fail_codes.append("cron_adapter_unclassified_jobs")
+    if fail_codes:
+        return {"status": "fail", "reason": ",".join(fail_codes), "probe": data}
+    capabilities = data.get("capabilities") if isinstance(data.get("capabilities"), dict) else {}
+    if str(capabilities.get("status") or "") not in {"", "ok"}:
+        return {"status": "warn", "reason": "cron_adapter_capability_probe_warn", "probe": data}
+    return {"status": "pass", "probe": data}
 
 
 def _classification_failures(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -476,7 +522,7 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
     fail: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     passed: list[dict[str, Any]] = []
-    for key in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe"):
+    for key in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe", "cron_adapter_probe"):
         section = report.get(key) if isinstance(report.get(key), dict) else {}
         status = section.get("status")
         if status in {"pass", "applied"}:
@@ -509,7 +555,7 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
             f"warn={_codes(classification['warn']) or '[]'} "
             f"fail={_codes(classification['fail']) or '[]'}"
         )
-    for name in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe"):
+    for name in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe", "cron_adapter_probe"):
         section = report.get(name) if isinstance(report.get(name), dict) else {}
         status = section.get("status")
         if status and status != "not_run":

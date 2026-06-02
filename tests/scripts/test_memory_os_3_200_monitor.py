@@ -2428,6 +2428,54 @@ def test_classify_snapshot_fails_memory_os_cron_naked_or_unregistered_like_jobs(
     assert any(item["code"] == "execution_gate_memory_os_cron_unregistered_like_job" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_memory_os_cron_helper_boundary_true_and_warns_unobserved():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "memory_os_owned_expected_count": 7,
+        "memory_os_owned_wrapped_count": 7,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "helper_completion_expected_count": 7,
+        "helper_completion_completed_count": 6,
+        "helper_completion_missing_count": 0,
+        "helper_completion_not_due_count": 1,
+        "helper_boundary_true_count": 1,
+        "helper_boundary_unobserved_count": 1,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "execution_gate_memory_os_cron_helper_boundary_true" for item in classification["fail"])
+    assert any(item["code"] == "execution_gate_memory_os_cron_helper_boundary_unobserved" for item in classification["warn"])
+
+
+def test_classify_snapshot_warns_on_memory_os_cron_helper_stale_completion():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "memory_os_owned_expected_count": 7,
+        "memory_os_owned_wrapped_count": 7,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "helper_completion_expected_count": 7,
+        "helper_completion_completed_count": 7,
+        "helper_completion_missing_count": 0,
+        "helper_completion_stale_count": 1,
+        "helper_completion_stale_lanes": ["module_cadence_report"],
+        "helper_boundary_true_count": 0,
+        "helper_boundary_unobserved_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(item["code"] == "execution_gate_memory_os_cron_helper_completion_stale" for item in classification["warn"])
+
+
 def test_classify_snapshot_fails_session_mirror_owner_approved_without_owner_channel_binding():
     snapshot = _healthy_snapshot()
     snapshot["session_mirror"] = {

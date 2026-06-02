@@ -1364,19 +1364,15 @@ def _session_mirror_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         if not dry_run and apply_governance.get("status") == "blocked":
             print(json.dumps(apply_governance["report"], ensure_ascii=False, indent=2, sort_keys=True))
             return 1
-        print(
-            json.dumps(
-                mirror.scan(
-                    dry_run=dry_run,
-                    max_sessions=max(int(getattr(args, "max_sessions", 0) or 0), 0),
-                    platform_allowlist=list(getattr(args, "platform", []) or []),
-                    apply_governance=apply_governance.get("metadata", {}),
-                ),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
+        result = mirror.scan(
+            dry_run=dry_run,
+            max_sessions=max(int(getattr(args, "max_sessions", 0) or 0), 0),
+            platform_allowlist=list(getattr(args, "platform", []) or []),
+            apply_governance=apply_governance.get("metadata", {}),
         )
+        print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        if not dry_run and result.get("status") == "blocked":
+            return 1
         return 0
     return 2
 
