@@ -28,6 +28,11 @@ def test_signal_source_registry_declares_read_only_sources():
         "kanban_state",
         "tool_registry",
         "runtime_logs",
+        "hermes_session_index",
+        "hindsight_bank_inventory",
+        "mailbox_delivery_trace",
+        "wandering_mind_cadence",
+        "mcp_tool_inventory",
         "cognitive_loop_status",
         "gateway_runtime_status",
         "proposal_queue_pressure",
@@ -45,6 +50,7 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "external_failure_count" in by_source["hermes_cron_jobs"].allowed_payload_fields
     assert "operation_count" in by_source["hindsight_provider_stats"].allowed_payload_fields
     assert "curation_review_suggested_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
+    assert "curation_decision_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
     assert "authoritative_claim_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
     assert "would_send_count" in by_source["mailbox_status"].allowed_payload_fields
     assert "latest_output_at" in by_source["wandering_mind_state"].allowed_payload_fields
@@ -54,6 +60,11 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "hindsight_provider_configured" in by_source["profile_config"].allowed_payload_fields
     assert "open_card_count" in by_source["kanban_state"].allowed_payload_fields
     assert "tool_manifest_count" in by_source["tool_registry"].allowed_payload_fields
+    assert "session_event_count" in by_source["hermes_session_index"].allowed_payload_fields
+    assert "bank_file_count" in by_source["hindsight_bank_inventory"].allowed_payload_fields
+    assert "failed_delivery_count" in by_source["mailbox_delivery_trace"].allowed_payload_fields
+    assert "would_send_pending_count" in by_source["wandering_mind_cadence"].allowed_payload_fields
+    assert "stdio_server_count" in by_source["mcp_tool_inventory"].allowed_payload_fields
     assert "step_count" in by_source["cognitive_loop_status"].allowed_payload_fields
     assert "heartbeat_state_exists" in by_source["gateway_runtime_status"].allowed_payload_fields
     assert "proposal_count" in by_source["proposal_queue_pressure"].allowed_payload_fields

@@ -35,6 +35,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/owner_actions.py::_append_feedback::append_jsonl_call::feedback_ledger_path(store.roots)": "owner_feedback_surface",
     "plugins/memory/memory_os/owner_actions.py::_append_speak_ticket::append_jsonl_call::speak_permission_tickets_path(store.roots)": "owner_gate_ticket_surface",
     "plugins/memory/memory_os/owner_actions.py::_append_expression_feedback::append_jsonl_call::expression_feedback_ledger_path(store.roots)": "owner_feedback_surface",
+    "plugins/memory/memory_os/owner_actions.py::_append_hindsight_curation_decision::append_jsonl_call::hindsight_curation_decisions_path(store.roots)": "owner_hindsight_curation_ledger",
     "plugins/memory/memory_os/owner_actions.py::_append_action_specific_ledger::append_jsonl_call::crystallization_approvals_path(store.roots)": "owner_action_specific_ledger",
     "plugins/memory/memory_os/owner_actions.py::_append_action_specific_ledger::append_jsonl_call::proposal_action_ledger_path(store.roots)": "owner_action_specific_ledger",
     "plugins/memory/memory_os/owner_actions.py::_append_action_specific_ledger::append_jsonl_call::path": "owner_action_specific_ledger",

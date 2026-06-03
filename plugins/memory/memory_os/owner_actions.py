@@ -61,6 +61,7 @@ SPEAK_PERMISSION_SCHEMA_VERSION = "memory-os.speak_permission_ticket.v0"
 EXPRESSION_FEEDBACK_SCHEMA_VERSION = "memory-os.expression_feedback.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
 OWNER_REVIEW_DELIVERY_ADAPTERS = {"hermes_owner_channel", "hermes_send"}
+LEFT_BRAIN_REVIEW_SUGGESTED_PER_SOURCE_CAP = 2
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAFE_KINDS = {"proposal"}
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_TRUE_BLOCK_KEYS = {
     "actual_send",
@@ -107,6 +108,11 @@ PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES = 3
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_FIRST_CANARY_DAILY_CAP = 1
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES = 3
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_EXPANDED_DAILY_CAP = 3
+HINDSIGHT_CURATION_ACTION_TYPES = {
+    "retain_hindsight_curation",
+    "reject_hindsight_curation",
+    "demote_hindsight_curation",
+}
 
 EXPRESSION_FEEDBACK_ACTION_TYPES = {
     "like_expression",
@@ -136,6 +142,7 @@ ACTION_TYPES = {
     "apply_proposal",
     "allow_speak_once",
     "approve_session_mirror_apply",
+    *HINDSIGHT_CURATION_ACTION_TYPES,
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
@@ -146,6 +153,7 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "memory_source": {"mark_feedback"},
     "speak": {"allow_speak_once"},
     "session_mirror_apply": {"approve_session_mirror_apply"},
+    "hindsight_curation": HINDSIGHT_CURATION_ACTION_TYPES,
     "expression": EXPRESSION_FEEDBACK_ACTION_TYPES,
 }
 
@@ -168,6 +176,10 @@ def proposal_action_ledger_path(roots: MemoryOSRoots) -> Path:
 
 def speak_permission_tickets_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "speak_permission_tickets.jsonl"
+
+
+def hindsight_curation_decisions_path(roots: MemoryOSRoots) -> Path:
+    return roots.memory_os_root / "system" / "hindsight_curation_decisions.jsonl"
 
 
 def approved_proposal_execution_tickets_path(roots: MemoryOSRoots) -> Path:
@@ -2670,6 +2682,16 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "actual_identity_write": False,
             "actual_unapproved_crystallized_approval": False,
         }
+    if action_type in HINDSIGHT_CURATION_ACTION_TYPES:
+        decision = _append_hindsight_curation_decision(store, record, note=note)
+        record["owner_effect"]["owner_recorded_hindsight_curation_decision"] = True
+        return {
+            "decision_id": decision["decision_id"],
+            "curation_decision": decision["curation_decision"],
+            "actual_hindsight_write": False,
+            "actual_hindsight_delete": False,
+            "actual_execute": False,
+        }
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         feedback = _append_expression_feedback(store, record, note=note)
         return {
@@ -2738,6 +2760,11 @@ def _validate_action_target(
             return "invalid_session_mirror_apply_target"
         if not target_id.startswith("production_bounded:"):
             return "invalid_session_mirror_apply_scope"
+    if action_type in HINDSIGHT_CURATION_ACTION_TYPES:
+        if target_type != "hindsight_curation":
+            return "invalid_hindsight_curation_target"
+        if not _find_hindsight_curation_finding(store, target_id):
+            return "hindsight_curation_finding_not_found"
     return ""
 
 
@@ -2834,6 +2861,68 @@ def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[s
                 record["result"] = "error"
     _append_jsonl(speak_permission_tickets_path(store.roots), ticket)
     return ticket
+
+
+def _append_hindsight_curation_decision(
+    store: MemoryOSStore,
+    record: dict[str, Any],
+    *,
+    note: str,
+) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc)
+    finding = _find_hindsight_curation_finding(store, str(record["target_id"])) or {}
+    action_type = str(record["action_type"])
+    curation_decision = action_type.removesuffix("_hindsight_curation")
+    decision = {
+        "schema_version": "memory-os.hindsight_curation_decision.v0",
+        "decision_id": f"hcur_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}",
+        "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        "profile": store.roots.profile or "default",
+        "owner_action_id": str(record["owner_action_id"]),
+        "owner_id": str(record["owner_id"]),
+        "channel": str(record.get("channel") or "unknown"),
+        "action_type": action_type,
+        "curation_decision": curation_decision,
+        "finding_id": str(record["target_id"]),
+        "source_key": str(finding.get("source_key") or ""),
+        "projection_id": str(finding.get("projection_id") or ""),
+        "safe_source_ids": _safe_list(finding.get("safe_source_ids")),
+        "note": _bounded_text(note, 240),
+        "actual_hindsight_write": False,
+        "actual_hindsight_delete": False,
+        "actual_hindsight_demote": False,
+        "actual_execute": False,
+        "actual_send": False,
+        "actual_policy_write": False,
+        "actual_route_score_write": False,
+        "hindsight_authoritative": False,
+        "advisory_only": True,
+        "raw_body_included": False,
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_relationship_write": False,
+            "actual_crystallized_approval": False,
+            "actual_policy_write": False,
+            "actual_route_score_write": False,
+            "hindsight_write": False,
+        },
+    }
+    _append_jsonl(hindsight_curation_decisions_path(store.roots), decision)
+    append_audit(
+        store.roots.audit_path,
+        action="hindsight_curation_decision_recorded",
+        status="ok",
+        target=str(hindsight_curation_decisions_path(store.roots)),
+        details={
+            "decision_id": decision["decision_id"],
+            "curation_decision": curation_decision,
+            "finding_id": decision["finding_id"],
+            "actual_hindsight_write": False,
+        },
+    )
+    return decision
 
 
 def _append_expression_feedback(store: MemoryOSStore, record: dict[str, Any], *, note: str) -> dict[str, Any]:
@@ -3491,28 +3580,75 @@ def _left_brain_advisor_review_items(store: MemoryOSStore, closed: set[str]) -> 
     latest = reports[-1]
     findings = latest.get("findings") if isinstance(latest.get("findings"), list) else []
     items: list[dict[str, Any]] = []
+    per_source_visible_count: Counter[str] = Counter()
+    per_source_overflow_count: Counter[str] = Counter()
     for finding in findings:
         if not isinstance(finding, dict) or not bool(finding.get("owner_visible")):
             continue
         target_id = str(finding.get("finding_id") or finding.get("target_id") or "")
-        if not target_id or f"left_brain_advisor_finding:{target_id}" in closed:
+        target_type = str(finding.get("target_type") or "left_brain_advisor_finding")
+        if target_type not in {"left_brain_advisor_finding", "hindsight_curation"}:
+            target_type = "left_brain_advisor_finding"
+        source_key = str(finding.get("source_key") or "unknown")
+        priority = str(finding.get("priority") or "review_suggested")
+        if (
+            priority in {"review_suggested", "fyi"}
+            and per_source_visible_count[source_key] >= LEFT_BRAIN_REVIEW_SUGGESTED_PER_SOURCE_CAP
+        ):
+            per_source_overflow_count[source_key] += 1
+            continue
+        per_source_visible_count[source_key] += 1
+        if not target_id or f"{target_type}:{target_id}" in closed:
             continue
         items.append(
             {
                 "schema_version": "memory-os.review_item.v0",
-                "review_item_id": f"review:left_brain_advisor_finding:{target_id}",
-                "target_type": "left_brain_advisor_finding",
+                "review_item_id": f"review:{target_type}:{target_id}",
+                "target_type": target_type,
                 "target_id": target_id,
                 "source_module": "left_brain_advisor",
-                "priority": str(finding.get("priority") or "review_suggested"),
+                "priority": priority,
                 "created_at": str(latest.get("created_at") or ""),
                 "created_at_source": "left_brain_advisor_report",
                 "status": "report_only",
                 "summary": _bounded_text(str(finding.get("summary") or finding.get("title") or ""), 220),
                 "reason": _bounded_text(str(finding.get("reason") or ""), 240),
                 "safe_source_ids": _safe_list(finding.get("safe_source_ids")),
-                "actions_suppressed": True,
+                "actions_suppressed": bool(finding.get("actions_suppressed")),
+                "allowed_action_type": str(finding.get("allowed_action_type") or "review_only"),
                 "raw_body_included": False,
+            }
+        )
+    for source_key, overflow_count in sorted(per_source_overflow_count.items()):
+        summary_id = "lba_owner_burden_" + _stable_token(
+            f"{latest.get('report_id') or latest.get('created_at')}:{source_key}:{overflow_count}",
+            16,
+        )
+        if f"left_brain_advisor_finding:{summary_id}" in closed:
+            continue
+        items.append(
+            {
+                "schema_version": "memory-os.review_item.v0",
+                "review_item_id": f"review:left_brain_advisor_finding:{summary_id}",
+                "target_type": "left_brain_advisor_finding",
+                "target_id": summary_id,
+                "source_module": "left_brain_advisor",
+                "priority": "fyi",
+                "created_at": str(latest.get("created_at") or ""),
+                "created_at_source": "left_brain_advisor_report",
+                "status": "report_only",
+                "summary": _bounded_text(
+                    f"{source_key} 还有 {overflow_count} 条相似左脑诊断已聚合，避免 owner digest 噪音。",
+                    220,
+                ),
+                "reason": "Owner-burden cap aggregated repeated LeftBrainAdvisor findings; full evidence remains in the advisor report.",
+                "safe_source_ids": [],
+                "actions_suppressed": True,
+                "allowed_action_type": "review_only",
+                "raw_body_included": False,
+                "owner_burden_aggregate": True,
+                "aggregated_source_key": source_key,
+                "aggregated_count": overflow_count,
             }
         )
     return items
@@ -3970,6 +4106,9 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     if target_type == "left_brain_advisor_finding":
         summary = _safe_review_summary(item.get("summary"), fallback="左脑信号诊断")
         return _bounded_text(f"左脑发现一个需要关注的治理信号：{summary}", 180)
+    if target_type == "hindsight_curation":
+        summary = _safe_review_summary(item.get("summary"), fallback="Hindsight 治理建议")
+        return _bounded_text(f"要记录这条 Hindsight 治理决策吗？{summary}", 180)
     return "请看一下这条 Memory-OS 状态信号。"
 
 
@@ -3989,6 +4128,8 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
         return f"{examples[0]}；如果内容不合适，让 Hermes 记录具体表达反馈"
     if target_type == "session_mirror_apply" and examples:
         return examples[0]
+    if target_type == "hindsight_curation" and examples:
+        return " or ".join(examples[:3])
     if target_type == "candidate_cleanup":
         return "这次摘要里不需要操作；等待后续整理或 review queue 清理"
     return "不需要操作"
@@ -4057,6 +4198,11 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             str(item.get("reason") or "LeftBrainAdvisor 只做 report-only 诊断，不执行任何动作。"),
             220,
         )
+    if target_type == "hindsight_curation":
+        return _bounded_text(
+            str(item.get("reason") or "LeftBrainAdvisor 提出 Hindsight curation 建议；Memory-OS 只记录 owner 决策，不写/删 Hindsight。"),
+            220,
+        )
     return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
 
 
@@ -4089,6 +4235,8 @@ def _review_consequence(target_type: str) -> str:
         )
     if target_type == "left_brain_advisor_finding":
         return "仅进入 owner digest 可见面；不会创建审批 token、不会 apply、不会改策略或长期记忆。"
+    if target_type == "hindsight_curation":
+        return "批准只记录一条 Hindsight curation owner decision；不会写入、删除、降级或提升 Hindsight，也不会让 Hindsight authoritative。"
     return "仅供了解；不需要状态变更。"
 
 
@@ -4126,6 +4274,12 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
         return actions
     if target_type == "session_mirror_apply":
         return [_review_action("approve", "approve_session_mirror_apply", target_type, target_id)]
+    if target_type == "hindsight_curation":
+        return [
+            _review_action("approve", "retain_hindsight_curation", target_type, target_id),
+            _review_action("reject", "reject_hindsight_curation", target_type, target_id),
+            _review_action("demote", "demote_hindsight_curation", target_type, target_id),
+        ]
     return []
 
 
@@ -4807,14 +4961,25 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "allow_speak_once"
     if verb == "approve" and target_type == "session_mirror_apply":
         return "approve_session_mirror_apply"
+    if verb == "approve" and target_type == "hindsight_curation":
+        return "retain_hindsight_curation"
+    if verb == "reject" and target_type == "hindsight_curation":
+        return "reject_hindsight_curation"
+    if verb == "demote" and target_type == "hindsight_curation":
+        return "demote_hindsight_curation"
     return ""
 
 
 def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
     if verb == "approve":
-        return action_type in {"approve_candidate", "approve_proposal", "approve_session_mirror_apply"}
+        return action_type in {
+            "approve_candidate",
+            "approve_proposal",
+            "approve_session_mirror_apply",
+            "retain_hindsight_curation",
+        }
     if verb == "reject":
-        return action_type in {"reject_candidate", "reject_proposal"}
+        return action_type in {"reject_candidate", "reject_proposal", "reject_hindsight_curation"}
     if verb == "feedback":
         return action_type == "mark_feedback" or action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
     if verb == "allow":
@@ -4822,7 +4987,7 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
     if verb == "apply":
         return action_type == "apply_proposal"
     if verb == "demote":
-        return action_type == "demote_crystallized"
+        return action_type in {"demote_crystallized", "demote_hindsight_curation"}
     if verb == "revoke":
         return action_type == "revoke_crystallized"
     return False
@@ -6753,6 +6918,9 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
             "session_mirror_apply": "session_mirror_apply",
             "session-mirror-apply": "session_mirror_apply",
             "smap": "session_mirror_apply",
+            "hindsight_curation": "hindsight_curation",
+            "hindsight-curation": "hindsight_curation",
+            "hcur": "hindsight_curation",
         }.get(prefix.strip(), prefix.strip())
         return normalized_prefix, suffix.strip()
     if action_type in {"approve_candidate", "reject_candidate"}:
@@ -6769,6 +6937,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return "speak", value
     if action_type == "approve_session_mirror_apply":
         return "session_mirror_apply", value
+    if action_type in HINDSIGHT_CURATION_ACTION_TYPES:
+        return "hindsight_curation", value
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         return "expression", value
     return "unknown", value
@@ -6797,6 +6967,27 @@ def _find_delivery_by_key(roots: MemoryOSRoots, delivery_key: str) -> dict[str, 
     for record in read_owner_review_delivery_records(roots):
         if record.get("delivery_key") == delivery_key:
             return record
+    return None
+
+
+def _find_hindsight_curation_finding(store: MemoryOSStore, target_id: str) -> dict[str, Any] | None:
+    from .left_brain_advisor import read_left_brain_advisor_reports
+
+    clean = str(target_id or "")
+    if not clean:
+        return None
+    for report in reversed(read_left_brain_advisor_reports(store.roots, limit=50)):
+        findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            if str(finding.get("finding_id") or finding.get("target_id") or "") != clean:
+                continue
+            if str(finding.get("target_type") or "") != "hindsight_curation":
+                continue
+            if str(finding.get("source_key") or "") not in {"hindsight_provider_stats", "hindsight_governance_signals"}:
+                continue
+            return finding
     return None
 
 

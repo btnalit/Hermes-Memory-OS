@@ -29,6 +29,7 @@ from plugins.memory.memory_os.owner_actions import (
     deep_reflection_policy_path,
     deliver_owner_review_digest_once,
     expression_feedback_ledger_path,
+    hindsight_curation_decisions_path,
     owner_actions_path,
     owner_review_deliveries_path,
     owner_review_rendered_digests_path,
@@ -3483,6 +3484,127 @@ def test_reply_parser_unknown_anchor_needs_clarification_without_mutation(tmp_pa
     assert result["status"] == "needs_clarification"
     assert result["reason"] == "action_token_not_found_in_recorded_digest"
     assert not owner_actions_path(store.roots).exists()
+
+
+def test_hindsight_curation_finding_gets_owner_gated_decision_tokens(tmp_path):
+    store = _store(tmp_path)
+    advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
+    advisor_root.mkdir(parents=True)
+    advisor_root.joinpath("reports.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.left_brain_advisor.v0",
+                "report_id": "lba_hcur",
+                "created_at": "2026-06-03T01:00:00Z",
+                "findings": [
+                    {
+                        "schema_version": "memory-os.left_brain_advisor_finding.v0",
+                        "finding_id": "lbf_hcur_1",
+                        "target_type": "hindsight_curation",
+                        "source_key": "hindsight_governance_signals",
+                        "projection_id": "mproj_hcur",
+                        "owner_visible": True,
+                        "priority": "review_suggested",
+                        "summary": "Hindsight governance metadata reports suggestion_count=1.",
+                        "reason": "review-only curation suggestion",
+                        "safe_source_ids": ["mproj_hcur"],
+                        "actions_suppressed": False,
+                        "allowed_action_type": "owner_gated_hindsight_curation_decision",
+                        "actual_execute": False,
+                        "hindsight_write": False,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rendered = render_owner_review_digest(store, max_action_required=0, max_review_suggested=3, max_fyi=0)
+    item = rendered["sections"]["review_suggested"][0]
+    result = apply_owner_action(
+        store,
+        action_type="retain_hindsight_curation",
+        target="hindsight_curation:lbf_hcur_1",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    decisions = _jsonl(hindsight_curation_decisions_path(store.roots))
+
+    assert item["target_type"] == "hindsight_curation"
+    assert set(item["action_tokens"]) == {
+        "retain_hindsight_curation",
+        "reject_hindsight_curation",
+        "demote_hindsight_curation",
+    }
+    assert result["status"] == "ok"
+    assert result["result_ref"]["actual_hindsight_write"] is False
+    assert decisions[0]["curation_decision"] == "retain"
+    assert decisions[0]["actual_hindsight_write"] is False
+    assert decisions[0]["boundary"]["hindsight_write"] is False
+
+
+def test_hindsight_curation_rejects_forged_target(tmp_path):
+    store = _store(tmp_path)
+
+    result = apply_owner_action(
+        store,
+        action_type="reject_hindsight_curation",
+        target="hindsight_curation:lbf_missing",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+
+    assert result["status"] == "error"
+    assert result["code"] == "hindsight_curation_finding_not_found"
+    assert not hindsight_curation_decisions_path(store.roots).exists()
+
+
+def test_left_brain_review_items_aggregate_repeated_source_findings(tmp_path):
+    store = _store(tmp_path)
+    advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
+    advisor_root.mkdir(parents=True)
+    findings = [
+        {
+            "finding_id": f"lbf_noise_{index}",
+            "target_type": "left_brain_advisor_finding",
+            "source_key": "runtime_logs",
+            "owner_visible": True,
+            "priority": "review_suggested",
+            "summary": f"runtime_logs finding {index}",
+            "reason": "fixture",
+            "actions_suppressed": True,
+        }
+        for index in range(4)
+    ]
+    advisor_root.joinpath("reports.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.left_brain_advisor.v0",
+                "report_id": "lba_burden",
+                "created_at": "2026-06-03T01:00:00Z",
+                "findings": findings,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    queue = owner_review_queue_report(store, limit=20)
+    items = queue["items"]
+
+    assert len([item for item in items if item.get("target_id", "").startswith("lbf_noise_")]) == 2
+    aggregates = [item for item in items if item.get("owner_burden_aggregate")]
+    assert len(aggregates) == 1
+    assert aggregates[0]["aggregated_source_key"] == "runtime_logs"
+    assert aggregates[0]["aggregated_count"] == 2
+    assert aggregates[0]["priority"] == "fyi"
 
 
 def test_delivery_gate_is_disabled_by_default_and_never_sends(tmp_path):

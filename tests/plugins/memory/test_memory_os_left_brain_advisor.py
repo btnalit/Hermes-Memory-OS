@@ -171,10 +171,14 @@ def test_left_brain_advisor_surfaces_hindsight_governance_suggestions_without_wr
     hindsight_findings = [finding for finding in report["findings"] if finding["source_key"] == "hindsight_provider_stats"]
 
     assert len(hindsight_findings) == 3
-    assert {finding["allowed_action_type"] for finding in hindsight_findings} == {"review_only"}
+    assert {finding["allowed_action_type"] for finding in hindsight_findings} == {
+        "owner_gated_hindsight_curation_decision"
+    }
     assert {finding["owner_burden_class"] for finding in hindsight_findings} == {"review_suggested"}
     assert all(finding["hindsight_write"] is False for finding in hindsight_findings)
     assert all(finding["actual_execute"] is False for finding in hindsight_findings)
+    assert {finding["target_type"] for finding in hindsight_findings} == {"hindsight_curation"}
+    assert all(finding["actions_suppressed"] is False for finding in hindsight_findings)
     assert any("stale" in finding["summary"] for finding in hindsight_findings)
 
 
@@ -192,8 +196,12 @@ def test_left_brain_advisor_surfaces_hindsight_governance_signal_source(tmp_path
     findings = [finding for finding in report["findings"] if finding["source_key"] == "hindsight_governance_signals"]
 
     assert len(findings) == 2
-    assert {finding["allowed_action_type"] for finding in findings} == {"review_only"}
+    assert {finding["allowed_action_type"] for finding in findings} == {
+        "owner_gated_hindsight_curation_decision"
+    }
     assert {finding["owner_burden_class"] for finding in findings} == {"review_suggested"}
     assert all(finding["hindsight_write"] is False for finding in findings)
     assert all(finding["actual_execute"] is False for finding in findings)
+    assert {finding["target_type"] for finding in findings} == {"hindsight_curation"}
+    assert all(finding["actions_suppressed"] is False for finding in findings)
     assert any("suggestion_count=3" in finding["summary"] for finding in findings)

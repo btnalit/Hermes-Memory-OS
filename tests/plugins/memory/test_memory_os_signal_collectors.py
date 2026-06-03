@@ -102,6 +102,27 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools" / "tool_registry.json").write_text(json.dumps({"secret": "SHOULD_NOT_LEAK"}), encoding="utf-8")
     (tmp_path / "tools" / "mcp-tool.json").write_text(json.dumps({"secret": "SHOULD_NOT_LEAK"}), encoding="utf-8")
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "sessions" / "session-1.jsonl").write_text('{"body":"SHOULD_NOT_LEAK"}\n', encoding="utf-8")
+    (tmp_path / "memory-os" / "events" / "2026-06-03").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "memory-os" / "events" / "2026-06-03" / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-06-03T05:00:00Z",
+                "source": "wechat",
+                "kind": "turn",
+                "safe_ref": {"session_id": "sess_1", "platform": "wechat"},
+                "summary": "SHOULD_NOT_LEAK",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "hindsight" / "bank-a").mkdir(parents=True)
+    (tmp_path / "hindsight" / "bank-a" / "strategy.json").write_text(
+        json.dumps({"secret": "SHOULD_NOT_LEAK"}),
+        encoding="utf-8",
+    )
     cognitive_root = tmp_path / "system-modules" / "cognitive_loop"
     cognitive_root.mkdir(parents=True)
     cognitive_steps = [
@@ -132,6 +153,34 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     (tmp_path / "memory-os" / "runtime").mkdir(parents=True)
     (tmp_path / "memory-os" / "runtime" / "heartbeat_state.json").write_text(
         json.dumps({"last_heartbeat_at": "2026-06-03T04:01:00Z", "processed_event_count": 7, "debug": "SHOULD_NOT_LEAK"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "memory-os" / "system" / "owner_review_deliveries.jsonl").write_text(
+        json.dumps(
+            {
+                "delivery_id": "ord_1",
+                "created_at": "2026-06-03T04:04:00Z",
+                "owner_id": "owner",
+                "channel": "telegram",
+                "result": "sent",
+                "text": "SHOULD_NOT_LEAK",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "memory-os" / "system" / "hindsight_curation_decisions.jsonl").write_text(
+        json.dumps(
+            {
+                "decision_id": "hcur_1",
+                "created_at": "2026-06-03T04:05:00Z",
+                "curation_decision": "reject",
+                "finding_id": "lbf_hcur",
+                "note": "SHOULD_NOT_LEAK",
+                "actual_hindsight_write": False,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     proposal_root = tmp_path / "system-modules" / "proposal_queue"
@@ -229,6 +278,8 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["hindsight_governance_signals"]["payload"]["available"] is True
     assert by_source["hindsight_governance_signals"]["payload"]["suggestion_count"] >= 1
     assert by_source["hindsight_governance_signals"]["payload"]["duplicate_indicator_count"] == 1
+    assert by_source["hindsight_governance_signals"]["payload"]["curation_decision_count"] == 1
+    assert by_source["hindsight_governance_signals"]["payload"]["reject_decision_count"] == 1
     assert by_source["hindsight_governance_signals"]["payload"]["authoritative_claim_count"] == 0
     assert by_source["hindsight_governance_signals"]["payload"]["raw_body_included"] is False
     assert by_source["mailbox_status"]["payload"]["inbox_count"] == 1
@@ -248,6 +299,18 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["kanban_state"]["payload"]["done_card_count"] == 1
     assert by_source["tool_registry"]["payload"]["tool_manifest_count"] == 1
     assert by_source["tool_registry"]["payload"]["mcp_tool_count"] == 1
+    assert by_source["hermes_session_index"]["payload"]["session_file_count"] == 2
+    assert by_source["hermes_session_index"]["payload"]["session_event_count"] == 1
+    assert by_source["hermes_session_index"]["payload"]["platform_count"] == 1
+    assert by_source["hindsight_bank_inventory"]["payload"]["bank_file_count"] == 1
+    assert by_source["hindsight_bank_inventory"]["payload"]["strategy_file_count"] == 1
+    assert by_source["hindsight_bank_inventory"]["payload"]["substrate_operation_count"] == 2
+    assert by_source["mailbox_delivery_trace"]["payload"]["delivery_record_count"] == 1
+    assert by_source["mailbox_delivery_trace"]["payload"]["owner_channel_delivery_count"] == 1
+    assert by_source["wandering_mind_cadence"]["payload"]["generated_count"] == 2
+    assert by_source["wandering_mind_cadence"]["payload"]["would_send_pending_count"] == 1
+    assert by_source["mcp_tool_inventory"]["payload"]["server_name_count"] == 1
+    assert by_source["mcp_tool_inventory"]["payload"]["config_file_count"] == 1
     assert by_source["cognitive_loop_status"]["payload"]["step_count"] == len(cognitive_steps)
     assert by_source["cognitive_loop_status"]["payload"]["warning_step_count"] == 1
     assert by_source["gateway_runtime_status"]["payload"]["heartbeat_state_exists"] is True

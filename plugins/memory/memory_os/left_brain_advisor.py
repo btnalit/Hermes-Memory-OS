@@ -270,6 +270,16 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
     summary = f"{source_key} projection reported status={status}."
     reason = "LeftBrainAdvisor report-only diagnosis from MemoryProjection metadata."
     confidence = 0.72
+    target_type = "left_brain_advisor_finding"
+    owner_burden_class = "review_suggested"
+    allowed_action_type = "review_only"
+    actions_suppressed = True
+    suggested_action = "review-only; no automatic apply"
+    if _hindsight_curation_status(source_key, status):
+        target_type = "hindsight_curation"
+        allowed_action_type = "owner_gated_hindsight_curation_decision"
+        actions_suppressed = False
+        suggested_action = "owner-gated curation decision; no Hindsight mutation"
     if source_key == "hermes_cron_jobs" and status == "external_cron_failure":
         job = str(payload.get("latest_failure_job") or "external Hermes cron job")
         failure_reason = str(payload.get("latest_failure_reason") or "external cron failure")
@@ -313,19 +323,19 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
         "finding_id": finding_id,
         "dedup_key": dedup_key,
         "confidence": confidence,
-        "owner_burden_class": "review_suggested",
+        "owner_burden_class": owner_burden_class,
         "expires_at": (now + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
-        "allowed_action_type": "review_only",
-        "target_type": "left_brain_advisor_finding",
+        "allowed_action_type": allowed_action_type,
+        "target_type": target_type,
         "target_id": finding_id,
         "source_module": "left_brain_advisor",
         "priority": "review_suggested",
         "owner_visible": True,
-        "actions_suppressed": True,
+        "actions_suppressed": actions_suppressed,
         "title": title,
         "summary": summary,
         "reason": reason,
-        "suggested_action": "review-only; no automatic apply",
+        "suggested_action": suggested_action,
         "projection_id": str(projection.get("projection_id") or ""),
         "source_key": source_key,
         "safe_source_ids": [str(projection.get("projection_id") or "")] if projection.get("projection_id") else [],
@@ -339,6 +349,10 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
         "actual_route_score_write": False,
         "hindsight_write": False,
     }
+
+
+def _hindsight_curation_status(source_key: str, status: str) -> bool:
+    return source_key in HINDSIGHT_GOVERNANCE_SOURCE_KEYS and str(status or "").startswith("hindsight_")
 
 
 def _finding_dedup_key(source_key: str, projection: dict[str, Any], status: str) -> str:

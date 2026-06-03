@@ -181,6 +181,16 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         return _kanban_payload(roots, base)
     if spec.source_key == "tool_registry":
         return _tool_registry_payload(roots, base)
+    if spec.source_key == "hermes_session_index":
+        return _hermes_session_index_payload(roots, base)
+    if spec.source_key == "hindsight_bank_inventory":
+        return _hindsight_bank_inventory_payload(roots, base)
+    if spec.source_key == "mailbox_delivery_trace":
+        return _mailbox_delivery_trace_payload(roots, base)
+    if spec.source_key == "wandering_mind_cadence":
+        return _wandering_mind_cadence_payload(roots, base)
+    if spec.source_key == "mcp_tool_inventory":
+        return _mcp_tool_inventory_payload(roots, base)
     return base
 
 
@@ -291,6 +301,185 @@ def _tool_registry_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[s
         "tool_manifest_count": manifest_count,
         "tool_config_exists": manifest_count > 0,
         "latest_tool_age_seconds": _latest_age_seconds(children),
+    }
+
+
+def _hermes_session_index_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    session_roots = [
+        roots.hermes_home / "sessions",
+        roots.hermes_home / "conversations",
+        roots.memory_os_root / "events",
+    ]
+    files: list[Path] = []
+    for root in session_roots:
+        files.extend(item for item in _safe_tree_children(root, limit=1_000) if item.is_file())
+    session_files = [
+        item for item in files if item.suffix.lower() in {".json", ".jsonl", ".md", ".txt"}
+    ]
+    conversation_files = [
+        item for item in session_files if "conversation" in item.name.lower() or "chat" in item.name.lower()
+    ]
+    event_records = _memory_os_event_records(roots, limit=1_000)
+    session_event_count = 0
+    recent_session_event_count = 0
+    platforms: set[str] = set()
+    for index, record in enumerate(event_records):
+        safe_ref = record.get("safe_ref") if isinstance(record.get("safe_ref"), dict) else {}
+        if safe_ref.get("session_id"):
+            session_event_count += 1
+            platform = str(safe_ref.get("platform") or record.get("source") or "")
+            if platform:
+                platforms.add(platform[:80])
+            if index >= max(0, len(event_records) - 250):
+                recent_session_event_count += 1
+    return {
+        **base,
+        "status": "ok" if session_files or event_records else base["status"],
+        "available": bool(session_files or event_records) or base["available"],
+        "record_count": len(session_files) + len(event_records),
+        "session_file_count": len(session_files),
+        "conversation_file_count": len(conversation_files),
+        "session_event_count": session_event_count,
+        "recent_session_event_count": recent_session_event_count,
+        "platform_count": len(platforms),
+        "latest_session_age_seconds": _latest_age_seconds(session_files),
+    }
+
+
+def _hindsight_bank_inventory_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    bank_roots = [
+        roots.hermes_home / "hindsight",
+        roots.hermes_home / ".hindsight",
+        roots.hermes_home / "memory" / "hindsight",
+    ]
+    children: list[Path] = []
+    for root in bank_roots:
+        children.extend(_safe_tree_children(root, limit=1_000))
+    files = [item for item in children if item.is_file()]
+    dirs = [item for item in children if item.is_dir()]
+    strategy_names = {"strategy.json", "config.json", "settings.json", "bank.json", "provider.json"}
+    strategy_count = sum(1 for item in files if item.name.lower() in strategy_names)
+    operation_records = _read_jsonl(roots.memory_os_root / "system" / "substrate_operations.jsonl")
+    provider_records = [record for record in operation_records if _hindsight_record(record)]
+    return {
+        **base,
+        "status": "ok" if children or provider_records else base["status"],
+        "available": bool(children or provider_records) or base["available"],
+        "record_count": len(children) + len(provider_records),
+        "bank_directory_count": len(dirs),
+        "bank_file_count": len(files),
+        "strategy_file_count": strategy_count,
+        "latest_bank_age_seconds": _latest_age_seconds(files + dirs),
+        "substrate_operation_count": len(provider_records),
+        "memory_os_config_present": bool(provider_records),
+        "raw_payload_file_count": 0,
+    }
+
+
+def _mailbox_delivery_trace_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    delivery_records = _read_jsonl(roots.memory_os_root / "system" / "owner_review_deliveries.jsonl")
+    output_files = _safe_tree_children(roots.hermes_home / "cron" / "output", limit=1_000)
+    failures = [
+        record
+        for record in delivery_records
+        if str(record.get("result") or record.get("status") or "") in {"error", "failed", "skipped"}
+    ]
+    cooldown_markers = [
+        roots.hermes_home / "system-modules" / "mailbox" / "cooldown.json",
+        roots.hermes_home / "system-modules" / "mailbox" / "cooldown.lock",
+        roots.hermes_home / "mailbox" / "cooldown.json",
+        roots.hermes_home / "mailbox" / "cooldown.lock",
+    ]
+    return {
+        **base,
+        "status": "ok" if delivery_records or output_files else base["status"],
+        "available": bool(delivery_records or output_files) or base["available"],
+        "record_count": len(delivery_records) + len(output_files),
+        "delivery_record_count": len(delivery_records),
+        "owner_channel_delivery_count": sum(
+            1 for record in delivery_records if str(record.get("owner_id") or record.get("channel") or "")
+        ),
+        "failed_delivery_count": len(failures),
+        "latest_delivery_at": _latest_record_time(delivery_records),
+        "latest_failure_at": _latest_record_time(failures),
+        "cron_output_file_count": sum(1 for item in output_files if item.is_file()),
+        "cooldown_marker_count": sum(1 for item in cooldown_markers if item.exists()),
+    }
+
+
+def _wandering_mind_cadence_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    root = roots.hermes_home / "system-modules" / "wandering_mind"
+    state = _safe_json_dict(root / "state.json")
+    output_records = _read_jsonl(root / "outputs.jsonl")
+    would_send_records = _read_jsonl(root / "would_send.jsonl")
+    config_present = any((root / name).exists() for name in ("config.json", "policy.json", "cadence.json"))
+    cooldown_active = any((root / name).exists() for name in ("cooldown.json", "cooldown.lock", "mute.lock"))
+    latest_output_at = _latest_record_time(output_records)
+    return {
+        **base,
+        "status": "ok" if root.exists() or state or output_records or would_send_records else base["status"],
+        "available": bool(root.exists() or state or output_records or would_send_records) or base["available"],
+        "record_count": len(output_records) + len(would_send_records) + (1 if state else 0),
+        "state_exists": bool(state),
+        "cadence_config_present": config_present,
+        "latest_output_age_seconds": _age_seconds_from_iso(latest_output_at),
+        "generated_count": int(state.get("generated_count") or _status_count(output_records, "generated")),
+        "skipped_count": int(state.get("skipped_count") or _status_count(output_records, "skipped")),
+        "would_send_pending_count": sum(
+            1
+            for record in would_send_records
+            if str(record.get("status") or "pending") in {"pending", "would_send", "ready"}
+        ),
+        "cooldown_active": cooldown_active,
+    }
+
+
+def _mcp_tool_inventory_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    config_paths = [roots.hermes_home / "mcp_servers.json", roots.hermes_home / "config" / "mcp.json"]
+    config_files = [path for path in config_paths if path.is_file()]
+    servers: list[Any] = []
+    server_names: set[str] = set()
+    for path in config_files:
+        loaded = _safe_json_dict(path)
+        for key in ("mcpServers", "servers", "mcp_servers"):
+            value = loaded.get(key)
+            if isinstance(value, dict):
+                server_names.update(str(name)[:80] for name in value)
+                servers.extend(value.values())
+            elif isinstance(value, list):
+                servers.extend(value)
+    directory_children = _safe_tree_children(roots.hermes_home / "mcp", limit=500)
+    stdio_count = 0
+    http_count = 0
+    disabled_count = 0
+    tool_candidate_count = 0
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        transport = str(server.get("transport") or server.get("type") or "").lower()
+        command = str(server.get("command") or "")
+        url = str(server.get("url") or "")
+        if command or transport == "stdio":
+            stdio_count += 1
+        if url.startswith(("http://", "https://")) or transport in {"http", "sse", "streamable-http"}:
+            http_count += 1
+        if server.get("enabled") is False or str(server.get("status") or "").lower() in {"disabled", "off"}:
+            disabled_count += 1
+        tools = server.get("tools")
+        if isinstance(tools, list):
+            tool_candidate_count += len(tools)
+    return {
+        **base,
+        "status": "ok" if config_files or directory_children else base["status"],
+        "available": bool(config_files or directory_children) or base["available"],
+        "record_count": len(config_files) + len(directory_children) + len(servers),
+        "server_name_count": len(server_names) or len(servers),
+        "stdio_server_count": stdio_count,
+        "http_server_count": http_count,
+        "disabled_server_count": disabled_count,
+        "tool_candidate_count": tool_candidate_count + sum(1 for item in directory_children if item.is_file()),
+        "config_file_count": len(config_files),
+        "latest_config_age_seconds": _latest_age_seconds(config_files + directory_children),
     }
 
 
@@ -408,12 +597,16 @@ def _hindsight_governance_payload(
     reject_review_suggested_count = max(raw_retained_count + duplicate_indicator_count, 0)
     demote_review_suggested_count = max(projection_stale_count, 0)
     curation_review_suggested_count = pollution_indicator_count
+    curation_decisions = _read_jsonl(roots.memory_os_root / "system" / "hindsight_curation_decisions.jsonl")
+    retain_decision_count = sum(1 for record in curation_decisions if str(record.get("curation_decision") or "") == "retain")
+    reject_decision_count = sum(1 for record in curation_decisions if str(record.get("curation_decision") or "") == "reject")
+    demote_decision_count = sum(1 for record in curation_decisions if str(record.get("curation_decision") or "") == "demote")
     configured = _present(capability) or bool(capability.get("memory_os_substrate_config_present")) or bool(provider_records)
     return {
         **base,
         "status": "warning" if pollution_indicator_count or authoritative_claim_count else "ok" if configured else base["status"],
         "available": configured or base["available"],
-        "record_count": len(provider_records) + len(projection_records),
+        "record_count": len(provider_records) + len(projection_records) + len(curation_decisions),
         "suggestion_count": (
             retain_review_suggested_count
             + reject_review_suggested_count
@@ -424,6 +617,10 @@ def _hindsight_governance_payload(
         "reject_review_suggested_count": reject_review_suggested_count,
         "demote_review_suggested_count": demote_review_suggested_count,
         "curation_review_suggested_count": curation_review_suggested_count,
+        "curation_decision_count": len(curation_decisions),
+        "retain_decision_count": retain_decision_count,
+        "reject_decision_count": reject_decision_count,
+        "demote_decision_count": demote_decision_count,
         "raw_retained_count": raw_retained_count,
         "projection_stale_count": projection_stale_count,
         "pollution_indicator_count": pollution_indicator_count,
@@ -879,6 +1076,34 @@ def _proposal_queue_items(roots: MemoryOSRoots) -> list[dict[str, Any]]:
 
 def _candidate_queue_records(roots: MemoryOSRoots) -> list[dict[str, Any]]:
     return _read_jsonl(roots.memory_os_root / "crystallized" / "candidates.jsonl")
+
+
+def _memory_os_event_records(roots: MemoryOSRoots, *, limit: int) -> list[dict[str, Any]]:
+    event_root = roots.memory_os_root / "events"
+    if not event_root.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        paths = sorted(event_root.glob("*/*.jsonl"))
+    except OSError:
+        return []
+    for path in paths[-max(int(limit), 1):]:
+        for record in _read_jsonl(path):
+            safe_ref = record.get("safe_ref") if isinstance(record.get("safe_ref"), dict) else {}
+            records.append(
+                {
+                    "created_at": str(record.get("created_at") or record.get("ts") or ""),
+                    "source": str(record.get("source") or ""),
+                    "kind": str(record.get("kind") or ""),
+                    "safe_ref": {
+                        "session_id": str(safe_ref.get("session_id") or ""),
+                        "platform": str(safe_ref.get("platform") or ""),
+                    },
+                }
+            )
+            if len(records) >= max(int(limit), 1):
+                return records
+    return records
 
 
 def _count_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:

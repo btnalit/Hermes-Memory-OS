@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
+from plugins.memory.memory_os.owner_actions import owner_actions_path
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.ground_truth_miner import (
@@ -38,6 +39,40 @@ def test_ground_truth_miner_writes_retractable_owner_label(tmp_path):
     assert module.read_labels()[0]["source_scope_ref"] == "crystallized_candidate:cand_1"
     assert module.read_labels()[0]["actual_route_score_write"] is False
     assert module.read_labels()[0]["hindsight_write"] is False
+
+
+def test_ground_truth_miner_mines_real_owner_action_ledger_input(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="main"))
+    store.initialize()
+    module = GroundTruthMinerModule(tmp_path, profile="main")
+    path = owner_actions_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.owner_action.v0",
+                "owner_action_id": "oa_real_1",
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "action_type": "approve_candidate",
+                "target_type": "candidate",
+                "target_id": "cand_real",
+                "result": "applied",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = module.run_once(store=store)
+    labels = module.read_labels()
+
+    assert result["label_count"] == 1
+    assert labels[0]["target_id"] == "cand_real"
+    assert labels[0]["source_audit_target"] == "oa_real_1"
+    assert labels[0]["source_scope_ref"] == "crystallized_candidate:cand_real"
+    assert labels[0]["actual_route_score_write"] is False
 
 
 def test_ground_truth_miner_automatic_write_uses_structural_write_gate(tmp_path):

@@ -118,9 +118,13 @@ class GroundTruthMinerModule:
         execution_envelope_id: str = "",
         expected_scope: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        from plugins.memory.memory_os.owner_actions import read_owner_action_records
+
+        audit_entries = read_audit_entries(store.roots.audit_path)
+        audit_entries.extend(_audit_entries_from_owner_action_records(read_owner_action_records(store.roots)))
         return self.mine(
             store=store,
-            audit_entries=read_audit_entries(store.roots.audit_path),
+            audit_entries=audit_entries,
             execution_envelope_id=execution_envelope_id,
             expected_scope=expected_scope,
         )
@@ -357,6 +361,34 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _audit_entries_from_owner_action_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for record in records:
+        action_type = str(record.get("action_type") or "")
+        target_id = str(record.get("target_id") or "")
+        if (
+            str(record.get("result") or "") not in {"applied", "duplicate_ignored"}
+            or action_type not in {"approve_candidate", "approve_crystallized_candidate"}
+            or not target_id
+        ):
+            continue
+        entries.append(
+            {
+                "action": "owner_action_reply_processed",
+                "status": "ok",
+                "target": str(record.get("owner_action_id") or ""),
+                "created_at": str(record.get("created_at") or ""),
+                "details": {
+                    "action_type": action_type,
+                    "target_id": target_id,
+                    "source": "owner_actions_ledger",
+                    "owner_action_id": str(record.get("owner_action_id") or ""),
+                },
+            }
+        )
+    return entries
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:

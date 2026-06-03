@@ -210,6 +210,60 @@ MEMORY_PROJECTION_55F_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
         "hermes_version_available",
     },
 }
+MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
+    "hindsight_governance_signals": {
+        "suggestion_count",
+        "curation_review_suggested_count",
+        "curation_decision_count",
+        "retain_decision_count",
+        "reject_decision_count",
+        "demote_decision_count",
+    },
+    "hermes_session_index": {
+        "session_file_count",
+        "conversation_file_count",
+        "session_event_count",
+        "recent_session_event_count",
+        "platform_count",
+        "latest_session_age_seconds",
+    },
+    "hindsight_bank_inventory": {
+        "bank_directory_count",
+        "bank_file_count",
+        "strategy_file_count",
+        "latest_bank_age_seconds",
+        "substrate_operation_count",
+        "memory_os_config_present",
+        "raw_payload_file_count",
+    },
+    "mailbox_delivery_trace": {
+        "delivery_record_count",
+        "owner_channel_delivery_count",
+        "failed_delivery_count",
+        "latest_delivery_at",
+        "latest_failure_at",
+        "cron_output_file_count",
+        "cooldown_marker_count",
+    },
+    "wandering_mind_cadence": {
+        "state_exists",
+        "cadence_config_present",
+        "latest_output_age_seconds",
+        "generated_count",
+        "skipped_count",
+        "would_send_pending_count",
+        "cooldown_active",
+    },
+    "mcp_tool_inventory": {
+        "server_name_count",
+        "stdio_server_count",
+        "http_server_count",
+        "disabled_server_count",
+        "tool_candidate_count",
+        "config_file_count",
+        "latest_config_age_seconds",
+    },
+}
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
@@ -3079,6 +3133,27 @@ def _classify_left_brain_signal_weaving(
                     "source_count": len(MEMORY_PROJECTION_55F_REQUIRED_PAYLOAD_FIELDS),
                 }
             )
+        missing_payload_fields_55g: list[dict[str, Any]] = []
+        for source_key, expected_fields in MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS.items():
+            observed_fields = set(payload_fields.get(source_key) or [])
+            missing_fields = sorted(expected_fields - observed_fields)
+            if missing_fields:
+                missing_payload_fields_55g.append({"source_key": source_key, "missing_fields": missing_fields})
+        if missing_payload_fields_55g:
+            target = warn if clean_host else fail
+            target.append(
+                {
+                    "code": "memory_projection_55g_payload_field_coverage_missing",
+                    "missing": missing_payload_fields_55g,
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "memory_projection_55g_payload_field_coverage_ok",
+                    "source_count": len(MEMORY_PROJECTION_55G_REQUIRED_PAYLOAD_FIELDS),
+                }
+            )
         projection_count = int(projection.get("projection_count") or 0)
         projection_ok = (
             projection_count > 0
@@ -3091,6 +3166,7 @@ def _classify_left_brain_signal_weaving(
             and not missing_payload_fields_55d
             and not missing_payload_fields_55e
             and not missing_payload_fields_55f
+            and not missing_payload_fields_55g
             and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )
