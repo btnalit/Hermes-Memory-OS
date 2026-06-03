@@ -27,6 +27,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/left_brain_advisor.py::run_left_brain_advisor::append_jsonl_call::left_brain_advisor_reports_path(store.roots)": "left_brain_advisor_manual_fallback",
     "plugins/memory/memory_os/left_brain_advisor.py::_append_jsonl::path.open_a::path": "left_brain_advisor_private_manual_writer",
     "plugins/memory/memory_os/memory_projection.py::collect_and_project_signals::append_jsonl_call::memory_projection_records_path(store.roots)": "memory_projection_manual_fallback",
+    "plugins/memory/memory_os/memory_projection.py::compact_memory_projection_records::append_jsonl_call::memory_projection_compactions_path(roots)": "memory_projection_compaction_audit",
     "plugins/memory/memory_os/memory_projection.py::_append_jsonl::path.open_a::path": "memory_projection_private_manual_writer",
     "plugins/memory/memory_os/memory_sources.py::append_memory_source_record::path.open_a::path": "memory_sources_existing_surface",
     "plugins/memory/memory_os/memory_sources.py::append_memory_source_feedback_record::path.open_a::path": "owner_feedback_surface",

@@ -64,7 +64,12 @@ from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, Hindsi
 from .index import MemoryOSIndex
 from .left_brain_advisor import left_brain_advisor_status, run_left_brain_advisor
 from .low_clue_recall import build_low_clue_recall_report, low_clue_judge_availability
-from .memory_projection import collect_and_project_signals, memory_projection_status
+from .memory_projection import (
+    compact_memory_projection_records,
+    collect_and_project_signals,
+    memory_projection_retention_status,
+    memory_projection_status,
+)
 from .memory_sources import (
     memory_sources_feedback_history_report,
     memory_sources_feedback_last_report,
@@ -1084,8 +1089,12 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     projection_parser = subs.add_parser("projection")
     projection_subs = projection_parser.add_subparsers(dest="projection_command", required=True)
     projection_subs.add_parser("status")
+    projection_subs.add_parser("retention-status")
     projection_collect = projection_subs.add_parser("collect")
     projection_collect.add_argument("--manual-run-ref", default="manual_cli")
+    projection_compact = projection_subs.add_parser("compact")
+    projection_compact.add_argument("--apply", action="store_true")
+    projection_compact.add_argument("--keep-latest-status-per-source", type=int, default=3)
     left_brain_parser = subs.add_parser("left-brain")
     left_brain_subs = left_brain_parser.add_subparsers(dest="left_brain_command", required=True)
     left_brain_subs.add_parser("status")
@@ -1243,6 +1252,9 @@ def memory_os_command(args: argparse.Namespace) -> int:
         if args.projection_command == "status":
             print(json.dumps(memory_projection_status(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
+        if args.projection_command == "retention-status":
+            print(json.dumps(memory_projection_retention_status(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
         if args.projection_command == "collect":
             report = collect_and_project_signals(
                 store,
@@ -1252,6 +1264,14 @@ def memory_os_command(args: argparse.Namespace) -> int:
             )
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
             return 1 if report.get("status") == "blocked" else 0
+        if args.projection_command == "compact":
+            report = compact_memory_projection_records(
+                store.roots,
+                keep_latest_status_per_source=max(int(args.keep_latest_status_per_source), 0),
+                apply=bool(args.apply),
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0 if report.get("status") == "ok" else 1
         return 2
     if command == "left-brain":
         if args.left_brain_command == "status":

@@ -17,6 +17,7 @@ from .structural_write_gate import append_governed_jsonl
 
 MEMORY_PROJECTION_SCHEMA_VERSION = "memory-os.memory_projection.v0"
 MEMORY_PROJECTION_RECORD_SCHEMA_VERSION = "memory-os.memory_projection_record.v0"
+MEMORY_PROJECTION_COMPACTION_SCHEMA_VERSION = "memory-os.memory_projection_compaction.v0"
 PROJECTION_LANE_ID = "memory_projection_collect"
 PROJECTION_RISK_CLASS = "governance_projection"
 
@@ -27,6 +28,96 @@ def memory_projection_records_path(roots: MemoryOSRoots) -> Path:
 
 def memory_projection_summary_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "memory_projection_summary.json"
+
+
+def memory_projection_compactions_path(roots: MemoryOSRoots) -> Path:
+    return roots.memory_os_root / "system" / "memory_projection_compactions.jsonl"
+
+
+def compact_memory_projection_records(
+    roots: MemoryOSRoots,
+    *,
+    keep_latest_status_per_source: int = 3,
+    apply: bool = False,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    started = now or datetime.now(timezone.utc)
+    records = _read_jsonl(memory_projection_records_path(roots))
+    keep_latest = max(int(keep_latest_status_per_source), 0)
+    short_lived_by_scope: dict[str, list[int]] = {}
+    retention_class_counts: dict[str, int] = {}
+    for index, record in enumerate(records):
+        retention_class = str(record.get("retention_class") or "unknown")
+        retention_class_counts[retention_class] = retention_class_counts.get(retention_class, 0) + 1
+        if retention_class == "short_lived_status" and not _projection_safety_preserved(record):
+            short_lived_by_scope.setdefault(_status_compaction_scope(record), []).append(index)
+
+    keep_indices: set[int] = set()
+    for index, record in enumerate(records):
+        if str(record.get("retention_class") or "") != "short_lived_status":
+            keep_indices.add(index)
+        if _projection_safety_preserved(record):
+            keep_indices.add(index)
+    for indices in short_lived_by_scope.values():
+        keep_indices.update(indices[-keep_latest:] if keep_latest else [])
+
+    kept = [record for index, record in enumerate(records) if index in keep_indices]
+    archived = [record for index, record in enumerate(records) if index not in keep_indices]
+    compaction_id = "mproj_compact_" + hashlib.sha256(
+        f"{started.isoformat()}:{len(records)}:{len(archived)}".encode("utf-8")
+    ).hexdigest()[:20]
+    archive_rel = ""
+    if apply and archived:
+        archive_path = roots.memory_os_root / "archive" / "memory_projection" / f"{compaction_id}.jsonl"
+        _write_jsonl_atomic(archive_path, archived)
+        archive_rel = str(archive_path.relative_to(roots.memory_os_root)).replace("\\", "/")
+        _write_jsonl_atomic(memory_projection_records_path(roots), kept)
+    completed = datetime.now(timezone.utc)
+    report = {
+        "schema_version": MEMORY_PROJECTION_COMPACTION_SCHEMA_VERSION,
+        "compaction_id": compaction_id,
+        "status": "ok",
+        "dry_run": not apply,
+        "started_at": started.isoformat().replace("+00:00", "Z"),
+        "completed_at": completed.isoformat().replace("+00:00", "Z"),
+        "input_count": len(records),
+        "output_count": len(kept),
+        "archived_count": len(archived),
+        "archive_path": archive_rel,
+        "keep_latest_status_per_source": keep_latest,
+        "retention_class_counts": retention_class_counts,
+        "boundary_true_preserved_count": sum(1 for record in kept if any_boundary_true(record.get("boundary"))),
+        "raw_body_included_preserved_count": sum(1 for record in kept if record.get("raw_body_included") is True),
+        "boundary_true_archived_count": sum(1 for record in archived if any_boundary_true(record.get("boundary"))),
+        "raw_body_included_archived_count": sum(1 for record in archived if record.get("raw_body_included") is True),
+        "boundary": _false_boundary(),
+        "raw_body_included": False,
+    }
+    if apply:
+        _append_jsonl(memory_projection_compactions_path(roots), report)
+    return report
+
+
+def memory_projection_retention_status(roots: MemoryOSRoots) -> dict[str, Any]:
+    records = _read_jsonl(memory_projection_compactions_path(roots))
+    latest = records[-1] if records else {}
+    return {
+        "schema_version": "memory-os.memory_projection_retention_status.v0",
+        "status": "ok" if records else "missing",
+        "compaction_count": len(records),
+        "latest_compaction_id": str(latest.get("compaction_id") or ""),
+        "latest_dry_run": latest.get("dry_run"),
+        "latest_input_count": int(latest.get("input_count") or 0),
+        "latest_output_count": int(latest.get("output_count") or 0),
+        "latest_archived_count": int(latest.get("archived_count") or 0),
+        "latest_archive_path": str(latest.get("archive_path") or ""),
+        "latest_boundary_true_archived_count": int(latest.get("boundary_true_archived_count") or 0),
+        "latest_raw_body_included_archived_count": int(latest.get("raw_body_included_archived_count") or 0),
+        "latest_boundary_true_preserved_count": int(latest.get("boundary_true_preserved_count") or 0),
+        "latest_raw_body_included_preserved_count": int(latest.get("raw_body_included_preserved_count") or 0),
+        "raw_body_included": any(record.get("raw_body_included") is True for record in records),
+        "boundary_true_count": sum(1 for record in records if any_boundary_true(record.get("boundary"))),
+    }
 
 
 def collect_and_project_signals(
@@ -287,6 +378,20 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
         handle.write("\n")
 
 
+def _write_jsonl_atomic(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{hashlib.sha256(str(datetime.now(timezone.utc).timestamp()).encode('utf-8')).hexdigest()[:12]}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for record in records:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -314,3 +419,16 @@ def _false_boundary() -> dict[str, bool]:
         "actual_route_score_write": False,
         "hindsight_write": False,
     }
+
+
+def _projection_safety_preserved(record: dict[str, Any]) -> bool:
+    return any_boundary_true(record.get("boundary")) or record.get("raw_body_included") is True
+
+
+def _status_compaction_scope(record: dict[str, Any]) -> str:
+    return ":".join(
+        [
+            str(record.get("source_scope_ref") or ""),
+            str(record.get("source_key") or ""),
+        ]
+    )

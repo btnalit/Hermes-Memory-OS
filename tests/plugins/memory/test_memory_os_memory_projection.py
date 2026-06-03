@@ -2,7 +2,13 @@ import json
 
 from plugins.memory.memory_os.execution_gate import read_execution_gate_records, start_execution_gate_envelope
 from plugins.memory.memory_os.host_capability_probe import probe_host_capabilities
-from plugins.memory.memory_os.memory_projection import collect_and_project_signals, memory_projection_status
+from plugins.memory.memory_os.memory_projection import (
+    compact_memory_projection_records,
+    collect_and_project_signals,
+    memory_projection_records_path,
+    memory_projection_retention_status,
+    memory_projection_status,
+)
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -118,3 +124,87 @@ def test_memory_projection_deduplicates_stable_source_hashes(tmp_path):
     assert first["written_count"] > 0
     assert second["duplicate_skipped_count"] > 0
     assert status["duplicate_source_hash_count"] == 0
+
+
+def test_memory_projection_compaction_archives_short_lived_status_records(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        _projection_record("old-a", "gateway_status", "hash-old-a", retention_class="short_lived_status"),
+        _projection_record("old-b", "gateway_status", "hash-old-b", retention_class="short_lived_status"),
+        _projection_record("new", "gateway_status", "hash-new", retention_class="short_lived_status"),
+        _projection_record("gov", "owner_actions", "hash-gov", retention_class="governance_evidence"),
+    ]
+    path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8")
+
+    report = compact_memory_projection_records(store.roots, keep_latest_status_per_source=1, apply=True)
+    remaining = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    retention = memory_projection_retention_status(store.roots)
+
+    assert report["status"] == "ok"
+    assert report["input_count"] == 4
+    assert report["output_count"] == 2
+    assert report["archived_count"] == 2
+    assert {record["projection_id"] for record in remaining} == {"new", "gov"}
+    assert report["archive_path"]
+    assert (store.roots.memory_os_root / report["archive_path"]).is_file()
+    assert retention["latest_archived_count"] == 2
+    assert retention["latest_boundary_true_archived_count"] == 0
+
+
+def test_memory_projection_compaction_preserves_boundary_and_safety_records(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = [
+        _projection_record("old", "gateway_status", "hash-old", retention_class="short_lived_status"),
+        _projection_record("new", "gateway_status", "hash-new", retention_class="short_lived_status"),
+        _projection_record(
+            "boundary",
+            "gateway_status",
+            "hash-boundary",
+            retention_class="short_lived_status",
+            boundary={"actual_send": True},
+        ),
+        _projection_record("raw", "gateway_status", "hash-raw", retention_class="short_lived_status", raw_body_included=True),
+    ]
+    path.write_text("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n", encoding="utf-8")
+
+    report = compact_memory_projection_records(store.roots, keep_latest_status_per_source=1, apply=True)
+    remaining = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert report["archived_count"] == 1
+    assert report["boundary_true_preserved_count"] == 1
+    assert report["raw_body_included_preserved_count"] == 1
+    assert {record["projection_id"] for record in remaining} == {"new", "boundary", "raw"}
+
+
+def _projection_record(
+    projection_id: str,
+    source_key: str,
+    source_hash: str,
+    *,
+    retention_class: str,
+    boundary: dict | None = None,
+    raw_body_included: bool = False,
+) -> dict:
+    return {
+        "schema_version": "memory-os.memory_projection_record.v0",
+        "projection_id": projection_id,
+        "dedup_key": f"dedup-{projection_id}",
+        "created_at": f"2026-06-03T00:0{len(projection_id) % 9}:00Z",
+        "host_id": "test-host",
+        "hermes_home_ref": "test-home",
+        "profile_id": "memoryos-test",
+        "source_scope_ref": "scope-test",
+        "source_key": source_key,
+        "source_hash": source_hash,
+        "projection_type": "operational_signal",
+        "retention_class": retention_class,
+        "payload": {"status": "ok"},
+        "raw_body_included": raw_body_included,
+        "boundary": boundary or {"actual_send": False},
+    }

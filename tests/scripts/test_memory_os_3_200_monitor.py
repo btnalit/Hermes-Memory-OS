@@ -286,6 +286,7 @@ def test_classify_snapshot_warns_on_expected_observation_items_without_fail():
         "host_capability_probe": _healthy_host_capability_probe(),
         "signal_source_requirements": _healthy_signal_source_requirements(),
         "memory_projection": _healthy_memory_projection(),
+        "memory_projection_retention": _healthy_memory_projection_retention(),
         "left_brain_advisor": _healthy_left_brain_advisor(),
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [{"id": "casual_memory_system_change", "chars": 0, "headings": []}],
@@ -339,6 +340,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert "structural_write_gate_available" in pass_codes
     assert "signal_source_requirements_ok" in pass_codes
     assert "memory_projection_online" in pass_codes
+    assert "memory_projection_retention_compaction_visible" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
 
     snapshot["signal_source_requirements"]["required_missing_count"] = 1
@@ -366,6 +368,12 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "memory_projection_duplicate_records" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection_retention"]["latest_boundary_true_archived_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_retention_archived_safety_evidence" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["left_brain_advisor"]["boundary_true_count"] = 1
@@ -3925,6 +3933,7 @@ def _healthy_snapshot() -> dict:
         "host_capability_probe": _healthy_host_capability_probe(),
         "signal_source_requirements": _healthy_signal_source_requirements(),
         "memory_projection": _healthy_memory_projection(),
+        "memory_projection_retention": _healthy_memory_projection_retention(),
         "left_brain_advisor": _healthy_left_brain_advisor(),
         "context_router": {"enabled": True, "mode": "apply", "apply_routes": ["all"]},
         "rh26_apply_probe": [],
@@ -4027,6 +4036,25 @@ def _healthy_memory_projection() -> dict:
         "duplicate_source_hash_count": 0,
         "duplicate_dedup_key_count": 0,
         "raw_body_included": False,
+    }
+
+
+def _healthy_memory_projection_retention() -> dict:
+    return {
+        "schema_version": "memory-os.memory_projection_retention_status.v0",
+        "status": "ok",
+        "compaction_count": 1,
+        "latest_compaction_id": "mproj_compact_test",
+        "latest_dry_run": False,
+        "latest_input_count": 30,
+        "latest_output_count": 14,
+        "latest_archived_count": 16,
+        "latest_boundary_true_archived_count": 0,
+        "latest_raw_body_included_archived_count": 0,
+        "latest_boundary_true_preserved_count": 0,
+        "latest_raw_body_included_preserved_count": 0,
+        "raw_body_included": False,
+        "boundary_true_count": 0,
     }
 
 

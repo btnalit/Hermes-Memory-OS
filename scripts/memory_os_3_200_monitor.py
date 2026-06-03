@@ -2783,6 +2783,47 @@ def _classify_left_brain_signal_weaving(
     else:
         fail.append({"code": "memory_projection_status_missing", "value": projection})
 
+    projection_retention = (
+        snapshot.get("memory_projection_retention")
+        if isinstance(snapshot.get("memory_projection_retention"), dict)
+        else {}
+    )
+    if projection_retention.get("schema_version") == "memory-os.memory_projection_retention_status.v0":
+        if projection_retention.get("raw_body_included") is True:
+            fail.append({"code": "memory_projection_retention_raw_body_included"})
+        if int(projection_retention.get("boundary_true_count") or 0) > 0:
+            fail.append(
+                {
+                    "code": "memory_projection_retention_boundary_true",
+                    "count": projection_retention.get("boundary_true_count"),
+                }
+            )
+        archived_safety_count = int(projection_retention.get("latest_boundary_true_archived_count") or 0) + int(
+            projection_retention.get("latest_raw_body_included_archived_count") or 0
+        )
+        if archived_safety_count:
+            fail.append(
+                {
+                    "code": "memory_projection_retention_archived_safety_evidence",
+                    "latest_boundary_true_archived_count": projection_retention.get("latest_boundary_true_archived_count"),
+                    "latest_raw_body_included_archived_count": projection_retention.get("latest_raw_body_included_archived_count"),
+                }
+            )
+        elif int(projection_retention.get("compaction_count") or 0) > 0:
+            passed.append(
+                {
+                    "code": "memory_projection_retention_compaction_visible",
+                    "compaction_count": projection_retention.get("compaction_count"),
+                    "latest_archived_count": projection_retention.get("latest_archived_count"),
+                }
+            )
+        elif int(projection.get("projection_count") or 0) > 0:
+            target = warn if clean_host else fail
+            target.append({"code": "memory_projection_retention_compaction_missing"})
+    elif projection:
+        target = warn if clean_host else fail
+        target.append({"code": "memory_projection_retention_status_missing", "value": projection_retention})
+
     advisor = snapshot.get("left_brain_advisor") if isinstance(snapshot.get("left_brain_advisor"), dict) else {}
     if advisor.get("schema_version") == "memory-os.left_brain_advisor_status.v0":
         if advisor.get("raw_body_included") is True:
@@ -6045,6 +6086,7 @@ owner_review_proposal_auto_route = memory_os_cli(["review", "proposal-followups"
 host_capability_probe = memory_os_cli(["host-probe", "--json"])
 signal_source_requirements = memory_os_cli(["signal-sources", "--json"])
 memory_projection = memory_os_cli(["projection", "status"])
+memory_projection_retention = memory_os_cli(["projection", "retention-status"])
 left_brain_advisor = memory_os_cli(["left-brain", "status"])
 owner_review_digest_preview = memory_os_cli(["review", "preview-digest"])
 owner_review_rendered_digest = owner_review_rendered_digest_summary()
@@ -6102,6 +6144,7 @@ print(json.dumps({
   "host_capability_probe": host_capability_probe,
   "signal_source_requirements": signal_source_requirements,
   "memory_projection": memory_projection,
+  "memory_projection_retention": memory_projection_retention,
   "left_brain_advisor": left_brain_advisor,
   "execution_gate_cron": execution_gate_cron_summary(),
   "owner_review_digest_preview": owner_review_digest_preview,
