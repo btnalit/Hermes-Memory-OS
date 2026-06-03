@@ -12,6 +12,7 @@ from .execution_gate import complete_execution_gate_envelope, resolve_execution_
 from .memory_projection import memory_projection_records_path
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
+from .structural_write_gate import append_governed_jsonl
 
 
 LEFT_BRAIN_ADVISOR_SCHEMA_VERSION = "memory-os.left_brain_advisor.v0"
@@ -31,12 +32,23 @@ def read_left_brain_advisor_reports(roots: MemoryOSRoots, *, limit: int = 0) -> 
 def left_brain_advisor_status(roots: MemoryOSRoots) -> dict[str, Any]:
     reports = read_left_brain_advisor_reports(roots)
     latest = reports[-1] if reports else {}
+    governance = (
+        latest.get("structural_write_governance")
+        if isinstance(latest.get("structural_write_governance"), dict)
+        else {}
+    )
     return {
         "schema_version": "memory-os.left_brain_advisor_status.v0",
         "status": str(latest.get("status") or "missing"),
         "report_count": len(reports),
         "latest_report_id": str(latest.get("report_id") or ""),
         "latest_created_at": str(latest.get("created_at") or ""),
+        "latest_live_closure_eligible": bool(latest.get("live_closure_eligible")) if latest else False,
+        "latest_structural_write_governance_present": bool(governance),
+        "latest_structural_write_permit_status": str(governance.get("permit_status") or ""),
+        "latest_structural_write_lane_id": str(governance.get("lane_id") or ""),
+        "latest_structural_write_risk_class": str(governance.get("risk_class") or ""),
+        "latest_structural_write_boundary_true": governance.get("boundary_true") is True,
         "finding_count": int(latest.get("finding_count") or 0),
         "owner_visible_finding_count": int(latest.get("owner_visible_finding_count") or 0),
         "boundary_true_count": int(latest.get("boundary_true_count") or 0),
@@ -107,7 +119,19 @@ def run_left_brain_advisor(
         execution_gate_resolution=resolution,
     )
     if write:
-        _append_jsonl(left_brain_advisor_reports_path(store.roots), report)
+        if automatic:
+            append_governed_jsonl(
+                store,
+                left_brain_advisor_reports_path(store.roots),
+                report,
+                write_owner="automatic",
+                lane_id=ADVISOR_LANE_ID,
+                risk_class=ADVISOR_RISK_CLASS,
+                execution_gate_envelope_id=execution_envelope_id,
+                scope_hash=str(resolution.get("scope_hash") or ""),
+            )
+        else:
+            _append_jsonl(left_brain_advisor_reports_path(store.roots), report)
     if automatic:
         complete_execution_gate_envelope(
             store,

@@ -392,6 +392,16 @@ def test_classify_snapshot_fails_when_structural_write_gate_is_not_available():
     assert any(item["code"] == "structural_write_gate_not_available" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_left_brain_advisor_live_report_lacks_structural_write_gate():
+    snapshot = _healthy_snapshot()
+    snapshot["left_brain_advisor"]["latest_live_closure_eligible"] = True
+    snapshot["left_brain_advisor"]["latest_structural_write_governance_present"] = False
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "left_brain_advisor_structural_write_gate_missing" for item in classification["fail"])
+
+
 def test_classify_snapshot_fails_when_projection_artifact_is_stale_after_deploy():
     snapshot = _healthy_snapshot()
     snapshot["host_capability_probe"]["deployment_runtime_manifest"]["deployed_at"] = "2026-06-03T01:00:00Z"
@@ -4028,6 +4038,12 @@ def _healthy_left_brain_advisor() -> dict:
         "finding_count": 0,
         "owner_visible_finding_count": 0,
         "boundary_true_count": 0,
+        "latest_live_closure_eligible": True,
+        "latest_structural_write_governance_present": True,
+        "latest_structural_write_permit_status": "valid",
+        "latest_structural_write_lane_id": "left_brain_advisor_report",
+        "latest_structural_write_risk_class": "governance_projection",
+        "latest_structural_write_boundary_true": False,
         "raw_body_included": False,
     }
 

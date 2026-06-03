@@ -1,4 +1,11 @@
-from plugins.memory.memory_os.left_brain_advisor import left_brain_advisor_reports_path, run_left_brain_advisor
+import json
+
+from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
+from plugins.memory.memory_os.left_brain_advisor import (
+    left_brain_advisor_reports_path,
+    left_brain_advisor_status,
+    run_left_brain_advisor,
+)
 from plugins.memory.memory_os.memory_projection import memory_projection_records_path
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -37,6 +44,54 @@ def test_left_brain_advisor_generates_report_only_findings(tmp_path):
     assert report["findings"][0]["expires_at"]
     assert report["findings"][0]["allowed_action_type"] == "review_only"
     assert left_brain_advisor_reports_path(store.roots).exists()
+
+
+def test_left_brain_advisor_automatic_write_uses_structural_write_gate(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"schema_version":"memory-os.memory_projection_record.v0","projection_id":"p1","source_key":"mailbox_status","projection_type":"operational_signal","payload":{"status":"missing","available":false},"raw_body_included":false,"boundary":{"actual_send":false}}\n',
+        encoding="utf-8",
+    )
+    scope = {"projection_count": 1, "profile": "memoryos-test"}
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="left_brain_advisor_report",
+        trigger_surface="cognitive_loop",
+        risk_class="governance_projection",
+        human_approval_required=False,
+        why_no_human_approval="report-only advisor",
+        scope=scope,
+        boundary={"actual_send": False, "actual_execute": False},
+    )
+
+    report = run_left_brain_advisor(
+        store,
+        write=True,
+        trigger_type="cognitive_loop",
+        execution_envelope_id=permit["execution_gate_envelope_id"],
+        expected_scope=scope,
+    )
+    records = [
+        json.loads(line)
+        for line in left_brain_advisor_reports_path(store.roots).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    governance = records[0]["structural_write_governance"]
+
+    assert report["execution_gate_resolution"]["status"] == "valid"
+    assert governance["permit_status"] == "valid"
+    assert governance["lane_id"] == "left_brain_advisor_report"
+    assert governance["risk_class"] == "governance_projection"
+    assert governance["boundary_true"] is False
+    status = left_brain_advisor_status(store.roots)
+    assert status["latest_structural_write_governance_present"] is True
+    assert status["latest_structural_write_permit_status"] == "valid"
+    assert status["latest_structural_write_lane_id"] == "left_brain_advisor_report"
+    assert status["latest_structural_write_risk_class"] == "governance_projection"
+    assert status["latest_structural_write_boundary_true"] is False
 
 
 def test_left_brain_advisor_blocks_boundary_true_projection(tmp_path):

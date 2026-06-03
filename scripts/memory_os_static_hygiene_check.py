@@ -47,6 +47,14 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
             "--repo-root",
             ".",
         ],
+        "write_surface_check": [
+            sys.executable,
+            "scripts/memory_os_write_surface_check.py",
+            "--repo-root",
+            ".",
+            "--output",
+            "summary",
+        ],
     }
     results: dict[str, dict[str, Any]] = {}
     for name, argv in checks.items():

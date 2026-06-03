@@ -2791,6 +2791,26 @@ def _classify_left_brain_signal_weaving(
         if boundary_true_count:
             fail.append({"code": "left_brain_advisor_boundary_true", "count": boundary_true_count})
         report_count = int(advisor.get("report_count") or 0)
+        if advisor.get("latest_live_closure_eligible") is True:
+            if advisor.get("latest_structural_write_governance_present") is not True:
+                fail.append({"code": "left_brain_advisor_structural_write_gate_missing"})
+            elif (
+                advisor.get("latest_structural_write_permit_status") == "valid"
+                and advisor.get("latest_structural_write_lane_id") == "left_brain_advisor_report"
+                and advisor.get("latest_structural_write_risk_class") == "governance_projection"
+                and advisor.get("latest_structural_write_boundary_true") is not True
+            ):
+                passed.append({"code": "left_brain_advisor_structural_write_gate_bound"})
+            else:
+                fail.append(
+                    {
+                        "code": "left_brain_advisor_structural_write_gate_invalid",
+                        "permit_status": advisor.get("latest_structural_write_permit_status"),
+                        "lane_id": advisor.get("latest_structural_write_lane_id"),
+                        "risk_class": advisor.get("latest_structural_write_risk_class"),
+                        "boundary_true": advisor.get("latest_structural_write_boundary_true"),
+                    }
+                )
         if report_count > 0 and not boundary_true_count and advisor.get("raw_body_included") is not True:
             passed.append(
                 {

@@ -15,9 +15,15 @@ def test_static_hygiene_reports_repo_native_pass_without_ruff(tmp_path):
     assert report["schema_version"] == "memory-os.static_hygiene.v0"
     assert report["status"] == "pass"
     assert report["ruff_required"] is False
-    assert set(report["checks"]) == {"compileall", "diff_check", "closure_matrix", "public_checkout_probe"}
+    assert set(report["checks"]) == {
+        "compileall",
+        "diff_check",
+        "closure_matrix",
+        "public_checkout_probe",
+        "write_surface_check",
+    }
     assert all(item["status"] == "pass" for item in report["checks"].values())
-    assert len(calls) == 4
+    assert len(calls) == 5
 
 
 def test_static_hygiene_fails_when_any_repo_native_check_fails(tmp_path):

@@ -93,10 +93,17 @@ def structural_write_gate_status() -> dict[str, Any]:
 
 
 def _assert_memory_os_path(store: MemoryOSStore, path: Path) -> None:
-    root = store.roots.memory_os_root.resolve()
+    memory_os_root = store.roots.memory_os_root.resolve()
+    system_modules_root = (store.roots.hermes_home / "system-modules").resolve()
     target = Path(path).resolve()
-    if root != target and root not in target.parents:
-        raise StoreError("structural_write_path_outside_memory_os_root")
+    allowed = (
+        target == memory_os_root
+        or memory_os_root in target.parents
+        or target == system_modules_root
+        or system_modules_root in target.parents
+    )
+    if not allowed:
+        raise StoreError("structural_write_path_outside_allowed_roots")
 
 
 def _governance_record(
