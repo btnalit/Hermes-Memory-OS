@@ -167,3 +167,17 @@ def test_host_capability_probe_marks_optional_runtime_modules_missing(tmp_path):
     assert report["capabilities"]["wandering_mind"]["status"] == "missing"
     assert report["capabilities"]["mailbox"]["status"] == "missing"
     assert report["capabilities"]["owner_channel"]["status"] in {"missing", "available", "disabled", "unknown"}
+
+
+def test_host_capability_probe_marks_disabled_hindsight_substrate_disabled(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"substrate_providers": {"hindsight": {"enabled": False}}}),
+        encoding="utf-8",
+    )
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+
+    report = probe_host_capabilities(roots, hermes_bin="definitely-missing-hermes-bin")
+    hindsight = report["capabilities"]["hindsight"]
+
+    assert hindsight["status"] == "disabled"
+    assert hindsight["memory_os_substrate_enabled"] is False

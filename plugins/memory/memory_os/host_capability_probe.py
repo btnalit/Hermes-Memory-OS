@@ -262,11 +262,14 @@ def _memory_provider_capability(config_shape: dict[str, Any]) -> dict[str, Any]:
 def _hindsight_capability(roots: MemoryOSRoots, config_shape: dict[str, Any]) -> dict[str, Any]:
     provider_config = roots.hermes_home / "hindsight" / "config.json"
     substrate = config_shape.get("substrate_providers.hindsight") if isinstance(config_shape, dict) else {}
-    configured = provider_config.exists() or bool(substrate)
+    substrate_enabled = bool(substrate.get("enabled")) if isinstance(substrate, dict) else False
+    configured = provider_config.exists() or substrate_enabled
+    status = "configured" if configured else "disabled" if substrate else "missing"
     return {
-        "status": "configured" if configured else "missing",
+        "status": status,
         "provider_config_present": provider_config.exists(),
         "memory_os_substrate_config_present": bool(substrate),
+        "memory_os_substrate_enabled": substrate_enabled,
         "raw_body_included": False,
     }
 
