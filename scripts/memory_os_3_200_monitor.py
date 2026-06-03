@@ -2206,6 +2206,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "wilson_95_lower_bound",
                 "proposal_kind_coverage",
                 "current_auto_route_cap_per_day",
+                "limited_auto_graduated",
+                "limited_auto_evidence_source",
             }
             missing_shadow_fields = sorted(key for key in required_shadow_fields if key not in proposal_auto_route)
             if missing_shadow_fields:
@@ -3872,6 +3874,8 @@ def _owner_proposal_auto_route_summary(summary: dict[str, Any]) -> dict[str, Any
         "wilson_95_lower_bound": summary.get("wilson_95_lower_bound"),
         "full_auto_eligible": summary.get("full_auto_eligible"),
         "limited_auto_eligible": summary.get("limited_auto_eligible"),
+        "limited_auto_graduated": summary.get("limited_auto_graduated"),
+        "limited_auto_evidence_source": summary.get("limited_auto_evidence_source"),
         "current_auto_route_cap_per_day": summary.get("current_auto_route_cap_per_day"),
         "continue_shadow_comparison": summary.get("continue_shadow_comparison"),
         "auto_demote_on_first_boundary_or_owner_disagreement": summary.get("auto_demote_on_first_boundary_or_owner_disagreement"),

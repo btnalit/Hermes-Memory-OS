@@ -828,6 +828,8 @@ def auto_route_safe_proposal_followups_to_ops_gate(
         "proposal_kind_coverage": calibration["proposal_kind_coverage"],
         "full_auto_eligible": calibration["full_auto_eligible"],
         "limited_auto_eligible": calibration["limited_auto_eligible"],
+        "limited_auto_graduated": calibration["limited_auto_graduated"],
+        "limited_auto_evidence_source": calibration["limited_auto_evidence_source"],
         "limited_auto_first_canary_max_auto_routes_per_day": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FIRST_CANARY_DAILY_CAP,
         "limited_auto_after_successful_routes": PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES,
         "limited_auto_expanded_max_auto_routes_per_day": PROPOSAL_FOLLOWUP_AUTO_ROUTE_EXPANDED_DAILY_CAP,
@@ -887,15 +889,19 @@ def _proposal_followup_auto_route_calibration(
     owner_disagreement_count = 0
     owner_agreement_rate = (owner_agreement_count / sample_count) if sample_count else 0.0
     wilson = _wilson_lower_bound(owner_agreement_count, sample_count)
+    limited_auto_graduated = successful_limited_routes >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES
     full_auto_eligible = (
         sample_count >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES
         and owner_agreement_rate >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE
     )
     limited_auto_eligible = (
-        PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES
-        <= sample_count
-        < PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES
-        and owner_agreement_rate == 1.0
+        limited_auto_graduated
+        or (
+            PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES
+            <= sample_count
+            < PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES
+            and owner_agreement_rate == 1.0
+        )
     )
     if full_auto_eligible:
         lane_mode = "full_auto"
@@ -921,6 +927,14 @@ def _proposal_followup_auto_route_calibration(
         "proposal_kind_coverage": _proposal_followup_kind_coverage(candidates),
         "full_auto_eligible": full_auto_eligible,
         "limited_auto_eligible": limited_auto_eligible,
+        "limited_auto_graduated": limited_auto_graduated,
+        "limited_auto_evidence_source": (
+            "historical_successful_routes"
+            if limited_auto_graduated
+            else "current_shadow_samples"
+            if limited_auto_eligible
+            else "insufficient_evidence"
+        ),
         "current_auto_route_cap_per_day": current_cap,
     }
 

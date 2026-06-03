@@ -46,7 +46,7 @@ def _llm_judge_probe_result():
                 "candidate_count": 1,
                 "llm_judge": {
                     "status": "ok",
-                    "mode": "report_only",
+                    "mode": "bounded_vote",
                     "provider": "hermes_default",
                     "resolved_model": "deepseek-v4-flash",
                     "api_mode": "chat_completions",
@@ -215,7 +215,7 @@ def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     assert report["profile"] == "fresh"
     assert report["restart_requested"] is False
     assert "--hindsight auto" in rendered
-    assert "--llm-judge-preset report-only" in rendered
+    assert "--llm-judge-preset active" in rendered
     assert "--production-safe" in rendered
     assert "SECRET" not in json.dumps(report, ensure_ascii=False)
 

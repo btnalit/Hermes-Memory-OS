@@ -918,7 +918,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     low_clue_dry_run.add_argument("--limit", type=int, default=4)
     low_clue_dry_run.add_argument(
         "--llm-judge",
-        choices=["config", "none", "report-only"],
+        choices=["config", "none", "report-only", "bounded-vote", "active"],
         default="config",
         help="Override low-clue LLM judge for this dry-run only.",
     )
@@ -2988,6 +2988,8 @@ def _low_clue_recall_command(args: argparse.Namespace, store: MemoryOSStore) -> 
             config = _low_clue_recall_cli_config(config, llm_enabled=False, mode="none")
         elif args.llm_judge == "report-only":
             config = _low_clue_recall_cli_config(config, llm_enabled=True, mode="report_only")
+        elif args.llm_judge in {"bounded-vote", "active"}:
+            config = _low_clue_recall_cli_config(config, llm_enabled=True, mode="bounded_vote")
         print(
             json.dumps(
                 build_low_clue_recall_report(

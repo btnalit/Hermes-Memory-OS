@@ -64,8 +64,9 @@ Options:
                                 explicitly disabled.
   --deep-reflection-preset NAME none|production-safe|observe|auto-bounded|test-host|operational.
   --memory-sources-preset NAME none|production-safe|test-host|operational.
-  --llm-judge-preset NAME      none|report-only|bounded-vote. Optional low-clue
-                                recall LLM judge; reuses Hermes provider/model config.
+  --llm-judge-preset NAME      active|none|report-only|bounded-vote. Low-clue
+                                recall LLM judge; default active reuses Hermes
+                                provider/model config in bounded-vote mode.
   --hindsight MODE             auto|off|adopt|active|wizard. Default: auto.
                                 auto adopts a new Hindsight config into shadow
                                 mode and preserves an already-active adoption;
@@ -137,7 +138,7 @@ while [[ $# -gt 0 ]]; do
       YES=1
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-operational}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-operational}"
-      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-report-only}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-active}"
       ENABLE_OWNER_CRON_ONBOARDING=1
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
       INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
@@ -148,14 +149,14 @@ while [[ $# -gt 0 ]]; do
       YES=1
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-test-host}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-test-host}"
-      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-report-only}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-active}"
       shift
       ;;
     --production-safe)
       MODE="production-safe"
       DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-production-safe}"
       MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-production-safe}"
-      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-report-only}"
+      LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-active}"
       shift
       ;;
     --deep-reflection-preset)

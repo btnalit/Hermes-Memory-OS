@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hermes Memory-OS · 监测大屏</title>
+  <link rel="stylesheet" href="assets/mos.css" />
+  <style>
+    html, body { margin: 0; background: #0f1318; }
+    #root { min-height: 100vh; }
+    .mos-root.theme-control { display: block; min-height: 100vh; background: var(--bg); }
+    .mos-root.theme-control .mos { max-width: 1820px; margin: 0 auto; min-height: 100vh; }
+    .dashboard-empty {
+      color: #d8e4e0;
+      background: #10141a;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font: 13px ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    @media (max-width: 1280px) {
+      .mos-root.theme-control .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+      .mos-root.theme-control .mod-summary { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 1080px) {
+      .mos-root.theme-control .grid > * { grid-column: span 12 !important; }
+    }
+    @media (max-width: 760px) {
+      .mos-root.theme-control .mos { padding: 16px; }
+      .mos-root.theme-control .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+      .mos-root.theme-control .topbar { grid-template-columns: 1fr; }
+      .mos-root.theme-control .topbar-right { align-items: flex-start; flex-direction: column; }
+      .mos-root.theme-control .status-block { text-align: left; }
+      .mos-root.theme-control .run-block { border-left: 0; padding-left: 0; }
+      .mos-root.theme-control .hero-grid,
+      .mos-root.theme-control .mem-charts,
+      .mos-root.theme-control .hs-charts,
+      .mos-root.theme-control .fb-ledgers { grid-template-columns: 1fr; }
+      .mos-root.theme-control .mem-stats,
+      .mos-root.theme-control .hs-stats,
+      .mos-root.theme-control .expr-stats,
+      .mos-root.theme-control .prop-states { grid-template-columns: repeat(2, 1fr); }
+      .mos-root.theme-control .audit-row {
+        grid-template-columns: 62px 12px minmax(0, 1fr);
+        grid-template-areas:
+          "time dot actor"
+          "time dot action"
+          "time dot detail";
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="root" class="mos-root theme-control"></div>
+
+  <script src="assets/sample-data.js"></script>
+  <script>
+    window.MOS_DATA_READY = new Promise(function (resolve) {
+      var script = document.createElement("script");
+      script.src = "snapshot.generated.js";
+      script.onload = resolve;
+      script.onerror = resolve;
+      document.head.appendChild(script);
+    });
+  </script>
+  <script src="assets/dashboard.js" defer></script>
+</body>
+</html>

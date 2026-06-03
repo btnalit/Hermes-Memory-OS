@@ -59,8 +59,9 @@ disabled and recall kept advisory.
 
 Automated deployment wrapper examples:
 
-The wrapper defaults `--llm-judge-preset` to `report-only`, reusing the current
-Hermes provider/model and running a post-install judge probe. Pass
+The wrapper defaults `--llm-judge-preset` to `active`, reusing the current
+Hermes provider/model in bounded-vote mode and running a post-install judge
+probe. Pass `--llm-judge-preset report-only` for report-only probes, or
 `--llm-judge-preset none` when the target should keep the judge disabled.
 
 ```bash
@@ -85,7 +86,42 @@ python scripts/deploy_memory_os.py \
 
 The installer does not restart `hermes-gateway.service`.
 
-## 3. Verify
+## 3. Optional Read-Only Monitor Dashboard
+
+Memory-OS includes a read-only monitor dashboard on the open-source frontend
+contract `0.0.0.0:3693`. The dashboard reads bounded snapshot evidence and has
+no approve/apply/send controls.
+
+Run locally:
+
+```bash
+python scripts/memory_os_monitor_dashboard_snapshot.py \
+  --hermes-home /root/.hermes \
+  --profile main \
+  --output monitor_dashboard/snapshot.generated.js
+
+python scripts/serve_memory_os_monitor_dashboard.py \
+  --host 0.0.0.0 \
+  --port 3693 \
+  --snapshot-hermes-home /root/.hermes \
+  --snapshot-profile main \
+  --snapshot-interval-seconds 60
+```
+
+Install as a system service:
+
+```bash
+sudo python scripts/install_memory_os_monitor_dashboard_service.py \
+  --repo-root /opt/Hermes-Memory-OS \
+  --hermes-home /root/.hermes \
+  --profile main \
+  --host 0.0.0.0 \
+  --port 3693 \
+  --python-bin /usr/bin/python3 \
+  --enable
+```
+
+## 4. Verify
 
 ```bash
 HERMES_HOME=/root/.hermes hermes memory
@@ -107,7 +143,7 @@ doctor.status = ok
 Current Hermes builds select Memory-OS through `memory.provider=memory_os`.
 They do not need to expose `hermes memory_os ...` as a top-level command.
 
-## 4. What Gets Installed
+## 5. What Gets Installed
 
 - `memory_os` provider under `$HERMES_HOME/plugins/memory_os/`
 - optional `memory-os-agent-os` shell plugin under
@@ -122,7 +158,7 @@ They do not need to expose `hermes memory_os ...` as a top-level command.
 Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 `$HERMES_HOME/plugins/`.
 
-## 5. Safety Defaults
+## 6. Safety Defaults
 
 Memory-OS does not automatically send messages, execute external actions, write
 identity, approve crystallized memory, export to Hindsight, apply cleanup, or
@@ -177,6 +213,11 @@ send messages, or write crystallized memory. The actual boundary action
 authority, identity/relationship write, external send, or unbounded autonomous
 acting) remains owner-gated unless that specific low-risk lane has been
 explicitly graduated.
+
+For `proposal_followup_auto_route`, `limited_auto` may be active and idle when
+there are no currently eligible proposals. Graduation is based on real prior
+bounded routes plus continuing boundary checks; an empty current queue must not
+be filled with synthetic proposal samples just to produce activity.
 
 Shell/CLI paths are operator/debug fallbacks only. They are not the owner-facing
 approval workflow.

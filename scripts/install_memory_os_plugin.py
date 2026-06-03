@@ -174,6 +174,21 @@ LLM_JUDGE_PRESETS: dict[str, dict[str, object]] = {
             "on_error": "deterministic_fallback",
         },
     },
+    "active": {
+        "enabled": True,
+        "candidate_limit": 4,
+        "llm_judge": {
+            "enabled": True,
+            "mode": "bounded_vote",
+            "provider": "hermes_default",
+            "model": None,
+            "temperature": 0,
+            "timeout_ms": 8000,
+            "max_tokens": 1024,
+            "max_candidates": 4,
+            "on_error": "deterministic_fallback",
+        },
+    },
 }
 
 
@@ -1300,10 +1315,10 @@ def main() -> int:
     parser.add_argument(
         "--llm-judge-preset",
         choices=sorted(LLM_JUDGE_PRESETS),
+        default="active",
         help=(
-            "Write Low-Clue Recall LLM judge config. Default is no config write; "
-            "use none for deterministic-only, report-only to reuse Hermes provider/model for reports, "
-            "or bounded-vote only after a separate review gate."
+            "Write Low-Clue Recall LLM judge config. Default active reuses Hermes provider/model "
+            "for bounded_vote; use none for deterministic-only or report-only for report-only probes."
         ),
     )
     parser.add_argument(

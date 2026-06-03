@@ -87,9 +87,10 @@ For automated host rollout, use the deployment wrapper in phases. `plan`,
 `preflight`, and `dry-run` are safe gates; `apply` writes installer changes and
 still does not restart Hermes unless `--allow-restart` and an explicit restart
 command are provided. Automated installs default `--llm-judge-preset` to
-`report-only`, which reuses the current Hermes provider/model and is checked by
-a post-install low-clue judge probe. Use `--llm-judge-preset none` to keep the
-LLM judge disabled.
+`active`, which reuses the current Hermes provider/model in bounded-vote mode
+and is checked by a post-install low-clue judge probe. Use
+`--llm-judge-preset report-only` for report-only probes, or
+`--llm-judge-preset none` to keep the LLM judge disabled.
 
 ```bash
 # Fresh open-source profile, local execution on the target.
@@ -128,6 +129,41 @@ The operational preset creates or verifies this Hermes cron set:
 Hermes owns the scheduler, transport, retry behavior, origin/local routing, and
 agent wording. Memory-OS owns the helper outputs, tokens, state transitions,
 audit, and monitor fields.
+
+## Read-Only Monitor Dashboard
+
+The repository includes a static monitor dashboard on the open-source frontend
+contract `0.0.0.0:3693`. It is a presentation surface only: it reads bounded
+snapshot evidence and has no approve/apply/send controls.
+
+Generate and serve a live snapshot:
+
+```bash
+python scripts/memory_os_monitor_dashboard_snapshot.py \
+  --hermes-home /root/.hermes \
+  --profile main \
+  --output monitor_dashboard/snapshot.generated.js
+
+python scripts/serve_memory_os_monitor_dashboard.py \
+  --host 0.0.0.0 \
+  --port 3693 \
+  --snapshot-hermes-home /root/.hermes \
+  --snapshot-profile main \
+  --snapshot-interval-seconds 60
+```
+
+Install it as a system service:
+
+```bash
+sudo python scripts/install_memory_os_monitor_dashboard_service.py \
+  --repo-root /opt/Hermes-Memory-OS \
+  --hermes-home /root/.hermes \
+  --profile main \
+  --host 0.0.0.0 \
+  --port 3693 \
+  --python-bin /usr/bin/python3 \
+  --enable
+```
 
 ## Verify
 

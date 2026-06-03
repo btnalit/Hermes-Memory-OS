@@ -32,7 +32,7 @@ def deploy_memory_os(
     hermes_home: str,
     mode: str,
     hindsight_mode: str,
-    llm_judge_preset: str = "report-only",
+    llm_judge_preset: str = "active",
     phase: str,
     profile: str,
     host: str = "",
@@ -50,8 +50,8 @@ def deploy_memory_os(
         raise SystemExit("--mode must be production-safe, test-host, or operational")
     if hindsight_mode not in {"auto", "off", "adopt", "active", "wizard"}:
         raise SystemExit("--hindsight must be auto, off, adopt, active, or wizard")
-    if llm_judge_preset not in {"none", "report-only", "bounded-vote"}:
-        raise SystemExit("--llm-judge-preset must be none, report-only, or bounded-vote")
+    if llm_judge_preset not in {"active", "none", "report-only", "bounded-vote"}:
+        raise SystemExit("--llm-judge-preset must be active, none, report-only, or bounded-vote")
 
     runner = run_command or _run_command
     repo_root = repo_root.expanduser().resolve()
@@ -732,7 +732,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hermes-home", required=True)
     parser.add_argument("--mode", choices=["production-safe", "test-host", "operational"], default="production-safe")
     parser.add_argument("--hindsight", choices=["auto", "off", "adopt", "active", "wizard"], default="auto")
-    parser.add_argument("--llm-judge-preset", choices=["none", "report-only", "bounded-vote"], default="report-only")
+    parser.add_argument("--llm-judge-preset", choices=["active", "none", "report-only", "bounded-vote"], default="active")
     parser.add_argument("--phase", choices=["plan", "preflight", "dry-run", "apply", "postcheck"], default="plan")
     parser.add_argument("--profile", choices=["fresh", "upgrade"], default="upgrade")
     parser.add_argument("--timeout", type=int, default=60)

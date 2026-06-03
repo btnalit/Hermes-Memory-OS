@@ -737,6 +737,36 @@ def test_auto_route_safe_proposal_followups_reports_limited_auto_probation_metri
     assert applied["auto_followup_actual_send_count"] == 0
 
 
+def test_auto_route_safe_proposal_followups_reports_limited_auto_idle_after_graduation(tmp_path):
+    store = _store(tmp_path)
+    for index in range(3):
+        owner_actions_module.append_audit(
+            store.roots.audit_path,
+            action="proposal_followup_auto_route_to_ops_gate",
+            status="ok",
+            target="proposal_queue",
+            details={
+                "auto_followup_routed_count": 1,
+                "actual_execute": False,
+                "policy_write_count": 0,
+            },
+        )
+
+    report = auto_route_safe_proposal_followups_to_ops_gate(store, apply=False)
+    applied = auto_route_safe_proposal_followups_to_ops_gate(store, apply=True, limit=10)
+
+    assert report["lane_mode"] == "limited_auto"
+    assert report["eligible_sample_count"] == 0
+    assert report["limited_auto_eligible"] is True
+    assert report["limited_auto_graduated"] is True
+    assert report["limited_auto_evidence_source"] == "historical_successful_routes"
+    assert report["current_auto_route_cap_per_day"] == 3
+    assert applied["auto_followup_routed_count"] == 0
+    assert applied["actual_execute"] is False
+    assert applied["auto_followup_policy_write_count"] == 0
+    assert applied["auto_followup_actual_send_count"] == 0
+
+
 def test_auto_route_safe_proposal_followups_rejects_boundary_and_apply_kind_proposals(tmp_path):
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")

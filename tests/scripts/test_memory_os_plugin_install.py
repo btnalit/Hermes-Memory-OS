@@ -844,6 +844,22 @@ def test_installer_writes_low_clue_recall_llm_judge_report_only_config(tmp_path)
     assert config["low_clue_recall"]["llm_judge"]["max_tokens"] == 1024
 
 
+def test_installer_writes_low_clue_recall_llm_judge_active_config(tmp_path):
+    report = install_plugin(
+        hermes_home=tmp_path / "home",
+        llm_judge_preset="active",
+    )
+
+    config = json.loads((tmp_path / "home" / "memory-os" / "config.json").read_text(encoding="utf-8"))
+    assert report["low_clue_recall_config_written"] is True
+    assert report["llm_judge_preset"] == "active"
+    assert config["low_clue_recall"]["enabled"] is True
+    assert config["low_clue_recall"]["preset"] == "active"
+    assert config["low_clue_recall"]["llm_judge"]["enabled"] is True
+    assert config["low_clue_recall"]["llm_judge"]["mode"] == "bounded_vote"
+    assert config["low_clue_recall"]["llm_judge"]["provider"] == "hermes_default"
+
+
 def test_test_host_install_shell_wraps_full_agent_os_install():
     script = Path("scripts/install_memory_os_test_host.sh")
     text = script.read_text(encoding="utf-8")
@@ -863,6 +879,7 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "--memory-sources-preset" in text
     assert "--llm-judge-preset" in text
     assert "--hindsight" in text
+    assert "default active reuses Hermes" in text
     assert "active enables retain/recall/reflect" in text
     assert "report-only" in text
     assert "--yes" in text

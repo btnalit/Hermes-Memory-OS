@@ -21,3 +21,5 @@ docs/public-materials-drafts/
 docs/superpowers/
 eval/reports/
 *.tmp
+monitor_dashboard/snapshot.generated.js
+monitor_dashboard/snapshot.generated.json

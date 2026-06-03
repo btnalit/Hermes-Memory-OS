@@ -4632,6 +4632,8 @@ def _healthy_owner_proposal_auto_route() -> dict:
         "proposal_kind_coverage": [],
         "full_auto_eligible": False,
         "limited_auto_eligible": False,
+        "limited_auto_graduated": False,
+        "limited_auto_evidence_source": "insufficient_evidence",
         "limited_auto_first_canary_max_auto_routes_per_day": 1,
         "limited_auto_after_successful_routes": 3,
         "limited_auto_expanded_max_auto_routes_per_day": 3,
