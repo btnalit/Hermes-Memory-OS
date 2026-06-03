@@ -81,6 +81,21 @@ def _cron_adapter_probe_result():
     }
 
 
+def _deployment_manifest_result():
+    return {
+        "exit_code": 0,
+        "stdout": json.dumps(
+            {
+                "schema_version": "memory-os.deployment_runtime_manifest.v0",
+                "status": "present",
+                "deployed_head": "abc123",
+                "deployed_at": "2026-06-03T01:00:00Z",
+            }
+        ),
+        "stderr": "",
+    }
+
+
 def _probe_json(*, status="ok", boundaries=None):
     return {
         "json": {
@@ -221,6 +236,82 @@ def test_plan_phase_allows_hindsight_active_cutover(tmp_path):
     assert "--hindsight active" in rendered
 
 
+def test_plan_phase_includes_deployment_runtime_manifest_commands(tmp_path):
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="production-safe",
+        hindsight_mode="auto",
+        phase="plan",
+        profile="upgrade",
+    )
+    commands = report["commands"]
+
+    assert "deployment_manifest_write" in commands
+    assert "deployment_manifest_status" in commands
+    assert "deployment-manifest write" in " ".join(commands["deployment_manifest_write"])
+    assert "--install-profile upgrade" in " ".join(commands["deployment_manifest_write"])
+
+
+def test_apply_phase_writes_and_verifies_deployment_runtime_manifest(tmp_path):
+    calls: list[str] = []
+
+    def fake_runner(argv, *, host=None, timeout=30):
+        command = " ".join(argv)
+        calls.append(command)
+        if "memory_os_upgrade_compat_check.py" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.hermes_upgrade_compat.v0",
+                        "classification": {"pass": [{"code": "memory_provider_active"}], "warn": [], "fail": []},
+                    }
+                ),
+                "stderr": "",
+            }
+        if "install_memory_os.sh" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps({"schema_version": "memory-os.install.v0", "dry_run": "--dry-run" in command}),
+                "stderr": "",
+            }
+        if "deployment-manifest write" in command or "deployment-manifest status" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.deployment_runtime_manifest.v0",
+                        "status": "present",
+                        "deployed_head": "abc123",
+                        "deployed_at": "2026-06-03T01:00:00Z",
+                    }
+                ),
+                "stderr": "",
+            }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
+        raise AssertionError(f"unexpected command: {command}")
+
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="production-safe",
+        hindsight_mode="auto",
+        phase="apply",
+        profile="upgrade",
+        run_command=fake_runner,
+    )
+
+    assert report["deployment_manifest_write"]["status"] == "pass"
+    assert report["deployment_manifest_status"]["status"] == "pass"
+    assert any("deployment-manifest write" in call for call in calls)
+
+
 def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
     def fake_runner(argv, *, host=None, timeout=30):
         command = " ".join(argv)
@@ -243,6 +334,8 @@ def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -322,6 +415,8 @@ def test_fresh_profile_allows_preinstall_provider_mismatch_but_requires_postchec
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -416,6 +511,8 @@ def test_fresh_profile_allows_missing_memory_os_shell_before_install(tmp_path):
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -483,6 +580,8 @@ def test_upgrade_profile_allows_preinstall_hindsight_status_gap_but_requires_pos
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -566,6 +665,8 @@ def test_upgrade_profile_allows_preinstall_fixable_shell_doctor_index_mismatch(t
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -633,6 +734,8 @@ def test_upgrade_profile_allows_preinstall_shell_doctor_gap_when_postcheck_repai
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -710,6 +813,8 @@ def test_upgrade_profile_allows_preinstall_provider_bank_evidence_gap_but_requir
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -786,6 +891,8 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(
@@ -801,7 +908,11 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
     rendered = render_deploy_plan(report)
 
     assert report["postcheck"]["status"] == "pass"
-    assert "classification: pass=postcheck_pass,llm_judge_probe_pass,cron_adapter_probe_pass warn=[] fail=[]" in rendered
+    assert (
+        "classification: "
+        "pass=postcheck_pass,deployment_manifest_status_pass,llm_judge_probe_pass,cron_adapter_probe_pass "
+        "warn=[] fail=[]"
+    ) in rendered
     assert "postcheck_status=pass" in rendered
     assert "llm_judge_probe_status=pass" in rendered
 
@@ -840,6 +951,8 @@ def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
             return _cron_adapter_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
 
     report = deploy_memory_os(

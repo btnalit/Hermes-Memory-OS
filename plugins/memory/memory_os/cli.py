@@ -58,6 +58,7 @@ from .crystallized import (
     is_active_crystallized_frontmatter,
     read_candidate_queue,
 )
+from .deployment_runtime_manifest import read_deployment_runtime_manifest, write_deployment_runtime_manifest
 from .host_capability_probe import probe_host_capabilities
 from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, HindsightHttpClient
 from .index import MemoryOSIndex
@@ -1061,6 +1062,20 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     cognitive_loop_run_once.add_argument("--test-host", action="store_true")
     cognitive_loop_run_once.add_argument("--apply", action="store_true")
     cognitive_loop_run_once.add_argument("--max-events", type=int, default=100)
+    deployment_manifest_parser = subs.add_parser("deployment-manifest")
+    deployment_manifest_subs = deployment_manifest_parser.add_subparsers(
+        dest="deployment_manifest_command",
+        required=True,
+    )
+    deployment_manifest_subs.add_parser("status")
+    deployment_manifest_write = deployment_manifest_subs.add_parser("write")
+    deployment_manifest_write.add_argument("--deployed-head", required=True)
+    deployment_manifest_write.add_argument("--deployed-at", default="")
+    deployment_manifest_write.add_argument("--active-runtime-path", required=True)
+    deployment_manifest_write.add_argument("--active-runtime-version", required=True)
+    deployment_manifest_write.add_argument("--install-profile", required=True)
+    deployment_manifest_write.add_argument("--deploy-tool-version", default="memory-os.deploy.v0")
+    deployment_manifest_write.add_argument("--source-repo-head", required=True)
     host_probe_parser = subs.add_parser("host-probe")
     host_probe_parser.add_argument("--json", action="store_true")
     signal_sources_parser = subs.add_parser("signal-sources")
@@ -1189,6 +1204,24 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _eval_command(args)
     if command == "cognitive-loop":
         return _cognitive_loop_command(args, store)
+    if command == "deployment-manifest":
+        if args.deployment_manifest_command == "status":
+            print(json.dumps(read_deployment_runtime_manifest(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        if args.deployment_manifest_command == "write":
+            report = write_deployment_runtime_manifest(
+                store.roots,
+                deployed_head=str(args.deployed_head or ""),
+                deployed_at=str(args.deployed_at or ""),
+                active_runtime_path=str(args.active_runtime_path or ""),
+                active_runtime_version=str(args.active_runtime_version or ""),
+                install_profile=str(args.install_profile or ""),
+                deploy_tool_version=str(args.deploy_tool_version or ""),
+                source_repo_head=str(args.source_repo_head or ""),
+            )
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        return 2
     if command == "host-probe":
         print(json.dumps(probe_host_capabilities(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
         return 0

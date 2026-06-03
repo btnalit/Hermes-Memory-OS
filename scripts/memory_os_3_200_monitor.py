@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2640,7 +2641,7 @@ def _classify_left_brain_signal_weaving(
         return
 
     host_probe = snapshot.get("host_capability_probe") if isinstance(snapshot.get("host_capability_probe"), dict) else {}
-    if host_probe.get("schema_version") == "memory-os.host_capability_probe.v0":
+    if host_probe.get("schema_version") in {"memory-os.host_capability_probe.v0", "memory-os.host_capability_probe.v2"}:
         if host_probe.get("raw_body_included") is True or host_probe.get("secret_values_included") is True:
             fail.append({"code": "host_capability_probe_sensitive_payload"})
         else:
@@ -2650,6 +2651,24 @@ def _classify_left_brain_signal_weaving(
                     "capability_count": len(host_probe.get("capabilities") or {}),
                 }
             )
+            deployment_manifest = (
+                host_probe.get("deployment_runtime_manifest")
+                if isinstance(host_probe.get("deployment_runtime_manifest"), dict)
+                else {}
+            )
+            if deployment_manifest.get("schema_version") == "memory-os.deployment_runtime_manifest.v0":
+                if deployment_manifest.get("status") == "present":
+                    passed.append(
+                        {
+                            "code": "deployment_runtime_manifest_present",
+                            "deployed_head": deployment_manifest.get("deployed_head"),
+                            "deployed_at": deployment_manifest.get("deployed_at"),
+                        }
+                    )
+                elif clean_host:
+                    warn.append({"code": "deployment_runtime_manifest_missing", "value": deployment_manifest})
+                else:
+                    fail.append({"code": "deployment_runtime_manifest_missing", "value": deployment_manifest})
     elif clean_host:
         warn.append({"code": "host_capability_probe_missing", "value": host_probe})
     else:
@@ -2690,6 +2709,10 @@ def _classify_left_brain_signal_weaving(
 
     projection = snapshot.get("memory_projection") if isinstance(snapshot.get("memory_projection"), dict) else {}
     if projection.get("schema_version") == "memory-os.memory_projection_status.v0":
+        projection_freshness_failed = _memory_projection_stale_after_deploy(host_probe, projection)
+        if projection_freshness_failed:
+            target = warn if clean_host else fail
+            target.append(projection_freshness_failed)
         if projection.get("raw_body_included") is True:
             fail.append({"code": "memory_projection_raw_body_included"})
         boundary_true_count = int(projection.get("boundary_true_count") or 0)
@@ -2720,10 +2743,15 @@ def _classify_left_brain_signal_weaving(
             and not source_scope_missing_count
             and not duplicate_source_hash_count
             and not duplicate_dedup_key_count
+            and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )
         if projection_ok:
-            passed.append({"code": "memory_projection_online", "projection_count": projection_count})
+            pass_item = {"code": "memory_projection_online", "projection_count": projection_count}
+            freshness_pass = _memory_projection_fresh_after_deploy(host_probe, projection)
+            if freshness_pass:
+                pass_item.update(freshness_pass)
+            passed.append(pass_item)
         elif projection_count <= 0:
             target = warn if clean_host else fail
             target.append({"code": "memory_projection_missing_or_empty", "value": projection})
@@ -2755,6 +2783,72 @@ def _classify_left_brain_signal_weaving(
         warn.append({"code": "left_brain_advisor_status_missing", "value": advisor})
     else:
         fail.append({"code": "left_brain_advisor_status_missing", "value": advisor})
+
+
+def _memory_projection_stale_after_deploy(
+    host_probe: dict[str, Any],
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = (
+        host_probe.get("deployment_runtime_manifest")
+        if isinstance(host_probe.get("deployment_runtime_manifest"), dict)
+        else {}
+    )
+    if manifest.get("schema_version") != "memory-os.deployment_runtime_manifest.v0" or manifest.get("status") != "present":
+        return {}
+    deployed_at = _parse_utc_timestamp(str(manifest.get("deployed_at") or ""))
+    if deployed_at is None:
+        return {}
+    latest_created_at = str(projection.get("latest_created_at") or "")
+    latest_at = _parse_utc_timestamp(latest_created_at)
+    if latest_at is None:
+        return {
+            "code": "memory_projection_freshness_missing",
+            "deployed_at": manifest.get("deployed_at"),
+            "latest_created_at": latest_created_at,
+        }
+    if latest_at < deployed_at:
+        return {
+            "code": "memory_projection_stale_after_deploy",
+            "deployed_at": manifest.get("deployed_at"),
+            "latest_created_at": latest_created_at,
+            "deployed_head": manifest.get("deployed_head"),
+        }
+    return {}
+
+
+def _memory_projection_fresh_after_deploy(
+    host_probe: dict[str, Any],
+    projection: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = (
+        host_probe.get("deployment_runtime_manifest")
+        if isinstance(host_probe.get("deployment_runtime_manifest"), dict)
+        else {}
+    )
+    if manifest.get("schema_version") != "memory-os.deployment_runtime_manifest.v0" or manifest.get("status") != "present":
+        return {}
+    deployed_at = _parse_utc_timestamp(str(manifest.get("deployed_at") or ""))
+    latest_at = _parse_utc_timestamp(str(projection.get("latest_created_at") or ""))
+    if deployed_at is None or latest_at is None or latest_at < deployed_at:
+        return {}
+    return {
+        "fresh_after_deploy": True,
+        "deployed_head": manifest.get("deployed_head"),
+        "latest_created_at": projection.get("latest_created_at"),
+    }
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _left_brain_signal_weaving_expected(snapshot: dict[str, Any]) -> bool:

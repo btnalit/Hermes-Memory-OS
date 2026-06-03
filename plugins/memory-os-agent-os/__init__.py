@@ -30,6 +30,7 @@ _ALLOWED_ALIASES = {
     "modules",
     "eval",
     "cognitive-loop",
+    "deployment-manifest",
     "host-probe",
     "signal-sources",
     "projection",
@@ -363,6 +364,20 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     cognitive_loop_run_once.add_argument("--test-host", action="store_true")
     cognitive_loop_run_once.add_argument("--dry-run", action="store_true")
     cognitive_loop_run_once.add_argument("--apply", action="store_true")
+    deployment_manifest_parser = subs.add_parser("deployment-manifest")
+    deployment_manifest_subs = deployment_manifest_parser.add_subparsers(
+        dest="deployment_manifest_command",
+        required=True,
+    )
+    deployment_manifest_subs.add_parser("status")
+    deployment_manifest_write = deployment_manifest_subs.add_parser("write")
+    deployment_manifest_write.add_argument("--deployed-head", required=True)
+    deployment_manifest_write.add_argument("--deployed-at", default="")
+    deployment_manifest_write.add_argument("--active-runtime-path", required=True)
+    deployment_manifest_write.add_argument("--active-runtime-version", required=True)
+    deployment_manifest_write.add_argument("--install-profile", required=True)
+    deployment_manifest_write.add_argument("--deploy-tool-version", default="memory-os.deploy.v0")
+    deployment_manifest_write.add_argument("--source-repo-head", required=True)
     host_probe_parser = subs.add_parser("host-probe")
     host_probe_parser.add_argument("--json", action="store_true")
     signal_sources_parser = subs.add_parser("signal-sources")

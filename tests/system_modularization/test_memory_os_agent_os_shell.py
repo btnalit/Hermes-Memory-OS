@@ -442,6 +442,9 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     host_probe_args = parser.parse_args(["host-probe", "--json"])
     assert host_probe_args.agent_os_command == "host-probe"
     assert host_probe_args.json is True
+    manifest_args = parser.parse_args(["deployment-manifest", "status"])
+    assert manifest_args.agent_os_command == "deployment-manifest"
+    assert manifest_args.deployment_manifest_command == "status"
     signal_sources_args = parser.parse_args(["signal-sources", "--json"])
     assert signal_sources_args.agent_os_command == "signal-sources"
     assert signal_sources_args.json is True

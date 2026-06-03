@@ -13,6 +13,7 @@ from typing import Any
 
 from .config import load_config
 from .cron_registry import memory_os_cron_specs
+from .deployment_runtime_manifest import read_deployment_runtime_manifest
 from .execution_gate import execution_gate_records_path, execution_gate_summary
 from .hermes_cron_adapter import HermesCronAdapter
 from .owner_actions import resolve_owner_review_channel
@@ -20,7 +21,7 @@ from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
 
-HOST_CAPABILITY_PROBE_SCHEMA_VERSION = "memory-os.host_capability_probe.v0"
+HOST_CAPABILITY_PROBE_SCHEMA_VERSION = "memory-os.host_capability_probe.v2"
 
 
 def probe_host_capabilities(
@@ -33,8 +34,10 @@ def probe_host_capabilities(
 
     now = datetime.now(timezone.utc)
     config = _safe_config_shape(load_config(roots.hermes_home))
+    deployment_manifest = read_deployment_runtime_manifest(roots)
     capabilities = {
         "memory_os_core": _path_capability(roots.memory_os_root),
+        "deployment_runtime_manifest": _deployment_manifest_capability(deployment_manifest),
         "execution_gate": _execution_gate_capability(roots),
         "session_mirror": _path_capability(roots.memory_os_root / "system" / "session_mirror_state.json"),
         "owner_channel": _owner_channel_capability(roots),
@@ -60,12 +63,29 @@ def probe_host_capabilities(
         "hermes_home_ref": str(roots.hermes_home),
         "memory_os_root_ref": str(roots.memory_os_root),
         "config_shape": config,
+        "deployment_runtime_manifest": deployment_manifest,
         "capabilities": capabilities,
         "raw_body_included": False,
         "secret_values_included": False,
     }
     report["capability_snapshot_id"] = _snapshot_id(report)
     return report
+
+
+def _deployment_manifest_capability(manifest: dict[str, Any]) -> dict[str, Any]:
+    status = str(manifest.get("status") or "missing")
+    return {
+        "status": status,
+        "schema_version": str(manifest.get("schema_version") or ""),
+        "path_ref": str(manifest.get("path_ref") or ""),
+        "deployed_head": str(manifest.get("deployed_head") or ""),
+        "deployed_at": str(manifest.get("deployed_at") or ""),
+        "active_runtime_path": str(manifest.get("active_runtime_path") or ""),
+        "active_runtime_version": str(manifest.get("active_runtime_version") or ""),
+        "install_profile": str(manifest.get("install_profile") or ""),
+        "freshness_status": "present" if status == "present" else status,
+        "raw_body_included": False,
+    }
 
 
 def _path_capability(path: Path) -> dict[str, Any]:

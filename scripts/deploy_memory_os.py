@@ -57,12 +57,15 @@ def deploy_memory_os(
     repo_root = repo_root.expanduser().resolve()
     command_repo_root = remote_repo_root or str(repo_root)
     effective_python_bin = python_bin or ("python3" if host else "python")
+    source_repo_head = _repo_head(repo_root)
     commands = _build_commands(
         repo_root=command_repo_root,
         hermes_home=hermes_home,
         mode=mode,
         hindsight_mode=hindsight_mode,
         llm_judge_preset=llm_judge_preset,
+        profile=profile,
+        source_repo_head=source_repo_head,
         host=host,
         python_bin=effective_python_bin,
         allow_restart=allow_restart,
@@ -83,6 +86,8 @@ def deploy_memory_os(
         "dry_run": {"status": "not_run"},
         "apply": {"status": "not_run"},
         "postcheck": {"status": "not_run"},
+        "deployment_manifest_write": {"status": "not_run"},
+        "deployment_manifest_status": {"status": "not_run"},
         "llm_judge_probe": {"status": "not_run"},
         "cron_adapter_probe": {"status": "not_run"},
         "rollback_hint": "rerun installer with previous config backup or disable substrate_providers.hindsight.enabled",
@@ -106,6 +111,12 @@ def deploy_memory_os(
             enabled=llm_judge_preset != "none",
         )
         report["cron_adapter_probe"] = _run_cron_adapter_probe(commands, runner=runner, host=host, timeout=timeout)
+        report["deployment_manifest_status"] = _run_deployment_manifest_status(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+        )
         return report
 
     preflight = _run_json(
@@ -151,6 +162,12 @@ def deploy_memory_os(
             report["restart"] = _redact_process_result(
                 runner(commands["restart"], host=host or None, timeout=timeout)
             )
+        report["deployment_manifest_write"] = _run_deployment_manifest_write(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+        )
         postcheck = _run_json(
             commands["compat"],
             runner=runner,
@@ -167,6 +184,12 @@ def deploy_memory_os(
             enabled=llm_judge_preset != "none",
         )
         report["cron_adapter_probe"] = _run_cron_adapter_probe(commands, runner=runner, host=host, timeout=timeout)
+        report["deployment_manifest_status"] = _run_deployment_manifest_status(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+        )
         return report
 
     return report
@@ -179,6 +202,8 @@ def _build_commands(
     mode: str,
     hindsight_mode: str,
     llm_judge_preset: str,
+    profile: str,
+    source_repo_head: str,
     host: str,
     python_bin: str,
     allow_restart: bool,
@@ -228,6 +253,30 @@ def _build_commands(
             "--output",
             "json",
         ],
+        "deployment_manifest_write": [
+            "hermes",
+            "memory-os-agent-os",
+            "deployment-manifest",
+            "write",
+            "--deployed-head",
+            source_repo_head,
+            "--active-runtime-path",
+            repo,
+            "--active-runtime-version",
+            source_repo_head,
+            "--install-profile",
+            profile,
+            "--deploy-tool-version",
+            "memory-os.deploy.v0",
+            "--source-repo-head",
+            source_repo_head,
+        ],
+        "deployment_manifest_status": [
+            "hermes",
+            "memory-os-agent-os",
+            "deployment-manifest",
+            "status",
+        ],
     }
     if allow_restart and restart_command:
         commands["restart"] = shlex.split(restart_command)
@@ -258,6 +307,24 @@ def _run_command(argv: list[str], *, host: str | None = None, timeout: int = 60)
     del host
     completed = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
     return {"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
+
+
+def _repo_head(repo_root: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    head = completed.stdout.strip()
+    if completed.returncode != 0 or not head:
+        return "unknown"
+    return head
 
 
 def _redact_process_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -446,6 +513,57 @@ def _classify_cron_adapter_probe(result: dict[str, Any]) -> dict[str, Any]:
     return {"status": "pass", "probe": data}
 
 
+def _run_deployment_manifest_write(
+    commands: dict[str, list[str]],
+    *,
+    runner: Runner,
+    host: str,
+    timeout: int,
+) -> dict[str, Any]:
+    result = _run_json(
+        commands["deployment_manifest_write"],
+        runner=runner,
+        host=host,
+        timeout=timeout,
+        expected_schema="memory-os.deployment_runtime_manifest.v0",
+    )
+    return _classify_deployment_manifest(result, action="write")
+
+
+def _run_deployment_manifest_status(
+    commands: dict[str, list[str]],
+    *,
+    runner: Runner,
+    host: str,
+    timeout: int,
+) -> dict[str, Any]:
+    result = _run_json(
+        commands["deployment_manifest_status"],
+        runner=runner,
+        host=host,
+        timeout=timeout,
+        expected_schema="memory-os.deployment_runtime_manifest.v0",
+    )
+    return _classify_deployment_manifest(result, action="status")
+
+
+def _classify_deployment_manifest(result: dict[str, Any], *, action: str) -> dict[str, Any]:
+    if int(result.get("exit_code", 1)) != 0:
+        return {"status": "fail", "reason": f"deployment_manifest_{action}_command_failed", "manifest": result}
+    data = result.get("json")
+    if not isinstance(data, dict) or data.get("schema_version") != "memory-os.deployment_runtime_manifest.v0":
+        return {"status": "fail", "reason": f"deployment_manifest_{action}_json_invalid", "manifest": result}
+    if data.get("status") != "present":
+        return {
+            "status": "fail" if action == "write" else "warn",
+            "reason": f"deployment_manifest_{action}_{data.get('status') or 'missing'}",
+            "manifest": data,
+        }
+    if not str(data.get("deployed_head") or "") or not str(data.get("deployed_at") or ""):
+        return {"status": "fail", "reason": f"deployment_manifest_{action}_incomplete", "manifest": data}
+    return {"status": "pass", "manifest": data}
+
+
 def _classification_failures(result: dict[str, Any]) -> list[dict[str, Any]]:
     data = result.get("json")
     if not isinstance(data, dict):
@@ -527,7 +645,16 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
     fail: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     passed: list[dict[str, Any]] = []
-    for key in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe", "cron_adapter_probe"):
+    for key in (
+        "preflight",
+        "dry_run",
+        "apply",
+        "postcheck",
+        "deployment_manifest_write",
+        "deployment_manifest_status",
+        "llm_judge_probe",
+        "cron_adapter_probe",
+    ):
         section = report.get(key) if isinstance(report.get(key), dict) else {}
         status = section.get("status")
         if status in {"pass", "applied"}:
@@ -560,7 +687,16 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
             f"warn={_codes(classification['warn']) or '[]'} "
             f"fail={_codes(classification['fail']) or '[]'}"
         )
-    for name in ("preflight", "dry_run", "apply", "postcheck", "llm_judge_probe", "cron_adapter_probe"):
+    for name in (
+        "preflight",
+        "dry_run",
+        "apply",
+        "postcheck",
+        "deployment_manifest_write",
+        "deployment_manifest_status",
+        "llm_judge_probe",
+        "cron_adapter_probe",
+    ):
         section = report.get(name) if isinstance(report.get(name), dict) else {}
         status = section.get("status")
         if status and status != "not_run":

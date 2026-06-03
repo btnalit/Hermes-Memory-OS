@@ -373,6 +373,16 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert any(item["code"] == "left_brain_advisor_boundary_true" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_projection_artifact_is_stale_after_deploy():
+    snapshot = _healthy_snapshot()
+    snapshot["host_capability_probe"]["deployment_runtime_manifest"]["deployed_at"] = "2026-06-03T01:00:00Z"
+    snapshot["memory_projection"]["latest_created_at"] = "2026-06-03T00:59:00Z"
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_stale_after_deploy" for item in classification["fail"])
+
+
 def test_classify_snapshot_clean_host_warns_on_missing_left_brain_signal_sources():
     snapshot = _healthy_snapshot()
     snapshot["monitor_profile"] = "clean_host"
@@ -3917,8 +3927,18 @@ def _healthy_snapshot() -> dict:
 
 def _healthy_host_capability_probe() -> dict:
     return {
-        "schema_version": "memory-os.host_capability_probe.v0",
-        "capabilities": {"memory_os_core": {"status": "present"}, "execution_gate": {"status": "present"}},
+        "schema_version": "memory-os.host_capability_probe.v2",
+        "capabilities": {
+            "memory_os_core": {"status": "present"},
+            "execution_gate": {"status": "present"},
+            "deployment_runtime_manifest": {"status": "present", "deployed_head": "abc123"},
+        },
+        "deployment_runtime_manifest": {
+            "schema_version": "memory-os.deployment_runtime_manifest.v0",
+            "status": "present",
+            "deployed_head": "abc123",
+            "deployed_at": "2026-06-03T01:00:00Z",
+        },
         "raw_body_included": False,
         "secret_values_included": False,
     }
@@ -3940,6 +3960,7 @@ def _healthy_memory_projection() -> dict:
         "schema_version": "memory-os.memory_projection_status.v0",
         "status": "ok",
         "projection_count": 14,
+        "latest_created_at": "2026-06-03T01:01:00Z",
         "boundary_true_count": 0,
         "source_scope_missing_count": 0,
         "duplicate_source_hash_count": 0,
