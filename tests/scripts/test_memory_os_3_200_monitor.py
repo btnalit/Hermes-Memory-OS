@@ -1562,7 +1562,8 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
 
     snapshot = _healthy_snapshot()
     snapshot["owner_review_proposal_auto_route"]["full_auto_eligible"] = True
-    snapshot["owner_review_proposal_auto_route"]["eligible_sample_count"] = 3
+    snapshot["owner_review_proposal_auto_route"]["eligible_sample_count"] = 20
+    snapshot["owner_review_proposal_auto_route"]["shadow_decision_count"] = 3
     classification = classify_snapshot(snapshot)
 
     assert classification["status"] == "FAIL"

@@ -672,9 +672,11 @@ def test_auto_route_safe_proposal_followups_to_ops_gate_without_owner_action(tmp
     assert dry_run["dry_run"] is True
     assert dry_run["eligible_count"] == 1
     assert dry_run["lane_mode"] == "live_shadow_calibration"
-    assert dry_run["shadow_decision_count"] == 1
-    assert dry_run["owner_agreement_rate"] == 1.0
-    assert dry_run["wilson_95_lower_bound"] > 0
+    assert dry_run["shadow_decision_count"] == 0
+    assert dry_run["owner_agreement_count"] == 0
+    assert dry_run["owner_disagreement_count"] == 0
+    assert dry_run["owner_agreement_rate"] == 0.0
+    assert dry_run["wilson_95_lower_bound"] == 0.0
     assert dry_run["continue_shadow_comparison"] is True
     assert dry_run["auto_demote_on_first_boundary_or_owner_disagreement"] is True
     assert dry_run["limited_auto_first_canary_max_auto_routes_per_day"] == 1
@@ -715,17 +717,32 @@ def test_auto_route_safe_proposal_followups_reports_limited_auto_probation_metri
     store = _store(tmp_path)
     proposal_queue = ProposalQueueModule(tmp_path, profile="main")
     for index in range(3):
-        proposal_queue.create_candidate(
+        sample = proposal_queue.create_candidate(
             store=store,
             title=f"Report-only process motion {index}",
             body="Bounded proposal",
         )
+        apply_owner_action(
+            store,
+            action_type="approve_proposal",
+            target=f"proposal:{sample['candidate_id']}",
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+    proposal_queue.create_candidate(
+        store=store,
+        title="Report-only process motion live",
+        body="Bounded proposal",
+    )
 
     report = auto_route_safe_proposal_followups_to_ops_gate(store, apply=False)
     applied = auto_route_safe_proposal_followups_to_ops_gate(store, apply=True, limit=10)
 
     assert report["lane_mode"] == "limited_auto"
-    assert report["eligible_sample_count"] == 3
+    assert report["eligible_sample_count"] == 1
+    assert report["shadow_decision_count"] == 3
+    assert report["owner_agreement_count"] == 3
     assert report["limited_auto_eligible"] is True
     assert report["full_auto_eligible"] is False
     assert report["owner_disagreement_count"] == 0
@@ -735,6 +752,41 @@ def test_auto_route_safe_proposal_followups_reports_limited_auto_probation_metri
     assert applied["auto_followup_actual_execute_count"] == 0
     assert applied["auto_followup_policy_write_count"] == 0
     assert applied["auto_followup_actual_send_count"] == 0
+
+
+def test_auto_route_safe_proposal_followups_full_auto_requires_wilson_evidence(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    for index in range(20):
+        sample = proposal_queue.create_candidate(
+            store=store,
+            title=f"Report-only process motion sample {index}",
+            body="Bounded proposal",
+        )
+        action = "reject_proposal" if index >= 18 else "approve_proposal"
+        apply_owner_action(
+            store,
+            action_type=action,
+            target=f"proposal:{sample['candidate_id']}",
+            owner_id="owner",
+            channel="cli",
+            apply=True,
+        )
+    proposal_queue.create_candidate(
+        store=store,
+        title="Report-only process motion live",
+        body="Bounded proposal",
+    )
+
+    report = auto_route_safe_proposal_followups_to_ops_gate(store, apply=False)
+
+    assert report["shadow_decision_count"] == 20
+    assert report["owner_agreement_count"] == 18
+    assert report["owner_disagreement_count"] == 2
+    assert report["owner_agreement_rate"] == 0.9
+    assert report["wilson_95_lower_bound"] < report["wilson_95_lower_bound_required"]
+    assert report["full_auto_eligible"] is False
+    assert report["lane_mode"] == "live_shadow_calibration"
 
 
 def test_auto_route_safe_proposal_followups_reports_limited_auto_idle_after_graduation(tmp_path):

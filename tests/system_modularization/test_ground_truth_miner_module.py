@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -119,3 +120,43 @@ def test_ground_truth_miner_retracts_label_without_deleting_record(tmp_path):
     assert labels[0]["retraction_reason"] == "crystallized_regression"
     assert len([line for line in module.labels_path.read_text(encoding="utf-8").splitlines() if line.strip()]) == 2
     assert "label_retracted" in module.runs_path.read_text(encoding="utf-8")
+
+
+def test_ground_truth_miner_expires_ttl_labels_from_active_read_model(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="main"))
+    store.initialize()
+    module = GroundTruthMinerModule(tmp_path, profile="main")
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    module.labels_path.parent.mkdir(parents=True, exist_ok=True)
+    module.labels_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.ground_truth_label.v0",
+                "label_id": "gt_label_expired",
+                "profile": "main",
+                "subject_ref": "crystallized_candidate:cand_expired",
+                "source_scope_ref": "crystallized_candidate:cand_expired",
+                "target_id": "cand_expired",
+                "label_kind": "owner_approved_candidate",
+                "label_state": "active",
+                "retractable": True,
+                "ttl_days": 90,
+                "expires_at": expired_at,
+                "actual_route_score_write": False,
+                "hindsight_write": False,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert module.read_labels() == []
+    all_labels = module.read_labels(include_expired=True)
+    status = module.status()
+
+    assert all_labels[0]["label_state"] == "expired"
+    assert all_labels[0]["expired"] is True
+    assert status["active_label_count"] == 0
+    assert status["expired_label_count"] == 1

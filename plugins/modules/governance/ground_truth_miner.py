@@ -74,8 +74,9 @@ class GroundTruthMinerModule:
         return self.module_root / "runs.jsonl"
 
     def status(self) -> dict[str, Any]:
-        labels = self.read_labels()
+        labels = self.read_labels(include_expired=True)
         runs = _read_jsonl(self.runs_path)
+        counts = _label_state_counts(labels)
         return {
             "schema_version": "hermes.ground_truth_miner_status.v0",
             "module": "ground_truth_miner",
@@ -83,8 +84,9 @@ class GroundTruthMinerModule:
             "status": "ok" if labels or runs else "missing",
             "label_count": len(labels),
             "run_count": len(runs),
-            "active_label_count": sum(1 for item in labels if item.get("label_state") == "active"),
-            "retracted_label_count": sum(1 for item in labels if item.get("label_state") == "retracted"),
+            "active_label_count": counts["active_label_count"],
+            "expired_label_count": counts["expired_label_count"],
+            "retracted_label_count": counts["retracted_label_count"],
             "actual_send": False,
             "actual_execute": False,
             "score_live_applied": False,
@@ -146,6 +148,8 @@ class GroundTruthMinerModule:
                 expected_scope_hash=scope_hash,
             )
             if resolution.get("status") != "valid":
+                labels = self.read_labels(include_expired=True)
+                counts = _label_state_counts(labels)
                 return {
                     "schema_version": "hermes.ground_truth_miner_result.v0",
                     "module": "ground_truth_miner",
@@ -157,11 +161,10 @@ class GroundTruthMinerModule:
                     "execution_envelope_id": str(execution_envelope_id or ""),
                     "execution_gate_resolution": resolution,
                     "label_count": 0,
-                    "total_label_count": len(self.read_labels()),
-                    "active_label_count": sum(1 for item in self.read_labels() if item.get("label_state") == "active"),
-                    "retracted_label_count": sum(
-                        1 for item in self.read_labels() if item.get("label_state") == "retracted"
-                    ),
+                    "total_label_count": len(labels),
+                    "active_label_count": counts["active_label_count"],
+                    "expired_label_count": counts["expired_label_count"],
+                    "retracted_label_count": counts["retracted_label_count"],
                     "actual_send": False,
                     "actual_execute": False,
                     "actual_policy_write": False,
@@ -173,7 +176,7 @@ class GroundTruthMinerModule:
                     "route_live_applied": False,
                     "boundary": _false_boundary(),
                 }
-        existing = {str(item.get("label_id") or ""): item for item in self.read_labels()}
+        existing = {str(item.get("label_id") or ""): item for item in self.read_labels(include_expired=True)}
         generated = []
         for entry in audit_entries:
             label = self._label_from_audit(entry)
@@ -195,7 +198,8 @@ class GroundTruthMinerModule:
                 )
             else:
                 _append_jsonl(self.labels_path, label)
-        labels = list(existing.values())
+        labels = [_effective_label(item) for item in existing.values()]
+        counts = _label_state_counts(labels)
         result = {
             "schema_version": "hermes.ground_truth_miner_result.v0",
             "module": "ground_truth_miner",
@@ -210,8 +214,9 @@ class GroundTruthMinerModule:
             "scope_hash": scope_hash,
             "label_count": len(generated),
             "total_label_count": len(labels),
-            "active_label_count": sum(1 for item in labels if item.get("label_state") == "active"),
-            "retracted_label_count": sum(1 for item in labels if item.get("label_state") == "retracted"),
+            "active_label_count": counts["active_label_count"],
+            "expired_label_count": counts["expired_label_count"],
+            "retracted_label_count": counts["retracted_label_count"],
             "actual_send": False,
             "actual_execute": False,
             "actual_policy_write": False,
@@ -257,7 +262,7 @@ class GroundTruthMinerModule:
         return result
 
     def retract_label(self, label_id: str, *, reason: str) -> dict[str, Any]:
-        labels = self.read_labels()
+        labels = self.read_labels(include_expired=True)
         current = next((label for label in labels if str(label.get("label_id") or "") == label_id), None)
         found = current is not None
         if current:
@@ -291,13 +296,16 @@ class GroundTruthMinerModule:
         _append_jsonl(self.runs_path, result)
         return result
 
-    def read_labels(self) -> list[dict[str, Any]]:
+    def read_labels(self, *, include_expired: bool = False) -> list[dict[str, Any]]:
         latest: dict[str, dict[str, Any]] = {}
         for record in _read_jsonl(self.labels_path):
             label_id = str(record.get("label_id") or "")
             if label_id:
                 latest[label_id] = record
-        return list(latest.values())
+        labels = [_effective_label(item) for item in latest.values()]
+        if not include_expired:
+            labels = [item for item in labels if item.get("label_state") != "expired"]
+        return labels
 
     def _label_from_audit(self, entry: dict[str, Any]) -> dict[str, Any] | None:
         if entry.get("action") != "owner_action_reply_processed" or entry.get("status") != "ok":
@@ -355,6 +363,42 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _effective_label(record: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    effective = dict(record)
+    if str(effective.get("label_state") or "") == "active" and _label_expired(effective, now=now):
+        effective["label_state"] = "expired"
+        effective["expired"] = True
+    return effective
+
+
+def _label_expired(record: dict[str, Any], *, now: datetime | None = None) -> bool:
+    expires_at = _parse_time(str(record.get("expires_at") or ""))
+    if expires_at is None:
+        return False
+    current = now or datetime.now(timezone.utc)
+    return expires_at <= current
+
+
+def _parse_time(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _label_state_counts(labels: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "active_label_count": sum(1 for item in labels if item.get("label_state") == "active"),
+        "expired_label_count": sum(1 for item in labels if item.get("label_state") == "expired"),
+        "retracted_label_count": sum(1 for item in labels if item.get("label_state") == "retracted"),
+    }
 
 
 def _false_boundary() -> dict[str, bool]:

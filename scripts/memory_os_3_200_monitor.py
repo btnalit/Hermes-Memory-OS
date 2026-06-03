@@ -2252,12 +2252,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
             if proposal_auto_route.get("full_auto_eligible") is True and int(
-                proposal_auto_route.get("eligible_sample_count") or 0
+                proposal_auto_route.get("shadow_decision_count") or 0
             ) < 20:
                 fail.append(
                     {
                         "code": "owner_review_proposal_auto_route_full_auto_sample_floor_bypass",
-                        "eligible_sample_count": proposal_auto_route.get("eligible_sample_count"),
+                        "shadow_decision_count": proposal_auto_route.get("shadow_decision_count"),
                     }
                 )
             if proposal_auto_route.get("actual_execute") is True:

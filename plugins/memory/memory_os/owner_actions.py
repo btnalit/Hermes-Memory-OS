@@ -102,6 +102,7 @@ PROPOSAL_FOLLOWUP_AUTO_ROUTE_BOUNDARY_KEYS = {
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAMPLE_WINDOW_DAYS = 7
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES = 20
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE = 0.90
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_WILSON_LOWER_BOUND = 0.80
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES = 3
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_FIRST_CANARY_DAILY_CAP = 1
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES = 3
@@ -761,9 +762,11 @@ def auto_route_safe_proposal_followups_to_ops_gate(
     boundary_rejected_count = sum(1 for item in queue_items if _proposal_auto_route_boundary_rejected(item))
     bounded_limit = max(min(int(limit or 50), 200), 0)
     successful_limited_routes = _proposal_followup_auto_route_success_count(store)
+    owner_comparison = _proposal_followup_auto_route_owner_comparison_counts(store)
     calibration = _proposal_followup_auto_route_calibration(
         candidates,
         successful_limited_routes=successful_limited_routes,
+        owner_comparison=owner_comparison,
     )
     effective_limit = bounded_limit
     if apply and not calibration["full_auto_eligible"]:
@@ -819,6 +822,8 @@ def auto_route_safe_proposal_followups_to_ops_gate(
         "minimum_real_samples_for_full_auto": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES,
         "minimum_real_samples_for_limited_auto": PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES,
         "observed_owner_agreement_rate_required": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE,
+        "wilson_95_lower_bound_required": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_WILSON_LOWER_BOUND,
+        "owner_agreement_evidence_source": calibration["owner_agreement_evidence_source"],
         "eligible_sample_count": calibration["eligible_sample_count"],
         "shadow_decision_count": calibration["shadow_decision_count"],
         "owner_agreement_count": calibration["owner_agreement_count"],
@@ -883,16 +888,19 @@ def _proposal_followup_auto_route_calibration(
     candidates: list[dict[str, Any]],
     *,
     successful_limited_routes: int,
+    owner_comparison: dict[str, Any],
 ) -> dict[str, Any]:
-    sample_count = len(candidates)
-    owner_agreement_count = sample_count
-    owner_disagreement_count = 0
+    eligible_sample_count = len(candidates)
+    sample_count = int(owner_comparison.get("sample_count") or 0)
+    owner_agreement_count = int(owner_comparison.get("owner_agreement_count") or 0)
+    owner_disagreement_count = int(owner_comparison.get("owner_disagreement_count") or 0)
     owner_agreement_rate = (owner_agreement_count / sample_count) if sample_count else 0.0
     wilson = _wilson_lower_bound(owner_agreement_count, sample_count)
     limited_auto_graduated = successful_limited_routes >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES
     full_auto_eligible = (
         sample_count >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES
         and owner_agreement_rate >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE
+        and wilson >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_WILSON_LOWER_BOUND
     )
     limited_auto_eligible = (
         limited_auto_graduated
@@ -907,7 +915,7 @@ def _proposal_followup_auto_route_calibration(
         lane_mode = "full_auto"
     elif limited_auto_eligible:
         lane_mode = "limited_auto"
-    elif sample_count <= 0:
+    elif sample_count <= 0 and eligible_sample_count <= 0:
         lane_mode = "insufficient_volume_running"
     else:
         lane_mode = "live_shadow_calibration"
@@ -918,16 +926,17 @@ def _proposal_followup_auto_route_calibration(
     )
     return {
         "lane_mode": lane_mode,
-        "eligible_sample_count": sample_count,
+        "eligible_sample_count": eligible_sample_count,
         "shadow_decision_count": sample_count,
         "owner_agreement_count": owner_agreement_count,
         "owner_disagreement_count": owner_disagreement_count,
         "owner_agreement_rate": round(owner_agreement_rate, 4),
         "wilson_95_lower_bound": round(wilson, 4),
-        "proposal_kind_coverage": _proposal_followup_kind_coverage(candidates),
+        "proposal_kind_coverage": _proposal_followup_kind_coverage_from_owner_comparison(owner_comparison),
         "full_auto_eligible": full_auto_eligible,
         "limited_auto_eligible": limited_auto_eligible,
         "limited_auto_graduated": limited_auto_graduated,
+        "owner_agreement_evidence_source": "owner_action_decision_ledger",
         "limited_auto_evidence_source": (
             "historical_successful_routes"
             if limited_auto_graduated
@@ -956,6 +965,74 @@ def _proposal_followup_kind_coverage(candidates: list[dict[str, Any]]) -> list[s
         if isinstance(item, dict)
     }
     return sorted(value for value in values if value)[:20]
+
+
+def _proposal_followup_kind_coverage_from_owner_comparison(owner_comparison: dict[str, Any]) -> list[str]:
+    coverage = owner_comparison.get("proposal_kind_coverage")
+    if isinstance(coverage, list):
+        return sorted({str(item).strip()[:96] for item in coverage if str(item).strip()})[:20]
+    return []
+
+
+def _proposal_followup_auto_route_owner_decision_context(
+    proposal: dict[str, Any],
+    *,
+    action_type: str,
+) -> dict[str, Any]:
+    auto_would_route = _proposal_followup_auto_route_eligible(proposal)
+    owner_decision = "approve" if action_type == "approve_proposal" else "reject"
+    proposal_kind = str(proposal.get("proposal_class") or proposal.get("kind") or "proposal").strip()[:96]
+    return {
+        "schema_version": "memory-os.proposal_followup_auto_route_owner_decision.v0",
+        "candidate_id": str(proposal.get("candidate_id") or ""),
+        "proposal_kind": proposal_kind or "proposal",
+        "owner_decision": owner_decision,
+        "auto_would_route": auto_would_route,
+        "comparison_sample": auto_would_route,
+        "owner_auto_agreement": auto_would_route and owner_decision == "approve",
+        "owner_auto_disagreement": auto_would_route and owner_decision == "reject",
+        "boundary_clean": proposal_auto_route_boundary_clean(proposal),
+        "actual_execute": False,
+        "actual_send": False,
+        "actual_policy_write": False,
+        "boundary": _owner_review_false_boundary(),
+    }
+
+
+def _proposal_followup_auto_route_owner_comparison_counts(store: MemoryOSStore) -> dict[str, Any]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAMPLE_WINDOW_DAYS)
+    sample_count = 0
+    agreement_count = 0
+    disagreement_count = 0
+    kind_coverage: set[str] = set()
+    for record in _read_jsonl(owner_actions_path(store.roots)):
+        created_at = _parse_dt(str(record.get("created_at") or ""))
+        if created_at is None or created_at < cutoff:
+            continue
+        context = record.get("action_context") if isinstance(record.get("action_context"), dict) else {}
+        decision = (
+            context.get("proposal_followup_auto_route_owner_decision")
+            if isinstance(context.get("proposal_followup_auto_route_owner_decision"), dict)
+            else {}
+        )
+        if decision.get("schema_version") != "memory-os.proposal_followup_auto_route_owner_decision.v0":
+            continue
+        if decision.get("comparison_sample") is not True:
+            continue
+        sample_count += 1
+        if decision.get("owner_auto_agreement") is True:
+            agreement_count += 1
+        if decision.get("owner_auto_disagreement") is True:
+            disagreement_count += 1
+        kind = str(decision.get("proposal_kind") or "").strip()[:96]
+        if kind:
+            kind_coverage.add(kind)
+    return {
+        "sample_count": sample_count,
+        "owner_agreement_count": agreement_count,
+        "owner_disagreement_count": disagreement_count,
+        "proposal_kind_coverage": sorted(kind_coverage)[:20],
+    }
 
 
 def _proposal_followup_auto_route_success_count(store: MemoryOSStore) -> int:
@@ -2086,6 +2163,15 @@ def apply_owner_action(
     _attach_owner_reply_context(record, reply_context or {})
     if original_target_id != target_id:
         record["original_target_id"] = original_target_id
+    if action_type in {"approve_proposal", "reject_proposal"}:
+        proposal = _find_proposal(store, target_id)
+        if proposal:
+            record["action_context"] = {
+                "proposal_followup_auto_route_owner_decision": _proposal_followup_auto_route_owner_decision_context(
+                    proposal,
+                    action_type=action_type,
+                )
+            }
     result_ref: dict[str, Any] = {}
     if apply:
         result_ref = _apply_state_transition(store, record, note=note, rating=rating)
