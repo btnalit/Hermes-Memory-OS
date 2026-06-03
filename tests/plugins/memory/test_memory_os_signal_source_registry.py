@@ -36,6 +36,11 @@ def test_signal_source_registry_declares_read_only_sources():
         "memory-os/system/session_mirror_applies.jsonl",
     )
     assert "external_failure_count" in by_source["hermes_cron_jobs"].allowed_payload_fields
+    assert "operation_count" in by_source["hindsight_provider_stats"].allowed_payload_fields
+    assert "would_send_count" in by_source["mailbox_status"].allowed_payload_fields
+    assert "latest_output_at" in by_source["wandering_mind_state"].allowed_payload_fields
+    assert "configured_server_count" in by_source["mcp_server_health"].allowed_payload_fields
+    assert "error_log_exists" in by_source["runtime_logs"].allowed_payload_fields
     assert validate_signal_source_specs(specs)["status"] == "ok"
 
 

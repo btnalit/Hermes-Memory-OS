@@ -17,6 +17,8 @@ from .signal_source_registry import (
     evaluate_signal_source_requirements,
     signal_source_specs,
 )
+from .substrates.ledger import derive_substrate_monitor_fields
+from .substrates.projection import derive_projection_coherence
 
 
 SIGNAL_COLLECTION_SCHEMA_VERSION = "memory-os.signal_collection.v0"
@@ -148,25 +150,19 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         records = _read_jsonl(path)
         return {**base, "status": "ok" if records else base["status"], "record_count": len(records), "feedback_count": len(records)}
     if spec.source_key == "runtime_logs":
-        log_dir = roots.hermes_home / "logs"
-        files = [item for item in log_dir.glob("*") if item.is_file()] if log_dir.exists() else []
-        return {**base, "status": "ok" if files else base["status"], "record_count": len(files), "log_file_count": len(files)}
+        return _runtime_log_payload(roots, base)
     if spec.source_key == "skills_inventory":
         path = roots.hermes_home / "skills"
         count = len([item for item in path.glob("*") if item.is_dir()]) if path.exists() else 0
         return {**base, "status": "ok" if count else base["status"], "record_count": count, "skill_count": count}
     if spec.source_key == "mcp_server_health":
-        paths = [roots.hermes_home / "mcp", roots.hermes_home / "mcp_servers.json", roots.hermes_home / "config" / "mcp.json"]
-        present = [path for path in paths if path.exists()]
-        return {**base, "status": "ok" if present else base["status"], "record_count": len(present), "server_count": len(present), "healthy_count": 0}
+        return _mcp_payload(roots, base)
     if spec.source_key == "wandering_mind_state":
-        path = roots.hermes_home / "system-modules" / "wandering_mind"
-        files = list(path.glob("*")) if path.exists() else []
-        return {**base, "status": "ok" if files else base["status"], "record_count": len(files), "journal_count": len(files)}
+        return _wandering_mind_payload(roots, base)
     if spec.source_key == "hindsight_provider_stats":
-        paths = [roots.hermes_home / "hindsight" / "config.json", roots.memory_os_root / "system" / "substrate_operations.jsonl"]
-        present = [path for path in paths if path.exists()]
-        return {**base, "status": "ok" if present else base["status"], "record_count": len(present), "retain_count": 0, "recall_count": 0, "pollution_indicator_count": 0}
+        return _hindsight_payload(roots, base, capability)
+    if spec.source_key == "mailbox_status":
+        return _mailbox_payload(roots, base)
     if spec.source_key == "profile_config":
         return {**base, "profile_id": roots.profile or "default"}
     if spec.source_key == "kanban_state":
@@ -178,6 +174,146 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         files = list(path.glob("*")) if path.exists() else []
         return {**base, "status": "ok" if files else base["status"], "record_count": len(files), "tool_count": len(files)}
     return base
+
+
+def _hindsight_payload(roots: MemoryOSRoots, base: dict[str, Any], capability: dict[str, Any]) -> dict[str, Any]:
+    operation_records = _read_jsonl(roots.memory_os_root / "system" / "substrate_operations.jsonl")
+    provider_records = [record for record in operation_records if _hindsight_record(record)]
+    monitor_fields = derive_substrate_monitor_fields(operation_records, provider="hindsight")
+    projection_records = _read_jsonl(roots.memory_os_root / "system" / "projection_ledger.jsonl")
+    coherence = derive_projection_coherence(projection_records, provider="hindsight")
+    operation_count = len(provider_records)
+    configured = _present(capability) or bool(capability.get("memory_os_substrate_config_present"))
+    projection_stale_count = int(coherence.get("projection_stale_count") or 0)
+    raw_retained_count = int(monitor_fields.get("raw_retained_count") or 0)
+    return {
+        **base,
+        "status": "ok" if configured or operation_count else base["status"],
+        "available": configured or base["available"],
+        "record_count": operation_count,
+        "configured": bool(configured),
+        "retain_enabled": bool(capability.get("retain_enabled") or capability.get("memory_os_substrate_enabled")),
+        "recall_mode": str(capability.get("recall_mode") or ""),
+        "reflect_enabled": bool(capability.get("reflect_enabled")),
+        "operation_count": operation_count,
+        "retain_count": int(monitor_fields.get("retain_count") or 0),
+        "recall_count": int(monitor_fields.get("recall_count") or 0),
+        "invalidate_count": int(monitor_fields.get("retract_count") or 0),
+        "reflect_count": int(monitor_fields.get("reflect_count") or 0),
+        "raw_retained_count": raw_retained_count,
+        "no_raw_retained": bool(monitor_fields.get("no_raw_retained", True)),
+        "projection_stale_count": projection_stale_count,
+        "active_projection_count": int(coherence.get("active_projection_count") or 0),
+        "recall_llm_triggered": bool(monitor_fields.get("recall_llm_triggered")),
+        "reflect_hot_path_count": int(monitor_fields.get("reflect_hot_path_count") or 0),
+        "latest_operation_at": _latest_record_time(provider_records),
+        "pollution_indicator_count": raw_retained_count + projection_stale_count,
+    }
+
+
+def _mailbox_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    root = _first_existing_path(roots.hermes_home, ("mailbox", "system/mailbox"))
+    inbox = root / "inbox" if root else roots.hermes_home / "mailbox" / "inbox"
+    outbox = root / "outbox" if root else roots.hermes_home / "mailbox" / "outbox"
+    would_send_records = _read_jsonl(roots.hermes_home / "system-modules" / "mailbox" / "would_send.jsonl")
+    if root:
+        would_send_records += _read_jsonl(root / "would_send.jsonl")
+    inbox_count = _safe_file_count(inbox)
+    outbox_count = _safe_file_count(outbox)
+    mailbox_exists = root is not None
+    return {
+        **base,
+        "status": "ok" if mailbox_exists or would_send_records else base["status"],
+        "available": mailbox_exists or base["available"],
+        "record_count": inbox_count + outbox_count + len(would_send_records),
+        "mailbox_exists": mailbox_exists,
+        "inbox_exists": inbox.exists(),
+        "outbox_exists": outbox.exists(),
+        "inbox_count": inbox_count,
+        "outbox_count": outbox_count,
+        "would_send_count": len(would_send_records),
+        "latest_would_send_at": _latest_record_time(would_send_records),
+        "backlog_count": inbox_count,
+        "cooldown_active": _mailbox_cooldown_active(roots, root),
+        "actual_send_count": _actual_send_count(would_send_records),
+    }
+
+
+def _wandering_mind_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    root = roots.hermes_home / "system-modules" / "wandering_mind"
+    state = _safe_json_dict(root / "state.json")
+    output_records = _read_jsonl(root / "outputs.jsonl")
+    would_send_records = _read_jsonl(root / "would_send.jsonl")
+    output_count = len(output_records)
+    would_send_count = len(would_send_records)
+    latest_status = str(state.get("latest_status") or _latest_status(output_records) or _latest_status(would_send_records) or "")
+    latest_reason = str(state.get("latest_reason") or _latest_reason(output_records) or _latest_reason(would_send_records) or "")
+    return {
+        **base,
+        "status": "ok" if root.exists() or state or output_records or would_send_records else base["status"],
+        "available": root.exists() or base["available"],
+        "record_count": output_count + would_send_count + (1 if state else 0),
+        "state_exists": bool(state),
+        "output_count": output_count,
+        "would_send_count": would_send_count,
+        "generated_count": int(state.get("generated_count") or _status_count(output_records, "generated")),
+        "skipped_count": int(state.get("skipped_count") or _status_count(output_records, "skipped")),
+        "latest_status": latest_status[:80],
+        "latest_reason": latest_reason[:180],
+        "latest_output_at": _latest_record_time(output_records),
+        "latest_would_send_at": _latest_record_time(would_send_records),
+        "actual_send_count": _actual_send_count(would_send_records),
+        "household_digest_exists": (root / "household_digest.md").exists() or (root / "household_digest.json").exists(),
+        "journal_count": _safe_file_count(root),
+    }
+
+
+def _mcp_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    config_paths = [roots.hermes_home / "mcp_servers.json", roots.hermes_home / "config" / "mcp.json"]
+    config_files = [path for path in config_paths if path.is_file()]
+    directory = roots.hermes_home / "mcp"
+    directory_server_count = _safe_child_count(directory)
+    parsed_counts = [_mcp_config_counts(path) for path in config_files]
+    configured_server_count = sum(item["server_count"] for item in parsed_counts)
+    healthy_count = sum(item["healthy_count"] for item in parsed_counts)
+    failed_server_count = sum(item["failed_server_count"] for item in parsed_counts)
+    server_count = configured_server_count + directory_server_count
+    latest_config_age = _latest_age_seconds(config_files + ([directory] if directory.exists() else []))
+    return {
+        **base,
+        "status": "ok" if config_files or directory.exists() else base["status"],
+        "available": bool(config_files or directory.exists()) or base["available"],
+        "record_count": server_count or len(config_files),
+        "config_file_count": len(config_files),
+        "configured_server_count": configured_server_count,
+        "directory_server_count": directory_server_count,
+        "server_count": server_count,
+        "healthy_count": healthy_count,
+        "failed_server_count": failed_server_count,
+        "latest_config_age_seconds": latest_config_age,
+    }
+
+
+def _runtime_log_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    files = _runtime_log_files(roots)
+    latest = max(files, key=lambda path: path.stat().st_mtime, default=None)
+    error_log = _first_named_file(files, {"error.log", "errors.log"})
+    gateway_log = _first_named_file(files, {"gateway.log"})
+    return {
+        **base,
+        "status": "ok" if files else base["status"],
+        "available": bool(files) or base["available"],
+        "record_count": len(files),
+        "log_file_count": len(files),
+        "latest_log_age_seconds": _latest_age_seconds(files),
+        "latest_log_file": latest.name[:80] if latest else "",
+        "latest_log_mtime": _mtime_iso(latest) if latest else "",
+        "error_log_exists": error_log is not None,
+        "error_log_size_bytes": _safe_size(error_log),
+        "gateway_log_exists": gateway_log is not None,
+        "gateway_log_size_bytes": _safe_size(gateway_log),
+        "rotated_log_count": sum(1 for path in files if ".log." in path.name or path.suffix not in {"", ".log"}),
+    }
 
 
 def _payload_schema_violation(spec: SignalSourceSpec, payload: dict[str, Any]) -> bool:
@@ -196,6 +332,51 @@ def _capability(host_capabilities: dict[str, Any], key: str) -> dict[str, Any]:
 
 def _present(capability: dict[str, Any]) -> bool:
     return str(capability.get("status") or "") in {"available", "present", "configured", "running", "ok", "healthy"}
+
+
+def _hindsight_record(record: dict[str, Any]) -> bool:
+    return (
+        str(record.get("provider") or record.get("substrate") or "").lower() == "hindsight"
+        or str(record.get("provider_key") or "").lower() == "hindsight"
+    )
+
+
+def _first_existing_path(root: Path, candidates: tuple[str, ...]) -> Path | None:
+    for candidate in candidates:
+        path = root / candidate
+        if path.exists():
+            return path
+    return None
+
+
+def _safe_file_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    if path.is_file():
+        return 1
+    try:
+        return len([item for item in path.iterdir() if item.is_file()])
+    except OSError:
+        return 0
+
+
+def _safe_child_count(path: Path) -> int:
+    if not path.exists() or path.is_file():
+        return 0
+    try:
+        return len([item for item in path.iterdir() if item.is_file() or item.is_dir()])
+    except OSError:
+        return 0
+
+
+def _safe_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -223,6 +404,137 @@ def _safe_jobs(path: Path) -> list[dict[str, Any]]:
         return []
     jobs = loaded.get("jobs", loaded) if isinstance(loaded, dict) else loaded
     return [item for item in jobs if isinstance(item, dict)] if isinstance(jobs, list) else []
+
+
+def _latest_record_time(records: list[dict[str, Any]]) -> str:
+    for record in reversed(records):
+        for key in ("created_at", "observed_at", "completed_at", "run_time", "timestamp", "ts"):
+            value = record.get(key)
+            if value:
+                return str(value)[:80]
+    return ""
+
+
+def _latest_status(records: list[dict[str, Any]]) -> str:
+    for record in reversed(records):
+        value = record.get("status") or record.get("latest_status")
+        if value:
+            return str(value)
+    return ""
+
+
+def _latest_reason(records: list[dict[str, Any]]) -> str:
+    for record in reversed(records):
+        value = record.get("reason") or record.get("latest_reason") or record.get("skip_reason")
+        if value:
+            return str(value)
+    return ""
+
+
+def _status_count(records: list[dict[str, Any]], status: str) -> int:
+    return sum(1 for record in records if str(record.get("status") or record.get("latest_status") or "") == status)
+
+
+def _actual_send_count(records: list[dict[str, Any]]) -> int:
+    count = 0
+    for record in records:
+        boundary = record.get("boundary") if isinstance(record.get("boundary"), dict) else {}
+        if record.get("actual_send") is True or _any_true(boundary.get("actual_send")):
+            count += 1
+    return count
+
+
+def _mailbox_cooldown_active(roots: MemoryOSRoots, root: Path | None) -> bool:
+    candidates = [
+        roots.hermes_home / "system-modules" / "mailbox" / "cooldown.json",
+        roots.hermes_home / "system-modules" / "mailbox" / "cooldown.lock",
+    ]
+    if root:
+        candidates.extend([root / "cooldown.json", root / "cooldown.lock"])
+    return any(path.exists() for path in candidates)
+
+
+def _mcp_config_counts(path: Path) -> dict[str, int]:
+    loaded = _safe_json_dict(path)
+    servers = _mcp_server_values(loaded)
+    healthy_count = 0
+    failed_count = 0
+    for server in servers:
+        if not isinstance(server, dict):
+            continue
+        status = str(server.get("status") or server.get("health") or "").lower()
+        if status in {"ok", "healthy", "running", "available"}:
+            healthy_count += 1
+        if status in {"error", "failed", "unhealthy", "timeout"}:
+            failed_count += 1
+    return {"server_count": len(servers), "healthy_count": healthy_count, "failed_server_count": failed_count}
+
+
+def _mcp_server_values(loaded: dict[str, Any]) -> list[Any]:
+    for key in ("mcpServers", "servers", "mcp_servers"):
+        value = loaded.get(key)
+        if isinstance(value, dict):
+            return list(value.values())
+        if isinstance(value, list):
+            return value
+    if loaded and all(isinstance(value, dict) for value in loaded.values()):
+        return list(loaded.values())
+    return []
+
+
+def _runtime_log_files(roots: MemoryOSRoots) -> list[Path]:
+    candidates = [roots.hermes_home / "logs", roots.hermes_home / "system" / "logs"]
+    files: dict[str, Path] = {}
+    for root in candidates:
+        if root.is_dir():
+            try:
+                for item in root.rglob("*"):
+                    if item.is_file():
+                        files[str(item.resolve())] = item
+            except OSError:
+                continue
+    for root_file in (roots.hermes_home / "gateway.log", roots.hermes_home / "errors.log", roots.hermes_home / "error.log"):
+        if root_file.is_file():
+            files[str(root_file.resolve())] = root_file
+    return list(files.values())
+
+
+def _first_named_file(files: list[Path], names: set[str]) -> Path | None:
+    lowered = {name.lower() for name in names}
+    for path in sorted(files, key=lambda item: item.stat().st_mtime, reverse=True):
+        if path.name.lower() in lowered:
+            return path
+    return None
+
+
+def _latest_age_seconds(paths: list[Path]) -> int | None:
+    present = [path for path in paths if path.exists()]
+    if not present:
+        return None
+    latest = max(present, key=lambda path: path.stat().st_mtime)
+    try:
+        mtime = datetime.fromtimestamp(latest.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None
+    return max(int((datetime.now(timezone.utc) - mtime).total_seconds()), 0)
+
+
+def _mtime_iso(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except OSError:
+        return ""
+
+
+def _safe_size(path: Path | None) -> int:
+    if path is None:
+        return 0
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
 
 
 def _cron_output_summary(output_root: Path, jobs: list[dict[str, Any]]) -> dict[str, Any]:

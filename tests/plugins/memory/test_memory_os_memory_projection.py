@@ -71,6 +71,11 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     assert status["unique_source_count"] == 14
     assert status["registered_source_missing_count"] == 0
     assert set(status["projected_source_keys"]) >= {"execution_gate_envelopes", "hermes_cron_jobs", "runtime_logs"}
+    assert "log_file_count" in status["source_payload_fields"]["runtime_logs"]
+    assert "operation_count" in status["source_payload_fields"]["hindsight_provider_stats"]
+    assert "would_send_count" in status["source_payload_fields"]["mailbox_status"]
+    assert "latest_output_at" in status["source_payload_fields"]["wandering_mind_state"]
+    assert "configured_server_count" in status["source_payload_fields"]["mcp_server_health"]
     assert status["boundary_true_count"] == 0
     assert status["source_scope_missing_count"] == 0
     assert status["duplicate_source_hash_count"] == 0

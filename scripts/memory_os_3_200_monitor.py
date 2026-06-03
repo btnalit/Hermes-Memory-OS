@@ -78,6 +78,42 @@ V7_REQUIRED_COMPONENTS_PRODUCTION = tuple(
 )
 V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
 V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
+MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
+    "hindsight_provider_stats": {
+        "operation_count",
+        "retain_count",
+        "recall_count",
+        "projection_stale_count",
+        "raw_retained_count",
+    },
+    "mailbox_status": {
+        "mailbox_exists",
+        "inbox_count",
+        "outbox_count",
+        "would_send_count",
+        "actual_send_count",
+    },
+    "wandering_mind_state": {
+        "state_exists",
+        "output_count",
+        "would_send_count",
+        "latest_output_at",
+        "actual_send_count",
+    },
+    "mcp_server_health": {
+        "config_file_count",
+        "configured_server_count",
+        "directory_server_count",
+        "failed_server_count",
+    },
+    "runtime_logs": {
+        "log_file_count",
+        "latest_log_age_seconds",
+        "error_log_exists",
+        "gateway_log_exists",
+        "rotated_log_count",
+    },
+}
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
@@ -2776,6 +2812,32 @@ def _classify_left_brain_signal_weaving(
                     "registered_source_count": projection.get("registered_source_count"),
                 }
             )
+        payload_fields = (
+            projection.get("source_payload_fields")
+            if isinstance(projection.get("source_payload_fields"), dict)
+            else {}
+        )
+        missing_payload_fields: list[dict[str, Any]] = []
+        for source_key, expected_fields in MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS.items():
+            observed_fields = set(payload_fields.get(source_key) or [])
+            missing_fields = sorted(expected_fields - observed_fields)
+            if missing_fields:
+                missing_payload_fields.append({"source_key": source_key, "missing_fields": missing_fields})
+        if missing_payload_fields:
+            target = warn if clean_host else fail
+            target.append(
+                {
+                    "code": "memory_projection_55c_payload_field_coverage_missing",
+                    "missing": missing_payload_fields,
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "memory_projection_55c_payload_field_coverage_ok",
+                    "source_count": len(MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS),
+                }
+            )
         projection_count = int(projection.get("projection_count") or 0)
         projection_ok = (
             projection_count > 0
@@ -2784,6 +2846,7 @@ def _classify_left_brain_signal_weaving(
             and not duplicate_source_hash_count
             and not duplicate_dedup_key_count
             and not registered_source_missing_count
+            and not missing_payload_fields
             and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )

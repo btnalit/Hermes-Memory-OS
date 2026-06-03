@@ -223,10 +223,13 @@ def memory_projection_status(roots: MemoryOSRoots) -> dict[str, Any]:
     latest = records[-1] if records else {}
     dedup_aware_records = [record for record in records if record.get("dedup_key")]
     source_key_counts: dict[str, int] = {}
+    source_payload_fields: dict[str, set[str]] = {}
     for record in records:
         source_key = str(record.get("source_key") or "")
         if source_key:
             source_key_counts[source_key] = source_key_counts.get(source_key, 0) + 1
+            payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+            source_payload_fields.setdefault(source_key, set()).update(str(key) for key in payload)
     registered_source_keys = sorted(spec.source_key for spec in signal_source_specs())
     projected_source_keys = sorted(source_key_counts)
     registered_source_missing_keys = [key for key in registered_source_keys if key not in source_key_counts]
@@ -246,6 +249,7 @@ def memory_projection_status(roots: MemoryOSRoots) -> dict[str, Any]:
         "registered_source_count": len(registered_source_keys),
         "unique_source_count": len(projected_source_keys),
         "source_key_counts": source_key_counts,
+        "source_payload_fields": {key: sorted(values) for key, values in sorted(source_payload_fields.items())},
         "projected_source_keys": projected_source_keys,
         "registered_source_missing_count": len(registered_source_missing_keys),
         "registered_source_missing_keys": registered_source_missing_keys,

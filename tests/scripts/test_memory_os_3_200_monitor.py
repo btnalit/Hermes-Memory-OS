@@ -341,6 +341,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert "signal_source_requirements_ok" in pass_codes
     assert "memory_projection_online" in pass_codes
     assert "memory_projection_registered_source_coverage_ok" in pass_codes
+    assert "memory_projection_55c_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_retention_compaction_visible" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
 
@@ -376,6 +377,12 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "memory_projection_registered_source_missing" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_payload_fields"]["runtime_logs"] = ["status"]
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_55c_payload_field_coverage_missing" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["memory_projection_retention"]["latest_boundary_true_archived_count"] = 1
@@ -4056,6 +4063,42 @@ def _healthy_memory_projection() -> dict:
             "kanban_state": 1,
             "tool_registry": 1,
             "runtime_logs": 1,
+        },
+        "source_payload_fields": {
+            "hindsight_provider_stats": [
+                "operation_count",
+                "projection_stale_count",
+                "raw_retained_count",
+                "recall_count",
+                "retain_count",
+            ],
+            "mailbox_status": [
+                "actual_send_count",
+                "inbox_count",
+                "mailbox_exists",
+                "outbox_count",
+                "would_send_count",
+            ],
+            "wandering_mind_state": [
+                "actual_send_count",
+                "latest_output_at",
+                "output_count",
+                "state_exists",
+                "would_send_count",
+            ],
+            "mcp_server_health": [
+                "config_file_count",
+                "configured_server_count",
+                "directory_server_count",
+                "failed_server_count",
+            ],
+            "runtime_logs": [
+                "error_log_exists",
+                "gateway_log_exists",
+                "latest_log_age_seconds",
+                "log_file_count",
+                "rotated_log_count",
+            ],
         },
         "projected_source_keys": [
             "execution_gate_envelopes",
