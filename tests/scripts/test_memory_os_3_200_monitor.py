@@ -336,6 +336,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     pass_codes = {item["code"] for item in classification["pass"]}
 
     assert "host_capability_probe_ok" in pass_codes
+    assert "structural_write_gate_available" in pass_codes
     assert "signal_source_requirements_ok" in pass_codes
     assert "memory_projection_online" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
@@ -380,6 +381,15 @@ def test_classify_snapshot_fails_when_host_capability_contract_is_incomplete():
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "host_capability_probe_contract_incomplete" for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_structural_write_gate_is_not_available():
+    snapshot = _healthy_snapshot()
+    snapshot["host_capability_probe"]["capabilities"]["structural_write_gate"]["status"] = "migration_needed"
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "structural_write_gate_not_available" for item in classification["fail"])
 
 
 def test_classify_snapshot_fails_when_projection_artifact_is_stale_after_deploy():

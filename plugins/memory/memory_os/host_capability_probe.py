@@ -295,10 +295,20 @@ def _hindsight_write_origin_capability(roots: MemoryOSRoots) -> dict[str, Any]:
 
 
 def _structural_write_gate_capability() -> dict[str, Any]:
+    try:
+        from .structural_write_gate import append_governed_jsonl, structural_write_gate_status
+    except Exception as exc:
+        return {
+            "status": "migration_needed",
+            "contract": "automatic writes require valid execution_gate_envelope_id at write surface",
+            "migration_hint": f"structural_write_gate import unavailable: {str(exc)[:120]}",
+            "raw_body_included": False,
+        }
+    status = structural_write_gate_status()
     return {
-        "status": "migration_needed",
-        "contract": "automatic writes require valid execution_gate_envelope_id at write surface",
-        "migration_hint": "introduce structural_write_gate.py append_governed_jsonl before 56 lane expansion",
+        **status,
+        "status": "present" if callable(append_governed_jsonl) else "migration_needed",
+        "migration_hint": "" if callable(append_governed_jsonl) else "append_governed_jsonl unavailable",
         "raw_body_included": False,
     }
 

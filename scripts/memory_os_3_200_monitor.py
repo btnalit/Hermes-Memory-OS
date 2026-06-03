@@ -2655,6 +2655,19 @@ def _classify_left_brain_signal_weaving(
                 fail.append(contract_gap)
             else:
                 passed.append({"code": "host_capability_probe_contract_ok"})
+                capabilities = host_probe.get("capabilities") if isinstance(host_probe.get("capabilities"), dict) else {}
+                structural = capabilities.get("structural_write_gate") if isinstance(capabilities.get("structural_write_gate"), dict) else {}
+                if host_probe.get("schema_version") == "memory-os.host_capability_probe.v2":
+                    if structural.get("status") == "available":
+                        passed.append({"code": "structural_write_gate_available"})
+                    else:
+                        fail.append(
+                            {
+                                "code": "structural_write_gate_not_available",
+                                "status": structural.get("status"),
+                                "migration_hint": structural.get("migration_hint"),
+                            }
+                        )
             passed.append(
                 {
                     "code": "host_capability_probe_ok",

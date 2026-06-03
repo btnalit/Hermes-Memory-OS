@@ -49,6 +49,13 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     status = memory_projection_status(store.roots)
     execution_records = read_execution_gate_records(store.roots)
     completions = [item for item in execution_records if item.get("stage") == "completion"]
+    projection_records = [
+        json.loads(line)
+        for line in (store.roots.memory_os_root / "system" / "memory_projections.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
     encoded = json.dumps(report, ensure_ascii=False)
 
     assert report["status"] in {"ok", "warning"}
@@ -62,6 +69,8 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     assert '"raw_body":' not in encoded
     assert "private_body" not in encoded
     assert report["execution_gate_resolution"]["status"] == "valid"
+    assert projection_records[0]["structural_write_governance"]["permit_status"] == "valid"
+    assert projection_records[0]["structural_write_governance"]["lane_id"] == "memory_projection_collect"
 
 
 def test_memory_projection_deduplicates_stable_source_hashes(tmp_path):

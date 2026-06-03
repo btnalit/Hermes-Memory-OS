@@ -12,6 +12,7 @@ from .execution_gate import any_boundary_true, complete_execution_gate_envelope,
 from .signal_collectors import collect_signal_sources
 from .store import MemoryOSStore
 from .roots import MemoryOSRoots
+from .structural_write_gate import append_governed_jsonl
 
 
 MEMORY_PROJECTION_SCHEMA_VERSION = "memory-os.memory_projection.v0"
@@ -80,7 +81,19 @@ def collect_and_project_signals(
     records = [record for record in candidate_records if record.get("dedup_key") not in existing_dedup_keys]
     duplicate_skipped_count = len(candidate_records) - len(records)
     for record in records:
-        _append_jsonl(memory_projection_records_path(store.roots), record)
+        if automatic:
+            append_governed_jsonl(
+                store,
+                memory_projection_records_path(store.roots),
+                record,
+                write_owner="automatic",
+                lane_id=PROJECTION_LANE_ID,
+                risk_class=PROJECTION_RISK_CLASS,
+                execution_gate_envelope_id=execution_envelope_id,
+                scope_hash=str(resolution.get("scope_hash") or ""),
+            )
+        else:
+            _append_jsonl(memory_projection_records_path(store.roots), record)
     summary = _write_projection_summary(store.roots)
     if automatic:
         postcheck = {

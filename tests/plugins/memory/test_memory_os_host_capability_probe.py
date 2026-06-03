@@ -123,6 +123,8 @@ def test_host_capability_probe_v2_exposes_full_capability_contract(tmp_path):
     assert LEGACY_COMPATIBILITY_KEYS.issubset(capabilities)
     assert report["capability_contract"]["required_capability_count"] >= len(EXPECTED_V2_CAPABILITY_KEYS)
     assert report["capability_contract"]["contract_status"] == "ok"
+    assert capabilities["structural_write_gate"]["status"] == "available"
+    assert capabilities["structural_write_gate"]["append_governed_jsonl_available"] is True
 
     for key, capability in capabilities.items():
         assert CAPABILITY_REQUIRED_FIELDS.issubset(capability), key
