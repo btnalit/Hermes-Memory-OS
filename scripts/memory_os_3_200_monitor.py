@@ -5501,7 +5501,11 @@ def shell_alias_no_env():
       "review_digest_ok": isinstance(review_digest, dict) and review_digest.get("schema_version") == "memory-os.owner_review_digest_preview.v0",
       "review_render_ok": isinstance(review_render, dict) and review_render.get("schema_version") == "memory-os.owner_review_rendered_digest.v0",
       "review_reply_ok": isinstance(review_reply, dict) and review_reply.get("schema_version") == "memory-os.owner_review_reply.v0",
-      "host_probe_ok": isinstance(host_probe, dict) and host_probe.get("schema_version") == "memory-os.host_capability_probe.v0",
+      "host_probe_ok": (
+          isinstance(host_probe, dict)
+          and host_probe.get("schema_version")
+          in {"memory-os.host_capability_probe.v0", "memory-os.host_capability_probe.v2"}
+      ),
       "signal_sources_ok": isinstance(signal_sources, dict) and signal_sources.get("schema_version") == "memory-os.signal_source_requirement_report.v0",
       "memory_projection_ok": isinstance(memory_projection, dict) and memory_projection.get("schema_version") == "memory-os.memory_projection_status.v0",
       "left_brain_ok": isinstance(left_brain, dict) and left_brain.get("schema_version") == "memory-os.left_brain_advisor_status.v0",
