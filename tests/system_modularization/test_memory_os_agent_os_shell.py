@@ -452,6 +452,16 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert projection_args.agent_os_command == "projection"
     assert projection_args.projection_command == "collect"
     assert projection_args.manual_run_ref == "agent-shell-test"
+    projection_retention_args = parser.parse_args(["projection", "retention-status"])
+    assert projection_retention_args.agent_os_command == "projection"
+    assert projection_retention_args.projection_command == "retention-status"
+    projection_compact_args = parser.parse_args(
+        ["projection", "compact", "--apply", "--keep-latest-status-per-source", "2"]
+    )
+    assert projection_compact_args.agent_os_command == "projection"
+    assert projection_compact_args.projection_command == "compact"
+    assert projection_compact_args.apply is True
+    assert projection_compact_args.keep_latest_status_per_source == 2
     left_brain_args = parser.parse_args(["left-brain", "advise", "--max-findings", "5", "--no-write"])
     assert left_brain_args.agent_os_command == "left-brain"
     assert left_brain_args.left_brain_command == "advise"
