@@ -344,6 +344,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert "memory_projection_55c_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_55d_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_55e_payload_field_coverage_ok" in pass_codes
+    assert "memory_projection_55f_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_retention_compaction_visible" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
 
@@ -397,6 +398,12 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "memory_projection_55e_payload_field_coverage_missing" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_payload_fields"]["host_capability_contract"] = ["status"]
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_55f_payload_field_coverage_missing" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["memory_projection_retention"]["latest_boundary_true_archived_count"] = 1
@@ -4080,7 +4087,7 @@ def _healthy_signal_source_requirements() -> dict:
     return {
         "schema_version": "memory-os.signal_source_requirement_report.v0",
         "status": "ok",
-        "source_count": 14,
+        "source_count": 20,
         "required_missing_count": 0,
         "optional_missing_count": 3,
         "sources": [],
@@ -4091,10 +4098,10 @@ def _healthy_memory_projection() -> dict:
     return {
         "schema_version": "memory-os.memory_projection_status.v0",
         "status": "ok",
-        "projection_count": 19,
+        "projection_count": 20,
         "latest_created_at": "2026-06-03T01:01:00Z",
-        "registered_source_count": 19,
-        "unique_source_count": 19,
+        "registered_source_count": 20,
+        "unique_source_count": 20,
         "source_key_counts": {
             "execution_gate_envelopes": 1,
             "session_mirror_apply": 1,
@@ -4115,6 +4122,7 @@ def _healthy_memory_projection() -> dict:
             "proposal_queue_pressure": 1,
             "candidate_queue_pressure": 1,
             "owner_review_pressure": 1,
+            "host_capability_contract": 1,
         },
         "source_payload_fields": {
             "hindsight_provider_stats": [
@@ -4219,6 +4227,28 @@ def _healthy_memory_projection() -> dict:
                 "tool_count",
                 "tool_manifest_count",
             ],
+            "host_capability_contract": [
+                "active_runtime_version_present",
+                "adapter_missing_count",
+                "adapter_required_count",
+                "capability_count",
+                "contract_status",
+                "cron_status",
+                "deployed_head_present",
+                "deployment_status",
+                "execution_gate_status",
+                "hermes_version_available",
+                "hindsight_status",
+                "incomplete_capability_count",
+                "invalid_status_count",
+                "memory_provider_name",
+                "memory_provider_status",
+                "migration_needed_count",
+                "missing_required_capability_count",
+                "owner_channel_status",
+                "required_capability_count",
+                "structural_write_gate_status",
+            ],
         },
         "projected_source_keys": [
             "candidate_queue_pressure",
@@ -4226,6 +4256,7 @@ def _healthy_memory_projection() -> dict:
             "execution_gate_envelopes",
             "gateway_runtime_status",
             "hermes_cron_jobs",
+            "host_capability_contract",
             "hindsight_provider_stats",
             "kanban_state",
             "mailbox_status",

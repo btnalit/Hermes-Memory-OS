@@ -159,6 +159,8 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         return _candidate_queue_payload(roots, base)
     if spec.source_key == "owner_review_pressure":
         return _owner_review_pressure_payload(roots, base)
+    if spec.source_key == "host_capability_contract":
+        return _host_capability_contract_payload(base, host_capabilities)
     if spec.source_key == "runtime_logs":
         return _runtime_log_payload(roots, base)
     if spec.source_key == "skills_inventory":
@@ -287,6 +289,66 @@ def _tool_registry_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[s
         "tool_manifest_count": manifest_count,
         "tool_config_exists": manifest_count > 0,
         "latest_tool_age_seconds": _latest_age_seconds(children),
+    }
+
+
+def _host_capability_contract_payload(base: dict[str, Any], host_capabilities: dict[str, Any]) -> dict[str, Any]:
+    capabilities = host_capabilities.get("capabilities") if isinstance(host_capabilities.get("capabilities"), dict) else {}
+    contract = (
+        host_capabilities.get("capability_contract")
+        if isinstance(host_capabilities.get("capability_contract"), dict)
+        else {}
+    )
+    status_counts: dict[str, int] = {}
+    migration_needed_keys: list[str] = []
+    adapter_required_count = 0
+    adapter_missing_count = 0
+    capability_items = capabilities.items() if isinstance(capabilities, dict) else ()
+    for key, value in capability_items:
+        if not isinstance(value, dict):
+            continue
+        status = str(value.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if status == "migration_needed":
+            migration_needed_keys.append(str(key)[:80])
+        if value.get("adapter_required") is True:
+            adapter_required_count += 1
+            if status in {"missing", "migration_needed", "unknown"}:
+                adapter_missing_count += 1
+    memory_provider = capabilities.get("memory_provider") if isinstance(capabilities.get("memory_provider"), dict) else {}
+    deployment = capabilities.get("deployment_runtime_manifest") if isinstance(capabilities.get("deployment_runtime_manifest"), dict) else {}
+    active_runtime = capabilities.get("active_runtime") if isinstance(capabilities.get("active_runtime"), dict) else {}
+    hermes_version = capabilities.get("hermes_version") if isinstance(capabilities.get("hermes_version"), dict) else {}
+    payload_status = "ok" if str(contract.get("contract_status") or "") == "ok" else "warning"
+    return {
+        **base,
+        "status": payload_status,
+        "available": True,
+        "record_count": len(capabilities) if isinstance(capabilities, dict) else 0,
+        "capability_count": len(capabilities) if isinstance(capabilities, dict) else 0,
+        "required_capability_count": int(contract.get("required_capability_count") or 0),
+        "missing_required_capability_count": len(contract.get("missing_required_capability_keys") or []),
+        "incomplete_capability_count": int(contract.get("incomplete_capability_count") or 0),
+        "invalid_status_count": int(contract.get("invalid_status_count") or 0),
+        "contract_status": str(contract.get("contract_status") or "unknown"),
+        "available_capability_count": sum(status_counts.get(key, 0) for key in ("available", "present", "configured", "running", "ok", "healthy")),
+        "missing_capability_count": status_counts.get("missing", 0),
+        "disabled_capability_count": status_counts.get("disabled", 0),
+        "migration_needed_count": status_counts.get("migration_needed", 0),
+        "migration_needed_keys": sorted(migration_needed_keys)[:20],
+        "adapter_required_count": adapter_required_count,
+        "adapter_missing_count": adapter_missing_count,
+        "owner_channel_status": _capability_status_value(capabilities, "owner_channel"),
+        "memory_provider_status": _capability_status_value(capabilities, "memory_provider"),
+        "memory_provider_name": str(memory_provider.get("provider") or "")[:80],
+        "hindsight_status": _capability_status_value(capabilities, "hindsight"),
+        "structural_write_gate_status": _capability_status_value(capabilities, "structural_write_gate"),
+        "execution_gate_status": _capability_status_value(capabilities, "execution_gate"),
+        "cron_status": _capability_status_value(capabilities, "cron"),
+        "deployment_status": str(deployment.get("status") or ""),
+        "deployed_head_present": bool(deployment.get("deployed_head")),
+        "active_runtime_version_present": bool(active_runtime.get("active_runtime_version")),
+        "hermes_version_available": bool(hermes_version.get("version_available")),
     }
 
 
@@ -600,6 +662,11 @@ def _capability(host_capabilities: dict[str, Any], key: str) -> dict[str, Any]:
 
 def _present(capability: dict[str, Any]) -> bool:
     return str(capability.get("status") or "") in {"available", "present", "configured", "running", "ok", "healthy"}
+
+
+def _capability_status_value(capabilities: dict[str, Any], key: str) -> str:
+    value = capabilities.get(key) if isinstance(capabilities, dict) else {}
+    return str(value.get("status") or "missing") if isinstance(value, dict) else "missing"
 
 
 def _hindsight_record(record: dict[str, Any]) -> bool:

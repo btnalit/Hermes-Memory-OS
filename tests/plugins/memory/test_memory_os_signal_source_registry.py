@@ -32,6 +32,7 @@ def test_signal_source_registry_declares_read_only_sources():
         "proposal_queue_pressure",
         "candidate_queue_pressure",
         "owner_review_pressure",
+        "host_capability_contract",
     }
     assert all(spec.writes_allowed is False for spec in specs)
     assert all(spec.allowed_payload_fields for spec in specs)
@@ -55,6 +56,8 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "proposal_count" in by_source["proposal_queue_pressure"].allowed_payload_fields
     assert "candidate_count" in by_source["candidate_queue_pressure"].allowed_payload_fields
     assert "owner_action_count" in by_source["owner_review_pressure"].allowed_payload_fields
+    assert "contract_status" in by_source["host_capability_contract"].allowed_payload_fields
+    assert "migration_needed_count" in by_source["host_capability_contract"].allowed_payload_fields
     assert validate_signal_source_specs(specs)["status"] == "ok"
 
 

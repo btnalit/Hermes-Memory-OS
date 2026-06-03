@@ -239,6 +239,15 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["candidate_queue_pressure"]["payload"]["private_candidate_count"] == 1
     assert by_source["owner_review_pressure"]["payload"]["advisor_finding_count"] == 2
     assert by_source["owner_review_pressure"]["payload"]["pending_proposal_count"] == 2
+    assert by_source["host_capability_contract"]["payload"]["capability_count"] >= 20
+    assert by_source["host_capability_contract"]["payload"]["contract_status"] == "ok"
+    assert by_source["host_capability_contract"]["payload"]["missing_required_capability_count"] == 0
+    assert by_source["host_capability_contract"]["payload"]["memory_provider_name"] == ""
+    assert by_source["host_capability_contract"]["payload"]["structural_write_gate_status"] in {
+        "present",
+        "available",
+        "migration_needed",
+    }
 
 
 def test_collect_signal_sources_blocks_payload_fields_outside_registry(tmp_path):

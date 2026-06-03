@@ -186,6 +186,30 @@ MEMORY_PROJECTION_55E_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
         "latest_tool_age_seconds",
     },
 }
+MEMORY_PROJECTION_55F_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
+    "host_capability_contract": {
+        "capability_count",
+        "required_capability_count",
+        "missing_required_capability_count",
+        "incomplete_capability_count",
+        "invalid_status_count",
+        "contract_status",
+        "migration_needed_count",
+        "adapter_required_count",
+        "adapter_missing_count",
+        "owner_channel_status",
+        "memory_provider_status",
+        "memory_provider_name",
+        "hindsight_status",
+        "structural_write_gate_status",
+        "execution_gate_status",
+        "cron_status",
+        "deployment_status",
+        "deployed_head_present",
+        "active_runtime_version_present",
+        "hermes_version_available",
+    },
+}
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
@@ -3032,6 +3056,27 @@ def _classify_left_brain_signal_weaving(
                     "source_count": len(MEMORY_PROJECTION_55E_REQUIRED_PAYLOAD_FIELDS),
                 }
             )
+        missing_payload_fields_55f: list[dict[str, Any]] = []
+        for source_key, expected_fields in MEMORY_PROJECTION_55F_REQUIRED_PAYLOAD_FIELDS.items():
+            observed_fields = set(payload_fields.get(source_key) or [])
+            missing_fields = sorted(expected_fields - observed_fields)
+            if missing_fields:
+                missing_payload_fields_55f.append({"source_key": source_key, "missing_fields": missing_fields})
+        if missing_payload_fields_55f:
+            target = warn if clean_host else fail
+            target.append(
+                {
+                    "code": "memory_projection_55f_payload_field_coverage_missing",
+                    "missing": missing_payload_fields_55f,
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "memory_projection_55f_payload_field_coverage_ok",
+                    "source_count": len(MEMORY_PROJECTION_55F_REQUIRED_PAYLOAD_FIELDS),
+                }
+            )
         projection_count = int(projection.get("projection_count") or 0)
         projection_ok = (
             projection_count > 0
@@ -3043,6 +3088,7 @@ def _classify_left_brain_signal_weaving(
             and not missing_payload_fields_55c
             and not missing_payload_fields_55d
             and not missing_payload_fields_55e
+            and not missing_payload_fields_55f
             and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )
