@@ -340,6 +340,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert "structural_write_gate_available" in pass_codes
     assert "signal_source_requirements_ok" in pass_codes
     assert "memory_projection_online" in pass_codes
+    assert "memory_projection_registered_source_coverage_ok" in pass_codes
     assert "memory_projection_retention_compaction_visible" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
 
@@ -368,6 +369,13 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "memory_projection_duplicate_records" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["registered_source_missing_count"] = 1
+    snapshot["memory_projection"]["registered_source_missing_keys"] = ["runtime_logs"]
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_registered_source_missing" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["memory_projection_retention"]["latest_boundary_true_archived_count"] = 1
@@ -4031,6 +4039,42 @@ def _healthy_memory_projection() -> dict:
         "status": "ok",
         "projection_count": 14,
         "latest_created_at": "2026-06-03T01:01:00Z",
+        "registered_source_count": 14,
+        "unique_source_count": 14,
+        "source_key_counts": {
+            "execution_gate_envelopes": 1,
+            "session_mirror_apply": 1,
+            "owner_actions": 1,
+            "memory_sources_feedback": 1,
+            "hermes_cron_jobs": 1,
+            "hindsight_provider_stats": 1,
+            "mailbox_status": 1,
+            "wandering_mind_state": 1,
+            "skills_inventory": 1,
+            "mcp_server_health": 1,
+            "profile_config": 1,
+            "kanban_state": 1,
+            "tool_registry": 1,
+            "runtime_logs": 1,
+        },
+        "projected_source_keys": [
+            "execution_gate_envelopes",
+            "hermes_cron_jobs",
+            "hindsight_provider_stats",
+            "kanban_state",
+            "mailbox_status",
+            "mcp_server_health",
+            "memory_sources_feedback",
+            "owner_actions",
+            "profile_config",
+            "runtime_logs",
+            "session_mirror_apply",
+            "skills_inventory",
+            "tool_registry",
+            "wandering_mind_state",
+        ],
+        "registered_source_missing_count": 0,
+        "registered_source_missing_keys": [],
         "boundary_true_count": 0,
         "source_scope_missing_count": 0,
         "duplicate_source_hash_count": 0,

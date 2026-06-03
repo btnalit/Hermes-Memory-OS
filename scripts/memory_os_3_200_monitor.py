@@ -2759,6 +2759,23 @@ def _classify_left_brain_signal_weaving(
                     "duplicate_dedup_key_count": duplicate_dedup_key_count,
                 }
             )
+        registered_source_missing_count = int(projection.get("registered_source_missing_count") or 0)
+        if registered_source_missing_count:
+            fail.append(
+                {
+                    "code": "memory_projection_registered_source_missing",
+                    "count": registered_source_missing_count,
+                    "sources": projection.get("registered_source_missing_keys"),
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "memory_projection_registered_source_coverage_ok",
+                    "unique_source_count": projection.get("unique_source_count"),
+                    "registered_source_count": projection.get("registered_source_count"),
+                }
+            )
         projection_count = int(projection.get("projection_count") or 0)
         projection_ok = (
             projection_count > 0
@@ -2766,6 +2783,7 @@ def _classify_left_brain_signal_weaving(
             and not source_scope_missing_count
             and not duplicate_source_hash_count
             and not duplicate_dedup_key_count
+            and not registered_source_missing_count
             and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )

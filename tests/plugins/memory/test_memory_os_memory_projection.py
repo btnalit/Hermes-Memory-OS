@@ -67,6 +67,10 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     assert report["status"] in {"ok", "warning"}
     assert report["written_count"] > 0
     assert status["projection_count"] == report["written_count"]
+    assert status["registered_source_count"] == 14
+    assert status["unique_source_count"] == 14
+    assert status["registered_source_missing_count"] == 0
+    assert set(status["projected_source_keys"]) >= {"execution_gate_envelopes", "hermes_cron_jobs", "runtime_logs"}
     assert status["boundary_true_count"] == 0
     assert status["source_scope_missing_count"] == 0
     assert status["duplicate_source_hash_count"] == 0
