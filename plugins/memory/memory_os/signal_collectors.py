@@ -195,7 +195,7 @@ def _capability(host_capabilities: dict[str, Any], key: str) -> dict[str, Any]:
 
 
 def _present(capability: dict[str, Any]) -> bool:
-    return str(capability.get("status") or "") in {"present", "configured", "running", "ok", "healthy"}
+    return str(capability.get("status") or "") in {"available", "present", "configured", "running", "ok", "healthy"}
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

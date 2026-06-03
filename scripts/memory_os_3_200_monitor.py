@@ -22,6 +22,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.modules.governance.live_guard import live_guard_registration_report
+from plugins.memory.memory_os.host_capability_probe import (
+    HOST_CAPABILITY_ALLOWED_STATUSES,
+    HOST_CAPABILITY_REQUIRED_FIELDS,
+    HOST_CAPABILITY_REQUIRED_KEYS,
+)
 
 
 EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
@@ -2645,6 +2650,11 @@ def _classify_left_brain_signal_weaving(
         if host_probe.get("raw_body_included") is True or host_probe.get("secret_values_included") is True:
             fail.append({"code": "host_capability_probe_sensitive_payload"})
         else:
+            contract_gap = _host_capability_contract_gap(host_probe)
+            if contract_gap:
+                fail.append(contract_gap)
+            else:
+                passed.append({"code": "host_capability_probe_contract_ok"})
             passed.append(
                 {
                     "code": "host_capability_probe_ok",
@@ -2783,6 +2793,37 @@ def _classify_left_brain_signal_weaving(
         warn.append({"code": "left_brain_advisor_status_missing", "value": advisor})
     else:
         fail.append({"code": "left_brain_advisor_status_missing", "value": advisor})
+
+
+def _host_capability_contract_gap(host_probe: dict[str, Any]) -> dict[str, Any] | None:
+    if host_probe.get("schema_version") != "memory-os.host_capability_probe.v2":
+        return None
+    capabilities = host_probe.get("capabilities") if isinstance(host_probe.get("capabilities"), dict) else {}
+    missing_keys = sorted(key for key in HOST_CAPABILITY_REQUIRED_KEYS if key not in capabilities)
+    incomplete: list[dict[str, Any]] = []
+    invalid_status: list[dict[str, Any]] = []
+    for key, capability in capabilities.items():
+        if not isinstance(capability, dict):
+            incomplete.append({"capability_key": key, "missing_fields": sorted(HOST_CAPABILITY_REQUIRED_FIELDS)})
+            continue
+        missing_fields = sorted(field for field in HOST_CAPABILITY_REQUIRED_FIELDS if field not in capability)
+        if missing_fields:
+            incomplete.append({"capability_key": key, "missing_fields": missing_fields})
+        if str(capability.get("status") or "") not in HOST_CAPABILITY_ALLOWED_STATUSES:
+            invalid_status.append({"capability_key": key, "status": capability.get("status")})
+    declared_contract = host_probe.get("capability_contract") if isinstance(host_probe.get("capability_contract"), dict) else {}
+    declared_error = declared_contract.get("contract_status") not in {"", None, "ok"}
+    if not missing_keys and not incomplete and not invalid_status and not declared_error:
+        return None
+    return {
+        "code": "host_capability_probe_contract_incomplete",
+        "missing_required_capability_keys": missing_keys,
+        "incomplete_capability_count": len(incomplete),
+        "incomplete_capabilities": incomplete[:20],
+        "invalid_status_count": len(invalid_status),
+        "invalid_status_capabilities": invalid_status[:20],
+        "declared_contract_status": declared_contract.get("contract_status"),
+    }
 
 
 def _memory_projection_stale_after_deploy(

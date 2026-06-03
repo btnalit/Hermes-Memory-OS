@@ -142,11 +142,12 @@ def probe_hermes_cron_capabilities(hermes_bin: str) -> HermesCronCapabilities:
             check=False,
             text=True,
             capture_output=True,
+            timeout=5,
         )
         help_text = f"{completed.stdout}\n{completed.stderr}"
         supports_script = "--script" in help_text
         supports_no_agent = "--no-agent" in help_text
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         findings.append({"code": "hermes_cron_create_help_unavailable", "error": str(exc)[:200]})
     try:
         completed = subprocess.run(
@@ -154,9 +155,10 @@ def probe_hermes_cron_capabilities(hermes_bin: str) -> HermesCronCapabilities:
             check=False,
             text=True,
             capture_output=True,
+            timeout=5,
         )
         supports_edit = completed.returncode == 0 or "cron edit" in f"{completed.stdout}\n{completed.stderr}"
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         findings.append({"code": "hermes_cron_edit_help_unavailable", "error": str(exc)[:200]})
     if not supports_script:
         findings.append({"code": "hermes_cron_script_unsupported"})

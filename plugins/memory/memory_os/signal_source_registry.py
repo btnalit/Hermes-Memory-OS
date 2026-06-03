@@ -354,7 +354,7 @@ def _capability_status(capability: Any) -> str:
 
 
 def _requirement_status(spec: SignalSourceSpec, capability_status: str) -> str:
-    present = capability_status in {"present", "configured", "running", "ok", "healthy"}
+    present = capability_status in {"available", "present", "configured", "running", "ok", "healthy"}
     if spec.requirement_policy == "required":
         return "required_present" if present else "required_missing"
     if spec.requirement_policy == "required_if_configured":

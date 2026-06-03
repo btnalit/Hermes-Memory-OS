@@ -1,6 +1,9 @@
+import subprocess
+
 from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, memory_os_cron_specs
 from plugins.memory.memory_os.hermes_cron_adapter import classify_hermes_cron_jobs, plan_hermes_cron_job_upsert
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronDesiredJob
+from plugins.memory.memory_os.hermes_cron_adapter import probe_hermes_cron_capabilities
 
 
 def test_hermes_cron_adapter_classifies_wrapped_naked_and_unregistered_jobs():
@@ -73,3 +76,16 @@ def test_hermes_cron_adapter_blocks_edit_without_job_id():
 
     assert plan.status == "blocked"
     assert plan.reason == "existing_job_id_missing"
+
+
+def test_hermes_cron_adapter_probe_reports_timeout_as_incompatible(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    capabilities = probe_hermes_cron_capabilities("hermes")
+
+    assert capabilities.status == "incompatible"
+    assert any(item["code"] == "hermes_cron_create_help_unavailable" for item in capabilities.findings)
+    assert any(item["code"] == "hermes_cron_edit_help_unavailable" for item in capabilities.findings)
