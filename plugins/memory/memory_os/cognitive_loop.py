@@ -501,9 +501,29 @@ class CognitiveLoopRunner:
         return result
 
     def _ground_truth_miner(self, context: dict[str, Any]) -> dict[str, Any]:
-        from plugins.modules.governance.ground_truth_miner import GroundTruthMinerModule
+        from plugins.modules.governance.ground_truth_miner import (
+            REVERSIBLE_LABELS_LANE_ID,
+            REVERSIBLE_LABELS_RISK_CLASS,
+            GroundTruthMinerModule,
+            reversible_labels_scope,
+        )
 
-        result = GroundTruthMinerModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
+        scope = reversible_labels_scope(self.profile)
+        permit = start_execution_gate_envelope(
+            self.store,
+            lane_id=REVERSIBLE_LABELS_LANE_ID,
+            trigger_surface="cognitive_loop",
+            risk_class=REVERSIBLE_LABELS_RISK_CLASS,
+            human_approval_required=False,
+            why_no_human_approval="retractable TTL/source-scoped labels only; no apply/send/policy/canonical/route-score writes",
+            scope=scope,
+            boundary=dict(BOUNDARIES),
+        )
+        result = GroundTruthMinerModule(self.hermes_home, profile=self.profile).run_once(
+            store=self.store,
+            execution_envelope_id=str(permit.get("execution_gate_envelope_id") or ""),
+            expected_scope=scope,
+        )
         context["ground_truth_miner_result"] = result
         return result
 

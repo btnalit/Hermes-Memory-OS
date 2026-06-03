@@ -4,12 +4,32 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit, read_audit_entries
+from plugins.memory.memory_os.execution_gate import (
+    complete_execution_gate_envelope,
+    execution_gate_scope_hash,
+    resolve_execution_gate_permit,
+)
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.structural_write_gate import append_governed_jsonl
+
+
+REVERSIBLE_LABELS_LANE_ID = "reversible_labels"
+REVERSIBLE_LABELS_RISK_CLASS = "bounded_reversible_label"
+REVERSIBLE_LABEL_TTL_DAYS = 90
+
+
+def reversible_labels_scope(profile: str) -> dict[str, Any]:
+    return {
+        "profile": str(profile or "default"),
+        "label_kind": "owner_approved_candidate",
+        "source": "memory_os.audit.owner_action_reply_processed",
+        "ttl_days": REVERSIBLE_LABEL_TTL_DAYS,
+    }
 
 
 def ground_truth_miner_manifest() -> dict[str, Any]:
@@ -89,34 +109,141 @@ class GroundTruthMinerModule:
             "findings": findings,
         }
 
-    def run_once(self, *, store: MemoryOSStore) -> dict[str, Any]:
-        return self.mine(store=store, audit_entries=read_audit_entries(store.roots.audit_path))
+    def run_once(
+        self,
+        *,
+        store: MemoryOSStore,
+        execution_envelope_id: str = "",
+        expected_scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self.mine(
+            store=store,
+            audit_entries=read_audit_entries(store.roots.audit_path),
+            execution_envelope_id=execution_envelope_id,
+            expected_scope=expected_scope,
+        )
 
-    def mine(self, *, store: MemoryOSStore, audit_entries: list[dict[str, Any]]) -> dict[str, Any]:
+    def mine(
+        self,
+        *,
+        store: MemoryOSStore,
+        audit_entries: list[dict[str, Any]],
+        execution_envelope_id: str = "",
+        expected_scope: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        automatic = bool(str(execution_envelope_id or "").strip())
+        scope = expected_scope or reversible_labels_scope(self.profile)
+        scope_hash = execution_gate_scope_hash(scope)
+        resolution: dict[str, Any] = {"status": "not_required", "reason": "manual_or_test_run"}
+        if automatic:
+            resolution = resolve_execution_gate_permit(
+                store.roots,
+                envelope_id=execution_envelope_id,
+                lane_id=REVERSIBLE_LABELS_LANE_ID,
+                risk_class=REVERSIBLE_LABELS_RISK_CLASS,
+                require_fresh=True,
+                require_unused=True,
+                expected_scope_hash=scope_hash,
+            )
+            if resolution.get("status") != "valid":
+                return {
+                    "schema_version": "hermes.ground_truth_miner_result.v0",
+                    "module": "ground_truth_miner",
+                    "profile": self.profile,
+                    "status": "blocked",
+                    "reason": str(resolution.get("reason") or "execution_gate_invalid"),
+                    "lane_id": REVERSIBLE_LABELS_LANE_ID,
+                    "risk_class": REVERSIBLE_LABELS_RISK_CLASS,
+                    "execution_envelope_id": str(execution_envelope_id or ""),
+                    "execution_gate_resolution": resolution,
+                    "label_count": 0,
+                    "total_label_count": len(self.read_labels()),
+                    "active_label_count": sum(1 for item in self.read_labels() if item.get("label_state") == "active"),
+                    "retracted_label_count": sum(
+                        1 for item in self.read_labels() if item.get("label_state") == "retracted"
+                    ),
+                    "actual_send": False,
+                    "actual_execute": False,
+                    "actual_policy_write": False,
+                    "actual_identity_write": False,
+                    "actual_relationship_write": False,
+                    "actual_route_score_write": False,
+                    "hindsight_write": False,
+                    "score_live_applied": False,
+                    "route_live_applied": False,
+                    "boundary": _false_boundary(),
+                }
         existing = {str(item.get("label_id") or ""): item for item in self.read_labels()}
-        labels = list(existing.values())
         generated = []
         for entry in audit_entries:
             label = self._label_from_audit(entry)
             if not label or label["label_id"] in existing:
                 continue
-            labels.append(label)
             existing[label["label_id"]] = label
             generated.append(label)
-        self._write_jsonl(self.labels_path, labels)
+        for label in generated:
+            if automatic:
+                append_governed_jsonl(
+                    store,
+                    self.labels_path,
+                    label,
+                    write_owner="automatic",
+                    lane_id=REVERSIBLE_LABELS_LANE_ID,
+                    risk_class=REVERSIBLE_LABELS_RISK_CLASS,
+                    execution_gate_envelope_id=execution_envelope_id,
+                    scope_hash=scope_hash,
+                )
+            else:
+                _append_jsonl(self.labels_path, label)
+        labels = list(existing.values())
         result = {
             "schema_version": "hermes.ground_truth_miner_result.v0",
             "module": "ground_truth_miner",
             "profile": self.profile,
             "status": "ok",
+            "lane_id": REVERSIBLE_LABELS_LANE_ID,
+            "risk_class": REVERSIBLE_LABELS_RISK_CLASS,
+            "lane_mode": "limited_auto",
+            "execution_envelope_id": str(execution_envelope_id or ""),
+            "execution_gate_resolution": resolution,
+            "structural_write_gate_bound": automatic,
+            "scope_hash": scope_hash,
             "label_count": len(generated),
             "total_label_count": len(labels),
+            "active_label_count": sum(1 for item in labels if item.get("label_state") == "active"),
+            "retracted_label_count": sum(1 for item in labels if item.get("label_state") == "retracted"),
             "actual_send": False,
             "actual_execute": False,
+            "actual_policy_write": False,
+            "actual_identity_write": False,
+            "actual_relationship_write": False,
+            "actual_route_score_write": False,
+            "hindsight_write": False,
             "score_live_applied": False,
             "route_live_applied": False,
+            "boundary": _false_boundary(),
         }
-        _append_jsonl(self.runs_path, result)
+        if automatic:
+            append_governed_jsonl(
+                store,
+                self.runs_path,
+                result,
+                write_owner="automatic",
+                lane_id=REVERSIBLE_LABELS_LANE_ID,
+                risk_class=REVERSIBLE_LABELS_RISK_CLASS,
+                execution_gate_envelope_id=execution_envelope_id,
+                scope_hash=scope_hash,
+            )
+            complete_execution_gate_envelope(
+                store,
+                envelope_id=execution_envelope_id,
+                lane_id=REVERSIBLE_LABELS_LANE_ID,
+                execution_status="ok",
+                postcheck={"boundary": _false_boundary(), "label_count": len(generated)},
+                result_summary={"label_count": len(generated), "total_label_count": len(labels)},
+            )
+        else:
+            _append_jsonl(self.runs_path, result)
         append_audit(
             store.roots.audit_path,
             action="ground_truth_labels_mined",
@@ -131,21 +258,22 @@ class GroundTruthMinerModule:
 
     def retract_label(self, label_id: str, *, reason: str) -> dict[str, Any]:
         labels = self.read_labels()
-        found = False
-        updated = []
-        for label in labels:
-            if str(label.get("label_id") or "") == label_id:
-                label = {
-                    **label,
-                    "label_state": "retracted",
-                    "retraction_reason": reason,
-                    "retracted_at": datetime.now(timezone.utc).isoformat(),
-                    "score_live_applied": False,
-                    "route_live_applied": False,
-                }
-                found = True
-            updated.append(label)
-        self._write_jsonl(self.labels_path, updated)
+        current = next((label for label in labels if str(label.get("label_id") or "") == label_id), None)
+        found = current is not None
+        if current:
+            retracted = {
+                **current,
+                "label_state": "retracted",
+                "retraction_reason": reason,
+                "retracted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "score_live_applied": False,
+                "route_live_applied": False,
+                "actual_route_score_write": False,
+                "actual_policy_write": False,
+                "hindsight_write": False,
+                "boundary": _false_boundary(),
+            }
+            _append_jsonl(self.labels_path, retracted)
         result = {
             "schema_version": "hermes.ground_truth_miner_retraction.v0",
             "module": "ground_truth_miner",
@@ -155,12 +283,21 @@ class GroundTruthMinerModule:
             "audit_action": "label_retracted" if found else "label_retraction_missing",
             "reason": reason,
             "actual_execute": False,
+            "actual_policy_write": False,
+            "actual_route_score_write": False,
+            "hindsight_write": False,
+            "boundary": _false_boundary(),
         }
         _append_jsonl(self.runs_path, result)
         return result
 
     def read_labels(self) -> list[dict[str, Any]]:
-        return _read_jsonl(self.labels_path)
+        latest: dict[str, dict[str, Any]] = {}
+        for record in _read_jsonl(self.labels_path):
+            label_id = str(record.get("label_id") or "")
+            if label_id:
+                latest[label_id] = record
+        return list(latest.values())
 
     def _label_from_audit(self, entry: dict[str, Any]) -> dict[str, Any] | None:
         if entry.get("action") != "owner_action_reply_processed" or entry.get("status") != "ok":
@@ -171,33 +308,35 @@ class GroundTruthMinerModule:
         if action_type not in {"approve_candidate", "approve_crystallized_candidate"} or not target_id:
             return None
         label_id = _stable_id("gt_label", action_type, target_id)
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(days=REVERSIBLE_LABEL_TTL_DAYS)
         return {
             "schema_version": "hermes.ground_truth_label.v0",
             "label_id": label_id,
             "profile": self.profile,
             "subject_ref": f"crystallized_candidate:{target_id}",
+            "source_scope_ref": f"crystallized_candidate:{target_id}",
             "target_id": target_id,
             "label_kind": "owner_approved_candidate",
             "label_state": "active",
             "source_action": action_type,
             "source_audit_target": str(entry.get("target") or ""),
             "retractable": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "ttl_days": REVERSIBLE_LABEL_TTL_DAYS,
+            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            "created_at": now.isoformat().replace("+00:00", "Z"),
             "live_applied": False,
             "score_live_applied": False,
             "route_live_applied": False,
             "actual_send": False,
             "actual_execute": False,
+            "actual_policy_write": False,
             "actual_identity_write": False,
+            "actual_relationship_write": False,
+            "actual_route_score_write": False,
+            "hindsight_write": False,
+            "boundary": _false_boundary(),
         }
-
-    @staticmethod
-    def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records),
-            encoding="utf-8",
-        )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -216,6 +355,19 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _false_boundary() -> dict[str, bool]:
+    return {
+        "actual_send": False,
+        "actual_execute": False,
+        "actual_policy_write": False,
+        "actual_identity_write": False,
+        "actual_relationship_write": False,
+        "actual_crystallized_approval": False,
+        "actual_route_score_write": False,
+        "hindsight_write": False,
+    }
 
 
 def _stable_id(prefix: str, *parts: str) -> str:

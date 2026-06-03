@@ -75,6 +75,7 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     assert set(status["projected_source_keys"]) >= {"execution_gate_envelopes", "hermes_cron_jobs", "runtime_logs"}
     assert "log_file_count" in status["source_payload_fields"]["runtime_logs"]
     assert "operation_count" in status["source_payload_fields"]["hindsight_provider_stats"]
+    assert "curation_review_suggested_count" in status["source_payload_fields"]["hindsight_governance_signals"]
     assert "would_send_count" in status["source_payload_fields"]["mailbox_status"]
     assert "latest_output_at" in status["source_payload_fields"]["wandering_mind_state"]
     assert "configured_server_count" in status["source_payload_fields"]["mcp_server_health"]

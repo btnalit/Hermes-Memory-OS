@@ -155,3 +155,24 @@ def test_left_brain_advisor_surfaces_repeated_external_cron_failures_as_review_s
     assert finding["actual_send"] is False
     assert "info-reflect-ai" in finding["summary"]
     assert "120s" in finding["summary"]
+
+
+def test_left_brain_advisor_surfaces_hindsight_governance_suggestions_without_writes(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        '{"schema_version":"memory-os.memory_projection_record.v0","projection_id":"phindsight","source_key":"hindsight_provider_stats","source_hash":"hs1","source_scope_ref":"hindsight:default","projection_type":"governance_signal","payload":{"status":"ok","recall_mode":"active","raw_retained_count":1,"projection_stale_count":2,"pollution_indicator_count":3},"raw_body_included":false,"boundary":{"actual_send":false}}\n',
+        encoding="utf-8",
+    )
+
+    report = run_left_brain_advisor(store, write=False, max_findings=10)
+    hindsight_findings = [finding for finding in report["findings"] if finding["source_key"] == "hindsight_provider_stats"]
+
+    assert len(hindsight_findings) == 3
+    assert {finding["allowed_action_type"] for finding in hindsight_findings} == {"review_only"}
+    assert {finding["owner_burden_class"] for finding in hindsight_findings} == {"review_suggested"}
+    assert all(finding["hindsight_write"] is False for finding in hindsight_findings)
+    assert all(finding["actual_execute"] is False for finding in hindsight_findings)
+    assert any("stale" in finding["summary"] for finding in hindsight_findings)

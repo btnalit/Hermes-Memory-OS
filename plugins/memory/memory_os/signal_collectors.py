@@ -171,6 +171,8 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         return _wandering_mind_payload(roots, base)
     if spec.source_key == "hindsight_provider_stats":
         return _hindsight_payload(roots, base, capability)
+    if spec.source_key == "hindsight_governance_signals":
+        return _hindsight_governance_payload(roots, base, capability)
     if spec.source_key == "mailbox_status":
         return _mailbox_payload(roots, base)
     if spec.source_key == "profile_config":
@@ -384,6 +386,52 @@ def _hindsight_payload(roots: MemoryOSRoots, base: dict[str, Any], capability: d
         "reflect_hot_path_count": int(monitor_fields.get("reflect_hot_path_count") or 0),
         "latest_operation_at": _latest_record_time(provider_records),
         "pollution_indicator_count": raw_retained_count + projection_stale_count,
+    }
+
+
+def _hindsight_governance_payload(
+    roots: MemoryOSRoots,
+    base: dict[str, Any],
+    capability: dict[str, Any],
+) -> dict[str, Any]:
+    operation_records = _read_jsonl(roots.memory_os_root / "system" / "substrate_operations.jsonl")
+    provider_records = [record for record in operation_records if _hindsight_record(record)]
+    monitor_fields = derive_substrate_monitor_fields(operation_records, provider="hindsight")
+    projection_records = _read_jsonl(roots.memory_os_root / "system" / "projection_ledger.jsonl")
+    coherence = derive_projection_coherence(projection_records, provider="hindsight")
+    raw_retained_count = int(monitor_fields.get("raw_retained_count") or 0)
+    projection_stale_count = int(coherence.get("projection_stale_count") or 0)
+    duplicate_indicator_count = _duplicate_projection_indicator_count(projection_records)
+    authoritative_claim_count = sum(1 for record in provider_records if record.get("advisory_only") is False)
+    pollution_indicator_count = raw_retained_count + projection_stale_count + duplicate_indicator_count
+    retain_review_suggested_count = max(raw_retained_count, 0)
+    reject_review_suggested_count = max(raw_retained_count + duplicate_indicator_count, 0)
+    demote_review_suggested_count = max(projection_stale_count, 0)
+    curation_review_suggested_count = pollution_indicator_count
+    configured = _present(capability) or bool(capability.get("memory_os_substrate_config_present")) or bool(provider_records)
+    return {
+        **base,
+        "status": "warning" if pollution_indicator_count or authoritative_claim_count else "ok" if configured else base["status"],
+        "available": configured or base["available"],
+        "record_count": len(provider_records) + len(projection_records),
+        "suggestion_count": (
+            retain_review_suggested_count
+            + reject_review_suggested_count
+            + demote_review_suggested_count
+            + (1 if curation_review_suggested_count else 0)
+        ),
+        "retain_review_suggested_count": retain_review_suggested_count,
+        "reject_review_suggested_count": reject_review_suggested_count,
+        "demote_review_suggested_count": demote_review_suggested_count,
+        "curation_review_suggested_count": curation_review_suggested_count,
+        "raw_retained_count": raw_retained_count,
+        "projection_stale_count": projection_stale_count,
+        "pollution_indicator_count": pollution_indicator_count,
+        "duplicate_indicator_count": duplicate_indicator_count,
+        "advisory_only": authoritative_claim_count == 0,
+        "authoritative_claim_count": authoritative_claim_count,
+        "raw_body_included": False,
+        "boundary_true_count": 0,
     }
 
 
@@ -674,6 +722,33 @@ def _hindsight_record(record: dict[str, Any]) -> bool:
         str(record.get("provider") or record.get("substrate") or "").lower() == "hindsight"
         or str(record.get("provider_key") or "").lower() == "hindsight"
     )
+
+
+def _duplicate_projection_indicator_count(records: list[dict[str, Any]]) -> int:
+    seen: set[str] = set()
+    duplicates = 0
+    for record in records:
+        if str(record.get("provider") or record.get("provider_key") or "").lower() not in {"", "hindsight"}:
+            continue
+        key = str(
+            record.get("dedup_key")
+            or record.get("source_ref")
+            or record.get("source_record_ref")
+            or record.get("source_ref_version")
+            or (
+                f"{record.get('source_record_ref')}:{record.get('source_version')}"
+                if record.get("source_record_ref") and record.get("source_version")
+                else ""
+            )
+            or record.get("projection_ref")
+            or ""
+        )
+        if not key:
+            continue
+        if key in seen:
+            duplicates += 1
+        seen.add(key)
+    return duplicates
 
 
 def _first_existing_path(root: Path, candidates: tuple[str, ...]) -> Path | None:

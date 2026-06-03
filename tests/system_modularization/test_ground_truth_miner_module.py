@@ -1,6 +1,14 @@
+import json
+
+from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
-from plugins.modules.governance.ground_truth_miner import GroundTruthMinerModule
+from plugins.modules.governance.ground_truth_miner import (
+    REVERSIBLE_LABELS_LANE_ID,
+    REVERSIBLE_LABELS_RISK_CLASS,
+    GroundTruthMinerModule,
+    reversible_labels_scope,
+)
 
 
 def test_ground_truth_miner_writes_retractable_owner_label(tmp_path):
@@ -25,6 +33,51 @@ def test_ground_truth_miner_writes_retractable_owner_label(tmp_path):
     assert result["actual_execute"] is False
     assert module.read_labels()[0]["label_state"] == "active"
     assert module.read_labels()[0]["retractable"] is True
+    assert module.read_labels()[0]["ttl_days"] == 90
+    assert module.read_labels()[0]["source_scope_ref"] == "crystallized_candidate:cand_1"
+    assert module.read_labels()[0]["actual_route_score_write"] is False
+    assert module.read_labels()[0]["hindsight_write"] is False
+
+
+def test_ground_truth_miner_automatic_write_uses_structural_write_gate(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="main"))
+    store.initialize()
+    module = GroundTruthMinerModule(tmp_path, profile="main")
+    scope = reversible_labels_scope("main")
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id=REVERSIBLE_LABELS_LANE_ID,
+        trigger_surface="cognitive_loop",
+        risk_class=REVERSIBLE_LABELS_RISK_CLASS,
+        human_approval_required=False,
+        why_no_human_approval="retractable labels only",
+        scope=scope,
+        boundary={"actual_send": False, "actual_execute": False},
+    )
+
+    result = module.mine(
+        store=store,
+        audit_entries=[
+            {
+                "action": "owner_action_reply_processed",
+                "status": "ok",
+                "target": "oa_123",
+                "details": {"action_type": "approve_candidate", "target_id": "cand_1"},
+            }
+        ],
+        execution_envelope_id=permit["execution_gate_envelope_id"],
+        expected_scope=scope,
+    )
+    labels = [json.loads(line) for line in module.labels_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    runs = [json.loads(line) for line in module.runs_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    assert result["status"] == "ok"
+    assert result["execution_gate_resolution"]["status"] == "valid"
+    assert result["structural_write_gate_bound"] is True
+    assert labels[0]["structural_write_governance"]["lane_id"] == REVERSIBLE_LABELS_LANE_ID
+    assert labels[0]["structural_write_governance"]["risk_class"] == REVERSIBLE_LABELS_RISK_CLASS
+    assert labels[0]["structural_write_governance"]["boundary_true"] is False
+    assert runs[0]["structural_write_governance"]["lane_id"] == REVERSIBLE_LABELS_LANE_ID
 
 
 def test_ground_truth_miner_status_is_ok_after_zero_label_run(tmp_path):
@@ -64,4 +117,5 @@ def test_ground_truth_miner_retracts_label_without_deleting_record(tmp_path):
     labels = module.read_labels()
     assert labels[0]["label_state"] == "retracted"
     assert labels[0]["retraction_reason"] == "crystallized_regression"
+    assert len([line for line in module.labels_path.read_text(encoding="utf-8").splitlines() if line.strip()]) == 2
     assert "label_retracted" in module.runs_path.read_text(encoding="utf-8")

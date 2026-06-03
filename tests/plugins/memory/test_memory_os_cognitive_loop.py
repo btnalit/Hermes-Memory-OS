@@ -116,6 +116,10 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert steps["imagination_loop"]["result"]["live_applied"] is False
     assert steps["confabulation_detector"]["result"]["live_behavior_changed"] is False
     assert steps["ground_truth_miner"]["result"]["score_live_applied"] is False
+    assert steps["ground_truth_miner"]["result"]["lane_id"] == "reversible_labels"
+    assert steps["ground_truth_miner"]["result"]["risk_class"] == "bounded_reversible_label"
+    assert steps["ground_truth_miner"]["result"]["execution_gate_resolution"]["status"] == "valid"
+    assert steps["ground_truth_miner"]["result"]["structural_write_gate_bound"] is True
     assert steps["crystallized_revalidator"]["result"]["demotion_live_applied"] is False
     assert steps["migration_controller"]["result"]["migration_live_applied"] is False
     assert steps["abstraction_distillation"]["result"]["distillation_live_applied"] is False

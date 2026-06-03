@@ -23,15 +23,29 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "memory-os" / "system" / "projection_ledger.jsonl").write_text(
-        json.dumps(
-            {
-                "provider": "hindsight",
-                "operation": "retain",
-                "source_record_ref": "crystal-public-1",
-                "source_version": "v1",
-                "substrate_record_id": "hs_1",
-                "substrate_snapshot_id": "snap_1",
-            }
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "provider": "hindsight",
+                        "operation": "retain",
+                        "source_record_ref": "crystal-public-1",
+                        "source_version": "v1",
+                        "substrate_record_id": "hs_1",
+                        "substrate_snapshot_id": "snap_1",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "provider": "hindsight",
+                        "operation": "retain",
+                        "source_record_ref": "crystal-public-1",
+                        "source_version": "v1",
+                        "substrate_record_id": "hs_1_duplicate",
+                        "substrate_snapshot_id": "snap_2",
+                    }
+                ),
+            ]
         )
         + "\n",
         encoding="utf-8",
@@ -212,6 +226,11 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["runtime_logs"]["payload"]["error_log_exists"] is True
     assert by_source["hindsight_provider_stats"]["payload"]["operation_count"] == 2
     assert by_source["hindsight_provider_stats"]["payload"]["retain_count"] == 1
+    assert by_source["hindsight_governance_signals"]["payload"]["available"] is True
+    assert by_source["hindsight_governance_signals"]["payload"]["suggestion_count"] >= 1
+    assert by_source["hindsight_governance_signals"]["payload"]["duplicate_indicator_count"] == 1
+    assert by_source["hindsight_governance_signals"]["payload"]["authoritative_claim_count"] == 0
+    assert by_source["hindsight_governance_signals"]["payload"]["raw_body_included"] is False
     assert by_source["mailbox_status"]["payload"]["inbox_count"] == 1
     assert by_source["mailbox_status"]["payload"]["would_send_count"] == 1
     assert by_source["wandering_mind_state"]["payload"]["output_count"] == 1

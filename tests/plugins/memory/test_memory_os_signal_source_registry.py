@@ -19,6 +19,7 @@ def test_signal_source_registry_declares_read_only_sources():
         "memory_sources_feedback",
         "hermes_cron_jobs",
         "hindsight_provider_stats",
+        "hindsight_governance_signals",
         "mailbox_status",
         "wandering_mind_state",
         "skills_inventory",
@@ -43,6 +44,8 @@ def test_signal_source_registry_declares_read_only_sources():
     )
     assert "external_failure_count" in by_source["hermes_cron_jobs"].allowed_payload_fields
     assert "operation_count" in by_source["hindsight_provider_stats"].allowed_payload_fields
+    assert "curation_review_suggested_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
+    assert "authoritative_claim_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
     assert "would_send_count" in by_source["mailbox_status"].allowed_payload_fields
     assert "latest_output_at" in by_source["wandering_mind_state"].allowed_payload_fields
     assert "configured_server_count" in by_source["mcp_server_health"].allowed_payload_fields

@@ -206,6 +206,25 @@ def _build_findings(projections: list[dict[str, Any]], *, max_findings: int) -> 
                 seen_dedup_keys,
                 _finding(source_key, projection, status="external_cron_failure"),
             )
+        if source_key == "hindsight_provider_stats":
+            if int(payload.get("projection_stale_count") or 0) > 0:
+                _append_finding_once(
+                    findings,
+                    seen_dedup_keys,
+                    _finding(source_key, projection, status="hindsight_projection_stale"),
+                )
+            if int(payload.get("raw_retained_count") or 0) > 0:
+                _append_finding_once(
+                    findings,
+                    seen_dedup_keys,
+                    _finding(source_key, projection, status="hindsight_raw_retain_detected"),
+                )
+            if int(payload.get("pollution_indicator_count") or 0) > 0:
+                _append_finding_once(
+                    findings,
+                    seen_dedup_keys,
+                    _finding(source_key, projection, status="hindsight_pollution_indicator"),
+                )
         if status in {"missing", "error", "blocked"}:
             _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status=status or "missing"))
         elif available is False:
@@ -251,6 +270,24 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
         summary = f"{job} reported {failure_reason}."
         reason = "Repeated external Hermes cron failure observed via read-only cron output projection; Memory-OS does not rerun, modify, or own the job."
         confidence = 0.86
+    elif source_key == "hindsight_provider_stats" and status == "hindsight_projection_stale":
+        stale_count = int(payload.get("projection_stale_count") or 0)
+        title = "Hindsight projection stale facts need review"
+        summary = f"Hindsight projection ledger reports stale projection count={stale_count}."
+        reason = "Memory-OS observed derived Hindsight projection coherence metadata; this is a review-only curation suggestion and does not write, delete, or promote Hindsight facts."
+        confidence = 0.84
+    elif source_key == "hindsight_provider_stats" and status == "hindsight_raw_retain_detected":
+        raw_count = int(payload.get("raw_retained_count") or 0)
+        title = "Hindsight raw retain boundary needs review"
+        summary = f"Hindsight substrate ledger reports raw retained count={raw_count}."
+        reason = "Raw-retain indicators should be investigated through governed curation; Memory-OS does not import raw payload or change Hindsight ownership."
+        confidence = 0.9
+    elif source_key == "hindsight_provider_stats" and status == "hindsight_pollution_indicator":
+        pollution_count = int(payload.get("pollution_indicator_count") or 0)
+        title = "Hindsight pollution indicators need review"
+        summary = f"Hindsight metadata reports pollution indicator count={pollution_count}."
+        reason = "Pollution/stale/duplicate indicators are surfaced as bounded governance suggestions only; Hindsight remains advisory and non-authoritative."
+        confidence = 0.82
     return {
         "schema_version": "memory-os.left_brain_advisor_finding.v0",
         "finding_id": finding_id,
@@ -293,6 +330,19 @@ def _finding_dedup_key(source_key: str, projection: dict[str, Any], status: str)
             "source_scope_ref": projection.get("source_scope_ref"),
             "latest_failure_job": payload.get("latest_failure_job"),
             "latest_failure_reason": payload.get("latest_failure_reason"),
+        }
+        return "lbf_dedup_" + hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:24]
+    if source_key == "hindsight_provider_stats" and status.startswith("hindsight_"):
+        material = {
+            "source_key": source_key,
+            "status": status,
+            "source_scope_ref": projection.get("source_scope_ref"),
+            "recall_mode": payload.get("recall_mode"),
+            "raw_retained_count": payload.get("raw_retained_count"),
+            "projection_stale_count": payload.get("projection_stale_count"),
+            "pollution_indicator_count": payload.get("pollution_indicator_count"),
         }
         return "lbf_dedup_" + hashlib.sha256(
             json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
