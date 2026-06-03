@@ -114,6 +114,44 @@ MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
         "rotated_log_count",
     },
 }
+MEMORY_PROJECTION_55D_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
+    "cognitive_loop_status": {
+        "report_count",
+        "latest_cycle_id",
+        "step_count",
+        "error_step_count",
+        "required_step_missing_count",
+    },
+    "gateway_runtime_status": {
+        "heartbeat_state_exists",
+        "heartbeat_age_seconds",
+        "processed_event_count",
+        "gateway_capability_status",
+        "gateway_log_exists",
+    },
+    "proposal_queue_pressure": {
+        "proposal_count",
+        "state_candidate_count",
+        "approved_for_proposal_count",
+        "awaiting_ops_gate_count",
+        "actual_execute_count",
+    },
+    "candidate_queue_pressure": {
+        "candidate_count",
+        "private_candidate_count",
+        "public_candidate_count",
+        "latest_candidate_at",
+        "source_event_ref_count",
+    },
+    "owner_review_pressure": {
+        "owner_action_count",
+        "action_required_estimate_count",
+        "review_suggested_estimate_count",
+        "advisor_finding_count",
+        "pending_candidate_count",
+        "pending_proposal_count",
+    },
+}
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
@@ -2817,18 +2855,18 @@ def _classify_left_brain_signal_weaving(
             if isinstance(projection.get("source_payload_fields"), dict)
             else {}
         )
-        missing_payload_fields: list[dict[str, Any]] = []
+        missing_payload_fields_55c: list[dict[str, Any]] = []
         for source_key, expected_fields in MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS.items():
             observed_fields = set(payload_fields.get(source_key) or [])
             missing_fields = sorted(expected_fields - observed_fields)
             if missing_fields:
-                missing_payload_fields.append({"source_key": source_key, "missing_fields": missing_fields})
-        if missing_payload_fields:
+                missing_payload_fields_55c.append({"source_key": source_key, "missing_fields": missing_fields})
+        if missing_payload_fields_55c:
             target = warn if clean_host else fail
             target.append(
                 {
                     "code": "memory_projection_55c_payload_field_coverage_missing",
-                    "missing": missing_payload_fields,
+                    "missing": missing_payload_fields_55c,
                 }
             )
         else:
@@ -2836,6 +2874,27 @@ def _classify_left_brain_signal_weaving(
                 {
                     "code": "memory_projection_55c_payload_field_coverage_ok",
                     "source_count": len(MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS),
+                }
+            )
+        missing_payload_fields_55d: list[dict[str, Any]] = []
+        for source_key, expected_fields in MEMORY_PROJECTION_55D_REQUIRED_PAYLOAD_FIELDS.items():
+            observed_fields = set(payload_fields.get(source_key) or [])
+            missing_fields = sorted(expected_fields - observed_fields)
+            if missing_fields:
+                missing_payload_fields_55d.append({"source_key": source_key, "missing_fields": missing_fields})
+        if missing_payload_fields_55d:
+            target = warn if clean_host else fail
+            target.append(
+                {
+                    "code": "memory_projection_55d_payload_field_coverage_missing",
+                    "missing": missing_payload_fields_55d,
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "memory_projection_55d_payload_field_coverage_ok",
+                    "source_count": len(MEMORY_PROJECTION_55D_REQUIRED_PAYLOAD_FIELDS),
                 }
             )
         projection_count = int(projection.get("projection_count") or 0)
@@ -2846,7 +2905,8 @@ def _classify_left_brain_signal_weaving(
             and not duplicate_source_hash_count
             and not duplicate_dedup_key_count
             and not registered_source_missing_count
-            and not missing_payload_fields
+            and not missing_payload_fields_55c
+            and not missing_payload_fields_55d
             and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )

@@ -65,6 +65,108 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
         json.dumps({"mcpServers": {"voicebox": {"status": "failed", "command": "SHOULD_NOT_LEAK"}}}),
         encoding="utf-8",
     )
+    cognitive_root = tmp_path / "system-modules" / "cognitive_loop"
+    cognitive_root.mkdir(parents=True)
+    cognitive_steps = [
+        {"step": "left_brain_pipeline_check", "status": "ok"},
+        {"step": "host_capability_probe", "status": "ok"},
+        {"step": "signal_collection", "status": "ok"},
+        {"step": "memory_projection", "status": "ok"},
+        {"step": "left_brain_advisor", "status": "ok"},
+        {"step": "governance_feedback", "status": "ok"},
+        {"step": "deep_reflection", "status": "warning"},
+        {"step": "heartbeat_post", "status": "ok"},
+        {"step": "doctor_boundary_report", "status": "ok"},
+    ]
+    (cognitive_root / "reports.jsonl").write_text(
+        json.dumps(
+            {
+                "cycle_id": "cycle-test",
+                "status": "warning",
+                "finished_at": "2026-06-03T04:00:00Z",
+                "step_count": len(cognitive_steps),
+                "steps": cognitive_steps,
+                "notes": "SHOULD_NOT_LEAK",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "memory-os" / "runtime").mkdir(parents=True)
+    (tmp_path / "memory-os" / "runtime" / "heartbeat_state.json").write_text(
+        json.dumps({"last_heartbeat_at": "2026-06-03T04:01:00Z", "processed_event_count": 7, "debug": "SHOULD_NOT_LEAK"}),
+        encoding="utf-8",
+    )
+    proposal_root = tmp_path / "system-modules" / "proposal_queue"
+    proposal_root.mkdir(parents=True)
+    (proposal_root / "queue.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "proposal_id": "prop1",
+                        "state": "candidate",
+                        "followup_state": "awaiting_ops_gate",
+                        "actual_execute": False,
+                        "body": "SHOULD_NOT_LEAK",
+                    },
+                    {
+                        "proposal_id": "prop2",
+                        "state": "approved_for_proposal",
+                        "followup_state": "ops_gate_reviewed",
+                        "execution_ticket": "",
+                        "crystallized_approved": False,
+                        "body": "SHOULD_NOT_LEAK",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate_root = tmp_path / "memory-os" / "crystallized"
+    candidate_root.mkdir(parents=True)
+    (candidate_root / "candidates.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "candidate_id": "cand1",
+                        "created_at": "2026-06-03T04:02:00Z",
+                        "kind": "public_fact",
+                        "visibility": "public",
+                        "source_event_ref": "evt1",
+                        "body": "SHOULD_NOT_LEAK",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "candidate_id": "cand2",
+                        "created_at": "2026-06-03T04:03:00Z",
+                        "kind": "private_note",
+                        "visibility": "private",
+                        "bridge_state": "needs_review",
+                        "body": "SHOULD_NOT_LEAK",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
+    advisor_root.mkdir(parents=True)
+    (advisor_root / "reports.jsonl").write_text(
+        json.dumps(
+            {
+                "findings": [
+                    {"finding_id": "f1", "owner_visible": True, "owner_burden_class": "review_suggested", "summary": "SHOULD_NOT_LEAK"},
+                    {"finding_id": "f2", "owner_visible": True, "owner_burden_class": "fyi", "summary": "SHOULD_NOT_LEAK"},
+                ]
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     capabilities = probe_host_capabilities(roots, hermes_bin="definitely-missing-hermes-bin")
 
     report = collect_signal_sources(
@@ -93,6 +195,16 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["wandering_mind_state"]["payload"]["would_send_count"] == 1
     assert by_source["mcp_server_health"]["payload"]["configured_server_count"] == 1
     assert by_source["mcp_server_health"]["payload"]["failed_server_count"] == 1
+    assert by_source["cognitive_loop_status"]["payload"]["step_count"] == len(cognitive_steps)
+    assert by_source["cognitive_loop_status"]["payload"]["warning_step_count"] == 1
+    assert by_source["gateway_runtime_status"]["payload"]["heartbeat_state_exists"] is True
+    assert by_source["gateway_runtime_status"]["payload"]["processed_event_count"] == 7
+    assert by_source["proposal_queue_pressure"]["payload"]["proposal_count"] == 2
+    assert by_source["proposal_queue_pressure"]["payload"]["awaiting_ops_gate_count"] == 1
+    assert by_source["candidate_queue_pressure"]["payload"]["candidate_count"] == 2
+    assert by_source["candidate_queue_pressure"]["payload"]["private_candidate_count"] == 1
+    assert by_source["owner_review_pressure"]["payload"]["advisor_finding_count"] == 2
+    assert by_source["owner_review_pressure"]["payload"]["pending_proposal_count"] == 2
 
 
 def test_collect_signal_sources_blocks_payload_fields_outside_registry(tmp_path):

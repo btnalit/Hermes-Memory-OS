@@ -149,6 +149,16 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         path = roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
         records = _read_jsonl(path)
         return {**base, "status": "ok" if records else base["status"], "record_count": len(records), "feedback_count": len(records)}
+    if spec.source_key == "cognitive_loop_status":
+        return _cognitive_loop_payload(roots, base)
+    if spec.source_key == "gateway_runtime_status":
+        return _gateway_runtime_payload(roots, base, capability)
+    if spec.source_key == "proposal_queue_pressure":
+        return _proposal_queue_payload(roots, base)
+    if spec.source_key == "candidate_queue_pressure":
+        return _candidate_queue_payload(roots, base)
+    if spec.source_key == "owner_review_pressure":
+        return _owner_review_pressure_payload(roots, base)
     if spec.source_key == "runtime_logs":
         return _runtime_log_payload(roots, base)
     if spec.source_key == "skills_inventory":
@@ -208,6 +218,160 @@ def _hindsight_payload(roots: MemoryOSRoots, base: dict[str, Any], capability: d
         "reflect_hot_path_count": int(monitor_fields.get("reflect_hot_path_count") or 0),
         "latest_operation_at": _latest_record_time(provider_records),
         "pollution_indicator_count": raw_retained_count + projection_stale_count,
+    }
+
+
+def _cognitive_loop_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    records = _read_jsonl(roots.hermes_home / "system-modules" / "cognitive_loop" / "reports.jsonl")
+    latest = records[-1] if records else {}
+    steps = latest.get("steps") if isinstance(latest.get("steps"), list) else []
+    step_names = {str(step.get("step") or "") for step in steps if isinstance(step, dict)}
+    required_steps = {
+        "left_brain_pipeline_check",
+        "host_capability_probe",
+        "signal_collection",
+        "memory_projection",
+        "left_brain_advisor",
+        "governance_feedback",
+        "deep_reflection",
+        "heartbeat_post",
+        "doctor_boundary_report",
+    }
+    return {
+        **base,
+        "status": "ok" if records else base["status"],
+        "available": bool(records) or base["available"],
+        "record_count": len(records),
+        "report_count": len(records),
+        "latest_cycle_id": str(latest.get("cycle_id") or ""),
+        "latest_finished_at": str(latest.get("finished_at") or ""),
+        "latest_status": str(latest.get("status") or "") if latest else "",
+        "step_count": int(latest.get("step_count") or len(steps)),
+        "error_step_count": sum(1 for step in steps if isinstance(step, dict) and str(step.get("status") or "") == "error"),
+        "warning_step_count": sum(1 for step in steps if isinstance(step, dict) and str(step.get("status") or "") == "warning"),
+        "required_step_missing_count": len(required_steps - step_names) if records else 0,
+        "boundary_true_count": 1 if _any_true(latest.get("boundary_state") or latest.get("boundaries")) else 0,
+    }
+
+
+def _gateway_runtime_payload(roots: MemoryOSRoots, base: dict[str, Any], capability: dict[str, Any]) -> dict[str, Any]:
+    heartbeat = _safe_json_dict(roots.memory_os_root / "runtime" / "heartbeat_state.json")
+    gateway_logs = [
+        path
+        for path in _runtime_log_files(roots)
+        if path.name.lower() == "gateway.log" or "gateway" in path.name.lower()
+    ]
+    last_heartbeat_at = str(
+        heartbeat.get("last_heartbeat_at")
+        or heartbeat.get("last_run_at")
+        or heartbeat.get("updated_at")
+        or heartbeat.get("created_at")
+        or ""
+    )
+    gateway_version = capability.get("version") or capability.get("hermes_version") or capability.get("build")
+    return {
+        **base,
+        "status": "ok" if heartbeat or gateway_logs or _present(capability) else base["status"],
+        "available": bool(heartbeat or gateway_logs or _present(capability)) or base["available"],
+        "record_count": (1 if heartbeat else 0) + len(gateway_logs),
+        "heartbeat_state_exists": bool(heartbeat),
+        "last_heartbeat_at": last_heartbeat_at[:80],
+        "heartbeat_age_seconds": _age_seconds_from_iso(last_heartbeat_at),
+        "processed_event_count": int(
+            heartbeat.get("processed_event_count")
+            or heartbeat.get("event_count")
+            or heartbeat.get("processed_count")
+            or 0
+        ),
+        "gateway_capability_status": str(capability.get("status") or "missing"),
+        "gateway_version_available": bool(gateway_version),
+        "gateway_log_exists": bool(gateway_logs),
+        "gateway_log_age_seconds": _latest_age_seconds(gateway_logs),
+    }
+
+
+def _proposal_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    items = _proposal_queue_items(roots)
+    state_counts = _count_by_key(items, "state")
+    followup_counts = _count_by_key(items, "followup_state")
+    return {
+        **base,
+        "status": "ok" if items else base["status"],
+        "available": bool(items) or base["available"],
+        "record_count": len(items),
+        "proposal_count": len(items),
+        "state_candidate_count": int(state_counts.get("candidate") or 0),
+        "approved_for_proposal_count": int(state_counts.get("approved_for_proposal") or 0),
+        "awaiting_ops_gate_count": int(followup_counts.get("awaiting_ops_gate") or 0),
+        "ops_gate_reviewed_count": int(followup_counts.get("ops_gate_reviewed") or 0),
+        "execution_ticket_count": sum(1 for item in items if item.get("execution_ticket")),
+        "actual_execute_count": sum(1 for item in items if item.get("actual_execute") is True),
+        "crystallized_approval_granted_count": sum(1 for item in items if item.get("crystallized_approved") is True),
+    }
+
+
+def _candidate_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    records = _candidate_queue_records(roots)
+    kind_values = {str(record.get("kind") or record.get("candidate_kind") or "") for record in records}
+    bridge_states = {
+        str(record.get("bridge_state") or record.get("candidate_bridge_state") or "")
+        for record in records
+        if record.get("bridge_state") or record.get("candidate_bridge_state")
+    }
+    return {
+        **base,
+        "status": "ok" if records else base["status"],
+        "available": bool(records) or base["available"],
+        "record_count": len(records),
+        "candidate_count": len(records),
+        "private_candidate_count": sum(1 for record in records if record.get("visibility") == "private" or record.get("is_private") is True),
+        "public_candidate_count": sum(1 for record in records if record.get("visibility") == "public" or record.get("is_private") is False),
+        "latest_candidate_at": _latest_record_time(records),
+        "kind_count": len({value for value in kind_values if value}),
+        "source_event_ref_count": sum(1 for record in records if record.get("source_event_ref") or record.get("source_event_id")),
+        "bridge_state_count": len(bridge_states),
+    }
+
+
+def _owner_review_pressure_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    owner_actions = _read_jsonl(owner_actions_path(roots))
+    proposal_items = _proposal_queue_items(roots)
+    candidate_records = _candidate_queue_records(roots)
+    advisor_records = _read_jsonl(roots.hermes_home / "system-modules" / "left_brain_advisor" / "reports.jsonl")
+    findings: list[dict[str, Any]] = []
+    for record in advisor_records:
+        record_findings = record.get("findings") if isinstance(record.get("findings"), list) else []
+        findings.extend(item for item in record_findings if isinstance(item, dict))
+    pending_proposals = [
+        item
+        for item in proposal_items
+        if str(item.get("state") or "") in {"candidate", "approved_for_proposal"}
+        or str(item.get("followup_state") or "") in {"awaiting_ops_gate", "ops_gate_reviewed"}
+    ]
+    pending_candidates = [
+        record
+        for record in candidate_records
+        if str(record.get("state") or record.get("status") or "pending") in {"pending", "candidate", "needs_review"}
+    ]
+    action_required = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "action_required")
+    review_suggested = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "review_suggested")
+    fyi = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "fyi")
+    return {
+        **base,
+        "status": "ok" if owner_actions or proposal_items or candidate_records or findings else base["status"],
+        "available": bool(owner_actions or proposal_items or candidate_records or findings) or base["available"],
+        "record_count": len(owner_actions) + len(proposal_items) + len(candidate_records) + len(findings),
+        "owner_action_count": len(owner_actions),
+        "action_required_estimate_count": action_required,
+        "review_suggested_estimate_count": review_suggested,
+        "fyi_estimate_count": fyi,
+        "advisor_finding_count": len(findings),
+        "owner_visible_finding_count": sum(1 for item in findings if item.get("owner_visible") is not False),
+        "pending_candidate_count": len(pending_candidates),
+        "pending_proposal_count": len(pending_proposals),
+        "overflow_estimate_count": max(action_required + review_suggested - 3, 0),
+        "duplicate_action_count": sum(1 for record in owner_actions if str(record.get("result") or "") == "duplicate"),
+        "error_action_count": sum(1 for record in owner_actions if str(record.get("result") or record.get("status") or "") in {"error", "failed"}),
     }
 
 
@@ -406,6 +570,29 @@ def _safe_jobs(path: Path) -> list[dict[str, Any]]:
     return [item for item in jobs if isinstance(item, dict)] if isinstance(jobs, list) else []
 
 
+def _proposal_queue_items(roots: MemoryOSRoots) -> list[dict[str, Any]]:
+    loaded = _safe_json_dict(roots.hermes_home / "system-modules" / "proposal_queue" / "queue.json")
+    value = loaded.get("items") or loaded.get("proposals") or loaded.get("queue")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [item for item in value.values() if isinstance(item, dict)]
+    return []
+
+
+def _candidate_queue_records(roots: MemoryOSRoots) -> list[dict[str, Any]]:
+    return _read_jsonl(roots.memory_os_root / "crystallized" / "candidates.jsonl")
+
+
+def _count_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = str(item.get(key) or "")
+        if value:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
 def _latest_record_time(records: list[dict[str, Any]]) -> str:
     for record in reversed(records):
         for key in ("created_at", "observed_at", "completed_at", "run_time", "timestamp", "ts"):
@@ -517,6 +704,18 @@ def _latest_age_seconds(paths: list[Path]) -> int | None:
     except OSError:
         return None
     return max(int((datetime.now(timezone.utc) - mtime).total_seconds()), 0)
+
+
+def _age_seconds_from_iso(value: str) -> int | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(int((datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()), 0)
 
 
 def _mtime_iso(path: Path | None) -> str:

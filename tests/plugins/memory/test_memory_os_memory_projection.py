@@ -10,6 +10,7 @@ from plugins.memory.memory_os.memory_projection import (
     memory_projection_status,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.signal_source_registry import signal_source_specs
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -34,6 +35,7 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
     store.initialize()
     capabilities = probe_host_capabilities(store.roots, hermes_bin="definitely-missing-hermes-bin")
+    source_count = len(signal_source_specs())
     permit = start_execution_gate_envelope(
         store,
         lane_id="memory_projection_collect",
@@ -41,7 +43,7 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
         risk_class="governance_projection",
         human_approval_required=False,
         why_no_human_approval="read-only signal projection",
-        scope={"source_count": 14, "profile": "memoryos-test"},
+        scope={"source_count": source_count, "profile": "memoryos-test"},
         boundary={"actual_send": False, "actual_execute": False, "actual_crystallized_approval": False},
     )
 
@@ -50,7 +52,7 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
         host_capabilities=capabilities,
         trigger_type="cognitive_loop",
         execution_envelope_id=permit["execution_gate_envelope_id"],
-        expected_scope={"source_count": 14, "profile": "memoryos-test"},
+        expected_scope={"source_count": source_count, "profile": "memoryos-test"},
     )
     status = memory_projection_status(store.roots)
     execution_records = read_execution_gate_records(store.roots)
@@ -67,8 +69,8 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     assert report["status"] in {"ok", "warning"}
     assert report["written_count"] > 0
     assert status["projection_count"] == report["written_count"]
-    assert status["registered_source_count"] == 14
-    assert status["unique_source_count"] == 14
+    assert status["registered_source_count"] == source_count
+    assert status["unique_source_count"] == source_count
     assert status["registered_source_missing_count"] == 0
     assert set(status["projected_source_keys"]) >= {"execution_gate_envelopes", "hermes_cron_jobs", "runtime_logs"}
     assert "log_file_count" in status["source_payload_fields"]["runtime_logs"]
@@ -76,6 +78,11 @@ def test_memory_projection_appends_records_with_valid_execution_gate(tmp_path):
     assert "would_send_count" in status["source_payload_fields"]["mailbox_status"]
     assert "latest_output_at" in status["source_payload_fields"]["wandering_mind_state"]
     assert "configured_server_count" in status["source_payload_fields"]["mcp_server_health"]
+    assert "step_count" in status["source_payload_fields"]["cognitive_loop_status"]
+    assert "heartbeat_state_exists" in status["source_payload_fields"]["gateway_runtime_status"]
+    assert "proposal_count" in status["source_payload_fields"]["proposal_queue_pressure"]
+    assert "candidate_count" in status["source_payload_fields"]["candidate_queue_pressure"]
+    assert "owner_action_count" in status["source_payload_fields"]["owner_review_pressure"]
     assert status["boundary_true_count"] == 0
     assert status["source_scope_missing_count"] == 0
     assert status["duplicate_source_hash_count"] == 0
@@ -92,7 +99,7 @@ def test_memory_projection_deduplicates_stable_source_hashes(tmp_path):
     store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
     store.initialize()
     capabilities = probe_host_capabilities(store.roots, hermes_bin="definitely-missing-hermes-bin")
-    scope = {"source_count": 14, "profile": "memoryos-test"}
+    scope = {"source_count": len(signal_source_specs()), "profile": "memoryos-test"}
 
     first_permit = start_execution_gate_envelope(
         store,

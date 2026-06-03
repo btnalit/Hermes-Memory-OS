@@ -342,6 +342,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert "memory_projection_online" in pass_codes
     assert "memory_projection_registered_source_coverage_ok" in pass_codes
     assert "memory_projection_55c_payload_field_coverage_ok" in pass_codes
+    assert "memory_projection_55d_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_retention_compaction_visible" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
 
@@ -383,6 +384,12 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "memory_projection_55c_payload_field_coverage_missing" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_payload_fields"]["owner_review_pressure"] = ["status"]
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_55d_payload_field_coverage_missing" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["memory_projection_retention"]["latest_boundary_true_archived_count"] = 1
@@ -4044,10 +4051,10 @@ def _healthy_memory_projection() -> dict:
     return {
         "schema_version": "memory-os.memory_projection_status.v0",
         "status": "ok",
-        "projection_count": 14,
+        "projection_count": 19,
         "latest_created_at": "2026-06-03T01:01:00Z",
-        "registered_source_count": 14,
-        "unique_source_count": 14,
+        "registered_source_count": 19,
+        "unique_source_count": 19,
         "source_key_counts": {
             "execution_gate_envelopes": 1,
             "session_mirror_apply": 1,
@@ -4063,6 +4070,11 @@ def _healthy_memory_projection() -> dict:
             "kanban_state": 1,
             "tool_registry": 1,
             "runtime_logs": 1,
+            "cognitive_loop_status": 1,
+            "gateway_runtime_status": 1,
+            "proposal_queue_pressure": 1,
+            "candidate_queue_pressure": 1,
+            "owner_review_pressure": 1,
         },
         "source_payload_fields": {
             "hindsight_provider_stats": [
@@ -4099,9 +4111,48 @@ def _healthy_memory_projection() -> dict:
                 "log_file_count",
                 "rotated_log_count",
             ],
+            "cognitive_loop_status": [
+                "error_step_count",
+                "latest_cycle_id",
+                "report_count",
+                "required_step_missing_count",
+                "step_count",
+            ],
+            "gateway_runtime_status": [
+                "gateway_capability_status",
+                "gateway_log_exists",
+                "heartbeat_age_seconds",
+                "heartbeat_state_exists",
+                "processed_event_count",
+            ],
+            "proposal_queue_pressure": [
+                "actual_execute_count",
+                "approved_for_proposal_count",
+                "awaiting_ops_gate_count",
+                "proposal_count",
+                "state_candidate_count",
+            ],
+            "candidate_queue_pressure": [
+                "candidate_count",
+                "latest_candidate_at",
+                "private_candidate_count",
+                "public_candidate_count",
+                "source_event_ref_count",
+            ],
+            "owner_review_pressure": [
+                "action_required_estimate_count",
+                "advisor_finding_count",
+                "owner_action_count",
+                "pending_candidate_count",
+                "pending_proposal_count",
+                "review_suggested_estimate_count",
+            ],
         },
         "projected_source_keys": [
+            "candidate_queue_pressure",
+            "cognitive_loop_status",
             "execution_gate_envelopes",
+            "gateway_runtime_status",
             "hermes_cron_jobs",
             "hindsight_provider_stats",
             "kanban_state",
@@ -4109,7 +4160,9 @@ def _healthy_memory_projection() -> dict:
             "mcp_server_health",
             "memory_sources_feedback",
             "owner_actions",
+            "owner_review_pressure",
             "profile_config",
+            "proposal_queue_pressure",
             "runtime_logs",
             "session_mirror_apply",
             "skills_inventory",

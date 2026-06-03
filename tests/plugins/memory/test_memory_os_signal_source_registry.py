@@ -27,6 +27,11 @@ def test_signal_source_registry_declares_read_only_sources():
         "kanban_state",
         "tool_registry",
         "runtime_logs",
+        "cognitive_loop_status",
+        "gateway_runtime_status",
+        "proposal_queue_pressure",
+        "candidate_queue_pressure",
+        "owner_review_pressure",
     }
     assert all(spec.writes_allowed is False for spec in specs)
     assert all(spec.allowed_payload_fields for spec in specs)
@@ -41,6 +46,11 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "latest_output_at" in by_source["wandering_mind_state"].allowed_payload_fields
     assert "configured_server_count" in by_source["mcp_server_health"].allowed_payload_fields
     assert "error_log_exists" in by_source["runtime_logs"].allowed_payload_fields
+    assert "step_count" in by_source["cognitive_loop_status"].allowed_payload_fields
+    assert "heartbeat_state_exists" in by_source["gateway_runtime_status"].allowed_payload_fields
+    assert "proposal_count" in by_source["proposal_queue_pressure"].allowed_payload_fields
+    assert "candidate_count" in by_source["candidate_queue_pressure"].allowed_payload_fields
+    assert "owner_action_count" in by_source["owner_review_pressure"].allowed_payload_fields
     assert validate_signal_source_specs(specs)["status"] == "ok"
 
 
