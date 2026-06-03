@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -170,44 +170,80 @@ def _base_report(
 
 def _build_findings(projections: list[dict[str, Any]], *, max_findings: int) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
+    seen_dedup_keys: set[str] = set()
     for projection in projections:
         source_key = str(projection.get("source_key") or "")
         payload = projection.get("payload") if isinstance(projection.get("payload"), dict) else {}
         status = str(payload.get("status") or "").lower()
         available = payload.get("available")
-        if status in {"missing", "error", "blocked"} or available is False:
-            findings.append(_finding(source_key, projection, status=status or "missing"))
+        if source_key == "hermes_cron_jobs" and int(payload.get("external_failure_count") or 0) > 0:
+            _append_finding_once(
+                findings,
+                seen_dedup_keys,
+                _finding(source_key, projection, status="external_cron_failure"),
+            )
+        if status in {"missing", "error", "blocked"}:
+            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status=status or "missing"))
+        elif available is False:
+            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status="availability_missing"))
         if int(payload.get("boundary_true_count") or 0) > 0:
-            findings.append(_finding(source_key, projection, status="boundary_true_count"))
+            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status="boundary_true_count"))
         if len(findings) >= max(max_findings, 0):
             break
     return findings
 
 
+def _append_finding_once(findings: list[dict[str, Any]], seen_dedup_keys: set[str], finding: dict[str, Any]) -> None:
+    dedup_key = str(finding.get("dedup_key") or finding.get("finding_id") or "")
+    if dedup_key in seen_dedup_keys:
+        return
+    seen_dedup_keys.add(dedup_key)
+    findings.append(finding)
+
+
 def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    payload = projection.get("payload") if isinstance(projection.get("payload"), dict) else {}
+    dedup_key = _finding_dedup_key(source_key, projection, status)
     finding_id = "lbf_" + hashlib.sha256(
         json.dumps(
             {
                 "source_key": source_key,
-                "projection_id": projection.get("projection_id"),
+                "dedup_key": dedup_key,
                 "status": status,
             },
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()[:16]
+    title = f"Signal source needs review: {source_key}"
+    summary = f"{source_key} projection reported status={status}."
+    reason = "LeftBrainAdvisor report-only diagnosis from MemoryProjection metadata."
+    confidence = 0.72
+    if source_key == "hermes_cron_jobs" and status == "external_cron_failure":
+        job = str(payload.get("latest_failure_job") or "external Hermes cron job")
+        failure_reason = str(payload.get("latest_failure_reason") or "external cron failure")
+        title = f"Hermes cron external failure: {job}"
+        summary = f"{job} reported {failure_reason}."
+        reason = "Repeated external Hermes cron failure observed via read-only cron output projection; Memory-OS does not rerun, modify, or own the job."
+        confidence = 0.86
     return {
         "schema_version": "memory-os.left_brain_advisor_finding.v0",
         "finding_id": finding_id,
+        "dedup_key": dedup_key,
+        "confidence": confidence,
+        "owner_burden_class": "review_suggested",
+        "expires_at": (now + timedelta(days=7)).isoformat().replace("+00:00", "Z"),
+        "allowed_action_type": "review_only",
         "target_type": "left_brain_advisor_finding",
         "target_id": finding_id,
         "source_module": "left_brain_advisor",
         "priority": "review_suggested",
         "owner_visible": True,
         "actions_suppressed": True,
-        "title": f"Signal source needs review: {source_key}",
-        "summary": f"{source_key} projection reported status={status}.",
-        "reason": "LeftBrainAdvisor report-only diagnosis from MemoryProjection metadata.",
+        "title": title,
+        "summary": summary,
+        "reason": reason,
         "suggested_action": "review-only; no automatic apply",
         "projection_id": str(projection.get("projection_id") or ""),
         "source_key": source_key,
@@ -222,6 +258,29 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
         "actual_route_score_write": False,
         "hindsight_write": False,
     }
+
+
+def _finding_dedup_key(source_key: str, projection: dict[str, Any], status: str) -> str:
+    payload = projection.get("payload") if isinstance(projection.get("payload"), dict) else {}
+    if source_key == "hermes_cron_jobs" and status == "external_cron_failure":
+        material = {
+            "source_key": source_key,
+            "status": status,
+            "source_scope_ref": projection.get("source_scope_ref"),
+            "latest_failure_job": payload.get("latest_failure_job"),
+            "latest_failure_reason": payload.get("latest_failure_reason"),
+        }
+        return "lbf_dedup_" + hashlib.sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:24]
+    material = {
+        "source_key": source_key,
+        "status": status,
+        "source_hash": projection.get("source_hash"),
+        "source_scope_ref": projection.get("source_scope_ref"),
+        "projection_id": "" if projection.get("source_hash") else projection.get("projection_id"),
+    }
+    return "lbf_dedup_" + hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:24]
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:

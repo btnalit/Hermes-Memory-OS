@@ -249,6 +249,46 @@ def test_module_cadence_report_warns_when_expected_cron_is_missing(tmp_path):
     } == {"owner_review_digest", "right_brain_expression_adapter"}
 
 
+def test_module_cadence_report_treats_disabled_deep_reflection_as_skipped_not_error(tmp_path):
+    module = _load_module()
+    home = tmp_path / "home"
+    _write_jobs(home)
+    loop_root = home / "system-modules" / "cognitive_loop"
+    loop_root.mkdir(parents=True)
+    (loop_root / "reports.jsonl").write_text(
+        json.dumps(
+            {
+                "cycle_id": "cloop_disabled_deep",
+                "status": "warning",
+                "finished_at": "2026-06-03T02:00:00+00:00",
+                "steps": [
+                    {
+                        "step": "deep_reflection",
+                        "status": "error",
+                        "result": {
+                            "module": "deep_reflection",
+                            "status": "error",
+                            "reason": "module_disabled",
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = module.build_cadence_report(hermes_home=home, profile="main")
+    by_module = {item["module"]: item for item in report["modules"]}
+
+    assert by_module["deep_reflection"]["cadence_counters"]["skipped_count"] == 1
+    assert by_module["deep_reflection"]["cadence_counters"]["error_count"] == 0
+    assert by_module["deep_reflection"]["cadence_counters"]["last_status"] == "skipped"
+    assert by_module["deep_reflection"]["current_window_error_count"] == 0
+    assert report["current_window_error_count"] == 0
+
+
 def test_module_cadence_cli_summary_does_not_write_without_apply(tmp_path, capsys, monkeypatch):
     module = _load_module()
     home = tmp_path / "home"

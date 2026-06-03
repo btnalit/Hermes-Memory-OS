@@ -1742,7 +1742,7 @@ def _cognitive_loop_command(args: argparse.Namespace, store: MemoryOSStore) -> i
         result = runner.run_once(
             apply=bool(args.apply),
             test_host=bool(args.test_host),
-            max_events=int(args.max_events),
+            max_events=int(getattr(args, "max_events", 100)),
         )
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
         return 0 if result.get("status") != "error" else 2

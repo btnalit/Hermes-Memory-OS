@@ -2695,10 +2695,36 @@ def _classify_left_brain_signal_weaving(
         boundary_true_count = int(projection.get("boundary_true_count") or 0)
         if boundary_true_count:
             fail.append({"code": "memory_projection_boundary_true", "count": boundary_true_count})
+        source_scope_missing_count = int(projection.get("source_scope_missing_count") or 0)
+        if source_scope_missing_count:
+            fail.append(
+                {
+                    "code": "memory_projection_source_scope_missing",
+                    "count": source_scope_missing_count,
+                }
+            )
+        duplicate_source_hash_count = int(projection.get("duplicate_source_hash_count") or 0)
+        duplicate_dedup_key_count = int(projection.get("duplicate_dedup_key_count") or 0)
+        if duplicate_source_hash_count or duplicate_dedup_key_count:
+            fail.append(
+                {
+                    "code": "memory_projection_duplicate_records",
+                    "duplicate_source_hash_count": duplicate_source_hash_count,
+                    "duplicate_dedup_key_count": duplicate_dedup_key_count,
+                }
+            )
         projection_count = int(projection.get("projection_count") or 0)
-        if projection_count > 0 and not boundary_true_count and projection.get("raw_body_included") is not True:
+        projection_ok = (
+            projection_count > 0
+            and not boundary_true_count
+            and not source_scope_missing_count
+            and not duplicate_source_hash_count
+            and not duplicate_dedup_key_count
+            and projection.get("raw_body_included") is not True
+        )
+        if projection_ok:
             passed.append({"code": "memory_projection_online", "projection_count": projection_count})
-        else:
+        elif projection_count <= 0:
             target = warn if clean_host else fail
             target.append({"code": "memory_projection_missing_or_empty", "value": projection})
     elif clean_host:

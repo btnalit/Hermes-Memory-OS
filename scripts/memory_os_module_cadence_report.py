@@ -516,6 +516,10 @@ def _record_step(counter: dict[str, Any], step: dict[str, Any], finished_at: str
     status = str(step.get("status") or result.get("status") or "").lower()
     counter["run_count"] += 1
     counter["last_run_at"] = finished_at
+    if _result_is_module_disabled(result):
+        counter["last_status"] = "skipped"
+        counter["skipped_count"] += 1
+        return
     counter["last_status"] = status or "unknown"
     if status == "error" or "error" in step or result.get("status") == "error":
         counter["error_count"] += 1
@@ -573,6 +577,10 @@ def _result_is_skipped(result: dict[str, Any], status: str) -> bool:
     if result.get("skipped") is True or result.get("novelty_skipped") is True or result.get("cadence_skipped") is True:
         return True
     return result.get("output") == "[SILENT]"
+
+
+def _result_is_module_disabled(result: dict[str, Any]) -> bool:
+    return str(result.get("reason") or "") == "module_disabled"
 
 
 def _result_is_duplicate(result: dict[str, Any]) -> bool:

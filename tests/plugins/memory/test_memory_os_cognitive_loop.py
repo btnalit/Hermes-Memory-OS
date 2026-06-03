@@ -257,6 +257,26 @@ def test_cognitive_loop_cli_runs_test_host_apply(tmp_path, monkeypatch, capsys):
     assert output["boundaries"]["actual_send"] is False
 
 
+def test_cognitive_loop_cli_uses_default_max_events_when_host_wrapper_omits_it(tmp_path, monkeypatch, capsys):
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed host wrapper cognitive loop.")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    args = argparse.Namespace(
+        memory_os_command="cognitive-loop",
+        cognitive_loop_command="run-once",
+        test_host=True,
+        apply=True,
+    )
+
+    result = memory_os_command(args)
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["schema_version"] == "memory-os.cognitive_loop.v0"
+    assert output["test_host"] is True
+
+
 def _parse_memory_os_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     register_cli(parser)

@@ -355,6 +355,18 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert any(item["code"] == "memory_projection_raw_body_included" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_scope_missing_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_source_scope_missing" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["duplicate_source_hash_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_duplicate_records" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
     snapshot["left_brain_advisor"]["boundary_true_count"] = 1
     classification = classify_snapshot(snapshot)
 
@@ -3929,6 +3941,9 @@ def _healthy_memory_projection() -> dict:
         "status": "ok",
         "projection_count": 14,
         "boundary_true_count": 0,
+        "source_scope_missing_count": 0,
+        "duplicate_source_hash_count": 0,
+        "duplicate_dedup_key_count": 0,
         "raw_body_included": False,
     }
 

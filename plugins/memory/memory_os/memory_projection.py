@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .execution_gate import complete_execution_gate_envelope, resolve_execution_gate_permit
+from .execution_gate import any_boundary_true, complete_execution_gate_envelope, resolve_execution_gate_permit
 from .signal_collectors import collect_signal_sources
 from .store import MemoryOSStore
 from .roots import MemoryOSRoots
@@ -70,26 +70,31 @@ def collect_and_project_signals(
         manual_run_ref=manual_run_ref,
         collector_overrides=collector_overrides,
     )
-    records = _projection_records_from_collection(
+    candidate_records = _projection_records_from_collection(
         store.roots,
         collection,
         execution_envelope_id=execution_envelope_id if automatic else "",
         live_closure_eligible=automatic,
     )
+    existing_dedup_keys = _existing_dedup_keys(store.roots)
+    records = [record for record in candidate_records if record.get("dedup_key") not in existing_dedup_keys]
+    duplicate_skipped_count = len(candidate_records) - len(records)
     for record in records:
         _append_jsonl(memory_projection_records_path(store.roots), record)
     summary = _write_projection_summary(store.roots)
     if automatic:
+        postcheck = {
+            "boundary": _false_boundary(),
+            "written_count": len(records),
+            "duplicate_skipped_count": duplicate_skipped_count,
+            "payload_schema_violation_count": int(collection.get("payload_schema_violation_count") or 0),
+        }
         complete_execution_gate_envelope(
             store,
             envelope_id=execution_envelope_id,
             lane_id=PROJECTION_LANE_ID,
-            execution_status="ok" if not _any_true({"collection": collection, "records": records}) else "boundary_true",
-            postcheck={
-                "boundary": _false_boundary(),
-                "written_count": len(records),
-                "payload_schema_violation_count": int(collection.get("payload_schema_violation_count") or 0),
-            },
+            execution_status="ok" if not any_boundary_true(postcheck["boundary"]) else "boundary_true",
+            postcheck=postcheck,
             result_summary={"projection_count": int(summary.get("projection_count") or 0)},
         )
     return {
@@ -100,6 +105,7 @@ def collect_and_project_signals(
         "collection_status": collection.get("status"),
         "record_count": int(collection.get("record_count") or 0),
         "written_count": len(records),
+        "duplicate_skipped_count": duplicate_skipped_count,
         "live_closure_eligible": automatic,
         "summary": summary,
         "raw_body_included": False,
@@ -110,6 +116,13 @@ def collect_and_project_signals(
 def memory_projection_status(roots: MemoryOSRoots) -> dict[str, Any]:
     records = _read_jsonl(memory_projection_records_path(roots))
     latest = records[-1] if records else {}
+    dedup_aware_records = [record for record in records if record.get("dedup_key")]
+    scoped_source_hashes = [
+        f"{record.get('source_scope_ref')}:{record.get('source_hash')}"
+        for record in dedup_aware_records
+        if record.get("source_scope_ref") and record.get("source_hash")
+    ]
+    dedup_keys = [str(record.get("dedup_key") or "") for record in dedup_aware_records if record.get("dedup_key")]
     return {
         "schema_version": "memory-os.memory_projection_status.v0",
         "status": "ok" if records else "missing",
@@ -117,7 +130,11 @@ def memory_projection_status(roots: MemoryOSRoots) -> dict[str, Any]:
         "latest_projection_id": str(latest.get("projection_id") or ""),
         "latest_source_key": str(latest.get("source_key") or ""),
         "latest_created_at": str(latest.get("created_at") or ""),
-        "boundary_true_count": sum(1 for record in records if _any_true(record.get("boundary"))),
+        "boundary_true_count": sum(1 for record in records if any_boundary_true(record.get("boundary"))),
+        "source_scope_missing_count": sum(1 for record in dedup_aware_records if not record.get("source_scope_ref")),
+        "legacy_without_source_scope_count": sum(1 for record in records if not record.get("dedup_key") and not record.get("source_scope_ref")),
+        "duplicate_source_hash_count": len(scoped_source_hashes) - len(set(scoped_source_hashes)),
+        "duplicate_dedup_key_count": len(dedup_keys) - len(set(dedup_keys)),
         "raw_body_included": any(record.get("raw_body_included") is True for record in records),
     }
 
@@ -135,15 +152,19 @@ def _projection_records_from_collection(
         if not isinstance(signal, dict) or signal.get("status") == "blocked":
             continue
         payload = signal.get("payload") if isinstance(signal.get("payload"), dict) else {}
-        projection_id = _projection_id(signal)
+        source_scope_ref = _source_scope_ref(roots, collection, signal)
+        dedup_key = _projection_dedup_key(signal, source_scope_ref)
+        projection_id = _projection_id(dedup_key)
         records.append(
             {
                 "schema_version": MEMORY_PROJECTION_RECORD_SCHEMA_VERSION,
                 "projection_id": projection_id,
+                "dedup_key": dedup_key,
                 "created_at": now,
                 "host_id": str(signal.get("host_id") or collection.get("host_id") or ""),
                 "hermes_home_ref": str(signal.get("hermes_home_ref") or roots.hermes_home),
                 "profile_id": str(signal.get("profile_id") or roots.profile or "default"),
+                "source_scope_ref": source_scope_ref,
                 "source_key": str(signal.get("source_key") or ""),
                 "source_hash": str(signal.get("source_hash") or ""),
                 "projection_type": _projection_type(signal),
@@ -170,17 +191,63 @@ def _write_projection_summary(roots: MemoryOSRoots) -> dict[str, Any]:
     return status
 
 
-def _projection_id(signal: dict[str, Any]) -> str:
+def _existing_dedup_keys(roots: MemoryOSRoots) -> set[str]:
+    keys: set[str] = set()
+    for record in _read_jsonl(memory_projection_records_path(roots)):
+        key = _dedup_key_for_existing_record(record)
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _dedup_key_for_existing_record(record: dict[str, Any]) -> str:
+    if record.get("dedup_key"):
+        return str(record.get("dedup_key") or "")
+    source_key = str(record.get("source_key") or "")
+    source_hash = str(record.get("source_hash") or "")
+    if not source_key or not source_hash:
+        return ""
+    source_scope_ref = str(record.get("source_scope_ref") or "") or _legacy_source_scope_ref(record)
+    return _projection_dedup_key({"source_key": source_key, "source_hash": source_hash}, source_scope_ref)
+
+
+def _legacy_source_scope_ref(record: dict[str, Any]) -> str:
+    material = {
+        "host_id": str(record.get("host_id") or ""),
+        "hermes_home_ref": str(record.get("hermes_home_ref") or ""),
+        "profile_id": str(record.get("profile_id") or "default"),
+        "source_key": str(record.get("source_key") or ""),
+    }
+    digest = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return f"scope_{digest}"
+
+
+def _source_scope_ref(roots: MemoryOSRoots, collection: dict[str, Any], signal: dict[str, Any]) -> str:
+    material = {
+        "host_id": str(signal.get("host_id") or collection.get("host_id") or ""),
+        "hermes_home_ref": str(signal.get("hermes_home_ref") or roots.hermes_home),
+        "profile_id": str(signal.get("profile_id") or roots.profile or "default"),
+        "source_key": str(signal.get("source_key") or ""),
+    }
+    digest = hashlib.sha256(json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    return f"scope_{digest}"
+
+
+def _projection_dedup_key(signal: dict[str, Any], source_scope_ref: str) -> str:
     material = json.dumps(
         {
+            "source_scope_ref": source_scope_ref,
             "source_key": signal.get("source_key"),
             "source_hash": signal.get("source_hash"),
-            "created_at": signal.get("created_at"),
         },
         ensure_ascii=False,
         sort_keys=True,
     )
-    return "mproj_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+    return "mproj_dedup_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def _projection_id(dedup_key: str) -> str:
+    return "mproj_" + hashlib.sha256(str(dedup_key).encode("utf-8")).hexdigest()[:20]
 
 
 def _projection_type(signal: dict[str, Any]) -> str:
@@ -221,16 +288,6 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
         if isinstance(parsed, dict):
             records.append(parsed)
     return records
-
-
-def _any_true(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, dict):
-        return any(_any_true(item) for item in value.values())
-    if isinstance(value, list):
-        return any(_any_true(item) for item in value)
-    return False
 
 
 def _false_boundary() -> dict[str, bool]:

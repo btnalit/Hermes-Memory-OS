@@ -31,6 +31,11 @@ def test_signal_source_registry_declares_read_only_sources():
     assert all(spec.writes_allowed is False for spec in specs)
     assert all(spec.allowed_payload_fields for spec in specs)
     assert all(spec.retention_class for spec in specs)
+    by_source = {spec.source_key: spec for spec in specs}
+    assert by_source["session_mirror_apply"].source_path_candidates == (
+        "memory-os/system/session_mirror_applies.jsonl",
+    )
+    assert "external_failure_count" in by_source["hermes_cron_jobs"].allowed_payload_fields
     assert validate_signal_source_specs(specs)["status"] == "ok"
 
 

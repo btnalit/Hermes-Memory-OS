@@ -128,12 +128,20 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         }
     if spec.source_key == "hermes_cron_jobs":
         jobs = _safe_jobs(roots.hermes_home / "cron" / "jobs.json")
+        cron_summary = _cron_output_summary(roots.hermes_home / "cron" / "output", jobs)
+        memory_os_job_count = sum(1 for job in jobs if _is_memory_os_cron_job(job))
+        external_job_count = max(len(jobs) - memory_os_job_count, 0)
+        status = "warning" if cron_summary["failure_count"] else "ok" if jobs else base["status"]
         return {
             **base,
-            "status": "ok" if jobs else base["status"],
+            "status": status,
             "record_count": len(jobs),
+            "job_count": len(jobs),
             "expected_count": 7,
             "wrapped_count": sum(1 for job in jobs if str(job.get("script") or "").startswith("memory_os_cron_")),
+            "memory_os_job_count": memory_os_job_count,
+            "external_job_count": external_job_count,
+            **cron_summary,
         }
     if spec.source_key == "memory_sources_feedback":
         path = roots.memory_os_root / "system" / "memory_sources_feedback.jsonl"
@@ -215,6 +223,120 @@ def _safe_jobs(path: Path) -> list[dict[str, Any]]:
         return []
     jobs = loaded.get("jobs", loaded) if isinstance(loaded, dict) else loaded
     return [item for item in jobs if isinstance(item, dict)] if isinstance(jobs, list) else []
+
+
+def _cron_output_summary(output_root: Path, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    jobs_by_id = {str(job.get("id") or ""): job for job in jobs if job.get("id")}
+    entries = _cron_output_entries(output_root, jobs_by_id)
+    failures = [entry for entry in entries if entry["status"] == "failure"]
+    external_failures = [entry for entry in failures if entry["owner_system"] != "memory-os"]
+    latest_success = next((entry for entry in entries if entry["status"] == "success"), {})
+    latest_failure = failures[0] if failures else {}
+    return {
+        "latest_success_at": str(latest_success.get("run_time") or ""),
+        "latest_failure_at": str(latest_failure.get("run_time") or ""),
+        "latest_failure_job": str(latest_failure.get("job_name") or ""),
+        "latest_failure_reason": str(latest_failure.get("reason") or ""),
+        "latest_failure_deliver": bool(latest_failure.get("deliver")) if latest_failure else False,
+        "latest_failure_owner_system": str(latest_failure.get("owner_system") or ""),
+        "failure_count": len(failures),
+        "external_failure_count": len(external_failures),
+        "timeout_failure_count": sum(1 for entry in failures if entry.get("timeout") is True),
+        "external_failure_jobs": [
+            {
+                "job_name": entry["job_name"],
+                "job_id": entry["job_id"],
+                "owner_system": entry["owner_system"],
+                "deliver": entry["deliver"],
+                "run_time": entry["run_time"],
+                "reason": entry["reason"],
+            }
+            for entry in external_failures[:10]
+        ],
+    }
+
+
+def _cron_output_entries(output_root: Path, jobs_by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    if not output_root.exists():
+        return []
+    files = sorted((item for item in output_root.rglob("*.md") if item.is_file()), key=lambda item: item.stat().st_mtime, reverse=True)
+    entries: list[dict[str, Any]] = []
+    for path in files[:200]:
+        parsed = _parse_cron_output_file(path)
+        job = jobs_by_id.get(parsed["job_id"], {})
+        if not parsed["job_name"]:
+            parsed["job_name"] = str(job.get("name") or path.parent.name)
+        parsed["deliver"] = bool(job.get("deliver"))
+        parsed["owner_system"] = "memory-os" if _is_memory_os_cron_job(job) or parsed["job_name"].startswith("memory-os-") else "hermes"
+        entries.append(parsed)
+    return entries
+
+
+def _parse_cron_output_file(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")[:8192]
+    except OSError:
+        text = ""
+    lower = text.lower()
+    status_line = _markdown_field(text, "Status")
+    failed = "failed" in status_line.lower() or "script timed out" in lower or "timed out after" in lower
+    timeout = "timed out" in lower
+    return {
+        "job_name": _cron_job_title(text),
+        "job_id": _markdown_field(text, "Job ID") or path.parent.name,
+        "run_time": _markdown_field(text, "Run Time") or _run_time_from_filename(path),
+        "status": "failure" if failed else "success",
+        "timeout": timeout,
+        "reason": _cron_failure_reason(text, timeout=timeout, failed=failed),
+        "deliver": False,
+        "owner_system": "hermes",
+    }
+
+
+def _cron_job_title(text: str) -> str:
+    for line in text.splitlines()[:8]:
+        stripped = line.strip()
+        if stripped.lower().startswith("# cron job:"):
+            return stripped.split(":", 1)[1].strip()
+    return ""
+
+
+def _markdown_field(text: str, field: str) -> str:
+    needle = f"**{field}:**"
+    for line in text.splitlines()[:12]:
+        stripped = line.strip()
+        if stripped.lower().startswith(needle.lower()):
+            return stripped[len(needle):].strip()
+    return ""
+
+
+def _cron_failure_reason(text: str, *, timeout: bool, failed: bool) -> str:
+    if timeout:
+        for line in text.splitlines():
+            if "timed out" in line.lower():
+                return _bounded_reason(line)
+        return "script timed out"
+    if failed:
+        return "script failed"
+    return ""
+
+
+def _bounded_reason(line: str) -> str:
+    cleaned = str(line or "").strip()
+    if ":" in cleaned:
+        left, _right = cleaned.split(":", 1)
+        cleaned = left.strip()
+    return cleaned[:180]
+
+
+def _run_time_from_filename(path: Path) -> str:
+    return path.stem.replace("_", " ")
+
+
+def _is_memory_os_cron_job(job: dict[str, Any]) -> bool:
+    name = str(job.get("name") or "")
+    script = str(job.get("script") or "")
+    return name.startswith("memory-os-") or script.startswith("memory_os_cron_")
 
 
 def _source_hash(source_key: str, payload: dict[str, Any]) -> str:
