@@ -343,6 +343,7 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     assert "memory_projection_registered_source_coverage_ok" in pass_codes
     assert "memory_projection_55c_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_55d_payload_field_coverage_ok" in pass_codes
+    assert "memory_projection_55e_payload_field_coverage_ok" in pass_codes
     assert "memory_projection_retention_compaction_visible" in pass_codes
     assert "left_brain_advisor_report_only_online" in pass_codes
 
@@ -390,6 +391,12 @@ def test_classify_snapshot_tracks_left_brain_signal_weaving_online_and_boundarie
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "memory_projection_55d_payload_field_coverage_missing" for item in classification["fail"])
+
+    snapshot = _healthy_snapshot()
+    snapshot["memory_projection"]["source_payload_fields"]["skills_inventory"] = ["status"]
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "memory_projection_55e_payload_field_coverage_missing" for item in classification["fail"])
 
     snapshot = _healthy_snapshot()
     snapshot["memory_projection_retention"]["latest_boundary_true_archived_count"] = 1
@@ -1293,6 +1300,8 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert "OwnerDigestPreview" in rendered
     assert "OwnerAgendaDigest" in rendered
     assert "OwnerReviewSurface" in rendered
+    assert any(item["code"] == "owner_review_proposal_auto_route_shadow_metrics_visible" for item in classification["pass"])
+    assert any(item["code"] == "owner_review_proposal_auto_route_probation_guard_visible" for item in classification["pass"])
 
     snapshot["owner_review_digest_preview"]["will_send"] = True
     classification = classify_snapshot(snapshot)
@@ -1532,6 +1541,37 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     assert any(
         item["code"] == "owner_review_proposal_auto_route_boundary_requires_owner"
         for item in classification["warn"]
+    )
+
+    snapshot = _healthy_snapshot()
+    del snapshot["owner_review_proposal_auto_route"]["wilson_95_lower_bound"]
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "owner_review_proposal_auto_route_shadow_metrics_missing"
+        for item in classification["fail"]
+    )
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_auto_route"]["full_auto_eligible"] = True
+    snapshot["owner_review_proposal_auto_route"]["eligible_sample_count"] = 3
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "owner_review_proposal_auto_route_full_auto_sample_floor_bypass"
+        for item in classification["fail"]
+    )
+
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_proposal_auto_route"]["auto_followup_actual_send_count"] = 1
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "owner_review_proposal_auto_route_actual_send_count_nonzero"
+        for item in classification["fail"]
     )
 
     snapshot = _healthy_snapshot()
@@ -4147,6 +4187,38 @@ def _healthy_memory_projection() -> dict:
                 "pending_proposal_count",
                 "review_suggested_estimate_count",
             ],
+            "skills_inventory": [
+                "latest_skill_age_seconds",
+                "skill_count",
+                "skill_directory_count",
+                "skill_file_count",
+                "skill_manifest_count",
+            ],
+            "profile_config": [
+                "channel_config_count",
+                "config_exists",
+                "config_file_count",
+                "hindsight_provider_configured",
+                "memory_provider_configured",
+                "model_config_present",
+                "profile_count",
+                "profile_id",
+            ],
+            "kanban_state": [
+                "card_count",
+                "column_count",
+                "done_card_count",
+                "latest_card_age_seconds",
+                "open_card_count",
+            ],
+            "tool_registry": [
+                "latest_tool_age_seconds",
+                "mcp_tool_count",
+                "plugin_count",
+                "tool_config_exists",
+                "tool_count",
+                "tool_manifest_count",
+            ],
         },
         "projected_source_keys": [
             "candidate_queue_pressure",
@@ -4514,11 +4586,37 @@ def _healthy_owner_proposal_auto_route() -> dict:
         "schema_version": "memory-os.proposal_followup_auto_route.v0",
         "status": "ok",
         "dry_run": True,
+        "lane_id": "proposal_followup_auto_route",
+        "lane_mode": "insufficient_volume_running",
+        "sample_window_days": 7,
+        "minimum_real_samples_for_full_auto": 20,
+        "minimum_real_samples_for_limited_auto": 3,
+        "observed_owner_agreement_rate_required": 0.9,
+        "eligible_sample_count": 0,
+        "shadow_decision_count": 0,
+        "owner_agreement_count": 0,
+        "owner_disagreement_count": 0,
+        "owner_agreement_rate": 0.0,
+        "wilson_95_lower_bound": 0.0,
+        "proposal_kind_coverage": [],
+        "full_auto_eligible": False,
+        "limited_auto_eligible": False,
+        "limited_auto_first_canary_max_auto_routes_per_day": 1,
+        "limited_auto_after_successful_routes": 3,
+        "limited_auto_expanded_max_auto_routes_per_day": 3,
+        "successful_limited_auto_route_count": 0,
+        "current_auto_route_cap_per_day": 1,
+        "continue_shadow_comparison": True,
+        "auto_demote_on_first_boundary_or_owner_disagreement": True,
+        "actual_followup_route_changed": False,
         "eligible_count": 0,
         "selected_count": 0,
+        "requested_limit": 10,
+        "effective_limit": 10,
         "auto_followup_routed_count": 0,
         "auto_followup_actual_execute_count": 0,
         "auto_followup_policy_write_count": 0,
+        "auto_followup_actual_send_count": 0,
         "owner_action_required_count": 0,
         "owner_action_required_boundary_count": 0,
         "auto_followup_boundary_rejected_count": 0,

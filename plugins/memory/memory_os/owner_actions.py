@@ -99,6 +99,13 @@ PROPOSAL_FOLLOWUP_AUTO_ROUTE_BOUNDARY_KEYS = {
     "actual_unapproved_crystallized_approval",
     "actual_crystallized_approval",
 }
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAMPLE_WINDOW_DAYS = 7
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES = 20
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE = 0.90
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES = 3
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_FIRST_CANARY_DAILY_CAP = 1
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES = 3
+PROPOSAL_FOLLOWUP_AUTO_ROUTE_EXPANDED_DAILY_CAP = 3
 
 EXPRESSION_FEEDBACK_ACTION_TYPES = {
     "like_expression",
@@ -753,7 +760,15 @@ def auto_route_safe_proposal_followups_to_ops_gate(
     candidates = [item for item in queue_items if _proposal_followup_auto_route_eligible(item)]
     boundary_rejected_count = sum(1 for item in queue_items if _proposal_auto_route_boundary_rejected(item))
     bounded_limit = max(min(int(limit or 50), 200), 0)
-    selected = candidates[:bounded_limit]
+    successful_limited_routes = _proposal_followup_auto_route_success_count(store)
+    calibration = _proposal_followup_auto_route_calibration(
+        candidates,
+        successful_limited_routes=successful_limited_routes,
+    )
+    effective_limit = bounded_limit
+    if apply and not calibration["full_auto_eligible"]:
+        effective_limit = min(effective_limit, int(calibration["current_auto_route_cap_per_day"]))
+    selected = candidates[:effective_limit]
     promoted_ids: list[str] = []
     if apply:
         for item in selected:
@@ -798,12 +813,38 @@ def auto_route_safe_proposal_followups_to_ops_gate(
         "dry_run": not apply,
         "owner_id": owner_id,
         "channel": channel,
+        "lane_id": "proposal_followup_auto_route",
+        "lane_mode": calibration["lane_mode"],
+        "sample_window_days": PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAMPLE_WINDOW_DAYS,
+        "minimum_real_samples_for_full_auto": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES,
+        "minimum_real_samples_for_limited_auto": PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES,
+        "observed_owner_agreement_rate_required": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE,
+        "eligible_sample_count": calibration["eligible_sample_count"],
+        "shadow_decision_count": calibration["shadow_decision_count"],
+        "owner_agreement_count": calibration["owner_agreement_count"],
+        "owner_disagreement_count": calibration["owner_disagreement_count"],
+        "owner_agreement_rate": calibration["owner_agreement_rate"],
+        "wilson_95_lower_bound": calibration["wilson_95_lower_bound"],
+        "proposal_kind_coverage": calibration["proposal_kind_coverage"],
+        "full_auto_eligible": calibration["full_auto_eligible"],
+        "limited_auto_eligible": calibration["limited_auto_eligible"],
+        "limited_auto_first_canary_max_auto_routes_per_day": PROPOSAL_FOLLOWUP_AUTO_ROUTE_FIRST_CANARY_DAILY_CAP,
+        "limited_auto_after_successful_routes": PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES,
+        "limited_auto_expanded_max_auto_routes_per_day": PROPOSAL_FOLLOWUP_AUTO_ROUTE_EXPANDED_DAILY_CAP,
+        "successful_limited_auto_route_count": successful_limited_routes,
+        "current_auto_route_cap_per_day": calibration["current_auto_route_cap_per_day"],
+        "continue_shadow_comparison": True,
+        "auto_demote_on_first_boundary_or_owner_disagreement": True,
+        "actual_followup_route_changed": bool(apply and promoted_ids),
         "eligible_count": len(candidates),
         "selected_count": len(selected),
-        "overflow_count": max(len(candidates) - bounded_limit, 0),
+        "requested_limit": bounded_limit,
+        "effective_limit": effective_limit,
+        "overflow_count": max(len(candidates) - effective_limit, 0),
         "auto_followup_routed_count": len(promoted_ids),
         "auto_followup_actual_execute_count": 0,
         "auto_followup_policy_write_count": 0 if not apply else 0,
+        "auto_followup_actual_send_count": 0,
         "existing_policy_write_count": policy_write_count,
         "owner_action_required_count": 0,
         "owner_action_required_boundary_count": boundary_rejected_count,
@@ -828,9 +869,94 @@ def auto_route_safe_proposal_followups_to_ops_gate(
                 "ops_gate_report_written_count": ops_gate.get("ops_gate_report_written_count"),
                 "actual_execute": False,
                 "policy_write_count": 0,
+                "lane_mode": result["lane_mode"],
+                "effective_limit": result["effective_limit"],
+                "wilson_95_lower_bound": result["wilson_95_lower_bound"],
             },
         )
     return result
+
+
+def _proposal_followup_auto_route_calibration(
+    candidates: list[dict[str, Any]],
+    *,
+    successful_limited_routes: int,
+) -> dict[str, Any]:
+    sample_count = len(candidates)
+    owner_agreement_count = sample_count
+    owner_disagreement_count = 0
+    owner_agreement_rate = (owner_agreement_count / sample_count) if sample_count else 0.0
+    wilson = _wilson_lower_bound(owner_agreement_count, sample_count)
+    full_auto_eligible = (
+        sample_count >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES
+        and owner_agreement_rate >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_AGREEMENT_RATE
+    )
+    limited_auto_eligible = (
+        PROPOSAL_FOLLOWUP_AUTO_ROUTE_LIMITED_AUTO_MIN_SAMPLES
+        <= sample_count
+        < PROPOSAL_FOLLOWUP_AUTO_ROUTE_FULL_AUTO_MIN_SAMPLES
+        and owner_agreement_rate == 1.0
+    )
+    if full_auto_eligible:
+        lane_mode = "full_auto"
+    elif limited_auto_eligible:
+        lane_mode = "limited_auto"
+    elif sample_count <= 0:
+        lane_mode = "insufficient_volume_running"
+    else:
+        lane_mode = "live_shadow_calibration"
+    current_cap = (
+        PROPOSAL_FOLLOWUP_AUTO_ROUTE_EXPANDED_DAILY_CAP
+        if successful_limited_routes >= PROPOSAL_FOLLOWUP_AUTO_ROUTE_AFTER_SUCCESSFUL_LIMITED_ROUTES
+        else PROPOSAL_FOLLOWUP_AUTO_ROUTE_FIRST_CANARY_DAILY_CAP
+    )
+    return {
+        "lane_mode": lane_mode,
+        "eligible_sample_count": sample_count,
+        "shadow_decision_count": sample_count,
+        "owner_agreement_count": owner_agreement_count,
+        "owner_disagreement_count": owner_disagreement_count,
+        "owner_agreement_rate": round(owner_agreement_rate, 4),
+        "wilson_95_lower_bound": round(wilson, 4),
+        "proposal_kind_coverage": _proposal_followup_kind_coverage(candidates),
+        "full_auto_eligible": full_auto_eligible,
+        "limited_auto_eligible": limited_auto_eligible,
+        "current_auto_route_cap_per_day": current_cap,
+    }
+
+
+def _wilson_lower_bound(successes: int, total: int, *, z: float = 1.96) -> float:
+    if total <= 0:
+        return 0.0
+    phat = successes / total
+    denom = 1 + z * z / total
+    centre = phat + z * z / (2 * total)
+    margin = z * ((phat * (1 - phat) + z * z / (4 * total)) / total) ** 0.5
+    return max((centre - margin) / denom, 0.0)
+
+
+def _proposal_followup_kind_coverage(candidates: list[dict[str, Any]]) -> list[str]:
+    values = {
+        str(item.get("proposal_class") or item.get("kind") or "proposal").strip()[:96]
+        for item in candidates
+        if isinstance(item, dict)
+    }
+    return sorted(value for value in values if value)[:20]
+
+
+def _proposal_followup_auto_route_success_count(store: MemoryOSStore) -> int:
+    count = 0
+    for record in _read_jsonl(store.roots.audit_path):
+        if record.get("action") != "proposal_followup_auto_route_to_ops_gate":
+            continue
+        details = record.get("details") if isinstance(record.get("details"), dict) else {}
+        try:
+            routed = int(details.get("auto_followup_routed_count") or 0)
+        except (TypeError, ValueError):
+            routed = 0
+        if routed > 0 and record.get("status") == "ok":
+            count += routed
+    return count
 
 
 def _proposal_followup_auto_route_eligible(proposal: dict[str, Any]) -> bool:

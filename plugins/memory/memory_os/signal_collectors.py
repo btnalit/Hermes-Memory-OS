@@ -162,9 +162,7 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
     if spec.source_key == "runtime_logs":
         return _runtime_log_payload(roots, base)
     if spec.source_key == "skills_inventory":
-        path = roots.hermes_home / "skills"
-        count = len([item for item in path.glob("*") if item.is_dir()]) if path.exists() else 0
-        return {**base, "status": "ok" if count else base["status"], "record_count": count, "skill_count": count}
+        return _skills_inventory_payload(roots, base)
     if spec.source_key == "mcp_server_health":
         return _mcp_payload(roots, base)
     if spec.source_key == "wandering_mind_state":
@@ -174,16 +172,122 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
     if spec.source_key == "mailbox_status":
         return _mailbox_payload(roots, base)
     if spec.source_key == "profile_config":
-        return {**base, "profile_id": roots.profile or "default"}
+        return _profile_config_payload(roots, base)
     if spec.source_key == "kanban_state":
-        path = roots.hermes_home / "kanban"
-        files = list(path.glob("*")) if path.exists() else []
-        return {**base, "status": "ok" if files else base["status"], "record_count": len(files), "card_count": len(files)}
+        return _kanban_payload(roots, base)
     if spec.source_key == "tool_registry":
-        path = roots.hermes_home / "tools"
-        files = list(path.glob("*")) if path.exists() else []
-        return {**base, "status": "ok" if files else base["status"], "record_count": len(files), "tool_count": len(files)}
+        return _tool_registry_payload(roots, base)
     return base
+
+
+def _skills_inventory_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    roots_to_scan = [roots.hermes_home / "skills", roots.hermes_home / "plugins" / "skills"]
+    children: list[Path] = []
+    for root in roots_to_scan:
+        children.extend(_safe_tree_children(root, limit=300))
+    skill_dirs = [item for item in children if item.is_dir()]
+    skill_files = [item for item in children if item.is_file()]
+    manifest_names = {"skill.json", "plugin.json", "manifest.json", "skill.md"}
+    manifest_count = sum(1 for item in skill_files if item.name.lower() in manifest_names)
+    markdown_count = sum(1 for item in skill_files if item.suffix.lower() in {".md", ".markdown"})
+    skill_count = len(skill_dirs) + manifest_count
+    record_count = len(children)
+    return {
+        **base,
+        "status": "ok" if record_count else base["status"],
+        "available": bool(record_count) or base["available"],
+        "record_count": record_count,
+        "skill_count": skill_count,
+        "skill_directory_count": len(skill_dirs),
+        "skill_file_count": len(skill_files),
+        "skill_manifest_count": manifest_count,
+        "skill_markdown_count": markdown_count,
+        "latest_skill_age_seconds": _latest_age_seconds(children),
+    }
+
+
+def _profile_config_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    config_paths = _profile_config_paths(roots)
+    profiles_dir = roots.hermes_home / "profiles"
+    profile_dirs = [item for item in _safe_children(profiles_dir) if item.is_dir()]
+    text = "\n".join(_safe_text_lower(path) for path in config_paths)
+    channel_terms = ("telegram", "wechat", "weixin", "slack", "discord", "signal", "matrix", "whatsapp")
+    channel_config_count = sum(1 for term in channel_terms if term in text)
+    config_exists = bool(config_paths)
+    return {
+        **base,
+        "status": "ok" if config_exists or roots.profile else base["status"],
+        "available": bool(config_exists or roots.profile) or base["available"],
+        "record_count": len(config_paths) + len(profile_dirs),
+        "profile_id": roots.profile or "default",
+        "config_exists": config_exists,
+        "config_file_count": len(config_paths),
+        "profile_count": len(profile_dirs),
+        "active_profile_id": roots.profile or "default",
+        "memory_provider_configured": "memory.provider" in text or ("memory" in text and "provider" in text),
+        "hindsight_provider_configured": "hindsight" in text,
+        "channel_config_count": channel_config_count,
+        "model_config_present": "model" in text or "llm" in text,
+        "config_age_seconds": _latest_age_seconds(config_paths + ([profiles_dir] if profiles_dir.exists() else [])),
+    }
+
+
+def _kanban_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    roots_to_scan = [
+        roots.hermes_home / "kanban",
+        roots.hermes_home / "tasks",
+        roots.hermes_home / "system" / "kanban",
+    ]
+    files: list[Path] = []
+    dirs: list[Path] = []
+    for root in roots_to_scan:
+        children = _safe_tree_children(root, limit=500)
+        files.extend(item for item in children if item.is_file())
+        dirs.extend(item for item in children if item.is_dir())
+    done_terms = ("done", "closed", "complete", "completed", "archive", "archived")
+    open_terms = ("open", "todo", "doing", "in-progress", "pending", "backlog")
+    done_count = sum(1 for item in files if any(term in item.name.lower() for term in done_terms))
+    open_count = sum(1 for item in files if any(term in item.name.lower() for term in open_terms))
+    card_count = len(files)
+    return {
+        **base,
+        "status": "ok" if files or dirs else base["status"],
+        "available": bool(files or dirs) or base["available"],
+        "record_count": card_count + len(dirs),
+        "card_count": card_count,
+        "column_count": len(dirs),
+        "open_card_count": open_count,
+        "done_card_count": done_count,
+        "latest_card_age_seconds": _latest_age_seconds(files + dirs),
+    }
+
+
+def _tool_registry_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    roots_to_scan = [
+        roots.hermes_home / "tools",
+        roots.hermes_home / "plugins",
+        roots.hermes_home / "mcp",
+    ]
+    children: list[Path] = []
+    for root in roots_to_scan:
+        children.extend(_safe_tree_children(root, limit=500))
+    files = [item for item in children if item.is_file()]
+    dirs = [item for item in children if item.is_dir()]
+    manifest_names = {"tool_registry.json", "tools.json", "plugin.json", "manifest.json", "mcp_servers.json"}
+    manifest_count = sum(1 for item in files if item.name.lower() in manifest_names)
+    mcp_count = sum(1 for item in children if "mcp" in item.name.lower())
+    return {
+        **base,
+        "status": "ok" if children else base["status"],
+        "available": bool(children) or base["available"],
+        "record_count": len(children),
+        "tool_count": len(files) + len(dirs),
+        "plugin_count": sum(1 for item in children if "plugin" in item.name.lower()),
+        "mcp_tool_count": mcp_count,
+        "tool_manifest_count": manifest_count,
+        "tool_config_exists": manifest_count > 0,
+        "latest_tool_age_seconds": _latest_age_seconds(children),
+    }
 
 
 def _hindsight_payload(roots: MemoryOSRoots, base: dict[str, Any], capability: dict[str, Any]) -> dict[str, Any]:
@@ -533,6 +637,30 @@ def _safe_child_count(path: Path) -> int:
         return 0
 
 
+def _safe_children(path: Path) -> list[Path]:
+    if not path.exists() or path.is_file():
+        return []
+    try:
+        return [item for item in path.iterdir() if item.is_file() or item.is_dir()]
+    except OSError:
+        return []
+
+
+def _safe_tree_children(path: Path, *, limit: int) -> list[Path]:
+    if not path.exists() or path.is_file():
+        return []
+    children: list[Path] = []
+    try:
+        for item in path.rglob("*"):
+            if item.is_file() or item.is_dir():
+                children.append(item)
+            if len(children) >= limit:
+                break
+    except OSError:
+        return children
+    return children
+
+
 def _safe_json_dict(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
@@ -541,6 +669,33 @@ def _safe_json_dict(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _safe_text_lower(path: Path, *, limit: int = 65_536) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")[:limit].lower()
+    except OSError:
+        return ""
+
+
+def _profile_config_paths(roots: MemoryOSRoots) -> list[Path]:
+    candidates = [
+        roots.hermes_home / "config.json",
+        roots.hermes_home / "config.yaml",
+        roots.hermes_home / "config.yml",
+        roots.hermes_home / "settings.json",
+    ]
+    if roots.profile:
+        candidates.extend(
+            [
+                roots.hermes_home / "profiles" / roots.profile / "config.json",
+                roots.hermes_home / "profiles" / roots.profile / "config.yaml",
+                roots.hermes_home / "profiles" / roots.profile / "config.yml",
+            ]
+        )
+    return [path for path in candidates if path.is_file()]
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

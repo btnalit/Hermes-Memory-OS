@@ -46,6 +46,10 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "latest_output_at" in by_source["wandering_mind_state"].allowed_payload_fields
     assert "configured_server_count" in by_source["mcp_server_health"].allowed_payload_fields
     assert "error_log_exists" in by_source["runtime_logs"].allowed_payload_fields
+    assert "skill_manifest_count" in by_source["skills_inventory"].allowed_payload_fields
+    assert "hindsight_provider_configured" in by_source["profile_config"].allowed_payload_fields
+    assert "open_card_count" in by_source["kanban_state"].allowed_payload_fields
+    assert "tool_manifest_count" in by_source["tool_registry"].allowed_payload_fields
     assert "step_count" in by_source["cognitive_loop_status"].allowed_payload_fields
     assert "heartbeat_state_exists" in by_source["gateway_runtime_status"].allowed_payload_fields
     assert "proposal_count" in by_source["proposal_queue_pressure"].allowed_payload_fields

@@ -65,6 +65,29 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
         json.dumps({"mcpServers": {"voicebox": {"status": "failed", "command": "SHOULD_NOT_LEAK"}}}),
         encoding="utf-8",
     )
+    (tmp_path / "skills" / "memory-helper").mkdir(parents=True)
+    (tmp_path / "skills" / "memory-helper" / "SKILL.md").write_text("secret SHOULD_NOT_LEAK\n", encoding="utf-8")
+    (tmp_path / "profiles" / "memoryos-test").mkdir(parents=True)
+    (tmp_path / "profiles" / "memoryos-test" / "config.yaml").write_text(
+        "\n".join(
+            [
+                "memory:",
+                "  provider: hindsight",
+                "llm:",
+                "  model: SHOULD_NOT_LEAK",
+                "channels:",
+                "  telegram: SHOULD_NOT_LEAK",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "kanban" / "todo").mkdir(parents=True)
+    (tmp_path / "kanban" / "done").mkdir()
+    (tmp_path / "kanban" / "todo" / "open-card.md").write_text("SHOULD_NOT_LEAK\n", encoding="utf-8")
+    (tmp_path / "kanban" / "done" / "done-card.md").write_text("SHOULD_NOT_LEAK\n", encoding="utf-8")
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "tools" / "tool_registry.json").write_text(json.dumps({"secret": "SHOULD_NOT_LEAK"}), encoding="utf-8")
+    (tmp_path / "tools" / "mcp-tool.json").write_text(json.dumps({"secret": "SHOULD_NOT_LEAK"}), encoding="utf-8")
     cognitive_root = tmp_path / "system-modules" / "cognitive_loop"
     cognitive_root.mkdir(parents=True)
     cognitive_steps = [
@@ -195,6 +218,17 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["wandering_mind_state"]["payload"]["would_send_count"] == 1
     assert by_source["mcp_server_health"]["payload"]["configured_server_count"] == 1
     assert by_source["mcp_server_health"]["payload"]["failed_server_count"] == 1
+    assert by_source["skills_inventory"]["payload"]["skill_directory_count"] == 1
+    assert by_source["skills_inventory"]["payload"]["skill_manifest_count"] == 1
+    assert by_source["profile_config"]["payload"]["config_exists"] is True
+    assert by_source["profile_config"]["payload"]["hindsight_provider_configured"] is True
+    assert by_source["profile_config"]["payload"]["channel_config_count"] == 1
+    assert by_source["kanban_state"]["payload"]["card_count"] == 2
+    assert by_source["kanban_state"]["payload"]["column_count"] == 2
+    assert by_source["kanban_state"]["payload"]["open_card_count"] == 1
+    assert by_source["kanban_state"]["payload"]["done_card_count"] == 1
+    assert by_source["tool_registry"]["payload"]["tool_manifest_count"] == 1
+    assert by_source["tool_registry"]["payload"]["mcp_tool_count"] == 1
     assert by_source["cognitive_loop_status"]["payload"]["step_count"] == len(cognitive_steps)
     assert by_source["cognitive_loop_status"]["payload"]["warning_step_count"] == 1
     assert by_source["gateway_runtime_status"]["payload"]["heartbeat_state_exists"] is True

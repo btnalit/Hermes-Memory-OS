@@ -152,6 +152,40 @@ MEMORY_PROJECTION_55D_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
         "pending_proposal_count",
     },
 }
+MEMORY_PROJECTION_55E_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
+    "skills_inventory": {
+        "skill_count",
+        "skill_directory_count",
+        "skill_file_count",
+        "skill_manifest_count",
+        "latest_skill_age_seconds",
+    },
+    "profile_config": {
+        "profile_id",
+        "config_exists",
+        "config_file_count",
+        "profile_count",
+        "memory_provider_configured",
+        "hindsight_provider_configured",
+        "channel_config_count",
+        "model_config_present",
+    },
+    "kanban_state": {
+        "card_count",
+        "column_count",
+        "open_card_count",
+        "done_card_count",
+        "latest_card_age_seconds",
+    },
+    "tool_registry": {
+        "tool_count",
+        "plugin_count",
+        "mcp_tool_count",
+        "tool_manifest_count",
+        "tool_config_exists",
+        "latest_tool_age_seconds",
+    },
+}
 CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "left_brain_pipeline_check_warn": {
         "classification": "next_lane",
@@ -2127,6 +2161,79 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if proposal_auto_route:
         if proposal_auto_route.get("schema_version") == "memory-os.proposal_followup_auto_route.v0":
             passed.append({"code": "owner_review_proposal_auto_route_ok"})
+            lane_mode = str(proposal_auto_route.get("lane_mode") or "")
+            valid_lane_modes = {
+                "live_shadow_calibration",
+                "limited_auto",
+                "full_auto",
+                "demoted_to_gated",
+                "insufficient_volume_running",
+            }
+            if lane_mode not in valid_lane_modes:
+                fail.append({"code": "owner_review_proposal_auto_route_lane_mode_invalid", "lane_mode": lane_mode})
+            required_shadow_fields = {
+                "sample_window_days",
+                "minimum_real_samples_for_full_auto",
+                "eligible_sample_count",
+                "shadow_decision_count",
+                "owner_agreement_count",
+                "owner_disagreement_count",
+                "owner_agreement_rate",
+                "wilson_95_lower_bound",
+                "proposal_kind_coverage",
+                "current_auto_route_cap_per_day",
+            }
+            missing_shadow_fields = sorted(key for key in required_shadow_fields if key not in proposal_auto_route)
+            if missing_shadow_fields:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_shadow_metrics_missing",
+                        "missing_fields": missing_shadow_fields,
+                    }
+                )
+            else:
+                passed.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_shadow_metrics_visible",
+                        "lane_mode": lane_mode,
+                        "eligible_sample_count": proposal_auto_route.get("eligible_sample_count"),
+                        "wilson_95_lower_bound": proposal_auto_route.get("wilson_95_lower_bound"),
+                    }
+                )
+            if proposal_auto_route.get("continue_shadow_comparison") is not True:
+                fail.append({"code": "owner_review_proposal_auto_route_shadow_comparison_disabled"})
+            if proposal_auto_route.get("auto_demote_on_first_boundary_or_owner_disagreement") is not True:
+                fail.append({"code": "owner_review_proposal_auto_route_auto_demote_disabled"})
+            if int(proposal_auto_route.get("limited_auto_first_canary_max_auto_routes_per_day") or 0) != 1:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_first_canary_cap_invalid",
+                        "value": proposal_auto_route.get("limited_auto_first_canary_max_auto_routes_per_day"),
+                    }
+                )
+            elif int(proposal_auto_route.get("current_auto_route_cap_per_day") or 0) > 3:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_current_cap_too_high",
+                        "value": proposal_auto_route.get("current_auto_route_cap_per_day"),
+                    }
+                )
+            else:
+                passed.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_probation_guard_visible",
+                        "current_cap": proposal_auto_route.get("current_auto_route_cap_per_day"),
+                    }
+                )
+            if proposal_auto_route.get("full_auto_eligible") is True and int(
+                proposal_auto_route.get("eligible_sample_count") or 0
+            ) < 20:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_full_auto_sample_floor_bypass",
+                        "eligible_sample_count": proposal_auto_route.get("eligible_sample_count"),
+                    }
+                )
             if proposal_auto_route.get("actual_execute") is True:
                 fail.append({"code": "owner_review_proposal_auto_route_actual_execute_true"})
             if int(proposal_auto_route.get("auto_followup_actual_execute_count") or 0) > 0:
@@ -2141,6 +2248,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     {
                         "code": "owner_review_proposal_auto_route_policy_write_count_nonzero",
                         "value": proposal_auto_route.get("auto_followup_policy_write_count"),
+                    }
+                )
+            if int(proposal_auto_route.get("auto_followup_actual_send_count") or 0) > 0:
+                fail.append(
+                    {
+                        "code": "owner_review_proposal_auto_route_actual_send_count_nonzero",
+                        "value": proposal_auto_route.get("auto_followup_actual_send_count"),
                     }
                 )
             if int(proposal_auto_route.get("owner_action_required_boundary_count") or 0) > 0:
@@ -2897,6 +3011,27 @@ def _classify_left_brain_signal_weaving(
                     "source_count": len(MEMORY_PROJECTION_55D_REQUIRED_PAYLOAD_FIELDS),
                 }
             )
+        missing_payload_fields_55e: list[dict[str, Any]] = []
+        for source_key, expected_fields in MEMORY_PROJECTION_55E_REQUIRED_PAYLOAD_FIELDS.items():
+            observed_fields = set(payload_fields.get(source_key) or [])
+            missing_fields = sorted(expected_fields - observed_fields)
+            if missing_fields:
+                missing_payload_fields_55e.append({"source_key": source_key, "missing_fields": missing_fields})
+        if missing_payload_fields_55e:
+            target = warn if clean_host else fail
+            target.append(
+                {
+                    "code": "memory_projection_55e_payload_field_coverage_missing",
+                    "missing": missing_payload_fields_55e,
+                }
+            )
+        else:
+            passed.append(
+                {
+                    "code": "memory_projection_55e_payload_field_coverage_ok",
+                    "source_count": len(MEMORY_PROJECTION_55E_REQUIRED_PAYLOAD_FIELDS),
+                }
+            )
         projection_count = int(projection.get("projection_count") or 0)
         projection_ok = (
             projection_count > 0
@@ -2907,6 +3042,7 @@ def _classify_left_brain_signal_weaving(
             and not registered_source_missing_count
             and not missing_payload_fields_55c
             and not missing_payload_fields_55d
+            and not missing_payload_fields_55e
             and not projection_freshness_failed
             and projection.get("raw_body_included") is not True
         )
@@ -3682,11 +3818,23 @@ def _owner_proposal_followups_summary(summary: dict[str, Any]) -> dict[str, Any]
 
 def _owner_proposal_auto_route_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
+        "lane_mode": summary.get("lane_mode"),
+        "sample_window_days": summary.get("sample_window_days"),
+        "eligible_sample_count": summary.get("eligible_sample_count"),
+        "shadow_decision_count": summary.get("shadow_decision_count"),
+        "owner_agreement_rate": summary.get("owner_agreement_rate"),
+        "wilson_95_lower_bound": summary.get("wilson_95_lower_bound"),
+        "full_auto_eligible": summary.get("full_auto_eligible"),
+        "limited_auto_eligible": summary.get("limited_auto_eligible"),
+        "current_auto_route_cap_per_day": summary.get("current_auto_route_cap_per_day"),
+        "continue_shadow_comparison": summary.get("continue_shadow_comparison"),
+        "auto_demote_on_first_boundary_or_owner_disagreement": summary.get("auto_demote_on_first_boundary_or_owner_disagreement"),
         "eligible": summary.get("eligible_count"),
         "selected": summary.get("selected_count"),
         "routed": summary.get("auto_followup_routed_count"),
         "actual_execute_count": summary.get("auto_followup_actual_execute_count"),
         "policy_write_count": summary.get("auto_followup_policy_write_count"),
+        "actual_send_count": summary.get("auto_followup_actual_send_count"),
         "owner_boundary_count": summary.get("owner_action_required_boundary_count"),
         "boundary_rejected": summary.get("auto_followup_boundary_rejected_count"),
         "dry_run": summary.get("dry_run"),

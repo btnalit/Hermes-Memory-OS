@@ -671,13 +671,24 @@ def test_auto_route_safe_proposal_followups_to_ops_gate_without_owner_action(tmp
     assert dry_run["schema_version"] == "memory-os.proposal_followup_auto_route.v0"
     assert dry_run["dry_run"] is True
     assert dry_run["eligible_count"] == 1
+    assert dry_run["lane_mode"] == "live_shadow_calibration"
+    assert dry_run["shadow_decision_count"] == 1
+    assert dry_run["owner_agreement_rate"] == 1.0
+    assert dry_run["wilson_95_lower_bound"] > 0
+    assert dry_run["continue_shadow_comparison"] is True
+    assert dry_run["auto_demote_on_first_boundary_or_owner_disagreement"] is True
+    assert dry_run["limited_auto_first_canary_max_auto_routes_per_day"] == 1
+    assert dry_run["full_auto_eligible"] is False
     assert dry_run["auto_followup_routed_count"] == 0
     assert applied["status"] == "ok"
     assert applied["dry_run"] is False
     assert applied["eligible_count"] == 1
+    assert applied["effective_limit"] == 1
+    assert applied["current_auto_route_cap_per_day"] == 1
     assert applied["auto_followup_routed_count"] == 1
     assert applied["auto_followup_actual_execute_count"] == 0
     assert applied["auto_followup_policy_write_count"] == 0
+    assert applied["auto_followup_actual_send_count"] == 0
     assert applied["boundary"]["actual_execute"] is False
     assert applied["ops_gate"]["ops_gate_report_written_count"] == 1
     assert queue[safe["candidate_id"]]["state"] == "approved_for_proposal"
@@ -698,6 +709,32 @@ def test_auto_route_safe_proposal_followups_to_ops_gate_without_owner_action(tmp
     )
     assert veto["status"] == "ok"
     assert proposal_queue.read_queue()["items"][0]["state"] == "owner_declined"
+
+
+def test_auto_route_safe_proposal_followups_reports_limited_auto_probation_metrics(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    for index in range(3):
+        proposal_queue.create_candidate(
+            store=store,
+            title=f"Report-only process motion {index}",
+            body="Bounded proposal",
+        )
+
+    report = auto_route_safe_proposal_followups_to_ops_gate(store, apply=False)
+    applied = auto_route_safe_proposal_followups_to_ops_gate(store, apply=True, limit=10)
+
+    assert report["lane_mode"] == "limited_auto"
+    assert report["eligible_sample_count"] == 3
+    assert report["limited_auto_eligible"] is True
+    assert report["full_auto_eligible"] is False
+    assert report["owner_disagreement_count"] == 0
+    assert report["proposal_kind_coverage"] == ["proposal"]
+    assert applied["effective_limit"] == 1
+    assert applied["auto_followup_routed_count"] == 1
+    assert applied["auto_followup_actual_execute_count"] == 0
+    assert applied["auto_followup_policy_write_count"] == 0
+    assert applied["auto_followup_actual_send_count"] == 0
 
 
 def test_auto_route_safe_proposal_followups_rejects_boundary_and_apply_kind_proposals(tmp_path):

@@ -28,6 +28,8 @@ def main() -> int:
             "proposal-followups",
             "--auto-route",
             "--apply",
+            "--limit",
+            "1",
             "--owner",
             "memory_os_auto",
             "--channel",
@@ -45,8 +47,11 @@ def main() -> int:
         boundary=boundary,
         result_summary={
             "status": result.get("status"),
-            "routed_count": result.get("routed_count"),
+            "routed_count": result.get("auto_followup_routed_count"),
             "eligible_count": result.get("eligible_count"),
+            "lane_mode": result.get("lane_mode"),
+            "effective_limit": result.get("effective_limit"),
+            "wilson_95_lower_bound": result.get("wilson_95_lower_bound"),
         },
     )
     if result.get("actual_execute") is True or result.get("execution_ticket_created") is True:
