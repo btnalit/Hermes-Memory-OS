@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .cron_registry import MemoryOSCronSpec
+from .cron_registry import MemoryOSCronSpec, memory_os_cron_specs
 
 
 @dataclass(frozen=True)
@@ -82,8 +82,12 @@ def read_jobs_from_hermes_home(hermes_home: Path) -> list[dict[str, Any]]:
 
 def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[MemoryOSCronSpec]) -> dict[str, Any]:
     specs_by_name = {spec.name: spec for spec in specs}
+    known_specs_by_name = {spec.name: spec for spec in memory_os_cron_specs()}
+    known_specs_by_wrapper = {spec.wrapper_script: spec for spec in memory_os_cron_specs()}
+    known_specs_by_raw = {spec.raw_script: spec for spec in memory_os_cron_specs()}
     wrapped: list[dict[str, Any]] = []
     naked: list[dict[str, Any]] = []
+    known_optional: list[dict[str, Any]] = []
     unregistered_like: list[dict[str, Any]] = []
     hermes_host_owned: list[dict[str, Any]] = []
     external_unmanaged: list[dict[str, Any]] = []
@@ -105,6 +109,12 @@ def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[Me
             else:
                 naked.append(safe)
             continue
+        known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
+        if known_spec:
+            safe["known_registry_key"] = known_spec.key
+            safe["known_optional_reason"] = "not_in_active_installed_snapshot"
+            known_optional.append(safe)
+            continue
         if name.startswith("memory-os-") or script.startswith("memory_os_"):
             unregistered_like.append(safe)
             continue
@@ -121,12 +131,14 @@ def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[Me
         "memory_os_owned_expected_count": len(specs_by_name),
         "memory_os_owned_wrapped_count": len(wrapped),
         "memory_os_owned_naked_count": len(naked),
+        "memory_os_known_optional_count": len(known_optional),
         "memory_os_like_unregistered_count": len(unregistered_like),
         "hermes_host_owned_count": len(hermes_host_owned),
         "external_unmanaged_count": len(external_unmanaged),
         "unclassified_count": len(unclassified),
         "wrapped_jobs": wrapped,
         "naked_jobs": naked,
+        "known_optional_jobs": known_optional,
         "unregistered_like_jobs": unregistered_like,
     }
 
