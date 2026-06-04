@@ -345,6 +345,21 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host may be inspected before a persisted cognitive-loop report exists",
         "production_behavior": "fail_if_production",
     },
+    "memory_projection_freshness_missing": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host may not have a post-deploy projection artifact before the cognitive-loop lane warms",
+        "production_behavior": "fail_if_production",
+    },
+    "memory_projection_stale_after_deploy": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host compatibility smoke is not equivalent to 53 production live closure until a post-deploy projection cycle runs",
+        "production_behavior": "fail_if_production",
+    },
+    "memory_projection_retention_compaction_missing": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host projection retention can be un-compacted before enough signal volume accumulates",
+        "production_behavior": "warn_if_production",
+    },
     "memory_sources_stats_unavailable": {
         "classification": "expected_clean_host",
         "reason": "clean-host may not have MemorySources stats before live traffic and feedback are generated",

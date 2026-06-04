@@ -645,6 +645,9 @@ def test_clean_host_warn_classification_table_covers_current_warn_codes():
         "session_mirror_pending_source_gap",
         "owner_review_proposal_auto_route_boundary_requires_owner",
         "owner_review_approved_proposals_pending_followup",
+        "memory_projection_freshness_missing",
+        "memory_projection_stale_after_deploy",
+        "memory_projection_retention_compaction_missing",
     }
 
     assert expected_codes <= set(monitor.CLEAN_HOST_WARN_CLASSIFICATIONS)
@@ -686,6 +689,24 @@ def test_clean_host_warns_classify_session_mirror_pending_source_gap():
         item["code"] == "session_mirror_pending_source_gap"
         and item["classification"] == "next_lane"
         and item["production_behavior"] == "warn_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_clean_host_warns_classify_post_deploy_projection_staleness():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["host_capability_probe"]["deployment_runtime_manifest"]["deployed_at"] = "2026-06-03T01:00:00Z"
+    snapshot["memory_projection"]["latest_created_at"] = "2026-06-03T00:59:00Z"
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert any(item["code"] == "memory_projection_stale_after_deploy" for item in classification["warn"])
+    assert any(
+        item["code"] == "memory_projection_stale_after_deploy"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "fail_if_production"
         for item in classification["clean_host_warn_classification"]
     )
 

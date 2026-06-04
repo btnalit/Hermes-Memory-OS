@@ -387,6 +387,10 @@ Current P0 deployed baseline: `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`
    - clean-host full monitor target <= 240s;
    - timeout is a monitor-performance finding unless fast probes show runtime
      boundary or cron-state failure.
+4. Post-deploy projection freshness keeps production and clean-host evidence
+   separate:
+   - production `memory_projection_stale_after_deploy` is a full-monitor FAIL;
+   - clean-host `memory_projection_stale_after_deploy` is a classified WARN.
 
 当前收口:
 

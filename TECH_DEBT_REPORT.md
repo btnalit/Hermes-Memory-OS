@@ -308,6 +308,9 @@ file::function::append_jsonl_call::expression
 - clean-host full monitor: target <= 240s;
 - full monitor timeout is classified as monitor-performance debt unless the
   fast probes show an actual cron/runtime boundary failure.
+- post-deploy projection freshness remains a production hard gate:
+  `memory_projection_stale_after_deploy` is FAIL in production and a classified
+  WARN for clean-host compatibility evidence.
 
 ### TD-009: cognitive loop 是固定顺序巨链，缺少 step registry 合同
 

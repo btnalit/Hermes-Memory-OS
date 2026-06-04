@@ -266,6 +266,10 @@ Current full monitor caveat:
 - full monitor performance budget is production <= 180s and clean-host <= 240s;
   timeout is a monitor-performance finding unless fast probes show runtime
   boundary or cron-state failure.
+- `memory_projection_stale_after_deploy` is intentionally asymmetric:
+  production must produce a fresh post-deploy projection cycle before full
+  monitor PASS; clean-host records it as a classified WARN unless 2.66 is
+  explicitly used as a live-closure host.
 
 ## Current Residual P1/P2 Work
 

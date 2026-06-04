@@ -307,6 +307,12 @@ Required follow-up:
 5. Use full monitor after fast probes for live runtime closure, broad monitor
    changes, scheduler behavior changes, or any finding originally discovered by
    full monitor.
+6. Post-deploy projection freshness keeps the host-role split:
+   - production profile: `memory_projection_stale_after_deploy` remains a hard
+     full-monitor FAIL until a fresh cognitive-loop/projection cycle runs;
+   - clean-host profile: the same code is a classified WARN because 2.66 is a
+     compatibility/smoke host unless explicitly promoted to live-closure
+     evidence.
 
 Acceptance gates:
 
