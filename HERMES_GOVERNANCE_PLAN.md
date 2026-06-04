@@ -4,7 +4,7 @@ Date: 2026-06-04
 
 Task start baseline: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 Purpose: define the governance structure for Memory-OS V1 hardening and future
 autonomy work.

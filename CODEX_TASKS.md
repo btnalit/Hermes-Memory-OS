@@ -4,7 +4,7 @@ Date: 2026-06-04
 
 Task start baseline: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 Purpose: turn the second-round stability audit into executable Codex work.
 
@@ -24,9 +24,9 @@ Current P0 status:
   Memory-OS cron jobs.
 - P0-003 permanent boundary sentinels are implemented and tested.
 - P0-004 dual-host evidence was refreshed after deployment.
-- P0-005 fast probe now has cron and boundary/runtime probe entrypoints. The
-  remaining follow-up is deploy/runbook integration and monitor performance
-  budget enforcement.
+- P0-005 fast probe now has cron and boundary/runtime probe entrypoints, both
+  live-validated on 3.200 and 2.66. The remaining follow-up is deploy/runbook
+  integration and monitor performance budget enforcement.
 
 ## 0. Execution Rules For Codex
 
@@ -169,11 +169,11 @@ Closure:
 Current closure evidence:
 
 ```text
-3.200 deployed_head=799b69d25d4d679e2d38a6d97e2f31c3f361db01
+3.200 deployed_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
 3.200 cron_adapter_probe status=ok active_registry_job_count=2 enabled_memory_os_job_count=2 enabled_known_optional_outside_active_registry_count=0
 3.200 live monitor PASS WARN=[] FAIL=[]
 
-2.66 deployed_head=799b69d25d4d679e2d38a6d97e2f31c3f361db01
+2.66 deployed_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
 2.66 active-closure onboarding already_configured; known optional Memory-OS jobs paused
 2.66 cron_adapter_probe status=ok active_registry_job_count=2 enabled_memory_os_job_count=2 enabled_known_optional_outside_active_registry_count=0
 2.66 clean-host monitor WARN FAIL=[]

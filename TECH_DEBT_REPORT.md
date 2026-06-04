@@ -4,7 +4,7 @@
 
 Task start code baseline: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 审计范围:
 
@@ -33,7 +33,7 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 | 10.20.2.66 cron registry | active-closure 2 jobs |
 | 10.20.2.66 legacy optional cron jobs | paused by active-closure onboarding |
 | fast cron probe on both hosts | `status=ok`, active registry=2, enabled Memory-OS jobs=2, optional outside registry=0 |
-| fast boundary/runtime probe | implemented; live validation required after deployment |
+| fast boundary/runtime probe | live `status=ok` on both hosts |
 
 结论: 当前代码基线不是红灯。V1 风险主要来自维护性、配置漂移和 monitor 漏报，而不是已观察到的越权写或测试失败。
 

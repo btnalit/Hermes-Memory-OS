@@ -6,7 +6,7 @@
 
 Historical first-round audit baseline: `1ed4ef414f9d4a46eb363cbc09e4964622508938`
 
-Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 证据级别:
 - `code`: 本地代码和 README 审查。
@@ -201,7 +201,7 @@ flowchart TD
 
 当前已知 live 状态:
 
-- 本地/双机 HEAD 为 `799b69d25d4d679e2d38a6d97e2f31c3f361db01`。
+- 本地/双机 HEAD 为 `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`。
 - 10.20.3.200 live monitor PASS，`WARN=[]`、`FAIL=[]`。
 - 10.20.2.66 clean-host monitor WARN、`FAIL=[]`。
 - 双机 fast cron probe PASS: active registry=2, enabled Memory-OS jobs=2,
@@ -298,6 +298,6 @@ Memory-OS 采用 file-first 设计。主要数据类别如下:
 
 进入下一轮前建议先做工程基线收敛:
 
-1. 固化 fast cron probe，并补 fast boundary/runtime probe。
+1. 将 fast cron probe 和 fast boundary/runtime probe 固化进 deploy/runbook。
 2. 把 projection freshness 的时间窗口写入部署后验证说明，避免部署后立刻 monitor 的假 FAIL 被误判成链路断裂。
 3. 继续保留本地定向测试、write_surface_check、static_hygiene 和双机 monitor 作为每轮变更前置门槛。

@@ -4,7 +4,7 @@
 
 Historical first-round audit baseline: `1ed4ef414f9d4a46eb363cbc09e4964622508938`
 
-Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 说明: 本文按工程职责划分模块，不按 Python package 物理目录逐行罗列。状态以当前 HEAD 和 live/read-only 证据为准；README、install help、monitor 或 live 证据不一致处单独标注为 drift。
 
@@ -170,7 +170,7 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 
 稳定基线:
 
-- GitHub/local/remote HEAD: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`。
+- GitHub/local/remote HEAD: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`。
 - 10.20.3.200 和 10.20.2.66 均对齐该 HEAD。
 - 10.20.3.200 live monitor PASS，`WARN=[]`，`FAIL=[]`。
 - 10.20.2.66 clean-host monitor WARN，`FAIL=[]`。

@@ -4,7 +4,7 @@ Date: 2026-06-04
 
 Task start code head: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed code head: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+Current P0 deployed code head: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 Purpose: keep the current V1 stabilization baseline visible in a tracked,
 public-safe file so future implementation work does not rely only on ignored
@@ -103,14 +103,14 @@ Live evidence:
 
 ```text
 10.20.3.200:
-  code_head=799b69d25d4d679e2d38a6d97e2f31c3f361db01
+  code_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
   monitor_profile=live
   status=PASS
   WARN=[]
   FAIL=[]
 
 10.20.2.66:
-  code_head=799b69d25d4d679e2d38a6d97e2f31c3f361db01
+  code_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
   active-closure onboarding=already_configured
   monitor_profile=clean-host
   status=WARN
@@ -166,6 +166,34 @@ python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --her
   memory_os_owned_expected_count=2
   memory_os_owned_wrapped_count=2
   memory_os_owned_naked_count=0
+```
+
+Fast boundary/runtime probe evidence after `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf` deployment:
+
+```text
+python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
+
+10.20.3.200:
+  status=ok
+  permit_boundary_true_count=0
+  completion_postcheck_boundary_true_count=0
+  unapproved_or_automatic_crystallized_write_count=0
+  actual_hindsight_write/delete/demote_count=0
+  actual_route_score_write_count=0
+  actual_identity_relationship_write_count=0
+  actual_external_send_count=0
+  unbounded_autonomous_action_count=0
+
+10.20.2.66:
+  status=ok
+  permit_boundary_true_count=0
+  completion_postcheck_boundary_true_count=0
+  unapproved_or_automatic_crystallized_write_count=0
+  actual_hindsight_write/delete/demote_count=0
+  actual_route_score_write_count=0
+  actual_identity_relationship_write_count=0
+  actual_external_send_count=0
+  unbounded_autonomous_action_count=0
 ```
 
 ## P0-003 Permanent Boundary Regression Sentinels
