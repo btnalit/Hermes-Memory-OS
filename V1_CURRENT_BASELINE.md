@@ -4,7 +4,7 @@ Date: 2026-06-04
 
 Task start code head: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed code head: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
+Current P0 deployed code head: `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`
 
 Purpose: keep the current V1 stabilization baseline visible in a tracked,
 public-safe file so future implementation work does not rely only on ignored
@@ -103,14 +103,14 @@ Live evidence:
 
 ```text
 10.20.3.200:
-  code_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
+  code_head=b4ae2c548f4440af00067a8b422bdcedd4a8dd25
   monitor_profile=live
   status=PASS
   WARN=[]
   FAIL=[]
 
 10.20.2.66:
-  code_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
+  code_head=b4ae2c548f4440af00067a8b422bdcedd4a8dd25
   active-closure onboarding=already_configured
   monitor_profile=clean-host
   status=WARN
@@ -168,7 +168,7 @@ python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --her
   memory_os_owned_naked_count=0
 ```
 
-Fast boundary/runtime probe evidence after `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf` deployment:
+Fast boundary/runtime probe evidence after `b4ae2c548f4440af00067a8b422bdcedd4a8dd25` deployment:
 
 ```text
 python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
@@ -194,6 +194,19 @@ python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes -
   actual_identity_relationship_write_count=0
   actual_external_send_count=0
   unbounded_autonomous_action_count=0
+```
+
+Fast deploy postcheck sequencing evidence after
+`b4ae2c548f4440af00067a8b422bdcedd4a8dd25` deployment:
+
+```text
+python scripts\deploy_memory_os.py --host hermes-media --remote-repo-root /opt/Hermes-Memory-OS --hermes-home /root/.hermes --phase postcheck --profile upgrade --mode operational --hindsight auto --timeout 180 --output summary
+  -> classification: pass=postcheck_pass,deployment_manifest_status_pass,llm_judge_probe_pass,cron_adapter_probe_pass,boundary_runtime_probe_pass warn=[] fail=[]
+  -> boundary_runtime_probe_status=pass
+
+python scripts\deploy_memory_os.py --host hermes-feiniu --remote-repo-root /opt/Hermes-Memory-OS --hermes-home /root/.hermes --phase postcheck --profile upgrade --mode operational --hindsight auto --timeout 180 --output summary
+  -> classification: pass=postcheck_pass,deployment_manifest_status_pass,llm_judge_probe_pass,cron_adapter_probe_pass,boundary_runtime_probe_pass warn=[] fail=[]
+  -> boundary_runtime_probe_status=pass
 ```
 
 ## P0-003 Permanent Boundary Regression Sentinels

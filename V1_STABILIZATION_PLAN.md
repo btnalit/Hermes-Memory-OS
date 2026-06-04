@@ -4,7 +4,7 @@
 
 Task start code baseline: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
+Current P0 deployed baseline: `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`
 
 ## 1. V1 目标
 
@@ -54,7 +54,7 @@ python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile
 
 优先级: P1
 
-当前状态: Closed at `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
+当前状态: Closed at `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`
 
 问题:
 
@@ -90,11 +90,11 @@ python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile
 当前闭环证据:
 
 ```text
-3.200 deployed_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
+3.200 deployed_head=b4ae2c548f4440af00067a8b422bdcedd4a8dd25
 3.200 cron_adapter_probe status=ok active_registry_job_count=2 enabled_memory_os_job_count=2 enabled_known_optional_outside_active_registry_count=0
 3.200 monitor PASS WARN=[] FAIL=[]
 
-2.66 deployed_head=64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf
+2.66 deployed_head=b4ae2c548f4440af00067a8b422bdcedd4a8dd25
 2.66 active-closure onboarding paused known optional Memory-OS jobs
 2.66 cron_adapter_probe status=ok active_registry_job_count=2 enabled_memory_os_job_count=2 enabled_known_optional_outside_active_registry_count=0
 2.66 clean-host monitor WARN FAIL=[]

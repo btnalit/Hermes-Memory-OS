@@ -4,7 +4,7 @@
 
 Task start code baseline: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
-Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
+Current P0 deployed baseline: `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`
 
 审计范围:
 

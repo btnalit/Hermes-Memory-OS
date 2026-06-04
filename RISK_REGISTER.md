@@ -4,7 +4,7 @@
 
 Historical first-round audit baseline: `1ed4ef414f9d4a46eb363cbc09e4964622508938`
 
-Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
+Current P0 deployed baseline: `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`
 
 严重度定义:
 
@@ -29,7 +29,7 @@ Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 | R-010 | P3 | Open | 2.66 缺少 pytest，clean-host 远端验证弱于 3.200 |
 | R-011 | P3 | Watch | metadata-only collectors 必须持续防 raw body/secret 泄露 |
 | R-012 | P3 | Watch | 58 高风险 authority lane 尚未打开，但需防止误开 |
-| R-013 | P2 | Open | full monitor 过重；fast probes 已有，仍需 deploy/runbook 集成和性能预算 |
+| R-013 | P2 | Watch | full monitor 过重；fast probes 已进入 deploy sequencing，仍需性能优化 |
 
 ## 2. 详细风险
 
@@ -47,7 +47,7 @@ Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 复测证据:
 
 - Historical evidence HEAD: `1ed4ef4`。
-- Current P0 deployed HEAD: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`。
+- Current P0 deployed HEAD: `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`。
 - `python scripts\memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output json`
 - 结果: `PASS`，`WARN=[]`，`FAIL=[]`。
 - monitor pass item: `memory_projection_online`，`fresh_after_deploy=true`，projection_count=304。
@@ -96,7 +96,7 @@ Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 - `scripts/memory_os_owner_cron_onboarding.py` 支持 `--cron-profile active-closure|full`，默认 `active-closure`。
 - README、installer help、onboarding、monitor、tests 已统一为 active-closure 默认 2 个必需 job；`full` profile 保留 7 个 optional-capable job。
-- 3.200 与 2.66 当前均已部署 `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`。
+- 3.200 与 2.66 当前均已部署 `b4ae2c548f4440af00067a8b422bdcedd4a8dd25`。
 - 3.200 active registry=2，enabled Memory-OS jobs=2。
 - 2.66 active-closure onboarding 已暂停 known optional Memory-OS jobs，enabled Memory-OS jobs=2。
 - 双机 `memory_os_cron_adapter_probe.py` 均为 `status=ok` 且 `enabled_known_optional_outside_active_registry_count=0`。
@@ -148,7 +148,7 @@ Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 严重度: P2
 
-状态: Open
+状态: Watch
 
 证据:
 
@@ -388,10 +388,15 @@ Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
    - timeout is a monitor-performance finding unless fast probes show runtime
      boundary or cron-state failure.
 
-关闭条件:
+当前收口:
 
 - fast cron probe 和 fast boundary/runtime probe 都进入 V1 runbook / deploy sequencing。
 - full monitor 仍作为最终 live/clean-host 证据，但不再是所有小切片唯一闭环。
+
+Remaining watch item:
+
+- full monitor performance optimization and timeout classification remain P1/P2
+  engineering debt, but deploy sequencing is closed.
 
 ## 3. 下一轮建议
 
