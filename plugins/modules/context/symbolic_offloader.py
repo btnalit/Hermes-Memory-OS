@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
+from plugins.memory.memory_os.jsonl_io import append_jsonl, read_jsonl
 
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -92,7 +92,7 @@ class SymbolicOffloaderModule:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(str(node["text"]), encoding="utf-8")
                 node.pop("text", None)
-            _append_jsonl(self.reports_path, result)
+            append_jsonl(self.reports_path, result)
         else:
             for node in nodes:
                 node.pop("text", None)
@@ -125,7 +125,7 @@ class SymbolicOffloaderModule:
         }
 
     def status(self) -> dict[str, Any]:
-        reports = _read_jsonl(self.reports_path)
+        reports = read_jsonl(self.reports_path)
         ref_count = len(list(self.refs_root.glob("*/*.md"))) if self.refs_root.exists() else 0
         return {
             "schema_version": "memory-os.symbolic_offloader_status.v0",
@@ -141,7 +141,7 @@ class SymbolicOffloaderModule:
 
     def doctor(self) -> dict[str, Any]:
         findings = []
-        reports = _read_jsonl(self.reports_path)
+        reports = read_jsonl(self.reports_path)
         missing_refs = []
         for report in reports:
             for node in report.get("nodes") or []:
@@ -216,22 +216,3 @@ def _mermaid(nodes: list[dict[str, Any]]) -> str:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        parsed = json.loads(line)
-        if isinstance(parsed, dict):
-            records.append(parsed)
-    return records

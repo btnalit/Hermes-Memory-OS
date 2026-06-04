@@ -357,6 +357,16 @@ Implementation:
 4. Migrate critical writer paths only after tests prove no write-surface
    regression.
 
+Current slice:
+
+- `plugins.memory.memory_os.jsonl_io` exists with `read_jsonl`,
+  `latest_jsonl_record`, `append_jsonl`, `write_jsonl`, and
+  `write_json_atomic`.
+- First report-only migrations are limited to `imagination_loop` and
+  `symbolic_offloader`.
+- Critical owner/session/projection paths are intentionally untouched in this
+  slice.
+
 Acceptance gates:
 
 ```text

@@ -20,6 +20,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/cleanup.py::_archive_event_action::path.open_a::archive_path": "retention_archive",
     "plugins/memory/memory_os/cognitive_loop.py::CognitiveLoopRunner._append_report::path.open_a::self.reports_path": "cycle_report",
     "plugins/memory/memory_os/crystallized.py::append_candidate_queue::path.open_a::path": "candidate_queue_existing_surface",
+    "plugins/memory/memory_os/jsonl_io.py::append_jsonl::path.open_a::target": "shared_jsonl_io_contract",
     "plugins/memory/memory_os/execution_gate.py::start_execution_gate_envelope::append_jsonl_call::execution_gate_records_path(store.roots)": "execution_gate_permit_ledger",
     "plugins/memory/memory_os/execution_gate.py::complete_execution_gate_envelope::append_jsonl_call::execution_gate_records_path(store.roots)": "execution_gate_completion_ledger",
     "plugins/memory/memory_os/execution_gate.py::rotate_execution_gate_records::path.open_a::rotated_path": "execution_gate_retention_archive",

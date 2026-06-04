@@ -168,6 +168,15 @@ python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile
 4. 再迁移 owner/projection/session_mirror critical path。
 5. write surface check 适配共享 writer，不降低分类能力。
 
+当前进展:
+
+- 已新增 `plugins.memory.memory_os.jsonl_io`。
+- 第一批迁移仅覆盖 report-only 模块:
+  - `plugins.modules.cognition.imagination_loop`
+  - `plugins.modules.context.symbolic_offloader`
+- owner / projection / session_mirror 关键写路径仍保留原状，等待后续独立
+  切片。
+
 验收:
 
 ```text

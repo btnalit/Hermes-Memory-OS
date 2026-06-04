@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from eval.memory_os.data.v7_simulated import load_scenarios
+from plugins.memory.memory_os.jsonl_io import append_jsonl, read_jsonl, write_jsonl
 
 
 def imagination_loop_manifest() -> dict[str, Any]:
@@ -102,7 +102,7 @@ class ImaginationLoopModule:
             }
             for scenario in load_scenarios()
         ]
-        self._write_jsonl(self.scenarios_path, records)
+        write_jsonl(self.scenarios_path, records)
         result = {
             "schema_version": "hermes.imagination_loop_result.v0",
             "module": "imagination_loop",
@@ -117,34 +117,8 @@ class ImaginationLoopModule:
             "candidate_written_to_canonical": False,
             "live_applied": False,
         }
-        _append_jsonl(self.runs_path, result)
+        append_jsonl(self.runs_path, result)
         return result
 
     def read_scenarios(self) -> list[dict[str, Any]]:
-        return _read_jsonl(self.scenarios_path)
-
-    @staticmethod
-    def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records),
-            encoding="utf-8",
-        )
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                records.append(parsed)
-    return records
-
-
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        return read_jsonl(self.scenarios_path)
