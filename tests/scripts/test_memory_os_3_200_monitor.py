@@ -31,6 +31,23 @@ def test_monitor_script_help_bootstraps_repo_import_path():
     assert "No module named 'plugins'" not in result.stderr
 
 
+def test_neutral_monitor_script_help_preserves_cli_contract():
+    script = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_monitor.py"
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout
+    assert "--monitor-profile" in result.stdout
+    assert "No module named 'plugins'" not in result.stderr
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:

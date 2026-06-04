@@ -296,6 +296,12 @@ python scripts\memory_os_write_surface_check.py
 
 保留 `memory_os_3_200_monitor.py` 作为兼容 wrapper。
 
+当前切片:
+
+- 已新增 `scripts/memory_os_monitor.py` 作为中性 CLI wrapper。
+- `scripts/memory_os_3_200_monitor.py` 仍是兼容入口。
+- 暂未移动 classifier 逻辑，PASS/WARN/FAIL 语义保持不变。
+
 验收:
 
 ```text

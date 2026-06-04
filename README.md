@@ -348,6 +348,8 @@ The operational baseline has live validation evidence:
 - fast cron and boundary/runtime probes available for lightweight
   deploy/audit checks before the full monitor and wired into
   `deploy_memory_os.py` postcheck/apply sequencing;
+- neutral monitor entrypoint `scripts/memory_os_monitor.py` is available, while
+  `scripts/memory_os_3_200_monitor.py` remains the compatibility entrypoint;
 - owner channel auto-detected from `channel_directory.json`;
 - monitor status `PASS` with no WARN/FAIL at the latest recorded validation;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and

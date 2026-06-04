@@ -486,6 +486,12 @@ Goal:
 - Keep the public CLI compatible while separating probe, snapshot, classifiers,
   and renderer.
 
+Current slice:
+
+- Added `scripts/memory_os_monitor.py` as the neutral monitor CLI wrapper.
+- Kept `scripts/memory_os_3_200_monitor.py` as the compatibility entrypoint.
+- No PASS/WARN/FAIL semantics moved or changed in this slice.
+
 Implementation:
 
 1. Add neutral `scripts/memory_os_monitor.py`.
