@@ -123,7 +123,7 @@ def _execution_gate_fast_summary(roots: MemoryOSRoots) -> dict[str, Any]:
             1 for record in permits if record.get("boundary_true") is True or _any_true(record.get("boundary"))
         ),
         "completion_postcheck_boundary_true_count": sum(
-            1 for record in completions if record.get("postcheck_boundary_true") is True or _any_true(record.get("postcheck"))
+            1 for record in completions if _postcheck_boundary_true(record)
         ),
         "latest_envelope_id": str(latest_permit.get("execution_gate_envelope_id") or ""),
         "latest_lane_id": str(latest_permit.get("lane_id") or ""),
@@ -177,6 +177,34 @@ def _any_true(value: Any) -> bool:
     if isinstance(value, list):
         return any(_any_true(item) for item in value)
     return False
+
+
+_BOUNDARY_KEYS = {
+    "actual_send",
+    "actual_execute",
+    "actual_identity_write",
+    "actual_relationship_write",
+    "actual_unapproved_crystallized_approval",
+    "actual_crystallized_approval",
+    "actual_policy_write",
+    "actual_route_score_write",
+    "actual_hindsight_write",
+    "actual_hindsight_delete",
+    "actual_hindsight_demote",
+    "hindsight_write",
+    "hindsight_delete",
+    "hindsight_demote",
+    "unbounded_autonomous_action",
+}
+
+
+def _postcheck_boundary_true(record: dict[str, Any]) -> bool:
+    postcheck = record.get("postcheck")
+    if not isinstance(postcheck, dict):
+        return record.get("postcheck_boundary_true") is True
+    if _any_true(postcheck.get("boundary")) or _any_true(postcheck.get("boundaries")):
+        return True
+    return any(postcheck.get(key) is True for key in _BOUNDARY_KEYS)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

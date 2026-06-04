@@ -149,3 +149,40 @@ def test_boundary_runtime_probe_warns_when_gate_records_are_missing(tmp_path):
         "execution_gate_completion_records_missing",
         "execution_gate_permit_records_missing",
     }
+
+
+def test_boundary_runtime_probe_does_not_treat_boundary_observed_as_boundary_true(tmp_path):
+    hermes_home = tmp_path / "home"
+    _jsonl(
+        hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl",
+        [
+            {
+                "stage": "permit",
+                "execution_gate_envelope_id": "xgate_observed",
+                "permit_decision": "allowed",
+                "boundary_true": False,
+                "boundary": {"actual_send": False},
+            },
+            {
+                "stage": "completion",
+                "execution_gate_envelope_id": "xgate_observed",
+                "execution_status": "ok",
+                "postcheck_boundary_true": False,
+                "postcheck": {
+                    "postcheck_boundary_observed": True,
+                    "boundary": {
+                        "actual_send": False,
+                        "actual_execute": False,
+                        "actual_unapproved_crystallized_approval": False,
+                    },
+                },
+            },
+        ],
+    )
+
+    result = _run_probe(hermes_home)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert report["status"] == "ok"
+    assert report["execution_gate"]["completion_postcheck_boundary_true_count"] == 0
