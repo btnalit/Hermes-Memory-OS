@@ -33,6 +33,7 @@ from .memory_sources import (
     read_memory_source_feedback_records,
     read_memory_source_records,
 )
+from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
@@ -159,7 +160,7 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
 
 
 def owner_actions_path(roots: MemoryOSRoots) -> Path:
-    return roots.memory_os_root / "system" / "owner_actions.jsonl"
+    return _owner_actions_path(roots)
 
 
 def feedback_ledger_path(roots: MemoryOSRoots) -> Path:

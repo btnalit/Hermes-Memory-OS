@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .execution_gate import execution_gate_records_path
-from .owner_actions import owner_actions_path
+from .read_model_paths import owner_actions_path, session_mirror_apply_records_path
 from .roots import MemoryOSRoots
-from .session_mirror import session_mirror_apply_records_path
 from .signal_source_registry import (
     SignalSourceSpec,
     evaluate_signal_source_requirements,

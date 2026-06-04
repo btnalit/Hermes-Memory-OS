@@ -226,6 +226,15 @@ python -m pytest -q tests\scripts\test_memory_os_3_200_monitor.py
 python scripts\memory_os_import_cycle_check.py
 ```
 
+当前进展:
+
+- 已新增 `scripts/memory_os_import_cycle_check.py`。
+- 已新增中性 path seam `plugins.memory.memory_os.read_model_paths`。
+- `signal_collectors` 通过中性 path seam 读取 owner/session ledgers。
+- `session_mirror` 通过中性 path seam + shared JSONL IO 读取 owner
+  actions，不再 import owner action state machine。
+- 当前 import-cycle check: `cycle_count=0`。
+
 关闭条件:
 
 - core Memory-OS package import cycle count = 0。

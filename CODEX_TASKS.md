@@ -400,6 +400,14 @@ Goal:
 
 - Core Memory-OS modules import without cycles.
 
+Current slice:
+
+- Added `scripts/memory_os_import_cycle_check.py`.
+- Added neutral `read_model_paths.py` for owner action and SessionMirror apply
+  ledger paths.
+- Removed the core cycle through `signal_collectors` and `session_mirror`;
+  current check reports `cycle_count=0`.
+
 Implementation:
 
 1. Add neutral path/read-model modules:

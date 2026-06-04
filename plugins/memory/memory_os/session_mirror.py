@@ -19,6 +19,11 @@ from .execution_gate import (
     start_execution_gate_envelope,
 )
 from .ids import new_event_id
+from .jsonl_io import read_jsonl
+from .read_model_paths import (
+    owner_actions_path,
+    session_mirror_apply_records_path as _session_mirror_apply_records_path,
+)
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
@@ -58,7 +63,7 @@ def _bounded_auto_apply_dry_run(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def session_mirror_apply_records_path(roots: MemoryOSRoots) -> Path:
-    return roots.memory_os_root / "system" / "session_mirror_applies.jsonl"
+    return _session_mirror_apply_records_path(roots)
 
 
 def read_session_mirror_apply_records(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
@@ -100,17 +105,7 @@ def session_mirror_graduation_policy(store: MemoryOSStore) -> dict[str, Any]:
             "reason": "auto_apply_after_owner_home_graduation_disabled",
             "owner_approved": False,
         }
-    try:
-        from .owner_actions import read_owner_action_records
-    except Exception as exc:
-        return {
-            "schema_version": "memory-os.session_mirror_graduation_policy.v0",
-            "status": "error",
-            "reason": "owner_action_records_unavailable",
-            "error": str(exc)[:200],
-            "owner_approved": False,
-        }
-    for record in reversed(read_owner_action_records(store.roots)):
+    for record in reversed(read_jsonl(owner_actions_path(store.roots))):
         result_ref = record.get("result_ref") if isinstance(record.get("result_ref"), dict) else {}
         token_binding = record.get("token_binding") if isinstance(record.get("token_binding"), dict) else {}
         owner_effect = record.get("owner_effect") if isinstance(record.get("owner_effect"), dict) else {}
@@ -1021,9 +1016,7 @@ def _governance_validation(
 
 
 def _find_owner_action_record(store: MemoryOSStore, owner_action_id: str) -> dict[str, Any] | None:
-    from .owner_actions import read_owner_action_records
-
-    for record in reversed(read_owner_action_records(store.roots)):
+    for record in reversed(read_jsonl(owner_actions_path(store.roots))):
         if str(record.get("owner_action_id") or "") == str(owner_action_id or ""):
             return record
     return None
