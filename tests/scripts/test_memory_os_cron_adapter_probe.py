@@ -123,9 +123,21 @@ def test_cron_adapter_probe_classifies_known_optional_jobs_outside_active_snapsh
         json.dumps(
             {
                 "jobs": [
-                    {"name": "memory-os-owner-review-digest", "script": "memory_os_cron_owner_review_digest_gate.py"},
-                    {"name": "memory-os-right-brain-expression", "script": "memory_os_cron_right_brain_expression_gate.py"},
-                    {"name": "memory-os-memory-sources-feedback-request", "script": "memory_os_cron_memory_sources_feedback_request_gate.py"},
+                    {
+                        "name": "memory-os-owner-review-digest",
+                        "script": "memory_os_cron_owner_review_digest_gate.py",
+                        "enabled": True,
+                    },
+                    {
+                        "name": "memory-os-right-brain-expression",
+                        "script": "memory_os_cron_right_brain_expression_gate.py",
+                        "enabled": False,
+                    },
+                    {
+                        "name": "memory-os-memory-sources-feedback-request",
+                        "script": "memory_os_cron_memory_sources_feedback_request_gate.py",
+                        "enabled": True,
+                    },
                 ]
             }
         ),
@@ -154,4 +166,6 @@ def test_cron_adapter_probe_classifies_known_optional_jobs_outside_active_snapsh
     assert report["classification"]["memory_os_owned_expected_count"] == 1
     assert report["classification"]["memory_os_owned_wrapped_count"] == 1
     assert report["classification"]["memory_os_known_optional_count"] == 2
+    assert report["classification"]["enabled_known_optional_outside_active_registry_count"] == 1
+    assert report["classification"]["enabled_memory_os_job_count"] == 2
     assert report["classification"]["memory_os_like_unregistered_count"] == 0

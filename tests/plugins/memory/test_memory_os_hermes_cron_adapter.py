@@ -24,6 +24,43 @@ def test_hermes_cron_adapter_classifies_wrapped_naked_and_unregistered_jobs():
     assert summary["memory_os_owned_naked_count"] == 1
     assert summary["memory_os_like_unregistered_count"] == 1
     assert summary["hermes_host_owned_count"] == 1
+    assert summary["active_registry_job_count"] == len(memory_os_cron_specs())
+    assert summary["enabled_memory_os_job_count"] == 1
+
+
+def test_hermes_cron_adapter_counts_enabled_known_optional_jobs_outside_active_registry():
+    owner_review = memory_os_cron_spec_by_key("owner_review_digest")
+    memory_sources = memory_os_cron_spec_by_key("memory_sources_feedback_request")
+    right_brain = memory_os_cron_spec_by_key("right_brain_expression")
+    assert owner_review is not None
+    assert memory_sources is not None
+    assert right_brain is not None
+
+    summary = classify_hermes_cron_jobs(
+        [
+            {"name": owner_review.name, "script": owner_review.wrapper_script, "enabled": True},
+            {"name": memory_sources.name, "script": memory_sources.wrapper_script, "enabled": True},
+            {"name": right_brain.name, "script": right_brain.wrapper_script, "enabled": False},
+        ],
+        [owner_review],
+    )
+
+    assert summary["active_registry_job_count"] == 1
+    assert summary["memory_os_owned_wrapped_count"] == 1
+    assert summary["memory_os_known_optional_count"] == 2
+    assert summary["enabled_known_optional_outside_active_registry_count"] == 1
+    assert summary["enabled_memory_os_job_count"] == 2
+    assert summary["enabled_known_optional_outside_active_registry_jobs"] == [
+        {
+            "name": memory_sources.name,
+            "script": memory_sources.wrapper_script,
+            "enabled": True,
+            "deliver": "",
+            "no_agent": False,
+            "known_registry_key": memory_sources.key,
+            "known_optional_reason": "not_in_active_installed_snapshot",
+        }
+    ]
 
 
 def test_hermes_cron_adapter_upsert_plan_owns_schedule_prompt_wrapper_and_no_agent():

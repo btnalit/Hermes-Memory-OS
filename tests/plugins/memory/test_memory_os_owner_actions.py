@@ -3542,9 +3542,26 @@ def test_hindsight_curation_finding_gets_owner_gated_decision_tokens(tmp_path):
     }
     assert result["status"] == "ok"
     assert result["result_ref"]["actual_hindsight_write"] is False
+    assert result["result_ref"]["actual_hindsight_delete"] is False
+    assert result["result_ref"]["actual_execute"] is False
     assert decisions[0]["curation_decision"] == "retain"
     assert decisions[0]["actual_hindsight_write"] is False
+    assert decisions[0]["actual_hindsight_delete"] is False
+    assert decisions[0]["actual_hindsight_demote"] is False
+    assert decisions[0]["actual_execute"] is False
+    assert decisions[0]["actual_send"] is False
+    assert decisions[0]["actual_policy_write"] is False
+    assert decisions[0]["actual_route_score_write"] is False
+    assert decisions[0]["hindsight_authoritative"] is False
+    assert decisions[0]["advisory_only"] is True
     assert decisions[0]["boundary"]["hindsight_write"] is False
+    assert decisions[0]["boundary"]["actual_send"] is False
+    assert decisions[0]["boundary"]["actual_execute"] is False
+    assert decisions[0]["boundary"]["actual_identity_write"] is False
+    assert decisions[0]["boundary"]["actual_relationship_write"] is False
+    assert decisions[0]["boundary"]["actual_crystallized_approval"] is False
+    assert decisions[0]["boundary"]["actual_policy_write"] is False
+    assert decisions[0]["boundary"]["actual_route_score_write"] is False
 
 
 def test_hindsight_curation_rejects_forged_target(tmp_path):

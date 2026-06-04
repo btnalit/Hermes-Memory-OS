@@ -2791,6 +2791,128 @@ def test_classify_snapshot_passes_memory_os_cron_execution_gate_coverage():
     assert not any(item["code"].startswith("execution_gate_memory_os_cron") for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_production_when_known_optional_cron_enabled_outside_active_registry():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "live"
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "active_registry_job_count": 2,
+        "enabled_memory_os_job_count": 7,
+        "memory_os_owned_expected_count": 2,
+        "memory_os_owned_wrapped_count": 2,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "enabled_known_optional_outside_active_registry_count": 5,
+        "enabled_known_optional_outside_active_registry_jobs": [
+            {"name": "memory-os-module-cadence-report", "enabled": True}
+        ],
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry"
+        for item in classification["warn"]
+    )
+    assert any(
+        item["code"]
+        == "execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry_in_production"
+        for item in classification["fail"]
+    )
+
+
+def test_classify_snapshot_warns_clean_host_when_known_optional_cron_enabled_outside_active_registry():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean-host"
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "active_registry_job_count": 2,
+        "enabled_memory_os_job_count": 7,
+        "memory_os_owned_expected_count": 2,
+        "memory_os_owned_wrapped_count": 2,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "enabled_known_optional_outside_active_registry_count": 5,
+        "enabled_known_optional_outside_active_registry_jobs": [
+            {"name": "memory-os-module-cadence-report", "enabled": True}
+        ],
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert any(
+        item["code"] == "execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry"
+        for item in classification["warn"]
+    )
+    assert not classification["fail"]
+    assert any(
+        item["code"] == "execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry"
+        and item["classification"] == "expected_clean_host"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_classify_snapshot_permanent_boundary_sentinels_fail_on_low_risk_authority_expansion():
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review"]["unapproved_crystallized_write_count"] = 1
+    snapshot["owner_review_proposal_auto_route"]["auto_followup_actual_execute_count"] = 1
+    snapshot["owner_review_proposal_auto_route"]["auto_followup_policy_write_count"] = 1
+    snapshot["owner_review_proposal_auto_route"]["auto_followup_actual_send_count"] = 1
+    snapshot["owner_review_proposal_auto_route"]["boundary"] = {
+        "actual_send": True,
+        "actual_identity_write": True,
+    }
+    snapshot["rh31_eval"] = {
+        "schema_version": "memory-os.rh31_summary.v0",
+        "status": "ok",
+        "boundary_true_count": 0,
+        "forbidden_field_count": 0,
+        "retrieval_shadow": {
+            "route_live_applied": True,
+            "score_live_applied": True,
+            "run_count": 1,
+        },
+    }
+    snapshot["memory_sources"] = {
+        "schema_version": "memory-os.memory_sources_stats.v0",
+        "record_count": 1,
+        "policy_actual_execute_count": 1,
+    }
+    snapshot["deep_reflection"]["policy_live_applied"] = True
+    snapshot["deep_reflection"]["policy_actual_execute_count"] = 1
+    snapshot["cognitive_loop"]["boundaries"] = {
+        "actual_send": True,
+        "actual_execute": True,
+        "actual_identity_write": True,
+        "actual_crystallized_approval": True,
+    }
+
+    classification = classify_snapshot(snapshot)
+    fail_codes = {item["code"] for item in classification["fail"]}
+
+    assert classification["status"] == "FAIL"
+    assert {
+        "owner_review_unapproved_crystallized_write",
+        "owner_review_proposal_auto_route_actual_execute_count_nonzero",
+        "owner_review_proposal_auto_route_policy_write_count_nonzero",
+        "owner_review_proposal_auto_route_actual_send_count_nonzero",
+        "owner_review_proposal_auto_route_actual_send_true",
+        "owner_review_proposal_auto_route_actual_identity_write_true",
+        "retrieval_shadow_live_applied",
+        "memory_sources_policy_actual_execute_true",
+        "deep_reflection_policy_live_applied_true",
+        "deep_reflection_policy_actual_execute_true",
+        "cognitive_loop_actual_send_true",
+        "cognitive_loop_actual_execute_true",
+        "cognitive_loop_actual_identity_write_true",
+        "cognitive_loop_actual_crystallized_approval_true",
+    }.issubset(fail_codes)
+
+
 def test_classify_snapshot_fails_memory_os_cron_naked_or_unregistered_like_jobs():
     snapshot = _healthy_snapshot()
     snapshot["execution_gate_cron"] = {

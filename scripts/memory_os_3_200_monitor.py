@@ -335,6 +335,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host may contain approved proposal follow-ups before the local OpsGate/report-only lane catches up",
         "production_behavior": "warn_if_production",
     },
+    "execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host may retain enabled legacy optional Memory-OS cron jobs until active-closure onboarding is applied",
+        "production_behavior": "fail_if_production",
+    },
     "cognitive_loop_step_evidence_missing": {
         "classification": "expected_clean_host",
         "reason": "clean-host may be inspected before a persisted cognitive-loop report exists",
@@ -1853,6 +1858,19 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "code": "execution_gate_memory_os_cron_wrapped_ok",
                         "expected": expected,
                         "wrapped": wrapped,
+                    }
+                )
+            enabled_optional_count = int(
+                execution_gate_cron.get("enabled_known_optional_outside_active_registry_count") or 0
+            )
+            if enabled_optional_count > 0:
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry",
+                        "count": enabled_optional_count,
+                        "jobs": execution_gate_cron.get("enabled_known_optional_outside_active_registry_jobs") or [],
+                        "active_registry_job_count": execution_gate_cron.get("active_registry_job_count"),
+                        "enabled_memory_os_job_count": execution_gate_cron.get("enabled_memory_os_job_count"),
                     }
                 )
             helper_boundary_true = int(execution_gate_cron.get("helper_boundary_true_count") or 0)
@@ -5740,6 +5758,10 @@ def execution_gate_cron_summary():
     specs = _memory_os_cron_specs_from_snapshot()
     specs_by_name = {str(item.get("name") or ""): item for item in specs}
     specs_by_lane = {str(item.get("lane_id") or ""): item for item in specs}
+    known_specs = _memory_os_known_cron_specs()
+    known_specs_by_name = {str(item.get("name") or ""): item for item in known_specs}
+    known_specs_by_wrapper = {str(item.get("wrapper_script") or ""): item for item in known_specs}
+    known_specs_by_raw = {str(item.get("raw_script") or ""): item for item in known_specs}
     adapter_probe = _execution_gate_cron_adapter_probe_summary()
     jobs_path = Path("/root/.hermes/cron/jobs.json")
     try:
@@ -5749,9 +5771,14 @@ def execution_gate_cron_summary():
             "schema_version": "memory-os.execution_gate_cron_summary.v0",
             "status": "warning",
             "error": str(exc)[:200],
+            "active_registry_job_count": len(specs_by_name),
             "memory_os_owned_expected_count": len(specs_by_name),
             "memory_os_owned_wrapped_count": 0,
             "memory_os_owned_naked_count": 0,
+            "enabled_memory_os_job_count": 0,
+            "memory_os_known_optional_count": 0,
+            "enabled_known_optional_outside_active_registry_count": 0,
+            "enabled_known_optional_outside_active_registry_jobs": [],
             "memory_os_like_unregistered_count": 0,
             "hermes_host_owned_count": 0,
             "external_unmanaged_count": 0,
@@ -5761,6 +5788,7 @@ def execution_gate_cron_summary():
     jobs = [dict(item) for item in jobs if isinstance(item, dict)] if isinstance(jobs, list) else []
     wrapped = []
     naked = []
+    known_optional = []
     unregistered_like = []
     hermes_host_owned = []
     external_unmanaged = []
@@ -5782,6 +5810,12 @@ def execution_gate_cron_summary():
             else:
                 naked.append(safe)
             continue
+        known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
+        if known_spec:
+            safe["known_registry_key"] = str(known_spec.get("key") or "")
+            safe["known_optional_reason"] = "not_in_active_installed_snapshot"
+            known_optional.append(safe)
+            continue
         if name.startswith("memory-os-") or script.startswith("memory_os_"):
             unregistered_like.append(safe)
             continue
@@ -5800,15 +5834,26 @@ def execution_gate_cron_summary():
         "registry_snapshot_status": "ok" if specs else "missing_or_invalid",
         "classification_source": "registry_snapshot",
         "adapter_probe_status": str(adapter_probe.get("status") or ""),
+        "active_registry_job_count": len(specs_by_name),
         "memory_os_owned_expected_count": len(specs_by_name),
         "memory_os_owned_wrapped_count": len(wrapped),
         "memory_os_owned_naked_count": len(naked),
+        "enabled_memory_os_job_count": _enabled_job_count(wrapped)
+        + _enabled_job_count(naked)
+        + _enabled_job_count(known_optional)
+        + _enabled_job_count(unregistered_like),
+        "memory_os_known_optional_count": len(known_optional),
+        "enabled_known_optional_outside_active_registry_count": _enabled_job_count(known_optional),
         "memory_os_like_unregistered_count": len(unregistered_like),
         "hermes_host_owned_count": len(hermes_host_owned),
         "external_unmanaged_count": len(external_unmanaged),
         "unclassified_count": len(unclassified),
         "wrapped_jobs": wrapped,
         "naked_jobs": naked,
+        "known_optional_jobs": known_optional,
+        "enabled_known_optional_outside_active_registry_jobs": [
+            job for job in known_optional if job.get("enabled") is True
+        ],
         "unregistered_like_jobs": unregistered_like,
     }
     adapter_classification = (
@@ -5819,12 +5864,18 @@ def execution_gate_cron_summary():
             "memory_os_owned_expected_count",
             "memory_os_owned_wrapped_count",
             "memory_os_owned_naked_count",
+            "active_registry_job_count",
+            "enabled_memory_os_job_count",
+            "memory_os_known_optional_count",
+            "enabled_known_optional_outside_active_registry_count",
             "memory_os_like_unregistered_count",
             "hermes_host_owned_count",
             "external_unmanaged_count",
             "unclassified_count",
             "wrapped_jobs",
             "naked_jobs",
+            "known_optional_jobs",
+            "enabled_known_optional_outside_active_registry_jobs",
             "unregistered_like_jobs",
         ):
             if key in adapter_classification:
@@ -5856,6 +5907,25 @@ def _memory_os_cron_specs_from_snapshot():
     if isinstance(specs, list) and specs:
         return [dict(item) for item in specs if isinstance(item, dict)]
     return []
+
+def _memory_os_known_cron_specs():
+    try:
+        from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+
+        return [
+            {
+                "key": item.key,
+                "name": item.name,
+                "raw_script": item.raw_script,
+                "wrapper_script": item.wrapper_script,
+            }
+            for item in memory_os_cron_specs()
+        ]
+    except Exception:
+        return []
+
+def _enabled_job_count(jobs):
+    return sum(1 for item in jobs if item.get("enabled") is True)
 
 def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     records_path = Path("/root/.hermes/memory-os/system/execution_gate_envelopes.jsonl")

@@ -128,10 +128,16 @@ def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[Me
     return {
         "schema_version": "memory-os.execution_gate_cron_summary.v0",
         "status": "ok",
+        "active_registry_job_count": len(specs_by_name),
         "memory_os_owned_expected_count": len(specs_by_name),
         "memory_os_owned_wrapped_count": len(wrapped),
         "memory_os_owned_naked_count": len(naked),
+        "enabled_memory_os_job_count": _enabled_count(wrapped)
+        + _enabled_count(naked)
+        + _enabled_count(known_optional)
+        + _enabled_count(unregistered_like),
         "memory_os_known_optional_count": len(known_optional),
+        "enabled_known_optional_outside_active_registry_count": _enabled_count(known_optional),
         "memory_os_like_unregistered_count": len(unregistered_like),
         "hermes_host_owned_count": len(hermes_host_owned),
         "external_unmanaged_count": len(external_unmanaged),
@@ -139,8 +145,13 @@ def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[Me
         "wrapped_jobs": wrapped,
         "naked_jobs": naked,
         "known_optional_jobs": known_optional,
+        "enabled_known_optional_outside_active_registry_jobs": [job for job in known_optional if job.get("enabled") is True],
         "unregistered_like_jobs": unregistered_like,
     }
+
+
+def _enabled_count(jobs: Iterable[dict[str, Any]]) -> int:
+    return sum(1 for job in jobs if job.get("enabled") is True)
 
 
 def probe_hermes_cron_capabilities(hermes_bin: str) -> HermesCronCapabilities:
