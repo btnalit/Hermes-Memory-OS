@@ -33,6 +33,7 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 | 10.20.2.66 cron registry | active-closure 2 jobs |
 | 10.20.2.66 legacy optional cron jobs | paused by active-closure onboarding |
 | fast cron probe on both hosts | `status=ok`, active registry=2, enabled Memory-OS jobs=2, optional outside registry=0 |
+| fast boundary/runtime probe | implemented; live validation required after deployment |
 
 结论: 当前代码基线不是红灯。V1 风险主要来自维护性、配置漂移和 monitor 漏报，而不是已观察到的越权写或测试失败。
 
@@ -66,13 +67,14 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 剩余影响:
 
 - full monitor 仍偏重，不适合作为每个小切片的唯一闭环。
-- 需要把 fast cron probe 和后续 boundary/runtime probe 固化为 deploy/audit
+- 需要把 fast cron probe 和 boundary/runtime probe 固化为 deploy/audit
   前置小探针。
 
 后续建议:
 
 - 继续使用 `memory_os_cron_adapter_probe.py` 作为 fast cron probe。
-- 新增 fast boundary/runtime probe，覆盖永久边界计数和 gate health。
+- 使用 `memory_os_boundary_runtime_probe.py` 作为 fast boundary/runtime probe，
+  覆盖永久边界计数和 gate health。
 - 为 full monitor 定义性能预算和超时处理规则。
 
 ### TD-002: 核心治理链存在循环依赖
@@ -282,6 +284,8 @@ file::function::append_jsonl_call::expression
 - 3.200 full monitor 可运行并返回 PASS，但耗时约两分钟。
 - 2.66 clean-host full monitor 曾出现超时，后续复跑 WARN/FAIL=[]。
 - 当前 cron enabled-state 已可用 `memory_os_cron_adapter_probe.py` 快速证明。
+- 当前 permanent boundary counters 和 Gate 基础健康可用
+  `memory_os_boundary_runtime_probe.py` 快速证明。
 
 影响:
 
@@ -292,8 +296,7 @@ file::function::append_jsonl_call::expression
 
 1. 保留 full monitor 作为最终 live/clean-host 证据。
 2. fast cron probe 用于部署后第一层 cron/registry/wrapper 检查。
-3. 新增 fast boundary/runtime probe，用于 permanent boundary counters 和
-   ExecutionGate/StructuralWriteGate 基本健康检查。
+3. 将 fast boundary/runtime probe 纳入 deploy/runbook。
 4. 在 deploy/runbook 中写明哪些任务必须升级到 full monitor。
 
 ### TD-009: cognitive loop 是固定顺序巨链，缺少 step registry 合同

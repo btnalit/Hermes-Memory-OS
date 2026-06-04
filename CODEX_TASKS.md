@@ -24,8 +24,9 @@ Current P0 status:
   Memory-OS cron jobs.
 - P0-003 permanent boundary sentinels are implemented and tested.
 - P0-004 dual-host evidence was refreshed after deployment.
-- P0-005 fast probe and monitor performance budget remains the next monitoring
-  task so full monitor is not the only audit loop.
+- P0-005 fast probe now has cron and boundary/runtime probe entrypoints. The
+  remaining follow-up is deploy/runbook integration and monitor performance
+  budget enforcement.
 
 ## 0. Execution Rules For Codex
 
@@ -279,28 +280,32 @@ Goal:
 - Establish a fast-probe layer that can be run on every deploy/audit slice
   before the full monitor.
 
-Current fast probe:
+Current fast probes:
 
 ```text
 python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
+python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
 ```
 
 Required follow-up:
 
 1. Keep `memory_os_cron_adapter_probe.py` as the fast cron/registry/wrapper
    probe.
-2. Add a fast boundary/runtime probe for permanent high-risk counters and
-   ExecutionGate/StructuralWriteGate health.
-3. Define monitor performance budgets:
+2. Keep `memory_os_boundary_runtime_probe.py` as the fast boundary/runtime
+   probe for permanent high-risk counters and ExecutionGate/StructuralWriteGate
+   health.
+3. Integrate both probes into deploy/runbook sequencing before full monitor.
+4. Define monitor performance budgets:
    - fast probe should return in seconds;
    - full monitor remains authoritative but should not be required for every
      small docs-only or scheduler-only audit.
-4. Document which tasks require full monitor after fast probe.
+5. Document which tasks require full monitor after fast probe.
 
 Acceptance gates:
 
 ```text
 python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
+python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
 python scripts\memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
 python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile clean-host --output summary
 ```

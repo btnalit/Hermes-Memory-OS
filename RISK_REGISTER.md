@@ -29,7 +29,7 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 | R-010 | P3 | Open | 2.66 缺少 pytest，clean-host 远端验证弱于 3.200 |
 | R-011 | P3 | Watch | metadata-only collectors 必须持续防 raw body/secret 泄露 |
 | R-012 | P3 | Watch | 58 高风险 authority lane 尚未打开，但需防止误开 |
-| R-013 | P2 | Open | full monitor 过重，需要 fast probe 和性能预算 |
+| R-013 | P2 | Open | full monitor 过重；fast probes 已有，仍需 deploy/runbook 集成和性能预算 |
 
 ## 2. 详细风险
 
@@ -367,6 +367,8 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 - 3.200 full monitor 可返回 PASS，但耗时约两分钟。
 - 2.66 full monitor 曾出现超时，后续 clean-host monitor 复跑 WARN/FAIL=[]。
 - cron enabled-state 已可用 `memory_os_cron_adapter_probe.py` 快速证明。
+- permanent boundary counters 和 Gate 基础健康已可用
+  `memory_os_boundary_runtime_probe.py` 快速证明。
 
 影响:
 
@@ -376,12 +378,12 @@ Current P0 deployed baseline: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
 建议动作:
 
 1. 将 `memory_os_cron_adapter_probe.py` 作为 deploy/audit 前置 fast cron probe。
-2. 新增 fast boundary/runtime probe，覆盖永久边界计数和 Gate 基础健康。
+2. 将 `memory_os_boundary_runtime_probe.py` 作为 deploy/audit 前置 fast boundary/runtime probe。
 3. 为 full monitor 定义性能预算、超时分类和升级规则。
 
 关闭条件:
 
-- fast cron probe 和 fast boundary/runtime probe 都进入 V1 runbook。
+- fast cron probe 和 fast boundary/runtime probe 都进入 V1 runbook / deploy sequencing。
 - full monitor 仍作为最终 live/clean-host 证据，但不再是所有小切片唯一闭环。
 
 ## 3. 下一轮建议

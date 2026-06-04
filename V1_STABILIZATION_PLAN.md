@@ -109,16 +109,17 @@ python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile
 - full monitor 是最终证据，但运行偏重。
 - scheduler/cron 小修应先用 fast probe 证明 registry/wrapper/enabled-state，再升级到 full monitor。
 
-当前 fast cron probe:
+当前 fast probes:
 
 ```text
 python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
+python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
 ```
 
 动作:
 
 1. 把 cron adapter probe 纳入 deploy/audit runbook。
-2. 新增 fast boundary/runtime probe:
+2. 把 boundary/runtime probe 纳入 deploy/audit runbook:
    - permanent high-risk counters;
    - ExecutionGate basic health;
    - StructuralWriteGate basic health.
@@ -128,6 +129,7 @@ python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --her
 
 ```text
 python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
+python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
 python scripts\memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
 python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile clean-host --output summary
 ```

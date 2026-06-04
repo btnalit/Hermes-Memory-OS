@@ -219,7 +219,8 @@ Current full monitor caveat:
 - full monitor remains valid evidence, but it is heavy enough that future audit
   slices should run fast probes first;
 - `memory_os_cron_adapter_probe.py` is the current fast cron probe;
-- a separate fast boundary/runtime probe remains open in `CODEX_TASKS.md`.
+- `memory_os_boundary_runtime_probe.py` is the current fast boundary/runtime
+  probe for high-risk counters and gate health.
 
 ## Current Residual P1/P2 Work
 
@@ -233,4 +234,4 @@ The following remain open and should be handled after P0:
 - exception/error record contract;
 - cognitive loop step registry;
 - clean-host focused test runner hygiene.
-- fast boundary/runtime probes and monitor performance budget.
+- deploy/runbook integration for fast probes and monitor performance budget.
