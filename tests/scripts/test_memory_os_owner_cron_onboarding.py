@@ -91,6 +91,20 @@ if args[:2] == ["cron", "edit"]:
     print("missing job", job_id, file=sys.stderr)
     raise SystemExit(2)
 
+if args[:2] == ["cron", "pause"]:
+    jobs_path = home / "cron" / "jobs.json"
+    loaded = json.loads(jobs_path.read_text(encoding="utf-8"))
+    jobs = loaded.get("jobs", [])
+    job_id = args[2]
+    for job in jobs:
+        if job.get("id") == job_id:
+            job["enabled"] = False
+            jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+            print("paused", job_id)
+            raise SystemExit(0)
+    print("missing job", job_id, file=sys.stderr)
+    raise SystemExit(2)
+
 print("unexpected command", args, file=sys.stderr)
 raise SystemExit(2)
 """.lstrip(),
@@ -328,6 +342,68 @@ def test_onboarding_migrates_existing_memory_os_raw_helper_to_gate_wrapper(tmp_p
         item["name"] == "memory-os-module-cadence-report" and item["status"] == "updated"
         for item in report["operational_cron_jobs"]
     )
+
+
+def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path):
+    module = _load_module()
+    home = _home_with_helpers(
+        tmp_path,
+        platforms={"telegram": [{"id": "owner", "type": "dm", "name": "owner"}]},
+    )
+    jobs_path = home / "cron" / "jobs.json"
+    jobs_path.parent.mkdir(parents=True)
+    jobs_path.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {
+                        "id": "job_memory_sources_feedback",
+                        "name": "memory-os-memory-sources-feedback-request",
+                        "enabled": True,
+                        "deliver": "telegram",
+                        "script": "memory_os_cron_memory_sources_feedback_request_gate.py",
+                        "no_agent": False,
+                        "prompt": "",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--hermes-home",
+            str(home),
+            "--hermes-bin",
+            str(_fake_hermes(tmp_path)),
+            "--owner-review-deliver",
+            "auto",
+            "--right-brain-deliver",
+            "origin",
+            "--apply",
+            "--owner-approved",
+        ]
+    )
+
+    report = module.run_onboarding(args)
+
+    assert report["status"] in {"already_configured", "updated", "applied"}
+    assert report["cron_profile"] == "active-closure"
+    assert report["paused_optional_cron_jobs"] == [
+        {
+            "name": "memory-os-memory-sources-feedback-request",
+            "job_id": "job_memory_sources_feedback",
+            "registry_key": "memory_sources_feedback_request",
+            "script": "memory_os_cron_memory_sources_feedback_request_gate.py",
+            "was_enabled": True,
+            "status": "paused",
+        }
+    ]
+    jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
+    by_name = {job["name"]: job for job in jobs}
+    assert by_name["memory-os-owner-review-digest"]["enabled"] is True
+    assert by_name["memory-os-proposal-followups-opsgate"]["enabled"] is True
+    assert by_name["memory-os-memory-sources-feedback-request"]["enabled"] is False
 
 
 def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypatch):

@@ -124,6 +124,7 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
     right_brain_report: dict[str, Any] = {}
     operational_jobs: list[dict[str, Any]] = []
     operational_specs = _operational_specs(args, owner_review_deliver, right_brain_deliver)
+    paused_optional_jobs: list[dict[str, Any]] = []
     for spec in operational_specs:
         if not (hermes_home / "scripts" / spec["raw_script"]).is_file():
             findings.append(_finding(f"{spec['name']}_helper_missing", "error"))
@@ -186,9 +187,16 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
         elif args.apply:
             for spec in operational_specs:
                 operational_jobs.append(_ensure_cron_job(hermes_home=hermes_home, hermes_bin=str(args.hermes_bin), spec=spec))
+            if str(args.cron_profile) == "active-closure":
+                paused_optional_jobs = _pause_known_optional_cron_jobs(
+                    hermes_home=hermes_home,
+                    hermes_bin=str(args.hermes_bin),
+                    active_specs=operational_specs,
+                )
             gate_statuses = {str(owner_report.get("status") or ""), str(right_brain_report.get("status") or "")}
             operational_statuses = {str(item.get("status") or "") for item in operational_jobs}
-            if "error" in operational_statuses:
+            optional_statuses = {str(item.get("status") or "") for item in paused_optional_jobs}
+            if "error" in operational_statuses or "error" in optional_statuses:
                 status = "blocked"
             elif gate_statuses <= {"already_configured", "skipped"} and operational_statuses <= {"already_configured"}:
                 status = "already_configured"
@@ -229,6 +237,7 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
         "owner_review": _summarize_gate(owner_report),
         "right_brain": _summarize_gate(right_brain_report),
         "operational_cron_jobs": operational_jobs,
+        "paused_optional_cron_jobs": paused_optional_jobs,
         "findings": findings,
         "boundary": {
             "actual_send": False,
@@ -406,6 +415,58 @@ def _ensure_cron_job(*, hermes_home: Path, hermes_bin: str, spec: dict[str, Any]
         "registry_key": str(spec["registry_key"]),
         "no_agent": bool(spec.get("no_agent")),
     }
+
+
+def _pause_known_optional_cron_jobs(
+    *,
+    hermes_home: Path,
+    hermes_bin: str,
+    active_specs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    active_names = {str(spec.get("name") or "") for spec in active_specs}
+    known_specs_by_name = {spec.name: spec for spec in memory_os_cron_specs()}
+    adapter = HermesCronAdapter(hermes_home=hermes_home, hermes_bin=hermes_bin)
+    results: list[dict[str, Any]] = []
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(hermes_home)
+    for job in adapter.read_jobs():
+        name = str(job.get("name") or "")
+        spec = known_specs_by_name.get(name)
+        if not spec or name in active_names:
+            continue
+        job_id = str(job.get("id") or job.get("job_id") or "")
+        enabled = job.get("enabled") is not False
+        base = {
+            "name": name,
+            "job_id": job_id,
+            "registry_key": spec.key,
+            "script": str(job.get("script") or ""),
+            "was_enabled": enabled,
+        }
+        if not enabled:
+            results.append({**base, "status": "already_paused"})
+            continue
+        if not job_id:
+            results.append({**base, "status": "error", "stderr": "job_id_missing"})
+            continue
+        completed = subprocess.run(
+            [hermes_bin, "cron", "pause", job_id],
+            check=False,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        if completed.returncode != 0:
+            results.append(
+                {
+                    **base,
+                    "status": "error",
+                    "stderr": (completed.stderr or completed.stdout or "").strip()[:500],
+                }
+            )
+        else:
+            results.append({**base, "status": "paused"})
+    return results
 
 
 def _cron_job_update_command(*, hermes_bin: str, existing: dict[str, Any], spec: dict[str, Any]) -> list[str]:

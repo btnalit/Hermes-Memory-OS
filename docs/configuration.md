@@ -95,9 +95,10 @@ timer handle sensing, projection, advisor reports, and low-risk lane evidence.
 right-brain expression, module cadence reporting, expression outcome capture,
 expression feedback, and MemorySources feedback. Those jobs are product
 surfaces, not prerequisites for the active-closure logic chain. On upgraded
-hosts, old optional Memory-OS cron jobs are classified as known optional rather
-than unregistered drift; Memory-OS does not delete Hermes cron jobs during
-install.
+hosts, active-closure onboarding pauses known optional Memory-OS cron jobs
+instead of deleting them. Running the `full` profile restores the optional cron
+surface when it is intentionally needed. Paused optional jobs are classified as
+known optional rather than unregistered drift.
 
 Memory-OS provides bounded helper scripts; Hermes owns cron, agent turns,
 platform transport, origin/local delivery, retry, and cooldown.

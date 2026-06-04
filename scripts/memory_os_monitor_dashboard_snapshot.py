@@ -262,7 +262,7 @@ def _kpis_snapshot(
             "flat",
             good="down",
         ),
-        _kpi("cron_ok", "Cron 健康", "/ 7 jobs", enabled_cron, "+0", "flat"),
+        _kpi("cron_ok", "Cron 健康", "enabled jobs", enabled_cron, "+0", "flat"),
         _kpi("modules", "活跃模块", "/ 18", modules, "+0", "flat"),
         _kpi("hindsight", "Hindsight 记录", "retained", hindsight.get("retained"), "+0", "flat"),
     ]

@@ -181,6 +181,10 @@ HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
   --owner-cron-profile full
 ```
 
+On upgraded hosts, active-closure onboarding pauses known optional Memory-OS
+cron jobs instead of deleting them. Running the `full` profile restores the
+optional cron surface when it is intentionally needed.
+
 ## 6. Safety Defaults
 
 Memory-OS does not automatically send messages, execute external actions, write

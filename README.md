@@ -151,10 +151,11 @@ Hermes owns the scheduler, transport, retry behavior, origin/local routing, and
 agent wording. Memory-OS owns the helper outputs, tokens, state transitions,
 audit, and monitor fields.
 
-On upgraded hosts, legacy optional Memory-OS cron jobs may still exist. They are
-classified as known optional jobs rather than unregistered drift. The installer
-does not delete existing Hermes cron jobs; removing them is a separate
-operator action.
+On upgraded hosts, active-closure onboarding pauses legacy optional Memory-OS
+cron jobs that are known in the registry but no longer part of the active
+profile. They are not deleted, and they can be restored by explicitly running
+the `full` cron profile. The monitor classifies paused optional jobs as known
+optional rather than unregistered drift.
 
 ## Read-Only Monitor Dashboard
 

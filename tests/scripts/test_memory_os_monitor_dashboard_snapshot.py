@@ -159,6 +159,7 @@ def test_dashboard_snapshot_maps_read_only_evidence_without_writing_reports(tmp_
 
     assert snapshot["schema_version"] == "memory-os.monitor_dashboard_snapshot.v0"
     assert snapshot["cron"]["enabled"] == 7
+    assert {item["key"]: item["unit"] for item in snapshot["kpis"]}["cron_ok"] == "enabled jobs"
     assert snapshot["ownerReview"]["counts"]["action_required_shown"] == 1
     assert snapshot["ownerReview"]["queue"][0]["token"] == "oa_abcdef12"
     assert snapshot["memory"]["working"] == 1
