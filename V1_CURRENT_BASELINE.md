@@ -249,6 +249,10 @@ Current full monitor caveat:
 - `memory_os_cron_adapter_probe.py` is the current fast cron probe;
 - `memory_os_boundary_runtime_probe.py` is the current fast boundary/runtime
   probe for high-risk counters and gate health.
+- both fast probes are part of `deploy_memory_os.py` postcheck/apply sequencing;
+- full monitor performance budget is production <= 180s and clean-host <= 240s;
+  timeout is a monitor-performance finding unless fast probes show runtime
+  boundary or cron-state failure.
 
 ## Current Residual P1/P2 Work
 
@@ -262,4 +266,4 @@ The following remain open and should be handled after P0:
 - exception/error record contract;
 - cognitive loop step registry;
 - clean-host focused test runner hygiene.
-- deploy/runbook integration for fast probes and monitor performance budget.
+- full monitor performance optimization and focused probe layering.

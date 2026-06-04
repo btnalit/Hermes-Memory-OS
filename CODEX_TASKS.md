@@ -294,18 +294,25 @@ Required follow-up:
 2. Keep `memory_os_boundary_runtime_probe.py` as the fast boundary/runtime
    probe for permanent high-risk counters and ExecutionGate/StructuralWriteGate
    health.
-3. Integrate both probes into deploy/runbook sequencing before full monitor.
-4. Define monitor performance budgets:
-   - fast probe should return in seconds;
-   - full monitor remains authoritative but should not be required for every
-     small docs-only or scheduler-only audit.
-5. Document which tasks require full monitor after fast probe.
+3. `deploy_memory_os.py` postcheck/apply must run both probes before the full
+   monitor path and classify either probe failure as deploy failure.
+4. Monitor performance budget:
+   - fast probe target: seconds-scale, P0/P1 deploy smoke should use this
+     first;
+   - full production monitor target: return within 180 seconds;
+   - clean-host full monitor target: return within 240 seconds;
+   - a full monitor timeout is a monitor-performance finding until the fast
+     probes show runtime boundary or cron state failure.
+5. Use full monitor after fast probes for live runtime closure, broad monitor
+   changes, scheduler behavior changes, or any finding originally discovered by
+   full monitor.
 
 Acceptance gates:
 
 ```text
 python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
 python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
+python scripts\deploy_memory_os.py --phase postcheck --profile upgrade --mode operational --hindsight auto --hermes-home /root/.hermes --output json
 python scripts\memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
 python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile clean-host --output summary
 ```

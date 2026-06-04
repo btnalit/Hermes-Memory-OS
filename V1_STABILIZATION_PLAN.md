@@ -118,12 +118,19 @@ python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes -
 
 动作:
 
-1. 把 cron adapter probe 纳入 deploy/audit runbook。
-2. 把 boundary/runtime probe 纳入 deploy/audit runbook:
+1. 把 cron adapter probe 纳入 deploy/audit runbook 和
+   `deploy_memory_os.py` postcheck/apply 序列。
+2. 把 boundary/runtime probe 纳入 deploy/audit runbook 和
+   `deploy_memory_os.py` postcheck/apply 序列:
    - permanent high-risk counters;
    - ExecutionGate basic health;
    - StructuralWriteGate basic health.
-3. 为 full monitor 定义性能预算和超时分类。
+3. 为 full monitor 定义性能预算和超时分类:
+   - fast probe: seconds-scale first pass;
+   - production full monitor: target <= 180s;
+   - clean-host full monitor: target <= 240s;
+   - full monitor timeout is monitor-performance debt unless fast probes show
+     cron/runtime boundary failure.
 
 当前证据:
 
@@ -135,6 +142,7 @@ python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes -
 ```text
 python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
 python scripts\memory_os_boundary_runtime_probe.py --hermes-home /root/.hermes --output json
+python scripts\deploy_memory_os.py --phase postcheck --profile upgrade --mode operational --hindsight auto --hermes-home /root/.hermes --output json
 python scripts\memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
 python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile clean-host --output summary
 ```

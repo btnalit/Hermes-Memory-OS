@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from scripts.deploy_memory_os import (
+    _classify_boundary_runtime_probe,
     _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
     classify_deploy_report,
@@ -74,6 +75,42 @@ def _cron_adapter_probe_result():
                     "memory_os_owned_naked_count": 0,
                     "memory_os_like_unregistered_count": 0,
                     "unclassified_count": 0,
+                },
+            }
+        ),
+        "stderr": "",
+    }
+
+
+def _boundary_runtime_probe_result():
+    return {
+        "exit_code": 0,
+        "stdout": json.dumps(
+            {
+                "schema_version": "memory-os.boundary_runtime_probe.v0",
+                "status": "ok",
+                "findings": [],
+                "permanent_boundary_counters": {
+                    "unapproved_or_automatic_crystallized_write_count": 0,
+                    "actual_hindsight_write_count": 0,
+                    "actual_hindsight_delete_count": 0,
+                    "actual_hindsight_demote_count": 0,
+                    "actual_route_score_write_count": 0,
+                    "actual_identity_relationship_write_count": 0,
+                    "actual_external_send_count": 0,
+                    "unbounded_autonomous_action_count": 0,
+                    "execution_gate_permit_boundary_true_count": 0,
+                    "execution_gate_completion_boundary_true_count": 0,
+                },
+                "execution_gate": {
+                    "permit_count": 1,
+                    "completion_count": 1,
+                    "permit_boundary_true_count": 0,
+                    "completion_postcheck_boundary_true_count": 0,
+                },
+                "structural_write_gate": {
+                    "status": "available",
+                    "append_governed_jsonl_available": True,
                 },
             }
         ),
@@ -198,6 +235,23 @@ def test_cron_adapter_probe_passes_on_wrapped_jobs():
     assert classified["status"] == "pass"
 
 
+def test_boundary_runtime_probe_fails_on_high_risk_counter():
+    result = _boundary_runtime_probe_result()
+    data = json.loads(result["stdout"])
+    data["permanent_boundary_counters"]["actual_hindsight_write_count"] = 1
+    classified = _classify_boundary_runtime_probe({"json": data})
+
+    assert classified["status"] == "fail"
+    assert "actual_hindsight_write_count" in classified["reason"]
+
+
+def test_boundary_runtime_probe_passes_when_boundaries_and_write_gate_are_clean():
+    result = _boundary_runtime_probe_result()
+    classified = _classify_boundary_runtime_probe({"json": json.loads(result["stdout"])})
+
+    assert classified["status"] == "pass"
+
+
 def test_plan_phase_includes_hindsight_and_no_restart_by_default(tmp_path):
     report = deploy_memory_os(
         repo_root=tmp_path,
@@ -291,6 +345,8 @@ def test_apply_phase_writes_and_verifies_deployment_runtime_manifest(tmp_path):
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -332,6 +388,8 @@ def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -413,6 +471,8 @@ def test_fresh_profile_allows_preinstall_provider_mismatch_but_requires_postchec
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -509,6 +569,8 @@ def test_fresh_profile_allows_missing_memory_os_shell_before_install(tmp_path):
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -578,6 +640,8 @@ def test_upgrade_profile_allows_preinstall_hindsight_status_gap_but_requires_pos
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -663,6 +727,8 @@ def test_upgrade_profile_allows_preinstall_fixable_shell_doctor_index_mismatch(t
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -732,6 +798,8 @@ def test_upgrade_profile_allows_preinstall_shell_doctor_gap_when_postcheck_repai
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -811,6 +879,8 @@ def test_upgrade_profile_allows_preinstall_provider_bank_evidence_gap_but_requir
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -889,6 +959,8 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:
@@ -910,11 +982,13 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
     assert report["postcheck"]["status"] == "pass"
     assert (
         "classification: "
-        "pass=postcheck_pass,deployment_manifest_status_pass,llm_judge_probe_pass,cron_adapter_probe_pass "
+        "pass=postcheck_pass,deployment_manifest_status_pass,llm_judge_probe_pass,"
+        "cron_adapter_probe_pass,boundary_runtime_probe_pass "
         "warn=[] fail=[]"
     ) in rendered
     assert "postcheck_status=pass" in rendered
     assert "llm_judge_probe_status=pass" in rendered
+    assert "boundary_runtime_probe_status=pass" in rendered
 
 
 def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
@@ -949,6 +1023,8 @@ def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
             }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
         if "deployment-manifest" in command:

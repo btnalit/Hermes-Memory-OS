@@ -295,9 +295,19 @@ file::function::append_jsonl_call::expression
 建议:
 
 1. 保留 full monitor 作为最终 live/clean-host 证据。
-2. fast cron probe 用于部署后第一层 cron/registry/wrapper 检查。
-3. 将 fast boundary/runtime probe 纳入 deploy/runbook。
+2. fast cron probe 用于部署后第一层 cron/registry/wrapper 检查，并在
+   `deploy_memory_os.py` postcheck/apply 序列中运行。
+3. fast boundary/runtime probe 用于 permanent boundary counters 和
+   Gate health 检查，并在 `deploy_memory_os.py` postcheck/apply 序列中运行。
 4. 在 deploy/runbook 中写明哪些任务必须升级到 full monitor。
+
+性能预算:
+
+- fast probes: seconds-scale first pass;
+- production full monitor: target <= 180s;
+- clean-host full monitor: target <= 240s;
+- full monitor timeout is classified as monitor-performance debt unless the
+  fast probes show an actual cron/runtime boundary failure.
 
 ### TD-009: cognitive loop 是固定顺序巨链，缺少 step registry 合同
 

@@ -346,7 +346,8 @@ The operational baseline has live validation evidence:
 - operational installer path completed;
 - active-closure Hermes cron profile present and verified;
 - fast cron and boundary/runtime probes available for lightweight
-  deploy/audit checks before the full monitor;
+  deploy/audit checks before the full monitor and wired into
+  `deploy_memory_os.py` postcheck/apply sequencing;
 - owner channel auto-detected from `channel_directory.json`;
 - monitor status `PASS` with no WARN/FAIL at the latest recorded validation;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and

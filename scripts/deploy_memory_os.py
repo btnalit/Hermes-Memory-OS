@@ -90,6 +90,7 @@ def deploy_memory_os(
         "deployment_manifest_status": {"status": "not_run"},
         "llm_judge_probe": {"status": "not_run"},
         "cron_adapter_probe": {"status": "not_run"},
+        "boundary_runtime_probe": {"status": "not_run"},
         "rollback_hint": "rerun installer with previous config backup or disable substrate_providers.hindsight.enabled",
     }
     if phase == "plan":
@@ -111,6 +112,12 @@ def deploy_memory_os(
             enabled=llm_judge_preset != "none",
         )
         report["cron_adapter_probe"] = _run_cron_adapter_probe(commands, runner=runner, host=host, timeout=timeout)
+        report["boundary_runtime_probe"] = _run_boundary_runtime_probe(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+        )
         report["deployment_manifest_status"] = _run_deployment_manifest_status(
             commands,
             runner=runner,
@@ -184,6 +191,12 @@ def deploy_memory_os(
             enabled=llm_judge_preset != "none",
         )
         report["cron_adapter_probe"] = _run_cron_adapter_probe(commands, runner=runner, host=host, timeout=timeout)
+        report["boundary_runtime_probe"] = _run_boundary_runtime_probe(
+            commands,
+            runner=runner,
+            host=host,
+            timeout=timeout,
+        )
         report["deployment_manifest_status"] = _run_deployment_manifest_status(
             commands,
             runner=runner,
@@ -248,6 +261,14 @@ def _build_commands(
         "cron_adapter_probe": [
             python_bin,
             f"{repo}/scripts/memory_os_cron_adapter_probe.py",
+            "--hermes-home",
+            hermes_home,
+            "--output",
+            "json",
+        ],
+        "boundary_runtime_probe": [
+            python_bin,
+            f"{repo}/scripts/memory_os_boundary_runtime_probe.py",
             "--hermes-home",
             hermes_home,
             "--output",
@@ -513,6 +534,71 @@ def _classify_cron_adapter_probe(result: dict[str, Any]) -> dict[str, Any]:
     return {"status": "pass", "probe": data}
 
 
+def _run_boundary_runtime_probe(
+    commands: dict[str, list[str]],
+    *,
+    runner: Runner,
+    host: str,
+    timeout: int,
+) -> dict[str, Any]:
+    result = _run_json(
+        commands["boundary_runtime_probe"],
+        runner=runner,
+        host=host,
+        timeout=timeout,
+        expected_schema="memory-os.boundary_runtime_probe.v0",
+    )
+    return _classify_boundary_runtime_probe(result)
+
+
+def _classify_boundary_runtime_probe(result: dict[str, Any]) -> dict[str, Any]:
+    data = result.get("json")
+    if not isinstance(data, dict) or data.get("schema_version") != "memory-os.boundary_runtime_probe.v0":
+        return {"status": "warn", "reason": "boundary_runtime_probe_json_invalid", "probe": result}
+    if data.get("status") == "fail":
+        findings = data.get("findings") if isinstance(data.get("findings"), list) else []
+        fail_codes = [
+            str(item.get("code"))
+            for item in findings
+            if isinstance(item, dict) and item.get("severity") == "fail" and item.get("code")
+        ]
+        return {
+            "status": "fail",
+            "reason": ",".join(fail_codes) or "boundary_runtime_probe_failed",
+            "probe": data,
+        }
+    if data.get("status") == "warning":
+        return {"status": "warn", "reason": "boundary_runtime_probe_warning", "probe": data}
+    counters = data.get("permanent_boundary_counters") if isinstance(data.get("permanent_boundary_counters"), dict) else {}
+    fail_counter_keys = (
+        "unapproved_or_automatic_crystallized_write_count",
+        "actual_hindsight_write_count",
+        "actual_hindsight_delete_count",
+        "actual_hindsight_demote_count",
+        "actual_route_score_write_count",
+        "actual_identity_relationship_write_count",
+        "actual_external_send_count",
+        "unbounded_autonomous_action_count",
+        "execution_gate_permit_boundary_true_count",
+        "execution_gate_completion_boundary_true_count",
+    )
+    nonzero = [key for key in fail_counter_keys if int(counters.get(key) or 0) > 0]
+    if nonzero:
+        return {
+            "status": "fail",
+            "reason": "boundary_runtime_probe_counter_nonzero:" + ",".join(nonzero),
+            "probe": data,
+        }
+    structural = data.get("structural_write_gate") if isinstance(data.get("structural_write_gate"), dict) else {}
+    if structural.get("status") != "available" or structural.get("append_governed_jsonl_available") is not True:
+        return {
+            "status": "fail",
+            "reason": "boundary_runtime_probe_structural_write_gate_unavailable",
+            "probe": data,
+        }
+    return {"status": "pass", "probe": data}
+
+
 def _run_deployment_manifest_write(
     commands: dict[str, list[str]],
     *,
@@ -654,6 +740,7 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
         "deployment_manifest_status",
         "llm_judge_probe",
         "cron_adapter_probe",
+        "boundary_runtime_probe",
     ):
         section = report.get(key) if isinstance(report.get(key), dict) else {}
         status = section.get("status")
@@ -696,6 +783,7 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
         "deployment_manifest_status",
         "llm_judge_probe",
         "cron_adapter_probe",
+        "boundary_runtime_probe",
     ):
         section = report.get(name) if isinstance(report.get(name), dict) else {}
         status = section.get("status")

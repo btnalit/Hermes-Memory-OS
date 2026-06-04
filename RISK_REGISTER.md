@@ -378,9 +378,15 @@ Current P0 deployed baseline: `64a00bcb06cee85f0cac1fcb5bf813dd2eece2bf`
 
 建议动作:
 
-1. 将 `memory_os_cron_adapter_probe.py` 作为 deploy/audit 前置 fast cron probe。
-2. 将 `memory_os_boundary_runtime_probe.py` 作为 deploy/audit 前置 fast boundary/runtime probe。
-3. 为 full monitor 定义性能预算、超时分类和升级规则。
+1. `deploy_memory_os.py` postcheck/apply runs `memory_os_cron_adapter_probe.py`
+   as the fast cron probe.
+2. `deploy_memory_os.py` postcheck/apply runs
+   `memory_os_boundary_runtime_probe.py` as the fast boundary/runtime probe.
+3. Full monitor performance budget:
+   - production full monitor target <= 180s;
+   - clean-host full monitor target <= 240s;
+   - timeout is a monitor-performance finding unless fast probes show runtime
+     boundary or cron-state failure.
 
 关闭条件:
 
