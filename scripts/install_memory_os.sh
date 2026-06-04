@@ -24,6 +24,7 @@ OWNER_REVIEW_CRON_SCHEDULE="${OWNER_REVIEW_CRON_SCHEDULE:-0 9 * * *}"
 OWNER_REVIEW_CRON_DELIVER="${OWNER_REVIEW_CRON_DELIVER:-auto}"
 OWNER_REVIEW_CRON_OWNER="${OWNER_REVIEW_CRON_OWNER:-owner}"
 OWNER_REVIEW_CRON_CHANNEL="${OWNER_REVIEW_CRON_CHANNEL:-auto}"
+OWNER_CRON_PROFILE="${OWNER_CRON_PROFILE:-active-closure}"
 DEEP_REFLECTION_PRESET="${DEEP_REFLECTION_PRESET:-}"
 MEMORY_SOURCES_PRESET="${MEMORY_SOURCES_PRESET:-}"
 LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-}"
@@ -56,8 +57,9 @@ Options:
   --yes, -y                     Accept defaults / run non-interactively.
   --operational                 Product-style one-command install: install and
                                 enable provider, shell, runtime, module
-                                runtime, cognitive loop, and seven-node Hermes
-                                cron onboarding with owner channel autodetect.
+                                runtime, cognitive loop, and active-closure
+                                Hermes cron onboarding with owner channel
+                                autodetect.
   --test-host                   Test-host defaults: install and enable all
                                 Memory-OS pieces with DeepReflection test-host.
   --production-safe             Production-safe defaults with DeepReflection
@@ -93,12 +95,16 @@ Options:
                                 HERMES_HOME/scripts. Does not create or enable
                                 a cron job.
   --enable-owner-cron-onboarding
-                                Enable the seven-node Memory-OS Hermes cron
-                                operational set. Owner-facing deliver targets
-                                are auto-detected from Hermes channel_directory.
+                                Enable Memory-OS active-closure Hermes cron
+                                onboarding. Owner-facing deliver targets are
+                                auto-detected from Hermes channel_directory.
   --no-enable-owner-cron-onboarding
-                                Do not create/enable the seven-node Hermes cron
-                                operational set.
+                                Do not create/enable Memory-OS Hermes cron jobs.
+  --owner-cron-profile VALUE    active-closure|full. Default: active-closure.
+                                active-closure creates owner review digest and
+                                proposal follow-up OpsGate jobs only. full also
+                                creates optional feedback/right-brain/report
+                                jobs.
   --right-brain-expression-cron-schedule VALUE
                                 Hermes cron schedule. Default: 30 4 * * 0
   --right-brain-expression-cron-deliver VALUE
@@ -263,6 +269,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --owner-review-cron-schedule)
       OWNER_REVIEW_CRON_SCHEDULE="${2:?missing --owner-review-cron-schedule value}"
+      shift 2
+      ;;
+    --owner-cron-profile)
+      OWNER_CRON_PROFILE="${2:?missing --owner-cron-profile value}"
+      case "${OWNER_CRON_PROFILE}" in
+        active-closure|full) ;;
+        *)
+          echo "Invalid --owner-cron-profile: ${OWNER_CRON_PROFILE}" >&2
+          exit 2
+          ;;
+      esac
       shift 2
       ;;
     --owner-review-cron-deliver)
@@ -643,6 +660,7 @@ run_installer() {
       "--owner-review-owner" "${OWNER_REVIEW_CRON_OWNER}"
       "--owner-review-channel" "${OWNER_REVIEW_CRON_CHANNEL}"
       "--owner-review-schedule" "${OWNER_REVIEW_CRON_SCHEDULE}"
+      "--owner-cron-profile" "${OWNER_CRON_PROFILE}"
       "--right-brain-schedule" "${RIGHT_BRAIN_EXPRESSION_CRON_SCHEDULE}"
     )
   elif [[ "${INSTALL_OWNER_REVIEW_CRON_HELPER}" == "1" || "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" == "1" ]]; then

@@ -425,6 +425,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_owner_review_deliver"] == "discord"
     assert report["owner_cron_onboarding_report"]["selected_owner_review_channel"] == "discord"
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
+    assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
     assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 2
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
@@ -435,6 +436,42 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
+
+
+def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    home.joinpath("channel_directory.json").write_text(
+        json.dumps({"platforms": {"telegram": [{"id": "chat-1", "type": "dm", "name": "owner"}]}}),
+        encoding="utf-8",
+    )
+
+    report = install_plugin(
+        hermes_home=home,
+        install_system_modules=True,
+        install_owner_cron_onboarding=True,
+        run_owner_cron_onboarding=True,
+        owner_cron_owner_approved=True,
+        owner_cron_profile="full",
+        hermes_bin=_fake_hermes(tmp_path),
+        owner_review_deliver="auto",
+        right_brain_deliver="origin",
+    )
+
+    assert report["owner_cron_profile"] == "full"
+    assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 7
+
+    jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
+    assert {job["name"] for job in jobs} == {
+        "memory-os-owner-review-digest",
+        "memory-os-right-brain-expression",
+        "memory-os-module-cadence-report",
+        "memory-os-right-brain-expression-outcome",
+        "memory-os-proposal-followups-opsgate",
+        "memory-os-expression-feedback-request",
+        "memory-os-memory-sources-feedback-request",
+    }
 
 
 def test_installer_runs_owner_cron_onboarding_after_shell_enable(tmp_path, monkeypatch):
@@ -903,6 +940,7 @@ def test_install_shell_exposes_one_command_operational_product_install():
     assert "default_enable_cognitive_loop=\"yes\"" in text
     assert "default_enable_owner_cron_onboarding=\"yes\"" in text
     assert "active-closure Hermes cron onboarding" in text
+    assert "--owner-cron-profile" in text
     assert "seven-node Hermes cron onboarding" not in text
     assert "--enable-owner-cron-onboarding" in text
     assert "--run-owner-cron-onboarding" in text

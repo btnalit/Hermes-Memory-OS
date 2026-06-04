@@ -217,6 +217,7 @@ def install_plugin(
     owner_review_owner: str = "owner",
     owner_review_channel: str = "owner_review_cron",
     owner_review_schedule: str = "0 9 * * *",
+    owner_cron_profile: str = "active-closure",
     right_brain_schedule: str = "30 4 * * 0",
     module_cadence_schedule: str = "15 */6 * * *",
     right_brain_outcome_schedule: str = "45 4 * * 0",
@@ -373,6 +374,7 @@ def install_plugin(
                 owner_review_owner=owner_review_owner,
                 owner_review_channel=owner_review_channel,
                 owner_review_schedule=owner_review_schedule,
+                owner_cron_profile=owner_cron_profile,
                 right_brain_schedule=right_brain_schedule,
                 module_cadence_schedule=module_cadence_schedule,
                 right_brain_outcome_schedule=right_brain_outcome_schedule,
@@ -494,6 +496,7 @@ def install_plugin(
         "owner_cron_onboarding_path": str(owner_cron_onboarding_path or ""),
         "owner_cron_onboarding_run_requested": run_owner_cron_onboarding,
         "owner_cron_onboarding_run_status": str(owner_cron_onboarding_report.get("status") or ""),
+        "owner_cron_profile": owner_cron_profile,
         "owner_cron_onboarding_report": owner_cron_onboarding_report,
         "module_cadence_report_path": str(module_cadence_report or ""),
         "module_cadence_report_cron_path": str(operational_helper_paths.get("module_cadence_report_cron") or ""),
@@ -880,6 +883,7 @@ def _run_owner_cron_onboarding(
     owner_review_owner: str,
     owner_review_channel: str,
     owner_review_schedule: str,
+    owner_cron_profile: str,
     right_brain_schedule: str,
     module_cadence_schedule: str,
     right_brain_outcome_schedule: str,
@@ -903,6 +907,8 @@ def _run_owner_cron_onboarding(
         owner_review_channel,
         "--owner-review-schedule",
         owner_review_schedule,
+        "--cron-profile",
+        owner_cron_profile,
         "--right-brain-schedule",
         right_brain_schedule,
         "--module-cadence-schedule",
@@ -1289,6 +1295,15 @@ def main() -> int:
     parser.add_argument("--owner-review-owner", default="owner", help="Owner id used by the owner review helper")
     parser.add_argument("--owner-review-channel", default="owner_review_cron", help="Channel label used for owner review active digest binding")
     parser.add_argument("--owner-review-schedule", default="0 9 * * *", help="Owner review cron schedule")
+    parser.add_argument(
+        "--owner-cron-profile",
+        choices=("active-closure", "full"),
+        default="active-closure",
+        help=(
+            "Memory-OS cron onboarding profile. active-closure creates only owner digest "
+            "and proposal follow-up jobs; full also creates optional feedback/right-brain/report jobs."
+        ),
+    )
     parser.add_argument("--right-brain-schedule", default="30 4 * * 0", help="Right-brain expression cron schedule")
     parser.add_argument("--module-cadence-schedule", default="15 */6 * * *", help="Module cadence report cron schedule")
     parser.add_argument("--right-brain-outcome-schedule", default="45 4 * * 0", help="Right-brain outcome capture cron schedule")
@@ -1357,6 +1372,7 @@ def main() -> int:
         owner_review_owner=args.owner_review_owner,
         owner_review_channel=args.owner_review_channel,
         owner_review_schedule=args.owner_review_schedule,
+        owner_cron_profile=args.owner_cron_profile,
         right_brain_schedule=args.right_brain_schedule,
         module_cadence_schedule=args.module_cadence_schedule,
         right_brain_outcome_schedule=args.right_brain_outcome_schedule,

@@ -25,10 +25,11 @@ HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational 
 
 This installs and enables the Memory-OS provider, the Hermes Agent OS shell,
 the portable runtime, heartbeat, the current cognitive loop harness, and the
-seven-node Hermes cron operational set. Owner-facing cron jobs use Hermes
+active-closure Hermes cron operational set. Owner-facing cron jobs use Hermes
 `channel_directory.json` autodiscovery, so Telegram is selected only when it is
-the configured owner channel. Right-brain expression uses `deliver=origin`, and
-background maintenance jobs use `deliver=local` / no-agent.
+the configured owner channel. The default active-closure cron set contains only
+the owner review digest and proposal follow-up OpsGate jobs. Runtime heartbeat
+and the cognitive-loop timer own the main sensing/projection/advisor loop.
 
 Interactive install:
 
@@ -153,10 +154,32 @@ They do not need to expose `hermes memory_os ...` as a top-level command.
 - optional heartbeat and cognitive-loop systemd user units under
   `$HERMES_HOME/memory-os/systemd/`
 - optional Memory-OS Hermes cron onboarding under `$HERMES_HOME/scripts/`; the
-  operational preset creates the seven-node cron set unless explicitly disabled
+  operational preset creates the active-closure cron set unless explicitly
+  disabled
 
 Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 `$HERMES_HOME/plugins/`.
+
+### Cron Profile
+
+The default cron profile is `active-closure`:
+
+| Job | Purpose |
+| --- | --- |
+| `memory-os-owner-review-digest` | sends approval items and real alerts through the owner channel |
+| `memory-os-proposal-followups-opsgate` | moves safe proposal follow-ups through OpsGate/report-only review |
+
+The full registry also contains optional jobs for right-brain expression,
+module cadence reports, expression outcome capture, and owner feedback prompts.
+They are intentionally not part of the default install. Enable them only when
+that user-facing product surface is desired:
+
+```bash
+HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
+  --run-owner-cron-onboarding \
+  --owner-cron-owner-approved \
+  --owner-cron-profile full
+```
 
 ## 6. Safety Defaults
 

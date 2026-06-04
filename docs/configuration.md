@@ -50,7 +50,7 @@ hermes memory-os-agent-os low-clue-recall dry-run --query "继续昨天那个"
 
 | Preset | Use when | Effect |
 | --- | --- | --- |
-| `--operational` | normal open-source install on an existing Hermes profile | one-command product path: provider, shell, runtime, module runtime, heartbeat, cognitive loop harness, and seven-node Hermes cron onboarding with owner-channel autodetect |
+| `--operational` | normal open-source install on an existing Hermes profile | one-command product path: provider, shell, runtime, module runtime, heartbeat, cognitive loop harness, and active-closure Hermes cron onboarding with owner-channel autodetect |
 | `--production-safe` | formal or cautious profile | provider and shell install path with DeepReflection and attribution kept safe/off |
 
 Optional preset flags:
@@ -75,15 +75,32 @@ Operational Hermes cron onboarding:
 ```bash
 --enable-owner-cron-onboarding
 --no-enable-owner-cron-onboarding
+--owner-cron-profile active-closure|full
 --owner-review-cron-schedule "0 9 * * *"
 --owner-review-cron-deliver auto|origin|telegram|discord|signal|platform:chat_id
 ```
 
-The operational preset enables seven Hermes cron jobs: owner review digest,
-right-brain expression, module cadence report, right-brain outcome capture,
-proposal follow-up routing, expression feedback request, and MemorySources
-feedback request. Memory-OS provides bounded helper scripts; Hermes owns cron,
-agent turns, platform transport, origin/local delivery, retry, and cooldown.
+The operational preset defaults to `--owner-cron-profile active-closure`, which
+creates only:
+
+- `memory-os-owner-review-digest`
+- `memory-os-proposal-followups-opsgate`
+
+That is the current automatic closure chain: owner-visible decisions remain in
+the normal Hermes owner channel, while safe proposal follow-up routing is
+report-only/OpsGate process motion. Runtime heartbeat and the cognitive-loop
+timer handle sensing, projection, advisor reports, and low-risk lane evidence.
+
+`--owner-cron-profile full` additionally creates optional jobs for
+right-brain expression, module cadence reporting, expression outcome capture,
+expression feedback, and MemorySources feedback. Those jobs are product
+surfaces, not prerequisites for the active-closure logic chain. On upgraded
+hosts, old optional Memory-OS cron jobs are classified as known optional rather
+than unregistered drift; Memory-OS does not delete Hermes cron jobs during
+install.
+
+Memory-OS provides bounded helper scripts; Hermes owns cron, agent turns,
+platform transport, origin/local delivery, retry, and cooldown.
 
 The approval boundary is trust-boundary based, not process-step based. Memory-OS
 may automate reversible/report-only workflow such as signal collection,

@@ -43,8 +43,8 @@ HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational 
 - portable Memory-OS runtime modules;
 - heartbeat runtime;
 - the current cognitive-loop integration harness;
-- seven Hermes cron jobs for owner review, right-brain expression, monitor
-  reports, feedback prompts, and proposal follow-up.
+- active-closure Hermes cron onboarding for owner review and proposal
+  follow-up.
 
 The installer auto-detects the owner-facing Hermes channel from
 `$HERMES_HOME/channel_directory.json`. Telegram is used only when Telegram is
@@ -114,21 +114,47 @@ python scripts/deploy_memory_os.py \
 
 ## What Gets Scheduled
 
-The operational preset creates or verifies this Hermes cron set:
+The operational preset defaults to the `active-closure` Hermes cron profile.
+That profile creates or verifies only the jobs required for the current
+automatic governance closure:
 
 | Job | Deliver | Agent | Purpose |
 | --- | --- | --- | --- |
 | `memory-os-owner-review-digest` | owner channel | yes | sends only approval items and real alerts to the owner |
+| `memory-os-proposal-followups-opsgate` | `local` | no | routes approved proposals through OpsGate/report-only follow-up |
+
+The full registry still contains optional cron jobs for right-brain expression,
+module cadence reporting, expression outcome capture, and feedback prompts.
+They are not part of the default open-source active-closure install because the
+current self-operating loop already gets signal collection, projection,
+advisor findings, heartbeat, and cognitive-loop evidence from runtime/systemd
+paths. Install them only when that product surface is intentionally needed:
+
+```bash
+HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
+  --run-owner-cron-onboarding \
+  --owner-cron-owner-approved \
+  --owner-cron-profile full
+```
+
+Full-profile optional jobs:
+
+| Job | Deliver | Agent | Purpose |
+| --- | --- | --- | --- |
 | `memory-os-right-brain-expression` | `origin` | yes | low-frequency right-brain expression through Hermes |
 | `memory-os-module-cadence-report` | `local` | no | records module generated/skipped/error/duplicate counters |
 | `memory-os-right-brain-expression-outcome` | `local` | no | records expression outcomes for feedback linkage |
-| `memory-os-proposal-followups-opsgate` | `local` | no | routes approved proposals through OpsGate/report-only follow-up |
 | `memory-os-expression-feedback-request` | owner channel | yes | asks for tokenized right-brain expression feedback |
 | `memory-os-memory-sources-feedback-request` | owner channel | yes | asks for tokenized MemorySources feedback |
 
 Hermes owns the scheduler, transport, retry behavior, origin/local routing, and
 agent wording. Memory-OS owns the helper outputs, tokens, state transitions,
 audit, and monitor fields.
+
+On upgraded hosts, legacy optional Memory-OS cron jobs may still exist. They are
+classified as known optional jobs rather than unregistered drift. The installer
+does not delete existing Hermes cron jobs; removing them is a separate
+operator action.
 
 ## Read-Only Monitor Dashboard
 
@@ -317,7 +343,7 @@ Do not rely on conversation history as the source of truth.
 The operational baseline has live validation evidence:
 
 - operational installer path completed;
-- seven Hermes cron jobs present and enabled;
+- active-closure Hermes cron profile present and verified;
 - owner channel auto-detected from `channel_directory.json`;
 - monitor status `PASS` with no WARN/FAIL at the latest recorded validation;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and
