@@ -4,6 +4,8 @@ Date: 2026-06-04
 
 Task start code head: `dd2b07b788dba4b4dcee3a51189c8d1f32040424`
 
+Current P0 deployed code head: `799b69d25d4d679e2d38a6d97e2f31c3f361db01`
+
 Purpose: keep the current V1 stabilization baseline visible in a tracked,
 public-safe file so future implementation work does not rely only on ignored
 internal evidence or local-only audit notes.
@@ -79,7 +81,7 @@ internal docs.
 
 ## P0-002 Active-Closure Cron Enabled-State Consistency
 
-Status: implemented and validated.
+Status: implemented, deployed, and validated.
 
 New monitor fields:
 
@@ -101,17 +103,19 @@ Live evidence:
 
 ```text
 10.20.3.200:
+  code_head=799b69d25d4d679e2d38a6d97e2f31c3f361db01
   monitor_profile=live
   status=PASS
   WARN=[]
   FAIL=[]
 
 10.20.2.66:
+  code_head=799b69d25d4d679e2d38a6d97e2f31c3f361db01
+  active-closure onboarding=already_configured
   monitor_profile=clean-host
   status=WARN
   FAIL=[]
-  WARN includes:
-    execution_gate_memory_os_cron_known_optional_enabled_outside_active_registry
+  WARN does not include enabled optional Memory-OS cron jobs after onboarding.
 ```
 
 Read-only cron state observed during this task:
@@ -130,10 +134,39 @@ Read-only cron state observed during this task:
   proposal_followups_opsgate
 
 10.20.2.66 clean-host state:
-  legacy optional Memory-OS jobs are still enabled and now monitor-visible.
+  legacy optional Memory-OS jobs were paused by active-closure onboarding:
+    memory-os-right-brain-expression
+    memory-os-module-cadence-report
+    memory-os-right-brain-expression-outcome
+    memory-os-expression-feedback-request
+    memory-os-memory-sources-feedback-request
 ```
 
 No cron jobs were deleted to make checks pass.
+
+Fast cron probe evidence after deployment and 2.66 onboarding:
+
+```text
+python scripts\memory_os_cron_adapter_probe.py --hermes-home /root/.hermes --hermes-bin hermes --output json
+
+10.20.3.200:
+  status=ok
+  active_registry_job_count=2
+  enabled_memory_os_job_count=2
+  enabled_known_optional_outside_active_registry_count=0
+  memory_os_owned_expected_count=2
+  memory_os_owned_wrapped_count=2
+  memory_os_owned_naked_count=0
+
+10.20.2.66:
+  status=ok
+  active_registry_job_count=2
+  enabled_memory_os_job_count=2
+  enabled_known_optional_outside_active_registry_count=0
+  memory_os_owned_expected_count=2
+  memory_os_owned_wrapped_count=2
+  memory_os_owned_naked_count=0
+```
 
 ## P0-003 Permanent Boundary Regression Sentinels
 
@@ -181,6 +214,13 @@ python scripts\memory_os_3_200_monitor.py --host hermes-feiniu --monitor-profile
   -> WARN, FAIL=[]
 ```
 
+Current full monitor caveat:
+
+- full monitor remains valid evidence, but it is heavy enough that future audit
+  slices should run fast probes first;
+- `memory_os_cron_adapter_probe.py` is the current fast cron probe;
+- a separate fast boundary/runtime probe remains open in `CODEX_TASKS.md`.
+
 ## Current Residual P1/P2 Work
 
 The following remain open and should be handled after P0:
@@ -193,4 +233,4 @@ The following remain open and should be handled after P0:
 - exception/error record contract;
 - cognitive loop step registry;
 - clean-host focused test runner hygiene.
-
+- fast boundary/runtime probes and monitor performance budget.
