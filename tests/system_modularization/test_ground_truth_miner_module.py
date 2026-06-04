@@ -195,3 +195,56 @@ def test_ground_truth_miner_expires_ttl_labels_from_active_read_model(tmp_path):
     assert all_labels[0]["expired"] is True
     assert status["active_label_count"] == 0
     assert status["expired_label_count"] == 1
+
+
+def test_ground_truth_miner_refreshes_expired_label_from_new_owner_action(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="main"))
+    store.initialize()
+    module = GroundTruthMinerModule(tmp_path, profile="main")
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    module.mine(
+        store=store,
+        audit_entries=[
+            {
+                "action": "owner_action_reply_processed",
+                "status": "ok",
+                "target": "oa_original",
+                "details": {"action_type": "approve_candidate", "target_id": "cand_refresh"},
+            }
+        ],
+    )
+    original = module.read_labels()[0]
+    expired_record = dict(original)
+    expired_record["expires_at"] = expired_at
+    module.labels_path.write_text(
+        json.dumps(expired_record, ensure_ascii=False, sort_keys=True)
+        + "\n",
+        encoding="utf-8",
+    )
+    assert module.read_labels() == []
+    owner_actions_path(store.roots).parent.mkdir(parents=True, exist_ok=True)
+    owner_actions_path(store.roots).write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.owner_action.v0",
+                "owner_action_id": "oa_refresh",
+                "action_type": "approve_candidate",
+                "target_id": "cand_refresh",
+                "result": "applied",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = module.run_once(store=store)
+
+    labels = module.read_labels()
+    all_labels = module.read_labels(include_expired=True)
+    assert result["label_count"] == 1
+    assert labels[0]["target_id"] == "cand_refresh"
+    assert labels[0]["label_state"] == "active"
+    assert all_labels[0].get("expired") is not True
+    assert len(module.labels_path.read_text(encoding="utf-8").splitlines()) == 2

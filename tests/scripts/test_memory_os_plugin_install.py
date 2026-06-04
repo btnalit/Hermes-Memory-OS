@@ -425,25 +425,15 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_owner_review_deliver"] == "discord"
     assert report["owner_cron_onboarding_report"]["selected_owner_review_channel"] == "discord"
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 7
+    assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 2
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
         "memory-os-owner-review-digest",
-        "memory-os-right-brain-expression",
-        "memory-os-module-cadence-report",
-        "memory-os-right-brain-expression-outcome",
         "memory-os-proposal-followups-opsgate",
-        "memory-os-expression-feedback-request",
-        "memory-os-memory-sources-feedback-request",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
-    assert by_name["memory-os-expression-feedback-request"]["deliver"] == "discord"
-    assert by_name["memory-os-memory-sources-feedback-request"]["deliver"] == "discord"
-    assert by_name["memory-os-right-brain-expression"]["deliver"] == "origin"
-    assert by_name["memory-os-module-cadence-report"]["deliver"] == "local"
-    assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
-    assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
 
 
@@ -912,6 +902,8 @@ def test_install_shell_exposes_one_command_operational_product_install():
     assert "MEMORY_SOURCES_PRESET=\"${MEMORY_SOURCES_PRESET:-operational}\"" in text
     assert "default_enable_cognitive_loop=\"yes\"" in text
     assert "default_enable_owner_cron_onboarding=\"yes\"" in text
+    assert "active-closure Hermes cron onboarding" in text
+    assert "seven-node Hermes cron onboarding" not in text
     assert "--enable-owner-cron-onboarding" in text
     assert "--run-owner-cron-onboarding" in text
 

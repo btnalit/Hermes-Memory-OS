@@ -644,6 +644,7 @@ def test_clean_host_warn_classification_table_covers_current_warn_codes():
         "v7_memory_sources_feedback_volume_pending",
         "session_mirror_pending_source_gap",
         "owner_review_proposal_auto_route_boundary_requires_owner",
+        "owner_review_approved_proposals_pending_followup",
     }
 
     assert expected_codes <= set(monitor.CLEAN_HOST_WARN_CLASSIFICATIONS)
@@ -683,6 +684,24 @@ def test_clean_host_warns_classify_session_mirror_pending_source_gap():
     assert any(item["code"] == "session_mirror_pending_source_gap" for item in classification["warn"])
     assert any(
         item["code"] == "session_mirror_pending_source_gap"
+        and item["classification"] == "next_lane"
+        and item["production_behavior"] == "warn_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_clean_host_warns_classify_approved_proposals_pending_followup():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["owner_review_proposal_followups"]["pending_followup_count"] = 1
+    snapshot["owner_review_proposal_followups"]["awaiting_ops_gate_count"] = 1
+
+    classification = classify_snapshot(snapshot)
+
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert any(item["code"] == "owner_review_approved_proposals_pending_followup" for item in classification["warn"])
+    assert any(
+        item["code"] == "owner_review_approved_proposals_pending_followup"
         and item["classification"] == "next_lane"
         and item["production_behavior"] == "warn_if_production"
         for item in classification["clean_host_warn_classification"]

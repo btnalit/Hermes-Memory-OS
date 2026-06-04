@@ -144,16 +144,22 @@ def memory_os_cron_spec_by_name(name: str) -> MemoryOSCronSpec | None:
     return None
 
 
-def cron_registry_snapshot(*, source_commit: str = "") -> dict[str, Any]:
+def cron_registry_snapshot(*, source_commit: str = "", specs: tuple[MemoryOSCronSpec, ...] | None = None) -> dict[str, Any]:
+    selected_specs = specs if specs is not None else MEMORY_OS_CRON_SPECS
     return {
         "schema_version": "memory-os.cron_registry.v0",
         "source_commit": str(source_commit or ""),
-        "specs": [spec.to_json() for spec in MEMORY_OS_CRON_SPECS],
+        "specs": [spec.to_json() for spec in selected_specs],
     }
 
 
-def write_cron_registry_snapshot(path: Path, *, source_commit: str = "") -> dict[str, Any]:
-    snapshot = cron_registry_snapshot(source_commit=source_commit)
+def write_cron_registry_snapshot(
+    path: Path,
+    *,
+    source_commit: str = "",
+    specs: tuple[MemoryOSCronSpec, ...] | None = None,
+) -> dict[str, Any]:
+    snapshot = cron_registry_snapshot(source_commit=source_commit, specs=specs)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return snapshot

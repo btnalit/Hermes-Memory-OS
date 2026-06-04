@@ -22,3 +22,16 @@ def test_cron_registry_snapshot_round_trips_all_specs(tmp_path):
     assert all(spec.wrapper_script.startswith("memory_os_cron_") for spec in restored)
     assert all(spec.schedule_arg for spec in restored)
     assert all(spec.prompt_ref for spec in restored)
+
+
+def test_cron_registry_snapshot_can_write_active_subset(tmp_path):
+    snapshot_path = tmp_path / "memory-os" / "system" / "memory_os_cron_registry.json"
+    subset = tuple(spec for spec in memory_os_cron_specs() if spec.key in {"owner_review_digest", "proposal_followups_opsgate"})
+
+    written = write_cron_registry_snapshot(snapshot_path, specs=subset)
+    loaded = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    restored = specs_from_snapshot(loaded)
+
+    assert written == cron_registry_snapshot(specs=subset)
+    assert [spec.key for spec in restored] == ["owner_review_digest", "proposal_followups_opsgate"]
+    assert [spec.key for spec in memory_os_cron_specs()] != [spec.key for spec in restored]

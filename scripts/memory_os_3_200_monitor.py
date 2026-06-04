@@ -330,6 +330,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "proposal follow-up auto-route correctly stops at owner-boundary items on clean-host",
         "production_behavior": "warn_if_production",
     },
+    "owner_review_approved_proposals_pending_followup": {
+        "classification": "next_lane",
+        "reason": "clean-host may contain approved proposal follow-ups before the local OpsGate/report-only lane catches up",
+        "production_behavior": "warn_if_production",
+    },
     "cognitive_loop_step_evidence_missing": {
         "classification": "expected_clean_host",
         "reason": "clean-host may be inspected before a persisted cognitive-loop report exists",

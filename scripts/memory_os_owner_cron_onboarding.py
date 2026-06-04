@@ -24,6 +24,7 @@ from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
 
 
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
+ACTIVE_CLOSURE_CRON_KEYS = frozenset({"owner_review_digest", "proposal_followups_opsgate"})
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
 DEFAULT_RIGHT_BRAIN_SCHEDULE = "30 4 * * 0"
 EXPRESSION_FEEDBACK_AGENT_PROMPT = (
@@ -70,6 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--proposal-followups-schedule", default="*/30 * * * *")
     parser.add_argument("--expression-feedback-schedule", default="0 5 * * 0")
     parser.add_argument("--memory-sources-feedback-schedule", default="30 10 * * *")
+    parser.add_argument(
+        "--cron-profile",
+        choices=("active-closure", "full"),
+        default=os.environ.get("MEMORY_OS_CRON_PROFILE", "active-closure"),
+        help="active-closure installs only current Memory-OS automation closure jobs; full installs optional feedback/right-brain/report jobs too.",
+    )
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--owner-approved", action="store_true")
@@ -125,43 +132,53 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
             _write_execution_gate_assets(hermes_home=hermes_home, specs=operational_specs)
         owner_gate = _load_script_module("memory_os_owner_review_cron_gate.py")
         right_brain_gate = _load_script_module("memory_os_right_brain_expression_cron_gate.py")
+        owner_review_enabled = any(str(spec.get("registry_key") or "") == "owner_review_digest" for spec in operational_specs)
+        right_brain_enabled = any(str(spec.get("registry_key") or "") == "right_brain_expression" for spec in operational_specs)
         if args.apply:
-            owner_gate.HELPER_NAME = _spec_by_key(operational_specs, "owner_review_digest")["script"]
-            right_brain_gate.HELPER_NAME = _spec_by_key(operational_specs, "right_brain_expression")["script"]
-        owner_args = owner_gate.build_parser().parse_args(
-            [
-                "--hermes-home",
-                str(hermes_home),
-                "--hermes-bin",
-                str(args.hermes_bin),
-                "--schedule",
-                str(args.owner_review_schedule),
-                "--deliver",
-                owner_review_deliver,
-                "--owner",
-                str(args.owner),
-                "--channel",
-                owner_review_channel,
-                *(["--apply"] if args.apply else []),
-                *(["--owner-approved"] if args.owner_approved else []),
-            ]
-        )
-        rb_args = right_brain_gate.build_parser().parse_args(
-            [
-                "--hermes-home",
-                str(hermes_home),
-                "--hermes-bin",
-                str(args.hermes_bin),
-                "--schedule",
-                str(args.right_brain_schedule),
-                "--deliver",
-                right_brain_deliver,
-                *(["--apply"] if args.apply else []),
-                *(["--owner-approved"] if args.owner_approved else []),
-            ]
-        )
-        owner_report = owner_gate.run_gate(owner_args)
-        right_brain_report = right_brain_gate.run_gate(rb_args)
+            if owner_review_enabled:
+                owner_gate.HELPER_NAME = _spec_by_key(operational_specs, "owner_review_digest")["script"]
+            if right_brain_enabled:
+                right_brain_gate.HELPER_NAME = _spec_by_key(operational_specs, "right_brain_expression")["script"]
+        if owner_review_enabled:
+            owner_args = owner_gate.build_parser().parse_args(
+                [
+                    "--hermes-home",
+                    str(hermes_home),
+                    "--hermes-bin",
+                    str(args.hermes_bin),
+                    "--schedule",
+                    str(args.owner_review_schedule),
+                    "--deliver",
+                    owner_review_deliver,
+                    "--owner",
+                    str(args.owner),
+                    "--channel",
+                    owner_review_channel,
+                    *(["--apply"] if args.apply else []),
+                    *(["--owner-approved"] if args.owner_approved else []),
+                ]
+            )
+            owner_report = owner_gate.run_gate(owner_args)
+        else:
+            owner_report = {"status": "skipped", "reason": "cron_profile_excludes_owner_review_digest", "findings": []}
+        if right_brain_enabled:
+            rb_args = right_brain_gate.build_parser().parse_args(
+                [
+                    "--hermes-home",
+                    str(hermes_home),
+                    "--hermes-bin",
+                    str(args.hermes_bin),
+                    "--schedule",
+                    str(args.right_brain_schedule),
+                    "--deliver",
+                    right_brain_deliver,
+                    *(["--apply"] if args.apply else []),
+                    *(["--owner-approved"] if args.owner_approved else []),
+                ]
+            )
+            right_brain_report = right_brain_gate.run_gate(rb_args)
+        else:
+            right_brain_report = {"status": "skipped", "reason": "cron_profile_excludes_right_brain_expression", "findings": []}
         findings.extend(_prefixed_findings("owner_review", owner_report.get("findings")))
         findings.extend(_prefixed_findings("right_brain", right_brain_report.get("findings")))
         if _has_error(findings):
@@ -173,9 +190,9 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
             operational_statuses = {str(item.get("status") or "") for item in operational_jobs}
             if "error" in operational_statuses:
                 status = "blocked"
-            elif gate_statuses <= {"already_configured"} and operational_statuses <= {"already_configured"}:
+            elif gate_statuses <= {"already_configured", "skipped"} and operational_statuses <= {"already_configured"}:
                 status = "already_configured"
-            elif gate_statuses <= {"applied", "already_configured", "updated"}:
+            elif gate_statuses <= {"applied", "already_configured", "updated", "skipped"}:
                 status = "applied" if "applied" in gate_statuses else "updated"
             else:
                 status = "blocked"
@@ -208,6 +225,7 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
         "selected_right_brain_deliver": right_brain_deliver,
         "owner_review_schedule": str(args.owner_review_schedule),
         "right_brain_schedule": str(args.right_brain_schedule),
+        "cron_profile": str(args.cron_profile),
         "owner_review": _summarize_gate(owner_report),
         "right_brain": _summarize_gate(right_brain_report),
         "operational_cron_jobs": operational_jobs,
@@ -224,6 +242,8 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
 def _operational_specs(args: argparse.Namespace, owner_deliver: str, right_brain_deliver: str) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     for cron_spec in memory_os_cron_specs():
+        if str(args.cron_profile) == "active-closure" and cron_spec.key not in ACTIVE_CLOSURE_CRON_KEYS:
+            continue
         specs.append(
             {
                 "_cron_spec": cron_spec,
@@ -267,7 +287,11 @@ def _prompt_for_spec(prompt_ref: str) -> str:
 def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any]]) -> None:
     scripts_dir = hermes_home / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    write_cron_registry_snapshot(hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json")
+    selected_specs = tuple(spec["_cron_spec"] for spec in specs)
+    write_cron_registry_snapshot(
+        hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json",
+        specs=selected_specs,
+    )
     runner_target = scripts_dir / "memory_os_execution_gate_runner.py"
     if SOURCE_EXECUTION_GATE_RUNNER.is_file():
         shutil.copy2(SOURCE_EXECUTION_GATE_RUNNER, runner_target)

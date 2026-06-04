@@ -559,7 +559,7 @@ select_options() {
   [[ -n "${ENABLE_COGNITIVE_LOOP}" ]] || { ask_yes_no "Enable cognitive-loop integration harness timer?" "${default_enable_cognitive_loop}" && ENABLE_COGNITIVE_LOOP=1 || ENABLE_COGNITIVE_LOOP=0; }
   [[ -n "${INSTALL_OWNER_REVIEW_CRON_HELPER}" ]] || { ask_yes_no "Install owner review Hermes cron helper/gate scripts?" "${default_owner_review_cron_helper}" && INSTALL_OWNER_REVIEW_CRON_HELPER=1 || INSTALL_OWNER_REVIEW_CRON_HELPER=0; }
   [[ -n "${INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER}" ]] || { ask_yes_no "Install right-brain expression Hermes cron helper/gate scripts?" "${default_right_brain_expression_cron_helper}" && INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1 || INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=0; }
-  [[ -n "${ENABLE_OWNER_CRON_ONBOARDING}" ]] || { ask_yes_no "Enable Memory-OS seven-node Hermes cron onboarding?" "${default_enable_owner_cron_onboarding}" && ENABLE_OWNER_CRON_ONBOARDING=1 || ENABLE_OWNER_CRON_ONBOARDING=0; }
+  [[ -n "${ENABLE_OWNER_CRON_ONBOARDING}" ]] || { ask_yes_no "Enable Memory-OS active-closure Hermes cron onboarding?" "${default_enable_owner_cron_onboarding}" && ENABLE_OWNER_CRON_ONBOARDING=1 || ENABLE_OWNER_CRON_ONBOARDING=0; }
   if [[ "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" ]]; then
     ENABLE_OWNER_REVIEW_CRON=1
     ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1

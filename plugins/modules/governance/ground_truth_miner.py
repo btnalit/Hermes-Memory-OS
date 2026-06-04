@@ -181,11 +181,15 @@ class GroundTruthMinerModule:
                     "boundary": _false_boundary(),
                 }
         existing = {str(item.get("label_id") or ""): item for item in self.read_labels(include_expired=True)}
+        duplicate_blockers = {
+            label_id: item for label_id, item in existing.items() if str(item.get("label_state") or "") != "expired"
+        }
         generated = []
         for entry in audit_entries:
             label = self._label_from_audit(entry)
-            if not label or label["label_id"] in existing:
+            if not label or label["label_id"] in duplicate_blockers:
                 continue
+            duplicate_blockers[label["label_id"]] = label
             existing[label["label_id"]] = label
             generated.append(label)
         for label in generated:

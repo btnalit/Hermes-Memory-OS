@@ -167,7 +167,12 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_owner_review_channel"] == "discord"
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
-    assert len(report["operational_cron_jobs"]) == 7
+    assert report["cron_profile"] == "active-closure"
+    assert len(report["operational_cron_jobs"]) == 2
+    assert {job["name"] for job in report["operational_cron_jobs"]} == {
+        "memory-os-owner-review-digest",
+        "memory-os-proposal-followups-opsgate",
+    }
     assert not home.joinpath("cron", "jobs.json").exists()
 
 
@@ -214,6 +219,8 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
             "auto",
             "--right-brain-deliver",
             "origin",
+            "--cron-profile",
+            "full",
             "--apply",
             "--owner-approved",
         ]
@@ -224,6 +231,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["status"] == "applied"
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
+    assert report["cron_profile"] == "full"
     assert len(report["operational_cron_jobs"]) == 7
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
@@ -303,6 +311,8 @@ def test_onboarding_migrates_existing_memory_os_raw_helper_to_gate_wrapper(tmp_p
             "auto",
             "--right-brain-deliver",
             "origin",
+            "--cron-profile",
+            "full",
             "--apply",
             "--owner-approved",
         ]
@@ -359,6 +369,8 @@ def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypa
             "auto",
             "--right-brain-deliver",
             "origin",
+            "--cron-profile",
+            "full",
             "--apply",
             "--owner-approved",
         ]
