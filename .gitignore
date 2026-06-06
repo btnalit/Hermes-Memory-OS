@@ -23,3 +23,13 @@ eval/reports/
 *.tmp
 monitor_dashboard/snapshot.generated.js
 monitor_dashboard/snapshot.generated.json
+
+# Local audit / governance working notes. Keep these off GitHub.
+/ARCHITECTURE_AUDIT.md
+/MODULE_MAP.md
+/RISK_REGISTER.md
+/TECH_DEBT_REPORT.md
+/V1_STABILIZATION_PLAN.md
+/CODEX_TASKS.md
+/HERMES_GOVERNANCE_PLAN.md
+/V1_CURRENT_BASELINE.md
