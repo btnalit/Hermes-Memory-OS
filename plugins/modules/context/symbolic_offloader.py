@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
-from plugins.memory.memory_os.jsonl_io import append_jsonl, read_jsonl
+from plugins.memory.memory_os.jsonl_io import JsonlReadResult, append_jsonl, read_jsonl_result
 
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -125,7 +125,8 @@ class SymbolicOffloaderModule:
         }
 
     def status(self) -> dict[str, Any]:
-        reports = read_jsonl(self.reports_path)
+        reports_result = self._read_reports_result()
+        reports = reports_result.records
         ref_count = len(list(self.refs_root.glob("*/*.md"))) if self.refs_root.exists() else 0
         return {
             "schema_version": "memory-os.symbolic_offloader_status.v0",
@@ -134,6 +135,8 @@ class SymbolicOffloaderModule:
             "status": "ok" if reports or ref_count else "missing",
             "report_count": len(reports),
             "ref_count": ref_count,
+            "suppressed_error_count": reports_result.suppressed_error_count,
+            "recent_error_codes": reports_result.recent_error_codes[-5:],
             "actual_send": False,
             "actual_execute": False,
             "canonical_state_changed": False,
@@ -141,7 +144,8 @@ class SymbolicOffloaderModule:
 
     def doctor(self) -> dict[str, Any]:
         findings = []
-        reports = read_jsonl(self.reports_path)
+        reports_result = self._read_reports_result()
+        reports = reports_result.records
         missing_refs = []
         for report in reports:
             for node in report.get("nodes") or []:
@@ -157,11 +161,19 @@ class SymbolicOffloaderModule:
                     "refs": missing_refs[:20],
                 }
             )
+        for error_record in reports_result.error_records[-5:]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "symbolic_offloader_jsonl_suppressed_error",
+                    "error_record": error_record,
+                }
+            )
         return {
             "schema_version": "memory-os.symbolic_offloader_doctor.v0",
             "module": "symbolic_offloader",
             "profile": self.profile,
-            "status": "error" if findings else "ok",
+            "status": "error" if any(item.get("severity") == "error" for item in findings) else "warning" if findings else "ok",
             "findings": findings,
             "actual_send": False,
             "actual_execute": False,
@@ -181,6 +193,13 @@ class SymbolicOffloaderModule:
             "estimated_tokens": _estimate_tokens(text),
             "text": text,
         }
+
+    def _read_reports_result(self) -> JsonlReadResult:
+        return read_jsonl_result(
+            self.reports_path,
+            component="symbolic_offloader",
+            operation="read_reports",
+        )
 
 
 def _safe_id(value: str, field_name: str) -> str:

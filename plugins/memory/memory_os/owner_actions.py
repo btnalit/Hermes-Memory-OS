@@ -52,6 +52,7 @@ OWNER_REVIEW_DELIVERY_SCHEMA_VERSION = "memory-os.owner_review_delivery.v0"
 OWNER_REVIEW_DELIVERY_STATUS_SCHEMA_VERSION = "memory-os.owner_review_delivery_status.v0"
 OWNER_REVIEW_CRON_INTEGRATION_SCHEMA_VERSION = "memory-os.owner_review_cron_integration.v0"
 APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION = "memory-os.approved_proposal_followups.v0"
+OWNER_BURDEN_BUDGET_SCHEMA_VERSION = "memory-os.owner_burden_budget.v0"
 APPROVED_PROPOSAL_OPS_GATE_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate.v0"
 APPROVED_PROPOSAL_OPS_GATE_BATCH_SCHEMA_VERSION = "memory-os.approved_proposal_ops_gate_batch.v0"
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_SCHEMA_VERSION = "memory-os.proposal_followup_auto_route.v0"
@@ -63,6 +64,10 @@ EXPRESSION_FEEDBACK_SCHEMA_VERSION = "memory-os.expression_feedback.v0"
 OWNER_REVIEW_TEXT_LIMIT = 2400
 OWNER_REVIEW_DELIVERY_ADAPTERS = {"hermes_owner_channel", "hermes_send"}
 LEFT_BRAIN_REVIEW_SUGGESTED_PER_SOURCE_CAP = 2
+OWNER_BURDEN_ACTION_REQUIRED_CAP = 5
+OWNER_BURDEN_REVIEW_SUGGESTED_CAP = 20
+OWNER_BURDEN_FYI_CAP = 20
+OWNER_BURDEN_STALE_CAP = 0
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_SAFE_KINDS = {"proposal"}
 PROPOSAL_FOLLOWUP_AUTO_ROUTE_TRUE_BLOCK_KEYS = {
     "actual_send",
@@ -287,12 +292,7 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "digest_boundary_true_count": 0,
         "delivery_status": owner_review_delivery_status_report(store),
         "cron_integration": owner_review_cron_integration_report(store),
-        "digest_burden": {
-            "owner_active_period": owner_active_period,
-            "action_required_per_digest": None,
-            "owner_response_latency_hours": None,
-            "action_completion_rate": None if not owner_active_period else 0.0,
-        },
+        "digest_burden": _owner_burden_budget(queue, owner_active_period=owner_active_period),
         "feedback_backflow": {
             "by_action_type": dict(sorted(by_type.items())),
             "by_route": {},
@@ -300,6 +300,41 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
             "apply_ready_count": 0,
         },
         "approved_proposal_followups": _approved_proposal_followups_summary(store),
+    }
+
+
+def _owner_burden_budget(queue: dict[str, Any], *, owner_active_period: bool) -> dict[str, Any]:
+    pending_total = int(queue.get("pending_count") or 0)
+    action_required_count = int(queue.get("action_required_count") or 0)
+    review_suggested_count = int(queue.get("review_suggested_count") or 0)
+    fyi_count = int(queue.get("fyi_count") or 0)
+    stale_count = int((queue.get("review_aging") or {}).get("stale_count") or 0)
+    over_budget = {
+        "action_required": max(action_required_count - OWNER_BURDEN_ACTION_REQUIRED_CAP, 0),
+        "review_suggested": max(review_suggested_count - OWNER_BURDEN_REVIEW_SUGGESTED_CAP, 0),
+        "fyi": max(fyi_count - OWNER_BURDEN_FYI_CAP, 0),
+        "stale": max(stale_count - OWNER_BURDEN_STALE_CAP, 0),
+    }
+    return {
+        "schema_version": OWNER_BURDEN_BUDGET_SCHEMA_VERSION,
+        "owner_active_period": owner_active_period,
+        "pending_total": pending_total,
+        "action_required_count": action_required_count,
+        "review_suggested_count": review_suggested_count,
+        "fyi_count": fyi_count,
+        "informational_count": review_suggested_count + fyi_count,
+        "stale_count": stale_count,
+        "budget": {
+            "action_required_cap": OWNER_BURDEN_ACTION_REQUIRED_CAP,
+            "review_suggested_cap": OWNER_BURDEN_REVIEW_SUGGESTED_CAP,
+            "fyi_cap": OWNER_BURDEN_FYI_CAP,
+            "stale_cap": OWNER_BURDEN_STALE_CAP,
+        },
+        "over_budget": over_budget,
+        "budget_status": "watch" if any(value > 0 for value in over_budget.values()) else "ok",
+        "action_required_per_digest": None,
+        "owner_response_latency_hours": None,
+        "action_completion_rate": None if not owner_active_period else 0.0,
     }
 
 
@@ -1575,9 +1610,15 @@ def owner_review_digest_preview(
     queue = owner_review_queue_report(store, limit=1000)
     status = owner_review_status_report(store)
     channel = resolve_owner_review_channel(store, owner_id=resolved_owner)
-    action_items = _digest_items(queue.get("items") or [], "action_required", action_limit)
-    suggested_items = _digest_items(queue.get("items") or [], "review_suggested", suggested_limit)
-    queue_fyi_items = _digest_items(queue.get("items") or [], "fyi", fyi_limit)
+    queue_items = list(queue.get("items") or [])
+    review_aging = queue.get("review_aging") if isinstance(queue.get("review_aging"), dict) else {}
+    visible_queue_items, stale_informational_suppressed = _suppress_stale_informational_digest_items(
+        queue_items,
+        review_aging=review_aging,
+    )
+    action_items = _digest_items(visible_queue_items, "action_required", action_limit)
+    suggested_items = _digest_items(visible_queue_items, "review_suggested", suggested_limit)
+    queue_fyi_items = _digest_items(visible_queue_items, "fyi", fyi_limit)
     memory_fyi_items = _memory_source_fyi_items(
         store,
         limit=max(fyi_limit - len(queue_fyi_items), 0),
@@ -1589,7 +1630,10 @@ def owner_review_digest_preview(
         start=len(queue_fyi_items) + len(memory_fyi_items) + 1,
     )
     fyi_items = queue_fyi_items + memory_fyi_items + status_fyi_items
-    fyi_total = int(queue.get("fyi_count") or 0) + len(memory_fyi_items) + 2
+    visible_action_total = sum(1 for item in visible_queue_items if item.get("priority") == "action_required")
+    visible_review_suggested_total = sum(1 for item in visible_queue_items if item.get("priority") == "review_suggested")
+    visible_fyi_total = sum(1 for item in visible_queue_items if item.get("priority") == "fyi")
+    fyi_total = visible_fyi_total + len(memory_fyi_items) + 2
     digest_id = _digest_id()
     preview = {
         "schema_version": OWNER_REVIEW_DIGEST_PREVIEW_SCHEMA_VERSION,
@@ -1621,11 +1665,21 @@ def owner_review_digest_preview(
             "action_required_shown": len(action_items),
             "review_suggested_shown": len(suggested_items),
             "fyi_shown": len(fyi_items),
+            "stale_informational_suppressed": stale_informational_suppressed,
+            "visible_action_required_total": visible_action_total,
+            "visible_review_suggested_total": visible_review_suggested_total,
+            "visible_fyi_total": visible_fyi_total,
         },
-        "review_aging": queue.get("review_aging") if isinstance(queue.get("review_aging"), dict) else {},
+        "review_aging": review_aging,
+        "aging_behavior": {
+            "stale_informational_action": "suppress_from_digest",
+            "stale_informational_suppressed_count": stale_informational_suppressed,
+            "canonical_state_changed": False,
+            "owner_action_created": False,
+        },
         "overflow": {
-            "action_required": max(int(queue.get("action_required_count") or 0) - len(action_items), 0),
-            "review_suggested": max(int(queue.get("review_suggested_count") or 0) - len(suggested_items), 0),
+            "action_required": max(visible_action_total - len(action_items), 0),
+            "review_suggested": max(visible_review_suggested_total - len(suggested_items), 0),
             "fyi": max(fyi_total - len(fyi_items), 0),
         },
         "sections": {
@@ -3928,6 +3982,26 @@ def _digest_items(items: list[dict[str, Any]], priority: str, limit: int) -> lis
         if len(selected) >= limit:
             break
     return selected
+
+
+def _suppress_stale_informational_digest_items(
+    items: list[dict[str, Any]],
+    *,
+    review_aging: dict[str, Any],
+) -> tuple[list[dict[str, Any]], int]:
+    retention_days = int(review_aging.get("informational_retention_days") or 0)
+    if retention_days <= 0:
+        return items, 0
+    visible: list[dict[str, Any]] = []
+    suppressed = 0
+    for item in items:
+        priority = str(item.get("source_priority") or item.get("priority") or "")
+        age_days = item.get("age_days")
+        if priority in {"review_suggested", "fyi"} and isinstance(age_days, int) and age_days > retention_days:
+            suppressed += 1
+            continue
+        visible.append(item)
+    return visible, suppressed
 
 
 def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -7124,11 +7198,27 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
         for item in items
         if item.get("effective_priority") == "action_required" and isinstance(item.get("age_days"), int)
     ]
+    informational_retention_days = int(aging.get("fyi_days") or 0)
+    stale_review_suggested_count = sum(
+        1
+        for item in items
+        if item.get("source_priority") == "review_suggested"
+        and isinstance(item.get("age_days"), int)
+        and int(item.get("age_days") or 0) > informational_retention_days
+    )
+    stale_fyi_count = sum(
+        1
+        for item in items
+        if item.get("source_priority") == "fyi"
+        and isinstance(item.get("age_days"), int)
+        and int(item.get("age_days") or 0) > informational_retention_days
+    )
     return {
         "schema_version": OWNER_REVIEW_AGING_SCHEMA_VERSION,
         "enabled": bool(aging.get("enabled")),
         "action_required_days": int(aging.get("action_required_days") or 0),
         "fyi_days": int(aging.get("fyi_days") or 0),
+        "informational_retention_days": informational_retention_days,
         "raw_action_required_count": int(raw_counts.get("action_required", 0)),
         "effective_action_required_count": int(effective_counts.get("action_required", 0)),
         "raw_review_suggested_count": int(raw_counts.get("review_suggested", 0)),
@@ -7146,6 +7236,9 @@ def _review_aging_summary(items: list[dict[str, Any]], aging: dict[str, Any]) ->
         ),
         "unknown_timestamp_count": unknown_timestamp_count,
         "unknown_timestamp_by_item_type": dict(unknown_timestamp_by_item_type),
+        "stale_informational_count": stale_review_suggested_count + stale_fyi_count,
+        "stale_review_suggested_count": stale_review_suggested_count,
+        "stale_fyi_count": stale_fyi_count,
         "created_at_coverage_ratio": round(known_created_at_count / len(items), 3) if items else 1.0,
         "created_at_source_distribution": dict(created_at_source_distribution),
         "created_at_source_by_item_type": {

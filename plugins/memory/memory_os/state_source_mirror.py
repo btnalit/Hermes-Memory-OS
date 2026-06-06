@@ -11,6 +11,7 @@ from typing import Any
 
 from .audit import append_audit
 from .ids import new_event_id
+from .jsonl_io import build_error_record, read_json_state_result
 from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 
@@ -56,7 +57,7 @@ class StateSourceMirror:
         return self.store.roots.memory_os_root / "runtime" / "state_source_mirror_state.json"
 
     def status(self) -> dict[str, Any]:
-        state, rebuilt, findings = self._load_state(persist_repair=False)
+        state, rebuilt, findings, error_records = self._load_state(persist_repair=False)
         sources = self._discover_sources(findings)
         pending = [source for source in sources if source["dedup_key"] not in state["seen_sources"]]
         return {
@@ -68,6 +69,8 @@ class StateSourceMirror:
             "pending_source_count": len(pending),
             "state_path": str(self.state_path),
             "state_rebuilt": rebuilt,
+            "suppressed_error_count": len(error_records),
+            "recent_error_codes": _recent_error_codes(error_records),
             "findings": findings,
         }
 
@@ -90,7 +93,7 @@ class StateSourceMirror:
     def scan(self, *, dry_run: bool = True) -> dict[str, Any]:
         if not dry_run:
             self.store.initialize()
-        state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
+        state, state_rebuilt, findings, error_records = self._load_state(persist_repair=not dry_run)
         sources = self._discover_sources(findings)
         new_sources = [source for source in sources if source["dedup_key"] not in state["seen_sources"]]
         written_events: list[str] = []
@@ -125,6 +128,8 @@ class StateSourceMirror:
             "new_event_count": len(new_sources),
             "dry_run": dry_run,
             "state_rebuilt": state_rebuilt,
+            "suppressed_error_count": len(error_records),
+            "recent_error_codes": _recent_error_codes(error_records),
             "written_event_ids": written_events,
             "findings": findings,
         }
@@ -151,18 +156,28 @@ class StateSourceMirror:
                         )
         return sources
 
-    def _load_state(self, *, persist_repair: bool) -> tuple[dict[str, Any], bool, list[dict[str, Any]]]:
+    def _load_state(self, *, persist_repair: bool) -> tuple[dict[str, Any], bool, list[dict[str, Any]], list[dict[str, Any]]]:
         if not self.state_path.exists():
-            return self._rebuild_state(), False, []
-        try:
-            data = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not isinstance(data.get("seen_sources", {}), dict):
-                raise ValueError("state shape is invalid")
-            data.setdefault("schema_version", self.state_schema_version)
-            data.setdefault("last_scan_at", "")
-            data.setdefault("seen_sources", {})
-            return data, False, []
-        except Exception as exc:
+            return self._rebuild_state(), False, [], []
+        state_result = read_json_state_result(
+            self.state_path,
+            component="state_source_mirror",
+            operation="load_state",
+        )
+        error_records = list(state_result.error_records)
+        data = state_result.data
+        if not error_records and not isinstance(data.get("seen_sources", {}), dict):
+            error_records.append(
+                build_error_record(
+                    component="state_source_mirror",
+                    operation="load_state",
+                    error_code="state_source_mirror_state_invalid_shape",
+                    severity="warning",
+                    recoverable=True,
+                    path=self.state_path,
+                )
+            )
+        if error_records:
             state = self._rebuild_state()
             if persist_repair:
                 self._write_state(state)
@@ -171,9 +186,13 @@ class StateSourceMirror:
                     "state_source_mirror_state_rebuilt",
                     "warning",
                     "StateSourceMirror state was corrupt and rebuilt from Memory-OS events.",
-                    {"error": str(exc)},
+                    {"error_records": [_bounded_error_record(record) for record in error_records]},
                 )
-            ]
+            ], error_records
+        data.setdefault("schema_version", self.state_schema_version)
+        data.setdefault("last_scan_at", "")
+        data.setdefault("seen_sources", {})
+        return data, False, [], []
 
     def _rebuild_state(self) -> dict[str, Any]:
         seen: dict[str, Any] = {}
@@ -313,6 +332,22 @@ def _read_event_records(store: MemoryOSStore) -> list[dict[str, Any]]:
             if isinstance(parsed, dict):
                 records.append(parsed)
     return records
+
+
+def _recent_error_codes(error_records: list[dict[str, Any]]) -> list[str]:
+    return [str(record.get("error_code") or "") for record in error_records if record.get("error_code")][:10]
+
+
+def _bounded_error_record(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": record.get("schema_version"),
+        "component": record.get("component"),
+        "operation": record.get("operation"),
+        "error_code": record.get("error_code"),
+        "severity": record.get("severity"),
+        "recoverable": record.get("recoverable"),
+        "path": record.get("path"),
+    }
 
 
 def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:

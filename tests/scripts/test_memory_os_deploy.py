@@ -923,6 +923,44 @@ def test_remote_plan_uses_ssh_without_printing_secret(tmp_path):
     assert "/opt/Hermes-Memory-OS/scripts/install_memory_os.sh" in rendered
 
 
+def test_remote_plan_resolves_known_host_repo_root_when_missing(tmp_path):
+    local_repo_root = tmp_path / "local checkout"
+    local_repo_root.mkdir()
+
+    report = deploy_memory_os(
+        repo_root=local_repo_root,
+        host="hermes-media",
+        hermes_home="/root/.hermes",
+        mode="operational",
+        hindsight_mode="auto",
+        phase="plan",
+        profile="upgrade",
+    )
+
+    rendered = render_deploy_plan(report)
+
+    assert "/opt/Hermes-Memory-OS/scripts/memory_os_upgrade_compat_check.py" in rendered
+    assert str(local_repo_root) not in rendered
+    assert report["host_runtime_profile"]["profile_source"] == "known_host"
+
+
+def test_remote_plan_unknown_host_without_remote_repo_root_fails_fast(tmp_path):
+    try:
+        deploy_memory_os(
+            repo_root=tmp_path,
+            host="unknown-host",
+            hermes_home="/root/.hermes",
+            mode="operational",
+            hindsight_mode="auto",
+            phase="plan",
+            profile="upgrade",
+        )
+    except ValueError as exc:
+        assert "--remote-repo-root is required" in str(exc)
+    else:
+        raise AssertionError("unknown --host without --remote-repo-root should fail fast")
+
+
 def test_python_bin_can_be_overridden_for_remote_targets(tmp_path):
     report = deploy_memory_os(
         repo_root=tmp_path,
@@ -986,9 +1024,53 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
         "cron_adapter_probe_pass,boundary_runtime_probe_pass "
         "warn=[] fail=[]"
     ) in rendered
+    assert "evidence_labels=fast_probe_pass,live_monitor_not_run,clean_host_not_run" in rendered
     assert "postcheck_status=pass" in rendered
     assert "llm_judge_probe_status=pass" in rendered
     assert "boundary_runtime_probe_status=pass" in rendered
+
+
+def test_postcheck_exposes_full_monitor_timeout_policy(tmp_path):
+    def fake_runner(argv, *, host=None, timeout=30):
+        command = " ".join(argv)
+        if "memory_os_upgrade_compat_check.py" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.hermes_upgrade_compat.v0",
+                        "classification": {"pass": [{"code": "memory_provider_active"}], "warn": [], "fail": []},
+                    }
+                ),
+                "stderr": "",
+            }
+        if "memory_os_cron_adapter_probe.py" in command:
+            return _cron_adapter_probe_result()
+        if "memory_os_boundary_runtime_probe.py" in command:
+            return _boundary_runtime_probe_result()
+        if "low-clue-recall" in command:
+            return _llm_judge_probe_result()
+        if "deployment-manifest" in command:
+            return _deployment_manifest_result()
+        raise AssertionError(f"unexpected command: {command}")
+
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="operational",
+        hindsight_mode="auto",
+        phase="postcheck",
+        profile="upgrade",
+        timeout=120,
+        run_command=fake_runner,
+    )
+    rendered = render_deploy_plan(report)
+
+    assert report["monitor_timeout_policy"]["schema_version"] == "memory-os.monitor_timeout_policy.v0"
+    assert report["monitor_timeout_policy"]["caller_timeout_seconds"] == 120
+    assert report["monitor_timeout_policy"]["full_monitor_not_run"] is True
+    assert report["monitor_timeout_policy"]["caller_timeout_under_full_monitor_minimum"] is True
+    assert "monitor_timeout_policy=fast_probe_timeout=120,full_monitor_min_timeout=300,full_monitor_not_run=true" in rendered
 
 
 def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):

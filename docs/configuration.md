@@ -244,7 +244,17 @@ hermes memory-os-agent-os modules status
 hermes memory-os-agent-os modules validate-no-send
 hermes memory-os-agent-os memory-sources stats --hours 24
 python scripts/memory_os_upgrade_compat_check.py --host hermes-media --output summary
+python scripts/memory_os_cron_adapter_probe.py --host hermes-media --output json
+python scripts/memory_os_boundary_runtime_probe.py --host hermes-media --output json
+python scripts/memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
+python scripts/memory_os_public_checkout_probe.py --source head --strict
+python scripts/memory_os_public_checkout_probe.py --source working-tree --strict
 ```
+
+Evidence labels are intentionally separate: fast probe PASS proves cron/gate
+health, while the full monitor owns live production health. A WARN/`FAIL=[]`
+full monitor must not be described as a clean live PASS unless the WARN is
+separately accepted and documented.
 
 Expected hard boundaries:
 

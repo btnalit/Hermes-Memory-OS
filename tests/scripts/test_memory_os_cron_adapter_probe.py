@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import scripts.memory_os_cron_adapter_probe as cron_probe
+
 
 def _fake_hermes(tmp_path: Path) -> Path:
     script = tmp_path / "fake_hermes.py"
@@ -169,3 +171,20 @@ def test_cron_adapter_probe_classifies_known_optional_jobs_outside_active_snapsh
     assert report["classification"]["enabled_known_optional_outside_active_registry_count"] == 1
     assert report["classification"]["enabled_memory_os_job_count"] == 2
     assert report["classification"]["memory_os_like_unregistered_count"] == 0
+
+
+def test_cron_adapter_probe_builds_host_remote_command():
+    command = cron_probe.remote_probe_command(
+        host="hermes-media",
+        remote_repo_root="/opt/Hermes-Memory-OS",
+        hermes_home="/root/.hermes",
+        hermes_bin="hermes",
+        python_bin="python3",
+    )
+
+    assert command[0] == "ssh"
+    assert command[1] == "hermes-media"
+    assert "python3 /opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py" in command[2]
+    assert "--hermes-home /root/.hermes" in command[2]
+    assert "--hermes-bin hermes" in command[2]
+    assert "--output json" in command[2]

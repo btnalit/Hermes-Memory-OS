@@ -144,6 +144,19 @@ doctor.status = ok
 Current Hermes builds select Memory-OS through `memory.provider=memory_os`.
 They do not need to expose `hermes memory_os ...` as a top-level command.
 
+Optional repo/operator validation:
+
+```bash
+python scripts/memory_os_public_checkout_probe.py --source head --strict
+python scripts/memory_os_public_checkout_probe.py --source working-tree --strict
+python scripts/memory_os_cron_adapter_probe.py --host hermes-media --output json
+python scripts/memory_os_boundary_runtime_probe.py --host hermes-media --output json
+python scripts/memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
+```
+
+Treat these as separate evidence levels. Fast probe PASS is not a substitute
+for a full live monitor PASS.
+
 ## 5. What Gets Installed
 
 - `memory_os` provider under `$HERMES_HOME/plugins/memory_os/`

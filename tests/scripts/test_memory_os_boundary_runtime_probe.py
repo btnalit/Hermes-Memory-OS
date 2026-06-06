@@ -3,6 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import scripts.memory_os_boundary_runtime_probe as boundary_probe
+
 
 def _jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,3 +188,20 @@ def test_boundary_runtime_probe_does_not_treat_boundary_observed_as_boundary_tru
     assert result.returncode == 0
     assert report["status"] == "ok"
     assert report["execution_gate"]["completion_postcheck_boundary_true_count"] == 0
+
+
+def test_boundary_runtime_probe_builds_host_remote_command():
+    command = boundary_probe.remote_probe_command(
+        host="hermes-feiniu",
+        remote_repo_root="/opt/Hermes-Memory-OS",
+        hermes_home="/root/.hermes",
+        profile="sannai",
+        python_bin="python3",
+    )
+
+    assert command[0] == "ssh"
+    assert command[1] == "hermes-feiniu"
+    assert "python3 /opt/Hermes-Memory-OS/scripts/memory_os_boundary_runtime_probe.py" in command[2]
+    assert "--hermes-home /root/.hermes" in command[2]
+    assert "--profile sannai" in command[2]
+    assert "--output json" in command[2]

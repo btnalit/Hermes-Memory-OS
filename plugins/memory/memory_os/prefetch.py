@@ -13,6 +13,7 @@ from typing import Any
 from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
 from .crystallized import read_candidate_queue
 from .low_clue_recall import build_low_clue_guard_lines, normalize_low_clue_recall_config
+from .jsonl_io import build_error_record
 from .memory_sources import (
     GUARD_RECALL_CLARIFICATION,
     append_memory_source_record,
@@ -304,6 +305,40 @@ def build_prefetch(
     return context
 
 
+def build_prefetch_with_observability(
+    query: str,
+    *,
+    budget_chars: int,
+    store: MemoryOSStore,
+    index: object | None = None,
+    current_task_anchor: str | None = None,
+    low_clue_recall_config: dict[str, Any] | None = None,
+    substrate_recall_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    error_records: list[dict[str, Any]] = []
+    sections = _build_prefetch_sections(
+        query,
+        store=store,
+        index=index,
+        current_task_anchor=current_task_anchor,
+        low_clue_recall_config=low_clue_recall_config,
+        substrate_recall_report=substrate_recall_report,
+        error_records=error_records,
+    )
+    context = _fit_budget(_format(sections), budget_chars) if sections else ""
+    return {
+        "schema_version": "memory-os.prefetch_observability.v0",
+        "context": context,
+        "suppressed_error_count": len(error_records),
+        "recent_error_codes": [
+            str(record.get("error_code") or "")
+            for record in error_records[-5:]
+            if str(record.get("error_code") or "")
+        ],
+        "error_records": error_records[-5:],
+    }
+
+
 def build_prefetch_section_candidates(
     query: str,
     *,
@@ -426,6 +461,7 @@ def _build_prefetch_sections(
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
+    error_records: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     _append_section(
@@ -446,7 +482,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
-    _append_section(sections, "Indexed Recall", _indexed_lines(query, index))
+    _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
     return sections
 
@@ -958,14 +994,30 @@ def _event_source_class(event: Any) -> str:
     return "other"
 
 
-def _indexed_lines(query: str, index: object | None) -> list[str]:
+def _indexed_lines(
+    query: str,
+    index: object | None,
+    *,
+    error_records: list[dict[str, Any]] | None = None,
+) -> list[str]:
     route = plan_query_route(query, diagnostic_grounding_enabled=False)
     search_query = str(route.get("search_query", ""))
     if index is None or not search_query.strip() or not hasattr(index, "search"):
         return []
     try:
         result = index.search(search_query, limit=5)
-    except Exception:
+    except Exception as exc:
+        if error_records is not None:
+            error_records.append(
+                build_error_record(
+                    component="prefetch",
+                    operation="indexed_lines",
+                    error_code="prefetch_index_search_error",
+                    severity="warning",
+                    recoverable=True,
+                    details={"error_type": type(exc).__name__},
+                )
+            )
         return []
     lines: list[str] = []
     for hit in result.get("hits", []):

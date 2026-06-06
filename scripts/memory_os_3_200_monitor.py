@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ from plugins.memory.memory_os.host_capability_probe import (
     HOST_CAPABILITY_REQUIRED_FIELDS,
     HOST_CAPABILITY_REQUIRED_KEYS,
 )
+from scripts.memory_os_host_profile import resolve_host_runtime_profile
 
 
 EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
@@ -78,6 +80,12 @@ V7_REQUIRED_COMPONENTS_PRODUCTION = tuple(
 )
 V7_ACTING_AUTONOMY_LEVELS = {"owner_approved_apply", "autonomous_acting"}
 V7_MEMORY_SOURCES_FEEDBACK_CANARY_TARGET = 20
+INDEX_CATCHUP_MAX_AGE_SECONDS = 900
+INDEX_CATCHUP_MAX_EVENT_BACKLOG = 1
+FULL_MONITOR_LIVE_TARGET_SECONDS = 180
+FULL_MONITOR_CLEAN_HOST_TARGET_SECONDS = 240
+FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS = 300
+FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS = 120
 MEMORY_PROJECTION_55C_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     "hindsight_provider_stats": {
         "operation_count",
@@ -300,6 +308,16 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host can be inspected before indexed recall has warmed; production must keep the index healthy",
         "production_behavior": "fail_if_production",
     },
+    "index_catchup_pending": {
+        "classification": "bounded_catchup",
+        "reason": "index is behind but heartbeat/write age are still inside the bounded catch-up window",
+        "production_behavior": "warn_if_production",
+    },
+    "monitor_error_observability_suppressed_errors": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host can expose bounded component suppressed-error counters without proving runtime unhealthy",
+        "production_behavior": "warn_if_production",
+    },
     "doctor_warning_finding": {
         "classification": "expected_clean_host",
         "reason": "clean-host can surface non-blocking doctor warnings during bootstrap compatibility checks",
@@ -484,6 +502,84 @@ def compact_rh31_eval_summary(summary: dict[str, Any]) -> dict[str, Any]:
     if retrieval_shadow:
         compact["retrieval_shadow"] = retrieval_shadow
     return compact
+
+
+def _optional_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_deltas(store_counts: dict[str, Any], index_counts: dict[str, Any]) -> dict[str, int]:
+    keys = sorted(set(store_counts) | set(index_counts))
+    deltas: dict[str, int] = {}
+    for key in keys:
+        store_value = _optional_int(store_counts.get(key)) or 0
+        index_value = _optional_int(index_counts.get(key)) or 0
+        deltas[key] = store_value - index_value
+    return deltas
+
+
+def index_catchup_contract(snapshot: dict[str, Any]) -> dict[str, Any]:
+    memory_status = snapshot.get("memory_status") if isinstance(snapshot.get("memory_status"), dict) else {}
+    index_health = (
+        memory_status.get("index_health") if isinstance(memory_status.get("index_health"), dict) else {}
+    )
+    store_counts = memory_status.get("counts") if isinstance(memory_status.get("counts"), dict) else {}
+    index_counts = memory_status.get("index_counts") if isinstance(memory_status.get("index_counts"), dict) else {}
+    count_deltas = _count_deltas(store_counts, index_counts) if index_counts else {}
+    heartbeat_state = (
+        snapshot.get("heartbeat_state") if isinstance(snapshot.get("heartbeat_state"), dict) else {}
+    )
+    observed_max_age_seconds = _optional_int(heartbeat_state.get("max_age_seconds"))
+    max_age_seconds = (
+        min(observed_max_age_seconds, INDEX_CATCHUP_MAX_AGE_SECONDS)
+        if observed_max_age_seconds is not None
+        else INDEX_CATCHUP_MAX_AGE_SECONDS
+    )
+    max_event_backlog = INDEX_CATCHUP_MAX_EVENT_BACKLOG
+    last_write_age_seconds = _optional_int(memory_status.get("last_write_age_seconds"))
+    heartbeat_age_seconds = _optional_int(heartbeat_state.get("age_seconds"))
+    heartbeat_fresh = heartbeat_state.get("fresh") is True
+    event_backlog = _optional_int(count_deltas.get("events")) if count_deltas else None
+    within_catchup_window = (
+        str(index_health.get("state") or "") == "stale"
+        and event_backlog is not None
+        and event_backlog > 0
+        and event_backlog <= max_event_backlog
+        and heartbeat_fresh
+        and last_write_age_seconds is not None
+        and last_write_age_seconds <= max_age_seconds
+    )
+    return {
+        "state": str(index_health.get("state") or "unknown"),
+        "fts_tokenizer": str(index_health.get("fts_tokenizer") or ""),
+        "store_counts": dict(store_counts),
+        "index_counts": dict(index_counts),
+        "count_deltas": count_deltas,
+        "event_backlog": event_backlog,
+        "max_event_backlog": max_event_backlog,
+        "last_write_age_seconds": last_write_age_seconds,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "heartbeat_fresh": heartbeat_fresh,
+        "max_catchup_age_seconds": max_age_seconds,
+        "within_catchup_window": within_catchup_window,
+    }
+
+
+def _index_catchup_summary(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "state": contract.get("state"),
+        "event_backlog": contract.get("event_backlog"),
+        "max_event_backlog": contract.get("max_event_backlog"),
+        "last_write_age_seconds": contract.get("last_write_age_seconds"),
+        "heartbeat_age_seconds": contract.get("heartbeat_age_seconds"),
+        "within_catchup_window": contract.get("within_catchup_window"),
+        "max_catchup_age_seconds": contract.get("max_catchup_age_seconds"),
+    }
 
 
 def _rh31_retrieval_shadow_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -1001,6 +1097,12 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     fail: list[dict[str, Any]] = []
     monitor_profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
     clean_host = monitor_profile == "clean_host"
+    runtime_contract = (
+        snapshot.get("full_monitor_runtime_contract")
+        if isinstance(snapshot.get("full_monitor_runtime_contract"), dict)
+        else {}
+    )
+    _classify_full_monitor_runtime_contract(runtime_contract, passed, warn)
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
 
@@ -1104,10 +1206,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, clean_host=clean_host)
 
     memory_status = snapshot.get("memory_status", {})
+    catchup_contract = (
+        snapshot.get("index_catchup_contract")
+        if isinstance(snapshot.get("index_catchup_contract"), dict)
+        else index_catchup_contract(snapshot)
+    )
     if memory_status.get("index_health", {}).get("state") == "healthy":
         passed.append({"code": "index_healthy"})
+    elif catchup_contract.get("within_catchup_window") is True:
+        warn.append({"code": "index_catchup_pending", "value": catchup_contract})
     else:
-        warn.append({"code": "index_not_healthy", "value": memory_status.get("index_health")})
+        warn.append({"code": "index_not_healthy", "value": catchup_contract})
     if memory_status.get("prefetch_mode") != "indexed":
         warn.append({"code": "prefetch_not_indexed", "value": memory_status.get("prefetch_mode")})
     crystallized_record_count = int(memory_status.get("counts", {}).get("crystallized_records", 0))
@@ -1590,6 +1699,52 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         warn.append({"code": "module_artifact_summary_unavailable", "value": module_artifacts})
 
+    error_observability = (
+        snapshot.get("error_observability")
+        if isinstance(snapshot.get("error_observability"), dict)
+        else monitor_error_observability(snapshot)
+    )
+    if error_observability.get("schema_version") == "memory-os.monitor_error_observability.v0":
+        passed.append(
+            {
+                "code": "monitor_error_observability_visible",
+                "suppressed_error_count": error_observability.get("suppressed_error_count"),
+                "degraded_component_count": error_observability.get("degraded_component_count"),
+                "live_write_error_count": error_observability.get("live_write_error_count"),
+            }
+        )
+        if error_observability.get("raw_body_included") is True:
+            fail.append({"code": "monitor_error_observability_raw_body_included"})
+        if int(error_observability.get("suppressed_error_count") or 0) > 0:
+            warn.append(
+                {
+                    "code": "monitor_error_observability_suppressed_errors",
+                    "value": {
+                        "suppressed_error_count": error_observability.get("suppressed_error_count"),
+                        "component_counts": error_observability.get("component_counts"),
+                        "recent_error_codes": error_observability.get("recent_error_codes"),
+                    },
+                }
+            )
+        if int(error_observability.get("live_write_error_count") or 0) > 0:
+            warn.append(
+                {
+                    "code": "monitor_live_write_errors_visible",
+                    "live_write_error_count": error_observability.get("live_write_error_count"),
+                    "component_counts": error_observability.get("component_counts"),
+                }
+            )
+        if int(error_observability.get("monitor_probe_error_count") or 0) > 0:
+            passed.append(
+                {
+                    "code": "monitor_error_observability_self_probe_error_visible",
+                    "monitor_probe_error_count": error_observability.get("monitor_probe_error_count"),
+                    "monitor_probe_error_codes": error_observability.get("monitor_probe_error_codes") or [],
+                }
+            )
+    else:
+        warn.append({"code": "monitor_error_observability_unavailable", "value": error_observability})
+
     module_cadence = snapshot.get("module_cadence", {})
     if isinstance(module_cadence, dict) and module_cadence:
         if module_cadence.get("schema_version") == "memory-os.module_cadence_monitor_summary.v0":
@@ -1969,6 +2124,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             stale_count = _int_at(owner_review, ("review_queue", "stale_count"))
             if stale_count > 0:
                 warn.append({"code": "owner_review_stale_items", "value": stale_count})
+            burden = owner_review.get("digest_burden") if isinstance(owner_review.get("digest_burden"), dict) else {}
+            if burden.get("schema_version") == "memory-os.owner_burden_budget.v0":
+                passed.append(
+                    {
+                        "code": "owner_review_burden_budget_visible",
+                        "budget_status": burden.get("budget_status"),
+                        "pending_total": burden.get("pending_total"),
+                        "informational_count": burden.get("informational_count"),
+                        "stale_count": burden.get("stale_count"),
+                    }
+                )
         else:
             warn.append({"code": "owner_review_status_unavailable", "value": owner_review})
 
@@ -1976,6 +2142,16 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if review_aging:
         if review_aging.get("schema_version") == "memory-os.owner_review_aging.v0":
             passed.append({"code": "owner_review_aging_ok"})
+            if review_aging.get("informational_retention_days") is not None:
+                passed.append(
+                    {
+                        "code": "owner_review_informational_aging_visible",
+                        "informational_retention_days": review_aging.get("informational_retention_days"),
+                        "stale_informational_count": review_aging.get("stale_informational_count"),
+                        "stale_review_suggested_count": review_aging.get("stale_review_suggested_count"),
+                        "stale_fyi_count": review_aging.get("stale_fyi_count"),
+                    }
+                )
             for key in ("raw_body_included", "canonical_state_changed", "owner_action_created"):
                 if review_aging.get(key) is True:
                     fail.append({"code": f"owner_review_aging_{key}_true"})
@@ -2376,9 +2552,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
             if int(proposal_auto_route.get("owner_action_required_boundary_count") or 0) > 0:
-                warn.append(
+                passed.append(
                     {
-                        "code": "owner_review_proposal_auto_route_boundary_requires_owner",
+                        "code": "owner_review_proposal_auto_route_boundary_guard_visible",
                         "value": proposal_auto_route.get("owner_action_required_boundary_count"),
                     }
                 )
@@ -2880,22 +3056,34 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             code = str(item.get("code") or "")
             policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
             if policy and policy.get("production_behavior") == "fail_if_production":
-                fail.append(
-                    {
-                        "code": f"{code}_in_production",
-                        "reason": policy["reason"],
-                        "production_behavior": policy["production_behavior"],
-                    }
-                )
+                failure = {
+                    "code": f"{code}_in_production",
+                    "reason": policy["reason"],
+                    "production_behavior": policy["production_behavior"],
+                }
+                if "value" in item:
+                    failure["value"] = item["value"]
+                if "finding" in item:
+                    failure["finding"] = item["finding"]
+                fail.append(failure)
 
     status = "FAIL" if fail else "WARN" if warn else "PASS"
+    evidence_labels = _monitor_evidence_labels(monitor_profile=monitor_profile, status=status)
     return {
         "status": status,
         "pass": passed,
         "warn": warn,
         "fail": fail,
         "clean_host_warn_classification": clean_host_warn_classification,
+        "evidence_labels": evidence_labels,
     }
+
+
+def _monitor_evidence_labels(*, monitor_profile: str, status: str) -> list[str]:
+    normalized_status = str(status or "").strip().lower()
+    if monitor_profile == "clean_host":
+        return [f"clean_host_{normalized_status}"] if normalized_status else ["clean_host_unknown"]
+    return [f"live_monitor_{normalized_status}"] if normalized_status else ["live_monitor_unknown"]
 
 
 def _systemd_service_failed(service: dict[str, Any]) -> bool:
@@ -3482,9 +3670,116 @@ def _int_at(payload: dict[str, Any], path: tuple[str, ...]) -> int:
     return _to_int(current)
 
 
+def monitor_error_observability(snapshot: dict[str, Any]) -> dict[str, Any]:
+    module_artifacts = snapshot.get("module_artifacts") if isinstance(snapshot.get("module_artifacts"), dict) else {}
+    component_sources = {
+        "runtime": snapshot.get("heartbeat_state") if isinstance(snapshot.get("heartbeat_state"), dict) else {},
+        "memory_projection": (
+            snapshot.get("memory_projection") if isinstance(snapshot.get("memory_projection"), dict) else {}
+        ),
+        "session_mirror": snapshot.get("session_mirror") if isinstance(snapshot.get("session_mirror"), dict) else {},
+        "prefetch": (
+            module_artifacts.get("prefetch_observability")
+            if isinstance(module_artifacts.get("prefetch_observability"), dict)
+            else {}
+        ),
+    }
+    component_counts: dict[str, int] = {}
+    component_recent_codes: dict[str, list[str]] = {}
+    recent_codes: list[str] = []
+    live_write_error_count = 0
+    monitor_probe_error_count = 0
+    monitor_probe_error_codes: list[str] = []
+    raw_body_included = False
+    for component, payload in component_sources.items():
+        error_records = _error_records_from_payload(payload if isinstance(payload, dict) else {})
+        monitor_probe_records = [record for record in error_records if _is_monitor_probe_error_record(record)]
+        monitor_probe_error_count += len(monitor_probe_records)
+        monitor_probe_error_codes.extend(
+            str(record.get("error_code") or "")
+            for record in monitor_probe_records
+            if str(record.get("error_code") or "")
+        )
+        count = _to_int(payload.get("suppressed_error_count")) if isinstance(payload, dict) else 0
+        if monitor_probe_records:
+            count = max(count - len(monitor_probe_records), 0)
+        component_counts[component] = count
+        codes = [
+            code
+            for code in _bounded_error_codes(payload.get("recent_error_codes") if isinstance(payload, dict) else [])
+            if code not in {str(record.get("error_code") or "") for record in monitor_probe_records}
+        ]
+        component_recent_codes[component] = codes
+        recent_codes.extend(codes)
+        raw_body_included = raw_body_included or bool(payload.get("raw_body_included")) if isinstance(payload, dict) else raw_body_included
+        raw_body_included = raw_body_included or any(record.get("raw_body_included") is True for record in error_records)
+        live_write_error_count += sum(
+            1
+            for record in error_records
+            if not _is_monitor_probe_error_record(record) and _is_live_write_error_record(component, record)
+        )
+    total_suppressed = sum(component_counts.values())
+    return {
+        "schema_version": "memory-os.monitor_error_observability.v0",
+        "suppressed_error_count": total_suppressed,
+        "degraded_component_count": sum(1 for value in component_counts.values() if value > 0),
+        "live_write_error_count": live_write_error_count,
+        "monitor_probe_error_count": monitor_probe_error_count,
+        "monitor_probe_error_codes": _bounded_error_codes(monitor_probe_error_codes, limit=10),
+        "component_counts": {key: value for key, value in sorted(component_counts.items()) if value > 0},
+        "component_recent_error_codes": {
+            key: value for key, value in sorted(component_recent_codes.items()) if value
+        },
+        "recent_error_codes": _bounded_error_codes(recent_codes, limit=10),
+        "raw_body_included": raw_body_included,
+    }
+
+
+def _bounded_error_codes(value: Any, *, limit: int = 5) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    codes = [str(item) for item in value if str(item or "")]
+    return codes[-limit:]
+
+
+def _error_records_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    last_record = payload.get("last_error_record")
+    if isinstance(last_record, dict):
+        records.append(last_record)
+    error_records = payload.get("error_records")
+    if isinstance(error_records, list):
+        records.extend(record for record in error_records if isinstance(record, dict))
+    return records[-5:]
+
+
+def _is_live_write_error_record(component: str, record: dict[str, Any]) -> bool:
+    if record.get("schema_version") != "memory-os.error_record.v0":
+        return False
+    if str(record.get("severity") or "").lower() != "error":
+        return False
+    operation = str(record.get("operation") or "").lower()
+    error_code = str(record.get("error_code") or "").lower()
+    if component == "runtime" and operation == "heartbeat":
+        return True
+    write_markers = ("write", "append", "apply", "heartbeat")
+    return any(marker in operation or marker in error_code for marker in write_markers)
+
+
+def _is_monitor_probe_error_record(record: dict[str, Any]) -> bool:
+    operation = str(record.get("operation") or "").lower()
+    error_code = str(record.get("error_code") or "").lower()
+    return operation.startswith("monitor_") or error_code in {"prefetch_observability_probe_error"}
+
+
 def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     classification = snapshot.get("classification") or classify_snapshot(snapshot)
     memory_status = snapshot.get("memory_status", {})
+    catchup_contract = (
+        snapshot.get("index_catchup_contract")
+        if isinstance(snapshot.get("index_catchup_contract"), dict)
+        else index_catchup_contract(snapshot)
+    )
     counts = memory_status.get("counts", {})
     router = snapshot.get("context_router", {})
     deltas = snapshot.get("deltas", {})
@@ -3494,6 +3789,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"监控结果: {classification['status']}",
         "",
         f"- host={snapshot.get('hostname')} profile={snapshot.get('monitor_profile', 'live')} time={snapshot.get('date_utc')}",
+        f"- evidence_labels={classification.get('evidence_labels') or []}",
         (
             f"- gateway={snapshot.get('gateway', {}).get('ActiveState')} "
             f"pid={snapshot.get('gateway', {}).get('MainPID')} "
@@ -3530,7 +3826,8 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- HookCoverage={_hook_coverage_summary(snapshot.get('hook_markers') or {}, snapshot.get('session_activity') or {}, deltas)}",
         (
             f"- index_health={memory_status.get('index_health')} "
-            f"prefetch_mode={memory_status.get('prefetch_mode')}"
+            f"prefetch_mode={memory_status.get('prefetch_mode')} "
+            f"index_catchup={_index_catchup_summary(catchup_contract)}"
         ),
         f"- doctor={snapshot.get('doctor', {}).get('status')} findings={snapshot.get('doctor', {}).get('findings')}",
         f"- shell_alias_no_env={snapshot.get('shell_alias_no_env')}",
@@ -3543,6 +3840,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
+        f"- ErrorObservability={_error_observability_summary(snapshot.get('error_observability') or monitor_error_observability(snapshot))}",
         f"- ModuleCadence={snapshot.get('module_cadence')}",
         f"- ExpressionArtifacts={_expression_artifacts_summary(snapshot.get('expression_artifacts') or {})}",
         f"- SessionMirror={_session_mirror_summary(snapshot.get('session_mirror') or {})}",
@@ -3566,6 +3864,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- DeepReflection={_deep_reflection_summary(snapshot.get('deep_reflection') or {})}",
         f"- L4Guard={summarize_l4_guard(snapshot)}",
         f"- V7Governance={summarize_v7_governance(snapshot)}",
+        f"- FullMonitorRuntime={_full_monitor_runtime_summary(snapshot.get('full_monitor_runtime_contract') or {})}",
         f"- disk={snapshot.get('disk_du')}",
         "",
         f"PASS: {[item.get('code') for item in classification['pass']]}",
@@ -3582,6 +3881,99 @@ def _normalize_monitor_profile(value: Any) -> str:
     return "live"
 
 
+def full_monitor_runtime_contract(
+    *,
+    monitor_profile: str,
+    elapsed_seconds: float,
+    caller_timeout_seconds: int = 0,
+) -> dict[str, Any]:
+    profile = _normalize_monitor_profile(monitor_profile)
+    target = FULL_MONITOR_CLEAN_HOST_TARGET_SECONDS if profile == "clean_host" else FULL_MONITOR_LIVE_TARGET_SECONDS
+    elapsed = round(max(float(elapsed_seconds), 0.0), 3)
+    caller_timeout = max(int(caller_timeout_seconds or 0), 0)
+    return {
+        "schema_version": "memory-os.full_monitor_runtime_contract.v0",
+        "monitor_profile": profile,
+        "elapsed_seconds": elapsed,
+        "target_seconds": target,
+        "runtime_over_target": elapsed > target,
+        "minimum_caller_timeout_seconds": FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS,
+        "caller_timeout_seconds": caller_timeout,
+        "caller_timeout_under_minimum": bool(caller_timeout and caller_timeout < FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS),
+        "fast_probe_recommended_timeout_seconds": FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS,
+        "timeout_classification": "monitor_performance",
+    }
+
+
+def _classify_full_monitor_runtime_contract(
+    runtime_contract: dict[str, Any],
+    passed: list[dict[str, Any]],
+    warn: list[dict[str, Any]],
+) -> None:
+    if runtime_contract.get("schema_version") != "memory-os.full_monitor_runtime_contract.v0":
+        return
+    passed.append(
+        {
+            "code": "full_monitor_runtime_contract_visible",
+            "elapsed_seconds": runtime_contract.get("elapsed_seconds"),
+            "target_seconds": runtime_contract.get("target_seconds"),
+            "minimum_caller_timeout_seconds": runtime_contract.get("minimum_caller_timeout_seconds"),
+        }
+    )
+    if runtime_contract.get("runtime_over_target") is True:
+        warn.append(
+            {
+                "code": "full_monitor_runtime_over_target",
+                "value": {
+                    "elapsed_seconds": runtime_contract.get("elapsed_seconds"),
+                    "target_seconds": runtime_contract.get("target_seconds"),
+                    "evidence_level": "monitor_performance",
+                },
+            }
+        )
+    if runtime_contract.get("caller_timeout_under_minimum") is True:
+        warn.append(
+            {
+                "code": "full_monitor_caller_timeout_below_contract",
+                "value": {
+                    "caller_timeout_seconds": runtime_contract.get("caller_timeout_seconds"),
+                    "minimum_caller_timeout_seconds": runtime_contract.get("minimum_caller_timeout_seconds"),
+                },
+            }
+        )
+
+
+def _merge_runtime_contract_classification(snapshot: dict[str, Any]) -> None:
+    classification = snapshot.get("classification")
+    if not isinstance(classification, dict):
+        snapshot["classification"] = classify_snapshot(snapshot)
+        return
+    passed = classification.setdefault("pass", [])
+    warn = classification.setdefault("warn", [])
+    fail = classification.setdefault("fail", [])
+    if not isinstance(passed, list) or not isinstance(warn, list) or not isinstance(fail, list):
+        snapshot["classification"] = classify_snapshot(snapshot)
+        return
+    existing_codes = {str(item.get("code") or "") for item in passed + warn if isinstance(item, dict)}
+    runtime_pass: list[dict[str, Any]] = []
+    runtime_warn: list[dict[str, Any]] = []
+    _classify_full_monitor_runtime_contract(
+        snapshot.get("full_monitor_runtime_contract")
+        if isinstance(snapshot.get("full_monitor_runtime_contract"), dict)
+        else {},
+        runtime_pass,
+        runtime_warn,
+    )
+    passed.extend(item for item in runtime_pass if str(item.get("code") or "") not in existing_codes)
+    existing_codes.update(str(item.get("code") or "") for item in runtime_pass)
+    warn.extend(item for item in runtime_warn if str(item.get("code") or "") not in existing_codes)
+    classification["status"] = "FAIL" if fail else ("WARN" if warn else "PASS")
+    classification["evidence_labels"] = _monitor_evidence_labels(
+        monitor_profile=_normalize_monitor_profile(snapshot.get("monitor_profile")),
+        status=str(classification.get("status") or ""),
+    )
+
+
 def collect_snapshot(
     *,
     host: str = "hermes-media",
@@ -3594,6 +3986,8 @@ def collect_snapshot(
     raw["deltas"] = compute_deltas(raw, previous)
     raw["l4_guard"] = summarize_l4_guard(raw)
     raw["v7_governance"] = summarize_v7_governance(raw)
+    raw["index_catchup_contract"] = index_catchup_contract(raw)
+    raw["error_observability"] = monitor_error_observability(raw)
     raw["classification"] = classify_snapshot(raw)
     return raw
 
@@ -3604,17 +3998,41 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--previous-json")
     parser.add_argument("--snapshot-out")
     parser.add_argument("--output", choices=["summary", "json"], default="summary")
-    parser.add_argument("--monitor-profile", choices=["live", "clean-host"], default="live")
+    parser.add_argument("--monitor-profile", choices=["live", "clean-host"], default="")
+    parser.add_argument(
+        "--caller-timeout-seconds",
+        type=int,
+        default=0,
+        help="Optional wrapper timeout used by the caller; values below 300s are WARN evidence, not runtime failure.",
+    )
     args = parser.parse_args(argv)
+    try:
+        host_profile = resolve_host_runtime_profile(
+            host=str(args.host),
+            monitor_profile=str(args.monitor_profile or ""),
+            require_remote_repo_root=False,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     previous = None
     if args.previous_json:
         previous_path = Path(args.previous_json)
         if previous_path.exists():
             previous = json.loads(previous_path.read_text(encoding="utf-8"))
-    monitor_profile = _normalize_monitor_profile(args.monitor_profile)
+    monitor_profile = _normalize_monitor_profile(host_profile.monitor_profile)
+    started = time.monotonic()
     snapshot = collect_snapshot(host=args.host, previous=previous, monitor_profile=monitor_profile)
+    elapsed = time.monotonic() - started
+    snapshot.setdefault("host_runtime_profile", host_profile.to_dict())
+    snapshot.setdefault("host_runtime_profile_source", host_profile.profile_source)
     snapshot.setdefault("monitor_profile", monitor_profile)
+    snapshot["full_monitor_runtime_contract"] = full_monitor_runtime_contract(
+        monitor_profile=monitor_profile,
+        elapsed_seconds=elapsed,
+        caller_timeout_seconds=int(args.caller_timeout_seconds or 0),
+    )
+    _merge_runtime_contract_classification(snapshot)
     if args.snapshot_out:
         output_path = Path(args.snapshot_out)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3723,6 +4141,7 @@ def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "digest": summary.get("digest"),
         "wandering": summary.get("wandering"),
         "evidence": summary.get("evidence"),
+        "imagination_loop": summary.get("imagination_loop"),
         "proposal_queue": summary.get("proposal_queue"),
         "self_evolution": summary.get("self_evolution"),
         "governance_feedback": summary.get("governance_feedback"),
@@ -3733,6 +4152,45 @@ def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "expression_draft": summary.get("expression_draft"),
         "expression_feedback": summary.get("expression_feedback"),
         "right_brain_expression_adapter": summary.get("right_brain_expression_adapter"),
+        "symbolic_offloader": summary.get("symbolic_offloader"),
+        "prefetch_observability": _error_component_summary(summary.get("prefetch_observability") or {}),
+    }
+
+
+def _error_component_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": summary.get("schema_version"),
+        "suppressed_error_count": summary.get("suppressed_error_count"),
+        "recent_error_codes": summary.get("recent_error_codes"),
+    }
+
+
+def _error_observability_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": summary.get("schema_version"),
+        "suppressed_error_count": summary.get("suppressed_error_count"),
+        "degraded_component_count": summary.get("degraded_component_count"),
+        "live_write_error_count": summary.get("live_write_error_count"),
+        "monitor_probe_error_count": summary.get("monitor_probe_error_count"),
+        "monitor_probe_error_codes": summary.get("monitor_probe_error_codes"),
+        "component_counts": summary.get("component_counts"),
+        "recent_error_codes": summary.get("recent_error_codes"),
+        "raw_body_included": summary.get("raw_body_included"),
+    }
+
+
+def _full_monitor_runtime_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": summary.get("schema_version"),
+        "monitor_profile": summary.get("monitor_profile"),
+        "elapsed_seconds": summary.get("elapsed_seconds"),
+        "target_seconds": summary.get("target_seconds"),
+        "runtime_over_target": summary.get("runtime_over_target"),
+        "minimum_caller_timeout_seconds": summary.get("minimum_caller_timeout_seconds"),
+        "caller_timeout_seconds": summary.get("caller_timeout_seconds"),
+        "caller_timeout_under_minimum": summary.get("caller_timeout_under_minimum"),
+        "fast_probe_recommended_timeout_seconds": summary.get("fast_probe_recommended_timeout_seconds"),
+        "timeout_classification": summary.get("timeout_classification"),
     }
 
 
@@ -3793,6 +4251,8 @@ def _session_mirror_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "pending_only_groups": summary.get("pending_only_groups"),
         "internet_data_collection_pending_count": summary.get("internet_data_collection_pending_count"),
         "internet_data_collection_provider_count": summary.get("internet_data_collection_provider_count"),
+        "suppressed_error_count": summary.get("suppressed_error_count"),
+        "recent_error_codes": summary.get("recent_error_codes"),
     }
 
 
@@ -3811,6 +4271,12 @@ def _owner_review_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "owner_approved_crystallized": summary.get("owner_approved_crystallized_write_count"),
         "unapproved_crystallized": summary.get("unapproved_crystallized_write_count"),
         "owner_active_period": burden.get("owner_active_period"),
+        "burden_budget_status": burden.get("budget_status"),
+        "pending_total": burden.get("pending_total"),
+        "review_suggested": burden.get("review_suggested_count"),
+        "fyi": burden.get("fyi_count"),
+        "informational": burden.get("informational_count"),
+        "stale_budget_count": burden.get("stale_count"),
         "feedback_backflow": backflow,
     }
 
@@ -3829,6 +4295,10 @@ def _owner_review_aging_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "created_at_source_by_item_type": summary.get("created_at_source_by_item_type"),
         "true_aged": summary.get("true_aged_count"),
         "unknown_aged": summary.get("unknown_aged_count"),
+        "informational_retention_days": summary.get("informational_retention_days"),
+        "stale_informational": summary.get("stale_informational_count"),
+        "stale_review_suggested": summary.get("stale_review_suggested_count"),
+        "stale_fyi": summary.get("stale_fyi_count"),
         "canonical_state_changed": summary.get("canonical_state_changed"),
         "owner_action_created": summary.get("owner_action_created"),
     }
@@ -4128,6 +4598,8 @@ def _heartbeat_state_summary(state: dict[str, Any]) -> dict[str, Any]:
         "last_heartbeat_at": state.get("last_heartbeat_at"),
         "processed_event_count": state.get("processed_event_count"),
         "last_processed_event_id": state.get("last_processed_event_id"),
+        "suppressed_error_count": state.get("suppressed_error_count"),
+        "recent_error_codes": state.get("recent_error_codes"),
     }
 
 
@@ -4405,6 +4877,20 @@ def heartbeat_state(max_age_seconds=900):
     if isinstance(processed_ids, list):
         processed_count = len(processed_ids)
         last_processed = str(processed_ids[-1]) if processed_ids else ""
+    last_error_record = state.get("last_error_record") if isinstance(state.get("last_error_record"), dict) else {}
+    bounded_error_record = {
+        key: last_error_record.get(key)
+        for key in (
+            "schema_version",
+            "component",
+            "operation",
+            "error_code",
+            "severity",
+            "recoverable",
+            "ts",
+        )
+        if key in last_error_record
+    }
     return {
         "exists": True,
         "fresh": fresh,
@@ -4414,6 +4900,17 @@ def heartbeat_state(max_age_seconds=900):
         "last_attempt_at": str(state.get("last_attempt_at") or ""),
         "processed_event_count": int(state.get("processed_event_count") or processed_count),
         "last_processed_event_id": str(state.get("last_processed_event_id") or last_processed),
+        "suppressed_error_count": int(state.get("suppressed_error_count") or 0),
+        "recent_error_codes": [
+            str(code)
+            for code in (
+                state.get("recent_error_codes")
+                if isinstance(state.get("recent_error_codes"), list)
+                else []
+            )
+            if str(code)
+        ][-5:],
+        "last_error_record": bounded_error_record,
     }
 
 def working_status():
@@ -4699,6 +5196,45 @@ def module_artifact_summary():
     expression_draft = status("expression_draft")
     grounded_expression_judge = status("grounded_expression_judge")
     mailbox = status("mailbox")
+
+    def prefetch_observability_summary():
+        try:
+            from plugins.memory.memory_os.index import MemoryOSIndex
+            from plugins.memory.memory_os.prefetch import build_prefetch_with_observability
+            from plugins.memory.memory_os.roots import MemoryOSRoots
+            from plugins.memory.memory_os.store import MemoryOSStore
+
+            roots = MemoryOSRoots.from_hermes_home("/root/.hermes", profile="default")
+            store = MemoryOSStore(roots)
+            return build_prefetch_with_observability(
+                "memory-os monitor prefetch observability",
+                budget_chars=0,
+                store=store,
+                index=MemoryOSIndex(roots),
+            )
+        except Exception as exc:
+            return {
+                "schema_version": "memory-os.prefetch_observability.v0",
+                "status": "error",
+                "context": "",
+                "suppressed_error_count": 0,
+                "recent_error_codes": [],
+                "monitor_probe_error_count": 1,
+                "monitor_probe_error_codes": ["prefetch_observability_probe_error"],
+                "error_records": [
+                    {
+                        "schema_version": "memory-os.error_record.v0",
+                        "component": "prefetch",
+                        "operation": "monitor_observability_probe",
+                        "error_code": "prefetch_observability_probe_error",
+                        "severity": "warning",
+                        "recoverable": True,
+                        "message": str(exc)[:160],
+                    }
+                ],
+            }
+
+    prefetch_observability = prefetch_observability_summary()
     expression_feedback = _read_jsonl("/root/.hermes/memory-os/system/expression_feedback_ledger.jsonl")
     speak_permission_tickets = _read_jsonl("/root/.hermes/memory-os/system/speak_permission_tickets.jsonl")
     right_brain_expression_requests = _read_jsonl(
@@ -4843,6 +5379,8 @@ def module_artifact_summary():
         "status": imagination_loop.get("status"),
         "scenario_count": imagination_loop.get("scenario_count"),
         "simulated_count": imagination_loop.get("simulated_count"),
+        "suppressed_error_count": imagination_loop.get("suppressed_error_count"),
+        "recent_error_codes": imagination_loop.get("recent_error_codes"),
         "actual_send": imagination_loop.get("actual_send"),
         "actual_execute": imagination_loop.get("actual_execute"),
         "actual_identity_write": imagination_loop.get("actual_identity_write"),
@@ -5003,6 +5541,8 @@ def module_artifact_summary():
         "status": symbolic_offloader.get("status"),
         "report_count": symbolic_offloader.get("report_count"),
         "ref_count": symbolic_offloader.get("ref_count"),
+        "suppressed_error_count": symbolic_offloader.get("suppressed_error_count"),
+        "recent_error_codes": symbolic_offloader.get("recent_error_codes"),
         "canonical_state_changed": symbolic_offloader.get("canonical_state_changed"),
         "actual_send": symbolic_offloader.get("actual_send"),
         "actual_execute": symbolic_offloader.get("actual_execute"),
@@ -5198,6 +5738,14 @@ def module_artifact_summary():
       "mailbox": {
         "mailbox_exists": mailbox.get("mailbox_exists"),
         "would_send_count": mailbox.get("would_send_count"),
+      },
+      "prefetch_observability": {
+        "schema_version": prefetch_observability.get("schema_version") if isinstance(prefetch_observability, dict) else "",
+        "status": prefetch_observability.get("status") if isinstance(prefetch_observability, dict) else None,
+        "suppressed_error_count": prefetch_observability.get("suppressed_error_count") if isinstance(prefetch_observability, dict) else None,
+        "recent_error_codes": prefetch_observability.get("recent_error_codes") if isinstance(prefetch_observability, dict) else [],
+        "error_records": prefetch_observability.get("error_records") if isinstance(prefetch_observability, dict) else [],
+        "raw_body_included": False,
       },
     }
 
@@ -5703,6 +6251,12 @@ def session_mirror_summary():
     latest_boundary = latest_apply.get("boundary") if isinstance(latest_apply.get("boundary"), dict) else {}
     written_ids = dry_run.get("written_event_ids") if isinstance(dry_run, dict) and isinstance(dry_run.get("written_event_ids"), list) else []
     findings = dry_run.get("findings") if isinstance(dry_run, dict) and isinstance(dry_run.get("findings"), list) else []
+    session_error_record = (
+        session_status.get("last_error_record")
+        if isinstance(session_status.get("last_error_record"), dict)
+        else dry_run.get("last_error_record") if isinstance(dry_run, dict) and isinstance(dry_run.get("last_error_record"), dict)
+        else {}
+    )
     return {
       "schema_version": "memory-os.session_mirror_monitor_summary.v0",
       "status": session_status.get("status") or (dry_run.get("status") if isinstance(dry_run, dict) else None),
@@ -5716,6 +6270,18 @@ def session_mirror_summary():
       "dry_run_new_event_count": dry_run.get("new_event_count") if isinstance(dry_run, dict) else None,
       "dry_run_written_event_ids_count": len(written_ids),
       "dry_run_findings_count": len(findings),
+      "suppressed_error_count": int(
+          session_status.get("suppressed_error_count")
+          or (dry_run.get("suppressed_error_count") if isinstance(dry_run, dict) else 0)
+          or 0
+      ),
+      "recent_error_codes": (
+          session_status.get("recent_error_codes")
+          if isinstance(session_status.get("recent_error_codes"), list)
+          else dry_run.get("recent_error_codes") if isinstance(dry_run, dict) and isinstance(dry_run.get("recent_error_codes"), list)
+          else []
+      )[-5:],
+      "last_error_record": session_error_record,
       "correlation_schema_version": correlation.get("schema_version") if isinstance(correlation, dict) else None,
       "correlation_status": correlation.get("status") if isinstance(correlation, dict) else None,
       "correlation_finding_count": correlation.get("finding_count") if isinstance(correlation, dict) else None,
@@ -6620,8 +7186,10 @@ print(json.dumps({
   "cognitive_loop_listed": "hermes-memory-os-cognitive-loop.timer" in run(["systemctl", "--user", "list-timers", "hermes-memory-os-cognitive-loop.timer", "--no-pager"])["out"],
   "memory_status": {
     "counts": status.get("counts") if isinstance(status, dict) else None,
+    "index_counts": status.get("index_counts") if isinstance(status, dict) else None,
     "index_health": status.get("index_health") if isinstance(status, dict) else None,
     "prefetch_mode": status.get("prefetch_mode") if isinstance(status, dict) else None,
+    "last_write_age_seconds": status.get("last_write_age_seconds") if isinstance(status, dict) else None,
     "hindsight_adapter_enabled": status.get("hindsight_adapter_enabled") if isinstance(status, dict) else None,
     "hindsight_substrate": status.get("hindsight_substrate") if isinstance(status, dict) else None,
     "queue_backlog": status.get("queue_backlog") if isinstance(status, dict) else None,

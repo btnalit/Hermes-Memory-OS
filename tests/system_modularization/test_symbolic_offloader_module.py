@@ -45,3 +45,15 @@ def test_symbolic_offloader_pressure_tier_does_not_delete_originals(tmp_path):
     assert module.recall_node("task-002", "001-N2")["text"] == "b" * 5000
     assert result["canonical_state_changed"] is False
     assert result["live_behavior_changed"] is False
+
+
+def test_symbolic_offloader_status_reports_jsonl_suppressed_errors(tmp_path):
+    module = SymbolicOffloaderModule(tmp_path, profile="default")
+    module.reports_path.parent.mkdir(parents=True)
+    module.reports_path.write_text('{"nodes":[]}\n{bad-json}\n', encoding="utf-8")
+
+    status = module.status()
+
+    assert status["report_count"] == 1
+    assert status["suppressed_error_count"] == 1
+    assert status["recent_error_codes"] == ["jsonl_malformed_line"]

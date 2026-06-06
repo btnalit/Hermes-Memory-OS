@@ -263,6 +263,106 @@ def test_review_aging_projects_old_and_unknown_items_without_mutating_state(tmp_
     assert "RAW PROPOSAL BODY" not in serialized
 
 
+def test_review_aging_reports_stale_informational_items_without_mutating_state(tmp_path):
+    store = _store(tmp_path)
+    advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
+    advisor_root.mkdir(parents=True)
+    advisor_root.joinpath("reports.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.left_brain_advisor.v0",
+                "report_id": "lba_old_info",
+                "created_at": "2000-01-01T00:00:00Z",
+                "findings": [
+                    {
+                        "finding_id": "lbf_old_review",
+                        "target_type": "left_brain_advisor_finding",
+                        "source_key": "runtime_logs",
+                        "owner_visible": True,
+                        "priority": "review_suggested",
+                        "summary": "old review suggested",
+                        "reason": "fixture",
+                    },
+                    {
+                        "finding_id": "lbf_old_fyi",
+                        "target_type": "left_brain_advisor_finding",
+                        "source_key": "runtime_logs",
+                        "owner_visible": True,
+                        "priority": "fyi",
+                        "summary": "old fyi",
+                        "reason": "fixture",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    aging = owner_review_aging_report(store)
+
+    assert aging["informational_retention_days"] == aging["fyi_days"]
+    assert aging["stale_informational_count"] == 2
+    assert aging["stale_review_suggested_count"] == 1
+    assert aging["stale_fyi_count"] == 1
+    assert aging["owner_action_created"] is False
+    assert aging["canonical_state_changed"] is False
+
+
+def test_digest_preview_suppresses_stale_informational_items_without_mutating_state(tmp_path):
+    store = _store(tmp_path)
+    advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
+    advisor_root.mkdir(parents=True)
+    advisor_root.joinpath("reports.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.left_brain_advisor.v0",
+                "report_id": "lba_old_info_digest",
+                "created_at": "2000-01-01T00:00:00Z",
+                "findings": [
+                    {
+                        "finding_id": "lbf_old_review_digest",
+                        "target_type": "left_brain_advisor_finding",
+                        "source_key": "runtime_logs",
+                        "owner_visible": True,
+                        "priority": "review_suggested",
+                        "summary": "old review suggested",
+                        "reason": "fixture",
+                    },
+                    {
+                        "finding_id": "lbf_old_fyi_digest",
+                        "target_type": "left_brain_advisor_finding",
+                        "source_key": "runtime_logs",
+                        "owner_visible": True,
+                        "priority": "fyi",
+                        "summary": "old fyi",
+                        "reason": "fixture",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    preview = owner_review_digest_preview(store, max_action_required=0, max_review_suggested=5, max_fyi=5)
+    serialized = json.dumps(preview, ensure_ascii=False)
+
+    assert preview["review_aging"]["stale_informational_count"] == 2
+    assert preview["counts"]["stale_informational_suppressed"] == 2
+    assert preview["aging_behavior"]["stale_informational_action"] == "suppress_from_digest"
+    assert preview["overflow"]["review_suggested"] == 0
+    assert preview["overflow"]["fyi"] == 0
+    assert "lbf_old_review_digest" not in serialized
+    assert "lbf_old_fyi_digest" not in serialized
+    assert preview["review_aging"]["owner_action_created"] is False
+    assert preview["review_aging"]["canonical_state_changed"] is False
+
+
 def test_approve_candidate_requires_apply_and_is_idempotent(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
@@ -335,6 +435,59 @@ def test_owner_actions_status_counts_queue_and_owner_effects(tmp_path):
     assert status["owner_actions"]["owner_approved_crystallized_write_count"] == 1
     assert status["owner_actions"]["unapproved_crystallized_write_count"] == 0
     assert status["digest_burden"]["owner_active_period"] is True
+
+
+def test_owner_actions_status_exposes_owner_burden_budget_counters(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+    advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
+    advisor_root.mkdir(parents=True)
+    advisor_root.joinpath("reports.jsonl").write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.left_brain_advisor.v0",
+                "report_id": "lba_budget",
+                "created_at": "2026-06-03T01:00:00Z",
+                "findings": [
+                    {
+                        "finding_id": "lbf_review",
+                        "target_type": "left_brain_advisor_finding",
+                        "source_key": "runtime_logs",
+                        "owner_visible": True,
+                        "priority": "review_suggested",
+                        "summary": "review suggested",
+                        "reason": "fixture",
+                    },
+                    {
+                        "finding_id": "lbf_fyi",
+                        "target_type": "left_brain_advisor_finding",
+                        "source_key": "runtime_logs",
+                        "owner_visible": True,
+                        "priority": "fyi",
+                        "summary": "fyi",
+                        "reason": "fixture",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    status = owner_review_status_report(store)
+    burden = status["digest_burden"]
+
+    assert burden["schema_version"] == "memory-os.owner_burden_budget.v0"
+    assert burden["pending_total"] == 3
+    assert burden["action_required_count"] == 1
+    assert burden["review_suggested_count"] == 1
+    assert burden["fyi_count"] == 1
+    assert burden["informational_count"] == 2
+    assert burden["budget_status"] == "ok"
+    assert burden["budget"]["action_required_cap"] >= 1
+    assert burden["budget"]["fyi_cap"] >= 1
 
 
 def test_revoke_crystallized_owner_action_marks_canonical_and_invalidates_projection(tmp_path):

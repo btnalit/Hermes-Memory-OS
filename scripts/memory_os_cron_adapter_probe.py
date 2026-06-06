@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, specs_from_snapshot
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
+from scripts.memory_os_host_profile import resolve_host_runtime_profile
 
 
 SCHEMA_VERSION = "memory-os.hermes_cron_adapter_probe.v0"
@@ -22,6 +25,9 @@ SCHEMA_VERSION = "memory-os.hermes_cron_adapter_probe.v0"
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Probe Hermes cron jobs through the Memory-OS cron adapter.")
+    parser.add_argument("--host", default="", help="SSH host alias for running this probe on a deployed target.")
+    parser.add_argument("--remote-repo-root", default="")
+    parser.add_argument("--python-bin", default="python3")
     parser.add_argument("--hermes-home", default="/root/.hermes")
     parser.add_argument("--hermes-bin", default="hermes")
     parser.add_argument("--output", choices=("json",), default="json")
@@ -29,13 +35,64 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        host_profile = resolve_host_runtime_profile(
+            host=str(args.host),
+            remote_repo_root=str(args.remote_repo_root),
+            hermes_home=str(args.hermes_home),
+            python_bin=str(args.python_bin),
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.host:
+        return run_remote_probe(
+            remote_probe_command(
+                host=str(args.host),
+                remote_repo_root=host_profile.remote_repo_root,
+                hermes_home=host_profile.hermes_home,
+                hermes_bin=str(args.hermes_bin),
+                python_bin=host_profile.python_bin,
+            )
+        )
     report = probe_hermes_cron_adapter(
         hermes_home=Path(args.hermes_home).expanduser(),
         hermes_bin=str(args.hermes_bin),
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report.get("status") in {"ok", "warning"} else 1
+
+
+def remote_probe_command(
+    *,
+    host: str,
+    remote_repo_root: str,
+    hermes_home: str,
+    hermes_bin: str,
+    python_bin: str,
+) -> list[str]:
+    script = Path(remote_repo_root) / "scripts" / "memory_os_cron_adapter_probe.py"
+    remote_argv = [
+        python_bin,
+        str(script).replace("\\", "/"),
+        "--hermes-home",
+        hermes_home,
+        "--hermes-bin",
+        hermes_bin,
+        "--output",
+        "json",
+    ]
+    return ["ssh", host, shlex.join(remote_argv)]
+
+
+def run_remote_probe(command: list[str]) -> int:
+    completed = subprocess.run(command, text=True, capture_output=True, check=False)
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, file=sys.stderr, end="")
+    return completed.returncode
 
 
 def probe_hermes_cron_adapter(*, hermes_home: Path, hermes_bin: str = "hermes") -> dict[str, Any]:

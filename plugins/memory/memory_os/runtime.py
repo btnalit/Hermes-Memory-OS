@@ -12,6 +12,7 @@ from .crystallized import append_candidate_queue, read_candidate_queue
 from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
 from .index import MemoryOSIndex
 from .inner_drive import InnerDriveEngine, select_events_for_inner_drive
+from .jsonl_io import build_error_record, write_json_atomic
 from .session_mirror import auto_apply_graduated_session_mirror
 from .store import MemoryOSStore
 from .working import ALLOWED_WORKING_KINDS, WorkingMemoryService
@@ -192,27 +193,46 @@ class MemoryOSRuntime:
         return json.loads(self._state_path.read_text(encoding="utf-8"))
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._state_path.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        write_json_atomic(self._state_path, state)
 
     def _write_attempt_state(self, current: datetime) -> None:
         state = self._read_state()
         state["last_attempt_at"] = current.isoformat()
         self._write_state(state)
 
-    def _write_error_state(self, current: datetime, exc: Exception) -> None:
+    def _write_error_state(self, current: datetime, exc: Exception, error_record: dict[str, Any]) -> None:
         state = self._read_state()
         state["last_attempt_at"] = current.isoformat()
         state["last_error"] = {"type": type(exc).__name__, "message": str(exc)[:200]}
+        state["last_error_record"] = error_record
+        previous_count = int(state.get("suppressed_error_count") or 0)
+        state["suppressed_error_count"] = previous_count + 1
+        recent_codes = [
+            str(code)
+            for code in (
+                state.get("recent_error_codes")
+                if isinstance(state.get("recent_error_codes"), list)
+                else []
+            )
+            if str(code)
+        ]
+        recent_codes.append(str(error_record.get("error_code") or "runtime_error"))
+        state["recent_error_codes"] = recent_codes[-5:]
         self._write_state(state)
 
     def _record_heartbeat_error(self, current: datetime, exc: Exception) -> None:
-        details = {"error_type": type(exc).__name__, "message": str(exc)[:200]}
+        error_record = build_error_record(
+            component="runtime",
+            operation="heartbeat",
+            error_code="runtime_heartbeat_error",
+            severity="error",
+            recoverable=True,
+            path=self._state_path,
+            details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+        )
+        details = {"error_type": type(exc).__name__, "message": str(exc)[:200], "error_record": error_record}
         try:
-            self._write_error_state(current, exc)
+            self._write_error_state(current, exc, error_record)
         except Exception as state_exc:
             details["state_error_type"] = type(state_exc).__name__
             details["state_error_message"] = str(state_exc)[:200]

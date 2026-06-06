@@ -19,7 +19,7 @@ from .execution_gate import (
     start_execution_gate_envelope,
 )
 from .ids import new_event_id
-from .jsonl_io import read_jsonl
+from .jsonl_io import build_error_record, read_jsonl, write_json_atomic
 from .read_model_paths import (
     owner_actions_path,
     session_mirror_apply_records_path as _session_mirror_apply_records_path,
@@ -306,6 +306,7 @@ class SessionMirror:
 
     def status(self) -> dict[str, Any]:
         state, rebuilt, findings = self._load_state(persist_repair=False)
+        error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         covered = self._provider_captured_session_ids()
         pending = [
@@ -324,6 +325,7 @@ class SessionMirror:
             "sessions_root_present": self.sessions_root.exists(),
             "state_path": str(self.state_path),
             "state_rebuilt": rebuilt,
+            **error_summary,
             "findings": findings,
         }
 
@@ -355,6 +357,7 @@ class SessionMirror:
         if not dry_run:
             self.store.initialize()
         state, state_rebuilt, findings = self._load_state(persist_repair=not dry_run)
+        error_summary = _error_summary_from_findings(findings)
         sessions = self._discover_sessions()
         covered = self._provider_captured_session_ids()
         new_sessions = [
@@ -421,6 +424,7 @@ class SessionMirror:
                     "raw_private_body_printed": False,
                     "apply_governance": _bounded_apply_governance(apply_governance or {}),
                     "governance_validation": governance_validation,
+                    **error_summary,
                     "findings": findings,
                 }
             if isinstance(governance_validation.get("execution_gate_permit_resolution"), dict):
@@ -492,6 +496,7 @@ class SessionMirror:
             "duplicate_ignored_count": 0,
             "raw_private_body_printed": False,
             "apply_governance": governance,
+            **error_summary,
             "findings": findings,
         }
 
@@ -580,6 +585,15 @@ class SessionMirror:
             data.setdefault("seen_sessions", {})
             return data, False, []
         except Exception as exc:
+            error_record = build_error_record(
+                component="session_mirror",
+                operation="load_state",
+                error_code="session_mirror_state_rebuilt",
+                severity="warning",
+                recoverable=True,
+                path=self.state_path,
+                details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+            )
             state = self._rebuild_state()
             if persist_repair:
                 self._write_state(state)
@@ -588,7 +602,7 @@ class SessionMirror:
                     "session_mirror_state_rebuilt",
                     "warning",
                     "SessionMirror state was corrupt and rebuilt from Memory-OS events.",
-                    {"error": str(exc)},
+                    {"error": str(exc), "error_record": error_record},
                 )
             ]
 
@@ -623,8 +637,7 @@ class SessionMirror:
         return captured
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        write_json_atomic(self.state_path, state)
 
     def _append_apply_record(
         self,
@@ -1171,3 +1184,19 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 def _finding(id_: str, severity: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     return {"id": id_, "code": id_, "severity": severity, "message": message, "details": details or {}}
+
+
+def _error_summary_from_findings(findings: list[dict[str, Any]]) -> dict[str, Any]:
+    error_records = [
+        item.get("details", {}).get("error_record")
+        for item in findings
+        if isinstance(item.get("details"), dict) and isinstance(item.get("details", {}).get("error_record"), dict)
+    ]
+    return {
+        "suppressed_error_count": len(error_records),
+        "recent_error_codes": [
+            str(record.get("error_code") or "")
+            for record in error_records[-5:]
+            if str(record.get("error_code") or "")
+        ],
+    }

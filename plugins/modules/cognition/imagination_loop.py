@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from eval.memory_os.data.v7_simulated import load_scenarios
-from plugins.memory.memory_os.jsonl_io import append_jsonl, read_jsonl, write_jsonl
+from plugins.memory.memory_os.jsonl_io import JsonlReadResult, append_jsonl, read_jsonl_result, write_jsonl
 
 
 def imagination_loop_manifest() -> dict[str, Any]:
@@ -52,7 +52,8 @@ class ImaginationLoopModule:
         return self.module_root / "runs.jsonl"
 
     def status(self) -> dict[str, Any]:
-        scenarios = self.read_scenarios()
+        scenario_result = self._read_scenarios_result()
+        scenarios = scenario_result.records
         return {
             "schema_version": "hermes.imagination_loop_status.v0",
             "module": "imagination_loop",
@@ -60,13 +61,16 @@ class ImaginationLoopModule:
             "status": "ok" if scenarios else "missing",
             "scenario_count": len(scenarios),
             "simulated_count": sum(1 for item in scenarios if item.get("provenance") == "simulated"),
+            "suppressed_error_count": scenario_result.suppressed_error_count,
+            "recent_error_codes": scenario_result.recent_error_codes[-5:],
             "actual_send": False,
             "actual_execute": False,
             "live_behavior_changed": False,
         }
 
     def doctor(self) -> dict[str, Any]:
-        scenarios = self.read_scenarios()
+        scenario_result = self._read_scenarios_result()
+        scenarios = scenario_result.records
         findings: list[dict[str, Any]] = []
         if any(item.get("provenance") != "simulated" for item in scenarios):
             findings.append(
@@ -76,11 +80,19 @@ class ImaginationLoopModule:
                     "message": "Imagination loop records must keep simulated provenance.",
                 }
             )
+        for error_record in scenario_result.error_records[-5:]:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "imagination_loop_jsonl_suppressed_error",
+                    "error_record": error_record,
+                }
+            )
         return {
             "schema_version": "hermes.imagination_loop_doctor.v0",
             "module": "imagination_loop",
             "profile": self.profile,
-            "status": "error" if findings else "ok",
+            "status": "error" if any(item.get("severity") == "error" for item in findings) else "warning" if findings else "ok",
             "findings": findings,
         }
 
@@ -121,4 +133,11 @@ class ImaginationLoopModule:
         return result
 
     def read_scenarios(self) -> list[dict[str, Any]]:
-        return read_jsonl(self.scenarios_path)
+        return self._read_scenarios_result().records
+
+    def _read_scenarios_result(self) -> JsonlReadResult:
+        return read_jsonl_result(
+            self.scenarios_path,
+            component="imagination_loop",
+            operation="read_scenarios",
+        )

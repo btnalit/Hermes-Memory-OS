@@ -20,9 +20,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.memory.memory_os.execution_gate import boundary_true_paths
+from scripts.memory_os_host_profile import resolve_host_runtime_profile
 
 
 Runner = Callable[..., dict[str, Any]]
+FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS = 120
+FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS = 300
 
 
 def deploy_memory_os(
@@ -55,12 +58,19 @@ def deploy_memory_os(
 
     runner = run_command or _run_command
     repo_root = repo_root.expanduser().resolve()
-    command_repo_root = remote_repo_root or str(repo_root)
-    effective_python_bin = python_bin or ("python3" if host else "python")
+    host_profile = resolve_host_runtime_profile(
+        host=host,
+        remote_repo_root=remote_repo_root,
+        hermes_home=hermes_home,
+        python_bin=python_bin or "",
+    )
+    command_repo_root = str(repo_root) if not host else host_profile.remote_repo_root
+    command_hermes_home = host_profile.hermes_home if host else hermes_home
+    effective_python_bin = python_bin or host_profile.python_bin
     source_repo_head = _repo_head(repo_root)
     commands = _build_commands(
         repo_root=command_repo_root,
-        hermes_home=hermes_home,
+        hermes_home=command_hermes_home,
         mode=mode,
         hindsight_mode=hindsight_mode,
         llm_judge_preset=llm_judge_preset,
@@ -76,7 +86,8 @@ def deploy_memory_os(
         "phase": phase,
         "profile": profile,
         "host": host or "local",
-        "hermes_home": hermes_home,
+        "hermes_home": command_hermes_home,
+        "host_runtime_profile": host_profile.to_dict(),
         "mode": mode,
         "hindsight_mode": hindsight_mode,
         "llm_judge_preset": llm_judge_preset,
@@ -91,6 +102,7 @@ def deploy_memory_os(
         "llm_judge_probe": {"status": "not_run"},
         "cron_adapter_probe": {"status": "not_run"},
         "boundary_runtime_probe": {"status": "not_run"},
+        "monitor_timeout_policy": _monitor_timeout_policy(timeout=timeout, full_monitor_not_run=True),
         "rollback_hint": "rerun installer with previous config backup or disable substrate_providers.hindsight.enabled",
     }
     if phase == "plan":
@@ -758,7 +770,43 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
             fail.append({"code": str(section.get("reason") or f"{key}_blocked")})
         elif status == "fail":
             fail.append({"code": f"{key}_failed"})
-    return {"pass": passed, "warn": warn, "fail": fail}
+    return {"pass": passed, "warn": warn, "fail": fail, "evidence_labels": _deploy_evidence_labels(report)}
+
+
+def _deploy_evidence_labels(report: dict[str, Any]) -> list[dict[str, str]]:
+    labels: list[dict[str, str]] = []
+    cron_status = _section_status(report, "cron_adapter_probe")
+    boundary_status = _section_status(report, "boundary_runtime_probe")
+    if cron_status == "pass" and boundary_status == "pass":
+        labels.append({"code": "fast_probe_pass", "level": "fast_probe"})
+    elif cron_status != "not_run" or boundary_status != "not_run":
+        status = "fail" if "fail" in {cron_status, boundary_status} else "warn"
+        labels.append({"code": f"fast_probe_{status}", "level": "fast_probe"})
+
+    if report.get("phase") in {"postcheck", "apply"}:
+        labels.append({"code": "live_monitor_not_run", "level": "live_monitor"})
+        labels.append({"code": "clean_host_not_run", "level": "clean_host"})
+    return labels
+
+
+def _monitor_timeout_policy(*, timeout: int, full_monitor_not_run: bool) -> dict[str, Any]:
+    caller_timeout = max(int(timeout or 0), 0)
+    return {
+        "schema_version": "memory-os.monitor_timeout_policy.v0",
+        "caller_timeout_seconds": caller_timeout,
+        "fast_probe_recommended_timeout_seconds": FAST_PROBE_RECOMMENDED_TIMEOUT_SECONDS,
+        "full_monitor_minimum_caller_timeout_seconds": FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS,
+        "caller_timeout_under_full_monitor_minimum": bool(
+            caller_timeout and caller_timeout < FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS
+        ),
+        "full_monitor_not_run": bool(full_monitor_not_run),
+        "timeout_classification": "monitor_performance",
+    }
+
+
+def _section_status(report: dict[str, Any], name: str) -> str:
+    section = report.get(name) if isinstance(report.get(name), dict) else {}
+    return str(section.get("status") or "not_run")
 
 
 def render_deploy_plan(report: dict[str, Any]) -> str:
@@ -773,6 +821,17 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
             f"pass={_codes(classification['pass']) or '[]'} "
             f"warn={_codes(classification['warn']) or '[]'} "
             f"fail={_codes(classification['fail']) or '[]'}"
+        )
+    evidence_labels = classification.get("evidence_labels") or []
+    if evidence_labels:
+        lines.append(f"evidence_labels={_codes(evidence_labels)}")
+    timeout_policy = report.get("monitor_timeout_policy") if isinstance(report.get("monitor_timeout_policy"), dict) else {}
+    if timeout_policy:
+        lines.append(
+            "monitor_timeout_policy="
+            f"fast_probe_timeout={timeout_policy.get('fast_probe_recommended_timeout_seconds')},"
+            f"full_monitor_min_timeout={timeout_policy.get('full_monitor_minimum_caller_timeout_seconds')},"
+            f"full_monitor_not_run={str(bool(timeout_policy.get('full_monitor_not_run'))).lower()}"
         )
     for name in (
         "preflight",
@@ -834,21 +893,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", choices=["summary", "json"], default="summary")
     args = parser.parse_args(argv)
 
-    report = deploy_memory_os(
-        repo_root=args.repo_root,
-        remote_repo_root=args.remote_repo_root,
-        host=args.host,
-        hermes_home=args.hermes_home,
-        mode=args.mode,
-        hindsight_mode=args.hindsight,
-        llm_judge_preset=args.llm_judge_preset,
-        phase=args.phase,
-        profile=args.profile,
-        timeout=args.timeout,
-        allow_restart=args.allow_restart,
-        restart_command=args.restart_command,
-        python_bin=args.python_bin or None,
-    )
+    try:
+        report = deploy_memory_os(
+            repo_root=args.repo_root,
+            remote_repo_root=args.remote_repo_root,
+            host=args.host,
+            hermes_home=args.hermes_home,
+            mode=args.mode,
+            hindsight_mode=args.hindsight,
+            llm_judge_preset=args.llm_judge_preset,
+            phase=args.phase,
+            profile=args.profile,
+            timeout=args.timeout,
+            allow_restart=args.allow_restart,
+            restart_command=args.restart_command,
+            python_bin=args.python_bin or None,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.output == "json":
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     else:

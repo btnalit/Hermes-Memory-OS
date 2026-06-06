@@ -8,7 +8,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import build_prefetch, continuity_selector_report
+from plugins.memory.memory_os.prefetch import build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -25,6 +25,28 @@ def test_prefetch_empty_store_returns_empty_string(tmp_path):
     store = _store(tmp_path)
 
     assert build_prefetch("anything", budget_chars=2200, store=store, index=None) == ""
+
+
+def test_prefetch_observability_reports_index_search_errors(tmp_path):
+    store = _store(tmp_path)
+
+    class BrokenIndex:
+        def search(self, _query, *, limit):
+            raise RuntimeError("synthetic index failure")
+
+    report = build_prefetch_with_observability(
+        "memory marker",
+        budget_chars=2200,
+        store=store,
+        index=BrokenIndex(),
+    )
+
+    assert report["schema_version"] == "memory-os.prefetch_observability.v0"
+    assert report["context"] == ""
+    assert report["suppressed_error_count"] == 1
+    assert report["recent_error_codes"] == ["prefetch_index_search_error"]
+    assert report["error_records"][0]["schema_version"] == "memory-os.error_record.v0"
+    assert report["error_records"][0]["component"] == "prefetch"
 
 
 def test_prefetch_records_substrate_shadow_recall_without_injecting_fact_or_query(tmp_path):

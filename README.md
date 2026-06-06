@@ -220,6 +220,9 @@ Useful operator checks:
 ```bash
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os memory-sources stats --hours 24
 HERMES_HOME=/root/.hermes hermes memory-os-agent-os modules validate-no-send
+python scripts/memory_os_cron_adapter_probe.py --host hermes-media --output json
+python scripts/memory_os_boundary_runtime_probe.py --host hermes-media --output json
+python scripts/memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary
 ```
 
 ## Owner Interaction
@@ -331,6 +334,8 @@ Installer and closure checks:
 ```bash
 python -m pytest tests/scripts/test_memory_os_plugin_install.py \
   tests/scripts/test_memory_os_owner_cron_onboarding.py -q
+python scripts/memory_os_public_checkout_probe.py --source head --strict
+python scripts/memory_os_public_checkout_probe.py --source working-tree --strict
 git diff --check
 ```
 
@@ -351,7 +356,11 @@ The operational baseline has live validation evidence:
 - neutral monitor entrypoint `scripts/memory_os_monitor.py` is available, while
   `scripts/memory_os_3_200_monitor.py` remains the compatibility entrypoint;
 - owner channel auto-detected from `channel_directory.json`;
-- monitor status `PASS` with no WARN/FAIL at the latest recorded validation;
+- current 3.200 full monitor status is PASS with `WARN=[]`, `FAIL=[]`, and
+  `evidence_labels=['live_monitor_pass']`; the index catch-up contract now
+  enforces `event_backlog <= max_event_backlog` and a hard 900 second age cap
+  that remote `max_age_seconds` cannot widen; owner-boundary proposal auto-route
+  stops are visible as guard evidence rather than production WARN;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and
   bounded expression policy apply have live evidence.
 

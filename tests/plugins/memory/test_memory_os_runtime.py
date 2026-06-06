@@ -184,10 +184,17 @@ def test_runtime_heartbeat_errors_are_audited_and_record_attempt(tmp_path, monke
         raise AssertionError("heartbeat should re-raise the original failure")
 
     actions = [entry.get("action") for entry in read_audit_entries(store.roots.audit_path)]
+    entries = read_audit_entries(store.roots.audit_path)
     state = json.loads((tmp_path / "memory-os" / "runtime" / "heartbeat_state.json").read_text(encoding="utf-8"))
     assert "heartbeat_error_summary" in actions
     assert state["last_attempt_at"] == "2026-05-23T01:00:00+00:00"
     assert state.get("last_error")
+    assert state["suppressed_error_count"] == 1
+    assert state["recent_error_codes"] == ["runtime_heartbeat_error"]
+    assert state["last_error_record"]["schema_version"] == "memory-os.error_record.v0"
+    assert state["last_error_record"]["component"] == "runtime"
+    assert state["last_error_record"]["operation"] == "heartbeat"
+    assert entries[-1]["details"]["error_record"]["error_code"] == "runtime_heartbeat_error"
 
 
 def test_runtime_heartbeat_attempt_state_errors_are_audited(tmp_path, monkeypatch):

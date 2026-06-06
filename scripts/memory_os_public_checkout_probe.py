@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = "memory-os.public_checkout_probe.v0"
+SCHEMA_VERSION = "memory-os.public_checkout_probe.v1"
 
 PUBLIC_DOCS = {"README.md", "configuration.md", "quickstart.md"}
 PRIVATE_DOCS = {
@@ -28,9 +30,14 @@ REQUIRED_PUBLIC_FILES = (
     "scripts/install_memory_os.sh",
     "scripts/memory_os_3_200_monitor.py",
     "scripts/memory_os_blank_host_smoke.py",
+    "scripts/memory_os_host_profile.py",
+    "scripts/memory_os_monitor.py",
     "scripts/memory_os_public_checkout_probe.py",
     "scripts/memory_os_upgrade_compat_check.py",
     "scripts/memory_os_upgrade_evidence_compare.py",
+    "plugins/memory/memory_os/execution_gate.py",
+    "plugins/memory/memory_os/owner_actions.py",
+    "plugins/memory/memory_os/session_mirror.py",
     "plugins/modules/expression/grounded_expression_judge.py",
     "eval/memory_os/runner/registry.py",
     "eval/memory_os/adapters/retrieval_shadow.py",
@@ -38,6 +45,14 @@ REQUIRED_PUBLIC_FILES = (
     "tests/eval/test_memory_os_retrieval_shadow.py",
     "tests/scripts/test_memory_os_public_checkout_probe.py",
     "tests/scripts/test_memory_os_upgrade_evidence_compare.py",
+)
+IMPORT_SMOKE_TARGETS = (
+    "plugins.memory.memory_os.owner_actions",
+    "plugins.memory.memory_os.session_mirror",
+    "plugins.memory.memory_os.execution_gate",
+    "scripts.memory_os_host_profile",
+    "scripts.memory_os_3_200_monitor",
+    "scripts.memory_os_monitor",
 )
 
 
@@ -68,12 +83,15 @@ def run_probe(repo_root: Path, *, source: str) -> dict[str, object]:
         )
         public_docs_ok = set(public_docs) == PUBLIC_DOCS
         internal_docs_visible = (checkout_root / "docs" / "internal-memory-os").exists()
+        import_smoke = _run_import_smoke(checkout_root)
 
     classification = _classify(
         public_docs_ok=public_docs_ok,
         missing_required=missing_required,
         private_docs_present=private_docs_present,
         internal_docs_visible=internal_docs_visible,
+        import_smoke_ok=bool(import_smoke["ok"]),
+        import_smoke_failures=list(import_smoke["failures"]),
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -85,6 +103,9 @@ def run_probe(repo_root: Path, *, source: str) -> dict[str, object]:
         "private_docs_present": private_docs_present,
         "required_public_files": required_presence,
         "missing_required_public_files": missing_required,
+        "import_smoke_targets": list(IMPORT_SMOKE_TARGETS),
+        "import_smoke_ok": bool(import_smoke["ok"]),
+        "import_smoke_failures": list(import_smoke["failures"]),
         "classification": classification,
     }
 
@@ -126,12 +147,49 @@ def _private_doc_relpaths(checkout_root: Path) -> Iterable[Path]:
         yield Path("docs") / "internal-memory-os"
 
 
+def _run_import_smoke(checkout_root: Path) -> dict[str, object]:
+    failures: list[dict[str, object]] = []
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(checkout_root)
+        if not existing_pythonpath
+        else str(checkout_root) + os.pathsep + existing_pythonpath
+    )
+    for target in IMPORT_SMOKE_TARGETS:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib, sys; importlib.import_module(sys.argv[1])",
+                target,
+            ],
+            cwd=checkout_root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            failures.append(
+                {
+                    "module": target,
+                    "returncode": result.returncode,
+                    "stderr": result.stderr.strip()[-2000:],
+                }
+            )
+    return {"ok": not failures, "failures": failures}
+
+
 def _classify(
     *,
     public_docs_ok: bool,
     missing_required: list[str],
     private_docs_present: list[str],
     internal_docs_visible: bool,
+    import_smoke_ok: bool,
+    import_smoke_failures: list[dict[str, object]],
 ) -> dict[str, list[dict[str, object]] | str]:
     passed: list[dict[str, object]] = []
     failed: list[dict[str, object]] = []
@@ -148,6 +206,10 @@ def _classify(
         failed.append({"code": "private_docs_visible", "paths": private_docs_present})
     else:
         passed.append({"code": "private_docs_absent"})
+    if import_smoke_ok:
+        passed.append({"code": "import_smoke_ok", "targets": list(IMPORT_SMOKE_TARGETS)})
+    else:
+        failed.append({"code": "import_smoke_failed", "failures": import_smoke_failures})
 
     return {
         "status": "FAIL" if failed else "PASS",

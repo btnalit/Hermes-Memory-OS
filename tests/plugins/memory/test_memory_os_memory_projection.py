@@ -199,6 +199,24 @@ def test_memory_projection_compaction_preserves_boundary_and_safety_records(tmp_
     assert {record["projection_id"] for record in remaining} == {"new", "boundary", "raw"}
 
 
+def test_memory_projection_status_reports_suppressed_jsonl_errors(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    path = memory_projection_records_path(store.roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_projection_record("ok", "gateway_status", "hash-ok", retention_class="short_lived_status"))
+        + "\n{bad-json}\n[]\n",
+        encoding="utf-8",
+    )
+
+    status = memory_projection_status(store.roots)
+
+    assert status["projection_count"] == 1
+    assert status["suppressed_error_count"] == 2
+    assert status["recent_error_codes"] == ["jsonl_malformed_line", "jsonl_non_object_line"]
+
+
 def _projection_record(
     projection_id: str,
     source_key: str,

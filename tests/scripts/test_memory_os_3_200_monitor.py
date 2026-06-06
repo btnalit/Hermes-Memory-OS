@@ -665,6 +665,7 @@ def test_clean_host_warn_classification_table_covers_current_warn_codes():
         "memory_projection_freshness_missing",
         "memory_projection_stale_after_deploy",
         "memory_projection_retention_compaction_missing",
+        "monitor_error_observability_suppressed_errors",
     }
 
     assert expected_codes <= set(monitor.CLEAN_HOST_WARN_CLASSIFICATIONS)
@@ -746,6 +747,29 @@ def test_clean_host_warns_classify_approved_proposals_pending_followup():
     )
 
 
+def test_clean_host_classifies_monitor_error_observability_suppressed_errors():
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["memory_projection"].update(
+        {
+            "suppressed_error_count": 1,
+            "recent_error_codes": ["jsonl_malformed_line"],
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert any(item["code"] == "monitor_error_observability_suppressed_errors" for item in classification["warn"])
+    assert any(
+        item["code"] == "monitor_error_observability_suppressed_errors"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "warn_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
 def test_clean_host_warns_classify_index_and_doctor_bootstrap_warnings():
     snapshot = _healthy_snapshot()
     snapshot["monitor_profile"] = "clean_host"
@@ -781,6 +805,94 @@ def test_production_index_not_healthy_still_fails():
         and item["production_behavior"] == "fail_if_production"
         for item in classification["fail"]
     )
+
+
+def test_production_index_stale_within_catchup_window_warns_with_contract():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {"fresh": True, "age_seconds": 30, "max_age_seconds": 900}
+    snapshot["memory_status"].update(
+        {
+            "counts": {"events": 11, "working_items": 7, "crystallized_records": 0},
+            "index_counts": {"events": 10, "working_items": 7, "crystallized_records": 0},
+            "index_health": {"state": "stale"},
+            "last_write_age_seconds": 45,
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert not any(item["code"] == "index_not_healthy_in_production" for item in classification["fail"])
+    catchup = next(item for item in classification["warn"] if item["code"] == "index_catchup_pending")
+    assert catchup["value"]["within_catchup_window"] is True
+    assert catchup["value"]["event_backlog"] == 1
+    assert catchup["value"]["max_event_backlog"] == 1
+    assert catchup["value"]["max_catchup_age_seconds"] == 900
+
+
+def test_production_index_stale_large_backlog_fails_even_inside_catchup_age_window():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {"fresh": True, "age_seconds": 30, "max_age_seconds": 900}
+    snapshot["memory_status"].update(
+        {
+            "counts": {"events": 10010, "working_items": 7, "crystallized_records": 0},
+            "index_counts": {"events": 10, "working_items": 7, "crystallized_records": 0},
+            "index_health": {"state": "stale"},
+            "last_write_age_seconds": 45,
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert not any(item["code"] == "index_catchup_pending" for item in classification["warn"])
+    failure = next(item for item in classification["fail"] if item["code"] == "index_not_healthy_in_production")
+    assert failure["value"]["within_catchup_window"] is False
+    assert failure["value"]["event_backlog"] == 10000
+    assert failure["value"]["max_event_backlog"] == 1
+
+
+def test_production_index_stale_remote_max_age_cannot_widen_catchup_window():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {"fresh": True, "age_seconds": 30, "max_age_seconds": 999999}
+    snapshot["memory_status"].update(
+        {
+            "counts": {"events": 11, "working_items": 7, "crystallized_records": 0},
+            "index_counts": {"events": 10, "working_items": 7, "crystallized_records": 0},
+            "index_health": {"state": "stale"},
+            "last_write_age_seconds": 3600,
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert not any(item["code"] == "index_catchup_pending" for item in classification["warn"])
+    failure = next(item for item in classification["fail"] if item["code"] == "index_not_healthy_in_production")
+    assert failure["value"]["within_catchup_window"] is False
+    assert failure["value"]["event_backlog"] == 1
+    assert failure["value"]["max_event_backlog"] == 1
+    assert failure["value"]["max_catchup_age_seconds"] == 900
+
+
+def test_production_index_stale_outside_catchup_window_still_fails_with_contract():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {"fresh": False, "age_seconds": 1200, "max_age_seconds": 900}
+    snapshot["memory_status"].update(
+        {
+            "counts": {"events": 12, "working_items": 7, "crystallized_records": 0},
+            "index_counts": {"events": 10, "working_items": 7, "crystallized_records": 0},
+            "index_health": {"state": "stale"},
+            "last_write_age_seconds": 1200,
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    failure = next(item for item in classification["fail"] if item["code"] == "index_not_healthy_in_production")
+    assert failure["value"]["within_catchup_window"] is False
+    assert failure["value"]["event_backlog"] == 2
 
 
 def test_production_clean_host_only_warn_escalates_by_policy():
@@ -1306,6 +1418,45 @@ def test_classify_snapshot_tracks_owner_review_status_and_illegal_crystallized_w
     assert any(item["code"] == "owner_review_unapproved_crystallized_write" for item in classification["fail"])
 
 
+def test_classify_snapshot_surfaces_owner_burden_budget_trend():
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review"] = {
+        "schema_version": "memory-os.owner_review_status.v0",
+        "review_queue": {
+            "pending_count": 42,
+            "action_required_count": 2,
+            "review_suggested_count": 25,
+            "fyi_count": 15,
+            "stale_count": 3,
+        },
+        "owner_action_count": 4,
+        "action_type_counts": {},
+        "duplicate_ignored_count": 0,
+        "error_count": 0,
+        "owner_approved_crystallized_write_count": 0,
+        "unapproved_crystallized_write_count": 0,
+        "digest_burden": {
+            "schema_version": "memory-os.owner_burden_budget.v0",
+            "budget_status": "watch",
+            "pending_total": 42,
+            "action_required_count": 2,
+            "review_suggested_count": 25,
+            "fyi_count": 15,
+            "informational_count": 40,
+            "stale_count": 3,
+            "budget": {"action_required_cap": 5, "fyi_cap": 20, "review_suggested_cap": 20},
+        },
+        "feedback_backflow": {},
+    }
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "owner_review_burden_budget_visible" for item in classification["pass"])
+    assert "burden_budget_status': 'watch'" in rendered
+    assert "'informational': 40" in rendered
+
+
 def test_classify_snapshot_allows_owner_approved_crystallized_records():
     snapshot = _healthy_snapshot()
     snapshot["memory_status"]["counts"]["crystallized_records"] = 1
@@ -1601,8 +1752,11 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
     snapshot["owner_review_proposal_auto_route"]["owner_action_required_boundary_count"] = 1
     classification = classify_snapshot(snapshot)
 
-    assert classification["status"] == "WARN"
     assert any(
+        item["code"] == "owner_review_proposal_auto_route_boundary_guard_visible"
+        for item in classification["pass"]
+    )
+    assert not any(
         item["code"] == "owner_review_proposal_auto_route_boundary_requires_owner"
         for item in classification["warn"]
     )
@@ -1698,6 +1852,131 @@ def test_classify_snapshot_tracks_owner_review_channel_and_digest_preview_bounda
 
     assert classification["status"] == "FAIL"
     assert any(item["code"] == "owner_review_cron_helper_missing" for item in classification["fail"])
+
+
+def test_classify_snapshot_aggregates_error_observability_counters():
+    snapshot = _healthy_snapshot()
+    snapshot["heartbeat_state"] = {
+        "exists": True,
+        "fresh": True,
+        "suppressed_error_count": 1,
+        "recent_error_codes": ["runtime_heartbeat_error"],
+        "last_error_record": {
+            "schema_version": "memory-os.error_record.v0",
+            "component": "runtime",
+            "operation": "heartbeat",
+            "error_code": "runtime_heartbeat_error",
+            "severity": "error",
+            "recoverable": True,
+        },
+    }
+    snapshot["memory_projection"].update(
+        {
+            "suppressed_error_count": 2,
+            "recent_error_codes": ["jsonl_malformed_line", "jsonl_non_object_line"],
+        }
+    )
+    snapshot["session_mirror"] = {
+        "schema_version": "memory-os.session_mirror_monitor_summary.v0",
+        "suppressed_error_count": 3,
+        "recent_error_codes": ["session_mirror_state_rebuilt"],
+        "last_error_record": {
+            "schema_version": "memory-os.error_record.v0",
+            "component": "session_mirror",
+            "operation": "load_state",
+            "error_code": "session_mirror_state_rebuilt",
+            "severity": "warning",
+            "recoverable": True,
+        },
+    }
+    snapshot["module_artifacts"]["prefetch_observability"] = {
+        "schema_version": "memory-os.prefetch_observability.v0",
+        "suppressed_error_count": 4,
+        "recent_error_codes": ["prefetch_index_search_error"],
+        "error_records": [
+            {
+                "schema_version": "memory-os.error_record.v0",
+                "component": "prefetch",
+                "operation": "index_search",
+                "error_code": "prefetch_index_search_error",
+                "severity": "warning",
+                "recoverable": True,
+            }
+        ],
+    }
+
+    summary = monitor.monitor_error_observability(snapshot)
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert summary["schema_version"] == "memory-os.monitor_error_observability.v0"
+    assert summary["suppressed_error_count"] == 10
+    assert summary["degraded_component_count"] == 4
+    assert summary["live_write_error_count"] == 1
+    assert summary["component_counts"] == {
+        "memory_projection": 2,
+        "prefetch": 4,
+        "runtime": 1,
+        "session_mirror": 3,
+    }
+    assert "runtime_heartbeat_error" in summary["recent_error_codes"]
+    assert any(item["code"] == "monitor_error_observability_visible" for item in classification["pass"])
+    assert any(item["code"] == "monitor_error_observability_suppressed_errors" for item in classification["warn"])
+    assert any(item["code"] == "monitor_live_write_errors_visible" for item in classification["warn"])
+    assert "ErrorObservability" in rendered
+    assert "'live_write_error_count': 1" in rendered
+
+
+def test_prefetch_observability_probe_error_does_not_pollute_runtime_suppressed_errors():
+    snapshot = _healthy_snapshot()
+    baseline = classify_snapshot(snapshot)
+    snapshot["module_artifacts"]["prefetch_observability"] = {
+        "schema_version": "memory-os.prefetch_observability.v0",
+        "status": "error",
+        "suppressed_error_count": 1,
+        "recent_error_codes": ["prefetch_observability_probe_error"],
+        "error_records": [
+            {
+                "schema_version": "memory-os.error_record.v0",
+                "component": "prefetch",
+                "operation": "monitor_observability_probe",
+                "error_code": "prefetch_observability_probe_error",
+                "severity": "warning",
+                "recoverable": True,
+            }
+        ],
+    }
+
+    summary = monitor.monitor_error_observability(snapshot)
+    classification = classify_snapshot(snapshot)
+
+    assert summary["suppressed_error_count"] == 0
+    assert summary["degraded_component_count"] == 0
+    assert summary["monitor_probe_error_count"] == 1
+    assert summary["monitor_probe_error_codes"] == ["prefetch_observability_probe_error"]
+    assert not any(item["code"] == "monitor_error_observability_suppressed_errors" for item in classification["warn"])
+    assert any(item["code"] == "monitor_error_observability_self_probe_error_visible" for item in classification["pass"])
+    assert classification["status"] == baseline["status"]
+    assert {item["code"] for item in classification["warn"]} == {item["code"] for item in baseline["warn"]}
+
+
+def test_classify_snapshot_makes_owner_informational_aging_visible():
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_aging"].update(
+        {
+            "informational_retention_days": 30,
+            "stale_informational_count": 5,
+            "stale_review_suggested_count": 2,
+            "stale_fyi_count": 3,
+        }
+    )
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary({**snapshot, "classification": classification})
+
+    assert any(item["code"] == "owner_review_informational_aging_visible" for item in classification["pass"])
+    assert "stale_informational': 5" in rendered
+    assert "informational_retention_days': 30" in rendered
 
 
 def test_classify_snapshot_fails_when_owner_review_aging_mutates_state_or_body():
@@ -2949,6 +3228,59 @@ def test_classify_snapshot_permanent_boundary_sentinels_fail_on_low_risk_authori
         "cognitive_loop_actual_identity_write_true",
         "cognitive_loop_actual_crystallized_approval_true",
     }.issubset(fail_codes)
+
+
+def test_classify_snapshot_emits_monitor_evidence_labels_by_profile():
+    live = _healthy_snapshot()
+    live_classification = classify_snapshot(live)
+
+    assert live_classification["status"] == "WARN"
+    assert live_classification["evidence_labels"] == ["live_monitor_warn"]
+
+    clean_host = _healthy_snapshot()
+    clean_host["monitor_profile"] = "clean-host"
+    clean_host["owner_review_proposal_followups"]["awaiting_ops_gate_count"] = 1
+    clean_host_classification = classify_snapshot(clean_host)
+
+    assert clean_host_classification["status"] == "WARN"
+    assert clean_host_classification["evidence_labels"] == ["clean_host_warn"]
+
+
+def test_full_monitor_runtime_contract_warns_on_slow_runtime_without_runtime_fail():
+    snapshot = _healthy_snapshot()
+    snapshot["full_monitor_runtime_contract"] = monitor.full_monitor_runtime_contract(
+        monitor_profile="live",
+        elapsed_seconds=191.2,
+        caller_timeout_seconds=120,
+    )
+
+    classification = classify_snapshot(snapshot)
+    rendered = render_chinese_summary(snapshot)
+
+    warn_codes = {item["code"] for item in classification["warn"]}
+    fail_codes = {item["code"] for item in classification["fail"]}
+    assert "full_monitor_runtime_over_target" in warn_codes
+    assert "full_monitor_caller_timeout_below_contract" in warn_codes
+    assert "full_monitor_runtime_over_target" not in fail_codes
+    assert "FullMonitorRuntime=" in rendered
+    assert "'minimum_caller_timeout_seconds': 300" in rendered
+
+
+def test_full_monitor_runtime_contract_merge_updates_evidence_label():
+    snapshot = {
+        "monitor_profile": "live",
+        "classification": {"status": "PASS", "pass": [], "warn": [], "fail": [], "evidence_labels": ["live_monitor_pass"]},
+        "full_monitor_runtime_contract": monitor.full_monitor_runtime_contract(
+            monitor_profile="live",
+            elapsed_seconds=191,
+            caller_timeout_seconds=0,
+        ),
+    }
+
+    monitor._merge_runtime_contract_classification(snapshot)
+
+    assert snapshot["classification"]["status"] == "WARN"
+    assert snapshot["classification"]["evidence_labels"] == ["live_monitor_warn"]
 
 
 def test_classify_snapshot_fails_memory_os_cron_naked_or_unregistered_like_jobs():

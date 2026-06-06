@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_gate import any_boundary_true, complete_execution_gate_envelope, resolve_execution_gate_permit
+from .jsonl_io import read_jsonl_result
 from .signal_collectors import collect_signal_sources
 from .signal_source_registry import signal_source_specs
 from .store import MemoryOSStore
@@ -219,7 +220,12 @@ def collect_and_project_signals(
 
 
 def memory_projection_status(roots: MemoryOSRoots) -> dict[str, Any]:
-    records = _read_jsonl(memory_projection_records_path(roots))
+    records_result = read_jsonl_result(
+        memory_projection_records_path(roots),
+        component="memory_projection",
+        operation="status_read_records",
+    )
+    records = records_result.records
     latest = records[-1] if records else {}
     dedup_aware_records = [record for record in records if record.get("dedup_key")]
     source_key_counts: dict[str, int] = {}
@@ -259,6 +265,8 @@ def memory_projection_status(roots: MemoryOSRoots) -> dict[str, Any]:
         "duplicate_source_hash_count": len(scoped_source_hashes) - len(set(scoped_source_hashes)),
         "duplicate_dedup_key_count": len(dedup_keys) - len(set(dedup_keys)),
         "raw_body_included": any(record.get("raw_body_included") is True for record in records),
+        "suppressed_error_count": records_result.suppressed_error_count,
+        "recent_error_codes": records_result.recent_error_codes[-5:],
     }
 
 

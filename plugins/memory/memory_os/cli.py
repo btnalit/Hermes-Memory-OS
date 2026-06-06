@@ -2386,6 +2386,17 @@ def _heartbeat_runtime_status(store: MemoryOSStore) -> dict[str, Any]:
         "last_attempt_at": str(document.get("last_attempt_at") or ""),
         "processed_event_count": int(document.get("processed_event_count") or 0),
         "last_processed_event_id": str(document.get("last_processed_event_id") or ""),
+        "suppressed_error_count": int(document.get("suppressed_error_count") or 0),
+        "recent_error_codes": [
+            str(code)
+            for code in (
+                document.get("recent_error_codes")
+                if isinstance(document.get("recent_error_codes"), list)
+                else []
+            )
+            if str(code)
+        ][-5:],
+        "last_error_record": _bounded_module_payload(document.get("last_error_record") or {}),
         "source": "memory-os/runtime/heartbeat_state.json",
     }
 

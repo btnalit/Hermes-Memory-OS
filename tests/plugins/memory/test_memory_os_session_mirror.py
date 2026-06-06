@@ -365,6 +365,10 @@ def test_session_mirror_dry_run_does_not_repair_corrupt_state_file(tmp_path):
     assert report["status"] == "warning"
     assert report["state_rebuilt"] is True
     assert report["new_event_count"] == 0
+    assert report["suppressed_error_count"] == 1
+    assert report["recent_error_codes"] == ["session_mirror_state_rebuilt"]
+    assert report["findings"][0]["details"]["error_record"]["schema_version"] == "memory-os.error_record.v0"
+    assert report["findings"][0]["details"]["error_record"]["component"] == "session_mirror"
     assert mirror.state_path.read_text(encoding="utf-8") == "{not json}"
 
 

@@ -132,6 +132,14 @@ def probe_host_capabilities(
         "kanban": _first_path_capability(roots.hermes_home, ("kanban", "tasks", "system/kanban")),
     }
     capabilities = _normalize_capabilities(raw_capabilities, observed_at=observed_at)
+    capability_status_counts = _capability_status_counts(capabilities)
+    required_capabilities = {
+        key: capability
+        for key, capability in capabilities.items()
+        if key in HOST_CAPABILITY_REQUIRED_KEYS
+    }
+    required_capability_status_counts = _capability_status_counts(required_capabilities)
+    capability_contract = _capability_contract(capabilities)
     report = {
         "schema_version": HOST_CAPABILITY_PROBE_SCHEMA_VERSION,
         "created_at": observed_at,
@@ -143,7 +151,13 @@ def probe_host_capabilities(
         "config_shape": config,
         "deployment_runtime_manifest": deployment_manifest,
         "capabilities": capabilities,
-        "capability_contract": _capability_contract(capabilities),
+        "capability_contract": capability_contract,
+        "capability_status_counts": capability_status_counts,
+        "required_capability_status_counts": required_capability_status_counts,
+        "missing_required_capability_count": len(capability_contract.get("missing_required_capability_keys") or []),
+        "required_missing_status_count": int(required_capability_status_counts.get("missing") or 0),
+        "required_migration_needed_status_count": int(required_capability_status_counts.get("migration_needed") or 0),
+        "migration_needed_capability_count": int(capability_status_counts.get("migration_needed") or 0),
         "raw_body_included": False,
         "secret_values_included": False,
     }
@@ -441,6 +455,16 @@ def _capability_contract(capabilities: dict[str, dict[str, Any]]) -> dict[str, A
         "invalid_status_capabilities": invalid_status[:20],
         "contract_status": "ok" if not missing_required_keys and not incomplete and not invalid_status else "error",
     }
+
+
+def _capability_status_counts(capabilities: dict[str, dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in sorted(HOST_CAPABILITY_ALLOWED_STATUSES)}
+    for capability in capabilities.values():
+        status = str(capability.get("status") or "unknown")
+        if status not in counts:
+            status = "unknown"
+        counts[status] += 1
+    return counts
 
 
 def _read_jsonl_bounded(path: Path, *, limit: int) -> list[dict[str, Any]]:
