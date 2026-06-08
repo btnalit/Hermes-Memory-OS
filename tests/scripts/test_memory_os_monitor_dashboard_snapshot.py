@@ -241,3 +241,79 @@ def test_dashboard_snapshot_cli_writes_js_payload(tmp_path):
     text = output.read_text(encoding="utf-8")
     assert text.startswith("window.MOS = ")
     assert "memory-os.monitor_dashboard_snapshot.v0" in text
+
+
+def test_dashboard_status_not_fail_when_current_window_error_count_is_zero(tmp_path):
+    """Regression: module_error was reading cumulative error_count, which
+    monotonically increased from append-only JSONL, causing the overall
+    health status to be permanently FAIL after the first module error.
+
+    Fix: switch to current_window_error_count (0/1, last-run status),
+    so one clean run resets the health status.
+    """
+    module = _load_module()
+    home = tmp_path / "home"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+
+    # Build snapshot — all evidence shows ok status, so current_window
+    # should be 0 and the overall status should not be FAIL.
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="main")
+
+    # The status is at the top level of the monitor section
+    status = snapshot["monitor"]["status"]
+    warn = snapshot["monitor"]["warn"]
+    fail = snapshot["monitor"]["fail"]
+
+    # With clean module runs, module_error should be 0 → fail=0 → status≠FAIL
+    assert fail == 0, (
+        f"When all modules run clean, fail should be 0, got {fail}. "
+        f"Monitor section: check if module_error is 0."
+    )
+    assert status != "FAIL", (
+        f"When fail=0, status should not be FAIL, got {status}. "
+        f"warn={warn} fail={fail}"
+    )
+    # Status should be PASS or WARN (could be WARN from other sections)
+    assert status in ("PASS", "WARN"), f"Unexpected status: {status}"
+
+
+def test_dashboard_status_shows_fail_when_current_window_has_errors(tmp_path):
+    """Verify that if current_window_error_count > 0, the status IS FAIL."""
+    module = _load_module()
+    home = tmp_path / "home"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+
+    # Inject a cadence report with a step that has last_status="error"
+    # This is how the cadence report detects current-window errors:
+    # _record_step sets last_status from step status → _current_window_error_count returns 1.
+    sys_modules = home / "system-modules" / "cognitive_loop"
+    sys_modules.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(
+        sys_modules / "reports.jsonl",
+        [{
+            "cycle_id": "err_1",
+            "status": "ok",
+            "finished_at": "2026-06-08T12:00:00Z",
+            "steps": [
+                {"step": "self_evolution", "status": "error",
+                 "result": {"status": "error", "reason": "test error"}},
+            ],
+        }],
+    )
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="main")
+    status = snapshot["monitor"]["status"]
+    fail = snapshot["monitor"]["fail"]
+
+    assert fail > 0, (
+        f"With current window errors, fail should be > 0, got {fail}. "
+        f"Status: {status}"
+    )
+    assert status == "FAIL", (
+        f"With active errors, status should be FAIL, got {status}. "
+        f"fail={fail}"
+    )

@@ -185,7 +185,7 @@ def _monitor_snapshot(
     boundary: list[dict[str, str]],
 ) -> dict[str, Any]:
     missing_cron = len(set(EXPECTED_CRON_NAMES) - {str(job.get("name") or "") for job in cron_jobs})
-    module_error = int(cadence_report.get("error_count") or 0)
+    module_error = int(cadence_report.get("current_window_error_count") or 0)
     module_findings = int(cadence_report.get("finding_count") or 0)
     index_warn = 0 if memory.get("index_fresh") else 1
     boundary_warn = sum(1 for item in boundary if item["key"] == "cron_modified" and item["state"] != "false")
