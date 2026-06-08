@@ -32,7 +32,7 @@ from .owner_actions import (
 )
 from .prefetch import build_prefetch
 from .roots import MemoryOSRoots
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
+from .schema import EVENT_SCHEMA_VERSION, IDENTITY_MANIFEST_SCHEMA_VERSION, EventEnvelope
 from .status_tool_contract import (
     MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
     MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION,
@@ -82,10 +82,39 @@ class MemoryOSProvider(MemoryProvider):
         self._store = MemoryOSStore(self._roots)
         self._store.initialize()
         self._index = MemoryOSIndex(self._roots)
+        self._sync_identity_manifest()
         self._queue = queue.Queue(maxsize=int(kwargs.get("queue_max_size") or 128))
         self._worker_stop = threading.Event()
         if kwargs.get("worker_autostart", True):
             self._start_worker()
+
+    def _sync_identity_manifest(self) -> None:
+        """Sync computed identity sources to identity/manifest.json."""
+        if not self._roots or not self._roots.identity_sources:
+            return
+        manifest = {
+            "schema_version": IDENTITY_MANIFEST_SCHEMA_VERSION,
+            "profile": self.profile,
+            "identity_sources": [
+                {
+                    "kind": source.kind,
+                    "path": source.path,
+                    "sha256": source.sha256,
+                    "size": source.size,
+                    "mtime": source.mtime,
+                    "owner_controlled": source.owner_controlled,
+                    "memory_os_writable": source.memory_os_writable,
+                }
+                for source in self._roots.identity_sources
+            ],
+            "last_checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        path = self._roots.identity_manifest_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._store is None:

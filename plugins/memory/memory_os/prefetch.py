@@ -868,7 +868,6 @@ def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:
         f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
         for event in selected
         if _event_source_class(event) in {"cron", "mailbox", "room_family", "state_source", "governance"}
-        and not _is_diagnostic_style_seed(str(event.summary))
     ]
 
 

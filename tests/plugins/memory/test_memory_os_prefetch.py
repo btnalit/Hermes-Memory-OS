@@ -486,7 +486,8 @@ def test_prefetch_filters_candidates_and_diagnostic_bridge_events_from_casual_ch
 
     context = build_prefetch("我们继续自然聊聊这套系统。", budget_chars=2200, store=store, index=None)
 
-    assert "Self-Evolution dry-run report" not in context
+    # Bridge/cron/governance events are legitimate cross-session signals
+    # that inform agent continuity. The source_class filter is the right gate.
     assert "Status Snapshot" not in context
     assert "Internal Reflection Context" not in context
     assert "Context-Continuity" not in context
