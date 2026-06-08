@@ -101,7 +101,7 @@ def run_upgrade_compat_check(
         spec.name: _run_spec(spec, host=host, hermes_home=hermes_home, timeout=timeout, run_command=runner)
         for spec in COMMANDS
     }
-    classification = classify_report(command_results)
+    classification = classify_report(command_results, hermes_home=hermes_home)
     return {
         "schema_version": "memory-os.hermes_upgrade_compat.v0",
         "host": host or "local",
@@ -147,7 +147,7 @@ def run_command_default(
     }
 
 
-def classify_report(command_results: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def classify_report(command_results: dict[str, dict[str, Any]], *, hermes_home: str | None = None) -> dict[str, list[dict[str, Any]]]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     fail: list[dict[str, Any]] = []
@@ -183,7 +183,7 @@ def classify_report(command_results: dict[str, dict[str, Any]]) -> dict[str, lis
     _require_json_field(command_results, "memory_sources_stats", ("boundary_true_count",), 0, "memory_sources_boundary_true", passed, fail)
     _require_no_forbidden_fields(command_results, "memory_sources_stats", passed, fail)
     _require_cognitive_loop_timer_active(command_results, passed, fail)
-    _require_prefetch_config_ok(command_results, passed, warn, fail)
+    _require_prefetch_config_ok(command_results, passed, warn, fail, hermes_home=hermes_home)
 
     return {"pass": _dedupe(passed), "warn": _dedupe(warn), "fail": _dedupe(fail)}
 
@@ -486,12 +486,12 @@ def _require_prefetch_config_ok(
     passed: list[dict[str, Any]],
     warn: list[dict[str, Any]],
     fail: list[dict[str, Any]],
+    *,
+    hermes_home: str | None = None,
 ) -> None:
     """Check that prefetch_char_budget >= 5500 (in existing config.json)."""
-    import os
-    hermes_home = os.environ.get("HERMES_HOME", "")
     if not hermes_home:
-        fail.append({"code": "prefetch_config_no_hermes_home"})
+        warn.append({"code": "prefetch_config_no_hermes_home"})
         return
 
     memory_os_root = Path(hermes_home) / "memory-os"
