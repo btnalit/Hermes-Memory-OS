@@ -488,8 +488,9 @@ def _require_prefetch_config_ok(
     fail: list[dict[str, Any]],
     *,
     hermes_home: str | None = None,
+    minimum_budget: int = 5500,
 ) -> None:
-    """Check that prefetch_char_budget >= 5500 (in existing config.json)."""
+    """Check that prefetch_char_budget >= minimum_budget (in existing config.json)."""
     if not hermes_home:
         warn.append({"code": "prefetch_config_no_hermes_home"})
         return
@@ -507,7 +508,7 @@ def _require_prefetch_config_ok(
         return
 
     budget = cfg.get("prefetch_char_budget", 0)
-    if budget >= 5500:
+    if budget >= minimum_budget:
         passed.append({"code": "prefetch_char_budget_ok", "value": budget})
     else:
         fail.append({"code": "prefetch_char_budget_low", "value": budget})
