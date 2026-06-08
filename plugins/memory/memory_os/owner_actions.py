@@ -20,6 +20,8 @@ from .crystallized import (
     CrystallizedMemoryService,
     is_active_crystallized_frontmatter,
     read_candidate_queue,
+    read_candidate_triage,
+    resolve_candidate_effective_state,
 )
 from .memory_sources import (
     ALLOWED_FEEDBACK_RATINGS,
@@ -3380,12 +3382,24 @@ def _attach_owner_reply_context(record: dict[str, Any], context: dict[str, Any])
 
 def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
+    # Read triage records to compute effective states
+    triage_records = read_candidate_triage(store)
     for candidate in read_candidate_queue(store.roots):
         target_ref = f"candidate:{candidate.candidate_id}"
         if target_ref in closed:
             continue
+        # Skip candidates already tagged as fleeting (no owner action needed)
+        effective_state = resolve_candidate_effective_state(candidate, triage_records)
+        if effective_state == "fleeting":
+            continue
+        # Candidates already crystallized — skip
+        crystallized_matches = CrystallizedMemoryService(store).find_records_by_candidate_id(candidate.candidate_id)
+        if crystallized_matches:
+            continue
         needs_consolidation = _candidate_needs_consolidation(candidate.body)
         created_at, created_at_source = _candidate_created_at_info(store, candidate)
+        # owner_eligible candidates get action_required; others keep original priority
+        priority = "fyi" if needs_consolidation else "action_required"
         items.append(
             {
                 "schema_version": "memory-os.review_item.v0",
@@ -3393,10 +3407,11 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
                 "target_type": "candidate_cleanup" if needs_consolidation else "candidate",
                 "target_id": candidate.candidate_id,
                 "source_module": "crystallized_candidates",
-                "priority": "fyi" if needs_consolidation else "action_required",
+                "priority": priority,
                 "created_at": created_at,
                 "created_at_source": created_at_source,
                 "status": "pending",
+                "effective_state": effective_state,
                 "summary": (
                     "Memory candidate is a transcript/event excerpt and needs consolidation before approval"
                     if needs_consolidation

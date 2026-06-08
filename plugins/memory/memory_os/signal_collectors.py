@@ -722,6 +722,8 @@ def _proposal_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[
 
 def _candidate_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
     records = _candidate_queue_records(roots)
+    triage_records = _read_candidate_triage_records(roots)
+    active_count = _active_candidate_count(records, triage_records)
     kind_values = {str(record.get("kind") or record.get("candidate_kind") or "") for record in records}
     bridge_states = {
         str(record.get("bridge_state") or record.get("candidate_bridge_state") or "")
@@ -734,6 +736,8 @@ def _candidate_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict
         "available": bool(records) or base["available"],
         "record_count": len(records),
         "candidate_count": len(records),
+        "active_candidate_count": active_count,
+        "fleeting_candidate_count": len(records) - active_count,
         "private_candidate_count": sum(1 for record in records if record.get("visibility") == "private" or record.get("is_private") is True),
         "public_candidate_count": sum(1 for record in records if record.get("visibility") == "public" or record.get("is_private") is False),
         "latest_candidate_at": _latest_record_time(records),
@@ -747,6 +751,7 @@ def _owner_review_pressure_payload(roots: MemoryOSRoots, base: dict[str, Any]) -
     owner_actions = _read_jsonl(owner_actions_path(roots))
     proposal_items = _proposal_queue_items(roots)
     candidate_records = _candidate_queue_records(roots)
+    triage_records = _read_candidate_triage_records(roots)
     advisor_records = _read_jsonl(roots.hermes_home / "system-modules" / "left_brain_advisor" / "reports.jsonl")
     findings: list[dict[str, Any]] = []
     for record in advisor_records:
@@ -762,6 +767,7 @@ def _owner_review_pressure_payload(roots: MemoryOSRoots, base: dict[str, Any]) -
         record
         for record in candidate_records
         if str(record.get("state") or record.get("status") or "pending") in {"pending", "candidate", "needs_review"}
+        and _candidate_effective_state(record, triage_records) != "fleeting"
     ]
     action_required = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "action_required")
     review_suggested = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "review_suggested")
@@ -1037,19 +1043,52 @@ def _profile_config_paths(roots: MemoryOSRoots) -> list[Path]:
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """Read a JSONL file, return list of parsed dicts."""
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+        line = line.strip()
+        if not line:
             continue
         try:
-            parsed = json.loads(line)
+            records.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
     return records
+
+
+def _read_candidate_triage_records(roots: MemoryOSRoots) -> list[dict[str, Any]]:
+    """Read candidate_triage.jsonl, newest first."""
+    path = roots.memory_os_root / "crystallized" / "candidate_triage.jsonl"
+    records = _read_jsonl(path)
+    records.reverse()  # newest first
+    return records
+
+
+def _candidate_effective_state(
+    candidate: dict[str, Any],
+    triage_records: list[dict[str, Any]],
+) -> str:
+    """Resolve effective state for a raw candidate dict (JSONL line)."""
+    cid = str(candidate.get("candidate_id") or "")
+    if not cid:
+        return ""
+    for rec in triage_records:
+        if str(rec.get("candidate_id") or "") == cid:
+            return str(rec.get("target_state") or "")
+    return str(candidate.get("bridge_state") or "")
+
+
+def _active_candidate_count(
+    records: list[dict[str, Any]],
+    triage_records: list[dict[str, Any]],
+) -> int:
+    """Return count of candidates NOT tagged as fleeting."""
+    return sum(
+        1 for c in records
+        if _candidate_effective_state(c, triage_records) != "fleeting"
+    )
 
 
 def _safe_jobs(path: Path) -> list[dict[str, Any]]:

@@ -17,6 +17,13 @@ from .store import MemoryOSStore, _format_frontmatter
 
 INACTIVE_CANONICAL_STATES = {"owner_revoked", "revoked", "demoted"}
 
+# Triage action types for candidate_aggregation lane
+CANDIDATE_TRIAGE_ACTIONS = frozenset({"promote", "demote", "fleeting", "discard"})
+CANDIDATE_TRIAGE_FILE = "candidate_triage.jsonl"
+
+# Default TTL for auto-demote (72 hours)
+CANDIDATE_DEMOTE_TTL_SECONDS = 259200
+
 
 class CrystallizedApprovalError(ValueError):
     """Raised when a candidate lacks crystallized-memory approval."""
@@ -106,6 +113,18 @@ class CrystallizedMemoryService:
                 if str(record.frontmatter.get("id") or "") == normalized:
                     return record
         return None
+
+    def find_records_by_candidate_id(self, candidate_id: str) -> list[CrystallizedRecord]:
+        """Return all crystallized records with the given candidate_id, if any."""
+        normalized = str(candidate_id or "").strip()
+        if not normalized or not self.store.roots.crystallized_root.exists():
+            return []
+        results: list[CrystallizedRecord] = []
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            for record in self.read_records(path.name):
+                if str(record.frontmatter.get("candidate_id") or "") == normalized:
+                    results.append(record)
+        return results
 
     def revoke_record(
         self,
@@ -362,3 +381,208 @@ def _datetime(value: datetime | None) -> datetime:
 
 def _timestamp(value: datetime | None) -> str:
     return _datetime(value).isoformat()
+
+
+# ── Candidate triage (candidate_aggregation lane) ──────────────────────────
+
+
+def append_candidate_triage(
+    store: MemoryOSStore,
+    *,
+    candidate_id: str,
+    action: str,
+    target_state: str,
+    reason: str,
+    cluster_key: str = "",
+    execution_gate_envelope_id: str = "",
+    now: datetime | None = None,
+) -> Path:
+    """Append a triage action record to candidate_triage.jsonl.
+
+    Append-only. Never modifies candidates.jsonl. Never crystallizes.
+    The lane reads both files at query time and resolves effective state.
+    """
+    if action not in CANDIDATE_TRIAGE_ACTIONS:
+        raise ValueError(f"invalid triage action: {action!r}; expected one of {CANDIDATE_TRIAGE_ACTIONS}")
+    path = store.roots.crystallized_root / CANDIDATE_TRIAGE_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "candidate_id": str(candidate_id),
+        "action": str(action),
+        "target_state": str(target_state),
+        "reason": str(reason),
+        "cluster_key": str(cluster_key or ""),
+        "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
+        "created_at": _timestamp(now),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    append_audit(
+        store.roots.audit_path,
+        action="candidate_triage_appended",
+        status="ok",
+        target=str(path),
+        details={"candidate_id": candidate_id, "action": action, "target_state": target_state},
+    )
+    return path
+
+
+def read_candidate_triage(store: MemoryOSStore) -> list[dict[str, Any]]:
+    """Read all triage actions from candidate_triage.jsonl, newest first."""
+    path = store.roots.crystallized_root / CANDIDATE_TRIAGE_FILE
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    records.reverse()  # newest first
+    return records
+
+
+def resolve_candidate_effective_state(
+    candidate: CrystallizedCandidate,
+    triage_records: list[dict[str, Any]],
+) -> str:
+    """Resolve a candidate's effective state given original + triage history.
+
+    The latest triage action for this candidate_id overrides its bridge_state.
+    No triage = original bridge_state. This is computed at read time, never
+    written back to candidates.jsonl.
+    """
+    cid = candidate.candidate_id
+    for rec in triage_records:
+        if rec.get("candidate_id") == cid:
+            return str(rec.get("target_state", candidate.bridge_state))
+    return candidate.bridge_state
+
+
+def compact_candidate_queue(
+    store: MemoryOSStore,
+    *,
+    archive_path: Path | None = None,
+    retention_days: int = 7,
+) -> int:
+    """Archive-and-compact: move stale candidates to archive file.
+
+    A candidate is 'active' (stays in main file) if:
+      - bridge_state=owner_eligible (owner needs to see it)
+      - resolves to owner_eligible via triage
+      - created_age < retention_days
+
+    Others are appended to archive and excluded from the main file.
+    Returns count of archived candidates.
+    Never deletes anything (append-only, INV-3).
+    """
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    if not candidates_path.exists():
+        return 0
+
+    now = datetime.now(timezone.utc)
+    triage = read_candidate_triage(store)
+    lines = candidates_path.read_text(encoding="utf-8").splitlines()
+    active: list[str] = []
+    archived: list[str] = []
+    archived_count = 0
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        raw = json.loads(line)
+        cand = CrystallizedCandidate(
+            candidate_id=str(raw["candidate_id"]),
+            kind=str(raw["kind"]),
+            body=str(raw["body"]),
+            source_event_ids=[str(i) for i in raw.get("source_event_ids", [])],
+            sensitivity=str(raw.get("sensitivity", "private")),
+            tags=[str(t) for t in (raw.get("tags") or [])],
+            bridge_state=str(raw.get("bridge_state", "")),
+            created_at=str(raw.get("created_at") or ""),
+        )
+        effective = resolve_candidate_effective_state(cand, triage)
+        age = _candidate_age_seconds(cand.created_at, now)
+
+        if effective == "owner_eligible" or age < retention_days * 86400:
+            active.append(line)
+        else:
+            archived.append(line)
+            archived_count += 1
+
+    # Rewrite main file with active candidates only
+    candidates_path.write_text("\n".join(active) + "\n", encoding="utf-8")
+
+    # Append archived to archive file (never delete)
+    if archived and archive_path is not None:
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+        if archive_path.exists():
+            existing = archive_path.read_text(encoding="utf-8").rstrip() + "\n"
+        else:
+            existing = ""
+        archive_path.write_text(existing + "\n".join(archived) + "\n", encoding="utf-8")
+
+    append_audit(
+        store.roots.audit_path,
+        action="candidate_queue_compacted",
+        status="ok",
+        target=str(candidates_path),
+        details={"archived_count": archived_count, "retention_days": retention_days},
+    )
+    return archived_count
+
+
+def _candidate_age_seconds(created_at: str, now: datetime) -> float:
+    """Parse a candidate's created_at timestamp and return age in seconds."""
+    if not created_at:
+        return float("inf")  # no timestamp = keep
+    try:
+        parsed = datetime.fromisoformat(created_at)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return (now - parsed).total_seconds()
+    except (ValueError, TypeError):
+        return float("inf")
+
+
+def find_crystallized_by_body(
+    store: MemoryOSStore,
+    body: str,
+    *,
+    min_similarity: float = 0.85,
+) -> list[dict[str, Any]]:
+    """Find crystallized records whose body overlaps with the given text.
+
+    Used by promote logic (candidate_aggregation, backfill) to avoid
+    re-promoting candidates that are already crystallized (dedup).
+
+    Uses exact substring overlap (normalized) rather than ML similarity —
+    deterministic, cheap, and safe for owner-review dedup.
+
+    Returns list of matching crystallized records with id, body, file_name.
+    Empty list = no match (safe to promote).
+    """
+    norm_body = body.strip().lower()
+    if not norm_body or len(norm_body) < 20:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for path in sorted(store.roots.crystallized_root.glob("*.md")):
+        records = CrystallizedMemoryService(store).read_records(path.name)
+        for record in records:
+            rec_body = (record.body or "").strip().lower()
+            # Simple overlap check: is the candidate body a substring of
+            # the crystallized body, or vice versa?
+            if not rec_body:
+                continue
+            if norm_body in rec_body or rec_body in norm_body:
+                results.append({
+                    "record_id": record.frontmatter.get("id", ""),
+                    "candidate_id": record.frontmatter.get("candidate_id", ""),
+                    "body_preview": record.body[:120] if record.body else "",
+                    "file_name": record.file_name,
+                    "canonical_state": record.frontmatter.get("canonical_state", "active"),
+                })
+    return results
+
