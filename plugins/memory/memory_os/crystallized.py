@@ -39,6 +39,7 @@ class CrystallizedCandidate:
     tags: list[str] | None = None
     bridge_state: str = ""
     created_at: str = ""
+    rejection_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -307,6 +308,7 @@ def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
                 tags=[str(item) for item in (raw.get("tags") or [])],
                 bridge_state=str(raw.get("bridge_state", "")),
                 created_at=str(raw.get("created_at") or ""),
+                rejection_count=int(raw.get("rejection_count", 0)),
             )
         )
     return candidates

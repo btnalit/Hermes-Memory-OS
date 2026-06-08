@@ -72,6 +72,9 @@ _CHAT_PATTERNS: frozenset[str] = frozenset({
 # Minimum body length to be considered substantive
 _MIN_SUBSTANTIVE_CHARS = 15
 
+# Auto-demote candidates that have been rejected N+ times by owner
+_REJECTION_THRESHOLD = 3
+
 
 # ── Public lane API ─────────────────────────────────────────────────────
 
@@ -117,9 +120,14 @@ def run_candidate_aggregation_lane(
         if not crystallized_service.find_records_by_candidate_id(c.candidate_id)
     ]
 
-    promote_results = _cluster_and_promote(pending, store, envelope_id=execution_gate_envelope_id, now=_now)
-    demote_results = _demote_aged(pending, store, envelope_id=execution_gate_envelope_id, now=_now)
-    fleeting_results = _tag_fleeting(pending, store, envelope_id=execution_gate_envelope_id, now=_now)
+    # Shared processed_ids set ensures each candidate is handled by exactly
+    # one stage — prevents duplicate/contradictory triage records.
+    processed_ids: set[str] = set()
+
+    rejected_results = _auto_demote_rejected(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    promote_results = _cluster_and_promote(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    demote_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    fleeting_results = _tag_fleeting(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
 
     compact_count = 0
     if promote_results["promoted_count"] + demote_results["demoted_count"] > 0:
@@ -133,6 +141,7 @@ def run_candidate_aggregation_lane(
         "already_triaged": len(already_triaged),
         "promoted_count": promote_results["promoted_count"],
         "promoted_clusters": promote_results["clusters"],
+        "rejected_demoted_count": rejected_results["rejected_demoted_count"],
         "demoted_count": demote_results["demoted_count"],
         "fleeting_count": fleeting_results["fleeting_count"],
         "compacted_count": compact_count,
@@ -144,12 +153,51 @@ def run_candidate_aggregation_lane(
     }
 
 
+def _auto_demote_rejected(
+    candidates: list[CrystallizedCandidate],
+    store: MemoryOSStore,
+    processed_ids: set[str],
+    *,
+    envelope_id: str = "",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Auto-demote candidates whose rejection_count >= _REJECTION_THRESHOLD.
+
+    Prevents repeated presentation of candidates the owner has explicitly
+    rejected multiple times. Uses the rejection_count on the candidate
+    dataclass (populated from candidates.jsonl).
+    """
+    _now = now or datetime.now(timezone.utc)
+    demoted_count = 0
+
+    for c in candidates:
+        if c.candidate_id in processed_ids:
+            continue
+        if c.bridge_state in ("demoted", "fleeting"):
+            continue
+        if c.rejection_count >= _REJECTION_THRESHOLD:
+            append_candidate_triage(
+                store,
+                candidate_id=c.candidate_id,
+                action="demote",
+                target_state="demoted",
+                reason=f"auto-demote: rejection_count={c.rejection_count} >= threshold={_REJECTION_THRESHOLD}",
+                execution_gate_envelope_id=envelope_id,
+                now=_now,
+            )
+            processed_ids.add(c.candidate_id)
+            demoted_count += 1
+
+    return {"rejected_demoted_count": demoted_count}
+
+
 # ── Cluster + promote ───────────────────────────────────────────────────
 
 
 def _cluster_and_promote(
     candidates: list[CrystallizedCandidate],
     store: MemoryOSStore,
+    processed_ids: set[str],
     *,
     envelope_id: str = "",
     now: datetime | None = None,
@@ -159,11 +207,13 @@ def _cluster_and_promote(
 
     Heuristics only — never crystallizes. Only promotes to owner_eligible.
     Cluster criteria: shared keyword matches, same kind, shared source_event_ids.
+    Skips candidates already written by earlier pipeline stages via processed_ids.
     """
     _now = now or datetime.now(timezone.utc)
     candidates_for_promote = [
         c for c in candidates
-        if c.bridge_state in ("", "inner_drive_candidate")
+        if c.candidate_id not in processed_ids
+        and c.bridge_state in ("", "inner_drive_candidate")
     ]
 
     # Build cluster map: cluster_key -> list of candidates
@@ -196,6 +246,7 @@ def _cluster_and_promote(
                     execution_gate_envelope_id=envelope_id,
                     now=_now,
                 )
+                processed_ids.add(overflow.candidate_id)
 
         # Extract matched keywords for the reason
         matched_keywords = _matched_keywords(members)
@@ -218,6 +269,7 @@ def _cluster_and_promote(
                     execution_gate_envelope_id=envelope_id,
                     now=_now,
                 )
+                processed_ids.add(member.candidate_id)
                 continue
             append_candidate_triage(
                 store,
@@ -229,6 +281,7 @@ def _cluster_and_promote(
                 execution_gate_envelope_id=envelope_id,
                 now=_now,
             )
+            processed_ids.add(member.candidate_id)
             promoted_count += 1
         cluster_summaries.append({
             "cluster_key": cluster_key,
@@ -245,16 +298,22 @@ def _cluster_and_promote(
 def _demote_aged(
     candidates: list[CrystallizedCandidate],
     store: MemoryOSStore,
+    processed_ids: set[str],
     *,
     envelope_id: str = "",
     now: datetime | None = None,
     ttl_seconds: int = CANDIDATE_DEMOTE_TTL_SECONDS,
 ) -> dict[str, Any]:
-    """Auto-demote candidates past TTL with no triage action."""
+    """Auto-demote candidates past TTL with no triage action.
+
+    Skips candidates already written by earlier pipeline stages via processed_ids.
+    """
     _now = now or datetime.now(timezone.utc)
     demoted_count = 0
 
     for c in candidates:
+        if c.candidate_id in processed_ids:
+            continue
         if c.bridge_state in ("owner_eligible", "demoted", "fleeting"):
             continue
         age = _candidate_age_seconds(c.created_at, _now)
@@ -268,6 +327,7 @@ def _demote_aged(
                 execution_gate_envelope_id=envelope_id,
                 now=_now,
             )
+            processed_ids.add(c.candidate_id)
             demoted_count += 1
 
     return {"demoted_count": demoted_count}
@@ -279,15 +339,21 @@ def _demote_aged(
 def _tag_fleeting(
     candidates: list[CrystallizedCandidate],
     store: MemoryOSStore,
+    processed_ids: set[str],
     *,
     envelope_id: str = "",
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Tag no-decision-content candidates as fleeting."""
+    """Tag no-decision-content candidates as fleeting.
+
+    Skips candidates already written by earlier pipeline stages via processed_ids.
+    """
     _now = now or datetime.now(timezone.utc)
     fleeting_count = 0
 
     for c in candidates:
+        if c.candidate_id in processed_ids:
+            continue
         if c.bridge_state in ("owner_eligible", "demoted", "fleeting"):
             continue
         if _is_fleeting_candidate(c):
@@ -300,6 +366,7 @@ def _tag_fleeting(
                 execution_gate_envelope_id=envelope_id,
                 now=_now,
             )
+            processed_ids.add(c.candidate_id)
             fleeting_count += 1
 
     return {"fleeting_count": fleeting_count}
