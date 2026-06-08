@@ -460,7 +460,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 8
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 9
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert {job["name"] for job in jobs} == {
@@ -472,6 +472,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
         "memory-os-candidate-aggregation",
+        "memory-os-index-sync",
     }
 
 

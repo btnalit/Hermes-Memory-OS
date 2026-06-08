@@ -72,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expression-feedback-schedule", default="0 5 * * 0")
     parser.add_argument("--memory-sources-feedback-schedule", default="30 10 * * *")
     parser.add_argument("--candidate-aggregation-schedule", default="0 */6 * * *")
+    parser.add_argument("--index-sync-schedule", default="*/30 * * * *")
     parser.add_argument(
         "--cron-profile",
         choices=("active-closure", "full"),

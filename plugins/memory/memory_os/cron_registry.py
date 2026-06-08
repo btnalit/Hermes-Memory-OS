@@ -136,6 +136,19 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         no_agent=True,
         requires_boundary_report=True,
     ),
+    MemoryOSCronSpec(
+        key="index_sync",
+        name="memory-os-index-sync",
+        raw_script="memory_os_index_sync.py",
+        wrapper_script="memory_os_cron_index_sync_gate.py",
+        lane_id="index_sync",
+        helper_kind="local_helper",
+        schedule_arg="index_sync_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
 )
 
 

@@ -40,6 +40,7 @@ SOURCE_EXECUTION_REPORT_HELPER = REPO_ROOT / "scripts" / "memory_os_execution_re
 SOURCE_OWNER_CRON_ONBOARDING = REPO_ROOT / "scripts" / "memory_os_owner_cron_onboarding.py"
 SOURCE_EXECUTION_GATE_RUNNER = REPO_ROOT / "scripts" / "memory_os_execution_gate_runner.py"
 SOURCE_CANDIDATE_AGGREGATION_LANE = REPO_ROOT / "scripts" / "memory_os_candidate_aggregation_lane.py"
+SOURCE_INDEX_SYNC = REPO_ROOT / "scripts" / "memory_os_index_sync.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -842,6 +843,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "proposal_followups_ops_gate": SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE,
         "execution_report_helper": SOURCE_EXECUTION_REPORT_HELPER,
         "candidate_aggregation_lane": SOURCE_CANDIDATE_AGGREGATION_LANE,
+        "index_sync": SOURCE_INDEX_SYNC,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():
@@ -925,6 +927,8 @@ def _run_owner_cron_onboarding(
         memory_sources_feedback_schedule,
         "--candidate-aggregation-schedule",
         "0 */6 * * *",
+        "--index-sync-schedule",
+        "*/30 * * * *",
         "--apply",
     ]
     if owner_approved:

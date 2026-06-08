@@ -102,6 +102,7 @@ class MemoryOSIndex:
         conn = sqlite3.connect(self.roots.index_path)
         try:
             _initialize_schema(conn)
+            before = self.counts()
             _index_events(conn, store)
             _update_event_source_state(conn, store)
             _clear_table(conn, "working_items")
@@ -115,6 +116,29 @@ class MemoryOSIndex:
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
+            after = self.counts()
+            append_audit(
+                self.roots.audit_path,
+                action="index_sync",
+                status="ok",
+                target=str(self.roots.index_path),
+                details={
+                    "events": f"{before.get('events',0)}->{after.get('events',0)}",
+                    "working_items": f"{before.get('working_items',0)}->{after.get('working_items',0)}",
+                    "crystallized_candidates": f"{before.get('crystallized_candidates',0)}->{after.get('crystallized_candidates',0)}",
+                    "crystallized_records": f"{before.get('crystallized_records',0)}->{after.get('crystallized_records',0)}",
+                    "audit_entries": f"{before.get('audit_entries',0)}->{after.get('audit_entries',0)}",
+                },
+            )
+            return after
+        except sqlite3.Error as exc:
+            append_audit(
+                self.roots.audit_path,
+                action="index_sync_failed",
+                status="warning",
+                target=str(self.roots.index_path),
+                details={"error": str(exc)},
+            )
             return self.counts()
         finally:
             conn.close()

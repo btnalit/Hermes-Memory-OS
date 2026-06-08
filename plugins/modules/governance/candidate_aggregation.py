@@ -205,6 +205,20 @@ def _cluster_and_promote(
             f"cluster_key={cluster_key})"
         )
         for member in promote_batch:
+            # Index-based near-duplicate dedup (fail-open)
+            dedup_hit = _check_index_dedup(store, member)
+            if dedup_hit is not None:
+                append_candidate_triage(
+                    store,
+                    candidate_id=member.candidate_id,
+                    action="demote",
+                    target_state="demoted",
+                    reason=f"dedup_skip: similar to crystallized {dedup_hit}",
+                    cluster_key=cluster_key,
+                    execution_gate_envelope_id=envelope_id,
+                    now=_now,
+                )
+                continue
             append_candidate_triage(
                 store,
                 candidate_id=member.candidate_id,
@@ -289,6 +303,38 @@ def _tag_fleeting(
             fleeting_count += 1
 
     return {"fleeting_count": fleeting_count}
+
+
+# ── Index-based near-duplicate dedup (fail-open) ──────────────────────
+
+
+def _check_index_dedup(
+    store: MemoryOSStore,
+    candidate: CrystallizedCandidate,
+) -> str | None:
+    """Check FTS5 index for crystallized records near-duplicate to candidate body.
+
+    Returns the matching crystallized record_id if a near-duplicate exists,
+    or None if the candidate is novel (or index is unavailable).
+
+    Fail-open: index missing/stale/search_error → None (promote proceeds).
+    """
+    body = (candidate.body or "").strip()
+    if not body or len(body) < _MIN_SUBSTANTIVE_CHARS:
+        return None
+    try:
+        from plugins.memory.memory_os.index import MemoryOSIndex
+
+        index = MemoryOSIndex(store.roots)
+        result = index.search(body, limit=5)
+        if result.get("mode") in ("missing",):
+            return None
+        for hit in result.get("hits", []):
+            if hit.get("record_type") == "crystallized_record":
+                return hit.get("record_id") or hit.get("title") or "unknown"
+    except Exception:
+        return None
+    return None
 
 
 # ── Heuristics ──────────────────────────────────────────────────────────
