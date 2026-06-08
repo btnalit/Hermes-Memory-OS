@@ -123,6 +123,19 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         prompt_ref="memory_sources_feedback_agent_prompt",
         no_agent=False,
     ),
+    MemoryOSCronSpec(
+        key="candidate_aggregation",
+        name="memory-os-candidate-aggregation",
+        raw_script="memory_os_candidate_aggregation_lane.py",
+        wrapper_script="memory_os_cron_candidate_aggregation_gate.py",
+        lane_id="candidate_aggregation",
+        helper_kind="bounded_reversible_queue",
+        schedule_arg="candidate_aggregation_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=True,
+    ),
 )
 
 
