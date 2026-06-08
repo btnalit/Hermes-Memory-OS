@@ -14,6 +14,7 @@ import shlex
 import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
+from pathlib import Path
 
 
 PREVIEW_LIMIT = 4000
@@ -182,6 +183,7 @@ def classify_report(command_results: dict[str, dict[str, Any]]) -> dict[str, lis
     _require_json_field(command_results, "memory_sources_stats", ("boundary_true_count",), 0, "memory_sources_boundary_true", passed, fail)
     _require_no_forbidden_fields(command_results, "memory_sources_stats", passed, fail)
     _require_cognitive_loop_timer_active(command_results, passed, fail)
+    _require_prefetch_config_ok(command_results, passed, warn, fail)
 
     return {"pass": _dedupe(passed), "warn": _dedupe(warn), "fail": _dedupe(fail)}
 
@@ -477,6 +479,38 @@ def _preview(text: str) -> str:
     if len(text) <= PREVIEW_LIMIT:
         return text.strip()
     return text[:PREVIEW_LIMIT].strip() + "...[truncated]"
+
+
+def _require_prefetch_config_ok(
+    results: dict[str, dict[str, Any]],
+    passed: list[dict[str, Any]],
+    warn: list[dict[str, Any]],
+    fail: list[dict[str, Any]],
+) -> None:
+    """Check that prefetch_char_budget >= 5500 (in existing config.json)."""
+    import os
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    if not hermes_home:
+        fail.append({"code": "prefetch_config_no_hermes_home"})
+        return
+
+    memory_os_root = Path(hermes_home) / "memory-os"
+    config_path = memory_os_root / "config.json"
+    if not config_path.exists():
+        warn.append({"code": "prefetch_config_no_config_json"})
+        return
+
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        fail.append({"code": "prefetch_config_read_error"})
+        return
+
+    budget = cfg.get("prefetch_char_budget", 0)
+    if budget >= 5500:
+        passed.append({"code": "prefetch_char_budget_ok", "value": budget})
+    else:
+        fail.append({"code": "prefetch_char_budget_low", "value": budget})
 
 
 if __name__ == "__main__":

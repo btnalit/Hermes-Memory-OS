@@ -676,6 +676,36 @@ run_installer() {
   printf '  %q' "${args[@]}"
   echo
   "${args[@]}"
+
+  # Install cleanup_expired_working.py script
+  local cleanup_src="${REPO_ROOT}/scripts/cleanup_expired_working.py"
+  local cleanup_dst="${HERMES_HOME}/scripts/cleanup_expired_working.py"
+  if [[ -f "${cleanup_src}" ]]; then
+    mkdir -p "${HERMES_HOME}/scripts"
+    install -m 755 "${cleanup_src}" "${cleanup_dst}"
+    echo "  ✅ cleanup_expired_working.py installed to ${cleanup_dst}"
+  else
+    echo "  ⚠️  cleanup_expired_working.py not found at ${cleanup_src}"
+  fi
+
+  # Create working memory cleanup cron (no_agent, watchdog pattern)
+  if command_exists hermes && [[ "${DRY_RUN}" != "1" ]]; then
+    local cron_name="memory-os-working-cleanup"
+    local cron_present=0
+    cron_present=$(hermes cron list 2>/dev/null | grep -c "${cron_name}" || true)
+    if [[ "${cron_present}" -eq 0 ]]; then
+      hermes cron create \
+        --name "${cron_name}" \
+        --schedule "0 3 * * 0" \
+        --script cleanup_expired_working.py \
+        --no-agent \
+        --deliver local 2>/dev/null && \
+        echo "  ✅ Cron '${cron_name}' created (Sun 03:00 CST, 7d retention)" || \
+        echo "  ⚠️  Could not create cron '${cron_name}' (hermes not fully configured?)"
+    else
+      echo "  ✅ Cron '${cron_name}' already exists"
+    fi
+  fi
 }
 
 verify_install() {

@@ -307,6 +307,14 @@ def install_plugin(
         mode=hindsight_mode,
         dry_run=dry_run,
     )
+    config_defaults_report = _ensure_config_defaults(
+        hermes_home,
+        dry_run=dry_run,
+    )
+    expired_cleanup_report = _run_expired_working_migration(
+        hermes_home,
+        dry_run=dry_run,
+    )
     runtime_artifacts: list[Path] = []
     if install_runtime or enable_runtime:
         runtime_artifacts = _write_runtime_artifacts(
@@ -524,6 +532,8 @@ def install_plugin(
         "low_clue_recall_config": low_clue_recall_config or {},
         "hindsight_mode": hindsight_mode,
         "hindsight_adoption": hindsight_adoption,
+        "config_defaults": config_defaults_report,
+        "expired_working_cleanup": expired_cleanup_report,
         "dry_run": dry_run,
     }
 
@@ -1396,6 +1406,91 @@ def main() -> int:
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _ensure_config_defaults(
+    hermes_home: Path,
+    *,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """Apply safe defaults to existing config.json without overwriting user values."""
+    # Lazy-import to avoid circular import during install before plugin is copied
+    from plugins.memory.memory_os.config import load_config, save_config
+
+    config_path = hermes_home / "memory-os" / "config.json"
+    if not config_path.exists():
+        return {"status": "no_config", "reason": "config.json not found"}
+    cfg = load_config(hermes_home)
+    changed: list[str] = []
+    
+    if cfg.get("prefetch_char_budget", 0) < 5500:
+        cfg["prefetch_char_budget"] = 5500
+        changed.append("prefetch_char_budget: 2200 → 5500")
+    
+    if not changed:
+        return {"status": "already_current", "changes": changed}
+    
+    if not dry_run:
+        save_config(cfg, hermes_home)
+    
+    return {
+        "status": "updated" if not dry_run else "would_update",
+        "changes": changed,
+    }
+
+
+def _run_expired_working_migration(
+    hermes_home: Path,
+    *,
+    dry_run: bool = False,
+) -> dict[str, object]:
+    """One-time migration: remove expired working items older than 7 days."""
+    from datetime import datetime, timezone
+    working_path = hermes_home / "memory-os" / "working" / "lingering.json"
+    if not working_path.exists():
+        return {"status": "no_working_file", "reason": "lingering.json not found"}
+    
+    import json
+    doc = json.loads(working_path.read_text(encoding="utf-8"))
+    items = doc.get("items", [])
+    now = datetime.now(timezone.utc)
+    
+    before = len(items)
+    surviving = []
+    removed = 0
+    
+    for item in items:
+        if item.get("status") != "expired":
+            surviving.append(item)
+            continue
+        ts_str = item.get("updated_at") or item.get("created_at")
+        if not ts_str:
+            surviving.append(item)
+            continue
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except (ValueError, TypeError):
+            surviving.append(item)
+            continue
+        age_days = (now - ts).total_seconds() / 86400
+        if age_days > 7:
+            removed += 1
+            continue
+        surviving.append(item)
+    
+    if removed == 0:
+        return {"status": "no_expired_old", "before": before, "after": before}
+    
+    if not dry_run:
+        doc["items"] = surviving
+        working_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
+    
+    return {
+        "status": "cleaned" if not dry_run else "would_clean",
+        "before": before,
+        "after": len(surviving),
+        "removed": removed,
+    }
 
 
 if __name__ == "__main__":
