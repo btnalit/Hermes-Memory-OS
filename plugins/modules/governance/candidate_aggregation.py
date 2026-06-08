@@ -326,12 +326,23 @@ def _check_index_dedup(
         from plugins.memory.memory_os.index import MemoryOSIndex
 
         index = MemoryOSIndex(store.roots)
-        result = index.search(body, limit=5)
-        if result.get("mode") in ("missing",):
-            return None
-        for hit in result.get("hits", []):
-            if hit.get("record_type") == "crystallized_record":
-                return hit.get("record_id") or hit.get("title") or "unknown"
+        # Split into sentences and search each one independently.
+        # Trigram FTS5 with AND semantics needs ALL trigrams in the
+        # query to match; appending new content or phrasing differences
+        # at the sentence level would miss near-duplicates.  By searching
+        # per sentence, a single matching sentence is enough to flag.
+        import re
+        sentences = re.split(r"(?<=[。？！.!?\n])\s*", body)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            result = index.search(sentence, limit=3)
+            if result.get("mode") in ("missing",):
+                return None
+            for hit in result.get("hits", []):
+                if hit.get("record_type") == "crystallized_record":
+                    return hit.get("record_id") or hit.get("title") or "unknown"
     except Exception:
         return None
     return None
