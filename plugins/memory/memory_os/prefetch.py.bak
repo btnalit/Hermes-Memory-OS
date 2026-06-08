@@ -11,11 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
-from .crystallized import (
-    read_candidate_queue,
-    _parse_markdown_records,
-    is_active_crystallized_frontmatter,
-)
+from .crystallized import read_candidate_queue
 from .low_clue_recall import build_low_clue_guard_lines, normalize_low_clue_recall_config
 from .jsonl_io import build_error_record
 from .memory_sources import (
@@ -788,30 +784,11 @@ def _relationship_lines(store: MemoryOSStore) -> list[str]:
 
 
 def _crystallized_lines(store: MemoryOSStore) -> list[str]:
-    """Record-level crystallized memory lines.
-
-    Parses each .md file into individual records, filters by canonical_state
-    (active only), and produces one line per active record.  Solves two bugs:
-
-    * accumulation decay:  file-level clip(260) from first frontmatter caused
-      records appended later to be invisible ("approval funnel narrowing").
-    * revocation leak:     file-level read ignored canonical_state entirely,
-      so revoked records still appeared in prefetch context.
-    """
     lines: list[str] = []
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
-        try:
-            content = path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        for frontmatter, body in _parse_markdown_records(content):
-            if not is_active_crystallized_frontmatter(frontmatter):
-                continue
-            kind = str(frontmatter.get("kind", "item"))
-            text = _redact(_clip(body, 220))
-            if not text or _is_diagnostic_style_seed(text):
-                continue
-            lines.append(f"- {path.name}/{kind}: {text}")
+        text = _crystallized_snippet(path)
+        if text:
+            lines.append(f"- {path.name}: {text}")
     return lines
 
 
@@ -1129,6 +1106,16 @@ def _file_snippet(path: Path) -> str:
         return _redact(_clip(path.read_text(encoding="utf-8"), 260))
     except Exception:
         return ""
+
+
+def _crystallized_snippet(path: Path) -> str:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    parts = content.split("---", 2)
+    body = parts[2] if len(parts) == 3 else content
+    return _redact(_clip(body, 260))
 
 
 def _format(sections: list[tuple[str, list[str]]]) -> str:
