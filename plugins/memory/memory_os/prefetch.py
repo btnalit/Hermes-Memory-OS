@@ -33,6 +33,8 @@ DIAGNOSTIC_SUPPRESSION_NOTICE = (
     "Historical recall suppressed for diagnostic query. Use Current Memory-OS Runtime Facts only."
 )
 CONTINUITY_SELECTOR_SCHEMA_VERSION = "memory-os.continuity_selector.v0"
+# Max working items shown per file (most recent first).
+WORKING_ITEMS_PER_FILE = 20
 
 _BRIDGE_SEED_SLOTS = {
     "foreground": 2,
@@ -767,14 +769,22 @@ def _working_lines(store: MemoryOSStore) -> list[str]:
             document = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
+        # Collect non-expired items, sort by recency, cap per file
+        candidates: list[tuple[dict, str]] = []
         for item in document.get("items", []):
             if not isinstance(item, dict):
+                continue
+            if item.get("status") == "expired":
                 continue
             text = _redact(_clip(str(item.get("text", "")), 220))
             if _is_diagnostic_style_seed(text):
                 continue
             if text:
-                lines.append(f"- {path.stem}/{item.get('kind', 'item')}: {text}")
+                candidates.append((item, text))
+        # Newest first (ISO 8601 sorts lexicographically)
+        candidates.sort(key=lambda x: x[0].get("updated_at", ""), reverse=True)
+        for item, text in candidates[:WORKING_ITEMS_PER_FILE]:
+            lines.append(f"- {path.stem}/{item.get('kind', 'item')}: {text}")
     return lines
 
 

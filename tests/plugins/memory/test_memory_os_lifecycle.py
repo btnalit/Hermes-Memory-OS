@@ -208,7 +208,7 @@ def test_memory_os_config_schema_and_save_config(tmp_path):
 
     schema = {field["key"]: field for field in provider.get_config_schema()}
     assert schema["capture_policy"]["default"] == "summary_only"
-    assert schema["prefetch_char_budget"]["default"] == 2200
+    assert schema["prefetch_char_budget"]["default"] == 5500
     assert schema["hindsight_adapter_enabled"]["default"] is False
     assert schema["allow_full_local_capture"]["default"] is False
     assert schema["l4"]["default"]["kill_switch_enabled"] is False
