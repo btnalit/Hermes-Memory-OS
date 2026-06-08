@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""ExecutionGate wrapper for Memory-OS-owned Hermes cron helpers."""
+"""Memory-OS execution gate runner.
+
+ExecutionGate wrapper for Memory-OS-owned Hermes cron helpers.
+Generates time-bounded permits for cron-lane subprocesses and
+records completion evidence in the gate envelope journal.
+
+Each permit carries:
+  - envelope_id (xgate_<timestamp>_<hash>)
+  - expires_at  (bounded by lane risk_class via _expiry_seconds)
+  - lane_id and risk_class for structural_write_gate validation
+  - scope hash for write-surface scope checking (where applicable)
+"""
 
 from __future__ import annotations
 
