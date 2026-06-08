@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from eval.memory_os.data.rh31_synthetic import load_cases, load_corpus
-from eval.memory_os.runner.registry import FIRST_SIX_ADAPTERS, default_adapter_registry
+from eval.memory_os.runner.registry import default_adapter_registry
 from eval.memory_os.runner.retention import build_report_retention_plan
 from eval.memory_os.runner.score import build_summary, scorecard_markdown
 from eval.memory_os.runner.types import Rh31Score

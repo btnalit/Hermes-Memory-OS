@@ -16,7 +16,6 @@ TASK ANCHOR compliance (see 56-lanes/candidate_aggregation/TASK_ANCHOR.md):
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -27,7 +26,6 @@ from plugins.memory.memory_os.crystallized import (
     append_candidate_triage,
     read_candidate_queue,
     read_candidate_triage,
-    resolve_candidate_effective_state,
 )
 from plugins.memory.memory_os.store import MemoryOSStore
 

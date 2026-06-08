@@ -1,7 +1,6 @@
 import argparse
 import json
 import importlib
-import sys
 from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli

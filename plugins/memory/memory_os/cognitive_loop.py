@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
-from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable
 from uuid import uuid4

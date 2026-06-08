@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import functools
 import threading
-import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 

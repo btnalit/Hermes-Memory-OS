@@ -17,7 +17,6 @@ TASK ANCHOR: A1-A7 all enforced. Never crystallizes, never deletes.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -42,7 +41,6 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.candidate_aggregation import (
     _is_fleeting_candidate,
-    _has_signal_keyword,
     _matched_keywords,
     _cluster_key,
 )
@@ -148,7 +146,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Merge clusters ───────────────────────────────────────────────
     clusters = classified["merge_clusters"]
-    promoted_total = 0
     print(f"\n[merge] {len(clusters)} clusters")
     for key, members in sorted(clusters.items(), key=lambda x: -len(x[1])):
         mkw = _matched_keywords(members)
@@ -210,13 +207,13 @@ def main(argv: list[str] | None = None) -> int:
         print("   No candidates were deleted. No crystallized records were written.")
         print(f"   Owner can now review {promoted_count} promoted items via owner_actions.")
     else:
-        print(f"\nℹ️  Dry-run mode. Use --apply --confirm-backfill to write.")
+        print("\nℹ️  Dry-run mode. Use --apply --confirm-backfill to write.")
 
     # Anchor verification
-    print(f"\n🔒 ANCHOR CHECK:")
-    print(f"   actual_crystallized_approval = false (no crystallization in backfill)")
-    print(f"   append-only = true (no deletions)")
-    print(f"   heuristics drive presentation, not crystallization = true")
+    print("\n🔒 ANCHOR CHECK:")
+    print("   actual_crystallized_approval = false (no crystallization in backfill)")
+    print("   append-only = true (no deletions)")
+    print("   heuristics drive presentation, not crystallization = true")
 
     return 0
 

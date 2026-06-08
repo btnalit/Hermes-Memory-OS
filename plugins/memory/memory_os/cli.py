@@ -110,7 +110,6 @@ from .prefetch import continuity_selector_report
 from .prefetch import build_context_router_report
 from .roots import MemoryOSRoots
 from .runtime import MemoryOSRuntime
-from .schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION
 from .session_mirror import SessionMirror
 from .session_mirror import read_session_mirror_apply_records
 from .shadow_journal import ShadowJournalIngestion
