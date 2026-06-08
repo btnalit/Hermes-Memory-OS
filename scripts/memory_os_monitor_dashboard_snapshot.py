@@ -184,7 +184,6 @@ def _monitor_snapshot(
     hindsight: dict[str, Any],
     boundary: list[dict[str, str]],
 ) -> dict[str, Any]:
-    enabled_cron = len([job for job in cron_jobs if job.get("enabled", True)])
     missing_cron = len(set(EXPECTED_CRON_NAMES) - {str(job.get("name") or "") for job in cron_jobs})
     module_error = int(cadence_report.get("error_count") or 0)
     module_findings = int(cadence_report.get("finding_count") or 0)

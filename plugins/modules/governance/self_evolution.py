@@ -945,7 +945,6 @@ def _proposal_shape(scores: list[dict[str, Any]], *, evidence_scoring: Any) -> d
     if top_subject_kind == "memory_sources_feedback":
         rating = ""
     top_score_value = top_score.get("maturity_score", top_score.get("score", ""))
-    evidence_line = _evidence_line(top_score, evidence_by_id=evidence_by_id)
     quality = _proposal_quality(top_score, trigger_rule="feature_maturity_top_signal")
     if rating:
         proposal_class = f"expression_policy:{_safe_key(rating)}"

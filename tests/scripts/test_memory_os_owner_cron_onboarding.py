@@ -132,6 +132,7 @@ def _home_with_helpers(tmp_path: Path, *, platforms: dict[str, list[dict[str, st
         "memory_os_proposal_followups_ops_gate.py",
         "memory_os_expression_feedback_prompt.py",
         "memory_os_memory_sources_feedback_prompt.py",
+        "memory_os_candidate_aggregation_lane.py",
     ):
         scripts.joinpath(helper).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     home.joinpath("channel_directory.json").write_text(
@@ -246,7 +247,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 7
+    assert len(report["operational_cron_jobs"]) == 8
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -257,6 +258,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-proposal-followups-opsgate",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
+        "memory-os-candidate-aggregation",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "telegram"
     assert by_name["memory-os-owner-review-digest"]["script"] == "memory_os_cron_owner_review_digest_gate.py"
