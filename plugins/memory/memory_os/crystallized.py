@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -401,6 +402,13 @@ def append_candidate_triage(
 
     Append-only. Never modifies candidates.jsonl. Never crystallizes.
     The lane reads both files at query time and resolves effective state.
+
+    Governance path:
+      - Lane ticks (envelope_id non-empty): goes through append_governed_jsonl
+        with the ExecutionGate envelope → A6 satisfied.
+      - Backfill/operator (envelope_id empty): uses
+        allow_owner_action_without_envelope=True → classified exemption in
+        write_surface_check.
     """
     if action not in CANDIDATE_TRIAGE_ACTIONS:
         raise ValueError(f"invalid triage action: {action!r}; expected one of {CANDIDATE_TRIAGE_ACTIONS}")
@@ -415,8 +423,27 @@ def append_candidate_triage(
         "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
         "created_at": _timestamp(now),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    # Use governed write — bare path.open('a') would fail write_surface_check
+    from .structural_write_gate import append_governed_jsonl
+    from .execution_gate import execution_gate_scope_hash
+
+    has_envelope = bool(execution_gate_envelope_id and str(execution_gate_envelope_id).strip())
+    scope_hash = execution_gate_scope_hash({
+        "lane": "candidate_aggregation",
+        "action": action,
+        "target_state": target_state,
+    })
+    append_governed_jsonl(
+        store,
+        path,
+        record,
+        write_owner="cognitive_loop" if has_envelope else "operator",
+        lane_id="candidate_aggregation",
+        risk_class="bounded_reversible_queue",
+        execution_gate_envelope_id=str(execution_gate_envelope_id or ""),
+        scope_hash=scope_hash,
+        allow_owner_action_without_envelope=not has_envelope,
+    )
     append_audit(
         store.roots.audit_path,
         action="candidate_triage_appended",

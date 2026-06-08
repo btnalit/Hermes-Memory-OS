@@ -32,7 +32,7 @@ Backfill `memory_os_candidate_backfill_409.py --apply --confirm-backfill`:
 | A3 ✅ | `candidate_triage.jsonl` append-only (431 lines); `candidates.jsonl` untouched (431 lines) |
 | A4 ✅ | Only `action=promote` (→owner_eligible) and `action=fleeting` (→fleeting) |
 | A5 ✅ | Promote target is `owner_eligible`, never crystallized; `'希望'` keyword drives presentation |
-| A6 ✅ | Lane: append_candidate_triage() → append_governed_jsonl() with envelope; Backfill: operator-scoped exemption (no envelope, one-shot manual run) |
+| A6 ✅ | Lane: append_candidate_triage() → append_governed_jsonl() with ExecutionGate envelope (scope_hash, envelope_id); Backfill/operator: append_governed_jsonl() with allow_owner_action_without_envelope=True (classified exemption) |
 | A7 ✅ | Lane registered via `cron_registry.json`; no `--no-gate` bypass |
 
 **Backfill numbers**: 430 fleeting tagged, 1 promoted to owner_eligible, 0 no_action, 0 crystallized.

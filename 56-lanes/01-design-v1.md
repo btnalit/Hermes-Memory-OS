@@ -329,7 +329,7 @@ scripts/memory_os_cron_candidate_aggregation_gate.py      # ExecutionGate wrappe
 | A3 Append-only, no delete | ✅ | `candidate_triage.jsonl` append-only; `candidates.jsonl` untouched |
 | A4 Queue state only | ✅ | Only `action=promote/fleeting`, never touches crystallized layer |
 | A5 Heuristics → present, not crystallize | ✅ | Promote is to `owner_eligible`, not to crystallized |
-| A6 StructuralWriteGate envelope | ✅ | Lane: append_candidate_triage() with envelope; Backfill: operator exemption (no envelope, one-shot) |
+| A6 StructuralWriteGate envelope | ✅ | Lane: append_governed_jsonl with ExecutionGate envelope (scope_hash, envelope_id); Backfill: append_governed_jsonl with allow_owner_action_without_envelope=True (classified exemption) |
 | A7 No cron bypass | ✅ | Lane registered in cron_registry; no `--no-gate` bypass |
 
 ## 8. Monitor integration

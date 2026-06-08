@@ -218,6 +218,8 @@ def signal_source_specs() -> tuple[SignalSourceSpec, ...]:
             status_fields
             + (
                 "candidate_count",
+                "active_candidate_count",
+                "fleeting_candidate_count",
                 "private_candidate_count",
                 "public_candidate_count",
                 "latest_candidate_at",
