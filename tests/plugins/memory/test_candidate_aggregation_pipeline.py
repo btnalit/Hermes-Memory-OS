@@ -6,16 +6,12 @@ a pre-created execution gate envelope so append_candidate_triage succeeds.
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 from plugins.memory.memory_os.crystallized import (
     CrystallizedCandidate,
-    read_candidate_queue,
-    append_candidate_queue,
-    read_candidate_triage,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
-from plugins.memory.memory_os.store import MemoryOSStore, StoreError
+from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.candidate_aggregation import (
     _cluster_and_promote,
     _demote_aged,
