@@ -9,7 +9,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -135,6 +135,20 @@ def _runner_spec_from_registry_item(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _expiry_seconds(lane_id: str, risk_class: str) -> int:
+    """Return permitted expiry window in seconds for a lane.
+
+    Tight for short-lived subprocess lanes, generous but bounded
+    so stale permits can't linger indefinitely.
+    """
+    if risk_class in ("owner_gate", "system_restart"):
+        return 300  # 5 min — human-in-loop or restart tasks
+    if risk_class == "render_report":
+        return 600  # 10 min — LLM-rendered reports
+    # local_helper / default: 1 hour
+    return 3600
+
+
 def _append_permit(
     *,
     hermes_home: Path,
@@ -155,6 +169,7 @@ def _append_permit(
         "stage": "permit",
         "execution_gate_envelope_id": envelope_id,
         "created_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(seconds=_expiry_seconds(lane_id, risk_class))).isoformat().replace("+00:00", "Z"),
         "profile": os.environ.get("HERMES_PROFILE") or "default",
         "lane_id": lane_id,
         "trigger_surface": "hermes_cron",

@@ -424,14 +424,13 @@ def append_candidate_triage(
     }
     # Use governed write — bare path.open('a') would fail write_surface_check
     from .structural_write_gate import append_governed_jsonl
-    from .execution_gate import execution_gate_scope_hash
 
     has_envelope = bool(execution_gate_envelope_id and str(execution_gate_envelope_id).strip())
-    scope_hash = execution_gate_scope_hash({
-        "lane": "candidate_aggregation",
-        "action": action,
-        "target_state": target_state,
-    })
+    # When an execution-gate envelope is present, the permit's lane_id /
+    # risk_class / expiry are already validated by the structural write gate.
+    # The envelope-level scope (cron metadata) differs from the triage-action
+    # scope (lane/action/target_state), so omit scope_hash for envelope-backed
+    # writes — lane_id + envelope_id + expiry provide sufficient constraint.
     append_governed_jsonl(
         store,
         path,
@@ -440,7 +439,11 @@ def append_candidate_triage(
         lane_id="candidate_aggregation",
         risk_class="bounded_reversible_queue",
         execution_gate_envelope_id=str(execution_gate_envelope_id or ""),
-        scope_hash=scope_hash,
+        scope_hash="" if has_envelope else execution_gate_scope_hash({
+            "lane": "candidate_aggregation",
+            "action": action,
+            "target_state": target_state,
+        }),
         allow_owner_action_without_envelope=not has_envelope,
     )
     append_audit(
