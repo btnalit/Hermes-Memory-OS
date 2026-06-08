@@ -945,7 +945,7 @@ def test_auto_route_safe_proposal_followups_full_auto_requires_wilson_evidence(t
 
 def test_auto_route_safe_proposal_followups_reports_limited_auto_idle_after_graduation(tmp_path):
     store = _store(tmp_path)
-    for index in range(3):
+    for _index in range(3):
         owner_actions_module.append_audit(
             store.roots.audit_path,
             action="proposal_followup_auto_route_to_ops_gate",

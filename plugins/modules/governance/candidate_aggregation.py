@@ -66,7 +66,7 @@ _CHAT_PATTERNS: frozenset[str] = frozenset({
     "好的", "明白", "ok", "got it", "了解", "是的",
     "嗯", "好的明白", "理解了", "收到", "好", "可以",
     "知道了", "没问题", "行", "謝謝", "谢谢",
-    "okay", "ok", "sure", "got it", "understood", "thanks",
+    "okay", "sure", "understood", "thanks",
 })
 
 # Minimum body length to be considered substantive
