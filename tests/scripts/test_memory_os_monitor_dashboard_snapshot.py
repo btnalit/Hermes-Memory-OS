@@ -317,3 +317,26 @@ def test_dashboard_status_shows_fail_when_current_window_has_errors(tmp_path):
         f"With active errors, status should be FAIL, got {status}. "
         f"fail={fail}"
     )
+
+
+def test_on_demand_module_shows_idle_not_missing(tmp_path):
+    """On-demand modules (session_mirror, rh31_eval, metadata_retention)
+    with no runs should show 'idle' instead of 'missing' in the modules table.
+    """
+    module = _load_module()
+    assert module._render_last_status is not None
+
+    # Direct unit tests for _render_last_status
+    assert module._render_last_status(raw_status=None, cadence_class="on_demand_or_operator_approved_apply") == "idle"
+    assert module._render_last_status(raw_status=None, cadence_class="on_demand_dry_run") == "idle"
+    assert module._render_last_status(raw_status="missing", cadence_class="on_demand_or_monitor_poll") == "idle"
+    assert module._render_last_status(raw_status="missing", cadence_class="on_demand_dry_run") == "idle"
+
+    # Non on-demand with no runs should still show 'missing'
+    assert module._render_last_status(raw_status=None, cadence_class="daily_weekly") == "missing"
+    assert module._render_last_status(raw_status="missing", cadence_class="test_host_integration_harness") == "missing"
+
+    # Real statuses pass through unchanged
+    assert module._render_last_status(raw_status="ok", cadence_class="on_demand_dry_run") == "ok"
+    assert module._render_last_status(raw_status="error", cadence_class="daily_weekly") == "error"
+    assert module._render_last_status(raw_status="observed", cadence_class="owner_daily") == "observed"

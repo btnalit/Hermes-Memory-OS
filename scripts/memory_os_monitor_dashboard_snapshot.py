@@ -393,6 +393,15 @@ def _memory_snapshot(memory_root: Path) -> dict[str, Any]:
     }
 
 
+def _render_last_status(*, raw_status: str | None, cadence_class: str) -> str:
+    """Render last_status label: on-demand modules with no runs show 'idle' instead of 'missing'."""
+    if raw_status is not None and raw_status != "" and raw_status != "missing":
+        return str(raw_status)
+    if cadence_class.startswith("on_demand_"):
+        return "idle"
+    return "missing"
+
+
 def _modules_snapshot(cadence_report: dict[str, Any]) -> dict[str, Any]:
     rows = []
     for item in cadence_report.get("modules", []) if isinstance(cadence_report.get("modules"), list) else []:
@@ -409,7 +418,10 @@ def _modules_snapshot(cadence_report: dict[str, Any]) -> dict[str, Any]:
                 "skip": _safe_int(counters.get("skipped_count")),
                 "err": _safe_int(counters.get("error_count")),
                 "dup": _safe_int(counters.get("duplicate_count")),
-                "last": str(counters.get("last_status") or "missing"),
+                "last": _render_last_status(
+                    raw_status=counters.get("last_status"),
+                    cadence_class=str(item.get("target_cadence_class") or ""),
+                ),
                 "split": bool(item.get("production_split_recommended"))
                 and not bool(item.get("module_local_skip_gate_visible")),
             }
