@@ -31,6 +31,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert result["status"] in {"ok", "warning"}
     assert [step["step"] for step in result["steps"]] == [
         "heartbeat_pre",
+        "working_decay",
         "household_digest",
         "digest_consolidation",
         "wandering_mind",
@@ -50,6 +51,9 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "abstraction_distillation",
         "grounded_expression_judge",
         "self_evolution",
+        "structural_edge_proposer",
+        "crystallization_gate",
+        "llm_edge_proposer",
         "left_brain_pipeline_check",
         "host_capability_probe",
         "signal_collection",

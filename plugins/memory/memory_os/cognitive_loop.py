@@ -180,6 +180,7 @@ class CognitiveLoopRunner:
     ) -> list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]]:
         return [
             ("heartbeat_pre", lambda context: self._heartbeat(max_events=max_events)),
+            ("working_decay", self._working_decay),
             ("household_digest", self._household_digest),
             ("digest_consolidation", self._digest_consolidation),
             ("wandering_mind", self._wandering_mind),
@@ -631,6 +632,23 @@ class CognitiveLoopRunner:
             proposal_queue=proposal_queue,
             evidence_scoring=evidence,
         )
+
+    def _working_decay(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Decay working memory items: mark old 'active' items as 'expired'."""
+        from .working import WorkingMemoryService
+
+        store = self.store
+        wms = WorkingMemoryService(store)
+        expired = wms.decay_items("lingering", audit_write=True)
+        result = {
+            "schema_version": "memory-os.cognitive_loop.working_decay.v0",
+            "status": "ok",
+            "kind": "lingering",
+            "total_active": sum(1 for e in expired if e.status == "active"),
+            "total_expired": sum(1 for e in expired if e.status == "expired"),
+        }
+        context["working_decay_result"] = result
+        return result
 
     def _structural_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:
         from .structural_edge_proposer import run_structural_proposer
