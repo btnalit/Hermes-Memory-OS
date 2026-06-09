@@ -34,7 +34,7 @@ DIAGNOSTIC_SUPPRESSION_NOTICE = (
 )
 CONTINUITY_SELECTOR_SCHEMA_VERSION = "memory-os.continuity_selector.v0"
 # Max working items shown per file (most recent first).
-WORKING_ITEMS_PER_FILE = 20
+WORKING_ITEMS_PER_FILE = 5
 
 _BRIDGE_SEED_SLOTS = {
     "foreground": 2,
