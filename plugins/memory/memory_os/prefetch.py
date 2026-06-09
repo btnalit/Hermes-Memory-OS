@@ -904,15 +904,26 @@ def _graph_layer_shadow_lines(
     *,
     index: object | None = None,
 ) -> list[str]:
-    """二跳图遍历:用第一跳召回节点 id 查询关联边,格式化为 prefetch lines。
+    """Phase 1: shadow-only graph layer edge logging — INJECTION DISABLED.
 
-    规则:
+    Under Phase 1 the function writes candidate edges to
+    system/graph_layer_shadow.jsonl for audit and returns [] so no
+    hash-record-id pairs enter the agent's memory-context block.
+
+    Rules (original):
     - anchor_ids: 第一跳选出的 record_id 集合(来自 FTS5 hit + section records)
     - 委托 MemoryOSIndex.query_edges() 查询
     - depth=1 (一跳,守 §5a)
     - state='active'
     - 不打断 main prefetch 路径(fail-open: 查询出错返回 [])
     - anchor_ids 为空 → 直接返回 [] (空 shadow 是诚实信号)
+
+    Phase 2+ injection re-enablement requires:
+    - Edge targets resolved to human-readable content (not hash record-ids)
+    - Cross-section dedup (same memory appears in ≤1 section)
+    - Budget awareness (graph section is priced like any other)
+    - Config gate with default=off
+    - Shadow eval passed first
     """
     if not anchor_ids:
         return []
@@ -924,22 +935,45 @@ def _graph_layer_shadow_lines(
         return []
     if not edges:
         return []
-    lines: list[str] = []
-    for edge in edges:
-        if not isinstance(edge, dict):
-            continue
-        rtype = str(edge.get("relation_type", "unknown"))
-        fid = str(edge.get("from_record_id", ""))
-        tid = str(edge.get("to_record_id", ""))
-        ftype = str(edge.get("from_record_type", ""))
-        ttype = str(edge.get("to_record_type", ""))
-        weight = float(edge.get("weight", 1.0))
-        lines.append(
-            f"- [{rtype}] {ftype}/{fid} ↔ {ttype}/{tid} (w={weight:.1f})"
-        )
-    if lines:
-        lines.insert(0, "- [graph layer shadow] edges from first-hop anchors:")
-    return lines
+
+    # ── Phase 1: write shadow log, return nothing ──────────────
+    _record_graph_layer_shadow(store, anchor_ids, edges)
+    return []
+
+
+def _record_graph_layer_shadow(
+    store: MemoryOSStore,
+    anchor_ids: list[str],
+    edges: list[dict],
+) -> None:
+    """Append a bounded shadow record to system/graph_layer_shadow.jsonl.
+
+    Matches the SubstrateRecall shadow-log pattern but for graph edges.
+    This is purely audit/inspection data — NOT injected into agent context.
+    """
+    path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": "memory-os.graph_layer_shadow.v0",
+        "phase": "1",
+        "anchor_count": len(anchor_ids),
+        "edge_count": len(edges),
+        "recorded_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "edges": [
+            {
+                "relation_type": str(edge.get("relation_type", "unknown")),
+                "from_record_type": str(edge.get("from_record_type", "")),
+                "from_record_id": str(edge.get("from_record_id", "")),
+                "to_record_type": str(edge.get("to_record_type", "")),
+                "to_record_id": str(edge.get("to_record_id", "")),
+                "weight": float(edge.get("weight", 1.0)),
+            }
+            for edge in edges
+            if isinstance(edge, dict)
+        ],
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:

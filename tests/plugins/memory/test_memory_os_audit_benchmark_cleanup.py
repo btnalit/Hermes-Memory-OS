@@ -508,7 +508,7 @@ def test_metadata_retention_plan_is_dry_run_and_keeps_canonical_paths(tmp_path):
         encoding="utf-8",
     )
     eval_reports = tmp_path / "eval" / "reports" / "memory-os-rh31"
-    _touch_dir(eval_reports / "rh31_old", days_old=45)
+    _touch_dir(eval_reports / "rh31_old", days_old=46)
     _touch_dir(eval_reports / "rh31_fresh", days_old=1)
 
     plan = metadata_retention_plan(

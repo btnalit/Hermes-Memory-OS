@@ -467,8 +467,8 @@ def test_t1_4_6_g7_deterministic_recall_independent(tmp_path):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_t1_5_1_shadow_section_appears_with_edges(tmp_path):
-    """T1.5.1: shadow section appears when edges match anchor."""
+def test_t1_5_1_shadow_section_does_not_inject_with_edges(tmp_path):
+    """T1.5.1: Phase 1 — edges are shadow-logged, NOT injected into context."""
     store, index = _store(tmp_path)
     # Seed an event so FTS5 has content
     event = EventEnvelope.from_dict(build_event(seed=100, profile="graph-layer-test"))
@@ -489,8 +489,30 @@ def test_t1_5_1_shadow_section_appears_with_edges(tmp_path):
 
     # Prefetch with the event summary keyword
     context = build_prefetch("event", budget_chars=3000, store=store, index=index)
-    assert "### Related Memory" in context, f"Shadow section missing. Context:\n{context}"
-    assert "co_occurs" in context
+
+    # Phase 1: Related Memory section must NOT appear in context
+    assert "Related Memory" not in context, (
+        f"Phase 1: graph section must not inject. Context:\n{context}"
+    )
+
+    # Phase 1: Shadow log must have been written instead
+    shadow_path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
+    assert shadow_path.exists(), f"Phase 1 shadow log not written at {shadow_path}"
+    lines = shadow_path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) >= 1, "Expected at least 1 shadow log entry"
+
+    # Verify shadow log structure
+    record = json.loads(lines[-1])
+    assert record.get("schema_version") == "memory-os.graph_layer_shadow.v0"
+    assert record.get("phase") == "1"
+    assert record.get("anchor_count") >= 1
+    assert record.get("edge_count") >= 1
+    edges = record.get("edges", [])
+    assert any(
+        e.get("relation_type") == "co_occurs"
+        and e.get("from_record_id") == event.id
+        for e in edges
+    ), f"Expected co_occurs edge from {event.id} in shadow log"
 
 
 def test_t1_5_2_no_anchor_no_expansion(tmp_path):
