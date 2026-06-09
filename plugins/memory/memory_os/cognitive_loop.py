@@ -199,6 +199,9 @@ class CognitiveLoopRunner:
             ("abstraction_distillation", self._abstraction_distillation),
             ("grounded_expression_judge", self._grounded_expression_judge),
             ("self_evolution", self._self_evolution),
+            ("structural_edge_proposer", self._structural_edge_proposer),
+            ("crystallization_gate", self._crystallization_gate),
+            ("llm_edge_proposer", self._llm_edge_proposer),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("host_capability_probe", self._host_capability_probe),
             ("signal_collection", self._signal_collection),
@@ -628,6 +631,79 @@ class CognitiveLoopRunner:
             proposal_queue=proposal_queue,
             evidence_scoring=evidence,
         )
+
+    def _structural_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:
+        from .structural_edge_proposer import run_structural_proposer
+        from .index import MemoryOSIndex
+
+        store = self.store
+        index_path = str(store.roots.index_path)
+        audit_path = str(store.roots.audit_path)
+        index = MemoryOSIndex(store.roots)
+        result = run_structural_proposer(
+            index_path,
+            index=index,
+            audit_path=audit_path,
+        )
+        context["structural_edge_proposer_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.structural_edge_proposer.v0",
+            "status": result.get("status", "ok"),
+            "record_count": result.get("record_count", 0),
+            "pair_count": result.get("pair_count", 0),
+            "proposed_count": result.get("proposed_count", 0),
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
+
+    def _crystallization_gate(self, context: dict[str, Any]) -> dict[str, Any]:
+        from .crystallization_gate import run_crystallization_gate
+        from .index import MemoryOSIndex
+
+        store = self.store
+        index_path = str(store.roots.index_path)
+        audit_path = str(store.roots.audit_path)
+        index = MemoryOSIndex(store.roots)
+        result = run_crystallization_gate(
+            index_path,
+            index=index,
+            audit_path=audit_path,
+        )
+        context["crystallization_gate_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.crystallization_gate.v0",
+            "status": result.get("status", "ok"),
+            "candidate_count": result.get("candidate_count", 0),
+            "flagged_count": result.get("flagged_count", 0),
+            "flagged_ids": [f.get("candidate_id", "") for f in result.get("flagged_candidates", [])],
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
+
+    def _llm_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:
+        from .llm_edge_proposer import run_llm_proposer
+        from .index import MemoryOSIndex
+
+        store = self.store
+        index_path = str(store.roots.index_path)
+        audit_path = str(store.roots.audit_path)
+        index = MemoryOSIndex(store.roots)
+        result = run_llm_proposer(
+            index_path,
+            index=index,
+            audit_path=audit_path,
+        )
+        context["llm_edge_proposer_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.llm_edge_proposer.v0",
+            "status": result.get("status", "ok"),
+            "record_count": result.get("record_count", 0),
+            "pair_count": result.get("pair_count", 0),
+            "proposed_count": result.get("proposed_count", 0),
+            "auto_active_count": result.get("auto_active_count", 0),
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
 
     def _left_brain_pipeline_check(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.governance.pipeline_checker import LeftBrainPipelineCheckModule

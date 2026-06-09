@@ -490,6 +490,11 @@ def _build_prefetch_sections(
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records))
     _append_section(sections, "Recent Event Summaries", _event_lines(store))
+    # Second-hop graph traversal: anchor_ids come from first-hop FTS5 results.
+    # _indexed_lines already called index.search(), so we avoid re-calling it
+    # by collecting record_ids from the same search path inline here.
+    _first_anchors = _collect_anchor_ids(query, index)
+    _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index))
     return sections
 
 
@@ -507,6 +512,7 @@ def _section_source_class(title: str) -> str:
         "Substrate Recall": "substrate_recall",
         "Indexed Recall": "indexed",
         "Recent Event Summaries": "event",
+        "Related Memory": "graph_layer",
         "Diagnostic Grounding": "diagnostic",
     }
     return mapping.get(title, "other")
@@ -860,6 +866,80 @@ def _event_lines(store: MemoryOSStore) -> list[str]:
         for event in selected
         if not _is_diagnostic_style_seed(str(event.summary))
     ]
+
+
+def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
+    """从第一跳 FTS5 召回结果中提取 record_id,作为第二跳图遍历的 anchor。
+
+    Anchor 靠内容匹配(搜索)产生,遍历靠 id。空查询/无 index → 返回 []。
+    与 _indexed_lines 使用相同的 plan_query_route 派生 search_query。
+    在生产中,与 _indexed_lines 各调一次 index.search()(FTS5 微秒级,可忽略)。
+    Mock index 追踪查询次数时,注意搜索次数因 Shadow 区块增加一次。
+    """
+    if not query or not query.strip() or index is None:
+        return []
+    if not hasattr(index, "search"):
+        return []
+    route = plan_query_route(query, diagnostic_grounding_enabled=False)
+    search_query = str(route.get("search_query", "")).strip()
+    if not search_query:
+        return []
+    try:
+        result = index.search(search_query, limit=5)
+    except Exception:
+        return []
+    ids: list[str] = []
+    for hit in result.get("hits", []):
+        if not isinstance(hit, dict):
+            continue
+        rid = str(hit.get("record_id", "")).strip()
+        if rid:
+            ids.append(rid)
+    return ids
+
+
+def _graph_layer_shadow_lines(
+    store: MemoryOSStore,
+    anchor_ids: list[str],
+    *,
+    index: object | None = None,
+) -> list[str]:
+    """二跳图遍历:用第一跳召回节点 id 查询关联边,格式化为 prefetch lines。
+
+    规则:
+    - anchor_ids: 第一跳选出的 record_id 集合(来自 FTS5 hit + section records)
+    - 委托 MemoryOSIndex.query_edges() 查询
+    - depth=1 (一跳,守 §5a)
+    - state='active'
+    - 不打断 main prefetch 路径(fail-open: 查询出错返回 [])
+    - anchor_ids 为空 → 直接返回 [] (空 shadow 是诚实信号)
+    """
+    if not anchor_ids:
+        return []
+    if index is None or not hasattr(index, "query_edges"):
+        return []
+    try:
+        edges = index.query_edges(anchor_ids, depth=1, state="active", limit=8)
+    except Exception:
+        return []
+    if not edges:
+        return []
+    lines: list[str] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        rtype = str(edge.get("relation_type", "unknown"))
+        fid = str(edge.get("from_record_id", ""))
+        tid = str(edge.get("to_record_id", ""))
+        ftype = str(edge.get("from_record_type", ""))
+        ttype = str(edge.get("to_record_type", ""))
+        weight = float(edge.get("weight", 1.0))
+        lines.append(
+            f"- [{rtype}] {ftype}/{fid} ↔ {ttype}/{tid} (w={weight:.1f})"
+        )
+    if lines:
+        lines.insert(0, "- [graph layer shadow] edges from first-hop anchors:")
+    return lines
 
 
 def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:

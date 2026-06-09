@@ -173,7 +173,7 @@ def test_non_diagnostic_prefetch_still_uses_indexed_recall(tmp_path):
         runtime_facts=_runtime_facts(tmp_path),
     )
 
-    assert index.queries == [("normal indexed question", 5)]
+    assert index.queries == [("normal indexed question", 5), ("normal indexed question", 5)]
     assert "### Indexed Recall" in context
     assert "Indexed recall can still answer normal questions." in context
     assert "### Current Memory-OS Runtime Facts" not in context

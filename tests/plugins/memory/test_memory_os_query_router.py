@@ -75,7 +75,7 @@ def test_prefetch_uses_routed_query_and_reports_route(tmp_path):
         diagnostic_grounding_enabled=True,
     )
 
-    assert index.queries == [("PCDN loss_rate", 5)]
+    assert index.queries == [("PCDN loss_rate", 5), ("PCDN loss_rate", 5)]
     assert "query route: fast_path" in context
     assert "PCDN loss_rate" in context
     assert "Routed indexed recall hit." in context

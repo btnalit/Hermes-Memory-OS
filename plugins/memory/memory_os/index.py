@@ -11,6 +11,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .audit import append_audit
 from .crystallized import is_active_crystallized_frontmatter, read_candidate_queue
@@ -176,6 +177,108 @@ class MemoryOSIndex:
         finally:
             conn.close()
 
+    def query_edges(
+        self,
+        anchor_ids: list[str],
+        *,
+        depth: int = 1,
+        relation_types: list[str] | None = None,
+        state: str = "active",
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """根据一组 anchor node id 查询关联边(第二跳遍历)。
+
+        契约:
+        - anchor_ids 为空 → 立即返回 [] (不做全表扫描,守 G2 性能边界)
+        - depth=1: 直接 IN (anchors) 查询,不做递归
+        - 异常 → 返回 [] (fail-open,守 G1)
+        - limit 上限避免 budget 爆炸
+        """
+        if not anchor_ids:
+            return []
+        if not self.roots.index_path.exists():
+            return []
+        if depth < 1:
+            depth = 1
+        conn = sqlite3.connect(self.roots.index_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            _initialize_schema(conn)
+            return _query_edges_sqlite(conn, anchor_ids, depth=depth, relation_types=relation_types, state=state, limit=limit)
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def write_governed_edge(
+        self,
+        *,
+        from_record_type: str,
+        from_record_id: str,
+        to_record_type: str,
+        to_record_id: str,
+        relation_type: str,
+        weight: float = 1.0,
+        source_event_id: str | None = None,
+        proposed_by: str = "structural",
+        state: str = "candidate",
+    ) -> dict[str, Any]:
+        """Write a governed edge to the memory_edges table.
+
+        Instance-level wrapper over the module-level write_governed_edge().
+        Opens its own SQLite connection and follows fail-open semantics.
+
+        Returns the edge dict on success, or {} on failure.
+        """
+        if not self.roots.index_path.exists():
+            return {}
+        conn = sqlite3.connect(self.roots.index_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            _initialize_schema(conn)
+            return write_governed_edge(
+                conn,
+                from_record_type=from_record_type,
+                from_record_id=from_record_id,
+                to_record_type=to_record_type,
+                to_record_id=to_record_id,
+                relation_type=relation_type,
+                weight=weight,
+                source_event_id=source_event_id,
+                proposed_by=proposed_by,
+                state=state,
+            )
+        except Exception:
+            return {}
+        finally:
+            conn.close()
+
+    def transition_edge_state(
+        self,
+        edge_id: str,
+        new_state: str,
+        *,
+        now: str | None = None,
+    ) -> dict[str, Any]:
+        """Transition an edge's governance state.
+
+        Instance-level wrapper over the module-level transition_edge_state().
+        Opens its own SQLite connection and follows fail-open semantics.
+
+        Returns the updated edge dict on success, or {} on failure.
+        """
+        if not self.roots.index_path.exists():
+            return {}
+        conn = sqlite3.connect(self.roots.index_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            _initialize_schema(conn)
+            return transition_edge_state(conn, edge_id, new_state, now=now)
+        except Exception:
+            return {}
+        finally:
+            conn.close()
+
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
     try:
@@ -264,13 +367,19 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             to_record_type text not null,
             to_record_id text not null,
             relation_type text not null,
-            weight real not null,
+            weight real not null default 1.0,
             created_at text not null,
-            source_event_id text
+            source_event_id text,
+            state text not null default 'candidate',
+            invalidated_at text,
+            proposed_by text not null default 'structural'
         );
         """
     )
     _ensure_column(conn, "events", "record_hash", "text not null default ''")
+    _ensure_column(conn, "memory_edges", "state", "text not null default 'candidate'")
+    _ensure_column(conn, "memory_edges", "invalidated_at", "text")
+    _ensure_column(conn, "memory_edges", "proposed_by", "text not null default 'structural'")
     _ensure_fts(conn)
     _set_metadata(conn, "fts_text_projection_version", _FTS_TEXT_PROJECTION_VERSION)
 
@@ -674,6 +783,80 @@ def _like_hits(conn: sqlite3.Connection, query: str, *, limit: int) -> list[dict
     return [_row_to_hit(row) for row in rows]
 
 
+def _query_edges_sqlite(
+    conn: sqlite3.Connection,
+    anchor_ids: list[str],
+    *,
+    depth: int = 1,
+    relation_types: list[str] | None = None,
+    state: str = "active",
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """SQLite query helper for MemoryOSIndex.query_edges()."""
+    if not anchor_ids or depth < 1:
+        return []
+    anchors = list(dict.fromkeys(anchor_ids))  # dedup preserve order
+    if len(anchors) > 200:
+        anchors = anchors[:200]
+    placeholders = ",".join("?" * len(anchors))
+    params: list[Any] = [state]
+    params.extend(anchors)
+    params.extend(anchors)  # second IN clause needs equal number of params
+    where_relation = ""
+    if relation_types:
+        rt_placeholders = ",".join("?" * len(relation_types))
+        where_relation = f" and relation_type in ({rt_placeholders})"
+        params.extend(relation_types)
+    params.append(limit + 1)
+    sql = f"""
+        select *
+        from memory_edges
+        where state = ?
+          and (from_record_id in ({placeholders})
+               or to_record_id in ({placeholders}))
+          {where_relation}
+        order by weight desc, created_at desc
+        limit ?
+    """
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        return []
+    results = [dict(row) for row in rows]
+    if depth <= 1:
+        return results[:limit]
+    # depth >= 2: collect second-hop anchor ids from first-hop results
+    second_ids = list(dict.fromkeys(
+        r["to_record_id"] for r in results
+        if r["to_record_id"] not in set(anchors)
+    ))
+    if not second_ids:
+        return results[:limit]
+    if len(second_ids) > 50:
+        second_ids = second_ids[:50]
+    s2_placeholders = ",".join("?" * len(second_ids))
+    s2_params: list[Any] = [state]
+    s2_params.extend(second_ids)
+    s2_params.extend(second_ids)  # second IN clause
+    s2_params.append(limit + 1)
+    s2_sql = f"""
+        select *
+        from memory_edges
+        where state = ?
+          and (from_record_id in ({s2_placeholders})
+               or to_record_id in ({s2_placeholders}))
+        order by weight desc, created_at desc
+        limit ?
+    """
+    try:
+        s2_rows = conn.execute(s2_sql, s2_params).fetchall()
+    except sqlite3.Error:
+        return results[:limit]
+    seen = {r["edge_id"] for r in results}
+    combined = results + [dict(row) for row in s2_rows if row["edge_id"] not in seen]
+    return combined[:limit]
+
+
 def _row_to_hit(row: sqlite3.Row) -> dict[str, str]:
     text = str(row["text"])
     return {
@@ -739,3 +922,138 @@ def _parse_frontmatter(lines: list[str]) -> dict[str, Any]:
 
 def _optional_str(value: object) -> str:
     return "" if value is None else str(value)
+
+
+# ── Edge governance helpers ───────────────────────────────────────────────
+
+
+def _edge_id() -> str:
+    """Generate a unique edge id."""
+    return f"edge_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}_{hashlib.sha256(str(uuid4()).encode()).hexdigest()[:12]}"
+
+
+def write_governed_edge(
+    conn: sqlite3.Connection,
+    *,
+    from_record_type: str,
+    from_record_id: str,
+    to_record_type: str,
+    to_record_id: str,
+    relation_type: str,
+    weight: float = 1.0,
+    source_event_id: str | None = None,
+    proposed_by: str = "structural",
+    state: str = "candidate",
+) -> dict[str, Any]:
+    """Write an edge through the governance path into memory_edges.
+
+    Args:
+        conn: open SQLite connection (index DB).
+        from/to: node references (record_type + record_id).
+        relation_type: one of the controlled vocabulary (refines, contradicts, etc.).
+        weight: edge strength (default 1.0).
+        source_event_id: optional provenance reference.
+        proposed_by: source of the edge proposal (structural|vector|llm|owner).
+        state: initial governance state (candidate|owner_eligible|active|invalidated).
+
+    Returns the edge dict, or {} on failure.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    edge = {
+        "edge_id": _edge_id(),
+        "from_record_type": from_record_type,
+        "from_record_id": from_record_id,
+        "to_record_type": to_record_type,
+        "to_record_id": to_record_id,
+        "relation_type": relation_type,
+        "weight": float(weight),
+        "created_at": now,
+        "source_event_id": source_event_id or "",
+        "state": state,
+        "invalidated_at": None,
+        "proposed_by": proposed_by,
+    }
+    try:
+        conn.execute(
+            """
+            insert into memory_edges (
+                edge_id, from_record_type, from_record_id,
+                to_record_type, to_record_id, relation_type,
+                weight, created_at, source_event_id,
+                state, invalidated_at, proposed_by
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                edge["edge_id"],
+                edge["from_record_type"],
+                edge["from_record_id"],
+                edge["to_record_type"],
+                edge["to_record_id"],
+                edge["relation_type"],
+                edge["weight"],
+                edge["created_at"],
+                edge["source_event_id"],
+                edge["state"],
+                edge["invalidated_at"],
+                edge["proposed_by"],
+            ),
+        )
+        conn.commit()
+        return edge
+    except sqlite3.Error:
+        return {}
+
+
+def transition_edge_state(
+    conn: sqlite3.Connection,
+    edge_id: str,
+    new_state: str,
+    *,
+    now: str | None = None,
+) -> dict[str, Any]:
+    """Transition an edge's governance state with validation.
+
+    Allowed transitions:
+        candidate → owner_eligible → active → invalidated
+        candidate → active  (auto-approve for low-risk edges)
+        candidate → invalidated  (rejection)
+
+    Returns the updated edge dict, or {} on failure/illegal transition.
+    """
+    try:
+        row = conn.execute(
+            "select * from memory_edges where edge_id = ?", (edge_id,)
+        ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if row is None:
+        return {}
+    col_names = [str(c[1]) for c in conn.execute("pragma table_info(memory_edges)").fetchall()]
+    current = dict(zip(col_names, row))
+    cur = str(current.get("state", ""))
+    if cur == new_state:
+        return current  # no-op
+    _valid = {
+        "candidate": {"owner_eligible", "active", "invalidated"},
+        "owner_eligible": {"active", "invalidated"},
+        "active": {"invalidated"},
+        "invalidated": set(),
+    }
+    allowed = _valid.get(cur, set())
+    if new_state not in allowed:
+        return {}
+    _now = now or datetime.now(timezone.utc).isoformat()
+    updates: dict[str, Any] = {"state": new_state}
+    if new_state == "invalidated":
+        updates["invalidated_at"] = _now
+    try:
+        conn.execute(
+            "update memory_edges set state = ?, invalidated_at = ? where edge_id = ?",
+            (updates["state"], updates.get("invalidated_at"), edge_id),
+        )
+        conn.commit()
+        current["state"] = updates["state"]
+        current["invalidated_at"] = updates.get("invalidated_at")
+        return current
+    except sqlite3.Error:
+        return {}
