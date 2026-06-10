@@ -557,7 +557,10 @@ def _record_substrate_shadow_recall(
     if not facts:
         return
     path = store.roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return  # fail-open: shadow loss must not break prefetch
     record = {
         "schema_version": "memory-os.substrate_recall_shadow.v0",
         "query_class": str(report.get("query_class") or ""),
@@ -570,8 +573,11 @@ def _record_substrate_shadow_recall(
         "recall_llm_triggered": bool(report.get("recall_llm_triggered")),
         "fallback_triggered": bool(report.get("fallback_triggered")),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        pass  # fail-open: shadow loss must not break prefetch
 
     from .substrates.ledger import SubstrateOperationLedger
 
@@ -952,7 +958,10 @@ def _record_graph_layer_shadow(
     This is purely audit/inspection data — NOT injected into agent context.
     """
     path = store.roots.memory_os_root / "system" / "graph_layer_shadow.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return  # fail-open: shadow loss must not break prefetch
     record = {
         "schema_version": "memory-os.graph_layer_shadow.v0",
         "phase": "1",
@@ -972,8 +981,11 @@ def _record_graph_layer_shadow(
             if isinstance(edge, dict)
         ],
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        pass  # fail-open: shadow loss must not break prefetch
 
 
 def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:

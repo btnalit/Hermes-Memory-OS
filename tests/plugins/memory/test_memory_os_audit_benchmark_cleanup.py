@@ -38,18 +38,20 @@ def _store(tmp_path):
     return store
 
 
-def _touch(path, *, days_old):
+def _touch(path, *, days_old, now=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("stale", encoding="utf-8")
-    ts = (datetime.now(timezone.utc) - timedelta(days=days_old)).timestamp()
+    base = now or datetime.now(timezone.utc)
+    ts = (base - timedelta(days=days_old)).timestamp()
     os.utime(path, (ts, ts))
 
 
-def _touch_dir(path, *, days_old):
+def _touch_dir(path, *, days_old, now=None):
     path.mkdir(parents=True, exist_ok=True)
     marker = path / "summary.json"
     marker.write_text("{}", encoding="utf-8")
-    ts = (datetime.now(timezone.utc) - timedelta(days=days_old)).timestamp()
+    base = now or datetime.now(timezone.utc)
+    ts = (base - timedelta(days=days_old)).timestamp()
     os.utime(path, (ts, ts))
     os.utime(marker, (ts, ts))
 
@@ -508,7 +510,7 @@ def test_metadata_retention_plan_is_dry_run_and_keeps_canonical_paths(tmp_path):
         encoding="utf-8",
     )
     eval_reports = tmp_path / "eval" / "reports" / "memory-os-rh31"
-    _touch_dir(eval_reports / "rh31_old", days_old=46)
+    _touch_dir(eval_reports / "rh31_old", days_old=46, now=now)
     _touch_dir(eval_reports / "rh31_fresh", days_old=1)
 
     plan = metadata_retention_plan(

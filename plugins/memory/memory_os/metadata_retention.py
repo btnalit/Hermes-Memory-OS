@@ -19,6 +19,7 @@ class MetadataRetentionPolicy:
     memory_sources_retention_days: int | None = 30
     feedback_retention_days: int | None = 30
     suggestion_retention_days: int | None = 30
+    shadow_retention_days: int | None = 30
     eval_report_retention_days: int | None = 30
     eval_report_keep_latest: int = 20
     suggestion_report_retention_days: int | None = 30
@@ -58,6 +59,20 @@ def metadata_retention_plan(
             now=current,
             actions=actions,
         ),
+        _ledger_plan(
+            ledger="graph_layer_shadow",
+            path=roots.memory_os_root / "system" / "graph_layer_shadow.jsonl",
+            retention_days=active_policy.shadow_retention_days,
+            now=current,
+            actions=actions,
+        ),
+        _ledger_plan(
+            ledger="substrate_recall_shadow",
+            path=roots.memory_os_root / "system" / "substrate_recall_shadow.jsonl",
+            retention_days=active_policy.shadow_retention_days,
+            now=current,
+            actions=actions,
+        ),
     ]
     report_roots = [
         _report_root_plan(
@@ -87,6 +102,7 @@ def metadata_retention_plan(
             "memory_sources_retention_days": active_policy.memory_sources_retention_days,
             "feedback_retention_days": active_policy.feedback_retention_days,
             "suggestion_retention_days": active_policy.suggestion_retention_days,
+            "shadow_retention_days": active_policy.shadow_retention_days,
             "eval_report_retention_days": active_policy.eval_report_retention_days,
             "eval_report_keep_latest": max(int(active_policy.eval_report_keep_latest), 0),
             "suggestion_report_retention_days": active_policy.suggestion_report_retention_days,
