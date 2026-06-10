@@ -581,23 +581,28 @@ def _record_substrate_shadow_recall(
 
     from .substrates.ledger import SubstrateOperationLedger
 
-    operation_ledger = SubstrateOperationLedger(store.roots.memory_os_root / "system" / "substrate_operations.jsonl")
-    for fact in facts:
-        if not isinstance(fact, dict):
-            continue
-        provider = str(fact.get("provider") or "")
-        if provider != "hindsight":
-            continue
-        operation_ledger.append(
-            {
-                "provider": "hindsight",
-                "operation": "recall",
-                "recall_llm_triggered": bool(fact.get("recall_llm_triggered")),
-                "advisory_only": bool(fact.get("advisory_only")),
-                "authority_class": str(fact.get("authority_class") or ""),
-                "substrate_snapshot_id": str(fact.get("substrate_snapshot_id") or ""),
-            }
+    try:
+        operation_ledger = SubstrateOperationLedger(
+            store.roots.memory_os_root / "system" / "substrate_operations.jsonl"
         )
+        for fact in facts:
+            if not isinstance(fact, dict):
+                continue
+            provider = str(fact.get("provider") or "")
+            if provider != "hindsight":
+                continue
+            operation_ledger.append(
+                {
+                    "provider": "hindsight",
+                    "operation": "recall",
+                    "recall_llm_triggered": bool(fact.get("recall_llm_triggered")),
+                    "advisory_only": bool(fact.get("advisory_only")),
+                    "authority_class": str(fact.get("authority_class") or ""),
+                    "substrate_snapshot_id": str(fact.get("substrate_snapshot_id") or ""),
+                }
+            )
+    except Exception:
+        pass  # fail-open: operations ledger loss must not break prefetch
 
 
 def _substrate_recall_lines(report: dict[str, Any] | None) -> list[str]:
