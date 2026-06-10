@@ -61,6 +61,7 @@ class MemoryOSProvider(MemoryProvider):
         self._worker_stop = threading.Event()
         self._current_task_anchor = ""
         self._foreground_task_only_prefetch = False
+        self._consecutive_topic_switch_count = 0
         self._last_owner_review_reply_result: dict[str, Any] | None = None
         self._last_owner_review_reply_query = ""
 
@@ -729,14 +730,73 @@ class MemoryOSProvider(MemoryProvider):
             return
         if decision.intent == "ambiguous_recall":
             self._current_task_anchor = ""
+            self._consecutive_topic_switch_count = 0
             self._foreground_task_only_prefetch = False
             return
+
+        # ── Topic switch detection ──────────────────────────────
+        # When the user's query shares no entities/keywords with the
+        # current foreground task anchor, treat it as a topic switch.
+        # After 2 consecutive zero-overlap queries, clear the anchor.
+        # Until then, keep the old anchor but allow the new topic
+        # to proceed (no foreground-only restriction).
+        if self._current_task_anchor and self._is_topic_switch(text):
+            self._consecutive_topic_switch_count += 1
+            if self._consecutive_topic_switch_count >= 2:
+                self._current_task_anchor = ""
+                self._consecutive_topic_switch_count = 0
+                self._foreground_task_only_prefetch = False
+                return
+            # First topic switch: keep old anchor, don't replace it.
+            self._foreground_task_only_prefetch = False
+            return
+        else:
+            self._consecutive_topic_switch_count = 0
+        # ────────────────────────────────────────────────────────
+
         self._current_task_anchor = _format_current_task_anchor(
             task=text,
             operations=[],
             session_id=session_id or self.session_id,
         )
         self._foreground_task_only_prefetch = False
+
+    def _is_topic_switch(self, query: str) -> bool:
+        """Detect if the user has switched topics.
+
+        Compares ASCII entities and Chinese keywords extracted from the
+        current foreground-task anchor against the new query.  Returns True
+        when the intersection is empty — no shared topics remain.
+        """
+        if not self._current_task_anchor:
+            return False
+        old_task = _extract_anchor_current_task(self._current_task_anchor)
+        if not old_task:
+            return False
+        query_text = " ".join(str(query or "").split())
+        if not query_text:
+            return False
+
+        # ASCII entities: alphanumeric tokens (same pattern as context_router.py)
+        entity_pat = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
+        old_entities = {m.group().lower() for m in entity_pat.finditer(old_task)}
+        query_entities = {m.group().lower() for m in entity_pat.finditer(query_text)}
+
+        # Chinese topic keywords (same set as context_router.py)
+        _CHINESE_TOPIC_KEYWORDS = (
+            "记忆", "架构", "系统", "插件", "安装", "视频", "渲染",
+            "错误", "失败", "网关", "状态", "候选", "结晶", "长期记忆",
+            "治理", "证据", "任务",
+        )
+        old_cjk = {kw for kw in _CHINESE_TOPIC_KEYWORDS if kw in old_task}
+        query_cjk = {kw for kw in _CHINESE_TOPIC_KEYWORDS if kw in query_text}
+
+        old_features = old_entities | old_cjk
+        query_features = query_entities | query_cjk
+
+        if not old_features:
+            return False  # nothing in the old anchor to compare against
+        return len(old_features & query_features) == 0
 
     def _write_deferred_current_task_anchor(self, *, anchor: str, deferral: str, session_id: str = "") -> None:
         if self._roots is None:
