@@ -63,6 +63,7 @@ class MemoryOSIndex:
             _index_crystallized_candidates(conn, self.roots)
             _index_crystallized_records(conn, self.roots.crystallized_root)
             _index_audit_entries(conn, self.roots.audit_path)
+            _index_edges(conn, self.roots)
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
@@ -114,6 +115,8 @@ class MemoryOSIndex:
             _index_crystallized_records(conn, self.roots.crystallized_root)
             _clear_table(conn, "audit_entries")
             _index_audit_entries(conn, self.roots.audit_path)
+            _clear_table(conn, "memory_edges")
+            _index_edges(conn, self.roots)
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
@@ -129,6 +132,7 @@ class MemoryOSIndex:
                     "crystallized_candidates": f"{before.get('crystallized_candidates',0)}->{after.get('crystallized_candidates',0)}",
                     "crystallized_records": f"{before.get('crystallized_records',0)}->{after.get('crystallized_records',0)}",
                     "audit_entries": f"{before.get('audit_entries',0)}->{after.get('audit_entries',0)}",
+                    "edges": f"{before.get('edges',0)}->{after.get('edges',0)}",
                 },
             )
             return after
@@ -152,12 +156,13 @@ class MemoryOSIndex:
                 "crystallized_candidates": 0,
                 "crystallized_records": 0,
                 "audit_entries": 0,
+                "edges": 0,
             }
         conn = sqlite3.connect(self.roots.index_path)
         try:
             return {
                 table: conn.execute(f"select count(*) from {table}").fetchone()[0]
-                for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries")
+                for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges")
             }
         finally:
             conn.close()
@@ -227,6 +232,7 @@ class MemoryOSIndex:
 
         Instance-level wrapper over the module-level write_governed_edge().
         Opens its own SQLite connection and follows fail-open semantics.
+        Writes to canonical store first (graph/edges.jsonl), then index DB.
 
         Returns the edge dict on success, or {} on failure.
         """
@@ -238,6 +244,7 @@ class MemoryOSIndex:
             _initialize_schema(conn)
             return write_governed_edge(
                 conn,
+                self.roots,
                 from_record_type=from_record_type,
                 from_record_id=from_record_id,
                 to_record_type=to_record_type,
@@ -502,7 +509,7 @@ def _remove_sqlite_sidecars(path: Path) -> None:
 
 
 def _clear(conn: sqlite3.Connection) -> None:
-    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries"):
+    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges"):
         _clear_table(conn, table)
 
 
@@ -683,6 +690,54 @@ def _index_audit_entries(conn: sqlite3.Connection, audit_path: Path) -> None:
                 json.dumps(entry.get("details", {}), ensure_ascii=False, sort_keys=True),
             ),
         )
+
+
+def _index_edges(conn: sqlite3.Connection, roots: MemoryOSRoots) -> int:
+    """Project canonical edges into memory_edges table.
+
+    Reads graph/edges.jsonl and inserts/replaces into memory_edges.
+    Edge rows with state='invalidated' are included (守 G3 invalidate-not-delete).
+    Returns edge count.
+    """
+    edges_path = roots.memory_os_root / "graph" / "edges.jsonl"
+    if not edges_path.exists():
+        return 0
+
+    count = 0
+    for line in edges_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            edge = json.loads(line)
+            conn.execute(
+                """
+                insert or replace into memory_edges (
+                    edge_id, from_record_type, from_record_id,
+                    to_record_type, to_record_id, relation_type,
+                    weight, created_at, source_event_id,
+                    state, invalidated_at, proposed_by
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(edge.get("edge_id", "")),
+                    str(edge.get("from_record_type", "")),
+                    str(edge.get("from_record_id", "")),
+                    str(edge.get("to_record_type", "")),
+                    str(edge.get("to_record_id", "")),
+                    str(edge.get("relation_type", "")),
+                    float(edge.get("weight", 1.0)),
+                    str(edge.get("created_at", "")),
+                    str(edge.get("source_event_id", "")),
+                    str(edge.get("state", "candidate")),
+                    edge.get("invalidated_at"),
+                    str(edge.get("proposed_by", "structural")),
+                ),
+            )
+            count += 1
+        except (json.JSONDecodeError, sqlite3.Error, Exception):
+            continue
+    conn.commit()
+    return count
 
 
 def _replace_fts_record(
@@ -932,8 +987,43 @@ def _edge_id() -> str:
     return f"edge_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}_{hashlib.sha256(str(uuid4()).encode()).hexdigest()[:12]}"
 
 
+def _write_edge_canonical(roots: MemoryOSRoots, edge: dict) -> bool:
+    """Append one edge record to graph/edges.jsonl (canonical store).
+
+    Uses append_jsonl (same pattern as events/working/candidates)
+    so the edge has a durable canonical source outside the index DB.
+    Writes an audit entry on success.
+
+    Returns True on success, False on error.
+    """
+    from .jsonl_io import append_jsonl
+    from .audit import append_audit
+    edges_path = roots.memory_os_root / "graph" / "edges.jsonl"
+    try:
+        edges_path.parent.mkdir(parents=True, exist_ok=True)
+        append_jsonl(edges_path, edge, ensure_parent=False)
+        append_audit(
+            roots.audit_path,
+            action="edge_canonical_written",
+            status="ok",
+            target=str(edges_path),
+            details={"edge_id": edge.get("edge_id", ""), "relation_type": edge.get("relation_type", "")},
+        )
+        return True
+    except (OSError, Exception):
+        append_audit(
+            roots.audit_path,
+            action="edge_canonical_write_failed",
+            status="warning",
+            target=str(edges_path),
+            details={"edge_id": edge.get("edge_id", "")},
+        )
+        return False
+
+
 def write_governed_edge(
     conn: sqlite3.Connection,
+    roots: MemoryOSRoots,
     *,
     from_record_type: str,
     from_record_id: str,
@@ -947,8 +1037,15 @@ def write_governed_edge(
 ) -> dict[str, Any]:
     """Write an edge through the governance path into memory_edges.
 
+    Governance path:
+        1. Canonical write: graph/edges.jsonl (durable, survives rebuild)
+        2. Index INSERT: memory_edges (queryable)
+    If canonical write fails, the edge is NOT written to the index.
+    Canonical write includes an audit entry (governance envelope).
+
     Args:
         conn: open SQLite connection (index DB).
+        roots: MemoryOSRoots (needed for canonical path).
         from/to: node references (record_type + record_id).
         relation_type: one of the controlled vocabulary (refines, contradicts, etc.).
         weight: edge strength (default 1.0).
@@ -974,6 +1071,11 @@ def write_governed_edge(
         "proposed_by": proposed_by,
     }
     try:
+        # 1. Write canonical (governance path — if this fails, edge is not written)
+        if not _write_edge_canonical(roots, edge):
+            return {}
+
+        # 2. Write to index DB
         conn.execute(
             """
             insert into memory_edges (

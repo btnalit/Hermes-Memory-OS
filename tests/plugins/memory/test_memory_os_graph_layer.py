@@ -70,7 +70,7 @@ def test_t1_1_2_rebuild_is_reversible(tmp_path):
     store, index = _store(tmp_path)
     conn = _conn(index)
     write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="rec_a",
         to_record_type="crystallized_record", to_record_id="rec_b",
         relation_type="refines",
@@ -99,7 +99,7 @@ def test_t1_1_3_weight_default_1_0(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="a",
         to_record_type="crystallized_record", to_record_id="b",
         relation_type="refines",
@@ -113,7 +113,7 @@ def test_t1_1_4_state_default_candidate(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="a",
         to_record_type="crystallized_record", to_record_id="b",
         relation_type="refines",
@@ -127,7 +127,7 @@ def test_t1_1_5_proposed_by_default_structural(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="a",
         to_record_type="crystallized_record", to_record_id="b",
         relation_type="refines",
@@ -141,7 +141,7 @@ def test_t1_1_6_invalidated_at_nullable(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="a",
         to_record_type="crystallized_record", to_record_id="b",
         relation_type="refines",
@@ -163,7 +163,7 @@ def test_t1_2_1_write_and_read_edge_back(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="rec_x",
         to_record_type="crystallized_record", to_record_id="rec_y",
         relation_type="depends_on",
@@ -183,14 +183,14 @@ def test_t1_2_2_query_edges_by_from_record_id(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="rec_a",
         to_record_type="crystallized_record", to_record_id="rec_b",
         relation_type="refines",
         state="active",
     )
     write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="rec_a",
         to_record_type="crystallized_record", to_record_id="rec_c",
         relation_type="depends_on",
@@ -209,7 +209,7 @@ def test_t1_2_3_query_edges_by_to_record_id(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="crystallized_record", from_record_id="rec_root",
         to_record_type="crystallized_record", to_record_id="rec_target",
         relation_type="refines",
@@ -227,11 +227,11 @@ def test_t1_2_4_query_edges_filters_by_relation_type(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines", state="active",
     )
     write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="c", relation_type="contradicts", state="active",
     )
     conn.close()
@@ -246,7 +246,7 @@ def test_t1_2_5_query_edges_filters_by_state(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines", state="candidate",
     )
     conn.close()
@@ -266,7 +266,7 @@ def test_t1_2_6_query_edges_respects_limit(tmp_path):
     conn = _conn(index)
     for i in range(5):
         write_governed_edge(
-            conn, from_record_type="c", from_record_id="hub",
+            conn, index.roots, from_record_type="c", from_record_id="hub",
             to_record_type="c", to_record_id=f"node_{i}", relation_type="refines", state="active",
         )
     conn.close()
@@ -285,7 +285,7 @@ def test_t1_3_1_state_default_candidate(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b",
         relation_type="refines",
@@ -299,7 +299,7 @@ def test_t1_3_2_candidate_to_owner_eligible_to_active(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
     )
     # → owner_eligible
@@ -316,7 +316,7 @@ def test_t1_3_2b_skip_transition_rejected(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
     )
     r = transition_edge_state(conn, edge["edge_id"], "active")
@@ -329,7 +329,7 @@ def test_t1_3_3_active_to_invalidated(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
@@ -344,7 +344,7 @@ def test_t1_3_4_invalidate_not_delete(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
@@ -361,7 +361,7 @@ def test_t1_3_5_invalidated_excluded_from_query(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
@@ -403,7 +403,7 @@ def test_t1_4_2_g2_scope_locked(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
     )
     # Verify it's in memory_edges only
@@ -416,12 +416,12 @@ def test_t1_4_4_g4_provenance(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge1 = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
         proposed_by="structural",
     )
     edge2 = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="c", relation_type="contradicts",
         proposed_by="owner",
     )
@@ -438,7 +438,7 @@ def test_t1_4_5_g6_audit(tmp_path):
     conn = _conn(index)
     before = conn.execute("select count(*) from memory_edges").fetchone()[0]
     write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
     )
     after = conn.execute("select count(*) from memory_edges").fetchone()[0]
@@ -479,7 +479,7 @@ def test_t1_5_1_shadow_section_does_not_inject_with_edges(tmp_path):
     # Write an edge between two record_ids that match the indexed event
     conn = _conn(index)
     write_governed_edge(
-        conn,
+        conn, index.roots,
         from_record_type="event", from_record_id=event.id,
         to_record_type="event", to_record_id="evt_related_100",
         relation_type="co_occurs",
@@ -531,7 +531,7 @@ def test_t1_5_3_budget_respected(tmp_path):
     conn = _conn(index)
     for i in range(10):
         write_governed_edge(
-            conn,
+            conn, index.roots,
             from_record_type="event", from_record_id=event.id,
             to_record_type="c", to_record_id=f"many_target_{i}",
             relation_type="co_occurs",
@@ -563,17 +563,17 @@ def test_t1_5_5_depth_not_exceed_2(tmp_path):
     conn = _conn(index)
     # Chain: a → b → c → d
     e1 = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
     e2 = write_governed_edge(
-        conn, from_record_type="c", from_record_id="b",
+        conn, index.roots, from_record_type="c", from_record_id="b",
         to_record_type="c", to_record_id="c", relation_type="refines",
         state="active",
     )
     e3 = write_governed_edge(
-        conn, from_record_type="c", from_record_id="c",
+        conn, index.roots, from_record_type="c", from_record_id="c",
         to_record_type="c", to_record_id="d", relation_type="refines",
         state="active",
     )
@@ -625,9 +625,10 @@ def test_graph_layer_shadow_lines_none_index(tmp_path):
 
 def test_write_governed_edge_returns_empty_on_error(tmp_path):
     """write_governed_edge returns {} on connection error."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="graph-layer-test")
     conn = sqlite3.connect(":memory:")
     result = write_governed_edge(
-        conn,
+        conn, roots,
         from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b",
         relation_type="refines",
@@ -642,7 +643,7 @@ def test_transition_edge_state_illegal_transition(tmp_path):
     _, index = _store(tmp_path)
     conn = _conn(index)
     edge = write_governed_edge(
-        conn, from_record_type="c", from_record_id="a",
+        conn, index.roots, from_record_type="c", from_record_id="a",
         to_record_type="c", to_record_id="b", relation_type="refines",
         state="active",
     )
@@ -1022,6 +1023,7 @@ def test_t2_1_8_proposer_detects_similar_body_but_same_kind(tmp_path):
 
 def _seed_contradicts_edge(
     conn: sqlite3.Connection,
+    roots: MemoryOSRoots,
     from_id: str,
     to_id: str,
     *,
@@ -1030,7 +1032,7 @@ def _seed_contradicts_edge(
     """Helper: write a contradicts edge between two crystallized records."""
     from plugins.memory.memory_os.index import write_governed_edge
     return write_governed_edge(
-        conn,
+        conn, roots,
         from_record_type="crystallized_record",
         from_record_id=from_id,
         to_record_type="crystallized_record",
@@ -1061,7 +1063,8 @@ def test_t2_2_1_gate_flags_contradicting_candidate(tmp_path):
     index.rebuild_from_store(store)
 
     # Write a contradicts edge between A and B
-    _seed_contradicts_edge(conn, "cry_gate_a", "cry_gate_b")
+    _seed_contradicts_edge(
+        conn, index.roots, "cry_gate_a", "cry_gate_b")
     conn.close()
 
     # Seed a crystallized candidate that matches A's body text
@@ -1146,7 +1149,8 @@ def test_t2_2_3_gate_allows_owner_override(tmp_path):
          "body": "Friday deployments are fine with rollback."},
     ])
     index.rebuild_from_store(store)
-    _seed_contradicts_edge(conn, "cry_override_a", "cry_override_b")
+    _seed_contradicts_edge(
+        conn, index.roots, "cry_override_a", "cry_override_b")
     conn.close()
 
     # Seed candidate that will be flagged
@@ -1223,7 +1227,8 @@ def test_t2_2_6_gate_does_not_alter_candidates(tmp_path):
          "body": "Rolling deployments increase complexity."},
     ])
     index.rebuild_from_store(store)
-    _seed_contradicts_edge(conn, "cry_ro_a", "cry_ro_b")
+    _seed_contradicts_edge(
+        conn, index.roots, "cry_ro_a", "cry_ro_b")
     conn.close()
 
     conn2 = _conn(index)

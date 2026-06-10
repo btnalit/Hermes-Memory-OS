@@ -118,7 +118,7 @@ def _detect_relation(
             "to_record_type": "crystallized_record",
             "to_record_id": rid_b,
             "relation_type": "refines",
-            "weight": 0.9,
+            "weight": 1.0,
             "source_event_id": shared_event,
             "proposed_by": "structural",
             "state": "candidate",
@@ -134,7 +134,7 @@ def _detect_relation(
             "to_record_type": "crystallized_record",
             "to_record_id": to_id,
             "relation_type": "depends_on",
-            "weight": 0.95,
+            "weight": 1.0,
             "source_event_id": None,
             "proposed_by": "structural",
             "state": "candidate",
@@ -145,10 +145,8 @@ def _detect_relation(
     if dice >= _DICE_THRESHOLD:
         if kind_a != kind_b:
             rtype = "contradicts"
-            w = 0.7
         else:
             rtype = "refines"
-            w = 0.6
         # Only write if we haven't already via source_event or depends_on
         has_same = any(
             e["relation_type"] == rtype
@@ -163,7 +161,7 @@ def _detect_relation(
                 "to_record_type": "crystallized_record",
                 "to_record_id": rid_b,
                 "relation_type": rtype,
-                "weight": w,
+                "weight": 1.0,
                 "source_event_id": None,
                 "proposed_by": "structural",
                 "state": "candidate",
@@ -181,7 +179,7 @@ def _detect_relation(
                 "to_record_type": "crystallized_record",
                 "to_record_id": rid_b,
                 "relation_type": "co_occurs",
-                "weight": 0.3,
+                "weight": 1.0,
                 "source_event_id": None,
                 "proposed_by": "structural",
                 "state": "candidate",

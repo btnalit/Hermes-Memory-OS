@@ -54,6 +54,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/session_mirror.py::_append_jsonl::path.open_a::path": "session_mirror_private_writer",
     "plugins/memory/memory_os/shadow_journal.py::ShadowJournalIngestion._quarantine_malformed::path.open_a::quarantine_path": "quarantine_only",
     "plugins/memory/memory_os/store.py::MemoryOSStore.append_event::path.open_a::path": "canonical_event_store",
+    "plugins/memory/memory_os/index.py::_write_edge_canonical::append_jsonl_call::edges_path": "graph_edge_canonical",
     "plugins/memory/memory_os/store.py::MemoryOSStore.append_crystallized_record::path.open_a::path": "owner_gated_crystallized_store",
     "plugins/memory/memory_os/store.py::MemoryOSStore._quarantine_malformed_event::path.open_a::quarantine_path": "quarantine_only",
     "plugins/memory/memory_os/structural_write_gate.py::append_governed_jsonl::path.open_a::destination": "structural_write_gate",

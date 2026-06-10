@@ -122,7 +122,9 @@ def run_crystallization_gate(
             contradictions: list[dict[str, Any]] = []
             if index and hasattr(index, "query_edges"):
                 try:
-                    for check_state in ("active", "candidate"):
+                    # Only consume active edges — candidate edges have not
+                    # passed owner review (§6) and must not trigger automation.
+                    for check_state in ("active",):
                         edges = index.query_edges(
                             similar_ids, depth=1, state=check_state, limit=50
                         )

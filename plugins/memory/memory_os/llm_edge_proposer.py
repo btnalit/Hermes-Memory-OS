@@ -3,8 +3,10 @@
 Phase 2.3 — calls the configured LLM (via low_clue_recall._call_hermes_runtime_model)
 to determine relationships between crystallized record pairs.
 
-Low-risk edges auto-promote to `active` to reduce manual intervention.
-High-risk edges (contradicts, depends_on) stay as `candidate`.
+Auto-active types (co_occurs, evidence_for) promote to `active` directly.
+Review-required types (contradicts, depends_on, refines) always stay as `candidate`
+— owner review is non-negotiable per §6, G4, T2.3.2.
+Confidence is stored as provenance metadata, NOT as a review bypass.
 """
 
 from __future__ import annotations
@@ -279,12 +281,12 @@ def run_llm_proposer(
             # Determine initial state based on risk
             if rtype in _AUTO_ACTIVE_TYPES:
                 init_state = "active"
-            elif rtype in _REVIEW_REQUIRED_TYPES and confidence >= 0.7:
-                init_state = "active"  # high-confidence → auto-promote
             else:
+                # REVIEW_REQUIRED types always start as candidate:
+                # owner review is non-negotiable per §6, G4, T2.3.2
                 init_state = "candidate"
 
-            # Write edge
+            # Write edge — weight=1.0 for Phase 1-2 (confidence is provenance only)
             if index and hasattr(index, "write_governed_edge"):
                 edge = index.write_governed_edge(
                     from_record_type="crystallized_record",
@@ -292,7 +294,7 @@ def run_llm_proposer(
                     to_record_type="crystallized_record",
                     to_record_id=records[j]["id"],
                     relation_type=rtype,
-                    weight=confidence,
+                    weight=1.0,
                     source_event_id=None,
                     proposed_by="llm",
                     state=init_state,
