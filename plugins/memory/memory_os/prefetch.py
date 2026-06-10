@@ -470,6 +470,9 @@ def _build_prefetch_sections(
     error_records: list[dict[str, Any]] | None = None,
 ) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
+    # Shared dedup set: record_ids emitted by dedicated sections are skipped
+    # by Indexed Recall to avoid duplicate injection across sections.
+    seen: set[tuple[str, str]] = set()
     _append_section(
         sections,
         "Recall Clarification Guard",
@@ -485,14 +488,14 @@ def _build_prefetch_sections(
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
-    _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query))
-    _append_section(sections, "Crystallized Memory", _crystallized_lines(store))
+    _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
+    _append_section(sections, "Crystallized Memory", _crystallized_lines(store, seen=seen))
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
-    _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records))
-    _append_section(sections, "Recent Event Summaries", _event_lines(store))
-    # Second-hop graph traversal: anchor_ids come from first-hop FTS5 results.
-    # _indexed_lines already called index.search(), so we avoid re-calling it
-    # by collecting record_ids from the same search path inline here.
+    _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
+    _append_section(sections, "Recent Event Summaries", _event_lines(store, seen=seen))
+    # Second-hop graph traversal: anchor_ids come from FTS5 results.
+    # _collect_anchor_ids calls index.search() a second time (微秒级,可忽略).
+    # See docstring at _collect_anchor_ids for details.
     _first_anchors = _collect_anchor_ids(query, index)
     _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index))
     return sections
@@ -814,7 +817,7 @@ def _relationship_lines(store: MemoryOSStore) -> list[str]:
     return lines
 
 
-def _crystallized_lines(store: MemoryOSStore) -> list[str]:
+def _crystallized_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | None = None) -> list[str]:
     """Record-level crystallized memory lines.
 
     Parses each .md file into individual records, filters by canonical_state
@@ -839,10 +842,14 @@ def _crystallized_lines(store: MemoryOSStore) -> list[str]:
             if not text or _is_diagnostic_style_seed(text):
                 continue
             lines.append(f"- {path.name}/{kind}: {text}")
+            if seen is not None:
+                rid = str(frontmatter.get("id", "")).strip()
+                if rid:
+                    seen.add(("crystallized_record", rid))
     return lines
 
 
-def _candidate_lines(store: MemoryOSStore, *, query: str) -> list[str]:
+def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:
     if not _should_include_candidates(query):
         return []
     lines: list[str] = []
@@ -855,6 +862,8 @@ def _candidate_lines(store: MemoryOSStore, *, query: str) -> list[str]:
                 "- candidate only / review candidate; not approved crystallized memory: "
                 f"{candidate.candidate_id} {candidate.kind}: {text}"
             )
+            if seen is not None:
+                seen.add(("crystallized_candidate", candidate.candidate_id))
     return lines
 
 
@@ -870,13 +879,16 @@ def _should_include_candidates(query: str) -> bool:
     return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
-def _event_lines(store: MemoryOSStore) -> list[str]:
+def _event_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | None = None) -> list[str]:
     selected, _dropped = _select_continuity_events(store)
-    return [
-        f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
-        for event in selected
-        if not _is_diagnostic_style_seed(str(event.summary))
-    ]
+    lines: list[str] = []
+    for event in selected:
+        if _is_diagnostic_style_seed(str(event.summary)):
+            continue
+        lines.append(f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}")
+        if seen is not None and event.id:
+            seen.add(("event", event.id))
+    return lines
 
 
 def _collect_anchor_ids(query: str, index: object | None) -> list[str]:
@@ -1162,6 +1174,7 @@ def _indexed_lines(
     index: object | None,
     *,
     error_records: list[dict[str, Any]] | None = None,
+    seen: set[tuple[str, str]] | None = None,
 ) -> list[str]:
     route = plan_query_route(query, diagnostic_grounding_enabled=False)
     search_query = str(route.get("search_query", ""))
@@ -1186,9 +1199,14 @@ def _indexed_lines(
     for hit in result.get("hits", []):
         if not isinstance(hit, dict):
             continue
+        record_type = str(hit.get("record_type", ""))
+        record_id = str(hit.get("record_id", ""))
+        if seen is not None and record_type and record_id:
+            if (record_type, record_id) in seen:
+                continue  # already emitted by a dedicated section
         snippet = _redact(_clip(str(hit.get("snippet", "")), 220))
         if snippet:
-            lines.append(f"- {hit.get('record_type', 'record')}/{hit.get('record_id', '')}: {snippet}")
+            lines.append(f"- {record_type}/{record_id}: {snippet}")
     if lines:
         display_query = str(route.get("display_query", ""))
         lines.insert(0, f"- query route: {route.get('route', 'slow_path')}; search: {display_query}")

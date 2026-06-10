@@ -106,18 +106,18 @@ def test_real_conversation_flow():
     assert p._consecutive_topic_switch_count == 0
 
     # Q1: User asks about memory system
-    # Should detect topic switch (counter goes 0→1), keeps old anchor
+    # 含有 CJK 关键词"记忆" → 正常切题
     p._refresh_current_task_anchor_from_query("你看看你会话注入了那些记忆")
     assert p._consecutive_topic_switch_count == 1
     # Anchor should still contain M003 reference (not replaced)
     assert "M003" in p._current_task_anchor
     assert not p._foreground_task_only_prefetch
 
-    # Q2: User confirms memory is normal (still on memory topic)
-    # Second consecutive zero-overlap → counter 1→2, anchor cleared
+    # Q2: User confirms memory is normal (zero-feature continuation of memory topic)
+    # 零特征→不计为切题,anchor 保留不变
     p._refresh_current_task_anchor_from_query("不用了，我要确认正常的")
-    assert p._consecutive_topic_switch_count == 0  # reset after clear
-    assert p._current_task_anchor == ""  # cleared!
+    assert p._consecutive_topic_switch_count == 0  # reset (not a switch)
+    assert "M003" in p._current_task_anchor  # preserved — zero-feature doesn't clear
 
 
 def test_single_off_topic_question_does_not_clear():
@@ -129,8 +129,8 @@ def test_single_off_topic_question_does_not_clear():
         session_id="test",
     )
 
-    # Q1: Off-topic question
-    p._refresh_current_task_anchor_from_query("今天天气怎么样")
+    # Q1: Off-topic question (entities don't overlap with anchor)
+    p._refresh_current_task_anchor_from_query("NBA 总决赛今天谁会赢")
     assert p._consecutive_topic_switch_count == 1
     assert "M003" in p._current_task_anchor  # still preserved
 
@@ -139,6 +139,66 @@ def test_single_off_topic_question_does_not_clear():
     assert p._consecutive_topic_switch_count == 0  # reset
     # Anchor should be replaced with new query
     assert "M003" not in p._current_task_anchor  # replaced by new task
+
+
+def test_zero_feature_followup_not_topic_switch():
+    """Zero-feature follow-ups (CJK 肯定语) must not trigger topic switch.
+
+    Only CJK-only phrases that produce zero extractable features are tested here.
+    "ok" and "yes do it" produce English entities (ok/yes/do/it) and would need
+    entity-level stopword filtering for complete coverage — see the separate
+    note in the F-1 analysis.
+    """
+    p = make_memory_provider()
+    p._current_task_anchor = _format_current_task_anchor(
+        task="修 M003 管线问题——验证全链修复",
+        operations=[],
+        session_id="test",
+    )
+    # CJK-only phrases — zero ASCII entities, zero CJK keyword hits
+    for phrase in ("好的", "对", "嗯", "就这么办", "可以"):
+        assert p._is_topic_switch(phrase) is False, f"'{phrase}' should NOT be a topic switch"
+
+
+def test_consecutive_affirmations_never_clear_anchor():
+    """Two consecutive zero-feature affirmations must NOT clear the anchor."""
+    p = make_memory_provider()
+    p._current_task_anchor = _format_current_task_anchor(
+        task="分析 M003 Canada vs Bosnia",
+        operations=[],
+        session_id="test",
+    )
+    anchor_before = p._current_task_anchor
+    assert p._consecutive_topic_switch_count == 0
+
+    # First affirmation — zero features → NOT a topic switch
+    p._refresh_current_task_anchor_from_query("好的")
+    assert p._consecutive_topic_switch_count == 0  # not incremented
+    assert p._current_task_anchor == anchor_before  # anchor preserved
+
+    # Second affirmation — still zero features → still NOT a topic switch
+    p._refresh_current_task_anchor_from_query("对的")
+    assert p._consecutive_topic_switch_count == 0  # not incremented
+    assert p._current_task_anchor == anchor_before  # anchor preserved
+
+
+def test_real_switch_still_detected_after_fix():
+    """The fix for zero-feature queries must not break real topic switch detection."""
+    p = make_memory_provider()
+    p._current_task_anchor = _format_current_task_anchor(
+        task="分析 M003 Canada vs Bosnia match",
+        operations=[],
+        session_id="test",
+    )
+    # First off-topic query → counter 1, anchor preserved
+    p._refresh_current_task_anchor_from_query("安装 ComfyUI 并渲染视频")
+    assert p._consecutive_topic_switch_count == 1
+    assert "M003" in p._current_task_anchor
+
+    # Second off-topic query → counter hits 2, anchor cleared
+    p._refresh_current_task_anchor_from_query("ffmpeg 转码怎么加速")
+    assert p._consecutive_topic_switch_count == 0
+    assert p._current_task_anchor == ""
 
 
 def test_non_switch_query_resets_counter():

@@ -753,6 +753,10 @@ class MemoryOSProvider(MemoryProvider):
         else:
             self._consecutive_topic_switch_count = 0
         # ────────────────────────────────────────────────────────
+        # Zero-feature follow-ups (affirmations, acknowledgments)
+        # carry no topic information — keep the existing anchor.
+        if self._current_task_anchor and not _extract_query_features(text):
+            return
 
         self._current_task_anchor = _format_current_task_anchor(
             task=text,
@@ -792,10 +796,12 @@ class MemoryOSProvider(MemoryProvider):
         query_cjk = {kw for kw in _CHINESE_TOPIC_KEYWORDS if kw in query_text}
 
         old_features = old_entities | old_cjk
-        query_features = query_entities | query_cjk
+        query_features = _extract_query_features(query_text)
 
         if not old_features:
             return False  # nothing in the old anchor to compare against
+        if not query_features:
+            return False  # zero-feature follow-up is NOT a topic switch
         return len(old_features & query_features) == 0
 
     def _write_deferred_current_task_anchor(self, *, anchor: str, deferral: str, session_id: str = "") -> None:
@@ -1336,6 +1342,26 @@ def _is_deferred_continue_query(text: str) -> bool:
 
 def _redact_task_text(value: str) -> str:
     return _redact_secrets(value)
+
+
+def _extract_query_features(text: str) -> set[str]:
+    """Extract topic-relevant ASCII entities and CJK keywords from a query.
+
+    Returns empty set for zero-feature follow-ups (affirmations, acknowledgments)
+    that carry no topic information.
+    """
+    query_text = " ".join(str(text or "").split())
+    if not query_text:
+        return set()
+    entity_pat = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
+    entities = {m.group().lower() for m in entity_pat.finditer(query_text)}
+    _CHINESE_TOPIC_KEYWORDS = (
+        "记忆", "架构", "系统", "插件", "安装", "视频", "渲染",
+        "错误", "失败", "网关", "状态", "候选", "结晶", "长期记忆",
+        "治理", "证据", "任务",
+    )
+    cjk = {kw for kw in _CHINESE_TOPIC_KEYWORDS if kw in query_text}
+    return entities | cjk
 
 
 def _clip_multiline(value: str, limit: int) -> str:
