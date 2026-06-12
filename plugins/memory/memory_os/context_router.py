@@ -362,10 +362,13 @@ def _route_exclusion_reason(section: ContextSection, route: str) -> str:
         return "route_excludes_broad_carryover"
     if route == "casual_continuity" and (
         name == "current foreground task"
+        or name == "working memory"
         or "diagnostic" in name
         or "candidate" in name
         or name == "crystallized memory"
     ):
+        return "route_excludes_section"
+    if route == "ambiguous_recall" and name == "working memory":
         return "route_excludes_section"
     if route == "ambiguous_recall" and name != "recall clarification guard":
         return "route_excludes_section"

@@ -217,6 +217,8 @@ def build_memory_source_record(
         "policy_ref": policy_ref,
         "policy_version": int(policy_ref.get("policy_version") or 0),
         "selected_chars_total": sum(int(item.get("chars", 0)) for item in selected_report),
+        "budget_chars": int(route_report.get("budget_chars") or 0),
+        "used_budget_chars": int(route_report.get("used_budget_chars") or 0),
         "dropped_count_total": len(route_report.get("dropped_sections") or []),
         "boundary": _boundary(boundary),
     }
@@ -284,6 +286,58 @@ def memory_sources_last_report(roots: MemoryOSRoots) -> dict[str, Any]:
         "code": "" if records else "memory_sources_empty",
         "record": records[0] if records else None,
     }
+
+
+def render_last_injection_explanation(roots: MemoryOSRoots) -> str:
+    """Render the most recent Memory Sources record as an operator-readable trace."""
+    report = memory_sources_last_report(roots)
+    record = report.get("record") if isinstance(report.get("record"), dict) else None
+    if not record:
+        return "No Memory Sources injection record exists for this profile."
+    lines = [
+        "Memory-OS last injection explanation",
+        f"record_id: {record.get('record_id', '')}",
+        f"created_at: {record.get('created_at', '')}",
+        f"profile: {record.get('profile', roots.profile or 'default')}",
+        f"route: {record.get('route', 'unknown')}",
+        "route_reason_codes: " + _join_codes(record.get("route_reason_codes")),
+        f"router: mode={record.get('context_router_mode', 'unknown')} applied={bool(record.get('router_applied'))}",
+        f"budget: used={int(record.get('used_budget_chars') or 0)} / limit={int(record.get('budget_chars') or 0)} chars; selected_chars_total={int(record.get('selected_chars_total') or 0)}",
+        "selected sections:",
+    ]
+    selected = record.get("selected") if isinstance(record.get("selected"), list) else []
+    if selected:
+        for item in selected:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- {item.get('heading', '')}: source={item.get('source_class', '')}; "
+                f"chars={int(item.get('chars') or 0)}; score={item.get('score')}; "
+                f"why={_join_codes(item.get('reason_codes'))}"
+            )
+    else:
+        lines.append("- none")
+    lines.append("dropped/excluded sections:")
+    dropped = record.get("dropped") if isinstance(record.get("dropped"), list) else []
+    if dropped:
+        for item in dropped:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- {item.get('heading', '')}: source={item.get('source_class', '')}; "
+                f"chars={int(item.get('chars') or 0)}; score={item.get('score')}; "
+                f"why={_join_codes(item.get('reason_codes'))}"
+            )
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def _join_codes(value: Any) -> str:
+    if not isinstance(value, list):
+        return "none"
+    codes = [str(item) for item in value if str(item)]
+    return ", ".join(codes) if codes else "none"
 
 
 def memory_sources_feedback_last_report(

@@ -153,7 +153,7 @@ def test_prefetch_orders_layers_deterministically(tmp_path):
         {
             "schema_version": WORKING_SCHEMA_VERSION,
             "updated_at": working_item.updated_at,
-            "items": [working_item.__dict__],
+            "items": [{**working_item.__dict__, "text": "Synthetic memory working item 2"}],
         },
     )
     (store.roots.relationships_root / "owner.md").write_text(
@@ -287,7 +287,7 @@ def test_prefetch_continuity_selector_preserves_bridge_seed_events(tmp_path):
     assert "### Continuity Bridge" in context
     assert "BRIDGE_CRON_MARKER" in context
     assert "BRIDGE_STATE_MARKER" in context
-    assert context.index("BRIDGE_CRON_MARKER") < context.find("NOISY_WORKING_MEMORY")
+    assert "NOISY_WORKING_MEMORY" not in context
 
 
 def test_continuity_selector_report_counts_selected_and_dropped_without_private_bodies(tmp_path):

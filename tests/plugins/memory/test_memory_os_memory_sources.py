@@ -196,6 +196,43 @@ def test_memory_sources_cli_last_history_and_stats_are_bounded(tmp_path, monkeyp
     assert "你还记得" not in rendered
     assert "Do not answer" not in rendered
 
+    result = memory_os_command(_parse_memory_os_args(["memory-sources", "explain-last-injection"]))
+    explanation = capsys.readouterr().out
+    assert result == 0
+    assert "Memory-OS last injection explanation" in explanation
+    assert "route: ambiguous_recall" in explanation
+    assert "budget: used=" in explanation
+    assert "selected sections:" in explanation
+    assert "dropped/excluded sections:" in explanation
+
+
+def test_memory_sources_explain_last_injection_handles_empty_ledger(tmp_path, monkeypatch, capsys):
+    _store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = memory_os_command(_parse_memory_os_args(["memory-sources", "explain-last-injection"]))
+    explanation = capsys.readouterr().out
+
+    assert result == 0
+    assert "No Memory Sources injection record exists" in explanation
+
+
+def test_memory_sources_record_includes_budget_usage(tmp_path):
+    store = _store(tmp_path)
+
+    build_prefetch(
+        "你还记得我之前跟你说过的一个设计吗？",
+        budget_chars=2200,
+        store=store,
+        index=None,
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        memory_sources_config={"enabled": True},
+    )
+    record = read_memory_source_records(store.roots, limit=1)[0]
+
+    assert record["budget_chars"] == 2200
+    assert record["used_budget_chars"] > 0
+
 
 def test_memory_sources_feedback_last_records_explicit_owner_feedback_without_mutating_sources(
     tmp_path,

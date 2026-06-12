@@ -76,6 +76,7 @@ from .memory_sources import (
     memory_sources_history_report,
     memory_sources_last_report,
     memory_sources_stats_report,
+    render_last_injection_explanation,
 )
 from .metadata_retention import MetadataRetentionPolicy, metadata_retention_plan
 from .migrator import (
@@ -924,6 +925,7 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_parser = subs.add_parser("memory-sources")
     memory_sources_subs = memory_sources_parser.add_subparsers(dest="memory_sources_command", required=True)
     memory_sources_subs.add_parser("last")
+    memory_sources_subs.add_parser("explain-last-injection")
     memory_sources_history = memory_sources_subs.add_parser("history")
     memory_sources_history.add_argument("--limit", type=int, default=20)
     memory_sources_stats = memory_sources_subs.add_parser("stats")
@@ -1805,6 +1807,9 @@ def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> i
     command = args.memory_sources_command
     if command == "last":
         print(json.dumps(memory_sources_last_report(store.roots), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "explain-last-injection":
+        print(render_last_injection_explanation(store.roots))
         return 0
     if command == "history":
         print(

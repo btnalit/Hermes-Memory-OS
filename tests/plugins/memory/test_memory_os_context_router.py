@@ -407,6 +407,64 @@ def test_prefetch_context_router_apply_can_be_rolled_back_by_config(tmp_path):
     assert rolled_back == baseline
 
 
+def test_working_memory_filters_zero_overlap_items_when_query_has_features(tmp_path):
+    store = _store(tmp_path)
+    relevant = build_working_item(seed=198, source_event_id="evt-relevant")
+    noise = build_working_item(seed=199, source_event_id="evt-noise")
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": relevant.updated_at,
+            "items": [
+                {**relevant.__dict__, "text": "ComfyUI plugin install is active."},
+                {**noise.__dict__, "text": "Garden irrigation reminder for weekend errands."},
+            ],
+        },
+    )
+
+    context = build_prefetch("ComfyUI plugin install", budget_chars=2200, store=store, index=None)
+
+    assert "ComfyUI plugin install is active" in context
+    assert "Garden irrigation" not in context
+
+
+def test_working_memory_zero_feature_query_keeps_recency_behavior(tmp_path):
+    store = _store(tmp_path)
+    first = build_working_item(seed=200, source_event_id="evt-first")
+    second = build_working_item(seed=201, source_event_id="evt-second")
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": second.updated_at,
+            "items": [
+                {**first.__dict__, "text": "ComfyUI plugin install is active."},
+                {**second.__dict__, "text": "Garden irrigation reminder for weekend errands."},
+            ],
+        },
+    )
+
+    context = build_prefetch("", budget_chars=2200, store=store, index=None)
+
+    assert "ComfyUI plugin install is active" in context
+    assert "Garden irrigation reminder" in context
+
+
+def test_context_router_casual_and_ambiguous_exclude_working_memory():
+    working = ContextSection(section="Working Memory", text="ComfyUI plugin install", source_class="working")
+    carryover = ContextSection(section="Conversation Carryover", text="Recent conversation has something worth carrying forward.")
+    guard = ContextSection(section="Recall Clarification Guard", text="Ask for a keyword.", source_class="recall_guard")
+
+    casual = route_context_sections("你觉得最近怎么样", sections=[working, carryover], budget_chars=1200)
+    ambiguous = route_context_sections("继续昨天那个", sections=[working, guard], budget_chars=1200)
+
+    assert casual["route"] == "casual_continuity"
+    assert any(item["section"] == "Working Memory" and "route_excludes_section" in item["reason_codes"] for item in casual["dropped_sections"])
+    assert ambiguous["route"] == "ambiguous_recall"
+    assert any(item["section"] == "Working Memory" and "route_excludes_section" in item["reason_codes"] for item in ambiguous["dropped_sections"])
+
+
 def test_prefetch_context_router_apply_casual_does_not_treat_query_anchor_as_task(tmp_path):
     store = _store(tmp_path)
     item = build_working_item(seed=99, source_event_id="evt-noisy")

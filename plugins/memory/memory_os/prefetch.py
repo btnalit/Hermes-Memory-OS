@@ -16,7 +16,11 @@ from .crystallized import (
     _parse_markdown_records,
     is_active_crystallized_frontmatter,
 )
-from .low_clue_recall import build_low_clue_guard_lines, normalize_low_clue_recall_config
+from .low_clue_recall import (
+    _bounded_query_features,
+    build_low_clue_guard_lines,
+    normalize_low_clue_recall_config,
+)
 from .jsonl_io import build_error_record
 from .memory_sources import (
     GUARD_RECALL_CLARIFICATION,
@@ -486,7 +490,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Identity Memory", _identity_lines(store))
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
-    _append_section(sections, "Working Memory", _working_lines(store))
+    _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store, seen=seen))
@@ -782,8 +786,17 @@ def _identity_lines(store: MemoryOSStore) -> list[str]:
     return [f"- manifest sources: {', '.join(sorted(kinds))}"]
 
 
-def _working_lines(store: MemoryOSStore) -> list[str]:
+def _working_lines(store: MemoryOSStore, *, query: str = "") -> list[str]:
     lines: list[str] = []
+    query_features = _bounded_query_features(query)
+    query_terms = {
+        str(term).lower()
+        for term in query_features.get("specific_terms", [])
+        if str(term).strip()
+    }
+    query_trigrams = _text_trigrams(query)
+    # F-1 guard: low/zero-feature queries retain the historical recency behavior.
+    relevance_gate_enabled = bool(query_terms or query_trigrams)
     for path in sorted(store.roots.working_root.glob("*.json")):
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
@@ -799,6 +812,12 @@ def _working_lines(store: MemoryOSStore) -> list[str]:
             text = _redact(_clip(str(item.get("text", "")), 220))
             if _is_diagnostic_style_seed(text):
                 continue
+            if relevance_gate_enabled and not _working_item_matches_query(
+                text,
+                query_terms=query_terms,
+                query_trigrams=query_trigrams,
+            ):
+                continue
             if text:
                 candidates.append((item, text))
         # Newest first (ISO 8601 sorts lexicographically)
@@ -806,6 +825,44 @@ def _working_lines(store: MemoryOSStore) -> list[str]:
         for item, text in candidates[:WORKING_ITEMS_PER_FILE]:
             lines.append(f"- {path.stem}/{item.get('kind', 'item')}: {text}")
     return lines
+
+
+def _working_item_matches_query(text: str, *, query_terms: set[str], query_trigrams: set[str]) -> bool:
+    normalized = _normalize_for_overlap(text)
+    expanded_terms = _expand_working_query_terms(query_terms)
+    if expanded_terms and any(term in normalized for term in expanded_terms):
+        return True
+    if not query_trigrams:
+        return False
+    item_trigrams = _text_trigrams(text)
+    overlap_count = len(item_trigrams & query_trigrams)
+    return overlap_count >= 3 and overlap_count / max(len(query_trigrams), 1) >= 0.12
+
+
+def _expand_working_query_terms(query_terms: set[str]) -> set[str]:
+    expanded = set(query_terms)
+    aliases = {
+        "记忆": {"memory", "memory-os", "memory_os"},
+        "系统": {"system", "memory-os", "memory_os"},
+        "架构": {"architecture"},
+        "候选": {"candidate"},
+        "结晶": {"crystallized"},
+        "治理": {"governance"},
+    }
+    for term in list(query_terms):
+        expanded.update(aliases.get(term, set()))
+    return expanded
+
+
+def _text_trigrams(text: str) -> set[str]:
+    normalized = _normalize_for_overlap(text)
+    if len(normalized) < 3:
+        return set()
+    return {normalized[index : index + 3] for index in range(0, len(normalized) - 2)}
+
+
+def _normalize_for_overlap(text: str) -> str:
+    return re.sub(r"\s+", "", _redact(str(text or "")).lower())
 
 
 def _relationship_lines(store: MemoryOSStore) -> list[str]:

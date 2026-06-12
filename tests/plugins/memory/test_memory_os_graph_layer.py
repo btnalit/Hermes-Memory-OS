@@ -65,11 +65,11 @@ def test_t1_1_1_schema_has_all_12_columns(tmp_path):
 
 
 def test_t1_1_2_rebuild_is_reversible(tmp_path):
-    """T1.1.2: rebuild re-creates the correct schema (edges are derived, not
-    backed by canonical source, so data doesn't survive — but schema must)."""
+    """T1.1.2: a governed edge written to canonical graph/edges.jsonl
+    survives rebuild via _index_edges projection back into memory_edges."""
     store, index = _store(tmp_path)
     conn = _conn(index)
-    write_governed_edge(
+    edge = write_governed_edge(
         conn, index.roots,
         from_record_type="crystallized_record", from_record_id="rec_a",
         to_record_type="crystallized_record", to_record_id="rec_b",
@@ -77,14 +77,20 @@ def test_t1_1_2_rebuild_is_reversible(tmp_path):
     )
     conn.close()
 
-    # Rebuild — edges don't have a canonical source yet, so they won't
-    # survive.  That's correct for Phase 1.
+    edges_path = index.roots.memory_os_root / "graph" / "edges.jsonl"
+    assert edges_path.exists()
+    assert edge["edge_id"] in edges_path.read_text(encoding="utf-8")
+
     index.rebuild_from_store(store)
 
-    # Schema must still be complete after rebuild
     conn2 = _conn(index)
+    row = conn2.execute("select * from memory_edges where edge_id=?", (edge["edge_id"],)).fetchone()
     cols = {str(c[1]) for c in conn2.execute("pragma table_info(memory_edges)").fetchall()}
     conn2.close()
+    assert row is not None
+    assert str(row["from_record_id"]) == "rec_a"
+    assert str(row["to_record_id"]) == "rec_b"
+    assert str(row["relation_type"]) == "refines"
     expected = {
         "edge_id", "from_record_type", "from_record_id",
         "to_record_type", "to_record_id", "relation_type",
