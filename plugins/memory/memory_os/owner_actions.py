@@ -38,6 +38,12 @@ from .memory_sources import (
 from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
+from .candidate_clusters import (
+    candidate_cluster_action_target,
+    candidate_cluster_scope,
+    find_candidate_cluster_by_target,
+    build_candidate_clusters,
+)
 
 
 OWNER_ACTION_SCHEMA_VERSION = "memory-os.owner_action.v0"
@@ -142,6 +148,9 @@ EXPRESSION_FEEDBACK_DIGEST_ACTIONS = (
 ACTION_TYPES = {
     "approve_candidate",
     "reject_candidate",
+    "approve_candidate_cluster",
+    "reject_candidate_cluster",
+    "defer_candidate_cluster",
     "revoke_crystallized",
     "demote_crystallized",
     "mark_feedback",
@@ -156,6 +165,7 @@ ACTION_TYPES = {
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "candidate": {"approve_candidate", "reject_candidate"},
+    "candidate_cluster": {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"},
     "crystallized_record": {"revoke_crystallized", "demote_crystallized"},
     "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
     "memory_source": {"mark_feedback"},
@@ -1496,7 +1506,8 @@ def owner_review_delivery_status_report(store: MemoryOSStore) -> dict[str, Any]:
 
 def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
     closed = _closed_targets(read_owner_action_records(store.roots))
-    items = _candidate_review_items(store, closed)
+    items = _candidate_cluster_review_items(store, closed)
+    items.extend(_candidate_review_items(store, closed))
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_session_mirror_apply_review_items(store, closed))
@@ -2133,7 +2144,8 @@ def deliver_owner_review_digest_once(
 
 def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[str, Any]:
     closed = _closed_targets(read_owner_action_records(store.roots))
-    items = _candidate_review_items(store, closed)
+    items = _candidate_cluster_review_items(store, closed)
+    items.extend(_candidate_review_items(store, closed))
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_session_mirror_apply_review_items(store, closed))
@@ -2602,6 +2614,52 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         return {"crystallized_path": str(path), "candidate_id": target_id}
     if action_type == "reject_candidate":
         return {"candidate_id": target_id, "state": "owner_rejected"}
+    if action_type in {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"}:
+        cluster, scope, status = find_candidate_cluster_by_target(store, target_id)
+        if status != "ok" or cluster is None:
+            return {"state": "failed_closed", "code": status, "cluster_scope": scope}
+        record["action_context"] = {"candidate_cluster_scope": scope}
+        if action_type == "approve_candidate_cluster":
+            service = CrystallizedMemoryService(store)
+            paths: list[str] = []
+            approved_ids: list[str] = []
+            candidates = {candidate.candidate_id: candidate for candidate in read_candidate_queue(store.roots)}
+            for candidate_id in scope["member_candidate_ids"]:
+                candidate = candidates.get(str(candidate_id))
+                if candidate is None:
+                    return {"state": "failed_closed", "code": "candidate_cluster_member_missing", "cluster_scope": scope}
+                decision = ApprovalDecision(
+                    candidate_id=candidate.candidate_id,
+                    purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                    reviewer=str(record["owner_id"]),
+                    reviewed_at=str(record["created_at"]),
+                    note=_bounded_text(note or "owner_approved_candidate_cluster", 240),
+                )
+                path = service.write_approved_record(
+                    candidate,
+                    decision,
+                    file_name="owner_approved.md",
+                )
+                paths.append(str(path))
+                approved_ids.append(candidate.candidate_id)
+            record["owner_effect"]["owner_approved_crystallized_write"] = True
+            record["owner_effect"]["owner_approved_candidate_cluster"] = True
+            return {
+                "cluster_id": scope["cluster_id"],
+                "cluster_scope_hash": scope["scope_hash"],
+                "approved_candidate_ids": approved_ids,
+                "crystallized_paths": paths,
+                "canonical_write_count": len(paths),
+                "state": "owner_approved_cluster",
+            }
+        state = "owner_rejected_cluster" if action_type == "reject_candidate_cluster" else "owner_deferred_cluster"
+        return {
+            "cluster_id": scope["cluster_id"],
+            "cluster_scope_hash": scope["scope_hash"],
+            "member_candidate_ids": list(scope["member_candidate_ids"]),
+            "state": state,
+            "canonical_write_count": 0,
+        }
     if action_type == "revoke_crystallized":
         revoke_result = CrystallizedMemoryService(store).revoke_record(
             target_id,
@@ -2771,6 +2829,12 @@ def _validate_action_target(
 ) -> str:
     if action_type in {"approve_candidate", "reject_candidate"} and not _find_candidate(store, target_id):
         return "candidate_not_found"
+    if action_type in {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"}:
+        if target_type != "candidate_cluster":
+            return "invalid_candidate_cluster_target"
+        _cluster, _scope, status = find_candidate_cluster_by_target(store, target_id)
+        if status != "ok":
+            return status
     if action_type in {"revoke_crystallized", "demote_crystallized"}:
         if target_type != "crystallized_record":
             return "invalid_crystallized_record_target"
@@ -3058,7 +3122,15 @@ def _find_right_brain_expression_outcome(roots: MemoryOSRoots, target_id: str) -
 
 def _append_action_specific_ledger(store: MemoryOSStore, record: dict[str, Any]) -> None:
     action_type = str(record.get("action_type", ""))
-    if action_type in {"approve_candidate", "reject_candidate", "revoke_crystallized", "demote_crystallized"}:
+    if action_type in {
+        "approve_candidate",
+        "reject_candidate",
+        "approve_candidate_cluster",
+        "reject_candidate_cluster",
+        "defer_candidate_cluster",
+        "revoke_crystallized",
+        "demote_crystallized",
+    }:
         _append_jsonl(crystallization_approvals_path(store.roots), record)
     elif action_type in {"approve_proposal", "reject_proposal", "apply_proposal"}:
         _append_jsonl(proposal_action_ledger_path(store.roots), record)
@@ -3378,6 +3450,51 @@ def _attach_owner_reply_context(record: dict[str, Any], context: dict[str, Any])
         record["action_context"] = {
             "session_mirror_approval": _bounded_session_mirror_approval(session_mirror_approval),
         }
+
+
+def _candidate_cluster_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    clusters = build_candidate_clusters(read_candidate_queue(store.roots))
+    items: list[dict[str, Any]] = []
+    for cluster in clusters:
+        if cluster.member_count < 2:
+            continue
+        target_id = candidate_cluster_action_target(cluster)
+        target_ref = f"candidate_cluster:{target_id}"
+        if target_ref in closed:
+            continue
+        scope = candidate_cluster_scope(cluster)
+        actions = _review_actions("candidate_cluster", target_id)
+        items.append(
+            {
+                "schema_version": "memory-os.review_item.v0",
+                "review_item_id": f"review:{target_ref}",
+                "target_type": "candidate_cluster",
+                "target_id": target_id,
+                "source_module": "crystallized_candidate_clusters",
+                "priority": "action_required",
+                "created_at": cluster.created_at_min,
+                "created_at_source": "cluster_member_min",
+                "status": "pending",
+                "summary": _bounded_text(
+                    f"候选记忆近重复簇：{cluster.member_count} 条候选 / {cluster.evidence_count} 个安全引用，可一次审一簇。",
+                    220,
+                ),
+                "proposed_memory_text": _bounded_text(cluster.representative_body, 360),
+                "candidate_kind": ",".join(sorted(cluster.kinds.keys())),
+                "safe_source_ids": [f"event:{event_id}" for event_id in cluster.source_event_ids],
+                "cluster_scope": scope,
+                "member_candidate_ids": list(cluster.member_candidate_ids),
+                "sensitivity": cluster.sensitivity,
+                "mixed_sensitivity": cluster.mixed_sensitivity,
+                "action_tokens": {action["action_type"]: action["token"] for action in actions},
+                "action_targets": {
+                    action["action_type"]: {"target_type": action["target_type"], "target_id": action["target_id"]}
+                    for action in actions
+                },
+                "raw_body_included": False,
+            }
+        )
+    return items
 
 
 def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
@@ -4175,6 +4292,11 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
         if proposed:
             return f"这条候选记忆要批准为长期记忆吗？{proposed}"
         return "这条候选记忆要批准为长期记忆吗？"
+    if target_type == "candidate_cluster":
+        scope = item.get("cluster_scope") if isinstance(item.get("cluster_scope"), dict) else {}
+        member_ids = scope.get("member_candidate_ids") if isinstance(scope, dict) else []
+        count = len(member_ids or item.get("member_candidate_ids") or [])
+        return f"这个近重复候选簇要一次性 approve/reject/defer 吗？共 {count} 条候选。"
     if target_type == "candidate_cleanup":
         return "这条候选记忆还像原始对话片段，批准前需要先整理。"
     if target_type == "proposal":
@@ -4206,6 +4328,8 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
     examples = [action["owner_utterance_example"] for action in actions]
     if target_type in {"candidate", "proposal"} and len(examples) >= 2:
         return f"{examples[0]} or {examples[1]}"
+    if target_type == "candidate_cluster" and examples:
+        return " or ".join(examples[:3])
     if target_type == "proposal_apply" and examples:
         return examples[0]
     if target_type == "proposal" and not examples:
@@ -4232,6 +4356,14 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
         aging = str(item.get("aging_reason") or "pending_owner_review")
         return _bounded_text(
             f"{source_module} 从 {source_count} 个安全引用里提出了稳定记忆候选；队列原因：{aging}。",
+            220,
+        )
+    if target_type == "candidate_cluster":
+        scope = item.get("cluster_scope") if isinstance(item.get("cluster_scope"), dict) else {}
+        mixed = bool(scope.get("mixed_sensitivity")) if isinstance(scope, dict) else False
+        sensitivity_note = "；mixed sensitivity，必须 fail-closed 或拆簇" if mixed else ""
+        return _bounded_text(
+            f"{source_module} 聚合了近重复候选，token 绑定 cluster_id、member ids、source ids 和 sensitivity scope{sensitivity_note}。",
             220,
         )
     if target_type == "candidate_cleanup":
@@ -4306,6 +4438,8 @@ def _safe_review_summary(value: Any, *, fallback: str) -> str:
 def _review_consequence(target_type: str) -> str:
     if target_type == "candidate":
         return "批准会写入一条 owner-approved crystallized memory；拒绝会保留审计证据并关闭该项。"
+    if target_type == "candidate_cluster":
+        return "批准会逐个成员写 owner-approved canonical crystallized memory；reject/defer 只写 owner action ledger；scope 变化或 mixed sensitivity 会 fail-closed。"
     if target_type == "candidate_cleanup":
         return "不会写入长期记忆；该项会留在 review backlog，直到整理或显式清理处理。"
     if target_type == "proposal":
@@ -4337,6 +4471,12 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
         return [
             _review_action("approve", "approve_candidate", target_type, target_id),
             _review_action("reject", "reject_candidate", target_type, target_id),
+        ]
+    if target_type == "candidate_cluster":
+        return [
+            _review_action("approve", "approve_candidate_cluster", target_type, target_id),
+            _review_action("reject", "reject_candidate_cluster", target_type, target_id),
+            _review_action("defer", "defer_candidate_cluster", target_type, target_id),
         ]
     if target_type == "proposal":
         # Generic or template proposals are deliberately not actionable. They
@@ -4389,7 +4529,7 @@ def _review_action(verb: str, action_type: str, target_type: str, target_id: str
     owner_utterance_example = _owner_utterance_example(action=verb, action_token=token, rating=rating)
     agent_tool_call = (
         {}
-        if "|" in rating
+        if "|" in rating or verb == "defer"
         else _owner_review_reply_tool_call(action=verb, action_token=token, rating=rating)
     )
     return {
@@ -6995,6 +7135,9 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         normalized_prefix = {
             "candidate": "candidate",
             "cand": "candidate",
+            "candidate_cluster": "candidate_cluster",
+            "candidate-cluster": "candidate_cluster",
+            "ccluster": "candidate_cluster",
             "proposal": "proposal",
             "prop": "proposal",
             "crystallized": "crystallized_record",
@@ -7015,6 +7158,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return normalized_prefix, suffix.strip()
     if action_type in {"approve_candidate", "reject_candidate"}:
         return "candidate", value
+    if action_type in {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"}:
+        return "candidate_cluster", value
     if action_type in {"revoke_crystallized", "demote_crystallized"}:
         return "crystallized_record", value
     if action_type in {"approve_proposal", "reject_proposal"}:

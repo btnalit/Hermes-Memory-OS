@@ -7,6 +7,7 @@ demotes, archives, or crystallizes candidates by similarity/frequency alone.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from hashlib import sha256
@@ -46,6 +47,8 @@ class CandidateCluster:
     kinds: dict[str, int]
     tags: dict[str, int]
     sensitivity: str
+    sensitivity_counts: dict[str, int]
+    mixed_sensitivity: bool
     created_at_min: str
     created_at_max: str
     similarity_threshold: float
@@ -63,6 +66,8 @@ class CandidateCluster:
             "kinds": dict(self.kinds),
             "tags": dict(self.tags),
             "sensitivity": self.sensitivity,
+            "sensitivity_counts": dict(self.sensitivity_counts),
+            "mixed_sensitivity": self.mixed_sensitivity,
             "created_at_min": self.created_at_min,
             "created_at_max": self.created_at_max,
             "similarity_threshold": self.similarity_threshold,
@@ -171,6 +176,7 @@ def _cluster_from_bucket(bucket: dict[str, Any], threshold: float) -> CandidateC
     member_ids = sorted(member.candidate_id for member in members)
     source_ids = sorted({source for member in members for source in member.source_event_ids})
     created_values = sorted(str(member.created_at or "") for member in members if str(member.created_at or ""))
+    sensitivity_counts = _count(_normalize_sensitivity(member.sensitivity) for member in members)
     return CandidateCluster(
         cluster_id=_cluster_id(member_ids),
         representative_body=representative.body,
@@ -181,12 +187,86 @@ def _cluster_from_bucket(bucket: dict[str, Any], threshold: float) -> CandidateC
         kinds=_count(member.kind for member in members),
         tags=_count(tag for member in members for tag in (member.tags or [])),
         sensitivity=_max_sensitivity(member.sensitivity for member in members),
+        sensitivity_counts=sensitivity_counts,
+        mixed_sensitivity=len(sensitivity_counts) > 1,
         created_at_min=created_values[0] if created_values else "",
         created_at_max=created_values[-1] if created_values else "",
         similarity_threshold=threshold,
         review_state="owner_review_required",
         boundary=dict(_BOUNDARY),
     )
+
+
+def candidate_cluster_scope(cluster: CandidateCluster) -> dict[str, Any]:
+    """Return the exact member/evidence scope an owner action token must bind."""
+    scope = {
+        "schema_version": "memory-os.candidate_cluster_scope.v0",
+        "cluster_id": cluster.cluster_id,
+        "member_candidate_ids": sorted(cluster.member_candidate_ids),
+        "source_event_ids": sorted(cluster.source_event_ids),
+        "sensitivity": cluster.sensitivity,
+        "sensitivity_counts": dict(sorted(cluster.sensitivity_counts.items())),
+        "mixed_sensitivity": bool(cluster.mixed_sensitivity),
+        "sensitivity_policy": "fail_closed_on_mixed_sensitivity",
+        "similarity_threshold": cluster.similarity_threshold,
+    }
+    scope["scope_hash"] = candidate_cluster_scope_hash(scope)
+    return scope
+
+
+def candidate_cluster_action_target(cluster: CandidateCluster) -> str:
+    scope = candidate_cluster_scope(cluster)
+    return f"{scope['cluster_id']}:{scope['scope_hash']}"
+
+
+def candidate_cluster_scope_hash(scope: dict[str, Any]) -> str:
+    payload = {
+        "cluster_id": str(scope.get("cluster_id") or ""),
+        "member_candidate_ids": sorted(str(value) for value in scope.get("member_candidate_ids") or []),
+        "source_event_ids": sorted(str(value) for value in scope.get("source_event_ids") or []),
+        "sensitivity": str(scope.get("sensitivity") or ""),
+        "sensitivity_counts": {
+            str(key): int(value) for key, value in sorted((scope.get("sensitivity_counts") or {}).items())
+        },
+        "mixed_sensitivity": bool(scope.get("mixed_sensitivity")),
+        "sensitivity_policy": str(scope.get("sensitivity_policy") or ""),
+        "similarity_threshold": float(scope.get("similarity_threshold") or 0.0),
+    }
+    return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+
+
+def find_candidate_cluster_by_target(
+    store: MemoryOSStore,
+    target_id: str,
+    *,
+    min_similarity: float = DEFAULT_CLUSTER_MIN_SIMILARITY,
+) -> tuple[CandidateCluster | None, dict[str, Any], str]:
+    """Resolve a scoped cluster action target against the current queue.
+
+    Returns (cluster, current_scope, status). Stale member/evidence/sensitivity
+    changes fail closed as ``candidate_cluster_scope_changed``.
+    """
+    cluster_id, expected_hash = _split_cluster_target(target_id)
+    if not cluster_id or not expected_hash:
+        return None, {}, "candidate_cluster_scope_invalid"
+    for cluster in build_candidate_clusters(read_candidate_queue(store), min_similarity=min_similarity):
+        if cluster.cluster_id != cluster_id:
+            continue
+        scope = candidate_cluster_scope(cluster)
+        if scope.get("scope_hash") != expected_hash:
+            return cluster, scope, "candidate_cluster_scope_changed"
+        if cluster.mixed_sensitivity:
+            return cluster, scope, "candidate_cluster_mixed_sensitivity"
+        return cluster, scope, "ok"
+    return None, {}, "candidate_cluster_scope_changed"
+
+
+def _split_cluster_target(target_id: str) -> tuple[str, str]:
+    value = str(target_id or "").strip()
+    if ":" not in value:
+        return value, ""
+    cluster_id, scope_hash = value.split(":", 1)
+    return cluster_id.strip(), scope_hash.strip()
 
 
 def _cluster_id(member_candidate_ids: list[str]) -> str:
@@ -231,11 +311,16 @@ def _count(values: Any) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
+def _normalize_sensitivity(value: Any) -> str:
+    text = str(value or "private").strip().lower()
+    return text if text in _SENSITIVITY_RANK else "private"
+
+
 def _max_sensitivity(values: Any) -> str:
     best = "private"
     best_rank = _SENSITIVITY_RANK[best]
     for value in values:
-        text = str(value or "private").strip().lower()
+        text = _normalize_sensitivity(value)
         rank = _SENSITIVITY_RANK.get(text, _SENSITIVITY_RANK["private"])
         if rank > best_rank:
             best = text
