@@ -128,8 +128,11 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
     operational_specs = _operational_specs(args, owner_review_deliver, right_brain_deliver)
     paused_optional_jobs: list[dict[str, Any]] = []
     for spec in operational_specs:
+        if not (hermes_home / "scripts" / spec["script"]).is_file():
+            findings.append(_finding(f"{spec['name']}_script_missing", "error"))
         if not (hermes_home / "scripts" / spec["raw_script"]).is_file():
-            findings.append(_finding(f"{spec['name']}_helper_missing", "error"))
+            findings.append(_finding(f"{spec['name']}_raw_script_missing", "error"))
+    status = "blocked" if _has_error(findings) else status
     if not _has_error(findings):
         if args.apply:
             _write_execution_gate_assets(hermes_home=hermes_home, specs=operational_specs)

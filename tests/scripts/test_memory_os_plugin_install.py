@@ -537,6 +537,7 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     expression_feedback_prompt = tmp_path / "home" / "scripts" / "memory_os_expression_feedback_prompt.py"
     memory_sources_feedback_prompt = tmp_path / "home" / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
     proposal_followups_ops_gate = tmp_path / "home" / "scripts" / "memory_os_proposal_followups_ops_gate.py"
+    index_sync_gate = tmp_path / "home" / "scripts" / "memory_os_cron_index_sync_gate.py"
     assert report["system_modules_installed"] is True
     assert report["system_module_file_count"] > 0
     assert report["agent_runtime_file_count"] > 0
@@ -553,12 +554,16 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert expression_feedback_prompt.is_file()
     assert memory_sources_feedback_prompt.is_file()
     assert proposal_followups_ops_gate.is_file()
+    assert index_sync_gate.is_file()
     assert "Hermes owns cron" in cadence_report.read_text(encoding="utf-8")
     assert "--apply" in cadence_report_cron.read_text(encoding="utf-8")
     assert "--apply" in right_brain_outcome_cron.read_text(encoding="utf-8")
     assert "Hermes agent owns the owner interaction" in expression_feedback_prompt.read_text(encoding="utf-8")
     assert "Hermes agent owns the owner interaction" in memory_sources_feedback_prompt.read_text(encoding="utf-8")
     assert "OpsGate report-only" in proposal_followups_ops_gate.read_text(encoding="utf-8")
+    index_sync_gate_text = index_sync_gate.read_text(encoding="utf-8")
+    assert "--registry-key" in index_sync_gate_text
+    assert "index_sync" in index_sync_gate_text
     assert runtime_root.joinpath("system", "lifecycle.py").is_file()
     assert runtime_root.joinpath("modules", "context", "digest_consolidation.py").is_file()
     assert runtime_root.joinpath("modules", "cognition", "deep_reflection.py").is_file()

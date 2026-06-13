@@ -120,21 +120,38 @@ raise SystemExit(2)
     return launcher
 
 
-def _home_with_helpers(tmp_path: Path, *, platforms: dict[str, list[dict[str, str]]]) -> Path:
+def _home_with_helpers(
+    tmp_path: Path,
+    *,
+    platforms: dict[str, list[dict[str, str]]],
+    omit_helpers: set[str] | None = None,
+) -> Path:
     home = tmp_path / "home"
     scripts = home / "scripts"
     scripts.mkdir(parents=True)
+    omitted = omit_helpers or set()
     for helper in (
         "memory_os_owner_review_digest.py",
+        "memory_os_cron_owner_review_digest_gate.py",
         "memory_os_right_brain_expression.py",
+        "memory_os_cron_right_brain_expression_gate.py",
         "memory_os_module_cadence_report_cron.py",
+        "memory_os_cron_module_cadence_report_gate.py",
         "memory_os_right_brain_expression_outcome_cron.py",
+        "memory_os_cron_right_brain_expression_outcome_gate.py",
         "memory_os_proposal_followups_ops_gate.py",
+        "memory_os_cron_proposal_followups_opsgate_gate.py",
         "memory_os_expression_feedback_prompt.py",
+        "memory_os_cron_expression_feedback_request_gate.py",
         "memory_os_memory_sources_feedback_prompt.py",
+        "memory_os_cron_memory_sources_feedback_request_gate.py",
         "memory_os_candidate_aggregation_lane.py",
+        "memory_os_cron_candidate_aggregation_gate.py",
         "memory_os_index_sync.py",
+        "memory_os_cron_index_sync_gate.py",
     ):
+        if helper in omitted:
+            continue
         scripts.joinpath(helper).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     home.joinpath("channel_directory.json").write_text(
         json.dumps({"platforms": platforms}, ensure_ascii=False),
@@ -195,7 +212,36 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert index_sync["raw_script"] == "memory_os_index_sync.py"
     assert index_sync["deliver"] == "local"
     assert index_sync["no_agent"] is True
+    for job in report["operational_cron_jobs"]:
+        assert home.joinpath("scripts", job["script"]).is_file(), job["script"]
     assert not home.joinpath("cron", "jobs.json").exists()
+
+
+def test_onboarding_fail_closed_when_active_closure_wrapper_script_missing(tmp_path):
+    module = _load_module()
+    home = _home_with_helpers(
+        tmp_path,
+        platforms={"telegram": [{"id": "owner", "type": "dm", "name": "owner"}]},
+        omit_helpers={"memory_os_cron_index_sync_gate.py"},
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--hermes-home",
+            str(home),
+            "--hermes-bin",
+            str(_fake_hermes(tmp_path)),
+            "--owner-review-deliver",
+            "auto",
+            "--right-brain-deliver",
+            "origin",
+        ]
+    )
+
+    report = module.run_onboarding(args)
+
+    assert report["status"] == "blocked"
+    assert any(item["code"] == "memory-os-index-sync_script_missing" for item in report["findings"])
+    assert not report["operational_cron_jobs"]
 
 
 def test_onboarding_apply_requires_owner_approval(tmp_path):

@@ -40,7 +40,9 @@ SOURCE_EXECUTION_REPORT_HELPER = REPO_ROOT / "scripts" / "memory_os_execution_re
 SOURCE_OWNER_CRON_ONBOARDING = REPO_ROOT / "scripts" / "memory_os_owner_cron_onboarding.py"
 SOURCE_EXECUTION_GATE_RUNNER = REPO_ROOT / "scripts" / "memory_os_execution_gate_runner.py"
 SOURCE_CANDIDATE_AGGREGATION_LANE = REPO_ROOT / "scripts" / "memory_os_candidate_aggregation_lane.py"
+SOURCE_CANDIDATE_AGGREGATION_GATE = REPO_ROOT / "scripts" / "memory_os_cron_candidate_aggregation_gate.py"
 SOURCE_INDEX_SYNC = REPO_ROOT / "scripts" / "memory_os_index_sync.py"
+SOURCE_INDEX_SYNC_GATE = REPO_ROOT / "scripts" / "memory_os_cron_index_sync_gate.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -853,7 +855,9 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "proposal_followups_ops_gate": SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE,
         "execution_report_helper": SOURCE_EXECUTION_REPORT_HELPER,
         "candidate_aggregation_lane": SOURCE_CANDIDATE_AGGREGATION_LANE,
+        "candidate_aggregation_gate": SOURCE_CANDIDATE_AGGREGATION_GATE,
         "index_sync": SOURCE_INDEX_SYNC,
+        "index_sync_gate": SOURCE_INDEX_SYNC_GATE,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():
@@ -867,7 +871,27 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    _write_registry_cron_wrappers(hermes_home)
     return targets
+
+
+def _write_registry_cron_wrappers(hermes_home: Path) -> None:
+    from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+
+    scripts_dir = hermes_home / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    for spec in memory_os_cron_specs():
+        wrapper = scripts_dir / spec.wrapper_script
+        wrapper.write_text(
+            (
+                "#!/usr/bin/env python3\n"
+                "from memory_os_execution_gate_runner import main\n\n"
+                "if __name__ == \"__main__\":\n"
+                f"    raise SystemExit(main([\"--registry-key\", \"{spec.key}\"]))\n"
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
 
 
 def _write_owner_cron_onboarding_script(hermes_home: Path, *, dry_run: bool) -> Path:
