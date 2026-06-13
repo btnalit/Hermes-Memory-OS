@@ -1362,10 +1362,115 @@ def _fit_budget(context: str, budget_chars: int) -> str:
         return context
     if budget_chars <= len(HEADER):
         return HEADER[:budget_chars]
+
+    sections = _parse_formatted_sections(context)
+    if sections:
+        fitted = _fit_sections_budget(sections, budget_chars)
+        if fitted:
+            return fitted
+        return HEADER[:budget_chars]
+
     trimmed = context[:budget_chars].rstrip()
     if "\n" in trimmed:
         trimmed = trimmed.rsplit("\n", 1)[0].rstrip()
     return trimmed[:budget_chars]
+
+
+def _parse_formatted_sections(context: str) -> list[tuple[str, list[str]]]:
+    lines = context.splitlines()
+    if not lines or lines[0].strip() != HEADER:
+        return []
+    sections: list[tuple[str, list[str]]] = []
+    current_title = ""
+    current_lines: list[str] = []
+    for line in lines[1:]:
+        if line.startswith("### "):
+            if current_title:
+                sections.append((current_title, current_lines))
+            current_title = line[4:].strip()
+            current_lines = []
+            continue
+        if current_title:
+            current_lines.append(line)
+    if current_title:
+        sections.append((current_title, current_lines))
+    return sections
+
+
+def _fit_sections_budget(sections: list[tuple[str, list[str]]], budget_chars: int) -> str:
+    kept = [True for _ in sections]
+    for index, (title, lines) in enumerate(sections):
+        if not _section_has_body(lines):
+            kept[index] = False
+    while True:
+        output = _format([section for section, include in zip(sections, kept, strict=False) if include])
+        if len(output) <= budget_chars:
+            return output
+        remaining = [section for section, include in zip(sections, kept, strict=False) if include]
+        if len(remaining) == 1:
+            return _fit_single_section_budget(remaining[0], budget_chars)
+        drop_index = _next_budget_drop_index(sections, kept)
+        if drop_index is None:
+            return HEADER if len(HEADER) <= budget_chars else HEADER[:budget_chars]
+        kept[drop_index] = False
+
+
+def _fit_single_section_budget(section: tuple[str, list[str]], budget_chars: int) -> str:
+    title, lines = section
+    output_lines = [HEADER, "", f"### {title}"]
+    if len("\n".join(output_lines)) > budget_chars:
+        return HEADER if len(HEADER) <= budget_chars else HEADER[:budget_chars]
+    for line in lines:
+        if not line.strip():
+            continue
+        candidate = "\n".join([*output_lines, line])
+        if len(candidate) > budget_chars:
+            break
+        output_lines.append(line)
+    if len(output_lines) <= 3:
+        return HEADER if len(HEADER) <= budget_chars else HEADER[:budget_chars]
+    return "\n".join(output_lines)
+
+
+def _section_has_body(lines: list[str]) -> bool:
+    return any(line.strip() and not line.strip().startswith("### ") for line in lines)
+
+
+def _next_budget_drop_index(sections: list[tuple[str, list[str]]], kept: list[bool]) -> int | None:
+    candidates: list[tuple[int, int, int]] = []
+    for index, (title, lines) in enumerate(sections):
+        if not kept[index]:
+            continue
+        priority = _budget_keep_priority(title)
+        section_size = len(_format([(title, lines)])) - len(HEADER)
+        candidates.append((priority, -section_size, index))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][2]
+
+
+def _budget_keep_priority(title: str) -> int:
+    """Higher value means survive budget pressure longer."""
+
+    priorities = {
+        "Identity Memory": 10,
+        "Continuity Bridge": 20,
+        "Conversation Carryover": 30,
+        "Working Memory": 40,
+        "Relationship Memory": 45,
+        "Crystallized Review Candidates": 50,
+        "Crystallized Memory": 60,
+        "Related Memory": 65,
+        "Current Foreground Task": 70,
+        "Recent Event Summaries": 80,
+        "Indexed Recall": 90,
+        "Substrate Recall": 100,
+        "Recall Clarification Guard": 110,
+        "Diagnostic Grounding": 120,
+        "Current Memory-OS Runtime Facts": 130,
+    }
+    return priorities.get(title, 50)
 
 
 def _clip(value: str, limit: int) -> str:

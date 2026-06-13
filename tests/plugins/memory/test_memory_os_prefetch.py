@@ -8,7 +8,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _fit_budget, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -185,9 +185,9 @@ def test_prefetch_respects_budget_and_excludes_private_bodies(tmp_path):
         encoding="utf-8",
     )
 
-    context = build_prefetch("memory", budget_chars=160, store=store, index=None)
+    context = build_prefetch("memory", budget_chars=320, store=store, index=None)
 
-    assert len(context) <= 160
+    assert len(context) <= 320
     assert "RAW TRANSCRIPT SHOULD NOT LEAK" not in context
     assert "SHOULD_NOT_LEAK" not in context
     assert "ALSO_SECRET" not in context
@@ -207,6 +207,55 @@ def test_provider_prefetch_uses_configured_budget(tmp_path):
     assert context.startswith("## Memory-OS Context")
     assert len(context) <= 120
     assert EVENT_SCHEMA_VERSION not in context
+
+
+def test_fit_budget_drops_low_priority_whole_sections_before_dynamic_recall():
+    context = "\n".join(
+        [
+            "## Memory-OS Context",
+            "",
+            "### Current Foreground Task",
+            "- foreground task anchor",
+            "",
+            "### Identity Memory",
+            "- " + "static identity filler " * 18,
+            "",
+            "### Continuity Bridge",
+            "- " + "static bridge filler " * 18,
+            "",
+            "### Indexed Recall",
+            "- DYNAMIC_INDEXED_RECALL_MARKER answers the current query",
+            "",
+            "### Recent Event Summaries",
+            "- DYNAMIC_EVENT_MARKER also answers the current query",
+        ]
+    )
+
+    trimmed = _fit_budget(context, 190)
+
+    assert len(trimmed) <= 190
+    assert "### Indexed Recall" in trimmed
+    assert "DYNAMIC_INDEXED_RECALL_MARKER" in trimmed
+    assert "### Identity Memory" not in trimmed
+    assert "### Continuity Bridge" not in trimmed
+
+
+def test_fit_budget_never_emits_empty_hanging_section_heading():
+    context = "\n".join(
+        [
+            "## Memory-OS Context",
+            "",
+            "### Indexed Recall",
+            "- DYNAMIC_INDEXED_RECALL_MARKER content that should be kept only with its heading",
+        ]
+    )
+    heading_only_budget = len("## Memory-OS Context\n\n### Indexed Recall") + 2
+
+    trimmed = _fit_budget(context, heading_only_budget)
+
+    assert len(trimmed) <= heading_only_budget
+    assert "### Indexed Recall" not in trimmed
+    assert "DYNAMIC_INDEXED_RECALL_MARKER" not in trimmed
 
 
 def test_prefetch_uses_index_search_for_relevant_older_event(tmp_path):
