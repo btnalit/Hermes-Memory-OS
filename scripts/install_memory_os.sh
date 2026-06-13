@@ -101,10 +101,10 @@ Options:
   --no-enable-owner-cron-onboarding
                                 Do not create/enable Memory-OS Hermes cron jobs.
   --owner-cron-profile VALUE    active-closure|full. Default: active-closure.
-                                active-closure creates owner review digest and
-                                proposal follow-up OpsGate jobs only. full also
-                                creates optional feedback/right-brain/report
-                                jobs.
+                                active-closure creates owner review digest,
+                                proposal follow-up OpsGate, and baseline local
+                                index sync jobs. full also creates optional
+                                feedback/right-brain/report jobs.
   --right-brain-expression-cron-schedule VALUE
                                 Hermes cron schedule. Default: 30 4 * * 0
   --right-brain-expression-cron-deliver VALUE

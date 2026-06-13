@@ -184,11 +184,17 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 2
+    assert len(report["operational_cron_jobs"]) == 3
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
+        "memory-os-index-sync",
     }
+    index_sync = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-index-sync"][0]
+    assert index_sync["script"] == "memory_os_cron_index_sync_gate.py"
+    assert index_sync["raw_script"] == "memory_os_index_sync.py"
+    assert index_sync["deliver"] == "local"
+    assert index_sync["no_agent"] is True
     assert not home.joinpath("cron", "jobs.json").exists()
 
 
@@ -407,6 +413,9 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
     by_name = {job["name"]: job for job in jobs}
     assert by_name["memory-os-owner-review-digest"]["enabled"] is True
     assert by_name["memory-os-proposal-followups-opsgate"]["enabled"] is True
+    assert by_name["memory-os-index-sync"]["enabled"] is True
+    assert by_name["memory-os-index-sync"]["script"] == "memory_os_cron_index_sync_gate.py"
+    assert by_name["memory-os-index-sync"]["no_agent"] is True
     assert by_name["memory-os-memory-sources-feedback-request"]["enabled"] is False
 
 

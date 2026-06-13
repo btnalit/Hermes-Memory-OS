@@ -24,7 +24,7 @@ from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
 
 
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
-ACTIVE_CLOSURE_CRON_KEYS = frozenset({"owner_review_digest", "proposal_followups_opsgate"})
+ACTIVE_CLOSURE_CRON_KEYS = frozenset({"owner_review_digest", "proposal_followups_opsgate", "index_sync"})
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
 DEFAULT_RIGHT_BRAIN_SCHEDULE = "30 4 * * 0"
 EXPRESSION_FEEDBACK_AGENT_PROMPT = (
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cron-profile",
         choices=("active-closure", "full"),
         default=os.environ.get("MEMORY_OS_CRON_PROFILE", "active-closure"),
-        help="active-closure installs only current Memory-OS automation closure jobs; full installs optional feedback/right-brain/report jobs too.",
+        help="active-closure installs current Memory-OS automation closure jobs plus baseline local index sync; full installs optional feedback/right-brain/report jobs too.",
     )
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--apply", action="store_true")
