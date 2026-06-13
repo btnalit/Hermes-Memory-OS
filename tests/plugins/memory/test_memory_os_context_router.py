@@ -200,7 +200,7 @@ def test_casual_continuity_report_selects_safe_carryover_without_mechanism_worki
     sections = [
         ContextSection(
             section="Conversation Carryover",
-            text="Recent conversation has something worth carrying forward without exposing internals.",
+            text="Concrete carryover task/context: keep the ComfyUI install thread bounded without exposing internals.",
             source_class="carryover",
         ),
         ContextSection(
@@ -453,7 +453,7 @@ def test_working_memory_zero_feature_query_keeps_recency_behavior(tmp_path):
 
 def test_context_router_casual_and_ambiguous_exclude_working_memory():
     working = ContextSection(section="Working Memory", text="ComfyUI plugin install", source_class="working")
-    carryover = ContextSection(section="Conversation Carryover", text="Recent conversation has something worth carrying forward.")
+    carryover = ContextSection(section="Conversation Carryover", text="Concrete carryover task/context: ComfyUI plugin install.")
     guard = ContextSection(section="Recall Clarification Guard", text="Ask for a keyword.", source_class="recall_guard")
 
     casual = route_context_sections("你觉得最近怎么样", sections=[working, carryover], budget_chars=1200)

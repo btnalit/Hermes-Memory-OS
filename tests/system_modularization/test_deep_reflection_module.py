@@ -199,7 +199,10 @@ def test_deep_reflection_deterministic_analysis_derives_internal_fields(tmp_path
     assert artifact["llm_enabled"] is False
     assert artifact["analysis_mode"] == "deterministic"
     assert artifact["themes"]
-    assert any("carrying forward" in item["text"].lower() for item in artifact["themes"])
+    theme_text = "\n".join(item["text"] for item in artifact["themes"])
+    assert "carrying forward" not in theme_text.lower()
+    assert "something worth" not in theme_text.lower()
+    assert "Telegram sessions" in theme_text
     assert artifact["open_questions"]
     assert artifact["governance_awareness"]
     assert artifact["suggested_attention"]
@@ -248,6 +251,8 @@ def test_deep_reflection_builds_injection_cards_with_ttl_budget_and_report(tmp_p
     assert "event:" + event.id in card["source_refs"]
     assert card["expires_at"] > card["freshness_ts"]
     assert card["text"]
+    assert "something worth carrying forward" not in card["text"]
+    assert "Telegram reset" in card["text"]
     assert len(card["text"]) <= 320
     assert card["instruction_like_hit"] is False
     assert card["mechanism_terms_hit"] is False
@@ -385,7 +390,65 @@ def test_deep_reflection_injection_cards_rephrase_internal_themes_for_foreground
     assert "memory_os" not in card_text
     assert "governance thread" not in card_text
     assert "proposal queue" not in card_text
-    assert "memory changes the relationship" in card_text or "careful and steady" in card_text
+    assert "proposal handling" in card_text or "proposal flow" in card_text
+
+
+def test_deep_reflection_carryover_cards_require_concrete_source_detail(tmp_path):
+    store = _store(tmp_path)
+    concrete_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=45, profile="main"),
+            "kind": "conversation_turn",
+            "summary": (
+                "Owner is finishing #4 carryover: replace abstract reflection card templates with "
+                "specific task, constraint, and forbidden-action wording."
+            ),
+            "safe_ref": {"drive_policy": "eligible"},
+        }
+    )
+    store.append_event(concrete_event)
+    module = DeepReflectionModule(tmp_path, profile="main")
+    module.config_path.parent.mkdir(parents=True, exist_ok=True)
+    module.config_path.write_text(
+        json.dumps({"max_cards": 3, "max_chars_total": 900, "max_chars_per_card": 320}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    result = module.run_once(store=store, dry_run=True)
+
+    artifact = json.loads(next(module.internal_analysis_root.glob("*.json")).read_text(encoding="utf-8"))
+    current = json.loads(module.current_injection_path.read_text(encoding="utf-8"))
+    all_text = "\n".join(
+        [*(theme["text"] for theme in artifact["themes"]), *(card["text"] for card in current["selected_cards"])]
+    )
+    assert result["selected_injection_count"] >= 1
+    assert "something worth carrying forward" not in all_text
+    assert "quiet reflective tone" not in all_text
+    assert "bounded current-context thread" not in all_text
+    assert "#4 carryover" in all_text
+    assert "specific task, constraint, and forbidden-action wording" in all_text
+
+
+def test_deep_reflection_skips_abstract_fallback_when_no_concrete_detail(tmp_path):
+    store = _store(tmp_path)
+    vague_event = EventEnvelope.from_dict(
+        {
+            **build_event(seed=46, profile="main"),
+            "kind": "conversation_turn",
+            "summary": "Continuity matters.",
+            "safe_ref": {"drive_policy": "eligible"},
+        }
+    )
+    store.append_event(vague_event)
+    module = DeepReflectionModule(tmp_path, profile="main")
+
+    result = module.run_once(store=store, dry_run=True)
+
+    artifact = json.loads(next(module.internal_analysis_root.glob("*.json")).read_text(encoding="utf-8"))
+    current = json.loads(module.current_injection_path.read_text(encoding="utf-8"))
+    assert artifact["themes"] == []
+    assert current["selected_cards"] == []
+    assert result["selected_injection_count"] == 0
 
 
 def test_deep_reflection_working_updates_apply_attention_curiosity_lingering_with_policy_caps(tmp_path):

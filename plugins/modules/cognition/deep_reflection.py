@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -760,7 +761,7 @@ class DeepReflectionModule:
         if themes:
             suggested_attention.append(
                 {
-                    "text": f"Keep attention on {themes[0]['label']} while preserving normal conversation.",
+                    "text": _attention_text_for_theme(themes[0]),
                     "source_refs": list(themes[0].get("source_refs", [])),
                 }
             )
@@ -1357,22 +1358,22 @@ def _themes_from_texts(texts: list[str]) -> list[dict[str, Any]]:
         (
             "continuity",
             ("continuity", "session", "telegram", "会话", "连续"),
-            "Recent conversation has something worth carrying forward.",
         ),
         (
             "governance",
             ("governance", "ops-gate", "proposal", "治理", "提案"),
-            "Recent background activity suggests staying careful and steady.",
         ),
         (
             "memory_os",
             ("memory-os", "memory os", "memory_os", "记忆"),
-            "Recent conversation keeps circling around how memory changes the relationship.",
         ),
         (
             "reflection",
             ("reflection", "reflect", "反思"),
-            "Recent conversation has a quiet reflective tone worth carrying forward.",
+        ),
+        (
+            "ordinary_tone",
+            ("像报告", "正常聊天", "report-like", "too formal"),
         ),
     ]
     themes: list[dict[str, Any]] = []
@@ -1380,8 +1381,11 @@ def _themes_from_texts(texts: list[str]) -> list[dict[str, Any]]:
     for index, text in enumerate(texts):
         if text.strip():
             source_refs.append(f"text:{index}")
-    for label, keywords, public_text in theme_specs:
+    for label, keywords in theme_specs:
         if any(keyword in haystack for keyword in keywords):
+            public_text = _concrete_theme_text(label=label, keywords=keywords, texts=texts)
+            if not public_text:
+                continue
             themes.append(
                 {
                     "label": label,
@@ -1389,15 +1393,135 @@ def _themes_from_texts(texts: list[str]) -> list[dict[str, Any]]:
                     "source_refs": source_refs[:8],
                 }
             )
-    if not themes and texts:
-        themes.append(
-            {
-                "label": "current_context",
-                "text": "Recent state contains a bounded current-context thread.",
-                "source_refs": source_refs[:8],
-            }
-        )
     return themes[:4]
+
+
+def _concrete_theme_text(*, label: str, keywords: tuple[str, ...], texts: list[str]) -> str:
+    detail = _best_concrete_detail(keywords=keywords, texts=texts)
+    if not detail:
+        return ""
+    prefixes = {
+        "continuity": "Concrete carryover task/context",
+        "governance": "Concrete carryover constraint",
+        "memory_os": "Concrete carryover memory-system detail",
+        "reflection": "Concrete carryover reflection detail",
+        "ordinary_tone": "Concrete carryover tone constraint",
+    }
+    prefix = prefixes.get(label, "Concrete carryover detail")
+    return _safe_sentence_clip(f"{prefix}: {detail}", 300)
+
+
+def _attention_text_for_theme(theme: dict[str, Any]) -> str:
+    detail = str(theme.get("text", "")).strip()
+    if ":" in detail:
+        detail = detail.split(":", 1)[1].strip()
+    if not detail:
+        detail = str(theme.get("label", "current detail"))
+    return _safe_sentence_clip(f"Keep this concrete carryover bounded and non-instructional: {detail}", 260)
+
+
+def _best_concrete_detail(*, keywords: tuple[str, ...], texts: list[str]) -> str:
+    candidates: list[tuple[int, str]] = []
+    lowered_keywords = tuple(keyword.lower() for keyword in keywords)
+    for index, text in enumerate(texts):
+        for sentence in _split_candidate_sentences(text):
+            lowered = sentence.lower()
+            if not any(keyword in lowered for keyword in lowered_keywords):
+                continue
+            detail = _sanitize_carryover_detail(sentence)
+            if not _is_concrete_carryover_detail(detail):
+                continue
+            score = _concrete_detail_score(detail)
+            candidates.append((score * 1000 - index, detail))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return _safe_sentence_clip(candidates[0][1], 240)
+
+
+def _split_candidate_sentences(text: str) -> list[str]:
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return []
+    parts = [part.strip(" -–—\t") for part in re.split(r"(?<=[.!?。！？；;])\s+|\n+", clean) if part.strip()]
+    return parts or [clean]
+
+
+def _sanitize_carryover_detail(text: str) -> str:
+    replacements = {
+        "Memory-OS": "memory system",
+        "Memory OS": "memory system",
+        "memory_os": "memory system",
+        "memory-os": "memory system",
+        "Ops-Gate": "ops guard",
+        "ops-gate": "ops guard",
+        "proposal queue": "proposal backlog",
+        "injection card": "context card",
+        "source refs": "evidence references",
+        "system prompt": "runtime context",
+        "Deep Reflection": "reflection",
+        "deep reflection": "reflection",
+    }
+    clean = str(text or "")
+    for old, new in replacements.items():
+        clean = clean.replace(old, new)
+    return _clip(clean, 240)
+
+
+def _is_concrete_carryover_detail(text: str) -> bool:
+    clean = str(text or "").strip()
+    cjk_chars = sum(1 for char in clean if "\u4e00" <= char <= "\u9fff")
+    if len(clean) < 45 and cjk_chars < 12:
+        return False
+    lowered = clean.lower()
+    abstract_markers = (
+        "something worth carrying forward",
+        "quiet reflective tone",
+        "bounded current-context thread",
+        "careful and steady",
+        "normal conversation",
+    )
+    if any(marker in lowered for marker in abstract_markers):
+        return False
+    concrete_markers = (
+        "#",
+        "task",
+        "constraint",
+        "forbidden",
+        "禁止",
+        "约束",
+        "任务",
+        "template",
+        "deploy",
+        "runtime",
+        "github",
+        "telegram",
+        "session",
+        "proposal",
+        "owner",
+        "test",
+        "verify",
+        "report-like",
+        "too formal",
+        "像报告",
+        "正常聊天",
+        "感受",
+        "验证",
+        "提交",
+        "推送",
+    )
+    if any(marker in lowered for marker in concrete_markers):
+        return True
+    return len(clean) >= 70 and any(ch in clean for ch in (":", "：", "—", "-", "/"))
+
+
+def _concrete_detail_score(text: str) -> int:
+    lowered = text.lower()
+    score = min(len(text), 160)
+    for marker in ("#", "task", "constraint", "forbidden", "禁止", "约束", "任务", "template", "runtime", "github"):
+        if marker in lowered:
+            score += 20
+    return score
 
 
 def _card(
