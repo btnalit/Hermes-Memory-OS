@@ -258,6 +258,34 @@ def test_fit_budget_never_emits_empty_hanging_section_heading():
     assert "DYNAMIC_INDEXED_RECALL_MARKER" not in trimmed
 
 
+def test_fit_budget_preserves_foreground_anchor_above_recall_sections():
+    context = "\n".join(
+        [
+            "## Memory-OS Context",
+            "",
+            "### Current Foreground Task",
+            "- FOREGROUND_ANCHOR_MARKER small critical current task",
+            "",
+            "### Indexed Recall",
+            "- " + "indexed recall filler " * 10,
+            "",
+            "### Substrate Recall",
+            "- " + "substrate recall filler " * 10,
+            "",
+            "### Recent Event Summaries",
+            "- " + "recent event filler " * 10,
+        ]
+    )
+
+    trimmed = _fit_budget(context, 120)
+
+    assert len(trimmed) <= 120
+    assert "### Current Foreground Task" in trimmed
+    assert "FOREGROUND_ANCHOR_MARKER" in trimmed
+    assert "### Indexed Recall" not in trimmed
+    assert "### Substrate Recall" not in trimmed
+
+
 def test_prefetch_uses_index_search_for_relevant_older_event(tmp_path):
     store = _store(tmp_path)
     older = EventEnvelope.from_dict(
