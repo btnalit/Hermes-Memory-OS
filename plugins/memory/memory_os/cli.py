@@ -50,6 +50,7 @@ from .conversation_regression import (
     status_tool_contract_report,
 )
 from .cognitive_loop import CognitiveLoopRunner
+from .candidate_clusters import candidate_cluster_report
 from .cron_mirror import CronMirror
 from .crystallized import (
     CrystallizedCandidate,
@@ -940,6 +941,11 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     memory_sources_feedback_last.add_argument("--note", default="")
     memory_sources_feedback_history = memory_sources_feedback_subs.add_parser("history")
     memory_sources_feedback_history.add_argument("--limit", type=int, default=20)
+    candidate_clusters_parser = subs.add_parser("candidate-clusters")
+    candidate_clusters_subs = candidate_clusters_parser.add_subparsers(dest="candidate_clusters_command", required=True)
+    candidate_clusters_top = candidate_clusters_subs.add_parser("top")
+    candidate_clusters_top.add_argument("--limit", type=int, default=10)
+    candidate_clusters_top.add_argument("--min-similarity", type=float, default=0.62)
     review_parser = subs.add_parser("review")
     review_subs = review_parser.add_subparsers(dest="review_command", required=True)
     review_subs.add_parser("status")
@@ -1208,6 +1214,8 @@ def memory_os_command(args: argparse.Namespace) -> int:
         return _low_clue_recall_command(args, store)
     if command == "memory-sources":
         return _memory_sources_command(args, store)
+    if command == "candidate-clusters":
+        return _candidate_clusters_command(args, store)
     if command == "review":
         return _review_command(args, store)
     if command == "eval":
@@ -1851,6 +1859,25 @@ def _memory_sources_command(args: argparse.Namespace, store: MemoryOSStore) -> i
                 )
             )
             return 0
+    return 2
+
+
+def _candidate_clusters_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
+    command = args.candidate_clusters_command
+    if command == "top":
+        print(
+            json.dumps(
+                candidate_cluster_report(
+                    store,
+                    limit=max(int(args.limit), 0),
+                    min_similarity=float(args.min_similarity),
+                ),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
     return 2
 
 
