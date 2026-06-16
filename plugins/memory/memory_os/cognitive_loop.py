@@ -320,7 +320,12 @@ class CognitiveLoopRunner:
             risk_flags=[],
             silence_reason=str(result.get("reason") or "") if output_text.strip() == "[SILENT]" else None,
         )
-        speak_gate = SpeakGateModule(self.hermes_home, profile=self.profile, delivery_mode="would-send")
+        speak_gate = SpeakGateModule(
+            self.hermes_home,
+            profile=self.profile,
+            delivery_mode="owner-send",
+            store=self.store,
+        )
         decision = speak_gate.evaluate_expression_draft(
             draft,
             channel="origin",

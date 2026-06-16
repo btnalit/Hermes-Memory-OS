@@ -87,7 +87,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert persisted["step_summary"]["tail_step_statuses"]["doctor_boundary_report"] in {"ok", "warning"}
     assert (tmp_path / "system-modules" / "household_digest" / "household_digest.md").is_file()
     assert (tmp_path / "system-modules" / "wandering_mind" / "outputs.jsonl").is_file()
-    assert (tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl").is_file()
+    assert (tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl").is_file() is False  # owner-send mode skips would-send records
     assert (tmp_path / "system-modules" / "evidence_scoring" / "scores.jsonl").is_file()
     assert (tmp_path / "system-modules" / "confidence_router" / "routing.jsonl").is_file()
     assert (tmp_path / "system-modules" / "candidate_review" / "runs.jsonl").is_file()
@@ -109,7 +109,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     steps = {step["step"]: step for step in result["steps"]}
     wandering_result = steps["wandering_mind"]["result"]
     assert wandering_result["speak_gate_evaluated"] is True
-    assert wandering_result["speak_gate_decision"]["decision"] == "would_send"
+    assert wandering_result["speak_gate_decision"]["decision"] == "send_blocked"
     assert wandering_result["speak_gate_decision"]["actual_send"] is False
     assert steps["confidence_router"]["result"]["route_live_applied"] is False
     assert steps["candidate_review"]["result"]["candidate_review_live_applied"] is False

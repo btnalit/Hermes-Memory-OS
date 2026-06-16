@@ -88,6 +88,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/modules/expression/expression_draft.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/expression/grounded_expression_judge.py::GroundedExpressionJudge._write_verdict::path.open_a::self.verdicts_path": "module_report_only_existing_surface",
     "plugins/modules/expression/speak_gate.py::SpeakGateModule._record_would_send::path.open_a::self.would_send_path": "right_brain_would_send_report_only",
+    "plugins/modules/expression/speak_gate.py::SpeakGateModule._deliver_to_owner::path.open_a::deliveries_path": "owner_send_delivery_ledger",
     "plugins/modules/governance/candidate_review.py::CandidateReviewModule.review::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/candidate_review.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/governance/cascade_routing_policy.py::CascadeRoutingPolicyModule.propose_policy::append_jsonl_call::self.proposals_path": "route_score_proposal_report_only",

@@ -54,11 +54,13 @@ class SpeakGateModule:
         *,
         profile: str,
         delivery_mode: str = "would-send",
+        store: Any = None,
         diagnostic_grounding_enabled: bool | None = None,
     ) -> None:
         self.hermes_home = Path(hermes_home).expanduser().resolve()
         self.profile = profile
         self.delivery_mode = delivery_mode
+        self._store = store
         self.diagnostic_grounding_enabled = (
             profile != "sannai" if diagnostic_grounding_enabled is None else bool(diagnostic_grounding_enabled)
         )
@@ -71,7 +73,12 @@ class SpeakGateModule:
     def would_send_path(self) -> Path:
         return self.module_root / "would_send.jsonl"
 
+    @property
+    def deliveries_path(self) -> Path:
+        return self.module_root / "deliveries.jsonl"
+
     def status(self) -> dict[str, Any]:
+        deliveries = self.read_delivery_records()
         return {
             "schema_version": "hermes.speak_gate_status.v0",
             "module": "speak_gate",
@@ -79,8 +86,20 @@ class SpeakGateModule:
             "delivery_mode": self.delivery_mode,
             "diagnostic_grounding_enabled": self.diagnostic_grounding_enabled,
             "would_send_count": len(self.read_would_send_records()),
-            "actual_send": False,
+            "delivery_count": len(deliveries),
+            "actual_send": len(deliveries) > 0,
         }
+
+    def read_delivery_records(self) -> list[dict[str, Any]]:
+        if not self.deliveries_path.exists():
+            return []
+        records: list[dict[str, Any]] = []
+        for line in self.deliveries_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    records.append(parsed)
+        return records
 
     def doctor(self) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
@@ -92,6 +111,24 @@ class SpeakGateModule:
                     "message": "Speak Gate v0.1 records would-send only; real send is disabled",
                 }
             )
+        if self.delivery_mode == "owner-send":
+            if self._store is None:
+                findings.append(
+                    {
+                        "severity": "warning",
+                        "code": "owner_send_without_store",
+                        "message": "owner-send mode active but store is not available; all delivery will be blocked",
+                    }
+                )
+            else:
+                deliveries = self.read_delivery_records()
+                findings.append(
+                    {
+                        "severity": "info",
+                        "code": "owner_send_active",
+                        "message": f"owner-send mode active; {len(deliveries)} deliveries recorded",
+                    }
+                )
         if self.profile == "sannai" and self.diagnostic_grounding_enabled:
             findings.append(
                 {
@@ -153,6 +190,32 @@ class SpeakGateModule:
                 source_module=source_module,
                 channel=channel,
                 reason=reason or "delivery_disabled_no_send",
+            )
+        if self.delivery_mode == "owner-send":
+            if self._store is None:
+                return self._delivery_result(
+                    decision="send_blocked",
+                    payload_ref=payload_ref,
+                    source_module=source_module,
+                    channel=channel,
+                    reason="owner_send_requires_store",
+                )
+            owner_channel = self._resolve_owner_channel()
+            channel_normalized = channel.strip().lower().replace("-", "_")
+            owner_channel_normalized = owner_channel.strip().lower().replace("-", "_")
+            if channel_normalized != owner_channel_normalized:
+                return self._delivery_result(
+                    decision="send_blocked",
+                    payload_ref=payload_ref,
+                    source_module=source_module,
+                    channel=channel,
+                    reason=f"channel_mismatch_{channel}_vs_owner_{owner_channel}",
+                )
+            return self._deliver_to_owner(
+                payload_ref=payload_ref,
+                source_module=source_module,
+                channel=channel,
+                reason=reason or "owner_send_delivery",
             )
         if self.delivery_mode == "send":
             return self._delivery_result(
@@ -277,6 +340,74 @@ class SpeakGateModule:
                 if isinstance(parsed, dict):
                     records.append(parsed)
         return records
+
+    def _resolve_owner_channel(self) -> str:
+        """Resolve owner channel dynamically from Hermes gateway config."""
+        from plugins.memory.memory_os.owner_actions import resolve_owner_review_channel
+
+        result = resolve_owner_review_channel(self._store)
+        return str(result.get("channel") or "owner")
+
+    def _deliver_to_owner(
+        self,
+        *,
+        payload_ref: str,
+        source_module: str,
+        channel: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Deliver expression payload to owner via Hermes native delivery outbox."""
+        now = datetime.now(timezone.utc)
+        delivery_id = f"sgd_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}"
+        record = {
+            "schema_version": "hermes.speak_gate_delivery.v0",
+            "id": delivery_id,
+            "ts": now.isoformat(),
+            "created_at": now.isoformat(),
+            "profile": self.profile,
+            "module": "speak_gate",
+            "source_module": source_module,
+            "delivery_mode": "owner-send",
+            "actual_send": True,
+            "channel": channel,
+            "payload_ref": payload_ref,
+            "reason": reason,
+        }
+        # Write to Hermes native delivery outbox FIRST (contract: $HERMES_HOME/delivery/outbox/)
+        # If outbox write fails, JSONL is not yet committed — prevents false positives in status()
+        outbox_dir = self.hermes_home / "delivery" / "outbox"
+        outbox_dir.mkdir(parents=True, exist_ok=True)
+        outbox_file = outbox_dir / f"{delivery_id}.json"
+        outbox_file.write_text(
+            json.dumps({
+                "id": delivery_id,
+                "profile": self.profile,
+                "source": "speak_gate",
+                "channel": channel,
+                "payload_ref": payload_ref,
+                "reason": reason,
+                "ts": record["ts"],
+            }, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        # Write to speak_gate delivery audit log (JSONL after outbox succeeds)
+        deliveries_path = self.module_root / "deliveries.jsonl"
+        deliveries_path.parent.mkdir(parents=True, exist_ok=True)
+        with deliveries_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+        result = self._delivery_result(
+            decision="delivered",
+            payload_ref=payload_ref,
+            source_module=source_module,
+            channel=channel,
+            reason=reason,
+        )
+        result["actual_send"] = True
+        result["delivery_id"] = delivery_id
+        return result
 
     def _record_would_send(
         self,

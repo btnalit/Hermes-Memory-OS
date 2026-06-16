@@ -1,3 +1,4 @@
+from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.fixtures import build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -177,3 +178,94 @@ def test_speak_gate_does_not_touch_sannai_shape_fixture(tmp_path):
 
     assert soul.stat().st_mtime_ns == before
     assert not (fixture.hermes_home / "system-modules").exists()
+
+
+def test_speak_gate_owner_send_delivers_when_channel_matches_owner(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {"owner_review": {"mode": "active", "enabled": True, "channel": "telegram", "target_ref": "owner_123"}},
+        store.roots.hermes_home,
+    )
+    module = SpeakGateModule(
+        tmp_path,
+        profile="main",
+        delivery_mode="owner-send",
+        store=store,
+    )
+    result = module.evaluate_delivery(
+        payload_ref="local://payload/owner-test",
+        source_module="wandering_mind",
+        channel="telegram",
+    )
+    assert result["decision"] == "delivered"
+    assert result["actual_send"] is True
+    assert result["requested_delivery_mode"] == "owner-send"
+    assert "delivery_id" in result
+    delivery_dir = tmp_path / "delivery" / "outbox"
+    delivery_files = list(delivery_dir.glob("*.json"))
+    assert len(delivery_files) == 1
+
+
+def test_speak_gate_owner_send_blocks_non_owner_channel(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {"owner_review": {"mode": "active", "enabled": True, "channel": "telegram", "target_ref": "owner_123"}},
+        store.roots.hermes_home,
+    )
+    module = SpeakGateModule(
+        tmp_path,
+        profile="main",
+        delivery_mode="owner-send",
+        store=store,
+    )
+    result = module.evaluate_delivery(
+        payload_ref="local://payload/world-test",
+        source_module="inner_drive",
+        channel="origin",
+    )
+    assert result["decision"] == "send_blocked"
+    assert result["actual_send"] is False
+    assert "channel_mismatch" in result["reason"]
+    delivery_dir = tmp_path / "delivery" / "outbox"
+    assert not delivery_dir.exists() or len(list(delivery_dir.glob("*.json"))) == 0
+
+
+def test_speak_gate_owner_send_requires_store(tmp_path):
+    module = SpeakGateModule(
+        tmp_path,
+        profile="main",
+        delivery_mode="owner-send",
+    )
+    result = module.evaluate_delivery(
+        payload_ref="local://payload/no-store-test",
+        source_module="wandering_mind",
+        channel="telegram-direct",
+    )
+    assert result["decision"] == "send_blocked"
+    assert result["reason"] == "owner_send_requires_store"
+    assert result["actual_send"] is False
+
+
+def test_speak_gate_owner_send_status_reflects_deliveries(tmp_path):
+    store = _store(tmp_path)
+    save_config(
+        {"owner_review": {"mode": "active", "enabled": True, "channel": "telegram", "target_ref": "owner_123"}},
+        store.roots.hermes_home,
+    )
+    module = SpeakGateModule(
+        tmp_path,
+        profile="main",
+        delivery_mode="owner-send",
+        store=store,
+    )
+    status_before = module.status()
+    assert status_before["actual_send"] is False
+
+    module.evaluate_delivery(
+        payload_ref="local://payload/status-test",
+        source_module="wandering_mind",
+        channel="telegram",
+    )
+    status_after = module.status()
+    assert status_after["actual_send"] is True
+    assert status_after["delivery_count"] == 1
