@@ -196,6 +196,7 @@ class CognitiveLoopRunner:
             ("confabulation_detector", self._confabulation_detector),
             ("ground_truth_miner", self._ground_truth_miner),
             ("crystallized_revalidator", self._crystallized_revalidator),
+            ("provisional_sweep", self._provisional_sweep),
             ("migration_controller", self._migration_controller),
             ("abstraction_distillation", self._abstraction_distillation),
             ("grounded_expression_judge", self._grounded_expression_judge),
@@ -540,6 +541,13 @@ class CognitiveLoopRunner:
 
         result = CrystallizedRevalidatorModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
         context["crystallized_revalidator_result"] = result
+        return result
+
+    def _provisional_sweep(self, context: dict[str, Any]) -> dict[str, Any]:
+        from plugins.modules.governance.provisional_sweep import ProvisionalSweepModule
+
+        result = ProvisionalSweepModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
+        context["provisional_sweep_result"] = result
         return result
 
     def _migration_controller(self, context: dict[str, Any]) -> dict[str, Any]:
