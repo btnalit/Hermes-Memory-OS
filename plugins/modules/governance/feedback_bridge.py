@@ -24,6 +24,7 @@ GOVERNANCE_EVENT_KINDS = {
     "governance_expression_feedback",
     "governance_memory_sources_feedback",
     "governance_self_evolution_reported",
+    "governance_speak_gate_delivery",
 }
 
 
@@ -49,6 +50,7 @@ def governance_feedback_manifest() -> dict[str, Any]:
                 "memory_os.expression_feedback_ledger",
                 "memory_os.memory_sources_feedback",
                 "local_artifact.self_evolution_report",
+                "local_artifact.speak_gate_deliveries",
             ],
             "writes": ["memory_os.events.summary", "memory_os.audit", "local_artifact.governance_feedback_state"],
         },
@@ -240,6 +242,7 @@ class GovernanceFeedbackBridgeModule:
             records.extend(self._proposal_events(proposal_queue))
         records.extend(self._memory_sources_feedback_events())
         records.extend(self._expression_feedback_events())
+        records.extend(self._speak_gate_events())
         if self_evolution is not None:
             records.extend(self._self_evolution_events(self_evolution))
         return [self._to_event(record) for record in records]
@@ -370,6 +373,45 @@ class GovernanceFeedbackBridgeModule:
                     "expression_feedback_id": feedback_id,
                     "expression_draft_id": draft_id,
                     "expression_feedback_type": action_type,
+                }
+            )
+        return records
+
+    def _speak_gate_events(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        deliveries_path = self.hermes_home / "system-modules" / "speak_gate" / "deliveries.jsonl"
+        for delivery in _read_jsonl(deliveries_path):
+            if str(delivery.get("profile", self.profile)) != self.profile:
+                continue
+            if not str(delivery.get("schema_version", "")).endswith("speak_gate_delivery.v0"):
+                continue
+            delivery_id = str(delivery.get("id", ""))
+            source_module = str(delivery.get("source_module", "unknown"))
+            channel = str(delivery.get("channel", "unknown"))
+            payload_ref = str(delivery.get("payload_ref", ""))
+            state_hash = _hash_json(
+                {
+                    "delivery_id": delivery_id,
+                    "source_module": source_module,
+                    "channel": channel,
+                    "actual_send": bool(delivery.get("actual_send", False)),
+                }
+            )
+            records.append(
+                {
+                    "kind": "governance_speak_gate_delivery",
+                    "source_module": "speak_gate",
+                    "source_key": f"speak_gate:delivery:{delivery_id}",
+                    "state_hash": state_hash,
+                    "artifact_ref": f"local://speak_gate/deliveries/{delivery_id}",
+                    "summary": (
+                        f"Speak Gate delivered via {source_module} to {channel}: "
+                        f"{_clip(payload_ref, 120)}"
+                    ),
+                    "evidence_refs": [f"speak_gate_delivery:{delivery_id}"],
+                    "speak_gate_delivery_id": delivery_id,
+                    "speak_gate_source_module": source_module,
+                    "speak_gate_delivery_channel": channel,
                 }
             )
         return records
@@ -540,6 +582,9 @@ def _optional_refs(record: dict[str, Any]) -> dict[str, Any]:
         "memory_sources_feedback_rating",
         "memory_sources_feedback_route",
         "memory_sources_feedback_query_class",
+        "speak_gate_delivery_id",
+        "speak_gate_source_module",
+        "speak_gate_delivery_channel",
     ):
         if record.get(key):
             output[key] = record[key]

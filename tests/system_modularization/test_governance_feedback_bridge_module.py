@@ -81,7 +81,7 @@ def test_governance_feedback_manifest_installs_through_lifecycle(tmp_path):
     lifecycle = ModuleLifecycle(
         tmp_path,
         profile="main",
-        available_dependencies=("memory_os", "scheduler", "evidence_scoring", "ops_gate", "proposal_queue", "self_evolution"),
+        available_dependencies=("memory_os", "scheduler", "evidence_scoring", "ops_gate", "proposal_queue", "self_evolution", "speak_gate"),
     )
 
     status = lifecycle.install(governance_feedback_manifest())
@@ -289,3 +289,126 @@ def test_governance_feedback_does_not_touch_sannai_shape_fixture(tmp_path):
 
     assert soul.stat().st_mtime_ns == before
     assert not (fixture.hermes_home / "system-modules").exists()
+
+
+def test_governance_feedback_consumes_speak_gate_deliveries(tmp_path):
+    store = _store(tmp_path)
+    deliveries_dir = tmp_path / "system-modules" / "speak_gate"
+    deliveries_dir.mkdir(parents=True, exist_ok=True)
+    deliveries_path = deliveries_dir / "deliveries.jsonl"
+    deliveries_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.speak_gate_delivery.v0",
+                "id": "sgd_20260617T120000000Z_abc123def0",
+                "ts": "2026-06-17T12:00:00+00:00",
+                "created_at": "2026-06-17T12:00:00+00:00",
+                "profile": "main",
+                "module": "speak_gate",
+                "source_module": "wandering_mind",
+                "delivery_mode": "owner-send",
+                "actual_send": True,
+                "channel": "telegram",
+                "payload_ref": "local://wandering_mind/output/abc123",
+                "reason": "wandering_mind_right_brain",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    result = bridge.run_once(store=store, dry_run=False)
+    governance_events = [event for event in store.read_events() if event.kind == "governance_speak_gate_delivery"]
+
+    assert result["written_event_count"] == 1
+    assert result["event_kinds"]["governance_speak_gate_delivery"] == 1
+    assert len(governance_events) == 1
+    safe_ref = governance_events[0].safe_ref
+    assert safe_ref["source_module"] == "speak_gate"
+    assert safe_ref["candidate_allowed"] is False
+    assert safe_ref["body_policy"] == "summary_only"
+    assert safe_ref["speak_gate_delivery_id"] == "sgd_20260617T120000000Z_abc123def0"
+    assert safe_ref["speak_gate_source_module"] == "wandering_mind"
+    assert safe_ref["speak_gate_delivery_channel"] == "telegram"
+    rendered = json.dumps(governance_events[0].to_dict(), ensure_ascii=False)
+    assert "wandering_mind" in rendered
+    assert "telegram" in rendered
+    assert "raw_body" not in rendered
+
+
+def test_governance_feedback_speak_gate_delivery_idempotent(tmp_path):
+    store = _store(tmp_path)
+    deliveries_dir = tmp_path / "system-modules" / "speak_gate"
+    deliveries_dir.mkdir(parents=True, exist_ok=True)
+    deliveries_path = deliveries_dir / "deliveries.jsonl"
+    deliveries_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.speak_gate_delivery.v0",
+                "id": "sgd_20260617T130000000Z_def456abc1",
+                "ts": "2026-06-17T13:00:00+00:00",
+                "created_at": "2026-06-17T13:00:00+00:00",
+                "profile": "main",
+                "module": "speak_gate",
+                "source_module": "expression_draft",
+                "delivery_mode": "owner-send",
+                "actual_send": True,
+                "channel": "telegram",
+                "payload_ref": "local://expression_draft/expr_1",
+                "reason": "expression_draft_test_host_observation",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    first = bridge.run_once(store=store, dry_run=False)
+    second = bridge.run_once(store=store, dry_run=False)
+
+    assert first["written_event_count"] == 1
+    assert second["written_event_count"] == 0
+    assert second["already_emitted_count"] == 1
+    governance_events = [event for event in store.read_events() if event.kind == "governance_speak_gate_delivery"]
+    assert len(governance_events) == 1
+
+
+def test_governance_feedback_skips_non_profile_speak_gate_deliveries(tmp_path):
+    store = _store(tmp_path)
+    deliveries_dir = tmp_path / "system-modules" / "speak_gate"
+    deliveries_dir.mkdir(parents=True, exist_ok=True)
+    deliveries_path = deliveries_dir / "deliveries.jsonl"
+    deliveries_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "hermes.speak_gate_delivery.v0",
+                "id": "sgd_20260617T140000000Z_ghi789jkl2",
+                "ts": "2026-06-17T14:00:00+00:00",
+                "created_at": "2026-06-17T14:00:00+00:00",
+                "profile": "sannai",
+                "module": "speak_gate",
+                "source_module": "wandering_mind",
+                "delivery_mode": "owner-send",
+                "actual_send": True,
+                "channel": "origin",
+                "payload_ref": "local://wandering_mind/output/def456",
+                "reason": "other_profile",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    result = bridge.run_once(store=store, dry_run=False)
+    governance_events = [event for event in store.read_events() if event.kind == "governance_speak_gate_delivery"]
+
+    assert result["status"] == "skipped"
+    assert len(governance_events) == 0
