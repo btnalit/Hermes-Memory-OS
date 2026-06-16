@@ -355,20 +355,6 @@ python scripts/memory_os_static_hygiene_check.py
 git diff --check
 ```
 
-### Code Intelligence
-
-This repository is indexed with [CodeGraph](https://github.com/colbymchenry/codegraph)
-for fast structural exploration. After setting up the project:
-
-```bash
-codegraph init
-```
-
-In an agent session, reach for `codegraph_explore` / `codegraph_node` before
-`grep`/`find` when answering architecture questions or tracing call paths.
-Without a running MCP server, `codegraph explore` and `codegraph node` work
-from the shell.
-
 Before changing scheduler, owner review, feedback, installer, module closure,
 or live monitor behavior, verify the owning interface and run the relevant
 checks. Internal closure-matrix documents are not part of the public upload.
