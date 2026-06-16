@@ -153,3 +153,34 @@ def test_execution_gate_resolver_lane_completes(tmp_path):
     assert completion["stage"] == "completion"
     assert completion["execution_status"] == "completed"
     assert completion["lane_id"] == RESOLVER_AUTO_APPROVE_LANE
+
+
+# ── _resolver_verdict tests (P3) ───────────────────────────────────────
+
+
+def test_resolver_verdict_returns_approve_false_when_not_resolver_eligible(tmp_path):
+    """_resolver_verdict must return approve=False when resolver_eligible fails."""
+    store = _store(tmp_path)
+    from plugins.modules.governance.candidate_aggregation import _resolver_verdict
+
+    candidate = _candidate(
+        body="My identity is that of an AI assistant.",  # identity signal - not eligible
+        sensitivity="private",
+    )
+    result = _resolver_verdict(candidate, store=store)
+    assert result["approve"] is False
+    assert "failed_resolver_gate" in result.get("reason", "")
+
+
+def test_resolver_verdict_returns_approve_for_eligible_candidate(tmp_path):
+    """_resolver_verdict must return approve=True for eligible candidates."""
+    store = _store(tmp_path)
+    from plugins.modules.governance.candidate_aggregation import _resolver_verdict
+
+    candidate = _candidate(
+        body="User mentioned liking rainy days today.",
+        sensitivity="private",
+    )
+    result = _resolver_verdict(candidate, store=store)
+    assert result["approve"] is True
+    assert "reason" in result
