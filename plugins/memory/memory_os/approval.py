@@ -22,6 +22,9 @@ class ApprovalDecision:
     reviewed_at: str
     note: str = ""
     source_state: str = ""
+    provisional: bool = False
+    expires_at: str | None = None
+    recurrence: int = 0
 
     @property
     def allows_crystallized_write(self) -> bool:
