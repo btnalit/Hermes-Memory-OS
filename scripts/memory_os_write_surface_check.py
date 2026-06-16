@@ -111,6 +111,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/modules/governance/provisional.py::ProvisionalModule.write_provisional::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/provisional.py::ProvisionalModule.evaluate_promotions::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/provisional.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/provisional_sweep.py::ProvisionalSweepModule.run_once::path.open_a::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/self_evolution.py::SelfEvolutionGovernorModule._write_report::path.open_a::self.reports_path": "module_report_only_existing_surface",
     "plugins/modules/governance/self_evolution.py::SelfEvolutionGovernorModule._write_agenda_candidate::path.open_a::self.agenda_candidates_path": "self_evolution_agenda_report_only",
     "plugins/modules/governance/shadow_recall.py::ShadowRecallModule.record_discards::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
