@@ -361,6 +361,100 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    def confirm_provisional_record(
+        self,
+        record_id: str,
+        *,
+        confirmed_by: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Confirm a provisional record, making it permanent.
+
+        Sets provisional=False, clears expires_at, adds confirmed_at/confirmed_by.
+        The record transitions from temporary to permanent.
+        """
+        normalized = str(record_id or "").strip()
+        if not normalized:
+            raise KeyError("crystallized record id is required")
+        if not self.store.roots.crystallized_root.exists():
+            raise KeyError(normalized)
+
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            records = self.read_records(path.name)
+            rendered: list[str] = []
+            changed = False
+            matched: dict[str, Any] | None = None
+            for current in records:
+                frontmatter = dict(current.frontmatter)
+                if str(frontmatter.get("id") or "") == normalized:
+                    matched = {
+                        "record_id": normalized,
+                        "file_name": current.file_name,
+                    }
+                    if frontmatter.get("provisional") is True:
+                        frontmatter["provisional"] = False
+                        frontmatter["expires_at"] = ""
+                        frontmatter["confirmed_by"] = confirmed_by
+                        frontmatter["confirmed_at"] = _timestamp(now)
+                        if frontmatter.get("canonical_state") in (
+                            "provisional_expired", "provisional_cap_evicted",
+                        ):
+                            frontmatter["canonical_state"] = "active"
+                        changed = True
+                rendered.append(_format_frontmatter(frontmatter))
+                rendered.append("")
+                rendered.append(current.body.rstrip())
+                rendered.append("")
+            if matched is None:
+                continue
+            if changed:
+                tmp_path = path.with_name(f"{path.name}.{normalized}.confirm.tmp")
+                try:
+                    tmp_path.write_text("\n".join(rendered).rstrip() + "\n", encoding="utf-8")
+                    tmp_path.replace(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="provisional_record_confirmed",
+                    status="ok",
+                    target=str(path),
+                    details={
+                        "record_id": normalized,
+                        "confirmed_by": confirmed_by,
+                    },
+                )
+            matched["canonical_state_changed"] = changed
+            return matched
+        raise KeyError(normalized)
+
+    def list_provisional_records(self) -> list[dict[str, Any]]:
+        """Return all active provisional crystallized records.
+
+        Active provisional = provisional=True AND canonical_state not inactive.
+        Used by provisional_sweep to find records subject to TTL/cap eviction.
+        """
+        results: list[dict[str, Any]] = []
+        if not self.store.roots.crystallized_root.exists():
+            return results
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            for record in self.read_records(path.name):
+                fm = record.frontmatter
+                if fm.get("provisional") is True and is_active_crystallized_frontmatter(fm):
+                    results.append({
+                        "id": fm.get("id", ""),
+                        "candidate_id": fm.get("candidate_id", ""),
+                        "provisional": True,
+                        "expires_at": fm.get("expires_at", ""),
+                        "approved_by": fm.get("approved_by", ""),
+                        "approved_at": fm.get("approved_at", ""),
+                        "body": record.body,
+                        "file_name": record.file_name,
+                        "canonical_state": fm.get("canonical_state", "active"),
+                    })
+        return results
+
     def _ensure_crystallized_approval(
         self,
         candidate: CrystallizedCandidate,

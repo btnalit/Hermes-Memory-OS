@@ -328,3 +328,104 @@ def test_invalidate_provisional_record_fails_for_nonexistent_record(tmp_path):
             "nonexistent_id",
             reason="resolver_ttl_expired",
         )
+
+
+def test_confirm_provisional_record_removes_provisional_and_expires_at(tmp_path):
+    """confirm_provisional_record must set provisional=False, clear expires_at,
+    set confirmed_at/confirmed_by, restore canonical_state=active."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_conf_001",
+        kind="moment",
+        body="User preference: dark mode enabled.",
+        source_event_ids=["evt_001"],
+        sensitivity="private",
+        bridge_state="inner_drive_candidate",
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_conf_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service = CrystallizedMemoryService(store)
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    records = service.read_records("owner_approved.md")
+    record_id = records[0].frontmatter["id"]
+
+    result = service.confirm_provisional_record(record_id, confirmed_by="owner")
+    assert result["record_id"] == record_id
+    assert result["canonical_state_changed"] is True
+
+    records_after = service.read_records("owner_approved.md")
+    fm = records_after[0].frontmatter
+    assert fm.get("provisional") is False
+    assert fm.get("expires_at") is None or fm.get("expires_at") == ""
+    assert fm.get("confirmed_by") == "owner"
+    assert fm.get("confirmed_at") is not None
+
+
+def test_list_provisional_records_filters_active_provisional_only(tmp_path):
+    """list_provisional_records must return only active provisional records,
+    excluding non-provisional and expired/evicted ones."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    service = CrystallizedMemoryService(store)
+
+    # Write a provisional record
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_list_001",
+        kind="moment",
+        body="Active provisional memory.",
+        source_event_ids=["evt_001"],
+        sensitivity="private",
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_list_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    # Write a non-provisional record
+    candidate2 = CrystallizedCandidate(
+        candidate_id="cand_list_002",
+        kind="moment",
+        body="Permanent owner-approved memory.",
+        source_event_ids=["evt_002"],
+        sensitivity="private",
+    )
+    decision2 = ApprovalDecision(
+        candidate_id="cand_list_002",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-17T00:00:00Z",
+        provisional=False,
+    )
+    service.write_approved_record(candidate2, decision2, file_name="owner_approved.md")
+
+    results = service.list_provisional_records()
+    assert len(results) == 1
+    assert results[0]["provisional"] is True
+    assert results[0]["candidate_id"] == "cand_list_001"
