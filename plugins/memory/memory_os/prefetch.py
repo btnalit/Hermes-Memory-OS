@@ -875,17 +875,21 @@ def _relationship_lines(store: MemoryOSStore) -> list[str]:
 
 
 def _crystallized_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | None = None) -> list[str]:
-    """Record-level crystallized memory lines.
+    """Record-level crystallized memory lines with provisional annotation.
 
     Parses each .md file into individual records, filters by canonical_state
-    (active only), and produces one line per active record.  Solves two bugs:
+    (active only), and produces one line per active record.
 
-    * accumulation decay:  file-level clip(260) from first frontmatter caused
-      records appended later to be invisible ("approval funnel narrowing").
-    * revocation leak:     file-level read ignored canonical_state entirely,
-      so revoked records still appeared in prefetch context.
+    Provisional records (provisional=True) are annotated with countdown
+    and sorted after permanent records. High-recurrence provisional records
+    receive a high-recurrence marker.
     """
-    lines: list[str] = []
+    now = datetime.now(timezone.utc)
+
+    permanent_lines: list[str] = []
+    # (expires_at_sort_key, line, record_id, recurrence)
+    provisional_entries: list[tuple[datetime, str, str, int]] = []
+
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
         try:
             content = path.read_text(encoding="utf-8")
@@ -898,12 +902,44 @@ def _crystallized_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | No
             text = _redact(_clip(body, 220))
             if not text or _is_diagnostic_style_seed(text):
                 continue
-            lines.append(f"- {path.name}/{kind}: {text}")
-            if seen is not None:
-                rid = str(frontmatter.get("id", "")).strip()
-                if rid:
-                    seen.add(("crystallized_record", rid))
-    return lines
+            rid = str(frontmatter.get("id", "")).strip()
+
+            is_provisional = frontmatter.get("provisional") is True
+            if is_provisional:
+                # Compute countdown
+                expires_str = str(frontmatter.get("expires_at") or "").strip()
+                days_remaining = 999
+                expires_dt = datetime.max.replace(tzinfo=timezone.utc)
+                if expires_str:
+                    try:
+                        expires_dt = datetime.fromisoformat(expires_str)
+                        sec = (expires_dt - now).total_seconds()
+                        days_remaining = max(0, int(sec / 86400))
+                    except (ValueError, TypeError):
+                        pass
+                # Recurrence from frontmatter
+                recurrence = 0
+                try:
+                    recurrence = int(frontmatter.get("recurrence", "0"))
+                except (ValueError, TypeError):
+                    pass
+                # Build annotated line
+                recurrence_marker = " ⚠high-recurrence" if recurrence >= 3 else ""
+                line = (
+                    f"- {path.name}/{kind}: "
+                    f"(provisional·剩{days_remaining}d){recurrence_marker} {text}"
+                )
+                provisional_entries.append((expires_dt, line, rid, recurrence))
+            else:
+                permanent_lines.append(f"- {path.name}/{kind}: {text}")
+
+            if seen is not None and rid:
+                seen.add(("crystallized_record", rid))
+
+    # Sort provisional entries: closest expiry first
+    provisional_entries.sort(key=lambda e: e[0])
+
+    return permanent_lines + [entry[1] for entry in provisional_entries]
 
 
 def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:

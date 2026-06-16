@@ -18,8 +18,8 @@ from .store import MemoryOSStore, _format_frontmatter
 INACTIVE_CANONICAL_STATES = {
     "owner_revoked", "revoked", "demoted",
     "provisional_expired", "provisional_cap_evicted",
+    "provisional_rejected",
 }
-# "provisional_rejected" will be added in P5 when owner-reject flow is built.
 
 # Triage action types for candidate_aggregation lane
 CANDIDATE_TRIAGE_ACTIONS = frozenset({"promote", "demote", "fleeting", "discard"})
@@ -296,6 +296,7 @@ class CrystallizedMemoryService:
         Valid reasons:
           - "resolver_ttl_expired" → canonical_state = "provisional_expired"
           - "resolver_cap_evicted" → canonical_state = "provisional_cap_evicted"
+          - "owner_rejected" → canonical_state = "provisional_rejected"
         """
         normalized = str(record_id or "").strip()
         if not normalized:
@@ -306,6 +307,7 @@ class CrystallizedMemoryService:
         state_map = {
             "resolver_ttl_expired": "provisional_expired",
             "resolver_cap_evicted": "provisional_cap_evicted",
+            "owner_rejected": "provisional_rejected",
         }
         target_state = state_map.get(reason)
         if target_state is None:
@@ -397,7 +399,7 @@ class CrystallizedMemoryService:
                         frontmatter["confirmed_by"] = confirmed_by
                         frontmatter["confirmed_at"] = _timestamp(now)
                         if frontmatter.get("canonical_state") in (
-                            "provisional_expired", "provisional_cap_evicted",
+                            "provisional_expired", "provisional_cap_evicted", "provisional_rejected",
                         ):
                             frontmatter["canonical_state"] = "active"
                         changed = True

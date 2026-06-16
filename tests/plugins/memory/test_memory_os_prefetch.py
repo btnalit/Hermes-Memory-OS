@@ -8,7 +8,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _fit_budget, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _crystallized_lines, _fit_budget, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -703,3 +703,88 @@ def test_provider_status_distinguishes_candidates_from_approved_crystallized_rec
     assert report["crystallized_records_label"] == "approved crystallized memory records"
     assert report["crystallized_candidate_count"] == 1
     assert report["crystallized_records"] == 0
+
+
+# ── P5: provisional crystal annotation in prefetch ──
+
+
+def test_crystallized_lines_annotates_provisional_with_countdown(tmp_path):
+    """_crystallized_lines annotates provisional records with countdown marker."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_pref_001",
+        kind="moment",
+        body="Prefetch provisional test.",
+        source_event_ids=["evt_001"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_pref_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    lines = _crystallized_lines(store)
+    assert len(lines) == 1
+    assert "provisional" in lines[0]
+    assert "剩" in lines[0]
+    assert "d)" in lines[0] or "d) " in lines[0]
+
+
+def test_crystallized_lines_sorts_permanent_before_provisional(tmp_path):
+    """Permanent records appear before provisional records in crystallized lines."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    # Write provisional record first
+    cand_prov = CrystallizedCandidate(
+        candidate_id="cand_sort_prov",
+        kind="moment",
+        body="Provisional record for sort test.",
+        source_event_ids=["evt_prov"],
+    )
+    dec_prov = ApprovalDecision(
+        candidate_id="cand_sort_prov",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(cand_prov, dec_prov, file_name="owner_approved.md")
+
+    # Write permanent record second
+    cand_perm = CrystallizedCandidate(
+        candidate_id="cand_sort_perm",
+        kind="moment",
+        body="Permanent record for sort test.",
+        source_event_ids=["evt_perm"],
+    )
+    dec_perm = ApprovalDecision(
+        candidate_id="cand_sort_perm",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-17T00:00:00Z",
+        provisional=False,
+    )
+    service.write_approved_record(cand_perm, dec_perm, file_name="owner_approved.md")
+
+    lines = _crystallized_lines(store)
+    assert len(lines) == 2
+    # Permanent record should be first
+    assert "Permanent" in lines[0]
+    assert "Provisional" in lines[1]
+    assert "provisional" in lines[1]

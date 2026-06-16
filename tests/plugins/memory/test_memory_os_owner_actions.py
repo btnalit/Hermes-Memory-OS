@@ -4061,3 +4061,243 @@ def test_cron_integration_status_reports_helper_and_redacted_delivery_target(tmp
     assert report["raw_body_included_count"] == 0
     assert report["boundary"]["actual_send"] is False
     assert "telegram:-100123" not in json.dumps(report, ensure_ascii=False)
+
+
+# ── P5: provisional crystallized record review items and owner actions ──
+
+
+def test_provisional_crystallized_review_items_generates_queue_items(tmp_path):
+    """Provisional records appear as review items with countdown and actions."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_p5_001",
+        kind="moment",
+        body="Provisional memory for review.",
+        source_event_ids=["evt_001"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_p5_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    items = owner_actions_module._provisional_crystallized_review_items(store, closed=set())
+    assert len(items) == 1
+    item = items[0]
+    assert item["target_type"] == "provisional_crystallized_record"
+    assert "confirm_provisional_crystallized_record" in item["action_tokens"]
+    assert "reject_provisional_crystallized_record" in item["action_tokens"]
+    assert "剩" in item["summary"]
+    assert "d)" in item["summary"]
+    assert item["remaining_days"] >= 6  # 2026-06-17 to 2026-06-24
+
+
+def test_provisional_review_items_priority_based_on_expiry(tmp_path):
+    """Priority escalates as expiry approaches — <=3d is action_required."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    import datetime as _dt
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    soon = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=2)).isoformat()
+    far = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=10)).isoformat()
+
+    for idx, (expires, _expected_priority) in enumerate([
+        (soon, "action_required"),
+        (far, "fyi"),
+    ]):
+        candidate = CrystallizedCandidate(
+            candidate_id=f"cand_prio_{idx}",
+            kind="moment",
+            body=f"Priority test body {idx}.",
+            source_event_ids=[f"evt_{idx}"],
+        )
+        decision = ApprovalDecision(
+            candidate_id=f"cand_prio_{idx}",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at="2026-06-17T00:00:00Z",
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=expires,
+        )
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    items = owner_actions_module._provisional_crystallized_review_items(store, closed=set())
+    assert len(items) == 2
+    for item in items:
+        if "cand_prio_0" in item["provisional_body"] or "Priority test body 0" in item["summary"]:
+            assert item["priority"] == "action_required", f"Expected action_required, got {item['priority']}"
+        elif "cand_prio_1" in item["provisional_body"] or "Priority test body 1" in item["summary"]:
+            assert item["priority"] == "fyi", f"Expected fyi, got {item['priority']}"
+
+
+def test_provisional_review_items_recurrence_escalation(tmp_path):
+    """Records with same body >=3 times get action_required regardless of expiry."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    import datetime as _dt
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    far = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(days=10)).isoformat()
+
+    for idx in range(3):
+        candidate = CrystallizedCandidate(
+            candidate_id=f"cand_recur_{idx}",
+            kind="moment",
+            body="Same content appears three times.",
+            source_event_ids=[f"evt_{idx}"],
+        )
+        decision = ApprovalDecision(
+            candidate_id=f"cand_recur_{idx}",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at="2026-06-17T00:00:00Z",
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=far,
+        )
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    items = owner_actions_module._provisional_crystallized_review_items(store, closed=set())
+    assert len(items) == 3
+    for item in items:
+        assert item["priority"] == "action_required", f"Expected action_required for recurrence, got {item['priority']}"
+        assert item["recurrence_count"] == 3
+        assert "high-recurrence" in item["summary"]
+
+
+def test_confirm_provisional_through_owner_action(tmp_path):
+    """Owner can confirm a provisional record via apply_owner_action."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_confirm_001",
+        kind="moment",
+        body="Will be confirmed by owner.",
+        source_event_ids=["evt_001"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_confirm_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    records = service.read_records("owner_approved.md")
+    record_id = records[0].frontmatter["id"]
+
+    result = apply_owner_action(
+        store,
+        action_type="confirm_provisional_crystallized_record",
+        target=f"provisional_crystallized_record:{record_id}",
+        owner_id="owner",
+        apply=True,
+    )
+    assert result["status"] in {"applied", "ok"}
+
+    records_after = service.read_records("owner_approved.md")
+    fm = records_after[0].frontmatter
+    assert fm.get("provisional") is False
+    assert fm.get("confirmed_by") == "owner"
+
+
+def test_reject_provisional_through_owner_action(tmp_path):
+    """Owner can reject a provisional record via apply_owner_action."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_reject_001",
+        kind="moment",
+        body="Will be rejected by owner.",
+        source_event_ids=["evt_001"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_reject_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    records = service.read_records("owner_approved.md")
+    record_id = records[0].frontmatter["id"]
+
+    result = apply_owner_action(
+        store,
+        action_type="reject_provisional_crystallized_record",
+        target=f"provisional_crystallized_record:{record_id}",
+        owner_id="owner",
+        apply=True,
+    )
+    assert result["status"] in {"applied", "ok"}
+
+    records_after = service.read_records("owner_approved.md")
+    fm = records_after[0].frontmatter
+    from plugins.memory.memory_os.crystallized import is_active_crystallized_frontmatter
+
+    assert is_active_crystallized_frontmatter(fm) is False
+    assert fm["canonical_state"] == "provisional_rejected"
+
+
+def test_reject_provisional_sets_provisional_rejected_state(tmp_path):
+    """invalidate_provisional_record with reason='owner_rejected' sets state correctly."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import (
+        is_active_crystallized_frontmatter,
+        INACTIVE_CANONICAL_STATES,
+    )
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_rejstate_001",
+        kind="moment",
+        body="Rejected state test.",
+        source_event_ids=["evt_001"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_rejstate_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    records = service.read_records("owner_approved.md")
+    record_id = records[0].frontmatter["id"]
+
+    result = service.invalidate_provisional_record(
+        record_id, reason="owner_rejected", invalidated_by="owner",
+    )
+    assert result["canonical_state_changed"] is True
+    assert "provisional_rejected" in INACTIVE_CANONICAL_STATES
+
+    records_after = service.read_records("owner_approved.md")
+    fm = records_after[0].frontmatter
+    assert fm["canonical_state"] == "provisional_rejected"
+    assert is_active_crystallized_frontmatter(fm) is False

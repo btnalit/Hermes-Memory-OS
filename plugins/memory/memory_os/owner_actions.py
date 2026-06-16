@@ -161,6 +161,8 @@ ACTION_TYPES = {
     "approve_session_mirror_apply",
     *HINDSIGHT_CURATION_ACTION_TYPES,
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
+    "confirm_provisional_crystallized_record",
+    "reject_provisional_crystallized_record",
 }
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
@@ -173,6 +175,10 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "session_mirror_apply": {"approve_session_mirror_apply"},
     "hindsight_curation": HINDSIGHT_CURATION_ACTION_TYPES,
     "expression": EXPRESSION_FEEDBACK_ACTION_TYPES,
+    "provisional_crystallized_record": {
+        "confirm_provisional_crystallized_record",
+        "reject_provisional_crystallized_record",
+    },
 }
 
 
@@ -1513,6 +1519,7 @@ def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
     items.extend(_session_mirror_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
+    items.extend(_provisional_crystallized_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     return _review_aging_summary(aged_items, aging)
 
@@ -2151,6 +2158,7 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
     items.extend(_session_mirror_apply_review_items(store, closed))
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
+    items.extend(_provisional_crystallized_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     sorted_items = sorted(
         aged_items,
@@ -2816,6 +2824,18 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "request_id": feedback.get("request_id", ""),
             "outcome_feedback_linked": bool(feedback.get("outcome_feedback_linked")),
         }
+    if action_type == "confirm_provisional_crystallized_record":
+        result = CrystallizedMemoryService(store).confirm_provisional_record(
+            target_id, confirmed_by=str(record["owner_id"]),
+        )
+        record["owner_effect"]["owner_confirmed_provisional"] = True
+        return {"record_id": target_id, "canonical_state_changed": result.get("canonical_state_changed", False)}
+    if action_type == "reject_provisional_crystallized_record":
+        result = CrystallizedMemoryService(store).invalidate_provisional_record(
+            target_id, reason="owner_rejected", invalidated_by=str(record["owner_id"]),
+        )
+        record["owner_effect"]["owner_rejected_provisional"] = True
+        return {"record_id": target_id, "canonical_state_changed": result.get("canonical_state_changed", False)}
     return {}
 
 
@@ -2886,6 +2906,18 @@ def _validate_action_target(
             return "invalid_hindsight_curation_target"
         if not _find_hindsight_curation_finding(store, target_id):
             return "hindsight_curation_finding_not_found"
+    if action_type in {"confirm_provisional_crystallized_record", "reject_provisional_crystallized_record"}:
+        if target_type != "provisional_crystallized_record":
+            return "invalid_provisional_crystallized_record_target"
+        service = CrystallizedMemoryService(store)
+        found = service.find_record(target_id)
+        if found is None:
+            return "provisional_crystallized_record_not_found"
+        if found.frontmatter.get("provisional") is not True:
+            return "provisional_crystallized_record_not_provisional"
+        if not is_active_crystallized_frontmatter(found.frontmatter):
+            canon = str(found.frontmatter.get("canonical_state") or "active")
+            return f"provisional_crystallized_record_already_{canon}"
     return ""
 
 
@@ -3841,6 +3873,108 @@ def _left_brain_advisor_review_items(store: MemoryOSStore, closed: set[str]) -> 
     return items
 
 
+def _provisional_crystallized_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    """Generate review items for active provisional crystallized records.
+
+    Each provisional record appears in the owner digest with:
+    - Countdown (remaining days until auto-expiry)
+    - Confirm/reject action tokens
+    - Recurrence escalation: records whose content hash appears >=3 times
+      are bumped to "action_required" priority regardless of expiry.
+    """
+    service = CrystallizedMemoryService(store)
+    records = service.list_provisional_records()
+    if not records:
+        return []
+
+    now = datetime.now(timezone.utc)
+
+    # ── Recurrence detection (body content hash) ──
+    hash_counter: Counter[str] = Counter()
+    for r in records:
+        body = str(r.get("body") or "").strip()
+        if body:
+            content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+            hash_counter[content_hash] += 1
+
+    recurrence_by_id: dict[str, int] = {}
+    for r in records:
+        body = str(r.get("body") or "").strip()
+        if body:
+            content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+            recurrence_by_id[r["id"]] = hash_counter[content_hash]
+
+    items: list[dict[str, Any]] = []
+    for r in records:
+        record_id = str(r.get("id") or "")
+        target_ref = f"provisional_crystallized_record:{record_id}"
+        if target_ref in closed:
+            continue
+        if not record_id:
+            continue
+
+        # Compute remaining days
+        expires_str = str(r.get("expires_at") or "").strip()
+        remaining_days = 999
+        if expires_str:
+            try:
+                expires_at = datetime.fromisoformat(expires_str)
+                remaining_seconds = (expires_at - now).total_seconds()
+                remaining_days = max(0, int(remaining_seconds / 86400))
+            except (ValueError, TypeError):
+                pass
+
+        # Recurrence count
+        recurrence_count = recurrence_by_id.get(record_id, 1)
+
+        # Priority
+        if recurrence_count >= 3 or remaining_days <= 3:
+            priority = "action_required"
+        elif remaining_days <= 5:
+            priority = "review_suggested"
+        else:
+            priority = "fyi"
+
+        # Summary
+        body_text = _bounded_text(str(r.get("body") or ""), 180)
+        summary_parts = [f"(剩{remaining_days}d) {body_text}"]
+        if recurrence_count >= 3:
+            summary_parts.insert(0, f"⚠high-recurrence({recurrence_count}x): ")
+        summary = "".join(summary_parts)
+
+        # Action tokens
+        actions = _review_actions("provisional_crystallized_record", record_id)
+
+        created_at = str(r.get("approved_at") or r.get("created_at") or now.isoformat().replace("+00:00", "Z"))
+
+        items.append({
+            "schema_version": "memory-os.review_item.v0",
+            "review_item_id": f"review:{target_ref}",
+            "target_type": "provisional_crystallized_record",
+            "target_id": record_id,
+            "source_module": "crystallized_memory",
+            "priority": priority,
+            "created_at": created_at,
+            "created_at_source": "provisional_record_approved_at",
+            "status": "pending",
+            "summary": _bounded_text(summary, 260),
+            "provisional_body": body_text,
+            "expires_at": expires_str,
+            "remaining_days": remaining_days,
+            "recurrence_count": recurrence_count,
+            "canonical_state": str(r.get("canonical_state") or "active"),
+            "safe_source_ids": [],
+            "action_tokens": {action["action_type"]: action["token"] for action in actions},
+            "action_targets": {
+                action["action_type"]: {"target_type": action["target_type"], "target_id": action["target_id"]}
+                for action in actions
+            },
+            "raw_body_included": False,
+        })
+
+    return items
+
+
 def _created_at_with_source(
     record: dict[str, Any],
     *,
@@ -4509,6 +4643,11 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
             _review_action("approve", "retain_hindsight_curation", target_type, target_id),
             _review_action("reject", "reject_hindsight_curation", target_type, target_id),
             _review_action("demote", "demote_hindsight_curation", target_type, target_id),
+        ]
+    if target_type == "provisional_crystallized_record":
+        return [
+            _review_action("confirm", "confirm_provisional_crystallized_record", target_type, target_id),
+            _review_action("reject", "reject_provisional_crystallized_record", target_type, target_id),
         ]
     return []
 
@@ -5197,6 +5336,10 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "reject_hindsight_curation"
     if verb == "demote" and target_type == "hindsight_curation":
         return "demote_hindsight_curation"
+    if verb in ("approve", "confirm") and target_type == "provisional_crystallized_record":
+        return "confirm_provisional_crystallized_record"
+    if verb == "reject" and target_type == "provisional_crystallized_record":
+        return "reject_provisional_crystallized_record"
     return ""
 
 
@@ -5220,6 +5363,8 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
         return action_type in {"demote_crystallized", "demote_hindsight_curation"}
     if verb == "revoke":
         return action_type == "revoke_crystallized"
+    if verb == "confirm":
+        return action_type == "confirm_provisional_crystallized_record"
     return False
 
 
@@ -7154,6 +7299,9 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
             "hindsight_curation": "hindsight_curation",
             "hindsight-curation": "hindsight_curation",
             "hcur": "hindsight_curation",
+            "pcrystal": "provisional_crystallized_record",
+            "provisional-crystallized": "provisional_crystallized_record",
+            "provisional_crystallized_record": "provisional_crystallized_record",
         }.get(prefix.strip(), prefix.strip())
         return normalized_prefix, suffix.strip()
     if action_type in {"approve_candidate", "reject_candidate"}:
@@ -7176,6 +7324,8 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
         return "hindsight_curation", value
     if action_type in EXPRESSION_FEEDBACK_ACTION_TYPES:
         return "expression", value
+    if action_type in {"confirm_provisional_crystallized_record", "reject_provisional_crystallized_record"}:
+        return "provisional_crystallized_record", value
     return "unknown", value
 
 
