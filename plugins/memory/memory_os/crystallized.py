@@ -85,6 +85,10 @@ class CrystallizedMemoryService:
             "hindsight_indexed": False,
             "bridge_state": candidate.bridge_state or decision.source_state,
         }
+        if decision.provisional:
+            frontmatter["provisional"] = True
+            frontmatter["expires_at"] = decision.expires_at or ""
+            frontmatter["recurrence"] = str(decision.recurrence)
         path = self.store.append_crystallized_record(file_name, frontmatter, candidate.body)
         append_audit(
             self.store.roots.audit_path,

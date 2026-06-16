@@ -169,3 +169,84 @@ def test_inactive_canonical_states_includes_provisional_expired_and_cap_evicted(
     # Existing inactive states still work
     assert is_active_crystallized_frontmatter({"canonical_state": "owner_revoked"}) is False
     assert is_active_crystallized_frontmatter({"canonical_state": "demoted"}) is False
+
+
+def test_write_approved_record_with_provisional_true_adds_provisional_frontmatter_keys(tmp_path):
+    """When decision.provisional=True, frontmatter must include
+    provisional, expires_at, and recurrence keys."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_prov_001",
+        kind="moment",
+        body="User mentioned liking rainy days.",
+        source_event_ids=["evt_001"],
+        sensitivity="private",
+        bridge_state="inner_drive_candidate",
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_prov_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        note="auto-approved",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+        recurrence=0,
+    )
+    service = CrystallizedMemoryService(store)
+    path = service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    records = service.read_records("owner_approved.md")
+    assert len(records) == 1
+    fm = records[0].frontmatter
+    assert fm["provisional"] is True
+    assert fm["expires_at"] == "2026-06-24T00:00:00Z"
+    assert fm["recurrence"] == "0"
+    assert fm["approved_by"] == "resolver"
+    assert fm["bridge_state"] == "inner_drive_candidate"
+
+
+def test_write_approved_record_with_provisional_false_does_not_add_provisional_keys(tmp_path):
+    """When decision.provisional=False (default), frontmatter must NOT
+    include provisional/expires_at/recurrence keys."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_normal_001",
+        kind="moment",
+        body="User mentioned liking rainy days.",
+        source_event_ids=["evt_001"],
+        sensitivity="private",
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_normal_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-17T00:00:00Z",
+        provisional=False,
+    )
+    service = CrystallizedMemoryService(store)
+    path = service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    records = service.read_records("owner_approved.md")
+    assert len(records) == 1
+    fm = records[0].frontmatter
+    assert "provisional" not in fm
+    assert "expires_at" not in fm
+    assert "recurrence" not in fm
