@@ -329,6 +329,13 @@ Run the main test suite:
 python -m pytest -q
 ```
 
+Run a single test:
+
+```bash
+python -m pytest -q tests/plugins/memory/test_memory_os_owner_actions.py
+python -m pytest -q -k "test_approve_candidate"
+```
+
 Installer and closure checks:
 
 ```bash
@@ -338,6 +345,29 @@ python scripts/memory_os_public_checkout_probe.py --source head --strict
 python scripts/memory_os_public_checkout_probe.py --source working-tree --strict
 git diff --check
 ```
+
+Static analysis (run before committing):
+
+```bash
+python scripts/memory_os_import_cycle_check.py --repo-root .
+python scripts/memory_os_write_surface_check.py
+python scripts/memory_os_static_hygiene_check.py
+git diff --check
+```
+
+### Code Intelligence
+
+This repository is indexed with [CodeGraph](https://github.com/colbymchenry/codegraph)
+for fast structural exploration. After setting up the project:
+
+```bash
+codegraph init
+```
+
+In an agent session, reach for `codegraph_explore` / `codegraph_node` before
+`grep`/`find` when answering architecture questions or tracing call paths.
+Without a running MCP server, `codegraph explore` and `codegraph node` work
+from the shell.
 
 Before changing scheduler, owner review, feedback, installer, module closure,
 or live monitor behavior, verify the owning interface and run the relevant
