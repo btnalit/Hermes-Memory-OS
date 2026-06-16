@@ -16,6 +16,10 @@ from .store import MemoryOSStore
 EXECUTION_GATE_SCHEMA_VERSION = "memory-os.execution_gate_envelope.v0"
 DEFAULT_PERMIT_TTL_SECONDS = 900
 
+# ── Lane registry ─────────────────────────────────────────────────
+RESOLVER_AUTO_APPROVE_LANE = "resolver_auto_approve"
+RESOLVER_AUTO_APPROVE_RISK_CLASS = "reversible_llm_auto_approval"
+
 
 def execution_gate_records_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "execution_gate_envelopes.jsonl"
@@ -313,6 +317,45 @@ def execution_gate_retention_status(roots: MemoryOSRoots) -> dict[str, Any]:
         "rotated_file_count": len(list(rotated_dir.glob("envelopes-*.jsonl"))) if rotated_dir.exists() else 0,
         "lock_path": str(rotated_dir / "rotation.lock"),
     }
+
+
+def start_resolver_auto_approve_envelope(
+    store: MemoryOSStore,
+    *,
+    candidate_id: str,
+    sensitivity: str,
+    has_identity_signal: bool,
+    bridge_state: str,
+    evidence_refs: list[str] | None = None,
+    ttl_seconds: int = DEFAULT_PERMIT_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Start an ExecutionGate permit envelope for resolver auto-approval.
+
+    Wraps start_execution_gate_envelope with resolver-specific defaults.
+    boundary is empty (all False) because the reversibility and identity
+    gates were already checked by resolver_gate BEFORE this envelope opens.
+    """
+    return start_execution_gate_envelope(
+        store,
+        lane_id=RESOLVER_AUTO_APPROVE_LANE,
+        trigger_surface="resolver_gate.resolver_eligible",
+        risk_class=RESOLVER_AUTO_APPROVE_RISK_CLASS,
+        human_approval_required=False,
+        why_no_human_approval=(
+            "resolver_gate: candidate passed deterministic dual-axis gate "
+            "(reversible + non-identity-adjacent + no side effects)"
+        ),
+        scope={
+            "candidate_id": str(candidate_id),
+            "sensitivity": str(sensitivity),
+            "has_identity_signal": bool(has_identity_signal),
+            "bridge_state": str(bridge_state),
+            "operation": "resolver_approved_crystallized_write",
+        },
+        boundary={},
+        evidence_refs=evidence_refs or [],
+        ttl_seconds=ttl_seconds,
+    )
 
 
 def rotate_execution_gate_records(
