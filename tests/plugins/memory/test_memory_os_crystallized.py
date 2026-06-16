@@ -250,3 +250,81 @@ def test_write_approved_record_with_provisional_false_does_not_add_provisional_k
     assert "provisional" not in fm
     assert "expires_at" not in fm
     assert "recurrence" not in fm
+
+
+def test_invalidate_provisional_record_sets_canonical_state_and_preserves_record(tmp_path):
+    """invalidate_provisional_record must set canonical_state to
+    provisional_expired/provisional_cap_evicted, add audit, keep record on disk."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedCandidate, CrystallizedMemoryService,
+        is_active_crystallized_frontmatter,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # First write a provisional record
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_inv_001",
+        kind="moment",
+        body="Temporary memory that will expire.",
+        source_event_ids=["evt_001"],
+        sensitivity="private",
+        bridge_state="inner_drive_candidate",
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_inv_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-06-17T00:00:00Z",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-06-24T00:00:00Z",
+    )
+    service = CrystallizedMemoryService(store)
+    path = service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    records = service.read_records("owner_approved.md")
+    record_id = records[0].frontmatter["id"]
+
+    # Now invalidate it
+    result = service.invalidate_provisional_record(
+        record_id,
+        reason="resolver_ttl_expired",
+        invalidated_by="provisional_sweep",
+    )
+    assert result["record_id"] == record_id
+    assert result["canonical_state_changed"] is True
+
+    # Re-read - canonical_state should be changed
+    records_after = service.read_records("owner_approved.md")
+    fm_after = records_after[0].frontmatter
+    assert fm_after["canonical_state"] == "provisional_expired"
+    assert fm_after["provisional"] is True  # preserved
+    assert fm_after["expires_at"] == "2026-06-24T00:00:00Z"  # preserved
+    assert is_active_crystallized_frontmatter(fm_after) is False
+
+    # Record still exists on disk (invalidate != delete)
+    assert path.exists()
+
+
+def test_invalidate_provisional_record_fails_for_nonexistent_record(tmp_path):
+    """Invalidating a non-existent record should raise KeyError."""
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    service = CrystallizedMemoryService(store)
+    import pytest
+    with pytest.raises(KeyError):
+        service.invalidate_provisional_record(
+            "nonexistent_id",
+            reason="resolver_ttl_expired",
+        )

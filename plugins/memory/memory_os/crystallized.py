@@ -280,6 +280,87 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    def invalidate_provisional_record(
+        self,
+        record_id: str,
+        *,
+        reason: str,
+        invalidated_by: str = "provisional_sweep",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Invalidate a provisional crystallized record (invalidate-not-delete).
+
+        Sets canonical_state based on reason and adds invalidation metadata.
+        The record remains on disk — only its active status changes.
+
+        Valid reasons:
+          - "resolver_ttl_expired" → canonical_state = "provisional_expired"
+          - "resolver_cap_evicted" → canonical_state = "provisional_cap_evicted"
+        """
+        normalized = str(record_id or "").strip()
+        if not normalized:
+            raise KeyError("crystallized record id is required")
+        if not self.store.roots.crystallized_root.exists():
+            raise KeyError(normalized)
+
+        state_map = {
+            "resolver_ttl_expired": "provisional_expired",
+            "resolver_cap_evicted": "provisional_cap_evicted",
+        }
+        target_state = state_map.get(reason)
+        if target_state is None:
+            raise ValueError(
+                f"invalid reason: {reason!r}; expected one of {list(state_map.keys())}"
+            )
+
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            records = self.read_records(path.name)
+            rendered: list[str] = []
+            changed = False
+            matched: dict[str, Any] | None = None
+            for current in records:
+                frontmatter = dict(current.frontmatter)
+                if str(frontmatter.get("id") or "") == normalized:
+                    matched = {
+                        "record_id": normalized,
+                        "file_name": current.file_name,
+                        "already_invalidated": not is_active_crystallized_frontmatter(frontmatter),
+                    }
+                    if is_active_crystallized_frontmatter(frontmatter):
+                        frontmatter["canonical_state"] = target_state
+                        frontmatter["invalidated_at"] = _timestamp(now)
+                        frontmatter["invalidated_by"] = invalidated_by
+                        frontmatter["invalidation_reason"] = reason
+                        changed = True
+                rendered.append(_format_frontmatter(frontmatter))
+                rendered.append("")
+                rendered.append(current.body.rstrip())
+                rendered.append("")
+            if matched is None:
+                continue
+            if changed:
+                tmp_path = path.with_name(f"{path.name}.{normalized}.invalidate.tmp")
+                try:
+                    tmp_path.write_text("\n".join(rendered).rstrip() + "\n", encoding="utf-8")
+                    tmp_path.replace(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="provisional_record_invalidated",
+                    status="ok",
+                    target=str(path),
+                    details={
+                        "record_id": normalized,
+                        "reason": reason,
+                        "invalidated_by": invalidated_by,
+                    },
+                )
+            matched["canonical_state_changed"] = changed
+            return matched
+        raise KeyError(normalized)
+
     def _ensure_crystallized_approval(
         self,
         candidate: CrystallizedCandidate,
