@@ -271,11 +271,57 @@ def _cluster_and_promote(
                 )
                 processed_ids.add(member.candidate_id)
                 continue
+
+            # ── Resolver routing (P3) ──
+            verdict = _resolver_verdict(member, store=store)
+            if verdict.get("approve"):
+                target_state = "resolver_approved"
+                from plugins.memory.memory_os.execution_gate import (
+                    start_resolver_auto_approve_envelope,
+                    complete_execution_gate_envelope,
+                    RESOLVER_AUTO_APPROVE_LANE,
+                )
+                from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+                from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+                from datetime import timedelta
+
+                crystallized_service = CrystallizedMemoryService(store)
+                envelope = start_resolver_auto_approve_envelope(
+                    store,
+                    candidate_id=member.candidate_id,
+                    sensitivity=member.sensitivity,
+                    has_identity_signal=False,
+                    bridge_state=member.bridge_state,
+                )
+                decision = ApprovalDecision(
+                    candidate_id=member.candidate_id,
+                    purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                    reviewer="resolver",
+                    reviewed_at=_now.isoformat(),
+                    note=verdict.get("reason", ""),
+                    source_state="resolver_approved",
+                    provisional=True,
+                    expires_at=(_now + timedelta(days=7)).isoformat(),
+                    recurrence=0,
+                )
+                crystallized_service.write_approved_record(
+                    member, decision, file_name="owner_approved.md",
+                )
+                complete_execution_gate_envelope(
+                    store,
+                    envelope_id=envelope["execution_gate_envelope_id"],
+                    lane_id=RESOLVER_AUTO_APPROVE_LANE,
+                    execution_status="completed",
+                    postcheck={"crystallized_write": "success"},
+                )
+            else:
+                target_state = "owner_eligible"
+
             append_candidate_triage(
                 store,
                 candidate_id=member.candidate_id,
                 action="promote",
-                target_state="owner_eligible",
+                target_state=target_state,
                 reason=reason,
                 cluster_key=cluster_key,
                 execution_gate_envelope_id=envelope_id,

@@ -504,11 +504,17 @@ class TestA1Boundary:
         assert result.get("actual_identity_write") is False
 
     def test_promote_writes_triage_not_crystallized(self, tmp_path):
-        """_cluster_and_promote appends to triage, never to crystallized."""
+        """Non-resolver-eligible candidates still write triage not crystallized.
+
+        Uses identity-adjacent bodies to ensure candidates cluster (signal
+        keyword present) but are NOT resolver-eligible (identity signal
+        detected by resolver_gate), so they write triage but no .md.
+        """
         store = _store_with_gate(tmp_path)
-        # Both have "记住"+"每次"+"必须"+"检查" → same cluster_key
-        c1 = _cand("cand-prom-a", body="记住：每次启动都必须检查日志文件")
-        c2 = _cand("cand-prom-b", body="记住：每次部署都必须检查版本号")
+        # "boundary" is both a signal keyword (clusters) and an identity
+        # signal (blocks resolver_eligible) — perfect for this test.
+        c1 = _cand("cand-prom-a", body="记住：这是一个boundary，必须遵守")
+        c2 = _cand("cand-prom-b", body="记住：这也是一个boundary，必须遵守")
         result = _cluster_and_promote([c1, c2], store, set(),
                                       envelope_id=_VALID_ENVELOPE_ID)
         assert result["promoted_count"] == 2, f"Expected 2 promoted, got {result}"
@@ -523,7 +529,7 @@ class TestA1Boundary:
         promote_entries = [t for t in triage_entries if t.get("action") == "promote"]
         assert len(promote_entries) == 2
 
-        # No crystallized record was created
+        # No crystallized record was created (identity signal blocks it)
         cry_path = store.roots.hermes_home / "memory-os" / "crystallized"
         cry_files = list(cry_path.glob("*.md")) if cry_path.exists() else []
         assert len(cry_files) == 0  # no new .md was written
@@ -550,3 +556,100 @@ class TestA1Boundary:
 
         after = queue_path.read_text() if queue_path.exists() else ""
         assert before == after, "candidates.jsonl was modified by lane operation"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 10. Resolver routing — _cluster_and_promote integration
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestResolverRouting:
+    """Resolver-eligible candidates route to resolver_approved, not owner_eligible."""
+
+    def test_cluster_and_promote_routes_resolver_eligible_to_resolver_approved(
+        self, tmp_path,
+    ):
+        """When a candidate passes resolver_eligible, target_state must be
+        resolver_approved and a crystallized record must be written."""
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, read_candidate_triage,
+        )
+        from datetime import datetime, timezone, timedelta
+
+        store = _store_with_gate(tmp_path)
+        now = datetime.now(timezone.utc)
+
+        c1 = CrystallizedCandidate(
+            candidate_id="cand_route_001", kind="moment",
+            body="User prefers drinking coffee every morning.",
+            source_event_ids=["evt_001"], sensitivity="private",
+            bridge_state="inner_drive_candidate",
+            created_at=(now - timedelta(hours=1)).isoformat(),
+        )
+        c2 = CrystallizedCandidate(
+            candidate_id="cand_route_002", kind="moment",
+            body="User prefers drinking coffee with milk every morning.",
+            source_event_ids=["evt_002"], sensitivity="private",
+            bridge_state="inner_drive_candidate",
+            created_at=now.isoformat(),
+        )
+        from plugins.memory.memory_os.crystallized import append_candidate_queue
+        append_candidate_queue(store, c1)
+        append_candidate_queue(store, c2)
+
+        pending = [c1, c2]
+        processed_ids: set[str] = set()
+
+        result = _cluster_and_promote(
+            pending, store, processed_ids,
+            envelope_id=_VALID_ENVELOPE_ID, now=now,
+        )
+        assert result["promoted_count"] >= 1
+
+        triage = read_candidate_triage(store)
+        target_states = [t["target_state"] for t in triage]
+        # At least one should be resolver_approved (not all owner_eligible)
+        assert "resolver_approved" in target_states, \
+            f"Expected resolver_approved in target_states, got {target_states}"
+
+    def test_cluster_and_promote_non_eligible_stays_owner_eligible(self, tmp_path):
+        """Identity-adjacent candidates must still route to owner_eligible."""
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, read_candidate_triage,
+        )
+        from datetime import datetime, timezone, timedelta
+
+        store = _store_with_gate(tmp_path)
+        now = datetime.now(timezone.utc)
+
+        c1 = CrystallizedCandidate(
+            candidate_id="cand_id_001", kind="moment",
+            body="My identity is a premium user and I always use admin privileges.",
+            source_event_ids=["evt_001"], sensitivity="private",
+            bridge_state="inner_drive_candidate",
+            created_at=(now - timedelta(hours=1)).isoformat(),
+        )
+        c2 = CrystallizedCandidate(
+            candidate_id="cand_id_002", kind="moment",
+            body="My identity is a premium user with admin privileges — always.",
+            source_event_ids=["evt_002"], sensitivity="private",
+            bridge_state="inner_drive_candidate",
+            created_at=now.isoformat(),
+        )
+        from plugins.memory.memory_os.crystallized import append_candidate_queue
+        append_candidate_queue(store, c1)
+        append_candidate_queue(store, c2)
+
+        pending = [c1, c2]
+        processed_ids: set[str] = set()
+
+        result = _cluster_and_promote(
+            pending, store, processed_ids,
+            envelope_id=_VALID_ENVELOPE_ID, now=now,
+        )
+        assert result["promoted_count"] >= 1
+
+        triage = read_candidate_triage(store)
+        for t in triage:
+            assert t.get("target_state") != "resolver_approved", \
+                f"Identity candidate {t['candidate_id']} was resolver_approved, should be owner_eligible"
