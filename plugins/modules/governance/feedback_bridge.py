@@ -11,6 +11,7 @@ from typing import Any
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import expression_feedback_ledger_path
+from plugins.modules.expression.speak_gate import SpeakGateModule
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -379,20 +380,23 @@ class GovernanceFeedbackBridgeModule:
 
     def _speak_gate_events(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        deliveries_path = self.hermes_home / "system-modules" / "speak_gate" / "deliveries.jsonl"
-        for delivery in _read_jsonl(deliveries_path):
+        # NOTE: read_delivery_records() reads the entire deliveries.jsonl on every
+        # cadence tick — same unbounded-read pattern as _expression_feedback_events()
+        # and _memory_sources_feedback_events(). A cursor-based incremental read
+        # should be added to all three if file growth becomes a performance concern.
+        gate = SpeakGateModule(hermes_home=self.hermes_home, profile=self.profile)
+        for delivery in gate.read_delivery_records():
             if str(delivery.get("profile", self.profile)) != self.profile:
                 continue
             if not str(delivery.get("schema_version", "")).endswith("speak_gate_delivery.v0"):
                 continue
             delivery_id = str(delivery.get("id", ""))
-            source_module = str(delivery.get("source_module", "unknown"))
+            delivery_source_module = str(delivery.get("source_module", "unknown"))
             channel = str(delivery.get("channel", "unknown"))
-            payload_ref = str(delivery.get("payload_ref", ""))
             state_hash = _hash_json(
                 {
                     "delivery_id": delivery_id,
-                    "source_module": source_module,
+                    "source_module": delivery_source_module,
                     "channel": channel,
                     "actual_send": bool(delivery.get("actual_send", False)),
                 }
@@ -405,12 +409,12 @@ class GovernanceFeedbackBridgeModule:
                     "state_hash": state_hash,
                     "artifact_ref": f"local://speak_gate/deliveries/{delivery_id}",
                     "summary": (
-                        f"Speak Gate delivered via {source_module} to {channel}: "
-                        f"{_clip(payload_ref, 120)}"
+                        f"Speak Gate delivered via {delivery_source_module} to {channel}: "
+                        f"{_clip(str(delivery.get('payload_ref', '')), 120)}"
                     ),
                     "evidence_refs": [f"speak_gate_delivery:{delivery_id}"],
                     "speak_gate_delivery_id": delivery_id,
-                    "speak_gate_source_module": source_module,
+                    "speak_gate_source_module": delivery_source_module,
                     "speak_gate_delivery_channel": channel,
                 }
             )
