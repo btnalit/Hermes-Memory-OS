@@ -1,0 +1,220 @@
+"""Provisional crystallized record lifecycle sweep.
+
+Manages TTL expiry, cap eviction, and recurrence detection for
+resolver-approved provisional records. Follows invalidate-not-delete
+pattern - records persist on disk, only canonical_state changes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+from plugins.memory.memory_os.store import MemoryOSStore
+
+
+def provisional_sweep_manifest() -> dict[str, Any]:
+    return {
+        "name": "provisional_sweep",
+        "kind": "governance",
+        "version": "0.1.0",
+        "layer": "L3",
+        "dependencies": {
+            "required": ["memory_os >=0.1.0", "execution_gate"],
+        },
+        "provides": {
+            "commands": ["status", "doctor", "run_once"],
+            "schedules": [],
+            "reads": ["memory_os.crystallized"],
+            "writes": ["local_artifact.provisional_sweep_runs"],
+        },
+        "defaults": {
+            "enabled": True,
+            "profile_scope": "per-profile",
+        },
+    }
+
+
+class ProvisionalSweepModule:
+    """TTL + cap + recurrence lifecycle for provisional crystallized records."""
+
+    def __init__(self, hermes_home: str | Path, *, profile: str) -> None:
+        self.hermes_home = Path(hermes_home).expanduser().resolve()
+        self.profile = profile
+
+    @property
+    def module_root(self) -> Path:
+        return self.hermes_home / "system-modules" / "provisional_sweep"
+
+    @property
+    def runs_path(self) -> Path:
+        return self.module_root / "runs.jsonl"
+
+    def run_once(self, *, store: MemoryOSStore) -> dict[str, Any]:
+        """Run one tick: TTL expiry -> cap eviction -> recurrence detection."""
+        service = CrystallizedMemoryService(store)
+        records = service.list_provisional_records()
+        now = datetime.now(timezone.utc)
+
+        # 1. TTL expiry
+        expired = 0
+        for r in records:
+            expires_str = str(r.get("expires_at") or "").strip()
+            if not expires_str:
+                continue
+            try:
+                expires_at = datetime.fromisoformat(expires_str)
+            except ValueError:
+                continue
+            if expires_at <= now:
+                try:
+                    service.invalidate_provisional_record(
+                        r["id"],
+                        reason="resolver_ttl_expired",
+                        invalidated_by="provisional_sweep",
+                    )
+                    expired += 1
+                except Exception:
+                    pass
+
+        # Re-read after TTL invalidations
+        records_after_ttl = service.list_provisional_records()
+
+        # 2. Cap eviction (oldest first, keep 30)
+        MAX_PROVISIONAL = 30
+        evicted = 0
+        if len(records_after_ttl) > MAX_PROVISIONAL:
+            sorted_records = sorted(
+                records_after_ttl,
+                key=lambda r: str(r.get("approved_at") or ""),
+            )
+            to_evict = sorted_records[: len(sorted_records) - MAX_PROVISIONAL]
+            for r in to_evict:
+                try:
+                    service.invalidate_provisional_record(
+                        r["id"],
+                        reason="resolver_cap_evicted",
+                        invalidated_by="provisional_sweep",
+                    )
+                    evicted += 1
+                except Exception:
+                    pass
+
+        # Re-read final state for recurrence detection
+        records_after_cap = service.list_provisional_records()
+
+        # 3. Recurrence detection (mark for P5 digest escalation)
+        escalated = _detect_recurrence(records_after_cap)
+
+        result = {
+            "schema_version": "hermes.provisional_sweep_result.v0",
+            "module": "provisional_sweep",
+            "profile": self.profile,
+            "provisional_total": len(records),
+            "expired_count": expired,
+            "evicted_count": evicted,
+            "escalated_count": len(escalated),
+            "escalated_ids": escalated,
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_crystallized_approval": False,
+        }
+
+        # Record run
+        self.module_root.mkdir(parents=True, exist_ok=True)
+        runs_record = {
+            key: value
+            for key, value in result.items()
+            if key not in ("escalated_ids",)
+        }
+        with self.runs_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(runs_record, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+        return result
+
+    def status(self) -> dict[str, Any]:
+        service = CrystallizedMemoryService(
+            _make_store(self.hermes_home, self.profile)
+        )
+        records = service.list_provisional_records()
+        return {
+            "schema_version": "hermes.provisional_sweep_status.v0",
+            "module": "provisional_sweep",
+            "profile": self.profile,
+            "provisional_count": len(records),
+            "near_expiry_count": sum(
+                1 for r in records if _days_until_expiry(r.get("expires_at", "")) <= 1
+            ),
+        }
+
+    def doctor(self) -> dict[str, Any]:
+        findings: list[dict[str, Any]] = []
+        service = CrystallizedMemoryService(
+            _make_store(self.hermes_home, self.profile)
+        )
+        records = service.list_provisional_records()
+        if len(records) > 30:
+            findings.append(
+                {
+                    "severity": "warning",
+                    "code": "provisional_over_cap",
+                    "message": f"{len(records)} active provisional records (cap=30); sweep may need to run",
+                }
+            )
+        status = "warning" if findings else "ok"
+        return {
+            "schema_version": "hermes.provisional_sweep_doctor.v0",
+            "module": "provisional_sweep",
+            "profile": self.profile,
+            "status": status,
+            "findings": findings,
+        }
+
+
+def _make_store(hermes_home: str | Path, profile: str) -> MemoryOSStore:
+    """Create a MemoryOSStore for read-only operations (status/doctor)."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(Path(hermes_home), profile=profile)
+    store = MemoryOSStore(roots)
+    store.initialize()
+    return store
+
+
+def _detect_recurrence(records: list[dict[str, Any]]) -> list[str]:
+    """Detect content that has been repeatedly re-approved across cycles."""
+    content_counter: Counter = Counter()
+    for r in records:
+        body = str(r.get("body") or "").strip()
+        if body:
+            content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+            content_counter[content_hash] += 1
+
+    escalated: list[str] = []
+    for r in records:
+        body = str(r.get("body") or "").strip()
+        if body:
+            content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+            if content_counter[content_hash] >= 3:
+                escalated.append(r.get("id", ""))
+    return escalated
+
+
+def _days_until_expiry(expires_at: str) -> float:
+    """Return days until expiry, negative if already expired."""
+    if not expires_at:
+        return float("inf")
+    try:
+        expires_dt = datetime.fromisoformat(expires_at)
+        remaining = expires_dt - datetime.now(timezone.utc)
+        return remaining.total_seconds() / 86400.0
+    except (ValueError, TypeError):
+        return float("inf")
