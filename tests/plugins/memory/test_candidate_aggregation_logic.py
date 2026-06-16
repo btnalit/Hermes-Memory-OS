@@ -653,3 +653,81 @@ class TestResolverRouting:
         for t in triage:
             assert t.get("target_state") != "resolver_approved", \
                 f"Identity candidate {t['candidate_id']} was resolver_approved, should be owner_eligible"
+
+    def test_resolver_verdict_veto_with_negative_signals(self):
+        """R3.1: confidence=low + guardrails_failed → approve=False."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+        from plugins.modules.governance.candidate_aggregation import _resolver_verdict
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            store = MemoryOSStore(MemoryOSRoots.from_hermes_home(Path(td), profile="test"))
+            store.initialize()
+            cand = CrystallizedCandidate(
+                candidate_id="cand_v", kind="moment",
+                body="User prefers drinking coffee every morning at sunrise.",
+                source_event_ids=["evt_v"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            )
+            verdict = _resolver_verdict(
+                cand, store=store,
+                confidence_route={"band": "low", "maturity_score": 0.2},
+                cascade_policy={"guardrails_passed": False},
+            )
+            assert verdict["approve"] is False, \
+                f"Expected veto with negative signals, got {verdict}"
+            assert "veto" in verdict["reason"]
+
+    def test_resolver_verdict_approve_with_positive_signals(self):
+        """R3.1: confidence=high + provisional mature → approve=True."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+        from plugins.modules.governance.candidate_aggregation import _resolver_verdict
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            store = MemoryOSStore(MemoryOSRoots.from_hermes_home(Path(td), profile="test"))
+            store.initialize()
+            cand = CrystallizedCandidate(
+                candidate_id="cand_p", kind="moment",
+                body="User prefers drinking coffee every morning at sunrise.",
+                source_event_ids=["evt_p"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            )
+            verdict = _resolver_verdict(
+                cand, store=store,
+                confidence_route={"band": "high", "maturity_score": 0.9},
+                provisional_promotion={"decision": "keep", "maturity_score": 0.95},
+            )
+            assert verdict["approve"] is True, \
+                f"Expected approve with positive signals, got {verdict}"
+            assert "confidence_high" in verdict["reason"]
+            assert "provisional_mature" in verdict["reason"]
+
+    def test_resolver_verdict_missing_data_falls_back_to_gate(self):
+        """When judgment stack data is None, gate-only behavior — approve."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+        from plugins.modules.governance.candidate_aggregation import _resolver_verdict
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as td:
+            store = MemoryOSStore(MemoryOSRoots.from_hermes_home(Path(td), profile="test"))
+            store.initialize()
+            cand = CrystallizedCandidate(
+                candidate_id="cand_m", kind="moment",
+                body="User prefers drinking coffee every morning for energy and focus.",
+                source_event_ids=["evt_m"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            )
+            verdict = _resolver_verdict(cand, store=store)
+            assert verdict["approve"] is True, \
+                f"Expected gate-only approve when no judgment data, got {verdict}"
+            assert "resolver_gate_passed" in verdict["reason"]

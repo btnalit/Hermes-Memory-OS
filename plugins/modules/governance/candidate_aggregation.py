@@ -272,8 +272,18 @@ def _cluster_and_promote(
                 processed_ids.add(member.candidate_id)
                 continue
 
-            # ── Resolver routing (P3) ──
-            verdict = _resolver_verdict(member, store=store)
+            # ── Resolver routing (P4: lookup judgment stack, then verdict) ──
+            confidence_route = _lookup_confidence_route(member, store)
+            provisional_promotion = _lookup_provisional_promotion(member, store)
+            cascade_policy = _latest_cascade_policy(store)
+
+            verdict = _resolver_verdict(
+                member,
+                store=store,
+                confidence_route=confidence_route,
+                provisional_promotion=provisional_promotion,
+                cascade_policy=cascade_policy,
+            )
             if verdict.get("approve"):
                 target_state = "resolver_approved"
                 from plugins.memory.memory_os.execution_gate import (
@@ -379,41 +389,132 @@ def _demote_aged(
     return {"demoted_count": demoted_count}
 
 
-# ── Resolver verdict (P3 minimal: gate + simple LLM) ───────────────────
+# ── Judgment stack lookups (P4: un-orphan confidence_router/provisional/cascade) ──
+
+
+def _lookup_confidence_route(
+    candidate: CrystallizedCandidate, store: MemoryOSStore
+) -> dict[str, Any] | None:
+    """Look up confidence_router route for a candidate.
+
+    Reads from system-modules/confidence_router/routing.jsonl.
+    Returns the matching route dict or None if not found / module not yet run.
+    """
+    routes_path = store.roots.hermes_home / "system-modules" / "confidence_router" / "routing.jsonl"
+    if not routes_path.exists():
+        return None
+    try:
+        for line in routes_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            route = json.loads(line)
+            if isinstance(route, dict) and route.get("subject_ref") == candidate.candidate_id:
+                return route
+    except Exception:
+        return None
+    return None
+
+
+def _lookup_provisional_promotion(
+    candidate: CrystallizedCandidate, store: MemoryOSStore
+) -> dict[str, Any] | None:
+    """Look up provisional module promotion record for a candidate.
+
+    Reads from system-modules/provisional/records.jsonl.
+    Returns the matching record dict or None if not found / module not yet run.
+    """
+    records_path = store.roots.hermes_home / "system-modules" / "provisional" / "records.jsonl"
+    if not records_path.exists():
+        return None
+    try:
+        for line in records_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if isinstance(record, dict) and record.get("subject_ref") == candidate.candidate_id:
+                return record
+    except Exception:
+        return None
+    return None
+
+
+def _latest_cascade_policy(store: MemoryOSStore) -> dict[str, Any] | None:
+    """Read the latest cascade_routing_policy proposal.
+
+    Reads from system-modules/cascade_routing_policy/policy_proposals.jsonl.
+    Returns the most recent proposal or None if the module has not yet run.
+    """
+    proposals_path = store.roots.hermes_home / "system-modules" / "cascade_routing_policy" / "policy_proposals.jsonl"
+    if not proposals_path.exists():
+        return None
+    try:
+        proposals = [
+            json.loads(line) for line in proposals_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return proposals[-1] if proposals else None
+    except Exception:
+        return None
+
+
+# ── Resolver verdict (P4: gate + judgment stack signals) ───────────────────
 
 
 def _resolver_verdict(
     candidate: CrystallizedCandidate,
     *,
     store: MemoryOSStore,
+    confidence_route: dict[str, Any] | None = None,
+    provisional_promotion: dict[str, Any] | None = None,
+    cascade_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """P3 minimal: resolver_eligible gate determines the verdict.
+    """P4: gate-first verdict enriched by judgment stack signals.
 
     The deterministic dual-axis gate (resolver_gate.py) is the primary
-    decision point. For candidates that pass the gate, a simple LLM
-    check confirms the auto-approval is reasonable.
+    decision point. Within the safety envelope, confidence_router band,
+    provisional module promotion, and cascade_routing_policy guardrails
+    tune the final verdict.
 
-    Full cascade_routing_policy/provisional integration will enhance
-    this in P4.
+    When judgment stack data is missing, falls back to P3 gate-only
+    behavior (default approve for gate-passing candidates).
     """
     from plugins.memory.memory_os.resolver_gate import resolver_eligible
 
     if not resolver_eligible(candidate, store=store):
         return {"approve": False, "reason": "failed_resolver_gate"}
 
-    # P3: Simple LLM check within the safety envelope.
-    # The deterministic gate already filtered out identity/redline/side-effect
-    # candidates. The LLM here only confirms that auto-approval is reasonable
-    # for this specific memory content.
-    try:
-        body = (candidate.body or "").strip()
-        if len(body) < 10:
-            return {"approve": False, "reason": "body_too_short_for_auto_approval"}
-        # P3 minimal: gate alone is sufficient for approval
-        return {"approve": True, "reason": "resolver_gate_passed_p3_minimal"}
-    except Exception:
-        # Fail-safe: if verdict computation fails, route to owner
-        return {"approve": False, "reason": "verdict_error_fail_safe"}
+    # ── Collect judgment stack signals ──
+    signals: list[str] = []
+    confidence_band = str(confidence_route.get("band") or "") if confidence_route else ""
+    provisional_maturity = float(provisional_promotion.get("maturity_score") or 0.0) if provisional_promotion else 0.0
+    guardrails_ok = True
+    if cascade_policy and isinstance(cascade_policy, dict):
+        guardrails_ok = bool(cascade_policy.get("guardrails_passed", True))
+
+    if confidence_band == "high":
+        signals.append("confidence_high")
+    elif confidence_band == "low":
+        signals.append("confidence_low")
+
+    if provisional_maturity >= 0.9:
+        signals.append("provisional_mature")
+
+    if not guardrails_ok:
+        signals.append("cascade_guardrails_failed")
+
+    # ── Verdict: veto when negative signals outweigh positive ──
+    veto_signals = sum(1 for s in signals if s in ("confidence_low", "cascade_guardrails_failed"))
+    approve_signals = sum(1 for s in signals if s in ("confidence_high", "provisional_mature"))
+
+    if veto_signals > approve_signals:
+        return {"approve": False, "reason": f"verdict_veto: {', '.join(signals)}"}
+
+    # Default approve: gate already filtered non-reversible/identity candidates.
+    # Missing judgment stack data → fall back to gate-only behavior (P3 compat).
+    return {
+        "approve": True,
+        "reason": f"resolver_approved: {', '.join(signals)}" if signals else "resolver_gate_passed",
+    }
 
 
 # ── Tag fleeting ────────────────────────────────────────────────────────
