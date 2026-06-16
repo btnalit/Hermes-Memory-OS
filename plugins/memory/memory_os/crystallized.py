@@ -15,7 +15,11 @@ from .schema import CRYSTALLIZED_SCHEMA_VERSION
 from .store import MemoryOSStore, _format_frontmatter
 
 
-INACTIVE_CANONICAL_STATES = {"owner_revoked", "revoked", "demoted"}
+INACTIVE_CANONICAL_STATES = {
+    "owner_revoked", "revoked", "demoted",
+    "provisional_expired", "provisional_cap_evicted",
+}
+# "provisional_rejected" will be added in P5 when owner-reject flow is built.
 
 # Triage action types for candidate_aggregation lane
 CANDIDATE_TRIAGE_ACTIONS = frozenset({"promote", "demote", "fleeting", "discard"})

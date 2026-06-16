@@ -8,10 +8,12 @@ from plugins.memory.memory_os.approval import (
     approval_from_cw019_state,
 )
 from plugins.memory.memory_os.crystallized import (
+    INACTIVE_CANONICAL_STATES,
     CrystallizedApprovalError,
     CrystallizedCandidate,
     CrystallizedMemoryService,
     append_candidate_queue,
+    is_active_crystallized_frontmatter,
     read_candidate_queue,
 )
 from plugins.memory.memory_os.fixtures import build_event
@@ -146,3 +148,24 @@ def test_approval_purpose_enum_contains_required_v1_states():
         "reject",
         "defer",
     ]
+
+
+def test_inactive_canonical_states_includes_provisional_expired_and_cap_evicted():
+    """INACTIVE_CANONICAL_STATES must include provisional states
+    so is_active_crystallized_frontmatter returns False for them."""
+    from plugins.memory.memory_os.crystallized import INACTIVE_CANONICAL_STATES, is_active_crystallized_frontmatter
+
+    assert "provisional_expired" in INACTIVE_CANONICAL_STATES
+    assert "provisional_cap_evicted" in INACTIVE_CANONICAL_STATES
+
+    # Active records still pass
+    assert is_active_crystallized_frontmatter({"canonical_state": "active"}) is True
+    assert is_active_crystallized_frontmatter({}) is True  # default=active
+
+    # Provisional expired/evicted are inactive
+    assert is_active_crystallized_frontmatter({"canonical_state": "provisional_expired"}) is False
+    assert is_active_crystallized_frontmatter({"canonical_state": "provisional_cap_evicted"}) is False
+
+    # Existing inactive states still work
+    assert is_active_crystallized_frontmatter({"canonical_state": "owner_revoked"}) is False
+    assert is_active_crystallized_frontmatter({"canonical_state": "demoted"}) is False
