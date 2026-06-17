@@ -965,6 +965,8 @@ def _run_owner_cron_onboarding(
         memory_sources_feedback_schedule,
         "--candidate-aggregation-schedule",
         "0 */6 * * *",
+        "--fact-judge-schedule",
+        "0 */4 * * *",
         "--index-sync-schedule",
         "*/30 * * * *",
         "--apply",
