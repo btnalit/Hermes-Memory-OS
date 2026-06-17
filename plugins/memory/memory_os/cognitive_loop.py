@@ -197,6 +197,7 @@ class CognitiveLoopRunner:
             ("ground_truth_miner", self._ground_truth_miner),
             ("crystallized_revalidator", self._crystallized_revalidator),
             ("provisional_sweep", self._provisional_sweep),
+            ("override_sweep", self._override_sweep),
             ("migration_controller", self._migration_controller),
             ("abstraction_distillation", self._abstraction_distillation),
             ("grounded_expression_judge", self._grounded_expression_judge),
@@ -534,6 +535,38 @@ class CognitiveLoopRunner:
 
         result = ProvisionalSweepModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
         context["provisional_sweep_result"] = result
+        return result
+
+    def _override_sweep(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Run override sweep: TTL expiry + cap eviction for knob overrides."""
+        from plugins.modules.governance.override_sweep import OverrideSweepModule
+        from plugins.modules.governance.live_guard import LiveGuardRegistry
+        from .config import load_config
+
+        module = OverrideSweepModule(self.hermes_home, profile=self.profile)
+        live_guard = LiveGuardRegistry()
+        config = load_config(self.hermes_home)
+        kill_config = config.get("live_guard", {})
+        kill_engaged = live_guard.kill_switch_enabled(kill_config)
+
+        result = module.run_once(
+            _now=datetime.now(timezone.utc),
+            _kill_switch_enabled=kill_engaged,
+        )
+
+        # Record run in audit
+        append_audit(
+            self.store.roots.audit_path,
+            action="override_sweep_cognitive_loop_run",
+            status="ok",
+            target="override_sweep",
+            details={
+                "expired_count": result.get("expired_count", 0),
+                "evicted_count": result.get("evicted_count", 0),
+                "kill_reverted_count": result.get("kill_reverted_count", 0),
+            },
+        )
+        context["override_sweep_result"] = result
         return result
 
     def _migration_controller(self, context: dict[str, Any]) -> dict[str, Any]:

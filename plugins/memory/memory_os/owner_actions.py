@@ -163,6 +163,8 @@ ACTION_TYPES = {
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
     "confirm_provisional_crystallized_record",
     "reject_provisional_crystallized_record",
+    "confirm_provisional_knob_override",
+    "reject_provisional_knob_override",
 }
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
@@ -1520,6 +1522,7 @@ def owner_review_aging_report(store: MemoryOSStore) -> dict[str, Any]:
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
     items.extend(_provisional_crystallized_review_items(store, closed))
+    items.extend(_provisional_knob_override_review_items(store, closed))
     aged_items, aging = _apply_review_aging(store, items)
     return _review_aging_summary(aged_items, aging)
 
@@ -2836,7 +2839,86 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         )
         record["owner_effect"]["owner_rejected_provisional"] = True
         return {"record_id": target_id, "canonical_state_changed": result.get("canonical_state_changed", False)}
+    if action_type == "confirm_provisional_knob_override":
+        return _apply_confirm_provisional_knob_override(store, record)
+    if action_type == "reject_provisional_knob_override":
+        return _apply_reject_provisional_knob_override(store, record)
     return {}
+
+
+def _apply_confirm_provisional_knob_override(store: MemoryOSStore, action: dict[str, Any]) -> dict[str, Any]:
+    """Confirm a provisional knob override (owner action)."""
+    from plugins.memory.memory_os.knob_overrides import _override_store_path
+    from plugins.memory.memory_os.structural_write_gate import append_governed_jsonl
+    from uuid import uuid4
+
+    target_id = str(action.get("target_id") or "")
+    now = datetime.now(timezone.utc)
+    store_path = _override_store_path(store.roots)
+
+    # Find the active override
+    original = None
+    for record in _read_jsonl(store_path):
+        if record.get("id") == target_id:
+            original = record
+            break
+
+    if original is None:
+        return {"status": "error", "reason": "override_not_found"}
+
+    # Write confirmed record through structural write gate
+    confirmed = {
+        "schema_version": "memory-os.knob_override.v0",
+        "id": f"ko_owner_confirm_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
+        "knob": original.get("knob"),
+        "override_value": original.get("override_value"),
+        "prior_value": original.get("prior_value"),
+        "bounds": original.get("bounds"),
+        "provisional": False,
+        "expires_at": "",
+        "proposed_by": "owner",
+        "approved_via": "owner",
+        "state": "confirmed",
+        "confirmed_from": target_id,
+        "ts": now.isoformat(),
+    }
+    append_governed_jsonl(
+        store,
+        store_path,
+        confirmed,
+        write_owner="owner_action",
+        lane_id="owner_knob_override_confirm",
+        risk_class="owner_gated_knob_override",
+        execution_gate_envelope_id="",
+        scope_hash="owner_action_gated",
+        allow_owner_action_without_envelope=True,
+    )
+
+    append_audit(
+        store.roots.audit_path,
+        action="knob_override_confirmed",
+        status="ok",
+        target=f"knob:{original.get('knob')}",
+        details={"override_id": target_id, "confirmed_by": "owner"},
+    )
+    return {"status": "ok", "action": "confirmed", "confirmed_id": confirmed["id"]}
+
+
+def _apply_reject_provisional_knob_override(store: MemoryOSStore, action: dict[str, Any]) -> dict[str, Any]:
+    """Reject a provisional knob override — revert to prior value."""
+    from plugins.memory.memory_os.knob_overrides import revert_override
+
+    target_id = str(action.get("target_id") or "")
+    rev = revert_override(target_id, reason="owner_rejected", roots=store.roots)
+
+    append_audit(
+        store.roots.audit_path,
+        action="knob_override_rejected",
+        status="ok",
+        target=f"knob:{rev.get('knob')}",
+        details={"override_id": target_id, "reverted_to": rev.get("override_value")},
+    )
+    return {"status": "ok", "action": "reverted", "reverted_to": rev.get("override_value")}
 
 
 def _validate_action_target(
@@ -2918,6 +3000,13 @@ def _validate_action_target(
         if not is_active_crystallized_frontmatter(found.frontmatter):
             canon = str(found.frontmatter.get("canonical_state") or "active")
             return f"provisional_crystallized_record_already_{canon}"
+    if action_type in {"confirm_provisional_knob_override", "reject_provisional_knob_override"}:
+        if target_type != "knob_override":
+            return "invalid_knob_override_target"
+        from plugins.memory.memory_os.knob_overrides import list_active_overrides
+        found = any(o.get("id") == target_id for o in list_active_overrides())
+        if not found:
+            return "knob_override_not_found_or_not_active"
     return ""
 
 
@@ -3975,6 +4064,69 @@ def _provisional_crystallized_review_items(store: MemoryOSStore, closed: set[str
     return items
 
 
+def _provisional_knob_override_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    """Generate owner-review items for active provisional knob overrides."""
+    from plugins.memory.memory_os.knob_overrides import list_active_overrides, OVERRIDABLE_KNOBS
+
+    active = list_active_overrides(roots=store.roots)
+    items: list[dict[str, Any]] = []
+    for override in active:
+        if override.get("state") != "active":
+            continue
+        knob_name = str(override.get("knob") or "")
+        target_id = f"knob_override:{override.get('id', '')}"
+        target_ref = target_id
+        if target_ref in closed:
+            continue
+
+        spec = OVERRIDABLE_KNOBS.get(knob_name, {})
+        prior = override.get("prior_value", spec.get("default"))
+        current = override.get("override_value", prior)
+        expires_str = str(override.get("expires_at") or "")
+        days_left = ""
+        if expires_str:
+            try:
+                expires_dt = datetime.fromisoformat(expires_str)
+                remaining = expires_dt - datetime.now(timezone.utc)
+                days_left = f"{max(0, remaining.days)}d"
+            except ValueError:
+                pass
+
+        summary = (
+            f"自演化旋钮调整: {knob_name} {prior}→{current} · "
+            f"还剩 {days_left or '?'} · [确认/回退]"
+        )
+
+        actions = _review_actions("knob_override", override.get("id", ""))
+        items.append({
+            "schema_version": "memory-os.review_item.v0",
+            "review_item_id": f"review:{target_ref}",
+            "target_type": "knob_override",
+            "target_id": override.get("id", ""),
+            "source_module": "override_sweep",
+            "priority": "action_required",
+            "created_at": override.get("ts", ""),
+            "created_at_source": "override_ts",
+            "status": "pending",
+            "summary": _bounded_text(summary, 220),
+            "proposed_memory_text": "",
+            "candidate_kind": "knob_tune",
+            "knob_name": knob_name,
+            "override_value": current,
+            "prior_value": prior,
+            "bounds": override.get("bounds"),
+            "approved_via": str(override.get("approved_via") or ""),
+            "expires_at": expires_str,
+            "action_tokens": {action["action_type"]: action["token"] for action in actions},
+            "action_targets": {
+                action["action_type"]: {"target_type": action["target_type"], "target_id": action["target_id"]}
+                for action in actions
+            },
+            "raw_body_included": False,
+        })
+    return items
+
+
 def _created_at_with_source(
     record: dict[str, Any],
     *,
@@ -4648,6 +4800,11 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
         return [
             _review_action("confirm", "confirm_provisional_crystallized_record", target_type, target_id),
             _review_action("reject", "reject_provisional_crystallized_record", target_type, target_id),
+        ]
+    if target_type == "knob_override":
+        return [
+            _review_action("confirm", "confirm_provisional_knob_override", target_type, target_id),
+            _review_action("reject", "reject_provisional_knob_override", target_type, target_id),
         ]
     return []
 
@@ -5340,6 +5497,10 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "confirm_provisional_crystallized_record"
     if verb == "reject" and target_type == "provisional_crystallized_record":
         return "reject_provisional_crystallized_record"
+    if verb in ("approve", "confirm") and target_type == "knob_override":
+        return "confirm_provisional_knob_override"
+    if verb == "reject" and target_type == "knob_override":
+        return "reject_provisional_knob_override"
     return ""
 
 
@@ -5352,7 +5513,7 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
             "retain_hindsight_curation",
         }
     if verb == "reject":
-        return action_type in {"reject_candidate", "reject_proposal", "reject_hindsight_curation"}
+        return action_type in {"reject_candidate", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override"}
     if verb == "feedback":
         return action_type == "mark_feedback" or action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
     if verb == "allow":
@@ -5364,7 +5525,7 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
     if verb == "revoke":
         return action_type == "revoke_crystallized"
     if verb == "confirm":
-        return action_type == "confirm_provisional_crystallized_record"
+        return action_type in {"confirm_provisional_crystallized_record", "confirm_provisional_knob_override"}
     return False
 
 
