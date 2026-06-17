@@ -191,12 +191,14 @@ class ProvisionalSweepModule:
             _make_store(self.hermes_home, self.profile)
         )
         records = service.list_provisional_records()
-        if len(records) > 30:
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        max_provisional = resolve_knob("max_provisional", default=30)
+        if len(records) > max_provisional:
             findings.append(
                 {
                     "severity": "warning",
                     "code": "provisional_over_cap",
-                    "message": f"{len(records)} active provisional records (cap=30); sweep may need to run",
+                    "message": f"{len(records)} active provisional records (cap={max_provisional}); sweep may need to run",
                 }
             )
         status = "warning" if findings else "ok"

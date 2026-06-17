@@ -115,9 +115,7 @@ class KnobABEvalModule:
             #   2. owner_actions.jsonl — owner decisions, joined by target_id
             #   3. Group by cluster_size, compute confirm rate per layer
             try:
-                layer_rates = _compute_stratified_confirm_rates(
-                    store, knob_name=knob_name,
-                )
+                layer_rates = _compute_stratified_confirm_rates(store)
             except Exception:
                 error_records.append(
                     build_error_record(
@@ -224,6 +222,7 @@ class KnobABEvalModule:
 
     def status(self) -> dict[str, Any]:
         active_count = 0
+        status_error = None
         try:
             from plugins.memory.memory_os.knob_overrides import (
                 OVERRIDABLE_KNOBS,
@@ -235,13 +234,23 @@ class KnobABEvalModule:
                 if OVERRIDABLE_KNOBS.get(str(o.get("knob") or ""), {}).get("ab_metric")
             ])
         except Exception:
-            pass
-        return {
+            from plugins.memory.memory_os.jsonl_io import build_error_record
+            status_error = build_error_record(
+                component="knob_ab_eval",
+                operation="status",
+                error_code="STATUS_FAILED",
+                severity="warning",
+                recoverable=True,
+            )
+        result = {
             "schema_version": "hermes.knob_ab_eval_status.v0",
             "module": "knob_ab_eval",
             "profile": self.profile,
             "ab_eligible_override_count": active_count,
         }
+        if status_error:
+            result["error"] = status_error
+        return result
 
     def doctor(self) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
@@ -258,8 +267,6 @@ class KnobABEvalModule:
 
 def _compute_stratified_confirm_rates(
     store: Any,
-    *,
-    knob_name: str,
 ) -> dict[int, dict[str, Any]]:
     """Three-table join: triage (cluster_size) → owner_actions (target_id) → group by cluster_size.
 
@@ -268,11 +275,8 @@ def _compute_stratified_confirm_rates(
     from plugins.memory.memory_os.crystallized import read_candidate_triage
 
     # 1. Read candidate_triage for promote records with cluster_size
-    triage_records = []
-    try:
-        triage_records = read_candidate_triage(store)
-    except Exception:
-        pass
+    # (Errors propagate to caller's try/except — no silent pass)
+    triage_records = read_candidate_triage(store)
 
     # Build candidate_id -> cluster_size mapping from promote/demote records
     candidate_cluster_map: dict[str, int] = {}
