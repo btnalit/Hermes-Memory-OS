@@ -576,7 +576,10 @@ def _validate_system_module_source(source: Path) -> None:
 
 
 def _validate_agent_source(source: Path) -> None:
-    required = ("__init__.py", "memory_provider.py")
+    # agent/ is a PEP 420 namespace package (no __init__.py) so that
+    # agent.credential_persistence from the Hermes agent root can be
+    # discovered even when Memory-OS REPO_ROOT is first on sys.path.
+    required = ("memory_provider.py",)
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
         raise SystemExit(f"Memory-OS agent compatibility source is missing: {', '.join(missing)}")

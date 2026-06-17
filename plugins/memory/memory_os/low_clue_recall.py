@@ -1133,7 +1133,16 @@ def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
             "/usr/local/lib/hermes-agent",
         ):
             if candidate and Path(candidate).exists() and candidate not in sys.path:
-                sys.path.insert(0, candidate)
+                # If the Memory-OS REPO_ROOT is at position 0, insert after it
+                # so plugins.memory continues to resolve from Memory-OS, not the
+                # agent root. Both roots ship plugins/ and agent/ top-level
+                # packages that shadow each other when the agent root comes first.
+                _insert_pos = 0
+                if sys.path and (
+                    Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"
+                ).exists():
+                    _insert_pos = 1
+                sys.path.insert(_insert_pos, candidate)
         try:
             from hermes_cli.config import load_config
             from hermes_cli.runtime_provider import resolve_runtime_provider
