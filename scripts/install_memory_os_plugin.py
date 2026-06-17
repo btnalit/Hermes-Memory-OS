@@ -602,6 +602,10 @@ def _ensure_llm_packages(*, dry_run: bool = False) -> dict[str, Any]:
         except ImportError:
             if dry_run:
                 result[import_name] = {"available": False, "action": "would_install"}
+                print(
+                    f"memory-os-install: {pip_name} not found — would install on live run",
+                    file=sys.stderr,
+                )
             else:
                 try:
                     subprocess.run(
@@ -618,6 +622,13 @@ def _ensure_llm_packages(*, dry_run: bool = False) -> dict[str, Any]:
                         "action": "install_failed",
                         "error": str(exc)[:200],
                     }
+                    print(
+                        f"memory-os-install: WARNING — failed to install {pip_name}: "
+                        f"{str(exc)[:200]}\n"
+                        f"  fact_judge cron lane will produce judge_empty_response "
+                        f"without {import_name}",
+                        file=sys.stderr,
+                    )
     return result
 
 
