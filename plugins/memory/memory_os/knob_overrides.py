@@ -26,6 +26,22 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "meta": False,
         "scope": "upper_layer",
     },
+    "max_speak_per_hour": {
+        "module": "expression/speak_rate_limit",
+        "default": 5,
+        "bounds": [1, 12],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "max_provisional": {
+        "module": "provisional_sweep",
+        "default": 30,
+        "bounds": [10, 100],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────

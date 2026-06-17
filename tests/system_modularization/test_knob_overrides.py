@@ -246,3 +246,43 @@ class TestCandidateAggregationIntegration:
             now=now, _override_store_root=no_override_root,
         )
         assert result_default["promoted_count"] >= 0  # depends on dedup
+
+
+class TestMaxSpeakPerHourKnob:
+    def test_A1_1_override_changes_speak_limit(self, tmp_path):
+        """A1.1: max_speak_per_hour override -> resolve_knob returns overridden value."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+        register_override(
+            "max_speak_per_hour", 3,
+            prior=5, proposed_by="test",
+            approved_via="resolver", expires_at=expires,
+            _now=now, _store_root=tmp_path,
+        )
+        result = resolve_knob("max_speak_per_hour", default=5, _store_root=tmp_path)
+        assert result == 3
+
+    def test_A1_1_default_when_no_override(self, tmp_path):
+        """A1.1: no override -> resolve_knob returns default 5."""
+        result = resolve_knob("max_speak_per_hour", default=5, _store_root=tmp_path)
+        assert result == 5
+
+
+class TestSpeakRateLimitIntegration:
+    def test_A1_1_sentinel_pattern_max_per_hour_param(self, tmp_path):
+        """A1.1: under_speak_limit accepts max_per_hour param (sentinel pattern)."""
+        from plugins.modules.expression.speak_rate_limit import under_speak_limit
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        # Create 3 deliveries in the past hour
+        deliveries = [
+            {"decision": "delivered", "ts": (now - timedelta(minutes=10)).isoformat()},
+            {"decision": "delivered", "ts": (now - timedelta(minutes=20)).isoformat()},
+            {"decision": "delivered", "ts": (now - timedelta(minutes=30)).isoformat()},
+        ]
+        # With max_per_hour=2, 3 deliveries should be over limit
+        assert under_speak_limit(deliveries, now=now, max_per_hour=2) is False
+        # With max_per_hour=5, 3 deliveries should be under limit
+        assert under_speak_limit(deliveries, now=now, max_per_hour=5) is True

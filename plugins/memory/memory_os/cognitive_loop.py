@@ -650,6 +650,7 @@ class CognitiveLoopRunner:
         under an ExecutionGate permit envelope (P1: no human approval gate).
         Otherwise records the block reason silently (no send, audit trail in result).
         """
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
         from plugins.modules.expression.speak_gate import SpeakGateModule
         from plugins.modules.expression.speak_rate_limit import under_speak_limit
 
@@ -691,7 +692,8 @@ class CognitiveLoopRunner:
             store=self.store,
         )
         deliveries = gate.read_delivery_records()
-        if not under_speak_limit(deliveries):
+        max_speak = resolve_knob("max_speak_per_hour", default=5)
+        if not under_speak_limit(deliveries, max_per_hour=max_speak):
             return {
                 "status": "blocked",
                 "spontaneous_expression_evaluated": True,
