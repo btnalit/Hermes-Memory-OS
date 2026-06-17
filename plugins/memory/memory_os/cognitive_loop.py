@@ -200,6 +200,7 @@ class CognitiveLoopRunner:
             ("migration_controller", self._migration_controller),
             ("abstraction_distillation", self._abstraction_distillation),
             ("grounded_expression_judge", self._grounded_expression_judge),
+            ("spontaneous_expression", self._spontaneous_expression),
             ("self_evolution", self._self_evolution),
             ("structural_edge_proposer", self._structural_edge_proposer),
             ("crystallization_gate", self._crystallization_gate),
