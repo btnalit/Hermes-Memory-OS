@@ -192,6 +192,8 @@ def _source_class(event: EventEnvelope) -> str:
     source_module = str(safe_ref.get("source_module", "")).lower()
     source_class = str(safe_ref.get("source_class", "")).lower()
     platform = str(safe_ref.get("platform", "")).lower()
+    if source_class == "self_activity":
+        return "self_activity"          # V2.2: recognize self_activity before source_module checks
     if source_module == "cron_mirror" or source == "cron" or "cron" in tags or platform == "cron":
         return "cron"
     if source_module == "state_source_mirror" or source_class.startswith("state:") or source == "state_source_mirror":

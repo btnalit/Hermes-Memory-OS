@@ -186,3 +186,86 @@ def test_inner_drive_module_respects_mirror_event_policy(tmp_path):
     lingering = json.loads((store.roots.working_root / "lingering.json").read_text(encoding="utf-8"))
     assert len(lingering["items"]) == 1
     assert lingering["items"][0]["text"] == "Mirrored conversation can become bounded working memory."
+
+
+def test_source_class_recognizes_self_activity():
+    """V2.2: _source_class() returns 'self_activity' for self_activity events."""
+    from plugins.memory.memory_os.inner_drive import _source_class
+
+    sa_event = EventEnvelope.from_dict({
+        "schema_version": "memory-os.event.v0",
+        "id": "evt_sa",
+        "ts": "2026-06-17T12:00:00Z",
+        "profile": "main",
+        "source": "governance_feedback",
+        "kind": "governance_speak_gate_delivery",
+        "summary": "self activity event",
+        "safe_ref": {"source_class": "self_activity", "self_activity_subtype": "speech"},
+        "tags": [],
+        "sensitivity": "private",
+        "body_policy": "summary_only",
+        "hashes": {},
+        "promotion_state": "raw",
+    })
+    result = _source_class(sa_event)
+    assert result == "self_activity", (
+        f"expected 'self_activity' but got '{result}' — _source_class must recognize self_activity"
+    )
+
+
+def test_self_activity_capped_by_select_events_for_inner_drive():
+    """V2.7: self_activity events are capped per-source-class by select_events_for_inner_drive."""
+    from plugins.memory.memory_os.inner_drive import select_events_for_inner_drive
+
+    def make_sa_event(seed):
+        return EventEnvelope.from_dict({
+            "schema_version": "memory-os.event.v0",
+            "id": f"evt_sa_{seed}",
+            "ts": f"2026-06-17T12:{seed:02d}:00Z",
+            "profile": "main",
+            "source": "governance_feedback",
+            "kind": "governance_speak_gate_delivery",
+            "summary": f"self activity {seed}",
+            "safe_ref": {"source_class": "self_activity", "self_activity_subtype": "speech"},
+            "tags": [],
+            "sensitivity": "private",
+            "body_policy": "summary_only",
+            "hashes": {},
+            "promotion_state": "raw",
+        })
+
+    def make_normal_event(seed):
+        return EventEnvelope.from_dict({
+            "schema_version": "memory-os.event.v0",
+            "id": f"evt_norm_{seed}",
+            "ts": f"2026-06-17T13:{seed:02d}:00Z",
+            "profile": "main",
+            "source": "telegram",
+            "kind": "conversation_turn",
+            "summary": f"normal chat {seed}",
+            "safe_ref": {"source_class": "foreground"},
+            "tags": [],
+            "sensitivity": "private",
+            "body_policy": "summary_only",
+            "hashes": {},
+            "promotion_state": "raw",
+        })
+
+    # Create 30 self_activity events + 5 normal events
+    sa_events = [make_sa_event(i) for i in range(30)]
+    normal_events = [make_normal_event(i) for i in range(5)]
+    all_events = sa_events + normal_events
+
+    # Cap self_activity at 3, all else at 100
+    caps = {"self_activity": 3, "*": 100}
+    selected, deferred = select_events_for_inner_drive(
+        all_events, set(), max_events=200, max_events_per_source_class=caps,
+    )
+
+    sa_selected = [e for e in selected if e.id.startswith("evt_sa_")]
+    sa_deferred = [e for e in deferred if e.id.startswith("evt_sa_")]
+    norm_selected = [e for e in selected if e.id.startswith("evt_norm_")]
+
+    assert len(sa_selected) == 3, f"expected 3 self_activity selected, got {len(sa_selected)}"
+    assert len(sa_deferred) >= 27, f"expected >=27 self_activity deferred, got {len(sa_deferred)}"
+    assert len(norm_selected) == 5, "all normal events must be selected (not deferred by self_activity cap)"
