@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from plugins.memory.memory_os.audit import append_audit
+from plugins.memory.memory_os.audit import append_audit, read_audit_entries
 from plugins.memory.memory_os.memory_sources import memory_sources_feedback_path
 from plugins.memory.memory_os.owner_actions import expression_feedback_ledger_path
 from plugins.modules.expression.speak_gate import SpeakGateModule
@@ -491,7 +491,7 @@ class GovernanceFeedbackBridgeModule:
             "provisional_record_invalidated",
         }
 
-        for entry in _read_jsonl(audit_path):
+        for entry in read_audit_entries(audit_path):
             action = str(entry.get("action") or "")
             if action not in RESOLVER_ACTIONS:
                 continue
