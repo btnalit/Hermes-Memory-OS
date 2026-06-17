@@ -200,7 +200,10 @@ class WanderingMindModule:
         latest_summary = _filter_system_language(events[-1].summary)
         output = f"今天我在这些片段里停了一下：{latest_summary}"
         output_record = self._append_output(output, source_event_id=events[-1].id)
-        would_send = self._record_would_send(payload_ref=output_record["output_ref"])
+        # NOTE: V1 — would_send tracking removed from wandering_mind.
+        # Delivery is now handled by cognitive_loop._spontaneous_expression
+        # via speak_gate._deliver_to_owner (owner-send mode). The would_send
+        # path is reserved for disabled world-level send mode only.
         generated_count = int(state.get("generated_count") or 0) + 1
         self._write_state(
             {
@@ -223,9 +226,8 @@ class WanderingMindModule:
             "profile": self.profile,
             "output": output,
             "output_ref": output_record["output_ref"],
-            "would_send": True,
+            "would_send": False,
             "actual_send": False,
-            "would_send_ref": would_send["id"],
             "signal_fingerprint": signal["fingerprint"],
             "signal_summary": signal["summary"],
         }
