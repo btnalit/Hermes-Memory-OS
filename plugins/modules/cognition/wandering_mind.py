@@ -26,7 +26,7 @@ def wandering_mind_manifest() -> dict[str, Any]:
         },
         "provides": {
             "commands": ["status", "doctor", "run-once"],
-            "schedules": ["weekly_wandering"],
+            "schedules": ["weekly_wandering"],  # V1: fallback only; primary trigger is event-driven via cognitive_loop
             "reads": ["memory_os.events.summary", "local_artifact.household_digest"],
             "writes": ["local_artifact.wandering_output", "module_bus.would_send"],
         },
