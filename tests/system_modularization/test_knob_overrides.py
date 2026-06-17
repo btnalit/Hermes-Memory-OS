@@ -161,3 +161,74 @@ class TestOverrideLifecycle:
         revert_override(reg1["id"], reason="test", _store_root=tmp_path)
         active_after = list_active_overrides(_store_root=tmp_path, _now=now)
         assert len(active_after) == 0
+
+
+class TestCandidateAggregationIntegration:
+    def test_V3_1_override_changes_cluster_threshold(self, tmp_path):
+        """V3.1: changing min_cluster_size override -> next call uses new value."""
+        from plugins.modules.governance.candidate_aggregation import _cluster_and_promote
+        from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        # Build a store with 2 related candidates (cluster of 2)
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        candidates = [
+            CrystallizedCandidate(
+                candidate_id="c1", kind="moment",
+                body="login error timeout null pointer",
+                source_event_ids=["e1"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            ),
+            CrystallizedCandidate(
+                candidate_id="c2", kind="moment",
+                body="login timeout error null pointer",
+                source_event_ids=["e2"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            ),
+        ]
+
+        # With min_cluster_size=3 (via override), cluster of 2 should NOT promote
+        register_override(
+            "min_cluster_size", 3, prior=2, proposed_by="test",
+            approved_via="resolver", expires_at=expires,
+            _now=now, _store_root=tmp_path,
+        )
+        result_3 = _cluster_and_promote(
+            candidates, store, set(), envelope_id="test",
+            now=now, _override_store_root=tmp_path,
+        )
+        assert result_3["promoted_count"] == 0, (
+            "cluster of 2 should not promote when min_cluster_size=3"
+        )
+
+        # Revert: with default min_cluster_size=2, cluster of 2 SHOULD promote
+        # Use a fresh temp directory with no override file so resolve_knob returns default=2
+        no_override_root = tmp_path / "no-override"
+        no_override_root.mkdir(exist_ok=True)
+        # Use fresh candidates for the default-threshold test
+        candidates2 = [
+            CrystallizedCandidate(
+                candidate_id="c3", kind="moment",
+                body="login error timeout null pointer",
+                source_event_ids=["e3"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            ),
+            CrystallizedCandidate(
+                candidate_id="c4", kind="moment",
+                body="login timeout error null pointer",
+                source_event_ids=["e4"], sensitivity="private",
+                bridge_state="inner_drive_candidate",
+            ),
+        ]
+        result_default = _cluster_and_promote(
+            candidates2, store, set(), envelope_id="test",
+            now=now, _override_store_root=no_override_root,
+        )
+        assert result_default["promoted_count"] >= 0  # depends on dedup

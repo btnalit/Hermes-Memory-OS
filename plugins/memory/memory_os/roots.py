@@ -67,6 +67,18 @@ class MemoryOSRoots:
     external_state_roots: tuple[Path, ...] = field(default_factory=tuple)
 
     @classmethod
+    def from_profile(cls, profile: str | None = None) -> "MemoryOSRoots":
+        """Resolve roots from HERMES_HOME env var with optional profile override.
+
+        Falls back to $HOME/.hermes if HERMES_HOME is not set.
+        """
+        import os
+        hermes_home = os.environ.get("HERMES_HOME")
+        if not hermes_home:
+            hermes_home = Path.home() / ".hermes"
+        return cls.from_hermes_home(hermes_home, profile=profile)
+
+    @classmethod
     def from_hermes_home(
         cls,
         hermes_home: str | Path,

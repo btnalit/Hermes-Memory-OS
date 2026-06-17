@@ -17,6 +17,7 @@ TASK ANCHOR compliance (see 56-lanes/candidate_aggregation/TASK_ANCHOR.md):
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.crystallized import (
@@ -28,6 +29,8 @@ from plugins.memory.memory_os.crystallized import (
     read_candidate_triage,
 )
 from plugins.memory.memory_os.store import MemoryOSStore
+
+# V3a: knob override resolution (imported here; resolve_knob called at runtime)
 
 # ── Keyword sets (heuristics, not crystallization rules) ────────────────
 
@@ -201,15 +204,29 @@ def _cluster_and_promote(
     *,
     envelope_id: str = "",
     now: datetime | None = None,
-    min_cluster_size: int = 2,
+    min_cluster_size: int | None = None,
+    _override_store_root: str | Path | None = None,
 ) -> dict[str, Any]:
     """Cluster pending candidates by theme, promote high-signal clusters.
 
     Heuristics only — never crystallizes. Only promotes to owner_eligible.
     Cluster criteria: shared keyword matches, same kind, shared source_event_ids.
     Skips candidates already written by earlier pipeline stages via processed_ids.
+
+    V3a: min_cluster_size is resolved at call time via resolve_knob() when
+    the caller doesn't pass an explicit value. Never put resolve_knob() in
+    the default parameter — Python evaluates defaults at import time.
+    _override_store_root is test-only; production callers omit it.
     """
     _now = now or datetime.now(timezone.utc)
+    # Resolve min_cluster_size at call time (not import time)
+    if min_cluster_size is None:
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        kwargs = {}
+        if _override_store_root is not None:
+            from pathlib import Path
+            kwargs["_store_root"] = Path(_override_store_root)
+        min_cluster_size = resolve_knob("min_cluster_size", default=2, **kwargs)
     candidates_for_promote = [
         c for c in candidates
         if c.candidate_id not in processed_ids
