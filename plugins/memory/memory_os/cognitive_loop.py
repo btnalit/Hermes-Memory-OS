@@ -197,6 +197,7 @@ class CognitiveLoopRunner:
             ("ground_truth_miner", self._ground_truth_miner),
             ("crystallized_revalidator", self._crystallized_revalidator),
             ("provisional_sweep", self._provisional_sweep),
+            ("knob_ab_eval", self._knob_ab_eval),
             ("override_sweep", self._override_sweep),
             ("migration_controller", self._migration_controller),
             ("abstraction_distillation", self._abstraction_distillation),
@@ -535,6 +536,20 @@ class CognitiveLoopRunner:
 
         result = ProvisionalSweepModule(self.hermes_home, profile=self.profile).run_once(store=self.store)
         context["provisional_sweep_result"] = result
+        return result
+
+    def _knob_ab_eval(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Run knob A/B evaluation: stratified real-result A/B for overridable knobs.
+
+        Evaluates active overrides with ab_metric set, using real owner decisions
+        stratified by cluster_size. Runs before override_sweep so that A/B
+        confirm/revert decisions take effect before TTL/cap processing.
+        """
+        from plugins.modules.governance.knob_ab_eval import KnobABEvalModule
+
+        module = KnobABEvalModule(self.hermes_home, profile=self.profile)
+        result = module.run_once(store=self.store)
+        context["knob_ab_eval_result"] = result
         return result
 
     def _override_sweep(self, context: dict[str, Any]) -> dict[str, Any]:
