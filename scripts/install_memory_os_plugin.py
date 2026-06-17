@@ -404,7 +404,9 @@ def install_plugin(
             owner_cron_onboarding_report = {"status": "dry_run"}
 
     runtime_enabled = False
+    runtime_start_method = ""
     runtime_enable_command: list[str] = []
+    runtime_enable_error: str = ""
     if enable_runtime:
         if not install_runtime:
             runtime_artifacts = _write_runtime_artifacts(
@@ -426,12 +428,26 @@ def install_plugin(
             unit_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(service_src, unit_dir / service_src.name)
             shutil.copy2(timer_src, unit_dir / timer_src.name)
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-            subprocess.run(runtime_enable_command, check=True)
-            runtime_enabled = True
+            if _systemctl_available():
+                try:
+                    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+                    subprocess.run(runtime_enable_command, check=True)
+                    runtime_enabled = True
+                    runtime_start_method = "systemd"
+                except subprocess.CalledProcessError as exc:
+                    runtime_enable_error = str(exc)[:200]
+            else:
+                runtime_start_method = "systemctl_unavailable_skipped"
+                print(
+                    "memory-os-install: systemctl not available — skipping runtime systemd enable; "
+                    "Hermes agent will fall back to cron-based heartbeat",
+                    file=sys.stderr,
+                )
 
     cognitive_loop_enabled = False
+    cognitive_loop_start_method = ""
     cognitive_loop_enable_command: list[str] = []
+    cognitive_loop_enable_error: str = ""
     if enable_cognitive_loop:
         if not install_cognitive_loop:
             cognitive_loop_artifacts = _write_cognitive_loop_artifacts(
@@ -453,9 +469,21 @@ def install_plugin(
             unit_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(service_src, unit_dir / service_src.name)
             shutil.copy2(timer_src, unit_dir / timer_src.name)
-            subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-            subprocess.run(cognitive_loop_enable_command, check=True)
-            cognitive_loop_enabled = True
+            if _systemctl_available():
+                try:
+                    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+                    subprocess.run(cognitive_loop_enable_command, check=True)
+                    cognitive_loop_enabled = True
+                    cognitive_loop_start_method = "systemd"
+                except subprocess.CalledProcessError as exc:
+                    cognitive_loop_enable_error = str(exc)[:200]
+            else:
+                cognitive_loop_start_method = "systemctl_unavailable_skipped"
+                print(
+                    "memory-os-install: systemctl not available — skipping cognitive-loop systemd enable; "
+                    "Hermes agent will fall back to cron-based cognitive loop",
+                    file=sys.stderr,
+                )
 
     return {
         "schema_version": "memory-os.install.v0",
@@ -493,12 +521,16 @@ def install_plugin(
         "runtime_interval": runtime_interval,
         "runtime_enable_requested": enable_runtime,
         "runtime_enabled": runtime_enabled,
+        "runtime_start_method": runtime_start_method,
+        "runtime_enable_error": runtime_enable_error,
         "runtime_enable_command": runtime_enable_command,
         "cognitive_loop_artifacts_installed": bool(cognitive_loop_artifacts) and not dry_run,
         "cognitive_loop_artifacts": [str(path) for path in cognitive_loop_artifacts],
         "cognitive_loop_interval": cognitive_loop_interval,
         "cognitive_loop_enable_requested": enable_cognitive_loop,
         "cognitive_loop_enabled": cognitive_loop_enabled,
+        "cognitive_loop_start_method": cognitive_loop_start_method,
+        "cognitive_loop_enable_error": cognitive_loop_enable_error,
         "cognitive_loop_enable_command": cognitive_loop_enable_command,
         "owner_review_cron_helper_install_requested": install_owner_review_cron_helper,
         "owner_review_cron_helper_installed": bool(owner_review_cron_helper.get("helper")) and not dry_run,
@@ -630,6 +662,22 @@ def _ensure_llm_packages(*, dry_run: bool = False) -> dict[str, Any]:
                         file=sys.stderr,
                     )
     return result
+
+
+def _systemctl_available() -> bool:
+    """Check whether systemctl --user is reachable on this host."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        # exit code 0..3 means systemctl is functional (3 = no services, which is fine)
+        return result.returncode in (0, 1, 2, 3)
+    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+        return False
 
 
 def _validate_eval_source(source: Path) -> None:
