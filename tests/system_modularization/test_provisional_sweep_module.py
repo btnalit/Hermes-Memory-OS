@@ -112,3 +112,61 @@ def test_provisional_sweep_doctor(tmp_path):
     result = module.doctor()
     assert result["module"] == "provisional_sweep"
     assert result["status"] in ("ok", "warning")
+
+
+class TestC4NoSilentFailures:
+    def test_A1_3_error_records_present_in_result(self, tmp_path):
+        """A1.3: C4 — result must include error_records field (was silent pass before)."""
+        store, service, now = _setup_store_with_provisional_records(
+            tmp_path, count=3, expires_days=-1  # already expired
+        )
+        from plugins.modules.governance.provisional_sweep import ProvisionalSweepModule
+
+        module = ProvisionalSweepModule(tmp_path, profile="test")
+        result = module.run_once(store=store)
+
+        assert "error_records" in result, (
+            "C4: result must include error_records (was silent pass before)"
+        )
+        assert isinstance(result["error_records"], list)
+
+    def test_A1_3_error_record_schema_compliant(self, tmp_path):
+        """A1.3: error_record follows build_error_record schema."""
+        from plugins.memory.memory_os.jsonl_io import build_error_record
+
+        record = build_error_record(
+            component="provisional_sweep",
+            operation="invalidate_provisional_record",
+            error_code="INVALIDATE_FAILED",
+            severity="error",
+            recoverable=True,
+            details={"record_id": "test-id", "reason": "resolver_ttl_expired"},
+        )
+        assert record["component"] == "provisional_sweep"
+        assert record["error_code"] == "INVALIDATE_FAILED"
+        assert record["severity"] == "error"
+        assert record["recoverable"] is True
+        assert "ts" in record
+
+
+class TestMaxProvisionalKnob:
+    def test_A1_2_override_changes_cap(self, tmp_path):
+        """A1.2: max_provisional override -> resolve_knob returns overridden value."""
+        from plugins.memory.memory_os.knob_overrides import register_override, resolve_knob
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+        register_override(
+            "max_provisional", 15,
+            prior=30, proposed_by="test",
+            approved_via="resolver", expires_at=expires,
+            _now=now, _store_root=tmp_path,
+        )
+        result = resolve_knob("max_provisional", default=30, _store_root=tmp_path)
+        assert result == 15
+
+    def test_A1_2_default_when_no_override(self, tmp_path):
+        """A1.2: no override -> resolve_knob returns default 30."""
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        result = resolve_knob("max_provisional", default=30, _store_root=tmp_path)
+        assert result == 30

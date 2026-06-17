@@ -55,11 +55,22 @@ class ProvisionalSweepModule:
     def runs_path(self) -> Path:
         return self.module_root / "runs.jsonl"
 
-    def run_once(self, *, store: MemoryOSStore) -> dict[str, Any]:
+    def run_once(
+        self, *,
+        store: MemoryOSStore,
+        _store_root: Path | None = None,
+    ) -> dict[str, Any]:
         """Run one tick: TTL expiry -> cap eviction -> recurrence detection."""
         service = CrystallizedMemoryService(store)
         records = service.list_provisional_records()
         now = datetime.now(timezone.utc)
+
+        # Resolve max_provisional at call time (C3 / sentinel pattern)
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        from plugins.memory.memory_os.jsonl_io import build_error_record
+        max_provisional = resolve_knob("max_provisional", default=30, _store_root=_store_root)
+
+        error_records: list[dict[str, Any]] = []
 
         # 1. TTL expiry
         expired = 0
@@ -80,20 +91,29 @@ class ProvisionalSweepModule:
                     )
                     expired += 1
                 except Exception:
-                    pass
+                    # C4 fix: was bare "except: pass"
+                    error_records.append(
+                        build_error_record(
+                            component="provisional_sweep",
+                            operation="invalidate_provisional_record",
+                            error_code="INVALIDATE_FAILED",
+                            severity="error",
+                            recoverable=True,
+                            details={"record_id": r.get("id"), "reason": "resolver_ttl_expired"},
+                        )
+                    )
 
         # Re-read after TTL invalidations
         records_after_ttl = service.list_provisional_records()
 
-        # 2. Cap eviction (oldest first, keep 30)
-        MAX_PROVISIONAL = 30
+        # 2. Cap eviction (oldest first, keep max_provisional)
         evicted = 0
-        if len(records_after_ttl) > MAX_PROVISIONAL:
+        if len(records_after_ttl) > max_provisional:
             sorted_records = sorted(
                 records_after_ttl,
                 key=lambda r: str(r.get("approved_at") or ""),
             )
-            to_evict = sorted_records[: len(sorted_records) - MAX_PROVISIONAL]
+            to_evict = sorted_records[: len(sorted_records) - max_provisional]
             for r in to_evict:
                 try:
                     service.invalidate_provisional_record(
@@ -103,7 +123,17 @@ class ProvisionalSweepModule:
                     )
                     evicted += 1
                 except Exception:
-                    pass
+                    # C4 fix: was bare "except: pass"
+                    error_records.append(
+                        build_error_record(
+                            component="provisional_sweep",
+                            operation="invalidate_provisional_record",
+                            error_code="INVALIDATE_FAILED",
+                            severity="error",
+                            recoverable=True,
+                            details={"record_id": r.get("id"), "reason": "resolver_cap_evicted"},
+                        )
+                    )
 
         # Re-read final state for recurrence detection
         records_after_cap = service.list_provisional_records()
@@ -120,6 +150,7 @@ class ProvisionalSweepModule:
             "evicted_count": evicted,
             "escalated_count": len(escalated),
             "escalated_ids": escalated,
+            "error_records": error_records,
             "actual_send": False,
             "actual_execute": False,
             "actual_identity_write": False,
