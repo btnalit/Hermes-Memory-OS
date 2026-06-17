@@ -493,6 +493,23 @@ class GovernanceFeedbackBridgeModule:
     def _to_event(self, record: dict[str, Any]) -> EventEnvelope:
         key = _idempotency_key(record)
         event_id = f"evt_gov_{_stable_digest(key)[:20]}"
+        source_class = str(record.get("source_class") or "governance")
+        subtype = record.get("subtype")
+        safe_ref: dict[str, Any] = {
+            "source_class": source_class,
+            "source_module": str(record["source_module"]),
+            "artifact_ref": str(record["artifact_ref"]),
+            "governance_feedback_key": key,
+            "source_key": str(record["source_key"]),
+            "state_hash": str(record["state_hash"]),
+            "drive_policy": "evidence_only",
+            "candidate_allowed": False,
+            "body_policy": "summary_only",
+            "evidence_refs": list(record.get("evidence_refs", [])),
+            **_optional_refs(record),
+        }
+        if subtype:
+            safe_ref["self_activity_subtype"] = str(subtype)
         return EventEnvelope(
             schema_version=EVENT_SCHEMA_VERSION,
             id=event_id,
@@ -501,19 +518,7 @@ class GovernanceFeedbackBridgeModule:
             source="governance_feedback",
             kind=str(record["kind"]),
             summary=_clip(str(record["summary"]), 260),
-            safe_ref={
-                "source_class": "governance",
-                "source_module": str(record["source_module"]),
-                "artifact_ref": str(record["artifact_ref"]),
-                "governance_feedback_key": key,
-                "source_key": str(record["source_key"]),
-                "state_hash": str(record["state_hash"]),
-                "drive_policy": "evidence_only",
-                "candidate_allowed": False,
-                "body_policy": "summary_only",
-                "evidence_refs": list(record.get("evidence_refs", [])),
-                **_optional_refs(record),
-            },
+            safe_ref=safe_ref,
             tags=["governance", str(record["source_module"]), "summary_only"],
             sensitivity="private",
             body_policy="summary_only",

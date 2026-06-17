@@ -412,3 +412,35 @@ def test_governance_feedback_skips_non_profile_speak_gate_deliveries(tmp_path):
 
     assert result["status"] == "skipped"
     assert len(governance_events) == 0
+
+
+def test_to_event_reads_source_class_and_subtype_from_record(tmp_path):
+    """V2.4: _to_event reads source_class/subtype from record dict, defaults to governance."""
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+    # Record WITHOUT source_class -> defaults to "governance"
+    default_record = {
+        "kind": "test_default",
+        "source_module": "test_mod",
+        "source_key": "test_key",
+        "state_hash": "abc",
+        "artifact_ref": "local://test/default",
+        "summary": "default source_class test",
+    }
+    event_default = bridge._to_event(default_record)
+    assert event_default.safe_ref["source_class"] == "governance"
+    assert "self_activity_subtype" not in event_default.safe_ref
+
+    # Record WITH source_class="self_activity" + subtype
+    sa_record = {
+        "kind": "test_self_activity",
+        "source_module": "test_mod",
+        "source_key": "test_key_sa",
+        "state_hash": "def",
+        "artifact_ref": "local://test/sa",
+        "summary": "self_activity test",
+        "source_class": "self_activity",
+        "subtype": "resolver",
+    }
+    event_sa = bridge._to_event(sa_record)
+    assert event_sa.safe_ref["source_class"] == "self_activity"
+    assert event_sa.safe_ref["self_activity_subtype"] == "resolver"
