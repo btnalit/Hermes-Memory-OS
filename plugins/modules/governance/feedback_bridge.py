@@ -26,6 +26,9 @@ GOVERNANCE_EVENT_KINDS = {
     "governance_memory_sources_feedback",
     "governance_self_evolution_reported",
     "governance_speak_gate_delivery",
+    "governance_resolver_approved",
+    "governance_resolver_confirmed",
+    "governance_resolver_invalidated",
 }
 
 
@@ -244,6 +247,7 @@ class GovernanceFeedbackBridgeModule:
         records.extend(self._memory_sources_feedback_events())
         records.extend(self._expression_feedback_events())
         records.extend(self._speak_gate_events())
+        records.extend(self._resolver_audit_events())
         if self_evolution is not None:
             records.extend(self._self_evolution_events(self_evolution))
         return [self._to_event(record) for record in records]
@@ -467,6 +471,69 @@ class GovernanceFeedbackBridgeModule:
             )
         return records
 
+    def _resolver_audit_events(self) -> list[dict[str, Any]]:
+        """Collect resolver audit actions as self_activity:resolver events.
+
+        Reads the audit log for resolver-relevant actions:
+        - crystallized_record_written -> approved
+        - provisional_record_confirmed -> confirmed
+        - provisional_record_invalidated -> rejected/ttl_expired/cap_evicted
+        """
+        records: list[dict[str, Any]] = []
+        roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        audit_path = roots.audit_path
+        if not audit_path.exists():
+            return records
+
+        RESOLVER_ACTIONS = {
+            "crystallized_record_written",
+            "provisional_record_confirmed",
+            "provisional_record_invalidated",
+        }
+
+        for entry in _read_jsonl(audit_path):
+            action = str(entry.get("action") or "")
+            if action not in RESOLVER_ACTIONS:
+                continue
+            if str(entry.get("profile", self.profile)) != self.profile:
+                continue
+
+            details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+            candidate_id = str(details.get("candidate_id") or entry.get("target", ""))
+            reason = str(details.get("reason") or "")
+
+            if action == "crystallized_record_written":
+                kind = "governance_resolver_approved"
+                summary = f"Resolver approved crystallized record {candidate_id}"
+            elif action == "provisional_record_confirmed":
+                kind = "governance_resolver_confirmed"
+                summary = f"Resolver confirmed provisional record {candidate_id}"
+            else:
+                kind = "governance_resolver_invalidated"
+                summary = f"Resolver invalidated provisional record {candidate_id}: {reason}"
+
+            state_hash = _hash_json({
+                "action": action,
+                "candidate_id": candidate_id,
+                "reason": reason,
+                "ts": str(entry.get("ts") or ""),
+            })
+            records.append({
+                "kind": kind,
+                "source_module": "resolver_audit",
+                "source_key": f"resolver_audit:{entry.get('id', candidate_id)}",
+                "state_hash": state_hash,
+                "artifact_ref": f"local://resolver_audit/{candidate_id}",
+                "summary": _clip(summary, 260),
+                "evidence_refs": [f"resolver_audit:{entry.get('id', '')}"],
+                "source_class": "self_activity",
+                "subtype": "resolver",
+                "resolver_action": action,
+                "resolver_reason": reason,
+                "resolver_candidate_id": candidate_id,
+            })
+        return records
+
     def _self_evolution_events(self, self_evolution: Any) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         for index, report in enumerate(self_evolution.read_reports()):
@@ -598,6 +665,9 @@ def _optional_refs(record: dict[str, Any]) -> dict[str, Any]:
         "speak_gate_delivery_id",
         "speak_gate_source_module",
         "speak_gate_delivery_channel",
+        "resolver_action",
+        "resolver_reason",
+        "resolver_candidate_id",
     ):
         if record.get(key):
             output[key] = record[key]

@@ -465,6 +465,65 @@ def test_to_event_reads_source_class_and_subtype_from_record(tmp_path):
     assert "self_activity_subtype" not in event_empty.safe_ref
 
 
+def test_resolver_audit_collector_produces_self_activity_events(tmp_path):
+    """V2.6: resolver audit events → self_activity:resolver feedback events."""
+    from plugins.memory.memory_os.audit import append_audit
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
+    # Seed audit with resolver-relevant actions
+    append_audit(
+        roots.audit_path,
+        action="crystallized_record_written",
+        status="ok",
+        target="memory:cand_abc",
+        details={"candidate_id": "cand_abc", "provisional": True, "canonical_state": "active"},
+    )
+    append_audit(
+        roots.audit_path,
+        action="provisional_record_confirmed",
+        status="ok",
+        target="memory:cand_def",
+        details={"candidate_id": "cand_def", "reason": "owner_confirmed"},
+    )
+    append_audit(
+        roots.audit_path,
+        action="provisional_record_invalidated",
+        status="ok",
+        target="memory:cand_ghi",
+        details={"candidate_id": "cand_ghi", "reason": "resolver_ttl_expired"},
+    )
+    append_audit(
+        roots.audit_path,
+        action="provisional_record_invalidated",
+        status="ok",
+        target="memory:cand_jkl",
+        details={"candidate_id": "cand_jkl", "reason": "resolver_cap_evicted"},
+    )
+    # Also write a non-resolver audit entry that should be skipped
+    append_audit(
+        roots.audit_path,
+        action="inner_drive_module_run",
+        status="ok",
+        target="inner_drive",
+        details={"processed_event_count": 5},
+    )
+
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+    records = bridge._resolver_audit_events()
+
+    assert len(records) == 4, f"expected 4 resolver records, got {len(records)}"
+
+    kinds = {r["kind"] for r in records}
+    assert "governance_resolver_approved" in kinds
+    assert "governance_resolver_confirmed" in kinds
+    assert "governance_resolver_invalidated" in kinds
+
+    for record in records:
+        assert record.get("source_class") == "self_activity"
+        assert record.get("subtype") == "resolver"
+
+
 def test_speak_gate_and_ops_gate_events_are_self_activity(tmp_path):
     """V2.5: speech/ops_gate events are tagged source_class='self_activity' with correct subtypes."""
     from plugins.modules.governance.feedback_bridge import GovernanceFeedbackBridgeModule
