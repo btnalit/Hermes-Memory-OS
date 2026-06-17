@@ -171,6 +171,62 @@ def test_self_activity_excluded_from_right_brain_eligible():
     )
 
 
+def test_speech_does_not_trigger_new_expression(tmp_path):
+    """V2.3 E2E: speech feedback event (self_activity) is NOT eligible for expression triggers
+    while normal conversation events remain eligible. Tests full pipeline through store."""
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.schema import EventEnvelope
+    from plugins.modules.cognition.wandering_mind import _right_brain_eligible_events
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    conversation_event = EventEnvelope.from_dict({
+        "schema_version": "memory-os.event.v0",
+        "id": "evt_conv_1",
+        "ts": "2026-06-17T10:00:00Z",
+        "profile": "main",
+        "source": "telegram",
+        "kind": "conversation_turn",
+        "summary": "Owner asked about weather",
+        "safe_ref": {"source_class": "foreground"},
+        "tags": [],
+        "sensitivity": "private",
+        "body_policy": "summary_only",
+        "hashes": {},
+        "promotion_state": "raw",
+    })
+    speech_feedback_event = EventEnvelope.from_dict({
+        "schema_version": "memory-os.event.v0",
+        "id": "evt_speech_1",
+        "ts": "2026-06-17T10:01:00Z",
+        "profile": "main",
+        "source": "governance_feedback",
+        "kind": "governance_speak_gate_delivery",
+        "summary": "System said: it looks sunny today",
+        "safe_ref": {"source_class": "self_activity", "self_activity_subtype": "speech"},
+        "tags": ["governance", "speak_gate", "summary_only"],
+        "sensitivity": "private",
+        "body_policy": "summary_only",
+        "hashes": {},
+        "promotion_state": "raw",
+    })
+
+    store.append_event(conversation_event)
+    store.append_event(speech_feedback_event)
+
+    events = store.read_events()
+    eligible = _right_brain_eligible_events(events)
+
+    eligible_ids = {e.id for e in eligible}
+    assert "evt_conv_1" in eligible_ids, "conversation event must be eligible for expression"
+    assert "evt_speech_1" not in eligible_ids, (
+        "self_activity speech event MUST NOT be eligible — anti-spiral gate failed"
+    )
+
+
 def test_wandering_mind_does_not_touch_sannai_shape_fixture(tmp_path):
     fixture = build_sannai_multi_root_fixture(tmp_path / "fixture")
     soul = fixture.hermes_home / "SOUL.md"
