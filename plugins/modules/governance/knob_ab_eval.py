@@ -133,9 +133,12 @@ class KnobABEvalModule:
                 skipped_insufficient_obs += 1
                 continue
 
-            # Discarded layer: size==prior_value (dropped by tightening)
-            # Retained layer: size>=override_value
-            discarded_rate = layer_rates.get(prior_value)
+            # Discarded layers: size in [prior_value, override_value) (dropped by tightening)
+            # Retained layers: size >= override_value
+            # Multi-step tighten (e.g., 2→4): size=3 must be in discarded, not lost
+            discarded_rate = _aggregate_layer_range(
+                layer_rates, min_size=prior_value, max_size=override_value,
+            )
             retained_rate = _aggregate_retained_rate(layer_rates, min_size=override_value)
 
             if discarded_rate is None or retained_rate is None:
@@ -343,6 +346,34 @@ def _aggregate_retained_rate(
     total_rejected = 0
     for cs, stats in layer_rates.items():
         if cs >= min_size:
+            total_confirmed += stats.get("confirmed", 0)
+            total_rejected += stats.get("rejected", 0)
+    total = total_confirmed + total_rejected
+    if total == 0:
+        return None
+    return {
+        "confirm_rate": total_confirmed / total,
+        "observations": total,
+        "confirmed": total_confirmed,
+        "rejected": total_rejected,
+    }
+
+
+def _aggregate_layer_range(
+    layer_rates: dict[int, dict[str, Any]],
+    min_size: int,
+    max_size: int,
+) -> dict[str, Any] | None:
+    """Aggregate confirm rate across layers with min_size <= size < max_size.
+
+    Used for the discarded set in multi-step tightening (e.g., 2→4:
+    sizes 2 and 3 both belong to the discarded group).  For single-step
+    tightening (2→3), this degenerates to just size==min_size.
+    """
+    total_confirmed = 0
+    total_rejected = 0
+    for cs, stats in layer_rates.items():
+        if min_size <= cs < max_size:
             total_confirmed += stats.get("confirmed", 0)
             total_rejected += stats.get("rejected", 0)
     total = total_confirmed + total_rejected

@@ -25,6 +25,7 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "bounds": [2, 5],
         "meta": False,
         "scope": "upper_layer",
+        "ab_metric": "confirm_rate",
     },
     "max_speak_per_hour": {
         "module": "expression/speak_rate_limit",
