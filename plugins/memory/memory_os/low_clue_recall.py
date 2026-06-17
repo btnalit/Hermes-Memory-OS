@@ -1135,8 +1135,9 @@ def _resolve_hermes_default_runtime(config: dict[str, Any]) -> dict[str, Any]:
             if candidate and Path(candidate).exists() and candidate not in sys.path:
                 # If the Memory-OS REPO_ROOT is at position 0, insert after it
                 # so plugins.memory continues to resolve from Memory-OS, not the
-                # agent root. Both roots ship plugins/ and agent/ top-level
-                # packages that shadow each other when the agent root comes first.
+                # agent root. Both roots ship a plugins/ top-level package;
+                # inserting the agent root at position 0 would shadow
+                # Memory-OS's plugins.memory.memory_os.
                 _insert_pos = 0
                 if sys.path and (
                     Path(sys.path[0]) / "plugins" / "memory" / "memory_os" / "__init__.py"

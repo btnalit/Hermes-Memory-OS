@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from agent.memory_provider import MemoryProvider
+from memory_os_agent.memory_provider import MemoryProvider
 
 from . import config as memory_os_config
 from .adapters.hindsight import HindsightHttpClient

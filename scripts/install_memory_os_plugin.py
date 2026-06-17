@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 SOURCE_PLUGIN_DIR = REPO_ROOT / "plugins" / "memory" / "memory_os"
 SOURCE_AGENT_OS_SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
 SOURCE_PACKAGE_DIR = REPO_ROOT / "plugins"
-SOURCE_AGENT_DIR = REPO_ROOT / "agent"
+SOURCE_AGENT_DIR = REPO_ROOT / "memory_os_agent"
 SOURCE_EVAL_DIR = REPO_ROOT / "eval"
 SOURCE_OWNER_REVIEW_CRON_HELPER = REPO_ROOT / "scripts" / "memory_os_owner_review_digest.py"
 SOURCE_OWNER_REVIEW_CRON_GATE = REPO_ROOT / "scripts" / "memory_os_owner_review_cron_gate.py"
@@ -259,7 +259,7 @@ def install_plugin(
     system_module_files: list[Path] = []
     system_module_root = hermes_home / "memory-os" / "runtime" / "python"
     system_module_target = system_module_root / "plugins"
-    agent_runtime_target = system_module_root / "agent"
+    agent_runtime_target = system_module_root / "memory_os_agent"
     eval_runtime_target = system_module_root / "eval"
     agent_runtime_files: list[Path] = []
     eval_runtime_files: list[Path] = []
@@ -576,10 +576,7 @@ def _validate_system_module_source(source: Path) -> None:
 
 
 def _validate_agent_source(source: Path) -> None:
-    # agent/ is a PEP 420 namespace package (no __init__.py) so that
-    # agent.credential_persistence from the Hermes agent root can be
-    # discovered even when Memory-OS REPO_ROOT is first on sys.path.
-    required = ("memory_provider.py",)
+    required = ("__init__.py", "memory_provider.py")
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
         raise SystemExit(f"Memory-OS agent compatibility source is missing: {', '.join(missing)}")

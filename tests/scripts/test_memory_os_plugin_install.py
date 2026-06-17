@@ -573,7 +573,7 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert runtime_root.joinpath("modules", "governance", "feedback_bridge.py").is_file()
     assert runtime_root.joinpath("memory", "memory_os", "store.py").is_file()
     assert runtime_root.joinpath("memory", "memory_os", "shadow_journal.py").is_file()
-    assert runtime_python.joinpath("agent", "memory_provider.py").is_file()
+    assert runtime_python.joinpath("memory_os_agent", "memory_provider.py").is_file()
     assert runtime_python.joinpath("eval", "memory_os", "runner", "run.py").is_file()
     assert runtime_python.joinpath("eval", "memory_os", "adapters", "grep.py").is_file()
     assert runtime_python.joinpath("eval", "memory_os", "adapters", "retrieval_shadow.py").is_file()
