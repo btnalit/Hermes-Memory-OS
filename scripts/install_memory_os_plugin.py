@@ -350,6 +350,10 @@ def install_plugin(
     if install_system_modules:
         module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
         operational_helper_paths = _write_operational_helper_scripts(hermes_home, dry_run=dry_run)
+
+    llm_packages: dict[str, Any] = {}
+    if install_system_modules:
+        llm_packages = _ensure_llm_packages(dry_run=dry_run)
     owner_cron_onboarding_report: dict[str, object] = {}
     enabled = False
     enable_command: list[str] = []
@@ -531,6 +535,7 @@ def install_plugin(
         "session_mirror_config_path": str(session_mirror_config_path) if session_mirror_config_path else "",
         "session_mirror_config": session_mirror_config or {},
         "llm_judge_preset": llm_judge_preset,
+        "llm_packages": llm_packages,
         "low_clue_recall_config_written": bool(low_clue_recall_config_path) and not dry_run,
         "low_clue_recall_config_path": str(low_clue_recall_config_path) if low_clue_recall_config_path else "",
         "low_clue_recall_config": low_clue_recall_config or {},
@@ -580,6 +585,40 @@ def _validate_agent_source(source: Path) -> None:
     missing = [name for name in required if not (source / name).is_file()]
     if missing:
         raise SystemExit(f"Memory-OS agent compatibility source is missing: {', '.join(missing)}")
+
+
+def _ensure_llm_packages(*, dry_run: bool = False) -> dict[str, Any]:
+    """Ensure openai and anthropic are importable; auto-install if missing.
+
+    Returns a dict with per-package status so the caller can surface
+    warnings in the install report.
+    """
+    packages = {"openai": "openai", "anthropic": "anthropic"}
+    result: dict[str, Any] = {}
+    for import_name, pip_name in packages.items():
+        try:
+            importlib.import_module(import_name)
+            result[import_name] = {"available": True, "action": "already_installed"}
+        except ImportError:
+            if dry_run:
+                result[import_name] = {"available": False, "action": "would_install"}
+            else:
+                try:
+                    subprocess.run(
+                        [sys.executable, "-m", "pip", "install", pip_name],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    importlib.import_module(import_name)
+                    result[import_name] = {"available": True, "action": "installed"}
+                except (subprocess.CalledProcessError, ImportError) as exc:
+                    result[import_name] = {
+                        "available": False,
+                        "action": "install_failed",
+                        "error": str(exc)[:200],
+                    }
+    return result
 
 
 def _validate_eval_source(source: Path) -> None:

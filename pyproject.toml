@@ -10,6 +10,10 @@ dependencies = []
 dev = [
   "pytest>=8",
 ]
+llm = [
+  "openai>=1.0",
+  "anthropic>=0.30",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
