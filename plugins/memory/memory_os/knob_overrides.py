@@ -269,6 +269,62 @@ def revert_override(
     return reversion
 
 
+def confirm_override(
+    override_id: str,
+    *,
+    reason: str,
+    roots: MemoryOSRoots | None = None,
+    _store_root: Path | None = None,
+) -> dict[str, Any]:
+    """Confirm a provisional override: append a new record with state='confirmed'.
+
+    Mirror of revert_override but instead of reverting, it hardens the override:
+    - state='confirmed' (permanent until explicit revert)
+    - provisional=False (won't be swept by TTL)
+    - expires_at='' (no expiry)
+    - prior_value preserved from the original
+
+    This is the A/B auto-confirm write path — goes directly to the knob store
+    JSONL (path.open('a')), not through append_governed_jsonl. The
+    write_surface_check.py classifies it as 'knob_override_store'.
+
+    Invalidate-not-delete: the original override record stays; a new record
+    marks the confirmation.
+    """
+    now = datetime.now(timezone.utc)
+    store_path = _override_store_path(roots, _store_root=_store_root)
+
+    # Find the original override to get its values
+    original = None
+    for record in _read_jsonl(store_path):
+        if record.get("id") == override_id:
+            original = record
+            break
+    if original is None:
+        raise ValueError(f"Override not found: {override_id}")
+
+    confirmed = {
+        "schema_version": "memory-os.knob_override.v0",
+        "id": f"ko_cnf_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
+        "knob": original.get("knob"),
+        "override_value": original.get("override_value"),
+        "prior_value": original.get("prior_value"),
+        "bounds": original.get("bounds"),
+        "provisional": False,
+        "expires_at": "",
+        "proposed_by": "knob_ab_eval",
+        "approved_via": "ab_auto_confirm",
+        "state": "confirmed",
+        "confirmed_from": override_id,
+        "confirm_reason": reason,
+        "ts": now.isoformat(),
+    }
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    with store_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(confirmed, ensure_ascii=False, sort_keys=True) + "\n")
+    return confirmed
+
+
 # ── Internal helpers ────────────────────────────────────────────────────
 
 def _is_active_state(record: dict[str, Any]) -> bool:
