@@ -10,26 +10,38 @@ from typing import Any
 
 from .audit import append_audit
 from .ids import new_working_id
-from .schema import WORKING_SCHEMA_VERSION, WorkingItem
+from .schema import WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0, WorkingItem
 from .store import MemoryOSStore
 
 
 ALLOWED_WORKING_KINDS = {"lingering", "emotional", "curiosity", "attention"}
 
-# ── Decay defaults ───────────────────────────────────────────────────────
-# Tuned to prevent unbounded accumulation: half-life reduced from 24h → 12h,
-# expire threshold raised from 0.2 → 0.25 so low-weight items expire faster.
-# Combined with prune_expired_items(), this keeps working-memory documents
-# bounded without losing the signal that decay provides.
+# ── Per-kind decay + cap parameters ──────────────────────────────────────
+# Each working memory kind has its own half-life, expire threshold, and max
+# item cap.  The cap bounds storage without forcing faster forgetting:
+# when add_item exceeds max_items, the lowest-weight items are evicted.
+# Decay uses per-kind half-life + expire_below instead of one-size-fits-all.
+#
+# Rationale:
+#   emotional  — slow decay (48h), low threshold: emotional salience persists
+#   curiosity  — medium decay (24h): topic curiosity fades over a day
+#   lingering  — medium decay (18h): the most-produced kind; cap=50 as backstop
+#   attention  — fast decay (6h): momentary focus, naturally transient
 
-DEFAULT_HALF_LIFE_HOURS: float = 12.0
-DEFAULT_EXPIRE_BELOW: float = 0.25
+WORKING_KIND_PARAMS: dict[str, dict[str, float]] = {
+    "lingering":  {"half_life_hours": 18.0, "max_items": 50, "expire_below": 0.10},
+    "emotional":  {"half_life_hours": 48.0, "max_items": 30, "expire_below": 0.05},
+    "curiosity":  {"half_life_hours": 24.0, "max_items": 30, "expire_below": 0.08},
+    "attention":  {"half_life_hours": 6.0,  "max_items": 20, "expire_below": 0.10},
+}
 
 # ── Prune defaults ───────────────────────────────────────────────────────
-# Items that have been expired for longer than this are eligible for removal.
-# 24h grace period ensures audit records are written before the item is gone.
+# Items expired longer than this are eligible for removal.  72h grace period
+# keeps expired items visible in owner-facing surfaces (digests, prefetch)
+# long enough to observe the expiry before removal.  Cap (§add_item) is the
+# primary storage bound; prune is the deep-clean backstop.
 
-DEFAULT_PRUNE_MIN_AGE_HOURS: float = 24.0
+DEFAULT_PRUNE_MIN_AGE_HOURS: float = 72.0
 
 
 class WorkingMemoryError(ValueError):
@@ -53,6 +65,8 @@ class WorkingMemoryService:
         now: datetime | None = None,
     ) -> WorkingItem:
         self._validate_kind(kind)
+        params = WORKING_KIND_PARAMS.get(kind, {})
+        max_items = int(params.get("max_items", 50))
         timestamp = _timestamp(now)
         item = WorkingItem(
             id=new_working_id(_datetime(now)),
@@ -64,10 +78,38 @@ class WorkingMemoryService:
             source_event_id=source_event_id,
             tags=list(tags or []),
             weight=float(weight),
+            last_decayed_at="",
+            expired_at="",
         )
         document = self.read_document(kind)
-        document["updated_at"] = timestamp
         document["items"].append(asdict(item))
+
+        # ── Top-N cap: evict lowest-weight items when over max_items ─────
+        if len(document["items"]) > max_items:
+            # Sort by weight ascending (lowest first), tiebreak by created_at
+            sorted_items = sorted(
+                document["items"],
+                key=lambda i: (i.get("weight", 0.0), i.get("created_at", "")),
+            )
+            overflow_count = len(sorted_items) - max_items
+            evicted = sorted_items[:overflow_count]
+            for evicted_raw in evicted:
+                evicted_item = _item_from_dict(evicted_raw)
+                self._audit(
+                    "working_item_evicted",
+                    "ok",
+                    {
+                        "item_id": evicted_item.id,
+                        "kind": kind,
+                        "reason": "cap_overflow",
+                        "weight": evicted_item.weight,
+                        "max_items": max_items,
+                    },
+                )
+            document["items"] = sorted_items[overflow_count:]
+
+        document["updated_at"] = timestamp
+        document["schema_version"] = WORKING_SCHEMA_VERSION
         self.store.write_working_document(kind, document)
         self._audit("working_item_added", "ok", {"item_id": item.id, "kind": kind})
         return item
@@ -82,10 +124,17 @@ class WorkingMemoryService:
                 "items": [],
             }
         document = self.store.read_working_document(kind)
-        if document.get("schema_version") != WORKING_SCHEMA_VERSION:
-            raise WorkingMemoryError(f"Unsupported working schema: {document.get('schema_version')}")
+        doc_version = document.get("schema_version", "")
+        if doc_version not in (WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0, ""):
+            raise WorkingMemoryError(f"Unsupported working schema: {doc_version}")
         if not isinstance(document.get("items"), list):
             raise WorkingMemoryError(f"Working document items must be a list: {kind}")
+        # ── v0 → v1 migration: fill missing fields on read ──────────────
+        if doc_version in (WORKING_SCHEMA_VERSION_V0, ""):
+            for raw_item in document["items"]:
+                raw_item.setdefault("last_decayed_at", "")
+                raw_item.setdefault("expired_at", "")
+            document["schema_version"] = WORKING_SCHEMA_VERSION
         return document
 
     def decay_items(
@@ -93,12 +142,15 @@ class WorkingMemoryService:
         kind: str,
         *,
         now: datetime | None = None,
-        half_life_hours: float = DEFAULT_HALF_LIFE_HOURS,
-        expire_below: float = DEFAULT_EXPIRE_BELOW,
+        half_life_hours: float | None = None,
+        expire_below: float | None = None,
         audit_write: bool = True,
     ) -> list[WorkingItem]:
         self._validate_kind(kind)
-        if half_life_hours <= 0:
+        params = WORKING_KIND_PARAMS.get(kind, {})
+        effective_half_life = half_life_hours if half_life_hours is not None else float(params.get("half_life_hours", 18.0))
+        effective_expire_below = expire_below if expire_below is not None else float(params.get("expire_below", 0.10))
+        if effective_half_life <= 0:
             raise WorkingMemoryError("half_life_hours must be positive")
         current = _datetime(now)
         current_ts = current.isoformat()
@@ -110,25 +162,35 @@ class WorkingMemoryService:
             if item.status != "active":
                 updated_items.append(item)
                 continue
-            elapsed_hours = max(0.0, (current - datetime.fromisoformat(item.updated_at)).total_seconds() / 3600.0)
-            decayed_weight = item.weight * pow(0.5, elapsed_hours / half_life_hours)
-            status = "expired" if decayed_weight < expire_below else "active"
+            # ── Decay from last_decayed_at (v1), fallback to updated_at (v0 compat) ──
+            decay_base_str = item.last_decayed_at or item.updated_at or item.created_at
+            decay_base = datetime.fromisoformat(decay_base_str)
+            elapsed_hours = max(0.0, (current - decay_base).total_seconds() / 3600.0)
+            decayed_weight = item.weight * pow(0.5, elapsed_hours / effective_half_life)
+            new_status = "expired" if decayed_weight < effective_expire_below else "active"
+            # ── Set expired_at on first expiry; never change it after ────
+            new_expired_at = item.expired_at
+            if new_status == "expired" and not item.expired_at:
+                new_expired_at = current_ts
             updated = WorkingItem(
                 id=item.id,
                 kind=item.kind,
-                status=status,
+                status=new_status,
                 created_at=item.created_at,
-                updated_at=current_ts,
+                updated_at=item.updated_at,          # ← NOT touched: preserves content recency
                 text=item.text,
                 source_event_id=item.source_event_id,
                 tags=list(item.tags),
                 weight=decayed_weight,
+                last_decayed_at=current_ts,           # ← decay bookkeeping on its own field
+                expired_at=new_expired_at,
             )
-            if status == "expired" and item.status != "expired":
+            if new_status == "expired" and item.status != "expired":
                 self._audit("working_item_expired", "ok", {"item_id": item.id, "kind": kind})
             updated_items.append(updated)
             changed = True
         if changed:
+            document["schema_version"] = WORKING_SCHEMA_VERSION
             document["updated_at"] = current_ts
             document["items"] = [asdict(item) for item in updated_items]
             self.store.write_working_document(kind, document, audit=audit_write)
@@ -144,10 +206,11 @@ class WorkingMemoryService:
     ) -> int:
         """Remove expired items that have been expired for longer than min_age_hours.
 
-        Only touches items with ``status == "expired"`` whose ``updated_at`` is
-        at least *min_age_hours* in the past.  The grace period ensures audit
-        records (written at the moment of expiry) are flushed before the item
-        is deleted.
+        Only touches items with ``status == "expired"`` whose ``expired_at``
+        (or ``updated_at`` as v0 fallback) is at least *min_age_hours* in the
+        past.  The grace period keeps expired items visible in owner-facing
+        surfaces (digests, prefetch) long enough to observe the expiry before
+        removal.
 
         Returns the number of pruned items.
         """
@@ -167,14 +230,15 @@ class WorkingMemoryService:
             if item.status != "expired":
                 kept.append(raw_item)
                 continue
-            # Compute age since the item was marked expired (updated_at).
+            # ── Grace from expired_at (v1), fallback updated_at (v0 compat) ──
+            expiry_base_str = item.expired_at or item.updated_at
             try:
-                updated_dt = datetime.fromisoformat(item.updated_at)
+                expiry_dt = datetime.fromisoformat(expiry_base_str)
             except (ValueError, TypeError):
                 # Malformed timestamp — keep the item rather than risk data loss.
                 kept.append(raw_item)
                 continue
-            age_hours = (current - updated_dt).total_seconds() / 3600.0
+            age_hours = (current - expiry_dt).total_seconds() / 3600.0
             if age_hours >= min_age_hours:
                 self._audit(
                     "working_item_pruned",
@@ -269,4 +333,6 @@ def _item_from_dict(data: dict[str, Any]) -> WorkingItem:
         source_event_id=str(data.get("source_event_id", "")),
         tags=[str(tag) for tag in data.get("tags", [])],
         weight=float(data.get("weight", 0.0)),
+        last_decayed_at=str(data.get("last_decayed_at", "")),
+        expired_at=str(data.get("expired_at", "")),
     )

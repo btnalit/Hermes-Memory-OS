@@ -7,7 +7,8 @@ from typing import Any
 
 
 EVENT_SCHEMA_VERSION = "memory-os.event.v0"
-WORKING_SCHEMA_VERSION = "memory-os.working.v0"
+WORKING_SCHEMA_VERSION = "memory-os.working.v1"
+WORKING_SCHEMA_VERSION_V0 = "memory-os.working.v0"  # read-compatible
 CRYSTALLIZED_SCHEMA_VERSION = "memory-os.crystallized.v0"
 IDENTITY_MANIFEST_SCHEMA_VERSION = "memory-os.identity_manifest.v0"
 CROSS_PROFILE_VIEW_SCHEMA_VERSION = "memory-os.cross_profile_view.v0"
@@ -112,6 +113,8 @@ class WorkingItem:
     source_event_id: str = ""
     tags: list[str] = field(default_factory=list)
     weight: float = 0.0
+    last_decayed_at: str = ""  # v1: last decay calculation timestamp; empty = never decayed
+    expired_at: str = ""       # v1: when the item was first marked expired; empty = not expired
 
 
 @dataclass(frozen=True)
@@ -183,6 +186,7 @@ class SchemaRegistry:
         kind: {version}
         for kind, version in _current.items()
     }
+    _read_compatible["working"] = {WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0}
 
     def current_write_version(self, kind: str) -> str:
         if kind not in self._current:
