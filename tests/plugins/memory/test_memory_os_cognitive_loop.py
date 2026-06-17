@@ -51,6 +51,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "migration_controller",
         "abstraction_distillation",
         "grounded_expression_judge",
+        "spontaneous_expression",
         "self_evolution",
         "structural_edge_proposer",
         "crystallization_gate",
@@ -109,9 +110,14 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert (tmp_path / "system-modules" / "deep_reflection" / "injection" / "current.json").is_file()
     steps = {step["step"]: step for step in result["steps"]}
     wandering_result = steps["wandering_mind"]["result"]
-    assert wandering_result["speak_gate_evaluated"] is True
-    assert wandering_result["speak_gate_decision"]["decision"] == "send_blocked"
-    assert wandering_result["speak_gate_decision"]["actual_send"] is False
+    assert wandering_result["expression_draft_created"] is True
+    assert "expression_draft" in wandering_result
+    assert "speak_gate_evaluated" not in wandering_result  # V1: speak_gate deferred to spontaneous_expression
+    assert "speak_gate_decision" not in wandering_result
+    # V1: spontaneous_expression step should exist and have been evaluated
+    spontaneous = steps["spontaneous_expression"]["result"]
+    assert spontaneous["spontaneous_expression_evaluated"] is True
+    assert spontaneous["spontaneous_sent"] is False  # test_host mode, no real owner channel match
     assert steps["confidence_router"]["result"]["route_live_applied"] is False
     assert steps["candidate_review"]["result"]["candidate_review_live_applied"] is False
     assert steps["judge_calibration"]["result"]["calibration_live_applied"] is False
@@ -184,9 +190,11 @@ def test_cognitive_loop_skips_right_brain_downstream_when_signal_unchanged(tmp_p
     assert wandering_result["status"] == "skipped"
     assert wandering_result["cadence_skipped"] is True
     assert wandering_result["expression_draft_skipped"] is True
-    assert wandering_result["speak_gate_skipped"] is True
     assert "expression_draft" not in wandering_result
-    assert "speak_gate_decision" not in wandering_result
+    # V1: spontaneous_expression handles the no-draft case gracefully
+    spontaneous = second_steps["spontaneous_expression"]["result"]
+    assert spontaneous["spontaneous_decision"] == "no_draft"
+    assert spontaneous["spontaneous_sent"] is False
     assert second["boundaries"]["actual_send"] is False
 
 
