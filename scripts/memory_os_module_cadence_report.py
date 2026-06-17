@@ -379,6 +379,8 @@ def _observed_module_counters(hermes_home: Path, cognitive_reports: list[dict[st
                 _record_step(counters.setdefault(module, _empty_counters()), step, finished_at)
             if step_name == "wandering_mind":
                 _record_expression_submodule_steps(counters, step, finished_at)
+            elif step_name == "spontaneous_expression":
+                _record_expression_submodule_steps(counters, step, finished_at)
 
     _merge_artifact_counter(
         counters,
@@ -542,7 +544,18 @@ def _record_expression_submodule_steps(
         _record_synthetic_result(counters, "expression_draft", finished_at, skipped=True)
     elif result.get("output") == "[SILENT]":
         _record_synthetic_result(counters, "expression_draft", finished_at, skipped=True)
-    if isinstance(result.get("speak_gate_decision"), dict):
+    # V1: speak_gate evaluation moved to spontaneous_expression step
+    spontaneous_decision = result.get("spontaneous_decision")
+    if spontaneous_decision is not None:
+        # spontaneous_expression step result — count based on decision
+        if spontaneous_decision == "delivered":
+            _record_synthetic_result(counters, "speak_gate", finished_at, generated=True)
+        elif spontaneous_decision in ("no_draft", "judge_blocked", "rate_limited", "send_blocked"):
+            _record_synthetic_result(counters, "speak_gate", finished_at, skipped=True)
+        else:
+            _record_synthetic_result(counters, "speak_gate", finished_at, error=True)
+    elif isinstance(result.get("speak_gate_decision"), dict):
+        # Legacy wandering_mind step result (pre-V1)
         _record_synthetic_result(counters, "speak_gate", finished_at, generated=True)
     elif result.get("speak_gate_skipped") is True:
         _record_synthetic_result(counters, "speak_gate", finished_at, skipped=True)

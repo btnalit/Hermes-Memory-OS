@@ -613,7 +613,8 @@ class CognitiveLoopRunner:
           1. Draft must exist (wandering_mind generated output)
           2. Judge must say "advisory_ok" (expression is grounded, not confabulation)
           3. Rate limit must allow (≤5 owner-send deliveries in past 60 min)
-        If all gates pass, delivers via speak_gate with delivery_tier="spontaneous_owner".
+        If all gates pass, delivers via speak_gate with delivery_tier="spontaneous_owner"
+        under an ExecutionGate permit envelope (P1: no human approval gate).
         Otherwise records the block reason silently (no send, audit trail in result).
         """
         from plugins.modules.expression.speak_gate import SpeakGateModule
@@ -622,25 +623,31 @@ class CognitiveLoopRunner:
         wandering = context.get("wandering_mind") if isinstance(context.get("wandering_mind"), dict) else {}
         judge_result = context.get("grounded_expression_judge_result") if isinstance(context.get("grounded_expression_judge_result"), dict) else {}
         draft = wandering.get("expression_draft") if isinstance(wandering.get("expression_draft"), dict) else {}
+        judge_decision = str(judge_result.get("decision") or "")
+        judge_verdict_class = str(judge_result.get("verdict_class") or "")
 
         # Gate 1: Must have a draft from wandering_mind
         if not draft or not draft.get("draft_id"):
             return {
+                "status": "skipped",
                 "spontaneous_expression_evaluated": True,
                 "spontaneous_decision": "no_draft",
                 "spontaneous_sent": False,
+                "actual_send": False,
                 "spontaneous_reason": "no_expression_draft_available",
             }
 
         # Gate 2: Judge must say "speak" — only advisory_ok means grounded expression
-        judge_decision = str(judge_result.get("decision") or "")
-        judge_verdict_class = str(judge_result.get("verdict_class") or "")
         if judge_decision != "advisory_ok":
             return {
+                "status": "blocked",
                 "spontaneous_expression_evaluated": True,
                 "spontaneous_decision": "judge_blocked",
                 "spontaneous_sent": False,
+                "actual_send": False,
                 "spontaneous_reason": f"judge_decision_{judge_decision}_class_{judge_verdict_class}",
+                "spontaneous_judge_decision": judge_decision,
+                "spontaneous_judge_verdict_class": judge_verdict_class,
             }
 
         # Gate 3: Rate limit check — ≤5 owner-send deliveries in past 60 min
@@ -653,15 +660,29 @@ class CognitiveLoopRunner:
         deliveries = gate.read_delivery_records()
         if not under_speak_limit(deliveries):
             return {
+                "status": "blocked",
                 "spontaneous_expression_evaluated": True,
                 "spontaneous_decision": "rate_limited",
                 "spontaneous_sent": False,
+                "actual_send": False,
                 "spontaneous_reason": "rate_limit_exceeded_5_per_hour",
                 "spontaneous_judge_decision": judge_decision,
                 "spontaneous_judge_verdict_class": judge_verdict_class,
             }
 
-        # All gates passed: deliver to owner via resolved channel with spontaneous_owner tier
+        # All gates passed: deliver to owner via resolved channel with spontaneous_owner tier.
+        # ExecutionGate envelope: delivery is automatic but bounded by judge + rate limit
+        # gates already checked above. Per P1 invariant, no human approval gate.
+        permit = start_execution_gate_envelope(
+            self.store,
+            lane_id="spontaneous_expression_delivery",
+            trigger_surface="cognitive_loop",
+            risk_class="automatic_owner_speech",
+            human_approval_required=False,
+            why_no_human_approval="P1: speech has no human approval gate; bounded by judge verdict + rate limit (≤5/hour)",
+            scope={"component": "cognitive_loop.spontaneous_expression", "operation": "deliver_to_owner"},
+            boundary=dict(BOUNDARIES),
+        )
         owner_channel = gate._resolve_owner_channel()
         delivery_decision = gate.evaluate_expression_draft(
             draft,
@@ -669,12 +690,15 @@ class CognitiveLoopRunner:
             delivery_tier="spontaneous_owner",
         )
         return {
+            "status": "ok",
             "spontaneous_expression_evaluated": True,
             "spontaneous_decision": delivery_decision.get("decision", "unknown"),
-            "spontaneous_sent": bool(delivery_decision.get("actual_send") is True),
+            "spontaneous_sent": bool(delivery_decision.get("actual_send")),
+            "actual_send": bool(delivery_decision.get("actual_send") is True),
             "spontaneous_delivery_id": delivery_decision.get("delivery_id", ""),
             "spontaneous_delivery_tier": "spontaneous_owner",
-            "spontaneous_channel": owner_channel,
+            "spontaneous_channel": delivery_decision.get("channel", owner_channel),
+            "execution_gate_envelope_id": str(permit.get("execution_gate_envelope_id") or ""),
         }
 
     def _self_evolution(self, context: dict[str, Any]) -> dict[str, Any]:
@@ -974,7 +998,7 @@ class CognitiveLoopRunner:
 
 def _step_status(result: dict[str, Any]) -> str:
     status = str(result.get("status", "") or "").lower()
-    if status in {"ok", "warning", "error", "deferred", "skipped", "skipped_dependency_failed"}:
+    if status in {"ok", "warning", "error", "deferred", "skipped", "skipped_dependency_failed", "blocked"}:
         return "warning" if status == "deferred" else status
     if result.get("output") == "[SILENT]" or result.get("reason"):
         return "warning"

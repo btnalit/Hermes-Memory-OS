@@ -5780,33 +5780,47 @@ def expression_artifact_summary():
         report_wandering_result_count = 0
         steps = report.get("steps") if isinstance(report.get("steps"), list) else []
         for step in steps:
-            if not isinstance(step, dict) or step.get("step") != "wandering_mind":
+            if not isinstance(step, dict):
                 continue
+            step_name = str(step.get("step") or "")
             result = step.get("result") if isinstance(step.get("result"), dict) else {}
-            wandering_result_count += 1
-            report_wandering_result_count += 1
-            if result.get("would_send") is True:
-                wandering_would_send_result_count += 1
-                if not isinstance(result.get("speak_gate_decision"), dict):
-                    speak_gate_missing_evaluation_count += 1
-                    report_speak_gate_missing += 1
-            if result.get("output") == "[SILENT]" or (result.get("would_send") is False and result.get("reason")):
-                wandering_silent_count += 1
-            if result.get("expression_draft_created") is True or isinstance(result.get("expression_draft"), dict):
-                expression_draft_created_count += 1
-            elif result.get("expression_draft_skipped") is True:
-                expression_draft_skipped_count += 1
-            elif result.get("output") not in {None, ""}:
-                expression_draft_missing_count += 1
-                report_expression_missing += 1
-            decision = result.get("speak_gate_decision") if isinstance(result.get("speak_gate_decision"), dict) else {}
-            if decision:
-                speak_gate_evaluated_count += 1
-                report_speak_gate_evaluated += 1
-                decision_name = str(decision.get("decision") or "unknown")
-                speak_gate_decision_distribution[decision_name] = speak_gate_decision_distribution.get(decision_name, 0) + 1
-            elif result.get("speak_gate_skipped") is True:
-                speak_gate_skipped_count += 1
+
+            # V1: wandering_mind handles expression_draft generation
+            if step_name == "wandering_mind":
+                wandering_result_count += 1
+                report_wandering_result_count += 1
+                if result.get("would_send") is True:
+                    wandering_would_send_result_count += 1
+                    if not isinstance(result.get("speak_gate_decision"), dict):
+                        speak_gate_missing_evaluation_count += 1
+                        report_speak_gate_missing += 1
+                if result.get("output") == "[SILENT]" or (result.get("would_send") is False and result.get("reason")):
+                    wandering_silent_count += 1
+                if result.get("expression_draft_created") is True or isinstance(result.get("expression_draft"), dict):
+                    expression_draft_created_count += 1
+                elif result.get("expression_draft_skipped") is True:
+                    expression_draft_skipped_count += 1
+                elif result.get("output") not in {None, ""}:
+                    expression_draft_missing_count += 1
+                    report_expression_missing += 1
+
+            # V1: spontaneous_expression handles speak_gate evaluation and delivery
+            elif step_name == "spontaneous_expression":
+                spontaneous_decision = result.get("spontaneous_decision")
+                if spontaneous_decision is not None:
+                    if spontaneous_decision == "delivered":
+                        speak_gate_evaluated_count += 1
+                        report_speak_gate_evaluated += 1
+                        speak_gate_decision_distribution["delivered"] = speak_gate_decision_distribution.get("delivered", 0) + 1
+                    elif spontaneous_decision in ("no_draft", "judge_blocked", "rate_limited", "send_blocked"):
+                        speak_gate_skipped_count += 1
+                        decision_name = str(spontaneous_decision)
+                        speak_gate_decision_distribution[decision_name] = speak_gate_decision_distribution.get(decision_name, 0) + 1
+                    else:
+                        speak_gate_evaluated_count += 1
+                        report_speak_gate_evaluated += 1
+                        decision_name = str(spontaneous_decision)
+                        speak_gate_decision_distribution[decision_name] = speak_gate_decision_distribution.get(decision_name, 0) + 1
         if report_wandering_result_count:
             latest_expression_draft_missing_count = report_expression_missing
             latest_speak_gate_missing_evaluation_count = report_speak_gate_missing

@@ -28,7 +28,7 @@ def wandering_mind_manifest() -> dict[str, Any]:
             "commands": ["status", "doctor", "run-once"],
             "schedules": ["weekly_wandering"],  # V1: fallback only; primary trigger is event-driven via cognitive_loop
             "reads": ["memory_os.events.summary", "local_artifact.household_digest"],
-            "writes": ["local_artifact.wandering_output", "module_bus.would_send"],
+            "writes": ["local_artifact.wandering_output"],  # V1: would_send removed; delivery via cognitive_loop._spontaneous_expression
         },
         "defaults": {
             "enabled": False,
@@ -248,24 +248,6 @@ class WanderingMindModule:
         }
         record["output_ref"] = f"local://wandering_mind/{record['id']}"
         _append_jsonl(self.outputs_path, record)
-        return record
-
-    def _record_would_send(self, *, payload_ref: str) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
-        record = {
-            "schema_version": "hermes.delivery_would_send.v0",
-            "id": f"wsend_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
-            "ts": now.isoformat(),
-            "created_at": now.isoformat(),
-            "profile": self.profile,
-            "module": "wandering_mind",
-            "mode": "would_send",
-            "actual_send": False,
-            "channel": "origin",
-            "payload_ref": payload_ref,
-            "reason": "wandering_mind_no_send",
-        }
-        _append_jsonl(self.would_send_path, record)
         return record
 
     def _right_brain_signal(self, *, store: MemoryOSStore, events: list[Any]) -> dict[str, Any]:
