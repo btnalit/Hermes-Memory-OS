@@ -87,7 +87,8 @@ def test_integrated_wandering_mind_trace_routes_expression_through_speak_gate(tm
     )
     silent_delivery = speak_gate.evaluate_wandering_output("[SILENT]", channel="origin")
 
-    assert wandering_result["would_send"] is True
+    # V1: wandering_mind no longer records would_send; delivery is handled by cognitive_loop._spontaneous_expression
+    assert wandering_result["would_send"] is False
     assert wandering_result["actual_send"] is False
     assert delivery["decision"] == "would_send"
     assert delivery["payload_ref"] == wandering_result["output_ref"]

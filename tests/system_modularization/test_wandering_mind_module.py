@@ -72,14 +72,12 @@ def test_wandering_mind_records_would_send_without_real_delivery(tmp_path):
 
     result = module.run_once(store=store, min_events=1)
 
-    assert result["would_send"] is True
+    # V1: wandering_mind no longer records would_send; delivery is handled by cognitive_loop._spontaneous_expression
+    assert result["would_send"] is False
     assert result["actual_send"] is False
     assert result["output"] != "[SILENT]"
     records = module.read_would_send_records()
-    assert len(records) == 1
-    assert records[0]["payload_ref"] == result["output_ref"]
-    assert records[0]["created_at"] == records[0]["ts"]
-    assert "body" not in records[0]
+    assert len(records) == 0
 
 
 def test_wandering_mind_skips_unchanged_signal_until_owner_reaction_changes(tmp_path):
@@ -91,11 +89,12 @@ def test_wandering_mind_skips_unchanged_signal_until_owner_reaction_changes(tmp_
     first = module.run_once(store=store, min_events=1)
     second = module.run_once(store=store, min_events=1)
 
-    assert first["would_send"] is True
+    # V1: wandering_mind no longer records would_send; delivery is handled by cognitive_loop._spontaneous_expression
+    assert first["would_send"] is False
     assert second["status"] == "skipped"
     assert second["cadence_skipped"] is True
     assert second["reason"] == "unchanged_right_brain_signal"
-    assert len(module.read_would_send_records()) == 1
+    assert len(module.read_would_send_records()) == 0
 
     feedback_path = store.roots.memory_os_root / "system" / "expression_feedback_ledger.jsonl"
     feedback_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,9 +115,10 @@ def test_wandering_mind_skips_unchanged_signal_until_owner_reaction_changes(tmp_
 
     after_reaction = module.run_once(store=store, min_events=1)
 
-    assert after_reaction["would_send"] is True
+    # V1: wandering_mind no longer records would_send
+    assert after_reaction["would_send"] is False
     assert after_reaction["signal_summary"]["feedback_count"] == 1
-    assert len(module.read_would_send_records()) == 2
+    assert len(module.read_would_send_records()) == 0
     status = module.status()
     assert status["generated_count"] == 2
     assert status["skipped_count"] == 1
