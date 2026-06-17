@@ -48,6 +48,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "ground_truth_miner",
         "crystallized_revalidator",
         "provisional_sweep",
+        "knob_ab_eval",
         "override_sweep",
         "migration_controller",
         "abstraction_distillation",
