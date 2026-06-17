@@ -162,15 +162,21 @@ def register_override(
             f"Knob '{name}' is meta=True — self-tuning of governance knobs is blocked"
         )
 
-    # Boolean knobs: validate against allowed list
+    # Allowed-list knobs: validate against allowed list
     allowed = spec.get("allowed")
     if allowed is not None:
-        # Use type-strict check: Python treats True==1 and False==0,
-        # so "value not in allowed" would incorrectly accept int 1 for [True, False].
-        if not (type(value) in (bool,) and value in allowed):
-            raise ValueError(
-                f"Value {value!r} for knob '{name}' is not in allowed {allowed}"
-            )
+        # When the allowed values are bool, use a type-strict check to prevent
+        # Python's True==1 / False==0 from accepting int 1 for [True, False].
+        if allowed and isinstance(allowed[0], bool):
+            if not (type(value) in (bool,) and value in allowed):
+                raise ValueError(
+                    f"Value {value!r} for knob '{name}' is not in allowed {allowed}"
+                )
+        else:
+            if value not in allowed:
+                raise ValueError(
+                    f"Value {value!r} for knob '{name}' is not in allowed {allowed}"
+                )
     else:
         # Threshold knobs: validate against bounds range
         bounds = spec.get("bounds")
@@ -279,6 +285,7 @@ def revert_override(
         "override_value": original.get("prior_value"),  # restored
         "prior_value": original.get("override_value"),   # what was reverted
         "bounds": original.get("bounds"),
+        "allowed": original.get("allowed"),
         "provisional": False,
         "expires_at": "",
         "proposed_by": "override_sweep",
@@ -335,6 +342,7 @@ def confirm_override(
         "override_value": original.get("override_value"),
         "prior_value": original.get("prior_value"),
         "bounds": original.get("bounds"),
+        "allowed": original.get("allowed"),
         "provisional": False,
         "expires_at": "",
         "proposed_by": "knob_ab_eval",
