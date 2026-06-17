@@ -292,7 +292,6 @@ class CognitiveLoopRunner:
     def _wandering_mind(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.cognition.wandering_mind import WanderingMindModule
         from plugins.modules.expression.expression_draft import ExpressionDraftModule
-        from plugins.modules.expression.speak_gate import SpeakGateModule
 
         result = WanderingMindModule(self.hermes_home, profile=self.profile).run_once(
             store=self.store,
@@ -303,8 +302,6 @@ class CognitiveLoopRunner:
                 **result,
                 "expression_draft_skipped": True,
                 "expression_draft_skip_reason": str(result.get("reason") or "wandering_mind_skipped"),
-                "speak_gate_skipped": True,
-                "speak_gate_skip_reason": str(result.get("reason") or "wandering_mind_skipped"),
             }
         if "output" not in result:
             return result
@@ -321,24 +318,12 @@ class CognitiveLoopRunner:
             risk_flags=[],
             silence_reason=str(result.get("reason") or "") if output_text.strip() == "[SILENT]" else None,
         )
-        speak_gate = SpeakGateModule(
-            self.hermes_home,
-            profile=self.profile,
-            delivery_mode="owner-send",
-            store=self.store,
-        )
-        decision = speak_gate.evaluate_expression_draft(
-            draft,
-            channel="origin",
-            delivery_tier="test_host_observation",
-        )
+        # NOTE: V1 — speak_gate delivery is deferred to _spontaneous_expression step,
+        # which runs after grounded_expression_judge and applies judge verdict + rate limit gates.
         return {
             **result,
             "expression_draft_created": True,
             "expression_draft": _bounded(draft),
-            "speak_gate_evaluated": True,
-            "speak_gate_decision": decision,
-            "speak_gate_actual_send": bool(decision.get("actual_send") is True),
         }
 
     def _ops_gate(self, context: dict[str, Any]) -> dict[str, Any]:
