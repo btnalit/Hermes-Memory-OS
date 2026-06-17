@@ -365,6 +365,112 @@ def _cluster_and_promote(
             "keywords": matched_keywords,
         })
 
+    # ── Durable-fact single-item bypass ─────────────────────────────────
+    # Candidates marked durable_fact=True by the fact_judge lane get a
+    # single-item channel through resolver verdict, bypassing the size≥2
+    # cluster gate. Only applies to singleton candidates not already
+    # processed by the cluster loop above.
+    durable_verdicts: dict[str, bool] = {}
+    try:
+        from plugins.modules.governance.fact_judge import read_fact_judge_verdicts
+        durable_verdicts = read_fact_judge_verdicts(store)
+    except Exception:
+        pass  # Fail-open: if verdicts can't be read, no bypass (safe default)
+
+    if durable_verdicts:
+        for c in candidates_for_promote:
+            if c.candidate_id in processed_ids:
+                continue
+            if not durable_verdicts.get(c.candidate_id):
+                continue
+
+            # Index-based near-duplicate dedup (fail-open)
+            dedup_hit = _check_index_dedup(store, c)
+            if dedup_hit is not None:
+                append_candidate_triage(
+                    store,
+                    candidate_id=c.candidate_id,
+                    action="demote",
+                    target_state="demoted",
+                    reason=f"dedup_skip: similar to crystallized {dedup_hit}",
+                    cluster_key="",
+                    cluster_size=1,
+                    execution_gate_envelope_id=envelope_id,
+                    now=_now,
+                )
+                processed_ids.add(c.candidate_id)
+                continue
+
+            # ── Resolver routing (reuses W1 path, same as cluster path) ──
+            reason = "durable_fact singleton bypass (judge marked durable_fact=True)"
+            confidence_route = _lookup_confidence_route(c, store)
+            provisional_promotion = _lookup_provisional_promotion(c, store)
+            cascade_policy = _latest_cascade_policy(store)
+
+            verdict = _resolver_verdict(
+                c,
+                store=store,
+                confidence_route=confidence_route,
+                provisional_promotion=provisional_promotion,
+                cascade_policy=cascade_policy,
+            )
+            if verdict.get("approve"):
+                target_state = "resolver_approved"
+                from plugins.memory.memory_os.execution_gate import (
+                    start_resolver_auto_approve_envelope,
+                    complete_execution_gate_envelope,
+                    RESOLVER_AUTO_APPROVE_LANE,
+                )
+                from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+                from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+                from datetime import timedelta
+
+                crystallized_service = CrystallizedMemoryService(store)
+                envelope = start_resolver_auto_approve_envelope(
+                    store,
+                    candidate_id=c.candidate_id,
+                    sensitivity=c.sensitivity,
+                    has_identity_signal=False,
+                    bridge_state=c.bridge_state,
+                )
+                decision = ApprovalDecision(
+                    candidate_id=c.candidate_id,
+                    purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                    reviewer="resolver",
+                    reviewed_at=_now.isoformat(),
+                    note=verdict.get("reason", ""),
+                    source_state="resolver_approved",
+                    provisional=True,
+                    expires_at=(_now + timedelta(days=7)).isoformat(),
+                    recurrence=0,
+                )
+                crystallized_service.write_approved_record(
+                    c, decision, file_name="owner_approved.md",
+                )
+                complete_execution_gate_envelope(
+                    store,
+                    envelope_id=envelope["execution_gate_envelope_id"],
+                    lane_id=RESOLVER_AUTO_APPROVE_LANE,
+                    execution_status="completed",
+                    postcheck={"crystallized_write": "success"},
+                )
+            else:
+                target_state = "owner_eligible"
+
+            append_candidate_triage(
+                store,
+                candidate_id=c.candidate_id,
+                action="promote",
+                target_state=target_state,
+                reason=reason,
+                cluster_key="",
+                cluster_size=1,
+                execution_gate_envelope_id=envelope_id,
+                now=_now,
+            )
+            processed_ids.add(c.candidate_id)
+            promoted_count += 1
+
     return {"promoted_count": promoted_count, "clusters": cluster_summaries}
 
 

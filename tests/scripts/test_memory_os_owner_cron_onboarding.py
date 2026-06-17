@@ -147,6 +147,8 @@ def _home_with_helpers(
         "memory_os_cron_memory_sources_feedback_request_gate.py",
         "memory_os_candidate_aggregation_lane.py",
         "memory_os_cron_candidate_aggregation_gate.py",
+        "memory_os_fact_judge_lane.py",
+        "memory_os_cron_fact_judge_gate.py",
         "memory_os_index_sync.py",
         "memory_os_cron_index_sync_gate.py",
     ):
@@ -300,7 +302,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 9
+    assert len(report["operational_cron_jobs"]) == 10
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -312,6 +314,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
         "memory-os-candidate-aggregation",
+        "memory-os-fact-judge",
         "memory-os-index-sync",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "telegram"

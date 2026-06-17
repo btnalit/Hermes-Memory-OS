@@ -43,6 +43,8 @@ SOURCE_CANDIDATE_AGGREGATION_LANE = REPO_ROOT / "scripts" / "memory_os_candidate
 SOURCE_CANDIDATE_AGGREGATION_GATE = REPO_ROOT / "scripts" / "memory_os_cron_candidate_aggregation_gate.py"
 SOURCE_INDEX_SYNC = REPO_ROOT / "scripts" / "memory_os_index_sync.py"
 SOURCE_INDEX_SYNC_GATE = REPO_ROOT / "scripts" / "memory_os_cron_index_sync_gate.py"
+SOURCE_FACT_JUDGE_LANE = REPO_ROOT / "scripts" / "memory_os_fact_judge_lane.py"
+SOURCE_FACT_JUDGE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_fact_judge_gate.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -856,6 +858,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "execution_report_helper": SOURCE_EXECUTION_REPORT_HELPER,
         "candidate_aggregation_lane": SOURCE_CANDIDATE_AGGREGATION_LANE,
         "candidate_aggregation_gate": SOURCE_CANDIDATE_AGGREGATION_GATE,
+        "fact_judge_lane": SOURCE_FACT_JUDGE_LANE,
+        "fact_judge_gate": SOURCE_FACT_JUDGE_GATE,
         "index_sync": SOURCE_INDEX_SYNC,
         "index_sync_gate": SOURCE_INDEX_SYNC_GATE,
     }

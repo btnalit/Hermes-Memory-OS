@@ -97,6 +97,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/modules/governance/confidence_router.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/governance/crystallized_revalidator.py::CrystallizedRevalidatorModule.evaluate::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/crystallized_revalidator.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/fact_judge.py::_append_verdict::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/governance/ground_truth_miner.py::GroundTruthMinerModule.mine::append_jsonl_call::self.labels_path": "reversible_labels_manual_fallback",
     "plugins/modules/governance/ground_truth_miner.py::GroundTruthMinerModule.mine::append_jsonl_call::self.runs_path": "reversible_labels_manual_fallback",
     "plugins/modules/governance/ground_truth_miner.py::GroundTruthMinerModule.retract_label::append_jsonl_call::self.labels_path": "reversible_labels_owner_retraction",

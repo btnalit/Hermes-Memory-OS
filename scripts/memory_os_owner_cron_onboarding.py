@@ -27,6 +27,7 @@ SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
 ACTIVE_CLOSURE_CRON_KEYS = frozenset({"owner_review_digest", "proposal_followups_opsgate", "index_sync"})
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
 DEFAULT_RIGHT_BRAIN_SCHEDULE = "30 4 * * 0"
+DEFAULT_FACT_JUDGE_SCHEDULE = "0 */4 * * *"
 EXPRESSION_FEEDBACK_AGENT_PROMPT = (
     "你正在处理 Memory-OS 右脑表达反馈请求。Script Output 为空时只回复 [SILENT]。"
     "如果非空，请用中文自然询问 owner，并保留每个 memory feedback oa_... token 命令。"
@@ -72,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expression-feedback-schedule", default="0 5 * * 0")
     parser.add_argument("--memory-sources-feedback-schedule", default="30 10 * * *")
     parser.add_argument("--candidate-aggregation-schedule", default="0 */6 * * *")
+    parser.add_argument("--fact-judge-schedule", default=DEFAULT_FACT_JUDGE_SCHEDULE)
     parser.add_argument("--index-sync-schedule", default="*/30 * * * *")
     parser.add_argument(
         "--cron-profile",
