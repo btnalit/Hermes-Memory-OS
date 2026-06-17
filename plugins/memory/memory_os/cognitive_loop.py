@@ -604,6 +604,78 @@ class CognitiveLoopRunner:
         context["grounded_expression_judge_result"] = result
         return result
 
+    def _spontaneous_expression(self, context: dict[str, Any]) -> dict[str, Any]:
+        """V1: Event-driven spontaneous owner expression with judge gate + rate limit.
+
+        Runs after _grounded_expression_judge. Reads the wandering_mind draft and
+        judge verdict, then applies three deterministic gates before delivering:
+          1. Draft must exist (wandering_mind generated output)
+          2. Judge must say "advisory_ok" (expression is grounded, not confabulation)
+          3. Rate limit must allow (≤5 owner-send deliveries in past 60 min)
+        If all gates pass, delivers via speak_gate with delivery_tier="spontaneous_owner".
+        Otherwise records the block reason silently (no send, audit trail in result).
+        """
+        from plugins.modules.expression.speak_gate import SpeakGateModule
+        from plugins.modules.expression.speak_rate_limit import under_speak_limit
+
+        wandering = context.get("wandering_mind") if isinstance(context.get("wandering_mind"), dict) else {}
+        judge_result = context.get("grounded_expression_judge_result") if isinstance(context.get("grounded_expression_judge_result"), dict) else {}
+        draft = wandering.get("expression_draft") if isinstance(wandering.get("expression_draft"), dict) else {}
+
+        # Gate 1: Must have a draft from wandering_mind
+        if not draft or not draft.get("draft_id"):
+            return {
+                "spontaneous_expression_evaluated": True,
+                "spontaneous_decision": "no_draft",
+                "spontaneous_sent": False,
+                "spontaneous_reason": "no_expression_draft_available",
+            }
+
+        # Gate 2: Judge must say "speak" — only advisory_ok means grounded expression
+        judge_decision = str(judge_result.get("decision") or "")
+        judge_verdict_class = str(judge_result.get("verdict_class") or "")
+        if judge_decision != "advisory_ok":
+            return {
+                "spontaneous_expression_evaluated": True,
+                "spontaneous_decision": "judge_blocked",
+                "spontaneous_sent": False,
+                "spontaneous_reason": f"judge_decision_{judge_decision}_class_{judge_verdict_class}",
+            }
+
+        # Gate 3: Rate limit check — ≤5 owner-send deliveries in past 60 min
+        gate = SpeakGateModule(
+            self.hermes_home,
+            profile=self.profile,
+            delivery_mode="owner-send",
+            store=self.store,
+        )
+        deliveries = gate.read_delivery_records()
+        if not under_speak_limit(deliveries):
+            return {
+                "spontaneous_expression_evaluated": True,
+                "spontaneous_decision": "rate_limited",
+                "spontaneous_sent": False,
+                "spontaneous_reason": "rate_limit_exceeded_5_per_hour",
+                "spontaneous_judge_decision": judge_decision,
+                "spontaneous_judge_verdict_class": judge_verdict_class,
+            }
+
+        # All gates passed: deliver to owner via resolved channel with spontaneous_owner tier
+        owner_channel = gate._resolve_owner_channel()
+        delivery_decision = gate.evaluate_expression_draft(
+            draft,
+            channel=owner_channel,
+            delivery_tier="spontaneous_owner",
+        )
+        return {
+            "spontaneous_expression_evaluated": True,
+            "spontaneous_decision": delivery_decision.get("decision", "unknown"),
+            "spontaneous_sent": bool(delivery_decision.get("actual_send") is True),
+            "spontaneous_delivery_id": delivery_decision.get("delivery_id", ""),
+            "spontaneous_delivery_tier": "spontaneous_owner",
+            "spontaneous_channel": owner_channel,
+        }
+
     def _self_evolution(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.evidence.scoring import EvidenceScoringModule
         from plugins.modules.governance.ops_gate import OpsGateModule
