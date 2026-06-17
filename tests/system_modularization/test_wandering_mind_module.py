@@ -124,6 +124,53 @@ def test_wandering_mind_skips_unchanged_signal_until_owner_reaction_changes(tmp_
     assert status["skipped_count"] == 1
 
 
+def test_self_activity_excluded_from_right_brain_eligible():
+    """V2.1: Events with safe_ref.source_class='self_activity' are excluded from expression triggers."""
+    from plugins.modules.cognition.wandering_mind import _right_brain_eligible_events
+    from plugins.memory.memory_os.schema import EventEnvelope
+
+    now = "2026-06-17T12:00:00Z"
+    normal_event = EventEnvelope.from_dict({
+        "schema_version": "memory-os.event.v0",
+        "id": "evt_normal",
+        "ts": now,
+        "profile": "main",
+        "source": "telegram",
+        "kind": "conversation_turn",
+        "summary": "normal chat",
+        "safe_ref": {"source_class": "foreground"},
+        "tags": [],
+        "sensitivity": "private",
+        "body_policy": "summary_only",
+        "hashes": {},
+        "promotion_state": "raw",
+    })
+    # Use a source/kind that would normally be eligible (telegram/conversation_turn)
+    # so the only thing excluding it is the source_class == "self_activity" gate
+    self_activity_event = EventEnvelope.from_dict({
+        "schema_version": "memory-os.event.v0",
+        "id": "evt_self",
+        "ts": now,
+        "profile": "main",
+        "source": "telegram",
+        "kind": "conversation_turn",
+        "summary": "I said something",
+        "safe_ref": {"source_class": "self_activity", "self_activity_subtype": "speech"},
+        "tags": [],
+        "sensitivity": "private",
+        "body_policy": "summary_only",
+        "hashes": {},
+        "promotion_state": "raw",
+    })
+
+    eligible = _right_brain_eligible_events([normal_event, self_activity_event])
+    eligible_ids = {e.id for e in eligible}
+    assert "evt_normal" in eligible_ids, "normal events must be eligible"
+    assert "evt_self" not in eligible_ids, (
+        "self_activity events must be EXCLUDED from expression triggers"
+    )
+
+
 def test_wandering_mind_does_not_touch_sannai_shape_fixture(tmp_path):
     fixture = build_sannai_multi_root_fixture(tmp_path / "fixture")
     soul = fixture.hermes_home / "SOUL.md"

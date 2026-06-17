@@ -308,6 +308,8 @@ def _right_brain_eligible_events(events: list[Any]) -> list[Any]:
         kind = str(getattr(event, "kind", "") or "").lower()
         safe_ref = getattr(event, "safe_ref", {}) or {}
         source_class = str(safe_ref.get("source_class") or safe_ref.get("class") or "").lower()
+        if source_class == "self_activity":
+            continue  # V2a: self_activity excluded from expression triggers
         if source in {"memory_os", "governance_feedback", "self_evolution", "cognitive_loop"}:
             continue
         if kind in {"governance_event", "proposal_event", "self_evolution_report"}:
