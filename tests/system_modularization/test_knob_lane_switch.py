@@ -11,7 +11,6 @@ from plugins.memory.memory_os.knob_overrides import (
     register_override,
     resolve_knob,
     revert_override,
-    confirm_override,
     list_active_overrides,
     knob_override_auto_approvable,
 )
