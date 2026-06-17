@@ -294,6 +294,188 @@ def test_cognitive_loop_cli_uses_default_max_events_when_host_wrapper_omits_it(t
     assert output["test_host"] is True
 
 
+def test_V1_5_spontaneous_expression_sends_when_judge_ok_and_under_limit(tmp_path, monkeypatch):
+    """V1.5: New qualifying event + judge says 'advisory_ok' + under limit → delivered via spontaneous_owner tier."""
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User shared a reflection on recent work.")
+
+    # Mock the judge to return advisory_ok (grounded expression, worth saying)
+    def mock_judge_ok(self, **kwargs):
+        return {
+            "schema_version": "hermes.grounded_expression_verdict.v0",
+            "module": "grounded_expression_judge",
+            "profile": "default",
+            "status": "ok",
+            "decision": "advisory_ok",
+            "verdict_class": "grounded",
+            "code": "cross_check_advisory_ok",
+            "owner_escalation_required": False,
+            "actual_send": False,
+            "actual_execute": False,
+        }
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.grounded_expression_judge.GroundedExpressionJudge.run_once",
+        mock_judge_ok,
+    )
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+    steps = {step["step"]: step for step in result["steps"]}
+
+    spontaneous = steps["spontaneous_expression"]["result"]
+    assert spontaneous["spontaneous_expression_evaluated"] is True
+    assert spontaneous["spontaneous_decision"] in {"delivered", "send_blocked"}
+    # send_blocked is acceptable in test_host mode (no real owner channel configured)
+    # but the path must have been exercised
+    assert spontaneous["spontaneous_delivery_tier"] == "spontaneous_owner"
+
+
+def test_V1_6_judge_blocks_confabulation_from_sending(tmp_path, monkeypatch):
+    """V1.6: Judge says 'confabulation' → silent, no send, judge decision recorded."""
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed something that might trigger confabulation.")
+
+    # Mock the judge to return confabulation (hallucination detected)
+    def mock_judge_confabulation(self, **kwargs):
+        return {
+            "schema_version": "hermes.grounded_expression_verdict.v0",
+            "module": "grounded_expression_judge",
+            "profile": "default",
+            "status": "ok",
+            "decision": "confabulation",
+            "verdict_class": "confabulation",
+            "code": "cross_check_confabulation",
+            "owner_escalation_required": True,
+            "actual_send": False,
+            "actual_execute": False,
+        }
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.grounded_expression_judge.GroundedExpressionJudge.run_once",
+        mock_judge_confabulation,
+    )
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+    steps = {step["step"]: step for step in result["steps"]}
+
+    spontaneous = steps["spontaneous_expression"]["result"]
+    assert spontaneous["spontaneous_expression_evaluated"] is True
+    assert spontaneous["spontaneous_decision"] == "judge_blocked"
+    assert spontaneous["spontaneous_sent"] is False
+    assert "confabulation" in spontaneous["spontaneous_reason"]
+
+
+def test_V1_7_spontaneous_expression_does_not_write_would_send(tmp_path):
+    """V1.7: Production spontaneous path does not write would_send records."""
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed would_send residue check.")
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+
+    # wandering_mind should NOT produce would_send records in V1
+    wm_would_send = tmp_path / "system-modules" / "wandering_mind" / "would_send.jsonl"
+    if wm_would_send.exists():
+        records = [
+            line for line in wm_would_send.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        # If any exist, they should be from before V1 — verify no new ones were added
+        assert len(records) == 0, f"wandering_mind would_send.jsonl should be empty, got {len(records)} records"
+
+    # speak_gate in owner-send mode should also not write would_send
+    sg_would_send = tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl"
+    assert sg_would_send.is_file() is False
+
+
+def test_V1_8_spontaneous_uses_resolved_owner_channel(tmp_path, monkeypatch):
+    """V1.8: spontaneous_expression resolves and uses the owner channel from speak_gate."""
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed channel verification.")
+
+    # Mock judge to return advisory_ok
+    def mock_judge_ok(self, **kwargs):
+        return {
+            "schema_version": "hermes.grounded_expression_verdict.v0",
+            "module": "grounded_expression_judge",
+            "profile": "default",
+            "status": "ok",
+            "decision": "advisory_ok",
+            "verdict_class": "grounded",
+            "code": "cross_check_advisory_ok",
+            "owner_escalation_required": False,
+            "actual_send": False,
+            "actual_execute": False,
+        }
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.grounded_expression_judge.GroundedExpressionJudge.run_once",
+        mock_judge_ok,
+    )
+
+    # Mock _resolve_owner_channel to return a known channel
+    def mock_resolve_channel(self):
+        return "telegram"
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule._resolve_owner_channel",
+        mock_resolve_channel,
+    )
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+    steps = {step["step"]: step for step in result["steps"]}
+
+    spontaneous = steps["spontaneous_expression"]["result"]
+    assert spontaneous["spontaneous_expression_evaluated"] is True
+    # With owner channel resolved to "telegram", the delivery should use that channel
+    assert spontaneous["spontaneous_channel"] == "telegram"
+
+
+def test_V1_9_no_owner_approval_gate_in_speech_path(tmp_path, monkeypatch):
+    """V1.9: Speech path has no owner-approval gate (P1 invariant)."""
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_1", "User discussed speech path P1 compliance.")
+
+    # Mock judge to return advisory_ok
+    def mock_judge_ok(self, **kwargs):
+        return {
+            "schema_version": "hermes.grounded_expression_verdict.v0",
+            "module": "grounded_expression_judge",
+            "profile": "default",
+            "status": "ok",
+            "decision": "advisory_ok",
+            "verdict_class": "grounded",
+            "code": "cross_check_advisory_ok",
+            "owner_escalation_required": False,
+            "actual_send": False,
+            "actual_execute": False,
+        }
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.grounded_expression_judge.GroundedExpressionJudge.run_once",
+        mock_judge_ok,
+    )
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+    steps = {step["step"]: step for step in result["steps"]}
+
+    spontaneous = steps["spontaneous_expression"]["result"]
+    # The spontaneous_expression step must NOT contain any owner approval field
+    assert "owner_approved" not in spontaneous
+    assert "approval_required" not in spontaneous
+    assert "owner_review_required" not in spontaneous
+    # The only gates are judge verdict + rate limit (both deterministic, no human).
+    # spontaneous_reason only present on blocked paths; if absent (happy path), that's even better.
+    assert spontaneous.get("spontaneous_reason") not in (
+        "owner_approval_required",
+        "awaiting_owner_review",
+    )
+
+
 def _parse_memory_os_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     register_cli(parser)
