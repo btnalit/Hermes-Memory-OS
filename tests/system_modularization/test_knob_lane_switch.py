@@ -242,3 +242,79 @@ def test_threshold_knob_record_stores_bounds_not_allowed(store_root):
     )
     assert record["bounds"] == [2, 5]
     assert record["allowed"] is None
+
+
+# ── A3.6: Runtime gate integration ────────────────────────────────────────
+
+def test_resolve_knob_injects_into_prefetch_config():
+    """A3.6: resolve_knob result injected into low_clue_recall_config before build_prefetch.
+
+    Verifies the injection pattern: read config default → resolve knob →
+    inject resolved value into config dict. The resolved dict is then
+    passed to build_prefetch, where normalize_low_clue_recall_config merges
+    it and _recall_clarification_guard_lines reads bool(config.get('enabled')).
+    """
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
+
+    # Simulate the pattern that prefetch() will use:
+    #   1. Start with the config dict
+    #   2. Extract the raw enabled value as default
+    #   3. Resolve knob — this may override the default
+    #   4. Inject resolved value back into config dict
+    #   5. Pass to build_prefetch / normalize_low_clue_recall_config
+
+    config = {"enabled": False, "candidate_limit": 4}
+
+    # Pattern A: config default is False, no override → remains False
+    cfg_enabled_a = bool(config.get("enabled"))
+    resolved_a = resolve_knob("lane_low_clue_recall_enabled", default=cfg_enabled_a)
+    config_a = dict(config)
+    config_a["enabled"] = resolved_a
+    assert config_a["enabled"] is False  # default preserved
+
+    # Pattern B: config default is True, no override → remains True
+    config2 = {"enabled": True, "candidate_limit": 4}
+    cfg_enabled_b = bool(config2.get("enabled"))
+    resolved_b = resolve_knob("lane_low_clue_recall_enabled", default=cfg_enabled_b)
+    config2["enabled"] = resolved_b
+    assert config2["enabled"] is True  # config default preserved
+
+
+def test_resolve_knob_in_prefetch_with_active_override(store_root):
+    """A3.6: when an active override(True) exists, config dict gets True injected."""
+    register_override(
+        "lane_low_clue_recall_enabled", True,
+        prior=False, proposed_by="test", approved_via="test",
+        expires_at=_future_iso(), _store_root=store_root,
+    )
+
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
+
+    config = {"enabled": False, "candidate_limit": 4}
+    cfg_enabled = bool(config.get("enabled"))
+    resolved = resolve_knob(
+        "lane_low_clue_recall_enabled", default=cfg_enabled,
+        _store_root=store_root,
+    )
+    config["enabled"] = resolved
+    assert config["enabled"] is True  # override active, overrides config default
+
+
+def test_resolve_knob_override_false_overrides_config_true(store_root):
+    """A3.6: override(False) overrides config default(True) — lane forced off."""
+    register_override(
+        "lane_low_clue_recall_enabled", False,
+        prior=True, proposed_by="test", approved_via="test",
+        expires_at=_future_iso(), _store_root=store_root,
+    )
+
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
+
+    config = {"enabled": True, "candidate_limit": 4}
+    cfg_enabled = bool(config.get("enabled"))
+    resolved = resolve_knob(
+        "lane_low_clue_recall_enabled", default=cfg_enabled,
+        _store_root=store_root,
+    )
+    config["enabled"] = resolved
+    assert config["enabled"] is False  # override forces off despite config

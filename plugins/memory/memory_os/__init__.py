@@ -124,6 +124,18 @@ class MemoryOSProvider(MemoryProvider):
             return _owner_review_reply_context_block(self._last_owner_review_reply_result)
         self._refresh_current_task_anchor_from_query(query, session_id=session_id)
         substrate_recall_report = self._substrate_recall_report(query)
+        # ── A3: lane switch override resolution ─────────────────────────
+        # Resolve the low_clue_recall.enabled knob at call-time and inject
+        # the resolved value into the config dict so all downstream paths
+        # (normalize_low_clue_recall_config → _recall_clarification_guard_lines)
+        # see the governed value, not the raw config.
+        from .knob_overrides import resolve_knob as _resolve_knob
+        low_clue_raw = dict(self._config.get("low_clue_recall") or {})
+        cfg_enabled = bool(low_clue_raw.get("enabled"))
+        low_clue_raw["enabled"] = _resolve_knob(
+            "lane_low_clue_recall_enabled", default=cfg_enabled,
+        )
+        # ────────────────────────────────────────────────────────────────
         return build_prefetch(
             query,
             budget_chars=int(self._config.get("prefetch_char_budget", 2200)),
@@ -138,7 +150,7 @@ class MemoryOSProvider(MemoryProvider):
             foreground_task_only=self._foreground_task_only_prefetch,
             context_router_config=self._config.get("context_router"),
             memory_sources_config=self._config.get("memory_sources"),
-            low_clue_recall_config=self._config.get("low_clue_recall"),
+            low_clue_recall_config=low_clue_raw,
             substrate_recall_report=substrate_recall_report,
         )
 
@@ -637,6 +649,8 @@ class MemoryOSProvider(MemoryProvider):
         uses_hindsight_http_api = False
         working_count = _working_item_count(self._roots)
         candidate_count = len(read_candidate_queue(self._roots))
+        # A3: resolve knob for status report
+        from .knob_overrides import resolve_knob as _resolve_knob_status
         return {
             "schema_version": "memory-os.tool_status.v0",
             "provider": "memory_os",
@@ -665,9 +679,12 @@ class MemoryOSProvider(MemoryProvider):
             "hindsight_role": "optional_adapter_only_not_canonical",
             "uses_hindsight_http_api": uses_hindsight_http_api,
             "low_clue_recall": {
-                "enabled": bool((self._config.get("low_clue_recall") or {}).get("enabled"))
-                if isinstance(self._config.get("low_clue_recall"), dict)
-                else False,
+                "enabled": _resolve_knob_status(
+                    "lane_low_clue_recall_enabled",
+                    default=bool((self._config.get("low_clue_recall") or {}).get("enabled"))
+                    if isinstance(self._config.get("low_clue_recall"), dict)
+                    else False,
+                ),
                 "judge_availability": low_clue_judge_availability(self._config.get("low_clue_recall")),
             },
             "body_policy": "summary_only",
