@@ -122,13 +122,15 @@ automatic governance closure:
 | --- | --- | --- | --- |
 | `memory-os-owner-review-digest` | owner channel | yes | sends only approval items and real alerts to the owner |
 | `memory-os-proposal-followups-opsgate` | `local` | no | routes approved proposals through OpsGate/report-only follow-up |
+| `memory-os-index-sync` | `local` | no | keeps the SQLite search index in sync with canonical files |
 
-The full registry still contains optional cron jobs for right-brain expression,
-module cadence reporting, expression outcome capture, and feedback prompts.
-They are not part of the default open-source active-closure install because the
-current self-operating loop already gets signal collection, projection,
-advisor findings, heartbeat, and cognitive-loop evidence from runtime/systemd
-paths. Install them only when that product surface is intentionally needed:
+The full registry also contains optional cron jobs for candidate aggregation,
+durable-fact judging, right-brain expression, module cadence reporting,
+expression outcome capture, and feedback prompts. They are not part of the
+default open-source active-closure install because the current self-operating
+loop already gets signal collection, projection, advisor findings, heartbeat,
+and cognitive-loop evidence from runtime/systemd paths. Install them only when
+that product surface is intentionally needed:
 
 ```bash
 HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
@@ -141,6 +143,8 @@ Full-profile optional jobs:
 
 | Job | Deliver | Agent | Purpose |
 | --- | --- | --- | --- |
+| `memory-os-candidate-aggregation` | `local` | no | clusters related working-memory events into reviewable candidates |
+| `memory-os-fact-judge` | `local` | no | durable-fact LLM judge for candidate quality screening |
 | `memory-os-right-brain-expression` | `origin` | yes | low-frequency right-brain expression through Hermes |
 | `memory-os-module-cadence-report` | `local` | no | records module generated/skipped/error/duplicate counters |
 | `memory-os-right-brain-expression-outcome` | `local` | no | records expression outcomes for feedback linkage |
@@ -271,6 +275,35 @@ records, tracks retain/retract in an append-only projection ledger, and returns
 recall facts as advisory `derived_projection` evidence. Local canonical
 artifacts remain the primary authority.
 
+## Install-Time Environment Checks
+
+The installer automatically detects and adapts to the host environment:
+
+**LLM package auto-install.** When `--install-system-modules` is used, the
+installer checks whether `openai` and `anthropic` Python packages are
+importable. If either is missing, it auto-installs it via `pip`. On dry-run
+mode the installer reports `would_install` without making changes. If
+auto-install fails (network, permissions), a warning is printed to stderr and
+the install report records `install_failed` per package so the operator can
+follow up.
+
+**systemctl availability guard.** When `--enable-runtime` or
+`--enable-cognitive-loop` is requested, the installer probes `systemctl --user`
+before attempting `daemon-reload` or `enable --now`. If systemctl is
+unreachable, the systemd steps are skipped gracefully (files are still copied),
+a notice is printed to stderr, and the install report records
+`start_method: systemctl_unavailable_skipped`. On such hosts Hermes agent
+falls back to cron-based heartbeat scheduling.
+
+**Cron registry snapshot.** Every `--install-system-modules` run regenerates
+the `memory_os_cron_registry.json` snapshot from the current `cron_registry.py`.
+This ensures newly-added cron lanes (such as `fact_judge`) are visible to the
+gate runner after an update install, without requiring a full cron onboarding
+re-run.
+
+All three checks are non-fatal — the install completes and the report carries
+enough detail for the operator or Hermes agent to decide on follow-up actions.
+
 ## Architecture
 
 ```text
@@ -301,7 +334,7 @@ OwnerActionProcessor
 ## Repository Layout
 
 ```text
-agent/                         Minimal Hermes compatibility surface
+memory_os_agent/               Minimal Hermes compatibility surface
 plugins/memory/memory_os/      Memory-OS provider and core services
 plugins/memory-os-agent-os/    Hermes shell plugin and review tools
 plugins/system/                Module contracts and coordination primitives
