@@ -103,6 +103,20 @@ class TestResolveKnob:
         assert isinstance(result, int)
         assert result == 2
 
+    def test_V3_5_knob_tune_auto_approvable(self):
+        """V3.5: in bounds, registered, non-meta -> auto_approvable returns True."""
+        from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
+        assert knob_override_auto_approvable("min_cluster_size", 3) is True
+        assert knob_override_auto_approvable("min_cluster_size", 2) is True
+        assert knob_override_auto_approvable("min_cluster_size", 5) is True
+
+    def test_V3_6_knob_tune_rejected(self):
+        """V3.6: out of bounds / unregistered / meta -> auto_approvable returns False."""
+        from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
+        assert knob_override_auto_approvable("min_cluster_size", 1) is False
+        assert knob_override_auto_approvable("min_cluster_size", 6) is False
+        assert knob_override_auto_approvable("nonexistent", 3) is False
+
     def test_G_2_register_rejects_unregistered(self, tmp_path):
         """G.2: register_override fail-closed for unregistered knobs."""
         now = datetime.now(timezone.utc)

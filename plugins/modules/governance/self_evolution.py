@@ -204,6 +204,48 @@ class SelfEvolutionGovernorModule:
             agenda_record["proposal_id"] = proposal_id
         self._write_agenda_candidate(agenda_record)
 
+        # ── Knob tune proposals ─────────────────────────────────────────────
+        # Generate knob_tune proposals for overridable non-meta knobs and
+        # auto-approve+enact those that pass the 3-condition gate.
+        from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
+        from plugins.memory.memory_os.knob_overrides import register_override as ko_register
+        from plugins.memory.memory_os.audit import append_audit as aud_append
+        from datetime import timedelta
+
+        knob_tunes = self._knob_tune_proposals()
+        for kt in knob_tunes:
+            gate_result_knob = ops_gate.run_once(
+                store=store,
+                proposed_actions=[
+                    {
+                        "id": f"knob-tune-{kt['knob']}",
+                        "kind": "knob_tune",
+                        "target": f"knob_overrides:{kt['knob']}",
+                        "details": kt,
+                    }
+                ],
+            )
+            if knob_override_auto_approvable(kt["knob"], kt["to"]):
+                now = datetime.now(timezone.utc)
+                expires = (now + timedelta(days=7)).isoformat()
+                try:
+                    ko_register(
+                        kt["knob"], kt["to"],
+                        prior=kt["from"],
+                        proposed_by="self_evolution",
+                        approved_via="resolver",
+                        expires_at=expires,
+                    )
+                    aud_append(
+                        store.roots.audit_path,
+                        action="knob_override_registered",
+                        status="ok",
+                        target=f"knob:{kt['knob']}",
+                        details={"from": kt["from"], "to": kt["to"], "approved_via": "resolver"},
+                    )
+                except ValueError:
+                    pass  # bounds/meta guard rejected
+
         result = self._result(
             status="ok",
             proposal_created=proposal_created,
@@ -448,6 +490,37 @@ class SelfEvolutionGovernorModule:
         if reason:
             result["reason"] = reason
         return result
+
+    def _knob_tune_proposals(self) -> list[dict[str, Any]]:
+        """Generate knob_tune proposals for overridable non-meta knobs.
+
+        First cut: propose current value (to=from, a no-change) — validates
+        the auto-approve+enact mechanism without changing production behavior.
+        The tuning strategy evolves later.
+        """
+        from plugins.memory.memory_os.knob_overrides import (
+            OVERRIDABLE_KNOBS,
+            resolve_knob,
+        )
+
+        proposals: list[dict[str, Any]] = []
+        for knob_name, spec in OVERRIDABLE_KNOBS.items():
+            if spec.get("meta") is True:
+                continue
+            current = resolve_knob(knob_name, default=spec["default"])
+            bounds = spec.get("bounds", [])
+            if not bounds:
+                continue
+
+            proposals.append({
+                "kind": "knob_tune",
+                "knob": knob_name,
+                "from": current,
+                "to": current,
+                "bounds": bounds,
+                "module": spec.get("module", ""),
+            })
+        return proposals
 
     def _write_blocked_attempt_result(
         self,

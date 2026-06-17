@@ -28,6 +28,33 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
     },
 }
 
+# ── Auto-approvable check ──────────────────────────────────────────────
+# Used by self_evolution._knob_tune_proposals() to decide whether a
+# knob_tune proposal can be enacted without owner review.
+
+def knob_override_auto_approvable(knob: str, to: Any) -> bool:
+    """Return True if a knob_tune proposal can be auto-approved by resolver.
+
+    Three conditions (all must pass):
+    1. Knob is registered in OVERRIDABLE_KNOBS (boundary enforcement)
+    2. Knob is not meta=True (can't self-tune governance knobs)
+    3. Value is within bounds
+
+    Reversible is always True for config values (revert = restore prior_value),
+    so we don't check it.
+    """
+    spec = OVERRIDABLE_KNOBS.get(knob)
+    if spec is None:
+        return False
+    if spec.get("meta") is True:
+        return False
+    bounds = spec.get("bounds")
+    if bounds is None:
+        return False
+    lo, hi = bounds[0], bounds[1]
+    return lo <= to <= hi
+
+
 # ── Path resolution ────────────────────────────────────────────────────
 
 def _override_store_path(roots: MemoryOSRoots | None = None, *,
