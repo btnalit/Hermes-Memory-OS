@@ -305,6 +305,8 @@ class GovernanceFeedbackBridgeModule:
                         f"decisions={len(decisions)}, blocked={blocked}, kinds={','.join(kinds) or 'none'}."
                     ),
                     "evidence_refs": [f"ops_gate:{report_id}"],
+                    "source_class": "self_activity",
+                    "subtype": "execution",
                 }
             )
         return records
@@ -416,6 +418,8 @@ class GovernanceFeedbackBridgeModule:
                     "speak_gate_delivery_id": delivery_id,
                     "speak_gate_source_module": delivery_source_module,
                     "speak_gate_delivery_channel": channel,
+                    "source_class": "self_activity",
+                    "subtype": "speech",
                 }
             )
         return records

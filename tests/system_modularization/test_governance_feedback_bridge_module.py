@@ -129,7 +129,10 @@ def test_governance_feedback_writes_summary_only_events_and_is_idempotent(tmp_pa
     assert "PRIVATE proposal body" not in rendered
     for event in governance_events:
         assert event.body_policy == "summary_only"
-        assert event.safe_ref["source_class"] == "governance"
+        if event.kind in ("governance_ops_gate_decision",):
+            assert event.safe_ref["source_class"] == "self_activity"
+        else:
+            assert event.safe_ref["source_class"] == "governance"
         assert event.safe_ref["drive_policy"] == "evidence_only"
         assert event.safe_ref["candidate_allowed"] is False
         assert event.safe_ref["body_policy"] == "summary_only"
@@ -460,3 +463,43 @@ def test_to_event_reads_source_class_and_subtype_from_record(tmp_path):
         "empty source_class must default to 'governance'"
     )
     assert "self_activity_subtype" not in event_empty.safe_ref
+
+
+def test_speak_gate_and_ops_gate_events_are_self_activity(tmp_path):
+    """V2.5: speech/ops_gate events are tagged source_class='self_activity' with correct subtypes."""
+    from plugins.modules.governance.feedback_bridge import GovernanceFeedbackBridgeModule
+
+    bridge = GovernanceFeedbackBridgeModule(tmp_path, profile="main")
+
+    # Verify _speak_gate_events records carry self_activity + speech subtype
+    speak_records = bridge._speak_gate_events()
+    for record in speak_records:
+        assert record.get("source_class") == "self_activity", (
+            f"speak_gate record {record.get('kind')} missing source_class=self_activity"
+        )
+        assert record.get("subtype") == "speech", (
+            f"speak_gate record {record.get('kind')} missing subtype=speech"
+        )
+
+    # Verify _ops_gate_events records carry self_activity + execution subtype
+    # (need a live ops_gate instance to produce records)
+    from plugins.modules.governance.ops_gate import OpsGateModule
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    ops_gate = OpsGateModule(tmp_path, profile="main")
+    ops_gate.run_once(
+        store=store,
+        proposed_actions=[{"id": "test-v2", "kind": "test_action", "target": "test"}],
+    )
+    ops_records = bridge._ops_gate_events(ops_gate)
+    for record in ops_records:
+        assert record.get("source_class") == "self_activity", (
+            f"ops_gate record {record.get('kind')} missing source_class=self_activity"
+        )
+        assert record.get("subtype") == "execution", (
+            f"ops_gate record {record.get('kind')} missing subtype=execution"
+        )
