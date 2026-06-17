@@ -779,18 +779,45 @@ class CognitiveLoopRunner:
         )
 
     def _working_decay(self, context: dict[str, Any]) -> dict[str, Any]:
-        """Decay working memory items: mark old 'active' items as 'expired'."""
-        from .working import WorkingMemoryService
+        """Decay and prune working memory across all allowed kinds.
+
+        Previously only decayed 'lingering' — the other three kinds
+        (emotional, curiosity, attention) accumulated unboundedly.
+        Now decays all four kinds and prunes expired items older than
+        the configured grace period.
+        """
+        from .working import WorkingMemoryService, ALLOWED_WORKING_KINDS
 
         store = self.store
         wms = WorkingMemoryService(store)
-        expired = wms.decay_items("lingering", audit_write=True)
+        kinds_result: dict[str, dict[str, int]] = {}
+        total_expired = 0
+        total_active = 0
+        total_pruned = 0
+        for kind in sorted(ALLOWED_WORKING_KINDS):
+            document = wms.read_document(kind)
+            if not document.get("items"):
+                continue
+            decayed = wms.decay_items(kind, audit_write=True)
+            active = sum(1 for e in decayed if e.status == "active")
+            expired = sum(1 for e in decayed if e.status == "expired")
+            pruned = wms.prune_expired_items(kind, audit_write=True)
+            kinds_result[kind] = {
+                "active": active,
+                "expired": expired,
+                "pruned": pruned,
+            }
+            total_active += active
+            total_expired += expired
+            total_pruned += pruned
+
         result = {
-            "schema_version": "memory-os.cognitive_loop.working_decay.v0",
+            "schema_version": "memory-os.cognitive_loop.working_decay.v1",
             "status": "ok",
-            "kind": "lingering",
-            "total_active": sum(1 for e in expired if e.status == "active"),
-            "total_expired": sum(1 for e in expired if e.status == "expired"),
+            "kinds": kinds_result,
+            "total_active": total_active,
+            "total_expired": total_expired,
+            "total_pruned": total_pruned,
         }
         context["working_decay_result"] = result
         return result

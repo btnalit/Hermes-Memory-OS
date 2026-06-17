@@ -104,10 +104,12 @@ class MemoryOSRuntime:
 
         working = WorkingMemoryService(self.store)
         decayed_documents: list[str] = []
+        pruned_total = 0
         for kind in sorted(ALLOWED_WORKING_KINDS):
             before = working.read_document(kind)
             if before.get("items"):
                 working.decay_items(kind, now=current, audit_write=False)
+                pruned_total += working.prune_expired_items(kind, now=current, audit_write=False)
                 decayed_documents.append(kind)
 
         latest_processed_event_id = processed_now[-1] if processed_now else str(state.get("last_processed_event_id") or "")
@@ -141,6 +143,7 @@ class MemoryOSRuntime:
             "crystallized_record_count": _crystallized_record_count(self.store),
             "index_counts": index_counts,
             "decayed_documents": decayed_documents,
+            "pruned_working_items": pruned_total,
             "runtime_state_path": str(self._state_path),
             "session_mirror_auto_apply": _bounded_session_mirror_auto_apply(session_mirror_auto_apply),
             "session_mirror_auto_apply_written_event_ids_count": int(

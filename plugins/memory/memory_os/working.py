@@ -16,6 +16,21 @@ from .store import MemoryOSStore
 
 ALLOWED_WORKING_KINDS = {"lingering", "emotional", "curiosity", "attention"}
 
+# ── Decay defaults ───────────────────────────────────────────────────────
+# Tuned to prevent unbounded accumulation: half-life reduced from 24h → 12h,
+# expire threshold raised from 0.2 → 0.25 so low-weight items expire faster.
+# Combined with prune_expired_items(), this keeps working-memory documents
+# bounded without losing the signal that decay provides.
+
+DEFAULT_HALF_LIFE_HOURS: float = 12.0
+DEFAULT_EXPIRE_BELOW: float = 0.25
+
+# ── Prune defaults ───────────────────────────────────────────────────────
+# Items that have been expired for longer than this are eligible for removal.
+# 24h grace period ensures audit records are written before the item is gone.
+
+DEFAULT_PRUNE_MIN_AGE_HOURS: float = 24.0
+
 
 class WorkingMemoryError(ValueError):
     """Raised when a working-memory operation is invalid."""
@@ -78,8 +93,8 @@ class WorkingMemoryService:
         kind: str,
         *,
         now: datetime | None = None,
-        half_life_hours: float = 24.0,
-        expire_below: float = 0.2,
+        half_life_hours: float = DEFAULT_HALF_LIFE_HOURS,
+        expire_below: float = DEFAULT_EXPIRE_BELOW,
         audit_write: bool = True,
     ) -> list[WorkingItem]:
         self._validate_kind(kind)
@@ -118,6 +133,63 @@ class WorkingMemoryService:
             document["items"] = [asdict(item) for item in updated_items]
             self.store.write_working_document(kind, document, audit=audit_write)
         return updated_items
+
+    def prune_expired_items(
+        self,
+        kind: str,
+        *,
+        now: datetime | None = None,
+        min_age_hours: float = DEFAULT_PRUNE_MIN_AGE_HOURS,
+        audit_write: bool = True,
+    ) -> int:
+        """Remove expired items that have been expired for longer than min_age_hours.
+
+        Only touches items with ``status == "expired"`` whose ``updated_at`` is
+        at least *min_age_hours* in the past.  The grace period ensures audit
+        records (written at the moment of expiry) are flushed before the item
+        is deleted.
+
+        Returns the number of pruned items.
+        """
+        self._validate_kind(kind)
+        if min_age_hours < 0:
+            raise WorkingMemoryError("min_age_hours must be non-negative")
+        current = _datetime(now)
+        document = self.read_document(kind)
+        original_count = len(document["items"])
+        if original_count == 0:
+            return 0
+
+        kept: list[dict[str, Any]] = []
+        pruned = 0
+        for raw_item in document["items"]:
+            item = _item_from_dict(raw_item)
+            if item.status != "expired":
+                kept.append(raw_item)
+                continue
+            # Compute age since the item was marked expired (updated_at).
+            try:
+                updated_dt = datetime.fromisoformat(item.updated_at)
+            except (ValueError, TypeError):
+                # Malformed timestamp — keep the item rather than risk data loss.
+                kept.append(raw_item)
+                continue
+            age_hours = (current - updated_dt).total_seconds() / 3600.0
+            if age_hours >= min_age_hours:
+                self._audit(
+                    "working_item_pruned",
+                    "ok",
+                    {"item_id": item.id, "kind": kind, "age_hours": round(age_hours, 1)},
+                )
+                pruned += 1
+            else:
+                kept.append(raw_item)
+
+        if pruned > 0:
+            document["updated_at"] = current.isoformat()
+            document["items"] = kept
+            self.store.write_working_document(kind, document, audit=audit_write)
+        return pruned
 
     def status_summary(self) -> str:
         lines: list[str] = []
