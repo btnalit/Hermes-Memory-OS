@@ -118,8 +118,8 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/modules/governance/shadow_recall.py::ShadowRecallModule.evaluate_recall_misses::append_jsonl_call::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/shadow_recall.py::_append_jsonl::path.open_a::path": "module_private_writer_existing_surface",
     "plugins/modules/messaging/mailbox.py::MailboxNoSendModule.record_would_send::path.open_a::self.would_send_path": "mailbox_would_send_report_only",
-    "plugins/memory/memory_os/knob_overrides.py::register_override::path.open_a::store_path": "structural_write_gate",
-    "plugins/memory/memory_os/knob_overrides.py::revert_override::path.open_a::store_path": "structural_write_gate",
+    "plugins/memory/memory_os/knob_overrides.py::register_override::path.open_a::store_path": "knob_override_store",
+    "plugins/memory/memory_os/knob_overrides.py::revert_override::path.open_a::store_path": "knob_override_store",
     "plugins/modules/governance/override_sweep.py::OverrideSweepModule.run_once::path.open_a::self.runs_path": "module_report_only_existing_surface",
 }
 

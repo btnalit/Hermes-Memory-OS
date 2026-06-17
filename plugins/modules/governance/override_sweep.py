@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
+from plugins.memory.memory_os.jsonl_io import build_error_record
 from plugins.memory.memory_os.knob_overrides import (
     list_active_overrides,
     revert_override,
@@ -68,6 +69,7 @@ class OverrideSweepModule:
         expired = 0
         evicted = 0
         kill_reverted = 0
+        error_records: list[dict[str, Any]] = []
 
         # 1. Kill switch: revert ALL active overrides
         if _kill_switch_enabled:
@@ -80,7 +82,16 @@ class OverrideSweepModule:
                     )
                     kill_reverted += 1
                 except Exception:
-                    pass
+                    error_records.append(
+                        build_error_record(
+                            component="override_sweep",
+                            operation="revert_override",
+                            error_code="REVERT_FAILED",
+                            severity="error",
+                            recoverable=True,
+                            details={"override_id": override.get("id"), "reason": "kill_switch_engaged"},
+                        )
+                    )
             # After kill switch, nothing else to do
             active = []
 
@@ -103,7 +114,16 @@ class OverrideSweepModule:
                         )
                         expired += 1
                     except Exception:
-                        pass
+                        error_records.append(
+                            build_error_record(
+                                component="override_sweep",
+                                operation="revert_override",
+                                error_code="REVERT_FAILED",
+                                severity="error",
+                                recoverable=True,
+                                details={"override_id": override.get("id"), "reason": "resolver_ttl_expired"},
+                            )
+                        )
 
             # Re-read after TTL invalidations
             active_after_ttl = list_active_overrides(_store_root=_store_root, _now=now)
@@ -125,7 +145,16 @@ class OverrideSweepModule:
                         )
                         evicted += 1
                     except Exception:
-                        pass
+                        error_records.append(
+                            build_error_record(
+                                component="override_sweep",
+                                operation="revert_override",
+                                error_code="REVERT_FAILED",
+                                severity="error",
+                                recoverable=True,
+                                details={"override_id": override.get("id"), "reason": "resolver_cap_evicted"},
+                            )
+                        )
 
         result = {
             "schema_version": "hermes.override_sweep_result.v0",
@@ -135,6 +164,8 @@ class OverrideSweepModule:
             "expired_count": expired,
             "evicted_count": evicted,
             "kill_reverted_count": kill_reverted,
+            "revert_fail_count": len(error_records),
+            "error_records": error_records,
             "actual_send": False,
             "actual_execute": False,
             "actual_identity_write": False,
