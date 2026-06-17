@@ -122,6 +122,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/knob_overrides.py::revert_override::path.open_a::store_path": "knob_override_store",
     "plugins/memory/memory_os/knob_overrides.py::confirm_override::path.open_a::store_path": "knob_override_store",
     "plugins/modules/governance/override_sweep.py::OverrideSweepModule.run_once::path.open_a::self.runs_path": "module_report_only_existing_surface",
+    "plugins/modules/governance/knob_ab_eval.py::KnobABEvalModule.run_once::path.open_a::self.runs_path": "module_report_only_existing_surface",
 }
 
 
