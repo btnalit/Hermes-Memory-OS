@@ -930,11 +930,15 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
 
 
 def _write_registry_cron_wrappers(hermes_home: Path) -> None:
-    from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+    from plugins.memory.memory_os.cron_registry import (
+        memory_os_cron_specs,
+        write_cron_registry_snapshot,
+    )
 
     scripts_dir = hermes_home / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    for spec in memory_os_cron_specs():
+    specs = memory_os_cron_specs()
+    for spec in specs:
         wrapper = scripts_dir / spec.wrapper_script
         wrapper.write_text(
             (
@@ -946,6 +950,13 @@ def _write_registry_cron_wrappers(hermes_home: Path) -> None:
             encoding="utf-8",
         )
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+
+    # Regenerate the cron registry snapshot so new lanes (e.g. fact_judge)
+    # are visible to the gate runner after an update install.
+    write_cron_registry_snapshot(
+        hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json",
+        specs=specs,
+    )
 
 
 def _write_owner_cron_onboarding_script(hermes_home: Path, *, dry_run: bool) -> Path:
