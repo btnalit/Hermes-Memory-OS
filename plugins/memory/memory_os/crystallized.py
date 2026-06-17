@@ -604,6 +604,7 @@ def append_candidate_triage(
     target_state: str,
     reason: str,
     cluster_key: str = "",
+    cluster_size: int = 0,
     execution_gate_envelope_id: str = "",
     now: datetime | None = None,
 ) -> Path:
@@ -629,6 +630,7 @@ def append_candidate_triage(
         "target_state": str(target_state),
         "reason": str(reason),
         "cluster_key": str(cluster_key or ""),
+        "cluster_size": int(cluster_size),
         "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
         "created_at": _timestamp(now),
     }

@@ -260,6 +260,7 @@ def _cluster_and_promote(
                     target_state="demoted",
                     reason=f"redundant with cluster {cluster_key} (capped at {max_promote_per_cluster})",
                     cluster_key=cluster_key,
+                    cluster_size=len(members),
                     execution_gate_envelope_id=envelope_id,
                     now=_now,
                 )
@@ -283,6 +284,7 @@ def _cluster_and_promote(
                     target_state="demoted",
                     reason=f"dedup_skip: similar to crystallized {dedup_hit}",
                     cluster_key=cluster_key,
+                    cluster_size=len(members),
                     execution_gate_envelope_id=envelope_id,
                     now=_now,
                 )
@@ -351,6 +353,7 @@ def _cluster_and_promote(
                 target_state=target_state,
                 reason=reason,
                 cluster_key=cluster_key,
+                cluster_size=len(members),
                 execution_gate_envelope_id=envelope_id,
                 now=_now,
             )
