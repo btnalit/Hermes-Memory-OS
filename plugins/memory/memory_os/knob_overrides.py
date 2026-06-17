@@ -43,6 +43,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "lane_low_clue_recall_enabled": {
+        "module": "low_clue_recall",
+        "default": False,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────
@@ -52,10 +61,11 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
 def knob_override_auto_approvable(knob: str, to: Any) -> bool:
     """Return True if a knob_tune proposal can be auto-approved by resolver.
 
-    Three conditions (all must pass):
+    Four conditions (all must pass):
     1. Knob is registered in OVERRIDABLE_KNOBS (boundary enforcement)
     2. Knob is not meta=True (can't self-tune governance knobs)
-    3. Value is within bounds
+    3. Knob is not kind=lane_switch (blast radius too large; always owner)
+    4. Value is within bounds (threshold knobs only)
 
     Reversible is always True for config values (revert = restore prior_value),
     so we don't check it.
@@ -64,6 +74,8 @@ def knob_override_auto_approvable(knob: str, to: Any) -> bool:
     if spec is None:
         return False
     if spec.get("meta") is True:
+        return False
+    if spec.get("kind") == "lane_switch":
         return False
     bounds = spec.get("bounds")
     if bounds is None:
@@ -150,13 +162,24 @@ def register_override(
             f"Knob '{name}' is meta=True — self-tuning of governance knobs is blocked"
         )
 
-    bounds = spec.get("bounds")
-    if bounds is not None:
-        lo, hi = bounds[0], bounds[1]
-        if not (lo <= value <= hi):
+    # Boolean knobs: validate against allowed list
+    allowed = spec.get("allowed")
+    if allowed is not None:
+        # Use type-strict check: Python treats True==1 and False==0,
+        # so "value not in allowed" would incorrectly accept int 1 for [True, False].
+        if not (type(value) in (bool,) and value in allowed):
             raise ValueError(
-                f"Value {value} for knob '{name}' is out of bounds [{lo}, {hi}]"
+                f"Value {value!r} for knob '{name}' is not in allowed {allowed}"
             )
+    else:
+        # Threshold knobs: validate against bounds range
+        bounds = spec.get("bounds")
+        if bounds is not None:
+            lo, hi = bounds[0], bounds[1]
+            if not (lo <= value <= hi):
+                raise ValueError(
+                    f"Value {value} for knob '{name}' is out of bounds [{lo}, {hi}]"
+                )
 
     now = _now or datetime.now(timezone.utc)
     store_path = _override_store_path(roots, _store_root=_store_root)
@@ -168,7 +191,8 @@ def register_override(
         "knob": name,
         "override_value": value,
         "prior_value": prior,
-        "bounds": bounds,
+        "bounds": spec.get("bounds"),
+        "allowed": spec.get("allowed"),
         "provisional": True,
         "expires_at": expires_at,
         "proposed_by": proposed_by,

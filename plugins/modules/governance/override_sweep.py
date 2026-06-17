@@ -17,6 +17,7 @@ from plugins.memory.memory_os.knob_overrides import (
     revert_override,
 )
 
+MAX_OVERRIDES = 30
 
 def override_sweep_manifest() -> dict[str, Any]:
     return {
@@ -128,8 +129,7 @@ class OverrideSweepModule:
             # Re-read after TTL invalidations
             active_after_ttl = list_active_overrides(_store_root=_store_root, _now=now)
 
-            # 3. Cap eviction (oldest first, keep 30)
-            MAX_OVERRIDES = 30
+            # 3. Cap eviction (oldest first, keep MAX_OVERRIDES)
             if len(active_after_ttl) > MAX_OVERRIDES:
                 sorted_overrides = sorted(
                     active_after_ttl,
@@ -212,11 +212,11 @@ class OverrideSweepModule:
     def doctor(self) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
         active = list_active_overrides()
-        if len(active) > 30:
+        if len(active) > MAX_OVERRIDES:
             findings.append({
                 "severity": "warning",
                 "code": "overrides_over_cap",
-                "message": f"{len(active)} active overrides (cap=30); sweep may need to run",
+                "message": f"{len(active)} active overrides (cap={MAX_OVERRIDES}); sweep may need to run",
             })
         status = "warning" if findings else "ok"
         return {
