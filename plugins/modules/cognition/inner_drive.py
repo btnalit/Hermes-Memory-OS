@@ -9,7 +9,11 @@ from typing import Any
 
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import append_candidate_queue, read_candidate_queue
-from plugins.memory.memory_os.inner_drive import InnerDriveEngine, select_events_for_inner_drive
+from plugins.memory.memory_os.inner_drive import (
+    InnerDriveEngine,
+    select_events_for_inner_drive,
+    DEFAULT_SOURCE_CLASS_CAP,
+)
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.working import ALLOWED_WORKING_KINDS
 from plugins.system.scheduler import ScheduleCoordinator
@@ -135,7 +139,7 @@ class InnerDriveRuntimeModule:
         store: MemoryOSStore,
         coordinator: ScheduleCoordinator | None = None,
         max_events: int = 100,
-        max_events_per_source_class: int | dict[str, int] = 20,
+        max_events_per_source_class: int | dict[str, int] = DEFAULT_SOURCE_CLASS_CAP,
         min_events: int = 1,
         lock_ttl_seconds: int = 300,
         now: datetime | None = None,

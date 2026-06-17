@@ -251,10 +251,11 @@ def test_self_activity_capped_by_select_events_for_inner_drive():
             "promotion_state": "raw",
         })
 
-    # Create 30 self_activity events + 5 normal events
+    # Create 30 self_activity events + 30 normal events (place normal first
+    # so the fraction gate has room before self_activity events are encountered)
     sa_events = [make_sa_event(i) for i in range(30)]
-    normal_events = [make_normal_event(i) for i in range(5)]
-    all_events = sa_events + normal_events
+    normal_events = [make_normal_event(i) for i in range(30)]
+    all_events = normal_events + sa_events
 
     # Cap self_activity at 3, all else at 100
     caps = {"self_activity": 3, "*": 100}
@@ -268,4 +269,54 @@ def test_self_activity_capped_by_select_events_for_inner_drive():
 
     assert len(sa_selected) == 3, f"expected 3 self_activity selected, got {len(sa_selected)}"
     assert len(sa_deferred) >= 27, f"expected >=27 self_activity deferred, got {len(sa_deferred)}"
-    assert len(norm_selected) == 5, "all normal events must be selected (not deferred by self_activity cap)"
+    assert len(norm_selected) == 30, f"expected 30 normal events selected, got {len(norm_selected)}"
+
+
+def test_V2_7_self_activity_fraction_gate_defers_excess():
+    """V2.7: self_activity events >15% of selected batch -> excess deferred."""
+    from plugins.memory.memory_os.inner_drive import (
+        select_events_for_inner_drive,
+        SELF_ACTIVITY_MAX_FRACTION,
+    )
+    from plugins.memory.memory_os.schema import EventEnvelope
+
+    now = datetime.now(timezone.utc)
+    # Create 20 foreground events + 10 self_activity events
+    events = []
+    for i in range(20):
+        events.append(EventEnvelope.from_dict({
+            "schema_version": "memory-os.event.v0",
+            "id": f"fg_{i}", "ts": now.isoformat(), "profile": "main",
+            "source": "telegram",
+            "kind": "conversation_turn", "summary": f"fg {i}",
+            "safe_ref": {"source_class": "foreground"},
+            "tags": [], "sensitivity": "private", "body_policy": "summary_only",
+            "hashes": {}, "promotion_state": "raw",
+        }))
+    for i in range(10):
+        events.append(EventEnvelope.from_dict({
+            "schema_version": "memory-os.event.v0",
+            "id": f"sa_{i}", "ts": now.isoformat(), "profile": "main",
+            "source": "governance_feedback",
+            "kind": "governance_feedback_event", "summary": f"sa {i}",
+            "safe_ref": {"source_class": "self_activity", "drive_policy": "evidence_only"},
+            "tags": [], "sensitivity": "private", "body_policy": "summary_only",
+            "hashes": {}, "promotion_state": "raw",
+        }))
+
+    selected, deferred = select_events_for_inner_drive(
+        events, set(), max_events=100,
+    )
+    sa_selected = [e for e in selected if e.id.startswith("sa_")]
+    fg_selected = [e for e in selected if e.id.startswith("fg_")]
+
+    # self_activity must not exceed SELF_ACTIVITY_MAX_FRACTION of selected
+    max_sa = max(1, int(len(selected) * SELF_ACTIVITY_MAX_FRACTION))
+    assert len(sa_selected) <= max_sa, (
+        f"self_activity count {len(sa_selected)} exceeds max {max_sa}"
+    )
+    # Foreground events must be present (not drowned out)
+    assert len(fg_selected) > 0, "foreground events must not be drowned"
+    # Excess self_activity must be deferred
+    sa_deferred = [e for e in deferred if e.id.startswith("sa_")]
+    assert len(sa_deferred) > 0, "excess self_activity must be deferred"

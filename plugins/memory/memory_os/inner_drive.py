@@ -13,6 +13,7 @@ from .working import WorkingMemoryService
 
 
 DEFAULT_SOURCE_CLASS_CAP = 20
+SELF_ACTIVITY_MAX_FRACTION = 0.15  # V2d: self_activity events ≤15% of selected batch
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,16 @@ def select_events_for_inner_drive(
         if source_counts.get(source_class, 0) >= cap:
             deferred.append(event)
             continue
+        # V2d: self_activity fraction gate — prevent self_activity from
+        # drowning out external events. Once self_activity exceeds
+        # SELF_ACTIVITY_MAX_FRACTION of the selected batch, defer remaining
+        # self_activity events (oldest-first, since events are sorted by ts).
+        if source_class == "self_activity" and len(selected) > 0:
+            sa_count = source_counts.get("self_activity", 0)
+            sa_max = max(1, int(len(selected) * SELF_ACTIVITY_MAX_FRACTION))
+            if sa_count >= sa_max:
+                deferred.append(event)
+                continue
         selected.append(event)
         source_counts[source_class] = source_counts.get(source_class, 0) + 1
         if len(selected) >= max_events:
