@@ -444,3 +444,19 @@ def test_to_event_reads_source_class_and_subtype_from_record(tmp_path):
     event_sa = bridge._to_event(sa_record)
     assert event_sa.safe_ref["source_class"] == "self_activity"
     assert event_sa.safe_ref["self_activity_subtype"] == "resolver"
+
+    # Record WITH source_class="" -> defaults to "governance" (empty string treated as absent)
+    empty_record = {
+        "kind": "test_empty",
+        "source_module": "test_mod",
+        "source_key": "test_key_empty",
+        "state_hash": "ghi",
+        "artifact_ref": "local://test/empty",
+        "summary": "empty source_class test",
+        "source_class": "",
+    }
+    event_empty = bridge._to_event(empty_record)
+    assert event_empty.safe_ref["source_class"] == "governance", (
+        "empty source_class must default to 'governance'"
+    )
+    assert "self_activity_subtype" not in event_empty.safe_ref
