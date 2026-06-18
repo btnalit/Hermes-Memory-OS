@@ -27,7 +27,6 @@ def _resolve_repo_root() -> Path:
 
     1. MEMORY_OS_REPO_ROOT env var (set by deploy_l3_probe.py at deploy time)
     2. Config file next to this script (written by deploy_l3_probe.py)
-    3. Auto-detect from script location (only works when run from repo, not after deploy)
     """
     env_val = os.environ.get("MEMORY_OS_REPO_ROOT", "").strip()
     if env_val:
@@ -39,12 +38,6 @@ def _resolve_repo_root() -> Path:
         candidate = Path(config_file.read_text(encoding="utf-8").strip())
         if candidate.is_dir():
             return candidate
-    # Last resort: auto-detect from script location.
-    # Only works when the script is run directly from a repo checkout.
-    auto = Path(__file__).resolve().parents[1]
-    probe = auto / "scripts" / "probe_l3_prefetch_behavior.py"
-    if probe.is_file():
-        return auto
     raise SystemExit(
         "Cannot resolve Memory-OS repo root. "
         "Set MEMORY_OS_REPO_ROOT env var or ensure l3_probe_repo_root.txt exists "

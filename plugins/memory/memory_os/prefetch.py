@@ -493,7 +493,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
-    _append_section(sections, "Crystallized Memory", _crystallized_lines(store, query=query, index=index, seen=seen))
+    _append_section(sections, "Crystallized Memory", _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records))
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
     _append_section(sections, "Recent Event Summaries", _event_lines(store, seen=seen))
@@ -880,16 +880,20 @@ def _crystallized_lines(
     query: str = "",
     index: object | None = None,
     seen: set[tuple[str, str]] | None = None,
+    error_records: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     """Record-level crystallized memory lines with relevance filtering and caps.
 
     Uses FTS5 index (like Indexed Recall) to find records relevant to the
     current query, then caps output at MAX_TOTAL (20) records with at most
-    MAX_PROVISIONAL (5) provisional records.
+    MAX_PERMANENT (15) permanent and at least MAX_PROVISIONAL (5) provisional
+    records — provisional always gets its reserved floor so imminent expiry
+    records aren't starved by permanent volume.
 
-    Falls back to reading all files (with caps) when the index is unavailable
-    or the query is empty. Only records that survive the caps are registered
-    in `seen` so Indexed Recall can still surface the rest.
+    Falls back to reading all files (with caps) when the index is unavailable,
+    the query is empty, or FTS5 returns zero hits (stale/missing index must not
+    silently exclude on-disk records). Only records that survive the caps are
+    registered in `seen` so Indexed Recall can still surface the rest.
 
     Provisional records (provisional=True) are annotated with countdown
     and sorted after permanent records. High-recurrence provisional records
@@ -897,29 +901,54 @@ def _crystallized_lines(
     """
     MAX_TOTAL = 20
     MAX_PROVISIONAL = 5
+    MAX_PERMANENT = MAX_TOTAL - MAX_PROVISIONAL  # 15 — reserve floor for provisional
 
     now = datetime.now(timezone.utc)
 
     # ── FTS5 relevance lookup ──────────────────────────────────────
+    route = plan_query_route(query, diagnostic_grounding_enabled=False)
+    search_query = str(route.get("search_query", ""))
     relevant_ids: set[str] | None = None
-    search_query = str(query or "").strip()
     if index is not None and search_query and hasattr(index, "search"):
         try:
             result = index.search(search_query, limit=60)
-            relevant_ids = {
+            hits = [
                 str(hit["record_id"])
                 for hit in result.get("hits", [])
                 if isinstance(hit, dict)
                 and str(hit.get("record_type", "")) == "crystallized_record"
-            }
-        except Exception:
+            ]
+            if hits:
+                relevant_ids = set(hits)
+            # Empty hits → leave relevant_ids=None so all on-disk records
+            # are included. The index may be stale; never treat it as the
+            # authority that excludes records which exist on disk.
+        except Exception as exc:
+            if error_records is not None:
+                error_records.append(
+                    build_error_record(
+                        component="prefetch",
+                        operation="crystallized_lines",
+                        error_code="prefetch_index_search_error",
+                        severity="warning",
+                        recoverable=True,
+                        details={"error_type": type(exc).__name__},
+                    )
+                )
             relevant_ids = None
 
     # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
     permanent_entries: list[tuple[str, str]] = []
     provisional_entries: list[tuple[datetime, str, str, int]] = []
 
-    for path in sorted(store.roots.crystallized_root.glob("*.md")):
+    # When FTS5 provides relevance, sort by filename (stable, predictable).
+    # When no FTS5 relevance is available, sort by mtime descending so the
+    # most recently modified records — including just-written probe nonces —
+    # appear first and survive the cap.
+    paths = sorted(store.roots.crystallized_root.glob("*.md"))
+    if relevant_ids is None:
+        paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in paths:
         try:
             content = path.read_text(encoding="utf-8")
         except Exception:
@@ -973,19 +1002,19 @@ def _crystallized_lines(
 
     # ── Apply caps and track seen only for surviving records ──────
     result: list[str] = []
-    # Cap permanent records at MAX_TOTAL
-    for rid, line in permanent_entries[:MAX_TOTAL]:
+    # Cap permanent records at MAX_PERMANENT (15) — reserve floor for provisional
+    for rid, line in permanent_entries[:MAX_PERMANENT]:
         result.append(line)
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))
 
-    # Cap provisional records at min(MAX_PROVISIONAL, remaining slots)
+    # Cap provisional records: at least MAX_PROVISIONAL (5), more if
+    # permanent didn't fill its MAX_PERMANENT allocation.
     remaining_slots = MAX_TOTAL - len(result)
-    if remaining_slots > 0:
-        for _, rid, line, _ in provisional_entries[:min(MAX_PROVISIONAL, remaining_slots)]:
-            result.append(line)
-            if seen is not None and rid:
-                seen.add(("crystallized_record", rid))
+    for _, rid, line, _ in provisional_entries[:max(MAX_PROVISIONAL, remaining_slots)]:
+        result.append(line)
+        if seen is not None and rid:
+            seen.add(("crystallized_record", rid))
 
     return result
 

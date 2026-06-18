@@ -43,8 +43,8 @@ def test_prefetch_observability_reports_index_search_errors(tmp_path):
 
     assert report["schema_version"] == "memory-os.prefetch_observability.v0"
     assert report["context"] == ""
-    assert report["suppressed_error_count"] == 1
-    assert report["recent_error_codes"] == ["prefetch_index_search_error"]
+    assert report["suppressed_error_count"] == 2
+    assert report["recent_error_codes"] == ["prefetch_index_search_error", "prefetch_index_search_error"]
     assert report["error_records"][0]["schema_version"] == "memory-os.error_record.v0"
     assert report["error_records"][0]["component"] == "prefetch"
 

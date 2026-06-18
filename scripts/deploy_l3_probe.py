@@ -403,11 +403,15 @@ _FALLBACK_HELPER = """\
 #!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path
-_root_txt = Path(__file__).with_name("l3_probe_repo_root.txt")
-if _root_txt.is_file():
-    _repo = Path(_root_txt.read_text(encoding="utf-8").strip())
+_repo_env = os.environ.get("MEMORY_OS_REPO_ROOT", "").strip()
+if _repo_env:
+    _repo = Path(_repo_env)
 else:
-    _repo = Path(os.environ.get("MEMORY_OS_REPO_ROOT", "/opt/Hermes-Memory-OS"))
+    _root_txt = Path(__file__).with_name("l3_probe_repo_root.txt")
+    if _root_txt.is_file():
+        _repo = Path(_root_txt.read_text(encoding="utf-8").strip())
+    else:
+        _repo = Path(os.environ.get("MEMORY_OS_REPO_ROOT", "/opt/Hermes-Memory-OS"))
 p = _repo / "scripts" / "probe_l3_prefetch_behavior.py"
 r = subprocess.run([sys.executable, str(p)], capture_output=True, text=True, timeout=120, cwd=str(_repo))
 all_pass = r.returncode == 0 and "GOVERNANCE PATH" in (r.stdout or "")

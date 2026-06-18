@@ -24,20 +24,27 @@ from plugins.memory.memory_os.crystallized import (
     ApprovalPurpose,
     is_active_crystallized_frontmatter,
 )
+from plugins.memory.memory_os.config import load_config
 from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.ids import new_crystallized_id, new_event_id
 
 # ── configuration ──────────────────────────────────────────────────
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/root/.hermes"))
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 NONCE_FILE = HERMES_HOME / "memory-os" / "crystallized" / "probe_test.md"
 LOG_FILE = Path(tempfile.gettempdir()) / f"l3_probe_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.log"
 
-# Prefetch budget for probe verification.
-# Must be large enough to hold Crystallized Memory section without truncation.
-# 5500 was too small (Crystallized Memory alone is often 12k+ chars).
-PROBE_BUDGET_CHARS = 20000
+def _resolve_probe_budget(hermes_home: Path) -> int:
+    """Read prefetch_char_budget from Memory-OS config, with 20000 fallback."""
+    try:
+        config = load_config(hermes_home)
+        budget = int(config.get("prefetch_char_budget", 0))
+        if budget >= 5000:
+            return budget
+    except Exception:
+        pass
+    return 20000
 
 # ── nonce generation ───────────────────────────────────────────────
 def _generate_nonce() -> str:
@@ -54,6 +61,7 @@ def _now() -> str:
 # ── harness core ───────────────────────────────────────────────────
 def run(cleanup: bool = True) -> dict[str, str]:
     results: dict[str, str] = {}
+    budget_chars = _resolve_probe_budget(HERMES_HOME)
 
     # ── positive nonce ──────────────────────────────────────────
     nonce_pos = _generate_nonce()
@@ -106,7 +114,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     l2_positive = False
     for q in probe_queries:
         context = build_prefetch(
-            q, budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
+            q, budget_chars=budget_chars, store=store, index=None,
             context_router_config=dry_run_config,
         )
         if nonce_pos in context:
@@ -117,7 +125,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     if not l2_positive:
         # Full context dump for debugging — show Crystallized Memory section specifically
         context = build_prefetch(
-            probe_queries[0], budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
+            probe_queries[0], budget_chars=budget_chars, store=store, index=None,
             context_router_config=dry_run_config,
         )
         results["l2_recall_positive"] = "❌ NONCE NOT FOUND in prefetch context"
@@ -137,7 +145,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     l2_negative = False
     for q in probe_queries:
         context = build_prefetch(
-            q, budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
+            q, budget_chars=budget_chars, store=store, index=None,
             context_router_config=dry_run_config,
         )
         if nonce_neg in context:
@@ -163,7 +171,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
 
         # Verify revocation: post-revoke prefetch should NOT contain nonce
         context_post = build_prefetch(
-            probe_queries[0], budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
+            probe_queries[0], budget_chars=budget_chars, store=store, index=None,
             context_router_config=dry_run_config,
         )
         if nonce_pos in context_post:
