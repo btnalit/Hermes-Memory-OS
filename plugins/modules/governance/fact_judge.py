@@ -35,7 +35,7 @@ MAX_JUDGE_RETRIES = 2
 # Heuristic durable/transient markers (Chinese + English).
 # Used ONLY as fallback when LLM fails — not as primary judgment.
 _DURABLE_MARKERS: frozenset[str] = frozenset({
-    "prefer", "决定", "用", "remember", "记住", "我喜欢", "我爱",
+    "prefer", "决定", "用", "记住", "我喜欢", "我爱",
     "framework", "框架", "策略", "always", "commit",
     "i prefer", "i like", "i use", "我的", "我是",
     "want to", "想要", "打算", "plan to", "will use",

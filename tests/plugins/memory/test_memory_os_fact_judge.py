@@ -835,7 +835,7 @@ class TestJudgeRetryAndHeuristic:
 
         candidate = _candidate(
             candidate_id="cand_heur_002",
-            body="Remembered from event: 今天的会议安排在下午三点。",
+            body="Quux baz frobnicate the widget stream.",
         )
 
         with patch(
