@@ -696,3 +696,73 @@ class TestRunFactJudgeLane:
         mock_call.assert_not_called()
         assert result["skipped_count"] == 1
         assert result["judged_count"] == 0
+
+
+# ── A.1-A.2: Lean-capture prompt (spec A1) ────────────────────────────────
+
+
+class TestLeanCapturePrompt:
+    """A.1-A.2: RULE 1 rewritten — lean toward capture, not conservative."""
+
+    def test_messy_colloquial_decision_returns_true(self):
+        """A.1: Messy colloquial preference/decision → durable_fact=True.
+
+        Old RULE 1 ('UNCERTAIN → False') would reject this as ambiguous.
+        New RULE 1 ('LEAN TOWARD CAPTURE') should mark it True.
+        """
+        from plugins.modules.governance.fact_judge import judge_candidate
+
+        # Real-world messy Chinese: "do data review online to improve betting strategy"
+        candidate = _candidate(
+            candidate_id="cand_a1_001",
+            body="Remembered from event: 联网做数据复盘完善下注策略",
+        )
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "colloquial decision about strategy"}',
+        ):
+            result = judge_candidate(candidate)
+            assert result["durable_fact"] is True, (
+                f"Messy colloquial decision should be durable; got {result}"
+            )
+
+    def test_messy_embedded_framework_returns_true(self):
+        """A.1: Framework definition embedded in discussion → durable_fact=True.
+
+        '三层穿透框架定义' — a framework defined casually in conversation.
+        Old prompt would mark UNCERTAIN → False; new prompt should capture.
+        """
+        from plugins.modules.governance.fact_judge import judge_candidate
+
+        candidate = _candidate(
+            candidate_id="cand_a1_002",
+            body="Remembered from event: 三层穿透框架定义，用于分析市场结构",
+        )
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "framework definition, reusable context"}',
+        ):
+            result = judge_candidate(candidate)
+            assert result["durable_fact"] is True, (
+                f"Embedded framework should be durable; got {result}"
+            )
+
+    def test_clear_transient_greeting_still_false(self):
+        """A.2: Clear transient (greeting) → still False (not over-correcting)."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+
+        candidate = _candidate(
+            candidate_id="cand_a2_001",
+            body="Remembered from event: 你好，今天天气不错，收到请回复。",
+        )
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": false, "reason": "greeting and casual chat, not durable"}',
+        ):
+            result = judge_candidate(candidate)
+            assert result["durable_fact"] is False, (
+                f"Clear transient should NOT be durable; got {result}"
+            )
