@@ -207,11 +207,13 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 3
+    assert len(report["operational_cron_jobs"]) == 5
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
         "memory-os-index-sync",
+        "memory-os-working-cleanup",
+        "memory-os-l3-probe-verification",
     }
     index_sync = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-index-sync"][0]
     assert index_sync["script"] == "memory_os_cron_index_sync_gate.py"

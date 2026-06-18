@@ -24,7 +24,13 @@ from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
 
 
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
-ACTIVE_CLOSURE_CRON_KEYS = frozenset({"owner_review_digest", "proposal_followups_opsgate", "index_sync"})
+ACTIVE_CLOSURE_CRON_KEYS = frozenset({
+    "owner_review_digest",
+    "proposal_followups_opsgate",
+    "index_sync",
+    "working_cleanup",
+    "l3_probe_verification",
+})
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
 DEFAULT_RIGHT_BRAIN_SCHEDULE = "30 4 * * 0"
 DEFAULT_FACT_JUDGE_SCHEDULE = "0 */4 * * *"

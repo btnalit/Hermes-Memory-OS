@@ -1066,7 +1066,63 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         shutil.copy2(source, target)
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
     _write_registry_cron_wrappers(hermes_home)
+    _migrate_cron_job_scripts_to_wrappers(hermes_home)
     return targets
+
+
+def _migrate_cron_job_scripts_to_wrappers(hermes_home: Path) -> dict[str, Any]:
+    """Update existing cron jobs whose script still points to raw_script.
+
+    During upgrades, new wrapper_script entries may be added to cron specs.
+    Jobs that were created before the wrapper existed will still reference
+    the raw script.  This migration rewrites those jobs to point to the
+    ExecutionGate wrapper so the cron_adapter_probe no longer reports them
+    as naked.
+    """
+    from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+
+    jobs_path = hermes_home / "cron" / "jobs.json"
+    if not jobs_path.exists():
+        return {"status": "noop", "reason": "no_jobs_file", "migrated": 0}
+
+    try:
+        raw = jobs_path.read_text(encoding="utf-8")
+        loaded = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return {"status": "noop", "reason": "jobs_read_error", "migrated": 0}
+
+    is_dict_wrapper = isinstance(loaded, dict) and "jobs" in loaded
+    jobs = loaded["jobs"] if is_dict_wrapper else loaded
+    if not isinstance(jobs, list):
+        return {"status": "noop", "reason": "unexpected_jobs_format", "migrated": 0}
+
+    specs_by_name = {spec.name: spec for spec in memory_os_cron_specs()}
+    migrated = 0
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        name = str(job.get("name") or "")
+        spec = specs_by_name.get(name)
+        if spec is None:
+            continue
+        current_script = str(job.get("script") or "")
+        # Only migrate when the job still points at the raw script
+        if current_script == spec.raw_script and current_script != spec.wrapper_script:
+            job["script"] = spec.wrapper_script
+            migrated += 1
+
+    if migrated == 0:
+        return {"status": "noop", "reason": "nothing_to_migrate", "migrated": 0}
+
+    # Preserve original serialisation shape
+    if is_dict_wrapper:
+        loaded["jobs"] = jobs
+        output = loaded
+    else:
+        output = jobs
+
+    jobs_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"status": "ok", "migrated": migrated}
 
 
 def _write_registry_cron_wrappers(hermes_home: Path) -> None:

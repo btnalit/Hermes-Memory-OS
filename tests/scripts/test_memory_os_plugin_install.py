@@ -427,13 +427,15 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
     assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 3
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 5
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
         "memory-os-index-sync",
+        "memory-os-working-cleanup",
+        "memory-os-l3-probe-verification",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
