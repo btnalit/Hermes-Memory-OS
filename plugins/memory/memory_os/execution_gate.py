@@ -40,7 +40,7 @@ def resolve_execution_gate_permit(
     require_unused: bool = False,
     expected_scope: dict[str, Any] | None = None,
     expected_scope_hash: str = "",
-    limit: int = 2000,
+    limit: int = 0,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Resolve whether an execution-gate permit is valid for a caller.

@@ -279,3 +279,74 @@ def test_resolve_execution_gate_permit_requires_fresh_unused_and_scope(tmp_path)
     assert scope_mismatch["reason"] == "execution_gate_scope_mismatch"
     assert reused["status"] == "invalid"
     assert reused["reason"] == "execution_gate_permit_already_completed"
+
+
+# ── B.1: Cliff elimination (spec B1a) ─────────────────────────────────────
+
+
+def test_old_permit_beyond_2000_window_still_resolvable(tmp_path):
+    """B.1: Permits older than the most recent 2000 records are still found.
+
+    Old code (limit=2000): only scans records[-2000:] → old permits unresolvable.
+    New code (limit=0): scans ALL records → old permits found.
+    """
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    now = datetime.now(timezone.utc)
+    expires_at = now.replace(year=now.year + 1).isoformat().replace("+00:00", "Z")
+
+    # Write an old permit (will be outside the 2000 window after we add padding)
+    old_envelope_id = "xgate_old_permit_test"
+    old_permit = {
+        "schema_version": "memory-os.execution_gate_envelope.v0",
+        "stage": "permit",
+        "execution_gate_envelope_id": old_envelope_id,
+        "created_at": "2020-01-01T00:00:00Z",
+        "expires_at": expires_at,
+        "profile": "memoryos-test",
+        "lane_id": "test_lane",
+        "trigger_surface": "test",
+        "risk_class": "bounded_reversible_queue",
+        "human_approval_required": False,
+        "why_no_human_approval": "test",
+        "scope": {},
+        "boundary": {},
+        "boundary_true": False,
+        "precheck": {},
+        "permit_decision": "allowed",
+        "permit_reason": "test",
+    }
+
+    records_path = execution_gate_records_path(roots)
+    records_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write the old permit
+    with records_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(old_permit, sort_keys=True) + "\n")
+
+    # Pad with 2001 dummy records to push old permit outside a 2000-record window
+    for i in range(2001):
+        padding = {
+            "schema_version": "memory-os.execution_gate_envelope.v0",
+            "stage": "completion",
+            "execution_gate_envelope_id": f"xgate_padding_{i:05d}",
+            "created_at": now.isoformat().replace("+00:00", "Z"),
+            "profile": "memoryos-test",
+            "completion_status": "completed",
+        }
+        with records_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(padding, sort_keys=True) + "\n")
+
+    # Resolve the old permit — should succeed even though it's beyond 2000
+    result = resolve_execution_gate_permit(
+        roots,
+        envelope_id=old_envelope_id,
+        lane_id="test_lane",
+        risk_class="bounded_reversible_queue",
+    )
+    assert result["status"] == "valid", (
+        f"B.1 FAIL: old permit should be valid; got status={result['status']}, "
+        f"reason={result.get('reason')}"
+    )
