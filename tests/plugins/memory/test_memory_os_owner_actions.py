@@ -4068,10 +4068,15 @@ def test_cron_integration_status_reports_helper_and_redacted_delivery_target(tmp
 
 def test_provisional_crystallized_review_items_generates_queue_items(tmp_path):
     """Provisional records appear as review items with countdown and actions."""
+    import datetime as _dt
+
     from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
 
     store = _store(tmp_path)
     service = CrystallizedMemoryService(store)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    expires_at = (now + _dt.timedelta(days=7)).isoformat()
 
     candidate = CrystallizedCandidate(
         candidate_id="cand_p5_001",
@@ -4083,10 +4088,10 @@ def test_provisional_crystallized_review_items_generates_queue_items(tmp_path):
         candidate_id="cand_p5_001",
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
         reviewer="resolver",
-        reviewed_at="2026-06-17T00:00:00Z",
+        reviewed_at=now.isoformat(),
         source_state="resolver_approved",
         provisional=True,
-        expires_at="2026-06-24T00:00:00Z",
+        expires_at=expires_at,
     )
     service.write_approved_record(candidate, decision, file_name="owner_approved.md")
 
@@ -4098,7 +4103,8 @@ def test_provisional_crystallized_review_items_generates_queue_items(tmp_path):
     assert "reject_provisional_crystallized_record" in item["action_tokens"]
     assert "剩" in item["summary"]
     assert "d)" in item["summary"]
-    assert item["remaining_days"] >= 6  # 2026-06-17 to 2026-06-24
+    # remaining_days uses int(seconds/86400), so a 7-day window may floor to 6
+    assert item["remaining_days"] >= 6
 
 
 def test_provisional_review_items_priority_based_on_expiry(tmp_path):
