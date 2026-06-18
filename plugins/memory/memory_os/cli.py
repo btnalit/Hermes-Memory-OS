@@ -662,7 +662,14 @@ def _hermes_contract_checks() -> list[dict[str, Any]]:
     try:
         mod = importlib.import_module("plugins.memory.memory_os.__init__")
         has_register = hasattr(mod, "register") and callable(mod.register)
+    except ImportError:
+        has_register = False
     except Exception:
+        findings.append(_finding(
+            "hermes_contract_register_check_failed",
+            "warning",
+            "register(ctx) check could not complete — unexpected error during import.",
+        ))
         has_register = False
     if has_register:
         sig = inspect.signature(mod.register)
@@ -685,18 +692,25 @@ def _hermes_contract_checks() -> list[dict[str, Any]]:
     # Check 2: ABC source
     try:
         from agent.memory_provider import MemoryProvider as HostABC  # type: ignore[import-untyped]
-        from plugins.memory.memory_os.__init__ import MemoryOSProvider
-        if not issubclass(MemoryOSProvider, HostABC):
-            findings.append(_finding(
-                "hermes_contract_abc_vendored",
-                "error",
-                "MemoryOSProvider inherits from vendored ABC, not agent.memory_provider.MemoryProvider. "
-                "isinstance() check will fail — Hermes reports NOT installed.",
-            ))
     except ImportError:
-        pass  # Standalone env — vendored fallback is correct
-    except Exception:
-        pass
+        pass  # Standalone env — vendored fallback is correct, skip host ABC check
+    else:
+        try:
+            from plugins.memory.memory_os.__init__ import MemoryOSProvider
+        except ImportError:
+            findings.append(_finding(
+                "hermes_contract_abc_plugin_import_failed",
+                "warning",
+                "Cannot import MemoryOSProvider from plugin — check may be incomplete.",
+            ))
+        else:
+            if not issubclass(MemoryOSProvider, HostABC):
+                findings.append(_finding(
+                    "hermes_contract_abc_vendored",
+                    "error",
+                    "MemoryOSProvider inherits from vendored ABC, not agent.memory_provider.MemoryProvider. "
+                    "isinstance() check will fail — Hermes reports NOT installed.",
+                ))
 
     # Check 3: sync_turn messages parameter
     try:
@@ -709,8 +723,14 @@ def _hermes_contract_checks() -> list[dict[str, Any]]:
                 "sync_turn() missing 'messages' parameter — Hermes MemoryManager.sync_all() "
                 "passes messages=[...], causing TypeError on the hot path.",
             ))
+    except ImportError:
+        pass  # Plugin not importable in this environment
     except Exception:
-        pass
+        findings.append(_finding(
+            "hermes_contract_sync_turn_check_failed",
+            "warning",
+            "sync_turn messages check could not complete — unexpected error.",
+        ))
 
     # Check 4: plugin.yaml hooks
     try:
@@ -723,8 +743,18 @@ def _hermes_contract_checks() -> list[dict[str, Any]]:
                 "warning",
                 "plugin.yaml missing hooks field — non-fatal but 5/8 built-in providers declare hooks.",
             ))
+    except FileNotFoundError:
+        findings.append(_finding(
+            "hermes_contract_plugin_yaml_missing",
+            "warning",
+            "plugin.yaml not found — Hermes may not discover this plugin.",
+        ))
     except Exception:
-        pass
+        findings.append(_finding(
+            "hermes_contract_plugin_yaml_check_failed",
+            "warning",
+            "plugin.yaml hooks check could not complete — unexpected error.",
+        ))
 
     return findings
 
