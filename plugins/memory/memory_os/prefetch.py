@@ -945,9 +945,11 @@ def _crystallized_lines(
     # When no FTS5 relevance is available, sort by mtime descending so the
     # most recently modified records — including just-written probe nonces —
     # appear first and survive the cap.
-    paths = sorted(store.roots.crystallized_root.glob("*.md"))
+    paths = list(store.roots.crystallized_root.glob("*.md"))
     if relevant_ids is None:
         paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    else:
+        paths.sort()
     for path in paths:
         try:
             content = path.read_text(encoding="utf-8")

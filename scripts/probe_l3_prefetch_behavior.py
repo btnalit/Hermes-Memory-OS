@@ -36,14 +36,24 @@ NONCE_FILE = HERMES_HOME / "memory-os" / "crystallized" / "probe_test.md"
 LOG_FILE = Path(tempfile.gettempdir()) / f"l3_probe_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.log"
 
 def _resolve_probe_budget(hermes_home: Path) -> int:
-    """Read prefetch_char_budget from Memory-OS config, with 20000 fallback."""
+    """Read prefetch_char_budget from Memory-OS config, with 20000 fallback.
+
+    Budgets below MIN_BUDGET (5000 chars) are too small to hold a meaningful
+    Crystallized Memory section and are silently replaced by the fallback.
+    """
+    MIN_BUDGET = 5000
     try:
         config = load_config(hermes_home)
         budget = int(config.get("prefetch_char_budget", 0))
-        if budget >= 5000:
+        if budget >= MIN_BUDGET:
             return budget
-    except Exception:
-        pass
+    except Exception as exc:
+        import sys
+        print(
+            f"Warning: failed to read prefetch_char_budget from config "
+            f"({type(exc).__name__}), using default 20000",
+            file=sys.stderr,
+        )
     return 20000
 
 # ── nonce generation ───────────────────────────────────────────────
