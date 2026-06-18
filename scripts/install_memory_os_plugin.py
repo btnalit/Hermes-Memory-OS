@@ -45,6 +45,8 @@ SOURCE_INDEX_SYNC = REPO_ROOT / "scripts" / "memory_os_index_sync.py"
 SOURCE_INDEX_SYNC_GATE = REPO_ROOT / "scripts" / "memory_os_cron_index_sync_gate.py"
 SOURCE_FACT_JUDGE_LANE = REPO_ROOT / "scripts" / "memory_os_fact_judge_lane.py"
 SOURCE_FACT_JUDGE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_fact_judge_gate.py"
+SOURCE_CLEANUP_EXPIRED_WORKING = REPO_ROOT / "scripts" / "cleanup_expired_working.py"
+SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -1048,6 +1050,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "fact_judge_gate": SOURCE_FACT_JUDGE_GATE,
         "index_sync": SOURCE_INDEX_SYNC,
         "index_sync_gate": SOURCE_INDEX_SYNC_GATE,
+        "cleanup_expired_working": SOURCE_CLEANUP_EXPIRED_WORKING,
+        "l3_probe_helper": SOURCE_L3_PROBE_HELPER,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():
