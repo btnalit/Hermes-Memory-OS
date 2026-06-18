@@ -29,6 +29,40 @@ DEFAULT_JUDGE_CONFIG: dict[str, Any] = {
     "max_tokens": 256,
 }
 
+# ── Retry + heuristic fallback ─────────────────────────────────────────────
+MAX_JUDGE_RETRIES = 2
+
+# Heuristic durable/transient markers (Chinese + English).
+# Used ONLY as fallback when LLM fails — not as primary judgment.
+_DURABLE_MARKERS: frozenset[str] = frozenset({
+    "prefer", "决定", "用", "remember", "记住", "我喜欢", "我爱",
+    "framework", "框架", "策略", "always", "commit",
+    "i prefer", "i like", "i use", "我的", "我是",
+    "want to", "想要", "打算", "plan to", "will use",
+    "习惯", "常用", "一直在", "选择", "选择使用",
+})
+
+_TRANSIENT_MARKERS: frozenset[str] = frozenset({
+    "谢谢", "收到", "hello", "thanks", "open", "show me",
+    "天气", "今天", "hi", "bye", "再见", "好的",
+    "ok", "明白了", "知道了", "不用谢",
+})
+
+
+def _heuristic_durable(candidate: "CrystallizedCandidate") -> dict[str, Any]:
+    """Deterministic keyword-based fallback when LLM fails all retries.
+
+    NOT fail-open: requires positive marker match to return True.
+    Returns verdict dict with reason="heuristic_fallback:..."
+    """
+    text = (candidate.body or "").lower()
+    if any(marker in text for marker in _TRANSIENT_MARKERS):
+        return {"durable_fact": False, "reason": "heuristic_fallback:transient_marker"}
+    if any(marker in text for marker in _DURABLE_MARKERS):
+        return {"durable_fact": True, "reason": "heuristic_fallback:durable_marker"}
+    return {"durable_fact": False, "reason": "heuristic_fallback:no_markers"}
+
+
 # ── Verdict schema ───────────────────────────────────────────────────────
 VERDICT_SCHEMA_VERSION = "memory-os.fact_judge_verdict.v0"
 
@@ -78,7 +112,7 @@ def judge_candidate(
 
     Returns:
         {"durable_fact": bool, "reason": str}
-        On any failure, returns {"durable_fact": False, "reason": "..."} — fail-safe.
+        On total failure after retries, falls back to heuristic (content-based, not fail-open).
     """
     effective_config = dict(DEFAULT_JUDGE_CONFIG, **(config or {}))
     body = str(candidate.body or "").strip()
@@ -97,28 +131,45 @@ def judge_candidate(
 
     prompt = f"{_JUDGE_SYSTEM_PROMPT}\n\n{user_prompt}"
 
-    try:
-        response_text = _call_hermes_runtime_model(prompt, effective_config)
-    except Exception:
-        return {"durable_fact": False, "reason": "judge_call_failed"}
+    # Retry loop: empty / non-JSON / missing-key responses get retried
+    for attempt in range(1 + MAX_JUDGE_RETRIES):  # 1 initial + N retries
+        try:
+            response_text = _call_hermes_runtime_model(prompt, effective_config)
+        except Exception:
+            if attempt < MAX_JUDGE_RETRIES:
+                continue
+            # All retries exhausted on exception → fall through to heuristic
+            break
 
-    if not response_text:
-        return {"durable_fact": False, "reason": "judge_empty_response"}
+        if not response_text:
+            if attempt < MAX_JUDGE_RETRIES:
+                continue
+            break
 
-    try:
-        parsed = _extract_json_object(response_text)
-    except Exception:
-        return {"durable_fact": False, "reason": "judge_json_parse_error"}
+        try:
+            parsed = _extract_json_object(response_text)
+        except Exception:
+            if attempt < MAX_JUDGE_RETRIES:
+                continue
+            break
 
-    if not isinstance(parsed, dict):
-        return {"durable_fact": False, "reason": "judge_non_json_response"}
+        if not isinstance(parsed, dict):
+            if attempt < MAX_JUDGE_RETRIES:
+                continue
+            break
 
-    durable = parsed.get("durable_fact")
-    if not isinstance(durable, bool):
-        return {"durable_fact": False, "reason": "judge_missing_durable_fact_key"}
+        durable = parsed.get("durable_fact")
+        if not isinstance(durable, bool):
+            if attempt < MAX_JUDGE_RETRIES:
+                continue
+            break
 
-    reason = str(parsed.get("reason") or "")[:200]
-    return {"durable_fact": durable, "reason": reason}
+        # Successful parse with valid durable_fact
+        reason = str(parsed.get("reason") or "")[:200]
+        return {"durable_fact": durable, "reason": reason}
+
+    # All attempts exhausted — fall back to deterministic heuristic
+    return _heuristic_durable(candidate)
 
 
 def run_fact_judge_lane(

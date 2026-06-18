@@ -233,12 +233,12 @@ class TestJudgeFailSafe:
     """F.3-F.4: Fail-safe and conservative behavior."""
 
     def test_empty_response_returns_false(self):
-        """F.3: Empty LLM response → durable_fact=False (fail-safe)."""
+        """F.3: Empty LLM response → after retries → heuristic fallback."""
         from plugins.modules.governance.fact_judge import judge_candidate
 
         candidate = _candidate(
             candidate_id="cand_fail_001",
-            body="Remembered from event: 我喜欢Python。",
+            body="Session data: 会议安排在三点。",  # no durable markers
         )
 
         with patch(
@@ -247,15 +247,15 @@ class TestJudgeFailSafe:
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
-            assert result["reason"] == "judge_empty_response"
+            assert "heuristic_fallback" in result["reason"]
 
     def test_non_json_response_returns_false(self):
-        """F.3: Non-JSON LLM response → durable_fact=False (fail-safe)."""
+        """F.3: Non-JSON → after retries → heuristic fallback."""
         from plugins.modules.governance.fact_judge import judge_candidate
 
         candidate = _candidate(
             candidate_id="cand_fail_002",
-            body="Remembered from event: 我喜欢Python。",
+            body="Session data: 会议安排在三点。",  # no durable markers
         )
 
         with patch(
@@ -264,15 +264,15 @@ class TestJudgeFailSafe:
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
-            assert "judge_" in result["reason"]
+            assert "heuristic_fallback" in result["reason"]
 
     def test_missing_durable_fact_key_returns_false(self):
-        """F.3: JSON without durable_fact key → durable_fact=False (fail-safe)."""
+        """F.3: JSON without durable_fact key → retries → heuristic fallback."""
         from plugins.modules.governance.fact_judge import judge_candidate
 
         candidate = _candidate(
             candidate_id="cand_fail_003",
-            body="Remembered from event: 我喜欢Python。",
+            body="Session data: the project deadline is next month.",  # no durable markers
         )
 
         with patch(
@@ -281,15 +281,15 @@ class TestJudgeFailSafe:
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
-            assert result["reason"] == "judge_missing_durable_fact_key"
+            assert "heuristic_fallback" in result["reason"]
 
     def test_model_call_exception_returns_false(self):
-        """F.3: Exception during model call → durable_fact=False (fail-safe)."""
+        """F.3: Exception → after retries exhausted → heuristic fallback."""
         from plugins.modules.governance.fact_judge import judge_candidate
 
         candidate = _candidate(
             candidate_id="cand_fail_004",
-            body="Remembered from event: 我喜欢Python。",
+            body="Session data: the project deadline is next month.",  # no durable markers
         )
 
         with patch(
@@ -298,7 +298,7 @@ class TestJudgeFailSafe:
         ):
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False
-            assert result["reason"] == "judge_call_failed"
+            assert "heuristic_fallback" in result["reason"]
 
     def test_empty_body_returns_false(self):
         """F.4: Empty candidate body → durable_fact=False (conservative)."""
@@ -765,4 +765,91 @@ class TestLeanCapturePrompt:
             result = judge_candidate(candidate)
             assert result["durable_fact"] is False, (
                 f"Clear transient should NOT be durable; got {result}"
+            )
+
+
+# ── A.3-A.5: Retry + heuristic fallback (spec A2+A3) ──────────────────────
+
+
+class TestJudgeRetryAndHeuristic:
+    """A.3-A.5: Retry on empty/non-JSON, heuristic fallback on total failure."""
+
+    def test_retry_succeeds_after_empty_response(self):
+        """A.3: First call returns empty, retry returns valid JSON → valid verdict.
+
+        Old code: empty response → immediate judge_empty_response.
+        New code: retry → succeeds on second attempt.
+        """
+        from plugins.modules.governance.fact_judge import judge_candidate
+
+        candidate = _candidate(
+            candidate_id="cand_retry_001",
+            body="Remembered from event: 我喜欢用Rust写后端服务。",
+        )
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            side_effect=[
+                "",   # first call: empty response
+                '{"durable_fact": true, "reason": "user preference for Rust"}',  # retry: valid
+            ],
+        ):
+            result = judge_candidate(candidate)
+            assert result["durable_fact"] is True, (
+                f"Retry should recover from empty first response; got {result}"
+            )
+            assert result["reason"] == "user preference for Rust"
+
+    def test_heuristic_fallback_when_all_retries_fail_with_durable_markers(self):
+        """A.4: All retries fail + durable markers in body → heuristic returns True.
+
+        Text contains '我喜欢' (I like) → durable marker → heuristic fallback True.
+        """
+        from plugins.modules.governance.fact_judge import judge_candidate
+
+        candidate = _candidate(
+            candidate_id="cand_heur_001",
+            body="Remembered from event: 我喜欢用Neovim编辑器，已经配置了很多插件。",
+        )
+
+        # All calls return non-JSON — retries exhausted → heuristic fallback
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value="Just some random text, not JSON at all.",
+        ):
+            result = judge_candidate(candidate)
+            assert result["durable_fact"] is True, (
+                f"Heuristic should detect '我喜欢' as durable marker; got {result}"
+            )
+            assert "heuristic_fallback" in result["reason"], (
+                f"Reason should indicate heuristic_fallback; got {result['reason']}"
+            )
+
+    def test_heuristic_not_fail_open_with_no_markers(self):
+        """A.5: All retries fail + no durable/transient markers → False (not fail-open).
+
+        Text has no durable markers and no transient markers → heuristic returns False.
+        This is the safety net: don't let random content through.
+        """
+        from plugins.modules.governance.fact_judge import judge_candidate
+
+        candidate = _candidate(
+            candidate_id="cand_heur_002",
+            body="Remembered from event: 今天的会议安排在下午三点。",
+        )
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            side_effect=[
+                "",           # empty
+                "not json",   # non-JSON
+                "",           # empty again (3 total = 1 initial + 2 retries)
+            ],
+        ):
+            result = judge_candidate(candidate)
+            assert result["durable_fact"] is False, (
+                f"Heuristic should NOT fail-open on content with no markers; got {result}"
+            )
+            assert "heuristic_fallback" in result["reason"], (
+                f"Reason should indicate heuristic_fallback; got {result['reason']}"
             )
