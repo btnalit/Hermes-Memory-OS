@@ -57,6 +57,20 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
         ],
     }
     results: dict[str, dict[str, Any]] = {}
+    provider_literal_hits = []
+    memory_os_root = root / "plugins" / "memory" / "memory_os"
+    if memory_os_root.exists():
+        for path in sorted(memory_os_root.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "ragflow" in text.lower():
+                provider_literal_hits.append(str(path.relative_to(root)))
+    results["memory_os_provider_agnostic"] = {
+        "status": "fail" if provider_literal_hits else "pass",
+        "exit_code": 1 if provider_literal_hits else 0,
+        "hits": provider_literal_hits,
+    }
     for name, argv in checks.items():
         raw = runner(argv, root)
         results[name] = {

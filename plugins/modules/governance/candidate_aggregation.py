@@ -28,6 +28,7 @@ from plugins.memory.memory_os.crystallized import (
     read_candidate_queue,
     read_candidate_triage,
 )
+from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.store import MemoryOSStore
 
 # V3a: knob override resolution (imported here; resolve_knob called at runtime)
@@ -196,6 +197,47 @@ def _auto_demote_rejected(
 
 # ── Cluster + promote ───────────────────────────────────────────────────
 
+def _skip_tainted_external_evidence(
+    candidate: CrystallizedCandidate,
+    store: MemoryOSStore,
+    processed_ids: set[str],
+    *,
+    cluster_key: str = "",
+    cluster_size: int = 0,
+    envelope_id: str = "",
+    now: datetime | None = None,
+) -> bool:
+    """Fail-closed auto path guard: tainted candidates need explicit owner ack."""
+    from plugins.memory.memory_os.provenance import candidate_external_ref, is_tainted
+
+    if not is_tainted(candidate, store=store):
+        return False
+    append_candidate_triage(
+        store,
+        candidate_id=candidate.candidate_id,
+        action="promote",
+        target_state="owner_eligible",
+        reason="external_evidence_tainted_blocked",
+        cluster_key=cluster_key,
+        cluster_size=cluster_size,
+        execution_gate_envelope_id=envelope_id,
+        now=now,
+    )
+    append_audit(
+        store.roots.audit_path,
+        action="external_evidence_auto_crystallization_blocked",
+        status="blocked",
+        target=candidate.candidate_id,
+        details={
+            "reason": "external_evidence_tainted_blocked",
+            "external_ref": candidate_external_ref(candidate, store=store) or "",
+            "cluster_key": cluster_key,
+            "cluster_size": cluster_size,
+        },
+    )
+    processed_ids.add(candidate.candidate_id)
+    return True
+
 
 def _cluster_and_promote(
     candidates: list[CrystallizedCandidate],
@@ -274,6 +316,16 @@ def _cluster_and_promote(
             f"cluster_key={cluster_key})"
         )
         for member in promote_batch:
+            if _skip_tainted_external_evidence(
+                member,
+                store,
+                processed_ids,
+                cluster_key=cluster_key,
+                cluster_size=len(members),
+                envelope_id=envelope_id,
+                now=_now,
+            ):
+                continue
             # Index-based near-duplicate dedup (fail-open)
             dedup_hit = _check_index_dedup(store, member)
             if dedup_hit is not None:
@@ -382,6 +434,16 @@ def _cluster_and_promote(
             if c.candidate_id in processed_ids:
                 continue
             if not durable_verdicts.get(c.candidate_id):
+                continue
+            if _skip_tainted_external_evidence(
+                c,
+                store,
+                processed_ids,
+                cluster_key="",
+                cluster_size=1,
+                envelope_id=envelope_id,
+                now=_now,
+            ):
                 continue
 
             # Index-based near-duplicate dedup (fail-open)

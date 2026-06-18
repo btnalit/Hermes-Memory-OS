@@ -349,7 +349,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             source_event_ids_json text not null,
             tags_json text not null,
             sensitivity text not null,
-            bridge_state text not null
+            bridge_state text not null,
+            provenance_json text not null default '{}'
         );
         create table if not exists audit_entries (
             id text primary key,
@@ -387,6 +388,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "memory_edges", "state", "text not null default 'candidate'")
     _ensure_column(conn, "memory_edges", "invalidated_at", "text")
     _ensure_column(conn, "memory_edges", "proposed_by", "text not null default 'structural'")
+    _ensure_column(conn, "crystallized_candidates", "provenance_json", "text not null default '{}'")
     _ensure_fts(conn)
     _set_metadata(conn, "fts_text_projection_version", _FTS_TEXT_PROJECTION_VERSION)
 
@@ -646,8 +648,8 @@ def _index_crystallized_candidates(conn: sqlite3.Connection, roots: MemoryOSRoot
         conn.execute(
             """
             insert or replace into crystallized_candidates
-            (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
-            values (?, ?, ?, ?, ?, ?, ?)
+            (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state, provenance_json)
+            values (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 candidate.candidate_id,
@@ -657,6 +659,7 @@ def _index_crystallized_candidates(conn: sqlite3.Connection, roots: MemoryOSRoot
                 json.dumps(candidate.tags or [], ensure_ascii=False, sort_keys=True),
                 candidate.sensitivity,
                 candidate.bridge_state,
+                json.dumps(candidate.provenance or {}, ensure_ascii=False, sort_keys=True),
             ),
         )
         _replace_fts_record(

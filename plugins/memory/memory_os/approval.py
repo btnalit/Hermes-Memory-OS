@@ -25,6 +25,8 @@ class ApprovalDecision:
     provisional: bool = False
     expires_at: str | None = None
     recurrence: int = 0
+    external_evidence_ack: bool = False
+    acked_external_ref: str | None = None
 
     @property
     def allows_crystallized_write(self) -> bool:

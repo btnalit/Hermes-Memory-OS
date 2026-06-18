@@ -21,6 +21,7 @@ def test_static_hygiene_reports_repo_native_pass_without_ruff(tmp_path):
         "closure_matrix",
         "public_checkout_probe",
         "write_surface_check",
+        "memory_os_provider_agnostic",
     }
     assert all(item["status"] == "pass" for item in report["checks"].values())
     assert len(calls) == 5

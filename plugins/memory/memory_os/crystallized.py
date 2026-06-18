@@ -44,6 +44,7 @@ class CrystallizedCandidate:
     bridge_state: str = ""
     created_at: str = ""
     rejection_count: int = 0
+    provenance: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,14 @@ class CrystallizedMemoryService:
     ) -> Path:
         self._ensure_crystallized_approval(candidate, decision)
         created_at = _timestamp(now)
+        provenance = dict(candidate.provenance or {})
+        from .provenance import candidate_external_ref, is_tainted
+
+        external_ref = candidate_external_ref(candidate, store=self.store) or ""
+        if not provenance and is_tainted(candidate, store=self.store):
+            provenance = {"source_class": "external_evidence"}
+            if external_ref:
+                provenance["external_ref"] = external_ref
         frontmatter = {
             "schema_version": CRYSTALLIZED_SCHEMA_VERSION,
             "id": new_crystallized_id(_datetime(now)),
@@ -89,6 +98,11 @@ class CrystallizedMemoryService:
             frontmatter["provisional"] = True
             frontmatter["expires_at"] = decision.expires_at or ""
             frontmatter["recurrence"] = str(decision.recurrence)
+        if provenance:
+            frontmatter["provenance"] = provenance
+        if decision.external_evidence_ack:
+            frontmatter["external_evidence_ack"] = True
+            frontmatter["acked_external_ref"] = decision.acked_external_ref or ""
         path = self.store.append_crystallized_record(file_name, frontmatter, candidate.body)
         append_audit(
             self.store.roots.audit_path,
@@ -100,6 +114,9 @@ class CrystallizedMemoryService:
                 "candidate_id": candidate.candidate_id,
                 "approval_purpose": decision.purpose.value,
                 "source_event_ids": list(candidate.source_event_ids),
+                "external_evidence_ack": bool(decision.external_evidence_ack),
+                "acked_external_ref": decision.acked_external_ref or "",
+                "external_ref": external_ref,
             },
         )
         return path
@@ -472,6 +489,42 @@ class CrystallizedMemoryService:
             )
         if not candidate.source_event_ids:
             raise CrystallizedApprovalError("crystallized records require source_event_ids")
+        from .provenance import candidate_external_ref, is_tainted
+
+        if is_tainted(candidate, store=self.store):
+            external_ref = candidate_external_ref(candidate, store=self.store) or ""
+            if not external_ref:
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="external_evidence_crystallization_rejected",
+                    status="blocked",
+                    target=candidate.candidate_id,
+                    details={"reason": "external_evidence_ref_unresolved"},
+                )
+                raise CrystallizedApprovalError("external_evidence_ref_unresolved")
+            if not decision.external_evidence_ack:
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="external_evidence_crystallization_rejected",
+                    status="blocked",
+                    target=candidate.candidate_id,
+                    details={"reason": "external_evidence_requires_explicit_ack", "external_ref": external_ref},
+                )
+                raise CrystallizedApprovalError("external_evidence_requires_explicit_ack")
+            acked_ref = str(decision.acked_external_ref or "").strip()
+            if acked_ref != external_ref:
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="external_evidence_crystallization_rejected",
+                    status="blocked",
+                    target=candidate.candidate_id,
+                    details={
+                        "reason": "external_evidence_ack_ref_mismatch",
+                        "external_ref": external_ref,
+                        "acked_external_ref": acked_ref,
+                    },
+                )
+                raise CrystallizedApprovalError("external_evidence_ack_ref_mismatch")
 
 
 def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidate) -> Path:
@@ -517,6 +570,7 @@ def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
                 bridge_state=str(raw.get("bridge_state", "")),
                 created_at=str(raw.get("created_at") or ""),
                 rejection_count=int(raw.get("rejection_count", 0)),
+                provenance=dict(raw.get("provenance") or {}) or None,
             )
         )
     return candidates
@@ -748,6 +802,7 @@ def compact_candidate_queue(
             tags=[str(t) for t in (raw.get("tags") or [])],
             bridge_state=str(raw.get("bridge_state", "")),
             created_at=str(raw.get("created_at") or ""),
+            provenance=dict(raw.get("provenance") or {}) or None,
         )
         effective = resolve_candidate_effective_state(cand, triage)
         age = _candidate_age_seconds(cand.created_at, now)

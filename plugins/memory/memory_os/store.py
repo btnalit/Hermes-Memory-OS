@@ -50,6 +50,8 @@ def _format_frontmatter(frontmatter: dict[str, Any]) -> str:
             lines.append(f"{key}:")
             for item in value:
                 lines.append(f"  - {item}")
+        elif isinstance(value, dict):
+            lines.append(f"{key}: {json.dumps(value, ensure_ascii=False, sort_keys=True)}")
         elif isinstance(value, bool):
             lines.append(f"{key}: {str(value).lower()}")
         else:
