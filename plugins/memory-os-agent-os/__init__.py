@@ -35,6 +35,7 @@ _ALLOWED_ALIASES = {
     "signal-sources",
     "projection",
     "left-brain",
+    "index",
 }
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
@@ -431,6 +432,9 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     eval_rh31_failures = eval_rh31_subs.add_parser("failures")
     eval_rh31_failures.add_argument("--report-root", default="")
     eval_rh31_failures.add_argument("--class", dest="failure_class", default="")
+    index_parser = subs.add_parser("index")
+    index_subs = index_parser.add_subparsers(dest="index_command", required=True)
+    index_subs.add_parser("rebuild")
 
 
 def memory_os_agent_os_command(args: argparse.Namespace) -> None:
