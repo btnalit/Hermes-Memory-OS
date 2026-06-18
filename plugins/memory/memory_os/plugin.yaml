@@ -1,3 +1,5 @@
 name: memory_os
 version: 0.1.0
 description: "Memory-OS — profile-local canonical memory store with event, working, crystallized, identity, and relationship layers."
+hooks:
+  - on_session_end
