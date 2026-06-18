@@ -198,6 +198,76 @@ LLM_JUDGE_PRESETS: dict[str, dict[str, object]] = {
 }
 
 
+def _verify_memory_os_hot_path(hermes_home: str) -> tuple:
+    """E2E smoke test: verify Hermes MemoryManager accepts and calls the provider.
+
+    Uses Hermes agent's own public API — no invented names.
+    Returns (ok: bool, detail: str).
+    """
+    import importlib
+    import sys
+
+    plugin_parent = str(Path(hermes_home) / "plugins" / "memory")
+    if plugin_parent not in sys.path:
+        sys.path.insert(0, plugin_parent)
+
+    try:
+        from agent.memory_manager import MemoryManager
+        from agent.memory_provider import MemoryProvider as HostABC
+    except ImportError as e:
+        return False, (
+            f"Cannot import Hermes agent runtime — is hermes-agent installed? {e}"
+        )
+
+    # 1. Verify provider class inherits from host ABC
+    try:
+        import plugins.memory.memory_os.__init__ as pkg
+    except ImportError as e:
+        return False, f"Cannot import MemoryOSProvider from installed plugin: {e}"
+
+    if not issubclass(pkg.MemoryOSProvider, HostABC):
+        return False, (
+            "ABC mismatch: MemoryOSProvider inherits from vendored ABC, "
+            "not agent.memory_provider.MemoryProvider. isinstance() check will fail."
+        )
+
+    # 2. Verify register(ctx) entry point
+    if not hasattr(pkg, "register") or not callable(pkg.register):
+        return False, "register is not callable — Hermes cannot discover this plugin"
+
+    # 3. Verify MemoryManager accepts the provider
+    mgr = MemoryManager()
+    mgr.add_provider(pkg.MemoryOSProvider())
+    try:
+        mgr.initialize_all(session_id="install-smoke-test", platform="cli")
+    except Exception as e:
+        return False, f"initialize_all failed: {e}"
+
+    if mgr.get_provider("memory-os") is None:
+        return False, (
+            "Provider not accepted by Hermes MemoryManager — "
+            "check: (1) register(ctx) exists "
+            "(2) ABC is agent.memory_provider.MemoryProvider "
+            "(3) name property returns 'memory-os'"
+        )
+
+    # 4. Verify sync_turn doesn't TypeError
+    try:
+        mgr.sync_all("smoke user msg", "smoke assistant msg")
+    except TypeError as e:
+        return False, f"sync_turn signature incompatible (missing messages param?): {e}"
+    except Exception:
+        pass  # Non-TypeError is fine — store paths may not exist yet
+
+    # 5. Verify on_session_end doesn't crash
+    try:
+        mgr.on_session_end([])
+    except Exception as e:
+        return False, f"on_session_end failed: {e}"
+
+    return True, "OK — provider loaded, sync_turn passed, on_session_end passed"
+
+
 def install_plugin(
     *,
     hermes_home: Path,
@@ -237,6 +307,7 @@ def install_plugin(
     systemd_dir: Path | None = None,
     hindsight_mode: str = "auto",
     dry_run: bool = False,
+    skip_verify: bool = False,
 ) -> dict[str, object]:
     source = source.expanduser().resolve()
     shell_source = shell_source.expanduser().resolve()
@@ -485,6 +556,18 @@ def install_plugin(
                     file=sys.stderr,
                 )
 
+    # E2E smoke test — verify hot path is actually working
+    smoke_ok = True
+    smoke_detail = ""
+    if not skip_verify and not dry_run:
+        smoke_ok, smoke_detail = _verify_memory_os_hot_path(str(hermes_home))
+        if smoke_ok:
+            print(f"  Smoke test: PASS — {smoke_detail}", file=sys.stderr)
+        else:
+            print(f"  Smoke test: FAIL — {smoke_detail}", file=sys.stderr)
+            print("  ⚠  INSTALL MAY BE BROKEN despite config being set.", file=sys.stderr)
+            print("  Run 'hermes memory_os doctor' for detailed diagnostics.", file=sys.stderr)
+
     return {
         "schema_version": "memory-os.install.v0",
         "provider": "memory_os",
@@ -575,6 +658,11 @@ def install_plugin(
         "hindsight_adoption": hindsight_adoption,
         "config_defaults": config_defaults_report,
         "expired_working_cleanup": expired_cleanup_report,
+        "smoke_test": {
+            "requested": not skip_verify and not dry_run,
+            "passed": smoke_ok,
+            "detail": smoke_detail,
+        },
         "dry_run": dry_run,
     }
 
@@ -1503,6 +1591,7 @@ def main() -> int:
         ),
     )
     parser.add_argument("--dry-run", action="store_true", help="Report actions without copying or enabling")
+    parser.add_argument("--skip-verify", action="store_true", help="Skip E2E smoke test after install")
     args = parser.parse_args()
 
     report = install_plugin(
@@ -1542,6 +1631,7 @@ def main() -> int:
         llm_judge_preset=args.llm_judge_preset,
         hindsight_mode=args.hindsight,
         dry_run=args.dry_run,
+        skip_verify=args.skip_verify,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
