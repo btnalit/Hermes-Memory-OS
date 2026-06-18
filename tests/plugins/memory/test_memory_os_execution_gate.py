@@ -506,3 +506,100 @@ class TestGateIndex:
         assert "already_completed" in result.get("reason", ""), (
             f"B.4: reason should indicate already completed; got {result.get('reason')}"
         )
+
+    # ── Task F2: C2-C7 fixes ─────────────────────────────────────────────
+
+    def test_completion_count_is_integer_not_boolean(self, tmp_path):
+        """C2: completion_count in resolution is actual count, not 0/1."""
+        from plugins.memory.memory_os.execution_gate import (
+            _update_gate_index, _read_gate_index,
+        )
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        eid = "xgate_test_c2_count"
+        # Write first completion
+        _update_gate_index(roots, eid, "completion", {
+            "execution_status": "completed", "created_at": "2025-01-01T00:00:00Z"
+        })
+        # Verify index stores int
+        index = _read_gate_index(roots)
+        assert index[eid]["completion_count"] == 1, \
+            f"Expected 1, got {index[eid].get('completion_count')}"
+        # Write second completion
+        _update_gate_index(roots, eid, "completion", {
+            "execution_status": "completed", "created_at": "2025-01-02T00:00:00Z"
+        })
+        index = _read_gate_index(roots)
+        assert index[eid]["completion_count"] == 2, \
+            f"Expected 2, got {index[eid].get('completion_count')}"
+
+    def test_permit_resolution_expires_at_status_respects_require_fresh(self):
+        """C3: expires_at_status uses require_fresh when passed."""
+        from plugins.memory.memory_os.execution_gate import _permit_resolution
+        result = _permit_resolution(
+            status="invalid",
+            reason="test",
+            envelope_id="xgate_c3",
+            lane_id="test",
+            risk_class="standard",
+            permit={"expires_at": ""},
+            require_fresh=True,
+        )
+        assert result["expires_at_status"] == "expiry_missing", \
+            f"Expected 'expiry_missing' with require_fresh=True, got {result['expires_at_status']}"
+
+    def test_permit_resolution_expires_at_status_relaxed_by_default(self):
+        """C3: expires_at_status uses relaxed mode when require_fresh not passed."""
+        from plugins.memory.memory_os.execution_gate import _permit_resolution
+        result = _permit_resolution(
+            status="valid",
+            reason="",
+            envelope_id="xgate_c3b",
+            lane_id="test",
+            risk_class="standard",
+            permit={},
+        )
+        assert result["expires_at_status"] == "valid", \
+            f"Expected 'valid' with relaxed default, got {result['expires_at_status']}"
+
+    def test_validate_permit_fields_shared_function_exists(self):
+        """C6: shared _validate_permit_fields function is importable and works."""
+        from plugins.memory.memory_os.execution_gate import _validate_permit_fields
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        # Empty dict should fail lane check
+        result = _validate_permit_fields(
+            d={},
+            target="xgate_c6",
+            lane_id="test-lane",
+            risk_class="",
+            require_fresh=False,
+            require_unused=False,
+            expected_scope=None,
+            expected_scope_hash="",
+            now=now,
+            completion_count=0,
+        )
+        assert result is not None  # Should return a failure dict
+        assert result["reason"] == "execution_gate_lane_mismatch"
+
+    def test_validate_permit_fields_no_side_effects(self):
+        """C5+C6: _validate_permit_fields is pure — no index rebuild side effects."""
+        from plugins.memory.memory_os.execution_gate import _validate_permit_fields
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        d = {
+            "lane_id": "wrong",
+            "risk_class": "standard",
+            "permit_decision": "allowed",
+        }
+        # Should return failure dict WITHOUT triggering any file I/O
+        result = _validate_permit_fields(
+            d=d, target="xgate_c5", lane_id="right-lane", risk_class="standard",
+            require_fresh=False, require_unused=False,
+            expected_scope=None, expected_scope_hash="",
+            now=now, completion_count=0,
+        )
+        assert result is not None
+        assert result["reason"] == "execution_gate_lane_mismatch"

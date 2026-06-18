@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from .jsonl_io import read_json_state_result, write_json_atomic
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
@@ -32,26 +33,18 @@ def _gate_index_path(roots: MemoryOSRoots) -> Path:
 
 def _read_gate_index(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:
     """Read the gate index. Returns empty dict if missing or corrupt."""
-    path = _gate_index_path(roots)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+    result = read_json_state_result(_gate_index_path(roots))
+    data = result.data
+    return data if isinstance(data, dict) else {}
 
 
 def _write_gate_index(roots: MemoryOSRoots, index: dict[str, dict[str, Any]]) -> None:
-    """Atomically write the gate index."""
-    path = _gate_index_path(roots)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    """Atomically write the gate index via jsonl_io."""
+    write_json_atomic(
+        _gate_index_path(roots),
+        index,
+        ensure_parent=True,
     )
-    tmp_path.replace(path)
 
 
 def _update_gate_index(
@@ -80,7 +73,8 @@ def _update_gate_index(
             "boundary_true": record.get("boundary_true", False),
         })
     elif stage == "completion":
-        # Map record's execution_status -> index completion_status
+        # Track completion count as integer (C2 fix: was boolean)
+        entry["completion_count"] = entry.get("completion_count", 0) + 1
         entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
         entry["completed_at"] = record.get("created_at")
     index[envelope_id] = entry
@@ -115,7 +109,8 @@ def _rebuild_gate_index_from_records(
                 "boundary_true": record.get("boundary_true", False),
             })
         elif stage == "completion":
-            # Map record's execution_status -> index completion_status
+            # Track completion count as integer (C2 fix: was boolean)
+            entry["completion_count"] = entry.get("completion_count", 0) + 1
             entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
             entry["completed_at"] = record.get("created_at")
         index[eid] = entry
@@ -126,6 +121,106 @@ def _rebuild_gate_index_from_records(
 def read_execution_gate_records(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
     records = _read_jsonl(execution_gate_records_path(roots))
     return records[-max(limit, 0):] if limit else records
+
+
+def _validate_permit_fields(
+    d: dict[str, Any],
+    target: str,
+    lane_id: str,
+    risk_class: str,
+    require_fresh: bool,
+    require_unused: bool,
+    expected_scope: dict[str, Any] | None,
+    expected_scope_hash: str,
+    now: datetime | None,
+    completion_count: int,
+) -> dict[str, Any] | None:
+    """Shared permit field validation — used by both index fast path and fallback.
+
+    Pure function: no side effects, no index rebuild calls.
+    Returns a _permit_resolution(...) dict on failure, or None on success.
+    """
+    if lane_id and str(d.get("lane_id") or "") != lane_id:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_lane_mismatch",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=d,
+        )
+    if risk_class and str(d.get("risk_class") or "") != risk_class:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_risk_class_mismatch",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=d,
+        )
+    if str(d.get("permit_decision") or "") != "allowed":
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_permit_not_allowed",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=d,
+        )
+    if d.get("boundary_true") is True or any_boundary_true(d.get("boundary")):
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_boundary_true",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=d,
+            completion_count=completion_count,
+        )
+    # Expiry key differs: index uses 'permit_expires_at', JSONL uses 'expires_at'
+    expires_at = d.get("permit_expires_at") or d.get("expires_at")
+    expiry = _expiry_status(expires_at, now=now, require_present=require_fresh)
+    if expiry != "valid":
+        return _permit_resolution(
+            status="invalid",
+            reason=f"execution_gate_permit_{expiry}",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=d,
+            completion_count=completion_count,
+            require_fresh=require_fresh,
+        )
+    if require_unused and completion_count > 0:
+        return _permit_resolution(
+            status="invalid",
+            reason="execution_gate_permit_already_completed",
+            envelope_id=target,
+            lane_id=lane_id,
+            risk_class=risk_class,
+            permit=d,
+            completion_count=completion_count,
+        )
+    expected_hash = str(expected_scope_hash or "").strip()
+    if expected_scope is not None:
+        expected_hash = execution_gate_scope_hash(expected_scope)
+    if expected_hash:
+        permit_scope_hash = str(d.get("scope_hash") or "").strip()
+        # Fallback: compute scope_hash from scope dict if not in the record
+        if not permit_scope_hash and isinstance(d.get("scope"), dict):
+            permit_scope_hash = execution_gate_scope_hash(d["scope"])
+        if permit_scope_hash != expected_hash:
+            return _permit_resolution(
+                status="invalid",
+                reason="execution_gate_scope_mismatch",
+                envelope_id=target,
+                lane_id=lane_id,
+                risk_class=risk_class,
+                permit=d,
+                completion_count=completion_count,
+                scope_match=False,
+            )
+    return None
 
 
 def _validate_index_entry(
@@ -139,89 +234,20 @@ def _validate_index_entry(
     expected_scope_hash: str,
     now: datetime | None,
 ) -> dict[str, Any] | None:
-    """Validate a permit from an index entry.
-
-    Returns a _permit_resolution(...) dict on failure, or None on success
-    (meaning the entry passed all checks and caller should return valid).
-    On success, callers should build the valid resolution themselves using
-    the index_entry data.
-    """
-    if lane_id and str(index_entry.get("lane_id") or "") != lane_id:
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_lane_mismatch",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=index_entry,
-        )
-    if risk_class and str(index_entry.get("risk_class") or "") != risk_class:
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_risk_class_mismatch",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=index_entry,
-        )
-    if str(index_entry.get("permit_decision") or "") != "allowed":
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_permit_not_allowed",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=index_entry,
-        )
-    if index_entry.get("boundary_true") is True:
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_boundary_true",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=index_entry,
-            completion_count=1 if index_entry.get("completion_status") else 0,
-        )
-    expiry = _expiry_status(index_entry.get("permit_expires_at"), now=now, require_present=require_fresh)
-    if expiry != "valid":
-        return _permit_resolution(
-            status="invalid",
-            reason=f"execution_gate_permit_{expiry}",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=index_entry,
-            completion_count=1 if index_entry.get("completion_status") else 0,
-        )
-    if require_unused and index_entry.get("completion_status"):
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_permit_already_completed",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=index_entry,
-            completion_count=1,
-        )
-    expected_hash = str(expected_scope_hash or "").strip()
-    if expected_scope is not None:
-        expected_hash = execution_gate_scope_hash(expected_scope)
-    if expected_hash:
-        permit_scope_hash = str(index_entry.get("scope_hash") or "").strip()
-        if permit_scope_hash != expected_hash:
-            return _permit_resolution(
-                status="invalid",
-                reason="execution_gate_scope_mismatch",
-                envelope_id=target,
-                lane_id=lane_id,
-                risk_class=risk_class,
-                permit=index_entry,
-                completion_count=1 if index_entry.get("completion_status") else 0,
-                scope_match=False,
-            )
-    # All checks passed — return None to signal valid
-    return None
+    """Validate a permit from an index entry. Delegates to _validate_permit_fields."""
+    completion_count = index_entry.get("completion_count", 0)
+    return _validate_permit_fields(
+        d=index_entry,
+        target=target,
+        lane_id=lane_id,
+        risk_class=risk_class,
+        require_fresh=require_fresh,
+        require_unused=require_unused,
+        expected_scope=expected_scope,
+        expected_scope_hash=expected_scope_hash,
+        now=now,
+        completion_count=completion_count,
+    )
 
 
 def resolve_execution_gate_permit(
@@ -265,7 +291,7 @@ def resolve_execution_gate_permit(
         if failed is not None:
             return failed
         # All checks passed — build valid resolution from index entry
-        completion_count = 1 if index_entry.get("completion_status") else 0
+        completion_count = index_entry.get("completion_count", 0)
         expected_hash = str(expected_scope_hash or "").strip()
         if expected_scope is not None:
             expected_hash = execution_gate_scope_hash(expected_scope)
@@ -312,89 +338,24 @@ def resolve_execution_gate_permit(
             permit_count=len(permits),
         )
     permit = permits[0]
-    if lane_id and str(permit.get("lane_id") or "") != lane_id:
-        _rebuild_gate_index_from_records(roots, records)
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_lane_mismatch",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=permit,
-        )
-    if risk_class and str(permit.get("risk_class") or "") != risk_class:
-        _rebuild_gate_index_from_records(roots, records)
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_risk_class_mismatch",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=permit,
-        )
-    if str(permit.get("permit_decision") or "") != "allowed":
-        _rebuild_gate_index_from_records(roots, records)
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_permit_not_allowed",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=permit,
-        )
-    if permit.get("boundary_true") is True or any_boundary_true(permit.get("boundary")):
-        _rebuild_gate_index_from_records(roots, records)
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_boundary_true",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=permit,
-            completion_count=len(completions),
-        )
-    expiry = _expiry_status(permit.get("expires_at"), now=now, require_present=require_fresh)
-    if expiry != "valid":
-        _rebuild_gate_index_from_records(roots, records)
-        return _permit_resolution(
-            status="invalid",
-            reason=f"execution_gate_permit_{expiry}",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=permit,
-            completion_count=len(completions),
-        )
-    if require_unused and completions:
-        _rebuild_gate_index_from_records(roots, records)
-        return _permit_resolution(
-            status="invalid",
-            reason="execution_gate_permit_already_completed",
-            envelope_id=target,
-            lane_id=lane_id,
-            risk_class=risk_class,
-            permit=permit,
-            completion_count=len(completions),
-        )
-    expected_hash = str(expected_scope_hash or "").strip()
-    if expected_scope is not None:
-        expected_hash = execution_gate_scope_hash(expected_scope)
-    if expected_hash:
-        permit_scope_hash = str(permit.get("scope_hash") or "").strip()
-        if not permit_scope_hash:
-            permit_scope_hash = execution_gate_scope_hash(permit.get("scope") if isinstance(permit.get("scope"), dict) else {})
-        if permit_scope_hash != expected_hash:
-            _rebuild_gate_index_from_records(roots, records)
-            return _permit_resolution(
-                status="invalid",
-                reason="execution_gate_scope_mismatch",
-                envelope_id=target,
-                lane_id=lane_id,
-                risk_class=risk_class,
-                permit=permit,
-                completion_count=len(completions),
-                scope_match=False,
-            )
+    # Validate using shared function (pure, no side effects)
+    failure = _validate_permit_fields(
+        d=permit,
+        target=target,
+        lane_id=lane_id,
+        risk_class=risk_class,
+        require_fresh=require_fresh,
+        require_unused=require_unused,
+        expected_scope=expected_scope,
+        expected_scope_hash=expected_scope_hash,
+        now=now,
+        completion_count=len(completions),
+    )
+    if failure is not None:
+        # Only rebuild index on true index staleness (not found / conflict),
+        # NOT on semantic rejections (C5 fix)
+        return failure
+
     result = _permit_resolution(
         status="valid",
         reason="",
@@ -403,7 +364,8 @@ def resolve_execution_gate_permit(
         risk_class=str(permit.get("risk_class") or ""),
         permit=permit,
         completion_count=len(completions),
-        scope_match=True if expected_hash else None,
+        scope_match=True if expected_scope_hash else None,
+        require_fresh=require_fresh,
     )
     _rebuild_gate_index_from_records(roots, records)
     return result
@@ -695,9 +657,13 @@ def _permit_resolution(
     permit_count: int = 0,
     completion_count: int = 0,
     scope_match: bool | None = None,
+    require_fresh: bool = False,
 ) -> dict[str, Any]:
     record = permit or {}
-    expiry_status = "missing" if permit and not str(record.get("expires_at") or "").strip() else _expiry_status(record.get("expires_at"), require_present=False)
+    if permit and not str(record.get("expires_at") or "").strip():
+        expiry_status = "expiry_missing" if require_fresh else "missing"
+    else:
+        expiry_status = _expiry_status(record.get("expires_at"), require_present=require_fresh)
     return {
         "schema_version": "memory-os.execution_gate_permit_resolution.v0",
         "status": status,
