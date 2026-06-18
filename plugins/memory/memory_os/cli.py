@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import inspect
 import json
 import os
@@ -12,6 +13,8 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 def _ensure_user_plugin_package() -> None:
@@ -642,15 +645,106 @@ def _direct_hermes_provider_active(hermes_home: Path) -> bool:
     return str(memory.get("provider") or "") == "hindsight"
 
 
+def _hermes_contract_checks() -> list[dict[str, Any]]:
+    """Verify Memory-OS plugin conforms to Hermes agent memory provider contract.
+
+    Checks the 4 seams identified in the hardening spec:
+    1. register(ctx) entry point exists
+    2. ABC source (host agent.memory_provider vs vendored)
+    3. sync_turn accepts messages parameter
+    4. plugin.yaml has hooks field
+
+    Returns a list of findings (same schema as _finding() calls in meta_audit).
+    """
+    findings: list[dict[str, Any]] = []
+
+    # Check 1: register(ctx) entry point
+    try:
+        mod = importlib.import_module("plugins.memory.memory_os.__init__")
+        has_register = hasattr(mod, "register") and callable(mod.register)
+    except Exception:
+        has_register = False
+    if has_register:
+        sig = inspect.signature(mod.register)
+        param_count = len(sig.parameters)
+        if param_count != 1:
+            findings.append(_finding(
+                "hermes_contract_register_signature",
+                "error",
+                f"register() takes {param_count} params — Hermes expects register(ctx). "
+                "Reference: built-in honcho provider pattern.",
+            ))
+    else:
+        findings.append(_finding(
+            "hermes_contract_register_missing",
+            "error",
+            "register(ctx) not found in __init__.py — Hermes cannot discover this plugin. "
+            "Reference: built-in honcho provider has def register(ctx) -> None: ctx.register_memory_provider(...)",
+        ))
+
+    # Check 2: ABC source
+    try:
+        from agent.memory_provider import MemoryProvider as HostABC  # type: ignore[import-untyped]
+        from plugins.memory.memory_os.__init__ import MemoryOSProvider
+        if not issubclass(MemoryOSProvider, HostABC):
+            findings.append(_finding(
+                "hermes_contract_abc_vendored",
+                "error",
+                "MemoryOSProvider inherits from vendored ABC, not agent.memory_provider.MemoryProvider. "
+                "isinstance() check will fail — Hermes reports NOT installed.",
+            ))
+    except ImportError:
+        pass  # Standalone env — vendored fallback is correct
+    except Exception:
+        pass
+
+    # Check 3: sync_turn messages parameter
+    try:
+        from plugins.memory.memory_os.__init__ import MemoryOSProvider
+        sig = inspect.signature(MemoryOSProvider.sync_turn)
+        if "messages" not in sig.parameters:
+            findings.append(_finding(
+                "hermes_contract_sync_turn_missing_messages",
+                "error",
+                "sync_turn() missing 'messages' parameter — Hermes MemoryManager.sync_all() "
+                "passes messages=[...], causing TypeError on the hot path.",
+            ))
+    except Exception:
+        pass
+
+    # Check 4: plugin.yaml hooks
+    try:
+        yaml_path = Path(__file__).resolve().parent / "plugin.yaml"
+        with open(yaml_path) as f:
+            plugin_data = yaml.safe_load(f)
+        if not plugin_data.get("hooks"):
+            findings.append(_finding(
+                "hermes_contract_plugin_yaml_no_hooks",
+                "warning",
+                "plugin.yaml missing hooks field — non-fatal but 5/8 built-in providers declare hooks.",
+            ))
+    except Exception:
+        pass
+
+    return findings
+
+
 def build_doctor_result(store: MemoryOSStore) -> dict[str, Any]:
     audit = meta_audit(store)
     has_error = any(finding["severity"] == "error" for finding in audit["findings"])
+    contract_findings = _hermes_contract_checks()
+    all_findings = audit["findings"] + contract_findings
+    has_error = has_error or any(f["severity"] == "error" for f in contract_findings)
     return {
         "schema_version": "memory-os.doctor.v0",
         "exit_code": 1 if has_error else 0,
         "status": "fail" if has_error else "ok",
-        "findings": audit["findings"],
+        "findings": all_findings,
         "meta_audit": audit,
+        "hermes_contract_checks": {
+            "count": len(contract_findings),
+            "findings": contract_findings,
+        },
     }
 
 
@@ -836,6 +930,9 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     diff_parser.add_argument("--since", required=True)
     diff_parser.add_argument("--until", required=True)
     subs.add_parser("approval-report")
+    index_parser = subs.add_parser("index")
+    index_subs = index_parser.add_subparsers(dest="index_command", required=True)
+    index_subs.add_parser("rebuild")
     benchmark_parser = subs.add_parser("benchmark")
     benchmark_parser.add_argument("--records", type=int, default=1000)
     benchmark_parser.add_argument("--seed", type=int, default=1)
@@ -1435,6 +1532,13 @@ def memory_os_command(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if command == "index":
+        if args.index_command == "rebuild":
+            idx = MemoryOSIndex(store.roots)
+            idx.rebuild_from_store(store)
+            print(f"Index rebuilt from canonical store: {store.roots.index_path}")
+            return 0
+        return 2
     return 2
 
 

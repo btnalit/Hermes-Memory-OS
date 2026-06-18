@@ -57,6 +57,56 @@ class TestRegisterEntryPoint:
         assert result is None, f"register() must return None, got {type(result)}"
 
 
+class TestDoctor:
+    """F7: doctor command reports specific root causes, not generic 'NOT installed'."""
+
+    def test_doctor_checks_register(self):
+        """Doctor detects missing register(ctx)."""
+        from plugins.memory.memory_os.cli import _hermes_contract_checks
+
+        results = _hermes_contract_checks()
+        register_findings = [r for r in results if "register" in r.get("code", "")]
+        # After F1 fix, should have no error about missing register
+        errors = [r for r in register_findings if r.get("severity") == "error"]
+        assert not errors, f"register(ctx) check should pass after F1 fix: {errors}"
+
+    def test_doctor_checks_sync_turn(self):
+        """Doctor detects sync_turn missing messages param."""
+        from plugins.memory.memory_os.cli import _hermes_contract_checks
+
+        results = _hermes_contract_checks()
+        st_findings = [r for r in results if "sync_turn" in r.get("code", "")]
+        errors = [r for r in st_findings if r.get("severity") == "error"]
+        assert not errors, f"sync_turn check should pass after F3 fix: {errors}"
+
+    def test_doctor_checks_all_report_specific_detail(self):
+        """Every check has a non-empty detail string — never silent pass/fail."""
+        from plugins.memory.memory_os.cli import _hermes_contract_checks
+
+        for r in _hermes_contract_checks():
+            assert isinstance(r.get("message"), str) and len(r["message"]) > 10, (
+                f"Check '{r.get('code')}' has vague detail: {r.get('message')!r}"
+            )
+
+
+class TestIndexRebuildCLI:
+    """F8: index rebuild CLI exposes existing rebuild_from_store logic."""
+
+    def test_register_cli_includes_index_rebuild(self):
+        """register_cli() registers 'index rebuild' subcommand."""
+        import argparse
+        from plugins.memory.memory_os.cli import register_cli
+
+        parser = argparse.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="cmd")
+        memory_os_sp = subparsers.add_parser("memory_os")
+        register_cli(memory_os_sp)
+
+        args = parser.parse_args(["memory_os", "index", "rebuild"])
+        assert args.memory_os_command == "index"
+        assert args.index_command == "rebuild"
+
+
 class TestABCImport:
     """F2: Provider must inherit from agent.memory_provider.MemoryProvider when available."""
 
