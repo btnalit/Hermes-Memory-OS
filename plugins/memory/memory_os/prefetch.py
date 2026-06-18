@@ -493,7 +493,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
-    _append_section(sections, "Crystallized Memory", _crystallized_lines(store, seen=seen))
+    _append_section(sections, "Crystallized Memory", _crystallized_lines(store, query=query, index=index, seen=seen))
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
     _append_section(sections, "Recent Event Summaries", _event_lines(store, seen=seen))
@@ -874,20 +874,49 @@ def _relationship_lines(store: MemoryOSStore) -> list[str]:
     return lines
 
 
-def _crystallized_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | None = None) -> list[str]:
-    """Record-level crystallized memory lines with provisional annotation.
+def _crystallized_lines(
+    store: MemoryOSStore,
+    *,
+    query: str = "",
+    index: object | None = None,
+    seen: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Record-level crystallized memory lines with relevance filtering and caps.
 
-    Parses each .md file into individual records, filters by canonical_state
-    (active only), and produces one line per active record.
+    Uses FTS5 index (like Indexed Recall) to find records relevant to the
+    current query, then caps output at MAX_TOTAL (20) records with at most
+    MAX_PROVISIONAL (5) provisional records.
+
+    Falls back to reading all files (with caps) when the index is unavailable
+    or the query is empty. Only records that survive the caps are registered
+    in `seen` so Indexed Recall can still surface the rest.
 
     Provisional records (provisional=True) are annotated with countdown
     and sorted after permanent records. High-recurrence provisional records
     receive a high-recurrence marker.
     """
+    MAX_TOTAL = 20
+    MAX_PROVISIONAL = 5
+
     now = datetime.now(timezone.utc)
 
-    permanent_lines: list[str] = []
-    # (expires_at_sort_key, line, record_id, recurrence)
+    # ── FTS5 relevance lookup ──────────────────────────────────────
+    relevant_ids: set[str] | None = None
+    search_query = str(query or "").strip()
+    if index is not None and search_query and hasattr(index, "search"):
+        try:
+            result = index.search(search_query, limit=60)
+            relevant_ids = {
+                str(hit["record_id"])
+                for hit in result.get("hits", [])
+                if isinstance(hit, dict)
+                and str(hit.get("record_type", "")) == "crystallized_record"
+            }
+        except Exception:
+            relevant_ids = None
+
+    # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
+    permanent_entries: list[tuple[str, str]] = []
     provisional_entries: list[tuple[datetime, str, str, int]] = []
 
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
@@ -898,11 +927,17 @@ def _crystallized_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | No
         for frontmatter, body in _parse_markdown_records(content):
             if not is_active_crystallized_frontmatter(frontmatter):
                 continue
+            rid = str(frontmatter.get("id", "")).strip()
+
+            # FTS5 relevance gate: when the index is available and the query
+            # is non-empty, only include records whose id matched the search.
+            if relevant_ids is not None and rid not in relevant_ids:
+                continue
+
             kind = str(frontmatter.get("kind", "item"))
             text = _redact(_clip(body, 220))
             if not text or _is_diagnostic_style_seed(text):
                 continue
-            rid = str(frontmatter.get("id", "")).strip()
 
             is_provisional = frontmatter.get("provisional") is True
             if is_provisional:
@@ -929,17 +964,30 @@ def _crystallized_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | No
                     f"- {path.name}/{kind}: "
                     f"(provisional·剩{days_remaining}d){recurrence_marker} {text}"
                 )
-                provisional_entries.append((expires_dt, line, rid, recurrence))
+                provisional_entries.append((expires_dt, rid, line, recurrence))
             else:
-                permanent_lines.append(f"- {path.name}/{kind}: {text}")
-
-            if seen is not None and rid:
-                seen.add(("crystallized_record", rid))
+                permanent_entries.append((rid, f"- {path.name}/{kind}: {text}"))
 
     # Sort provisional entries: closest expiry first
     provisional_entries.sort(key=lambda e: e[0])
 
-    return permanent_lines + [entry[1] for entry in provisional_entries]
+    # ── Apply caps and track seen only for surviving records ──────
+    result: list[str] = []
+    # Cap permanent records at MAX_TOTAL
+    for rid, line in permanent_entries[:MAX_TOTAL]:
+        result.append(line)
+        if seen is not None and rid:
+            seen.add(("crystallized_record", rid))
+
+    # Cap provisional records at min(MAX_PROVISIONAL, remaining slots)
+    remaining_slots = MAX_TOTAL - len(result)
+    if remaining_slots > 0:
+        for _, rid, line, _ in provisional_entries[:min(MAX_PROVISIONAL, remaining_slots)]:
+            result.append(line)
+            if seen is not None and rid:
+                seen.add(("crystallized_record", rid))
+
+    return result
 
 
 def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:

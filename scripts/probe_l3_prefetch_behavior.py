@@ -34,6 +34,11 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/root/.hermes"))
 NONCE_FILE = HERMES_HOME / "memory-os" / "crystallized" / "probe_test.md"
 LOG_FILE = Path(tempfile.gettempdir()) / f"l3_probe_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.log"
 
+# Prefetch budget for probe verification.
+# Must be large enough to hold Crystallized Memory section without truncation.
+# 5500 was too small (Crystallized Memory alone is often 12k+ chars).
+PROBE_BUDGET_CHARS = 20000
+
 # ── nonce generation ───────────────────────────────────────────────
 def _generate_nonce() -> str:
     import secrets
@@ -101,7 +106,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     l2_positive = False
     for q in probe_queries:
         context = build_prefetch(
-            q, budget_chars=5500, store=store, index=None,
+            q, budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
             context_router_config=dry_run_config,
         )
         if nonce_pos in context:
@@ -112,7 +117,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     if not l2_positive:
         # Full context dump for debugging — show Crystallized Memory section specifically
         context = build_prefetch(
-            probe_queries[0], budget_chars=5500, store=store, index=None,
+            probe_queries[0], budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
             context_router_config=dry_run_config,
         )
         results["l2_recall_positive"] = "❌ NONCE NOT FOUND in prefetch context"
@@ -132,7 +137,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     l2_negative = False
     for q in probe_queries:
         context = build_prefetch(
-            q, budget_chars=5500, store=store, index=None,
+            q, budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
             context_router_config=dry_run_config,
         )
         if nonce_neg in context:
@@ -158,7 +163,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
 
         # Verify revocation: post-revoke prefetch should NOT contain nonce
         context_post = build_prefetch(
-            probe_queries[0], budget_chars=5500, store=store, index=None,
+            probe_queries[0], budget_chars=PROBE_BUDGET_CHARS, store=store, index=None,
             context_router_config=dry_run_config,
         )
         if nonce_pos in context_post:

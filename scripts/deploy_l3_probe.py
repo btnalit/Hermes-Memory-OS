@@ -174,6 +174,14 @@ def run_apply(hermes_home: Path) -> dict[str, Any]:
             "target": str(DEPLOY_HELPER),
             "status": "written",
         })
+    # Write repo root config so the deployed helper can find probe_l3_prefetch_behavior.py
+    repo_root_file = DEPLOY_HELPER.with_name("l3_probe_repo_root.txt")
+    repo_root_file.write_text(str(REPO_ROOT), encoding="utf-8")
+    actions.append({
+        "action": "write_repo_root_config",
+        "path": str(repo_root_file),
+        "repo_root": str(REPO_ROOT),
+    })
     result["helper_deployed"] = True
 
     # Step 3: create cron job via Hermes CLI
@@ -390,12 +398,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # Inline fallback helper (should not be needed since SOURCE_HELPER exists)
+# Reads repo root from config file written alongside it during deploy.
 _FALLBACK_HELPER = """\
 #!/usr/bin/env python3
-import json, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
-p = Path("/opt/Hermes-Memory-OS/scripts/probe_l3_prefetch_behavior.py")
-r = subprocess.run([sys.executable, str(p)], capture_output=True, text=True, timeout=120, cwd=str(p.parent.parent))
+_root_txt = Path(__file__).with_name("l3_probe_repo_root.txt")
+if _root_txt.is_file():
+    _repo = Path(_root_txt.read_text(encoding="utf-8").strip())
+else:
+    _repo = Path(os.environ.get("MEMORY_OS_REPO_ROOT", "/opt/Hermes-Memory-OS"))
+p = _repo / "scripts" / "probe_l3_prefetch_behavior.py"
+r = subprocess.run([sys.executable, str(p)], capture_output=True, text=True, timeout=120, cwd=str(_repo))
 all_pass = r.returncode == 0 and "GOVERNANCE PATH" in (r.stdout or "")
 if "--smoke" in sys.argv:
     print(json.dumps({"status":"smoke","returncode":r.returncode,"stdout":(r.stdout or "")[:1000]}))

@@ -15,14 +15,46 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-REPO_ROOT = Path("/opt/Hermes-Memory-OS")
+def _resolve_repo_root() -> Path:
+    """Resolve the Memory-OS repository root for probe discovery.
+
+    1. MEMORY_OS_REPO_ROOT env var (set by deploy_l3_probe.py at deploy time)
+    2. Config file next to this script (written by deploy_l3_probe.py)
+    3. Auto-detect from script location (only works when run from repo, not after deploy)
+    """
+    env_val = os.environ.get("MEMORY_OS_REPO_ROOT", "").strip()
+    if env_val:
+        candidate = Path(env_val)
+        if candidate.is_dir():
+            return candidate
+    config_file = Path(__file__).with_name("l3_probe_repo_root.txt")
+    if config_file.is_file():
+        candidate = Path(config_file.read_text(encoding="utf-8").strip())
+        if candidate.is_dir():
+            return candidate
+    # Last resort: auto-detect from script location.
+    # Only works when the script is run directly from a repo checkout.
+    auto = Path(__file__).resolve().parents[1]
+    probe = auto / "scripts" / "probe_l3_prefetch_behavior.py"
+    if probe.is_file():
+        return auto
+    raise SystemExit(
+        "Cannot resolve Memory-OS repo root. "
+        "Set MEMORY_OS_REPO_ROOT env var or ensure l3_probe_repo_root.txt exists "
+        f"next to this script ({Path(__file__).with_name('l3_probe_repo_root.txt')})."
+    )
+
+
+REPO_ROOT = _resolve_repo_root()
 PROBE_SCRIPT = REPO_ROOT / "scripts" / "probe_l3_prefetch_behavior.py"
-LAST_RUN_FILE = Path("/tmp/l3_probe_last_result.json")
+LAST_RUN_FILE = Path(tempfile.gettempdir()) / "l3_probe_last_result.json"
 
 SCHEMA_VERSION = "memory-os.l3_probe_result.v0"
 

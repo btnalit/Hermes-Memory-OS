@@ -10,7 +10,7 @@ from uuid import uuid4
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "capture_policy": "summary_only",
-    "prefetch_char_budget": 7500,
+    "prefetch_char_budget": 20000,
     "hindsight_adapter_enabled": False,
     "allow_full_local_capture": False,
     "diagnostic_grounding_enabled": None,
