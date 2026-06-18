@@ -162,6 +162,32 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         no_agent=True,
         requires_boundary_report=False,
     ),
+    MemoryOSCronSpec(
+        key="working_cleanup",
+        name="memory-os-working-cleanup",
+        raw_script="cleanup_expired_working.py",
+        wrapper_script="memory_os_cron_working_cleanup_gate.py",
+        lane_id="working_cleanup",
+        helper_kind="local_helper",
+        schedule_arg="working_cleanup_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
+    MemoryOSCronSpec(
+        key="l3_probe_verification",
+        name="memory-os-l3-probe-verification",
+        raw_script="memory_os_l3_probe_helper.py",
+        wrapper_script="memory_os_cron_l3_probe_verification_gate.py",
+        lane_id="l3_probe_verification",
+        helper_kind="local_helper",
+        schedule_arg="l3_probe_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
 )
 
 

@@ -75,6 +75,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-aggregation-schedule", default="0 */6 * * *")
     parser.add_argument("--fact-judge-schedule", default=DEFAULT_FACT_JUDGE_SCHEDULE)
     parser.add_argument("--index-sync-schedule", default="*/30 * * * *")
+    parser.add_argument("--working-cleanup-schedule", default="0 3 * * 0")
+    parser.add_argument("--l3-probe-schedule", default="0 */6 * * *")
     parser.add_argument(
         "--cron-profile",
         choices=("active-closure", "full"),

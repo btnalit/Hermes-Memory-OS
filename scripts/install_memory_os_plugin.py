@@ -1166,6 +1166,10 @@ def _run_owner_cron_onboarding(
         "0 */4 * * *",
         "--index-sync-schedule",
         "*/30 * * * *",
+        "--working-cleanup-schedule",
+        "0 3 * * 0",
+        "--l3-probe-schedule",
+        "0 */6 * * *",
         "--apply",
     ]
     if owner_approved:

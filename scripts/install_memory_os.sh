@@ -688,6 +688,16 @@ run_installer() {
     echo "  ⚠️  cleanup_expired_working.py not found at ${cleanup_src}"
   fi
 
+	  # Install gate wrapper for working-cleanup cron
+	  local cleanup_gate_src="${REPO_ROOT}/scripts/memory_os_cron_working_cleanup_gate.py"
+	  local cleanup_gate_dst="${HERMES_HOME}/scripts/memory_os_cron_working_cleanup_gate.py"
+	  if [[ -f "${cleanup_gate_src}" ]]; then
+	    install -m 755 "${cleanup_gate_src}" "${cleanup_gate_dst}"
+	    echo "  ✅ memory_os_cron_working_cleanup_gate.py installed to ${cleanup_gate_dst}"
+	  else
+	    echo "  ⚠️  memory_os_cron_working_cleanup_gate.py not found at ${cleanup_gate_src}"
+	  fi
+
   # Create working memory cleanup cron (no_agent, watchdog pattern)
   if command_exists hermes && [[ "${DRY_RUN}" != "1" ]]; then
     local cron_name="memory-os-working-cleanup"

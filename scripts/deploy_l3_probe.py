@@ -37,7 +37,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
-from plugins.memory.memory_os.cron_registry import write_cron_registry_snapshot
+from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, write_cron_registry_snapshot
 
 SCHEMA_VERSION = "memory-os.l3_probe_deploy.v0"
 
@@ -286,35 +286,26 @@ def _find_job_by_name(jobs: list[dict[str, Any]], name: str) -> dict[str, Any] |
 
 
 def _ensure_registry_snapshot_exists(hermes_home: Path) -> dict[str, Any]:
-    """Ensure the cron registry snapshot exists (writes from code if missing)."""
+    """Ensure the cron registry snapshot exists (writes from central MEMORY_OS_CRON_SPECS)."""
     registry_path = hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json"
+    central_spec = memory_os_cron_spec_by_key("l3_probe_verification")
+    if central_spec is None:
+        return {"status": "error", "reason": "l3_probe_verification not found in central MEMORY_OS_CRON_SPECS"}
+    spec_dict = central_spec.to_json()
     if registry_path.exists():
         loaded = json.loads(registry_path.read_text(encoding="utf-8"))
         specs = loaded.get("specs", [])
-        # Check if our key is already registered
         for spec in specs:
             if spec.get("key") == "l3_probe_verification":
                 return {"status": "already_registered"}
-        # Append our spec
-        specs.append(_REGISTRY_SPEC)
+        specs.append(spec_dict)
         registry_path.write_text(
             json.dumps({**loaded, "specs": specs}, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         return {"status": "registered"}
     else:
-        # Create fresh registry snapshot with just our spec
-        write_cron_registry_snapshot(
-            registry_path,
-            specs=(),  # Our spec is ad-hoc, not in MEMORY_OS_CRON_SPECS
-        )
-        # Append our spec to the snapshot
-        loaded = json.loads(registry_path.read_text(encoding="utf-8"))
-        specs = [json.loads(json.dumps(_REGISTRY_SPEC, sort_keys=True))]
-        registry_path.write_text(
-            json.dumps({**loaded, "specs": specs}, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        write_cron_registry_snapshot(registry_path)
         return {"status": "created"}
 
 
@@ -397,20 +388,6 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     return 0
 
-
-_REGISTRY_SPEC = {
-    "key": "l3_probe_verification",
-    "name": "memory-os-l3-probe-verification",
-    "raw_script": "memory_os_l3_probe_helper.py",
-    "wrapper_script": "memory_os_l3_probe_helper.py",
-    "lane_id": "l3_probe_verification",
-    "helper_kind": "local_helper",
-    "schedule_arg": "l3_probe_schedule",
-    "deliver_role": "local",
-    "prompt_ref": "empty",
-    "no_agent": True,
-    "requires_boundary_report": False,
-}
 
 # Inline fallback helper (should not be needed since SOURCE_HELPER exists)
 _FALLBACK_HELPER = """\
