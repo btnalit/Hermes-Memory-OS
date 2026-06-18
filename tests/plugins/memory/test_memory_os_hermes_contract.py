@@ -55,3 +55,47 @@ class TestRegisterEntryPoint:
         ctx = MagicMock()
         result = register(ctx)
         assert result is None, f"register() must return None, got {type(result)}"
+
+
+class TestABCImport:
+    """F2: Provider must inherit from agent.memory_provider.MemoryProvider when available."""
+
+    def test_provider_inherits_from_host_abc_when_available(self):
+        """In production (hermes agent installed), isinstance check passes."""
+        try:
+            from agent.memory_provider import MemoryProvider as HostABC
+        except ImportError:
+            pytest.skip("Hermes agent not installed — vendored ABC fallback is correct")
+            return
+
+        from plugins.memory.memory_os.__init__ import MemoryOSProvider
+
+        assert issubclass(MemoryOSProvider, HostABC), (
+            "MemoryOSProvider must be a subclass of agent.memory_provider.MemoryProvider "
+            "when Hermes agent is installed. Currently inheriting from vendored copy — "
+            "isinstance(provider, agent.memory_provider.MemoryProvider) would return False, "
+            "causing 'NOT installed'."
+        )
+
+    def test_vendored_abc_has_same_abstractmethods_as_host(self):
+        """Vendored ABC's abstractmethod set matches host ABC's — prevents drift."""
+        try:
+            from agent.memory_provider import MemoryProvider as HostABC
+        except ImportError:
+            pytest.skip("Hermes agent not installed — cannot compare")
+            return
+
+        from memory_os_agent.memory_provider import MemoryProvider as VendoredABC
+
+        host_abstracts = set(HostABC.__abstractmethods__)
+        vendored_abstracts = set(VendoredABC.__abstractmethods__)
+
+        missing_from_vendored = host_abstracts - vendored_abstracts
+        extra_in_vendored = vendored_abstracts - host_abstracts
+
+        assert not missing_from_vendored, (
+            f"Vendored ABC missing abstract methods present in host ABC: {missing_from_vendored}"
+        )
+        assert not extra_in_vendored, (
+            f"Vendored ABC has extra abstract methods not in host ABC: {extra_in_vendored}"
+        )

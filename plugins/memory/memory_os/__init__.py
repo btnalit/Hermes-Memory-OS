@@ -14,7 +14,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from memory_os_agent.memory_provider import MemoryProvider
+try:
+    from agent.memory_provider import MemoryProvider          # 宿主 ABC (isinstance 通过)
+except ImportError:
+    from memory_os_agent.memory_provider import MemoryProvider  # vendored 回退 (仓库独立测试)
 
 from . import config as memory_os_config
 from .adapters.hindsight import HindsightHttpClient
