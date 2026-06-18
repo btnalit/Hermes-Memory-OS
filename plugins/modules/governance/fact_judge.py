@@ -53,13 +53,21 @@ def _heuristic_durable(candidate: "CrystallizedCandidate") -> dict[str, Any]:
     """Deterministic keyword-based fallback when LLM fails all retries.
 
     NOT fail-open: requires positive marker match to return True.
+    Durable markers checked FIRST (lean-capture priority) — a body
+    with both durable and transient markers gets durable_fact=True.
     Returns verdict dict with reason="heuristic_fallback:..."
+    The reason includes the specific matched marker for traceability.
     """
     text = (candidate.body or "").lower()
-    if any(marker in text for marker in _TRANSIENT_MARKERS):
-        return {"durable_fact": False, "reason": "heuristic_fallback:transient_marker"}
-    if any(marker in text for marker in _DURABLE_MARKERS):
-        return {"durable_fact": True, "reason": "heuristic_fallback:durable_marker"}
+    # Check durable markers FIRST (C1 fix: lean-capture priority)
+    # A body with both durable and transient markers should be captured.
+    for marker in _DURABLE_MARKERS:
+        if marker in text:
+            return {"durable_fact": True, "reason": f"heuristic_fallback:durable_marker:{marker}"}
+    # Then check transient markers
+    for marker in _TRANSIENT_MARKERS:
+        if marker in text:
+            return {"durable_fact": False, "reason": f"heuristic_fallback:transient_marker:{marker}"}
     return {"durable_fact": False, "reason": "heuristic_fallback:no_markers"}
 
 

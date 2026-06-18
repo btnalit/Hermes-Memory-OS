@@ -855,6 +855,38 @@ class TestJudgeRetryAndHeuristic:
             )
 
 
+    def test_heuristic_durable_marker_priority_over_transient(self):
+        """C1: durable markers checked first — body with both gets durable_fact=True."""
+        from plugins.modules.governance.fact_judge import _heuristic_durable, CrystallizedCandidate
+        candidate = CrystallizedCandidate(
+            candidate_id="test-c1", kind="moment",
+            body="Thanks, I use Python for all backend services.",
+            source_event_ids=["evt-1"],
+        )
+        verdict = _heuristic_durable(candidate)
+        # "i use" is in _DURABLE_MARKERS, "thanks" is in _TRANSIENT_MARKERS
+        # With corrected priority, durable markers checked first → True
+        assert verdict["durable_fact"] is True, f"Expected True (durable markers first), got {verdict}"
+        assert "heuristic_fallback:durable_marker" in verdict["reason"]
+
+    def test_heuristic_fallback_reason_includes_matched_marker(self):
+        """C8: reason string identifies which marker triggered the verdict."""
+        from plugins.modules.governance.fact_judge import _heuristic_durable, CrystallizedCandidate
+        candidate = CrystallizedCandidate(
+            candidate_id="test-c8", kind="moment",
+            body="I plan to use Rust going forward.",
+            source_event_ids=["evt-2"],
+        )
+        verdict = _heuristic_durable(candidate)
+        assert verdict["durable_fact"] is True
+        # Reason must include the specific matched marker, not just a generic class
+        assert ":" in verdict["reason"]
+        parts = verdict["reason"].split(":")
+        assert len(parts) >= 3, f"Expected reason with marker identity, got: {verdict['reason']}"
+        matched_marker = parts[-1]
+        assert matched_marker in {"plan to", "i use"}, f"Unexpected marker: {matched_marker}"
+
+
 # ── A.6-A.7: Adaptive bias (spec A4) ───────────────────────────────────────
 
 
