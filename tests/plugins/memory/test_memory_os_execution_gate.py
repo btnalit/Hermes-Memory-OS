@@ -563,6 +563,25 @@ class TestGateIndex:
         assert result["expires_at_status"] == "valid", \
             f"Expected 'valid' with relaxed default, got {result['expires_at_status']}"
 
+    def test_permit_resolution_reports_index_expiry_fields(self):
+        """C3+B1b: fast-path index entries render permit_* timestamps as normal resolution fields."""
+        from plugins.memory.memory_os.execution_gate import _permit_resolution
+        result = _permit_resolution(
+            status="valid",
+            reason="",
+            envelope_id="xgate_c3_index",
+            lane_id="test",
+            risk_class="standard",
+            permit={
+                "permit_created_at": "2030-01-01T00:00:00Z",
+                "permit_expires_at": "2030-01-01T00:15:00Z",
+                "permit_decision": "allowed",
+            },
+        )
+        assert result["permit_created_at"] == "2030-01-01T00:00:00Z"
+        assert result["expires_at"] == "2030-01-01T00:15:00Z"
+        assert result["expires_at_status"] == "valid"
+
     def test_validate_permit_fields_shared_function_exists(self):
         """C6: shared _validate_permit_fields function is importable and works."""
         from plugins.memory.memory_os.execution_gate import _validate_permit_fields

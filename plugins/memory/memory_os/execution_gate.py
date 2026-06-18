@@ -660,10 +660,16 @@ def _permit_resolution(
     require_fresh: bool = False,
 ) -> dict[str, Any]:
     record = permit or {}
-    if permit and not str(record.get("expires_at") or "").strip():
+    # Raw JSONL permits use created_at/expires_at. The O(1) sidecar index uses
+    # permit_created_at/permit_expires_at to avoid clashing with completion
+    # fields. Normalize both shapes before rendering the public resolution;
+    # otherwise the fast path validates correctly but reports missing expiry.
+    permit_created_at = record.get("created_at") or record.get("permit_created_at")
+    expires_at = record.get("expires_at") or record.get("permit_expires_at")
+    if permit and not str(expires_at or "").strip():
         expiry_status = "expiry_missing" if require_fresh else "missing"
     else:
-        expiry_status = _expiry_status(record.get("expires_at"), require_present=require_fresh)
+        expiry_status = _expiry_status(expires_at, require_present=require_fresh)
     return {
         "schema_version": "memory-os.execution_gate_permit_resolution.v0",
         "status": status,
@@ -675,8 +681,8 @@ def _permit_resolution(
         "boundary_true": record.get("boundary_true") is True or any_boundary_true(record.get("boundary")),
         "permit_count": permit_count or (1 if permit else 0),
         "completion_count": completion_count,
-        "permit_created_at": str(record.get("created_at") or ""),
-        "expires_at": str(record.get("expires_at") or ""),
+        "permit_created_at": str(permit_created_at or ""),
+        "expires_at": str(expires_at or ""),
         "expires_at_status": expiry_status,
         "scope_hash": str(record.get("scope_hash") or ""),
         "scope_match": scope_match,
