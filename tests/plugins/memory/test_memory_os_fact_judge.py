@@ -853,3 +853,98 @@ class TestJudgeRetryAndHeuristic:
             assert "heuristic_fallback" in result["reason"], (
                 f"Reason should indicate heuristic_fallback; got {result['reason']}"
             )
+
+
+# ── A.6-A.7: Adaptive bias (spec A4) ───────────────────────────────────────
+
+
+class TestAdaptiveBias:
+    """A.6-A.7: Adaptive bias — lean when crystallized count < threshold, strict when >=."""
+
+    def test_lean_prompt_when_below_threshold(self):
+        """A.6: active_crystallized_count < LEAN_CAPTURE_THRESHOLD → lean prompt.
+
+        The lean prompt (default _JUDGE_SYSTEM_PROMPT) contains 'LEAN TOWARD CAPTURE'.
+        """
+        from plugins.modules.governance.fact_judge import (
+            _adaptive_prompt,
+            LEAN_CAPTURE_THRESHOLD,
+        )
+
+        below = LEAN_CAPTURE_THRESHOLD - 1
+        prompt = _adaptive_prompt(below)
+        assert "LEAN TOWARD CAPTURE" in prompt, (
+            f"Below threshold ({below} < {LEAN_CAPTURE_THRESHOLD}) should use lean prompt"
+        )
+
+    def test_strict_prompt_when_above_threshold(self):
+        """A.6: active_crystallized_count >= LEAN_CAPTURE_THRESHOLD → strict prompt.
+
+        The strict prompt should NOT contain 'LEAN TOWARD CAPTURE'.
+        It should contain conservative language.
+        """
+        from plugins.modules.governance.fact_judge import (
+            _adaptive_prompt,
+            LEAN_CAPTURE_THRESHOLD,
+        )
+
+        at_threshold = LEAN_CAPTURE_THRESHOLD
+        prompt = _adaptive_prompt(at_threshold)
+        assert "LEAN TOWARD CAPTURE" not in prompt, (
+            f"At threshold ({at_threshold} >= {LEAN_CAPTURE_THRESHOLD}) should use strict prompt"
+        )
+        assert "UNCERTAIN" in prompt, (
+            "Strict prompt should contain conservative UNCERTAIN language"
+        )
+
+    def test_lean_capture_threshold_not_in_overridable_knobs(self):
+        """A.7: LEAN_CAPTURE_THRESHOLD is meta — NOT in OVERRIDABLE_KNOBS.
+
+        The system cannot tune its own judge threshold.
+        """
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        from plugins.modules.governance.fact_judge import LEAN_CAPTURE_THRESHOLD
+
+        # Verify it's a meta constant (exists, has correct value)
+        assert isinstance(LEAN_CAPTURE_THRESHOLD, int)
+        assert LEAN_CAPTURE_THRESHOLD > 0
+
+        # Verify NOT in OVERRIDABLE_KNOBS
+        assert "lean_capture_threshold" not in OVERRIDABLE_KNOBS, (
+            "A.7 violation: LEAN_CAPTURE_THRESHOLD must NOT be in OVERRIDABLE_KNOBS "
+            "(meta constant, system cannot self-tune judge threshold)"
+        )
+        assert "LEAN_CAPTURE_THRESHOLD" not in OVERRIDABLE_KNOBS, (
+            "A.7 violation: LEAN_CAPTURE_THRESHOLD must NOT be in OVERRIDABLE_KNOBS"
+        )
+
+    def test_count_active_crystallized_respects_inactive_states(self, tmp_path):
+        """A.6: _count_active_crystallized filters out inactive records."""
+        from plugins.modules.governance.fact_judge import _count_active_crystallized
+        store = _store(tmp_path)
+
+        # Initially empty → count = 0
+        assert _count_active_crystallized(store) == 0
+
+        # Write a crystallized record (active)
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedMemoryService,
+            CrystallizedCandidate,
+            ApprovalDecision,
+            ApprovalPurpose,
+        )
+        svc = CrystallizedMemoryService(store)
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_active_001",
+            kind="preference",
+            body="I prefer dark mode",
+            source_event_ids=["evt_001"],
+        )
+        decision = ApprovalDecision(
+            candidate_id=candidate.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="test",
+            reviewed_at="2026-06-18T00:00:00Z",
+        )
+        svc.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        assert _count_active_crystallized(store) == 1

@@ -99,10 +99,75 @@ _JUDGE_SYSTEM_PROMPT = (
     "- reason: short string explaining the decision (max 120 chars)\n"
 )
 
+# ── Adaptive bias ──────────────────────────────────────────────────────────
+LEAN_CAPTURE_THRESHOLD = 50
+"""Meta constant: when active crystallized count < this, judge leans toward capture.
+
+NOT in OVERRIDABLE_KNOBS — the judge's own threshold is meta, system cannot self-tune.
+"""
+
+_JUDGE_SYSTEM_PROMPT_STRICT = (
+    "You are a conservative durability judge for a memory system. "
+    "Your ONLY task: decide whether a conversation snippet is a DURABLE FACT "
+    "(worth permanently remembering) or a TRANSIENT MOMENT (should fade away).\n\n"
+    "DURABLE FACTS (mark True):\n"
+    "- User preferences and tastes (\"I prefer dark mode\", \"I like concise answers\")\n"
+    "- Decisions and commitments (\"I'll use PostgreSQL for this project\")\n"
+    "- Factual knowledge about the user (\"I work at Acme Corp\", \"My dog is named Max\")\n"
+    "- Explicit requests to remember (\"Remember that I...\")\n"
+    "- Reusable project context (\"This repo uses pytest with coverage threshold 80%\")\n\n"
+    "TRANSIENT MOMENTS (mark False):\n"
+    "- Greetings and pleasantries (\"Hello\", \"Thanks\")\n"
+    "- Process and navigation (\"Open the file\", \"Show me the code\")\n"
+    "- Emotional expressions (\"I'm tired today\", \"This is frustrating\")\n"
+    "- Pure information requests (\"What does git status do?\")\n"
+    "- Inconclusive discussion without closure\n"
+    "- Single-turn task instructions with no lasting value\n\n"
+    "RULES:\n"
+    "1. If UNCERTAIN whether something is durable, answer False. "
+    "Only mark True when clearly a lasting preference, decision, or factual knowledge.\n"
+    "2. A fact stated once IS durable if it reveals a preference or identity.\n"
+    "3. Do NOT mark True for transient emotional states, even if strongly expressed.\n\n"
+    "Return ONLY a JSON object with keys:\n"
+    "- durable_fact: boolean\n"
+    "- reason: short string explaining the decision (max 120 chars)\n"
+)
+
+
+def _count_active_crystallized(store: "MemoryOSStore") -> int:
+    """Count active (non-inactive) crystallized records across all .md files."""
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedMemoryService,
+        is_active_crystallized_frontmatter,
+    )
+    svc = CrystallizedMemoryService(store)
+    crystallized_root = store.roots.crystallized_root
+    if not crystallized_root.exists():
+        return 0
+    count = 0
+    for md_path in sorted(crystallized_root.glob("*.md")):
+        try:
+            records = svc.read_records(md_path.name)
+        except Exception:
+            continue
+        for record in records:
+            if is_active_crystallized_frontmatter(record.frontmatter):
+                count += 1
+    return count
+
+
+def _adaptive_prompt(active_crystallized_count: int) -> str:
+    """Return lean or strict judge prompt based on active crystallized count."""
+    if active_crystallized_count < LEAN_CAPTURE_THRESHOLD:
+        return _JUDGE_SYSTEM_PROMPT
+    return _JUDGE_SYSTEM_PROMPT_STRICT
+
 
 def judge_candidate(
     candidate: CrystallizedCandidate,
     config: dict[str, Any] | None = None,
+    *,
+    active_crystallized_count: int = 0,
 ) -> dict[str, Any]:
     """Judge whether a candidate is a durable fact or a transient moment.
 
@@ -129,7 +194,8 @@ def judge_candidate(
         f'Is this a durable fact or a transient moment? Return JSON.'
     )
 
-    prompt = f"{_JUDGE_SYSTEM_PROMPT}\n\n{user_prompt}"
+    system_prompt = _adaptive_prompt(active_crystallized_count)
+    prompt = f"{system_prompt}\n\n{user_prompt}"
 
     # Retry loop: empty / non-JSON / missing-key responses get retried
     for attempt in range(1 + MAX_JUDGE_RETRIES):  # 1 initial + N retries
@@ -189,6 +255,7 @@ def run_fact_judge_lane(
     Returns a summary dict for monitor integration.
     """
     _now = now or datetime.now(timezone.utc)
+    active_count = _count_active_crystallized(store)
     candidates = read_candidate_queue(store)
 
     # Only judge inner_drive candidates that haven't been judged yet
@@ -209,7 +276,7 @@ def run_fact_judge_lane(
         if candidate.bridge_state not in ("", "inner_drive_candidate"):
             continue
 
-        verdict = judge_candidate(candidate)
+        verdict = judge_candidate(candidate, active_crystallized_count=active_count)
         judged_count += 1
 
         if verdict.get("durable_fact"):
