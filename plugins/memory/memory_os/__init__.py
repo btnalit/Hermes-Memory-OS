@@ -186,7 +186,7 @@ class MemoryOSProvider(MemoryProvider):
         report["query_class"] = "active" if recall_mode == "active" else "shadow"
         return report
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", messages=None) -> None:
         if self._owner_review_reply_processed(user_content):
             self._audit(
                 "owner_review_reply_sync_turn_skipped",

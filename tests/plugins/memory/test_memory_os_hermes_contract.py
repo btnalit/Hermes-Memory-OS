@@ -99,3 +99,50 @@ class TestABCImport:
         assert not extra_in_vendored, (
             f"Vendored ABC has extra abstract methods not in host ABC: {extra_in_vendored}"
         )
+
+
+class TestSyncTurnSignature:
+    """F3: sync_turn must accept messages=None keyword-only parameter."""
+
+    def test_sync_turn_accepts_messages_kwarg(self):
+        """MemoryManager.sync_all() passes messages=[...] — our sync_turn must accept it."""
+        from plugins.memory.memory_os.__init__ import MemoryOSProvider
+
+        provider = MemoryOSProvider()
+        try:
+            provider.sync_turn("user msg", "assistant msg", session_id="test", messages=[{"role": "user", "content": "hi"}])
+        except TypeError as e:
+            pytest.fail(f"sync_turn raised TypeError when passed messages=...: {e}")
+
+    def test_sync_turn_messages_defaults_to_none(self):
+        """sync_turn works without messages kwarg (backward compat)."""
+        from plugins.memory.memory_os.__init__ import MemoryOSProvider
+
+        provider = MemoryOSProvider()
+        try:
+            provider.sync_turn("user msg", "assistant msg", session_id="test")
+        except TypeError as e:
+            pytest.fail(f"sync_turn raised TypeError without messages: {e}")
+
+    def test_sync_turn_signature_matches_host_abc(self):
+        """sync_turn parameter names match host ABC exactly."""
+        try:
+            from agent.memory_provider import MemoryProvider as HostABC
+        except ImportError:
+            pytest.skip("Hermes agent not installed")
+            return
+
+        import inspect
+        from plugins.memory.memory_os.__init__ import MemoryOSProvider
+
+        host_sig = inspect.signature(HostABC.sync_turn)
+        our_sig = inspect.signature(MemoryOSProvider.sync_turn)
+
+        host_params = set(host_sig.parameters.keys())
+        our_params = set(our_sig.parameters.keys())
+
+        missing = host_params - our_params
+        assert not missing, (
+            f"sync_turn missing parameters present in host ABC: {missing}. "
+            f"Host wants: {sorted(host_params)}"
+        )
