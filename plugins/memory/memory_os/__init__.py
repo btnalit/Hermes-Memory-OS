@@ -868,8 +868,9 @@ class MemoryOSProvider(MemoryProvider):
         return ""
 
 
-def register_memory_provider() -> MemoryProvider:
-    return MemoryOSProvider()
+def register(ctx) -> None:
+    """Hermes memory plugin 发现入口。参考: honcho 的 register(ctx)。"""
+    ctx.register_memory_provider(MemoryOSProvider())
 
 
 def _ensure_system_module_runtime_path(hermes_home: str | Path) -> None:
