@@ -350,3 +350,159 @@ def test_old_permit_beyond_2000_window_still_resolvable(tmp_path):
         f"B.1 FAIL: old permit should be valid; got status={result['status']}, "
         f"reason={result.get('reason')}"
     )
+
+
+# ── B.2-B.4: Gate index sidecar (spec B1b) ────────────────────────────────
+
+
+class TestGateIndex:
+    """B.2-B.4: Sidecar index for O(1) permit resolution."""
+
+    def test_index_hit_returns_correct_permit(self, tmp_path):
+        """B.2: Index hit -> O(1) return of correct permit state."""
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Start an envelope -- should populate index
+        permit = start_execution_gate_envelope(
+            store,
+            lane_id="test_index_lane",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={"key": "value"},
+            boundary={},
+        )
+        envelope_id = permit["execution_gate_envelope_id"]
+
+        # Read the index directly -- should contain the envelope
+        from plugins.memory.memory_os.execution_gate import _read_gate_index
+
+        idx = _read_gate_index(roots)
+        assert envelope_id in idx, (
+            f"B.2 FAIL: index should contain {envelope_id} after start; "
+            f"got keys={list(idx.keys())}"
+        )
+        entry = idx[envelope_id]
+        assert entry["permit_decision"] == "allowed"
+        assert entry["lane_id"] == "test_index_lane"
+
+        # Resolve via index path
+        result = resolve_execution_gate_permit(
+            roots,
+            envelope_id=envelope_id,
+            lane_id="test_index_lane",
+            risk_class="bounded_reversible_queue",
+        )
+        assert result["status"] == "valid", (
+            f"B.2 FAIL: permit should be valid via index; "
+            f"got {result['status']}: {result.get('reason')}"
+        )
+
+    def test_index_miss_falls_back_to_full_scan(self, tmp_path):
+        """B.3: Index miss -> full scan fallback -> rebuild index.
+
+        If the index is deleted/corrupt, resolve still works by scanning
+        the full JSONL, then rebuilds the missing index entries.
+        """
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Start an envelope normally
+        permit = start_execution_gate_envelope(
+            store,
+            lane_id="test_fallback_lane",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={},
+            boundary={},
+        )
+        envelope_id = permit["execution_gate_envelope_id"]
+
+        # Corrupt the index -- delete it
+        from plugins.memory.memory_os.execution_gate import _gate_index_path, _read_gate_index
+
+        index_path = _gate_index_path(roots)
+        index_path.unlink()
+
+        # Index should be empty now
+        idx = _read_gate_index(roots)
+        assert envelope_id not in idx, "Index should be empty after deletion"
+
+        # Resolve should still work (full-scan fallback)
+        result = resolve_execution_gate_permit(
+            roots,
+            envelope_id=envelope_id,
+            lane_id="test_fallback_lane",
+            risk_class="bounded_reversible_queue",
+        )
+        assert result["status"] == "valid", (
+            f"B.3 FAIL: permit should be valid via full-scan fallback; "
+            f"got {result['status']}: {result.get('reason')}"
+        )
+
+        # Index should have been rebuilt
+        idx_rebuilt = _read_gate_index(roots)
+        assert envelope_id in idx_rebuilt, (
+            "B.3 FAIL: index should be rebuilt after full-scan fallback"
+        )
+
+    def test_completion_updates_index(self, tmp_path):
+        """B.4: append completion -> index updated with completion status."""
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        permit = start_execution_gate_envelope(
+            store,
+            lane_id="test_completion_lane",
+            trigger_surface="test",
+            risk_class="bounded_reversible_queue",
+            human_approval_required=False,
+            why_no_human_approval="test",
+            scope={},
+            boundary={},
+        )
+        envelope_id = permit["execution_gate_envelope_id"]
+
+        # Complete the envelope
+        from plugins.memory.memory_os.execution_gate import complete_execution_gate_envelope
+
+        complete_execution_gate_envelope(
+            store,
+            envelope_id=envelope_id,
+            lane_id="test_completion_lane",
+            execution_status="completed",
+            result_summary={"summary": "test completion"},
+        )
+
+        # Index should reflect completion
+        from plugins.memory.memory_os.execution_gate import _read_gate_index
+
+        idx = _read_gate_index(roots)
+        assert envelope_id in idx
+        assert idx[envelope_id].get("completion_status") == "completed", (
+            f"B.4 FAIL: index should show completion_status='completed'; "
+            f"got {idx[envelope_id]}"
+        )
+
+        # Resolve with require_unused should now fail
+        result = resolve_execution_gate_permit(
+            roots,
+            envelope_id=envelope_id,
+            lane_id="test_completion_lane",
+            risk_class="bounded_reversible_queue",
+            require_unused=True,
+        )
+        assert result["status"] == "invalid", (
+            f"B.4: permit should be invalid when require_unused and completed; "
+            f"got {result['status']}"
+        )
+        assert "already_completed" in result.get("reason", ""), (
+            f"B.4: reason should indicate already completed; got {result.get('reason')}"
+        )
