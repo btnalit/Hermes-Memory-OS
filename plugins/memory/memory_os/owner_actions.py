@@ -1826,11 +1826,47 @@ def parse_owner_review_reply(
                 rendered={"profile": store.roots.profile or "default"},
                 binding="raw_token",
             )
-        service = CrystallizedMemoryService(store)
-        result = service.confirm_provisional_record(
-            record_id.strip(),
-            confirmed_by="owner",
+        # P1 fix: require recorded digest when caller demands it (was bypassed)
+        rendered, binding = _resolve_reply_digest(
+            store,
+            owner_id=owner_id,
+            channel=channel,
+            digest_id=digest_id,
+            require_recorded_digest=require_recorded_digest,
+            anchor=anchor,
+            action_token=action_token,
+            max_action_required=max_action_required,
+            max_review_suggested=max_review_suggested,
+            max_fyi=max_fyi,
         )
+        if binding == "digest_not_found":
+            return _reply_result(
+                status="needs_clarification",
+                reply_text=reply_text,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                reason="digest_not_found_or_expired",
+                rendered=rendered,
+                binding=binding,
+            )
+        service = CrystallizedMemoryService(store)
+        try:
+            result = service.confirm_provisional_record(
+                record_id.strip(),
+                confirmed_by="owner",
+            )
+        except KeyError:
+            return _reply_result(
+                status="error",
+                reply_text=reply_text,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                reason=f"record_not_found: {record_id.strip()}",
+                rendered=rendered,
+                binding=binding,
+            )
         return _reply_result(
             status="ok",
             reply_text=reply_text,
@@ -1838,8 +1874,8 @@ def parse_owner_review_reply(
             channel=channel,
             apply=apply,
             reason="",
-            rendered={"profile": store.roots.profile or "default"},
-            binding="raw_token",
+            rendered=rendered,
+            binding=binding,
             action_result={
                 "status": "ok",
                 "action": "provisional_confirmed",

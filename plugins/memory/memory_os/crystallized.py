@@ -470,10 +470,12 @@ class CrystallizedMemoryService:
         *,
         max_renewals: int = 10,
         now: datetime | None = None,
+        execution_gate_envelope_id: str = "",
     ) -> dict[str, Any]:
         """recurrence += 1; expires_at = now + 7d (renew); write audit.
 
         Exceeds max_renewals -> returns requires_owner_decision=True, no renewal.
+        Only operates on provisional records (guard: provisional is True).
         """
         from datetime import timedelta
 
@@ -492,6 +494,17 @@ class CrystallizedMemoryService:
             for current in records:
                 frontmatter = dict(current.frontmatter)
                 if str(frontmatter.get("id") or "") == normalized:
+                    # Guard: only operate on provisional records
+                    if frontmatter.get("provisional") is not True:
+                        matched = {
+                            "record_id": normalized,
+                            "file_name": current.file_name,
+                            "renewed": False,
+                            "requires_owner_decision": False,
+                            "current_recurrence": 0,
+                            "error": "not_provisional",
+                        }
+                        continue
                     matched = {"record_id": normalized, "file_name": current.file_name}
                     current_recurrence = 0
                     try:
@@ -538,6 +551,7 @@ class CrystallizedMemoryService:
                         "record_id": normalized,
                         "recurrence": matched["current_recurrence"],
                         "max_renewals": max_renewals,
+                        "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
                     },
                 )
             return matched

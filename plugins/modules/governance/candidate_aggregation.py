@@ -315,6 +315,10 @@ def _cluster_and_promote(
             f"keywords={matched_keywords!r}, "
             f"cluster_key={cluster_key})"
         )
+        # P2 fix: track already-bumped record_ids within this pipeline run
+        # to prevent cluster recurrence inflation (N members matching the
+        # same provisional → N bumps in one tick instead of 1).
+        bumped_record_ids: set[str] = set()
         for member in promote_batch:
             if _skip_tainted_external_evidence(
                 member,
@@ -329,9 +333,28 @@ def _cluster_and_promote(
             # P2: Index-based near-duplicate dedup — bump+renew existing provisional
             existing_prov = _match_existing_provisional(store, member.body)
             if existing_prov is not None:
+                if existing_prov in bumped_record_ids:
+                    # Already bumped by a prior cluster member — absorb silently
+                    append_candidate_triage(
+                        store,
+                        candidate_id=member.candidate_id,
+                        action="dedup_absorb",
+                        target_state="absorbed",
+                        reason=f"bump via cluster: already bumped {existing_prov} this tick",
+                        cluster_key=cluster_key,
+                        cluster_size=len(members),
+                        execution_gate_envelope_id=envelope_id,
+                        now=_now,
+                    )
+                    processed_ids.add(member.candidate_id)
+                    continue
+                bumped_record_ids.add(existing_prov)
                 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
                 crystallized_service = CrystallizedMemoryService(store)
-                bump_result = crystallized_service.bump_recurrence_and_renew(existing_prov)
+                bump_result = crystallized_service.bump_recurrence_and_renew(
+                    existing_prov,
+                    execution_gate_envelope_id=envelope_id,
+                )
                 if bump_result.get("requires_owner_decision"):
                     append_candidate_triage(
                         store,
@@ -356,6 +379,24 @@ def _cluster_and_promote(
                         execution_gate_envelope_id=envelope_id,
                         now=_now,
                     )
+                processed_ids.add(member.candidate_id)
+                continue
+            # P2 fix: fallback to full-index dedup (catches permanent records
+            # that _match_existing_provisional ignores — old _check_index_dedup
+            # covered ALL crystallized records, not just provisional).
+            perm_match = _check_index_dedup(store, member)
+            if perm_match is not None:
+                append_candidate_triage(
+                    store,
+                    candidate_id=member.candidate_id,
+                    action="demote",
+                    target_state="demoted",
+                    reason=f"dedup_skip: similar to permanent crystallized {perm_match}",
+                    cluster_key=cluster_key,
+                    cluster_size=len(members),
+                    execution_gate_envelope_id=envelope_id,
+                    now=_now,
+                )
                 processed_ids.add(member.candidate_id)
                 continue
 
@@ -467,7 +508,10 @@ def _cluster_and_promote(
             if existing_prov is not None:
                 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
                 crystallized_service = CrystallizedMemoryService(store)
-                result = crystallized_service.bump_recurrence_and_renew(existing_prov)
+                result = crystallized_service.bump_recurrence_and_renew(
+                    existing_prov,
+                    execution_gate_envelope_id=envelope_id,
+                )
                 if result.get("requires_owner_decision"):
                     append_candidate_triage(
                         store,
@@ -492,6 +536,24 @@ def _cluster_and_promote(
                         execution_gate_envelope_id=envelope_id,
                         now=_now,
                     )
+                processed_ids.add(c.candidate_id)
+                continue
+
+            # P2 fix: fallback to full-index dedup (catches permanent records
+            # that _match_existing_provisional ignores).
+            perm_match = _check_index_dedup(store, c)
+            if perm_match is not None:
+                append_candidate_triage(
+                    store,
+                    candidate_id=c.candidate_id,
+                    action="demote",
+                    target_state="demoted",
+                    reason=f"dedup_skip: similar to permanent crystallized {perm_match}",
+                    cluster_key="",
+                    cluster_size=1,
+                    execution_gate_envelope_id=envelope_id,
+                    now=_now,
+                )
                 processed_ids.add(c.candidate_id)
                 continue
 
@@ -790,27 +852,49 @@ def _match_existing_provisional(
     命中返回 record_id，否则 None。
     Fail-open: index 不可用时返回 None（走新建路径）。
     只在 provisional=True 的记录中匹配，不碰 permanent。
+
+    P2 fix: 拆分句子逐句搜索（FTS5 trigram AND 语义下，整段搜索
+    会漏掉多句正文中仅部分匹配的情况）。同时预建 provisional ID 集合
+    替代逐 hit 调用 find_record（避免 N+1 全量 .md 扫描）。
     """
     if not body or len(body.strip()) < _MIN_SUBSTANTIVE_CHARS:
         return None
     try:
         from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+        # Pre-build provisional record ID set (one scan instead of N+1)
+        crystallized_service = CrystallizedMemoryService(store)
+        provisional_ids: set[str] = {
+            r["id"] for r in crystallized_service.list_provisional_records()
+            if r.get("id")
+        }
+        if not provisional_ids:
+            return None
 
         idx = index or MemoryOSIndex(store.roots)
-        result = idx.search(body.strip(), limit=5)
-        if result.get("mode") in ("missing",):
-            return None
-        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
-        crystallized_service = CrystallizedMemoryService(store)
-        for hit in result.get("hits", []):
-            if hit.get("record_type") != "crystallized_record":
+        # Split into sentences and search each independently.
+        # Trigram FTS5 with AND semantics needs ALL trigrams in the
+        # query to match; appending new content or phrasing differences
+        # at the sentence level would miss near-duplicates.  By searching
+        # per sentence, a single matching sentence is enough to flag.
+        import re
+        sentences = re.split(r"(?<=[。？！.!?\n])\s*", body)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
                 continue
-            record_id = hit.get("record_id")
-            if not record_id:
+            result = idx.search(sentence, limit=3)
+            if result.get("mode") in ("missing",):
                 continue
-            record = crystallized_service.find_record(record_id)
-            if record is not None and record.frontmatter.get("provisional") is True:
-                return record_id
+            for hit in result.get("hits", []):
+                if hit.get("record_type") != "crystallized_record":
+                    continue
+                record_id = hit.get("record_id")
+                if not record_id:
+                    continue
+                if record_id in provisional_ids:
+                    return record_id
     except Exception:
         return None
     return None
