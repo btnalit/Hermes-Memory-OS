@@ -768,12 +768,17 @@ def _match_existing_provisional(
         result = idx.search(body.strip(), limit=5)
         if result.get("mode") in ("missing",):
             return None
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+        crystallized_service = CrystallizedMemoryService(store)
         for hit in result.get("hits", []):
-            if (
-                hit.get("record_type") == "crystallized_record"
-                and hit.get("provisional") is True
-            ):
-                return hit.get("record_id")
+            if hit.get("record_type") != "crystallized_record":
+                continue
+            record_id = hit.get("record_id")
+            if not record_id:
+                continue
+            record = crystallized_service.find_record(record_id)
+            if record is not None and record.frontmatter.get("provisional") is True:
+                return record_id
     except Exception:
         return None
     return None

@@ -464,6 +464,85 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    def bump_recurrence_and_renew(
+        self,
+        record_id: str,
+        *,
+        max_renewals: int = 10,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """recurrence += 1; expires_at = now + 7d (renew); write audit.
+
+        Exceeds max_renewals -> returns requires_owner_decision=True, no renewal.
+        """
+        from datetime import timedelta
+
+        _now = now or datetime.now(timezone.utc)
+        normalized = str(record_id or "").strip()
+        if not normalized:
+            raise KeyError("crystallized record id is required")
+        if not self.store.roots.crystallized_root.exists():
+            raise KeyError(normalized)
+
+        for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+            records = self.read_records(path.name)
+            rendered: list[str] = []
+            changed = False
+            matched: dict[str, Any] | None = None
+            for current in records:
+                frontmatter = dict(current.frontmatter)
+                if str(frontmatter.get("id") or "") == normalized:
+                    matched = {"record_id": normalized, "file_name": current.file_name}
+                    current_recurrence = 0
+                    try:
+                        current_recurrence = int(frontmatter.get("recurrence", 0))
+                    except (ValueError, TypeError):
+                        pass
+
+                    if current_recurrence >= max_renewals:
+                        matched["renewed"] = False
+                        matched["requires_owner_decision"] = True
+                        matched["current_recurrence"] = current_recurrence
+                    else:
+                        frontmatter["recurrence"] = str(current_recurrence + 1)
+                        frontmatter["expires_at"] = (_now + timedelta(days=7)).isoformat()
+                        frontmatter["last_renewed_at"] = _timestamp(_now)
+                        matched["renewed"] = True
+                        matched["requires_owner_decision"] = False
+                        matched["current_recurrence"] = current_recurrence + 1
+                        changed = True
+
+                rendered.append(_format_frontmatter(frontmatter))
+                rendered.append("")
+                rendered.append(current.body.rstrip())
+                rendered.append("")
+
+            if matched is None:
+                continue
+            if changed:
+                tmp_path = path.with_name(f"{path.name}.{normalized}.renew.tmp")
+                try:
+                    tmp_path.write_text(
+                        "\n".join(rendered).rstrip() + "\n", encoding="utf-8"
+                    )
+                    tmp_path.replace(path)
+                finally:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="provisional_renewed",
+                    status="ok",
+                    target=str(path),
+                    details={
+                        "record_id": normalized,
+                        "recurrence": matched["current_recurrence"],
+                        "max_renewals": max_renewals,
+                    },
+                )
+            return matched
+        raise KeyError(normalized)
+
     def list_provisional_records(self) -> list[dict[str, Any]]:
         """Return all active provisional crystallized records.
 

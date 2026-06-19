@@ -325,7 +325,7 @@ def test_bump_recurrence_on_match(tmp_path):
         body=body,
         bridge_state="resolver_approved",
         sensitivity="private",
-        source_event_ids=[],
+        source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=3)).isoformat(),
     )
     d = ApprovalDecision(
@@ -346,6 +346,10 @@ def test_bump_recurrence_on_match(tmp_path):
     assert len(existing) == 1
     original_expires = existing[0]["expires_at"]
     existing_id = existing[0]["id"]
+
+    # Sync index so FTS5 can see the record
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    MemoryOSIndex(store.roots).sync_from_store(store)
 
     # FTS5 匹配
     match_id = _match_existing_provisional(store, body)
@@ -393,7 +397,7 @@ def test_repeated_observation_accumulates_recurrence(tmp_path):
         body=body,
         bridge_state="resolver_approved",
         sensitivity="private",
-        source_event_ids=[],
+        source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=5)).isoformat(),
     )
     d = ApprovalDecision(
@@ -444,7 +448,7 @@ def test_max_renewals_requires_owner_decision(tmp_path):
         body=body,
         bridge_state="resolver_approved",
         sensitivity="private",
-        source_event_ids=[],
+        source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=10)).isoformat(),
     )
     d = ApprovalDecision(
