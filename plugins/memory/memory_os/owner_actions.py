@@ -1710,7 +1710,7 @@ def owner_review_digest_preview(
             "review_suggested": suggested_items,
             "fyi": fyi_items,
         },
-        "text_preview": _digest_text_preview(action_items, suggested_items, fyi_items),
+        "text_preview": _digest_text_preview(action_items, suggested_items, fyi_items, store=store),
         "boundary": {
             "actual_send": False,
             "actual_execute": False,
@@ -1780,6 +1780,7 @@ def render_owner_review_digest(
             counts=preview.get("counts"),
             overflow=preview.get("overflow"),
             digest_mode=digest_mode,
+            store=store,
         ),
         "boundary": {
             "actual_send": False,
@@ -1810,6 +1811,83 @@ def parse_owner_review_reply(
     parsed = _parse_owner_reply_text(reply_text)
     anchor = str(parsed.get("anchor") or "").upper() if parsed.get("status") == "ok" else ""
     action_token = str(parsed.get("action_token") or "").lower() if parsed.get("status") == "ok" else ""
+
+    # --- P1: expiry cliff guard tokens (oa_confirm_ / oa_let_expire_) ---
+    if action_token and action_token.startswith("oa_confirm_"):
+        record_id = action_token[len("oa_confirm_"):]
+        if not record_id.strip():
+            return _reply_result(
+                status="error",
+                reply_text=reply_text,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                reason="missing record_id in oa_confirm_ token",
+                rendered={"profile": store.roots.profile or "default"},
+                binding="raw_token",
+            )
+        service = CrystallizedMemoryService(store)
+        result = service.confirm_provisional_record(
+            record_id.strip(),
+            confirmed_by="owner",
+        )
+        return _reply_result(
+            status="ok",
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            reason="",
+            rendered={"profile": store.roots.profile or "default"},
+            binding="raw_token",
+            action_result={
+                "status": "ok",
+                "action": "provisional_confirmed",
+                "record_id": record_id.strip(),
+                "canonical_state_changed": result.get("canonical_state_changed", False),
+            },
+        )
+
+    if action_token and action_token.startswith("oa_let_expire_"):
+        record_id = action_token[len("oa_let_expire_"):]
+        if not record_id.strip():
+            return _reply_result(
+                status="error",
+                reply_text=reply_text,
+                owner_id=owner_id,
+                channel=channel,
+                apply=apply,
+                reason="missing record_id in oa_let_expire_ token",
+                rendered={"profile": store.roots.profile or "default"},
+                binding="raw_token",
+            )
+        if apply:
+            append_audit(
+                store.roots.audit_path,
+                action="provisional_let_expire",
+                status="ok",
+                target=str(store.roots.crystallized_root),
+                details={
+                    "record_id": record_id.strip(),
+                    "note": "owner explicitly chose to let this provisional record expire",
+                },
+            )
+        return _reply_result(
+            status="ok",
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            reason="",
+            rendered={"profile": store.roots.profile or "default"},
+            binding="raw_token",
+            action_result={
+                "status": "ok",
+                "action": "provisional_let_expire_acknowledged",
+                "record_id": record_id.strip(),
+            },
+        )
+
     rendered, binding = _resolve_reply_digest(
         store,
         owner_id=owner_id,
@@ -4844,17 +4922,72 @@ def _action_token(*, action_type: str, target_type: str, target_id: str) -> str:
     return "oa_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:14]
 
 
+def _render_expiring_provisional_section(store: MemoryOSStore) -> str:
+    """渲染临近过期 provisional 区段，带 confirm/let_expire action token。
+
+    从 system/expiring_provisional.json 读取 sweep 输出的列表，
+    按 recurrence 降序 + expires_at 升序取 top-N，生成 digest 区段。
+    """
+    from plugins.modules.governance.provisional_sweep import _expiring_list_path as _sweep_list_path
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
+
+    list_path = _sweep_list_path(store)
+    if not list_path.exists():
+        return ""
+
+    try:
+        expiring = json.loads(list_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    if not isinstance(expiring, list) or not expiring:
+        return ""
+
+    max_n = int(resolve_knob("max_expiring_in_digest", default=10))
+    # 按 recurrence 降序 + expires_at 升序
+    expiring.sort(
+        key=lambda r: (
+            -int(r.get("recurrence", 0)),
+            str(r.get("expires_at", "")),
+        )
+    )
+    expiring = expiring[:max_n]
+
+    lines = [
+        "## ⚠ 即将过期的 Provisional 事实（48h 内）",
+        "",
+    ]
+    for r in expiring:
+        record_id = str(r.get("id") or "")
+        body = str(r.get("body") or "")
+        if len(body) > 120:
+            body = body[:117] + "..."
+        hours = int(r.get("hours_remaining", 0))
+        external_ref = str(r.get("external_ref") or "")
+        ref_line = f"\n    外部参考: {external_ref}" if external_ref else ""
+
+        lines.append(
+            f"- [⏳即将过期] {body} (剩{hours}h){ref_line}\n"
+            f"    → confirm: 确认为 permanent    let_expire: 让其过期\n"
+            f"    action_tokens: oa_confirm_{record_id} | oa_let_expire_{record_id}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _digest_text_preview(
     action_items: list[dict[str, Any]],
     suggested_items: list[dict[str, Any]],
     fyi_items: list[dict[str, Any]],
+    *,
+    store: MemoryOSStore | None = None,
 ) -> str:
     rendered_sections = {
         "action_required": [_render_review_item(item, section="action_required") for item in action_items],
         "review_suggested": [_render_review_item(item, section="review_suggested") for item in suggested_items],
         "fyi": [_render_review_item(item, section="fyi") for item in fyi_items],
     }
-    return _rendered_digest_text(rendered_sections)[:2000]
+    return _rendered_digest_text(rendered_sections, store=store)[:2000]
 
 
 def _rendered_digest_text(
@@ -4863,6 +4996,7 @@ def _rendered_digest_text(
     counts: dict[str, Any] | None = None,
     overflow: dict[str, Any] | None = None,
     digest_mode: str = "review",
+    store: MemoryOSStore | None = None,
 ) -> str:
     digest_mode = _digest_mode(digest_mode)
     max_chars = OWNER_REVIEW_TEXT_LIMIT
@@ -4915,6 +5049,15 @@ def _rendered_digest_text(
                 section_lines.append(summary_line)
         lines.extend(section_lines)
         lines.append("")
+
+    # 临近过期 provisional 提醒（expiry cliff guard）
+    if store is not None:
+        _expiring = _render_expiring_provisional_section(store)
+        if _expiring:
+            candidate = lines + [_expiring]
+            if len("\n".join(candidate).rstrip()) <= max_chars:
+                lines.append(_expiring)
+
     final_overview = _rendered_overview_lines(
         counts or {},
         overflow or {},
