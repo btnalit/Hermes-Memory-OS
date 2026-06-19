@@ -747,6 +747,38 @@ def _tag_fleeting(
 # ── Index-based near-duplicate dedup (fail-open) ──────────────────────
 
 
+def _match_existing_provisional(
+    store: MemoryOSStore,
+    body: str,
+    *,
+    index: object | None = None,
+) -> str | None:
+    """FTS5 查是否已有高相似的 active provisional crystallized 记录。
+
+    命中返回 record_id，否则 None。
+    Fail-open: index 不可用时返回 None（走新建路径）。
+    只在 provisional=True 的记录中匹配，不碰 permanent。
+    """
+    if not body or len(body.strip()) < _MIN_SUBSTANTIVE_CHARS:
+        return None
+    try:
+        from plugins.memory.memory_os.index import MemoryOSIndex
+
+        idx = index or MemoryOSIndex(store.roots)
+        result = idx.search(body.strip(), limit=5)
+        if result.get("mode") in ("missing",):
+            return None
+        for hit in result.get("hits", []):
+            if (
+                hit.get("record_type") == "crystallized_record"
+                and hit.get("provisional") is True
+            ):
+                return hit.get("record_id")
+    except Exception:
+        return None
+    return None
+
+
 def _check_index_dedup(
     store: MemoryOSStore,
     candidate: CrystallizedCandidate,
