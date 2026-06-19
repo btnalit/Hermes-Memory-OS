@@ -125,10 +125,26 @@ class CrystallizedMemoryService:
         path = self.store.roots.crystallized_root / file_name
         if not path.exists():
             return []
-        return [
+        raw = path.read_text(encoding="utf-8")
+        records = [
             CrystallizedRecord(file_name=file_name, frontmatter=frontmatter, body=body)
-            for frontmatter, body in _parse_markdown_records(path.read_text(encoding="utf-8"))
+            for frontmatter, body in _parse_markdown_records(raw)
         ]
+        # P3: fail-loud — non-empty file yielding 0 records is not silent
+        if raw.strip() and not records:
+            from plugins.memory.memory_os.audit import append_audit
+
+            append_audit(
+                self.store.roots.audit_path,
+                action="crystallized_file_unparseable",
+                status="warning",
+                target=str(path),
+                details={
+                    "file_name": file_name,
+                    "error_code": "crystallized_file_unparseable",
+                },
+            )
+        return records
 
     def find_record(self, record_id: str) -> CrystallizedRecord | None:
         normalized = str(record_id or "").strip()
