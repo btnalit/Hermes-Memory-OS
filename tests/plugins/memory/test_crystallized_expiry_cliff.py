@@ -299,3 +299,177 @@ def test_thundering_herd_top_n(tmp_path):
     top_n = near[:max_n]
     assert len(top_n) == 10
     assert len(near) > len(top_n)  # 2 条留给下次
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P2: recurrence bump + dedup (D.6-D.9)
+# ═══════════════════════════════════════════════════════════════════
+
+from plugins.modules.governance.candidate_aggregation import _match_existing_provisional
+
+
+def test_bump_recurrence_on_match(tmp_path):
+    """D.6: durable 撞已有 provisional → bump recurrence+1 + expires_at 续期，不新建."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    # 先建一条已有 provisional
+    body = "用户反复提及的数据: PostgreSQL 是首选数据库"
+    c = CrystallizedCandidate(
+        candidate_id="cand_existing",
+        kind="preference",
+        body=body,
+        bridge_state="resolver_approved",
+        sensitivity="private",
+        source_event_ids=[],
+        created_at=(now - timedelta(days=3)).isoformat(),
+    )
+    d = ApprovalDecision(
+        candidate_id=c.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        note="test",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now + timedelta(days=1)).isoformat(),
+        recurrence=0,
+    )
+    service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    # 找到已有 record
+    existing = service.list_provisional_records()
+    assert len(existing) == 1
+    original_expires = existing[0]["expires_at"]
+    existing_id = existing[0]["id"]
+
+    # FTS5 匹配
+    match_id = _match_existing_provisional(store, body)
+    assert match_id is not None
+
+    # bump
+    result = service.bump_recurrence_and_renew(match_id, max_renewals=10, now=now)
+    assert result["renewed"] is True
+    assert result["current_recurrence"] == 1
+
+    # 验证 expires_at 被续期
+    updated = service.list_provisional_records()
+    assert len(updated) == 1
+    new_expires = updated[0]["expires_at"]
+    assert new_expires != original_expires
+
+    # 验证 recurrence 已更新
+    records = service.read_records("owner_approved.md")
+    bumped = [r for r in records if r.frontmatter.get("id") == existing_id]
+    assert len(bumped) == 1
+    assert int(bumped[0].frontmatter.get("recurrence", 0)) == 1
+
+
+def test_new_record_when_no_match(tmp_path):
+    """D.7: 未撞 → FTS5 返回 None（现有路径不变）."""
+    store = _store(tmp_path)
+
+    match_id = _match_existing_provisional(store, "completely novel content never seen before")
+    assert match_id is None
+
+
+def test_repeated_observation_accumulates_recurrence(tmp_path):
+    """D.8: 反复观察 N 次 → recurrence=N，一直不过期."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    body = "反复出现的事实: 用户使用 VSCode 作为主要编辑器"
+    c = CrystallizedCandidate(
+        candidate_id="cand_repeat",
+        kind="preference",
+        body=body,
+        bridge_state="resolver_approved",
+        sensitivity="private",
+        source_event_ids=[],
+        created_at=(now - timedelta(days=5)).isoformat(),
+    )
+    d = ApprovalDecision(
+        candidate_id=c.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        note="test",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now + timedelta(days=2)).isoformat(),
+        recurrence=0,
+    )
+    service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    # bump 5 次
+    existing = service.list_provisional_records()
+    record_id = existing[0]["id"]
+    for i in range(5):
+        result = service.bump_recurrence_and_renew(record_id, max_renewals=10, now=now)
+        assert result["renewed"] is True
+        assert result["current_recurrence"] == i + 1
+
+    # 验证 recurrence=5
+    records = service.read_records("owner_approved.md")
+    bumped = [r for r in records if r.frontmatter.get("id") == record_id]
+    assert int(bumped[0].frontmatter.get("recurrence", 0)) == 5
+    # 验证未过期（expires_at 被续到未来）
+    expires_str = bumped[0].frontmatter.get("expires_at", "")
+    assert expires_str
+    expires_dt = datetime.fromisoformat(expires_str)
+    assert expires_dt > now
+
+
+def test_max_renewals_requires_owner_decision(tmp_path):
+    """D.9: MAX_RENEWALS 后 → requires_owner_decision=True，不续期."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    body = "高频但可能无价值的事实"
+    c = CrystallizedCandidate(
+        candidate_id="cand_max",
+        kind="moment",
+        body=body,
+        bridge_state="resolver_approved",
+        sensitivity="private",
+        source_event_ids=[],
+        created_at=(now - timedelta(days=10)).isoformat(),
+    )
+    d = ApprovalDecision(
+        candidate_id=c.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        note="test",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now + timedelta(hours=12)).isoformat(),
+        recurrence=9,  # 已有 9 次
+    )
+    service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    existing = service.list_provisional_records()
+    record_id = existing[0]["id"]
+
+    # 第 10 次 bump（max_renewals=10）
+    result = service.bump_recurrence_and_renew(record_id, max_renewals=10, now=now)
+    assert result["renewed"] is True  # 第 10 次本身允许（recurrence 9→10）
+    assert result["current_recurrence"] == 10
+
+    # 第 11 次 bump → 拒绝
+    result2 = service.bump_recurrence_and_renew(record_id, max_renewals=10, now=now)
+    assert result2["renewed"] is False
+    assert result2["requires_owner_decision"] is True
+    assert result2["current_recurrence"] == 10  # 没有增加
