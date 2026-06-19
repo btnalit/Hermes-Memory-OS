@@ -326,20 +326,36 @@ def _cluster_and_promote(
                 now=_now,
             ):
                 continue
-            # Index-based near-duplicate dedup (fail-open)
-            dedup_hit = _check_index_dedup(store, member)
-            if dedup_hit is not None:
-                append_candidate_triage(
-                    store,
-                    candidate_id=member.candidate_id,
-                    action="demote",
-                    target_state="demoted",
-                    reason=f"dedup_skip: similar to crystallized {dedup_hit}",
-                    cluster_key=cluster_key,
-                    cluster_size=len(members),
-                    execution_gate_envelope_id=envelope_id,
-                    now=_now,
-                )
+            # P2: Index-based near-duplicate dedup — bump+renew existing provisional
+            existing_prov = _match_existing_provisional(store, member.body)
+            if existing_prov is not None:
+                from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+                crystallized_service = CrystallizedMemoryService(store)
+                bump_result = crystallized_service.bump_recurrence_and_renew(existing_prov)
+                if bump_result.get("requires_owner_decision"):
+                    append_candidate_triage(
+                        store,
+                        candidate_id=member.candidate_id,
+                        action="flag",
+                        target_state="owner_eligible",
+                        reason=f"max_renewals_reached via cluster: merged into {existing_prov}",
+                        cluster_key=cluster_key,
+                        cluster_size=len(members),
+                        execution_gate_envelope_id=envelope_id,
+                        now=_now,
+                    )
+                else:
+                    append_candidate_triage(
+                        store,
+                        candidate_id=member.candidate_id,
+                        action="dedup_absorb",
+                        target_state="absorbed",
+                        reason=f"bump via cluster: merged into existing provisional {existing_prov}",
+                        cluster_key=cluster_key,
+                        cluster_size=len(members),
+                        execution_gate_envelope_id=envelope_id,
+                        now=_now,
+                    )
                 processed_ids.add(member.candidate_id)
                 continue
 
@@ -446,20 +462,36 @@ def _cluster_and_promote(
             ):
                 continue
 
-            # Index-based near-duplicate dedup (fail-open)
-            dedup_hit = _check_index_dedup(store, c)
-            if dedup_hit is not None:
-                append_candidate_triage(
-                    store,
-                    candidate_id=c.candidate_id,
-                    action="demote",
-                    target_state="demoted",
-                    reason=f"dedup_skip: similar to crystallized {dedup_hit}",
-                    cluster_key="",
-                    cluster_size=1,
-                    execution_gate_envelope_id=envelope_id,
-                    now=_now,
-                )
+            # P2: Index-based near-duplicate dedup — bump+renew existing provisional
+            existing_prov = _match_existing_provisional(store, c.body)
+            if existing_prov is not None:
+                from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+                crystallized_service = CrystallizedMemoryService(store)
+                result = crystallized_service.bump_recurrence_and_renew(existing_prov)
+                if result.get("requires_owner_decision"):
+                    append_candidate_triage(
+                        store,
+                        candidate_id=c.candidate_id,
+                        action="flag",
+                        target_state="owner_eligible",
+                        reason=f"max_renewals_reached: merged into existing provisional {existing_prov}",
+                        cluster_key="",
+                        cluster_size=1,
+                        execution_gate_envelope_id=envelope_id,
+                        now=_now,
+                    )
+                else:
+                    append_candidate_triage(
+                        store,
+                        candidate_id=c.candidate_id,
+                        action="dedup_absorb",
+                        target_state="absorbed",
+                        reason=f"recurrence bump + renew: merged into existing provisional {existing_prov}",
+                        cluster_key="",
+                        cluster_size=1,
+                        execution_gate_envelope_id=envelope_id,
+                        now=_now,
+                    )
                 processed_ids.add(c.candidate_id)
                 continue
 
