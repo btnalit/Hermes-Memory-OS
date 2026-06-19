@@ -76,7 +76,7 @@ def test_find_expiring_provisional_filters_48h(tmp_path):
             body=f"test body {seed}",
             bridge_state="resolver_approved",
             sensitivity="private",
-            source_event_ids=[],
+            source_event_ids=["ev_sweep_test"],
             created_at=(now - timedelta(days=6)).isoformat(),
         )
         d = ApprovalDecision(
@@ -120,7 +120,7 @@ def test_expiring_section_in_digest(tmp_path):
         body="用户偏好:使用暗色主题编辑代码",
         bridge_state="resolver_approved",
         sensitivity="private",
-        source_event_ids=[],
+        source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=6)).isoformat(),
     )
     d = ApprovalDecision(
@@ -168,7 +168,7 @@ def test_owner_confirm_makes_permanent(tmp_path):
         body="项目默认使用 Python 3.11+",
         bridge_state="resolver_approved",
         sensitivity="private",
-        source_event_ids=[],
+        source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=5)).isoformat(),
     )
     d = ApprovalDecision(
@@ -226,7 +226,7 @@ def test_expired_provisional_invalidated(tmp_path):
         body="expired test body",
         bridge_state="resolver_approved",
         sensitivity="private",
-        source_event_ids=[],
+        source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=8)).isoformat(),
     )
     d = ApprovalDecision(
@@ -274,7 +274,7 @@ def test_thundering_herd_top_n(tmp_path):
             body=f"herd body {i}",
             bridge_state="resolver_approved",
             sensitivity="private",
-            source_event_ids=[],
+            source_event_ids=["ev_sweep_test"],
             created_at=(now - timedelta(days=6)).isoformat(),
         )
         d = ApprovalDecision(

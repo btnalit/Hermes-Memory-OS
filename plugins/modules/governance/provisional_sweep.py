@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +71,15 @@ class ProvisionalSweepModule:
         max_provisional = resolve_knob("max_provisional", default=30, _store_root=_store_root)
 
         error_records: list[dict[str, Any]] = []
+
+        # 0. Expiry cliff guard: find near-expiry records for owner digest
+        near_expiry = find_expiring_provisional(store, within_hours=48)
+        p = _expiring_list_path(store)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(near_expiry, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
 
         # 1. TTL expiry
         expired = 0
@@ -251,3 +260,50 @@ def _days_until_expiry(expires_at: str) -> float:
         return remaining.total_seconds() / 86400.0
     except (ValueError, TypeError):
         return float("inf")
+
+
+def find_expiring_provisional(
+    store: MemoryOSStore,
+    *,
+    within_hours: int = 48,
+) -> list[dict[str, Any]]:
+    """找 expires_at 在 within_hours 内的 active provisional 记录。
+
+    按 expires_at 升序，最紧迫的在前。
+    """
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+    service = CrystallizedMemoryService(store)
+    records = service.list_provisional_records()
+    now = datetime.now(timezone.utc)
+    threshold = now + timedelta(hours=within_hours)
+
+    expiring: list[dict[str, Any]] = []
+    for r in records:
+        expires_str = str(r.get("expires_at") or "").strip()
+        if not expires_str:
+            continue
+        try:
+            expires_at = datetime.fromisoformat(expires_str)
+        except ValueError:
+            continue
+        if expires_at <= threshold and expires_at > now:
+            recurrence = 0
+            try:
+                recurrence = int(r.get("recurrence", 0))
+            except (ValueError, TypeError):
+                pass
+            expiring.append({
+                **r,
+                "days_remaining": max(0, int((expires_at - now).total_seconds() / 86400)),
+                "hours_remaining": max(0, int((expires_at - now).total_seconds() / 3600)),
+                "recurrence": recurrence,
+            })
+
+    expiring.sort(key=lambda r: str(r.get("expires_at", "")))
+    return expiring
+
+
+def _expiring_list_path(store: MemoryOSStore) -> Path:
+    """临时文件：临近过期 provisional 列表，供 digest 渲染读取."""
+    return store.roots.memory_os_root / "system" / "expiring_provisional.json"
