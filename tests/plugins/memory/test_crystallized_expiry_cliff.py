@@ -50,3 +50,252 @@ def test_unparseable_file_produces_error_record(tmp_path):
     assert len(unparseable_events) == 1
     assert unparseable_events[0]["details"]["file_name"] == "bad.md"
     assert unparseable_events[0]["status"] == "warning"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P1: expiry cliff guard (D.1-D.5)
+# ═══════════════════════════════════════════════════════════════════
+
+from plugins.modules.governance.provisional_sweep import find_expiring_provisional
+
+
+def test_find_expiring_provisional_filters_48h(tmp_path):
+    """D.1: 48h 内过期的 active provisional 被找出，按 expires_at 升序."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    # 造 3 条: 24h 过期、47h 过期、49h 过期
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    def _write_provisional(seed, hours_to_expiry):
+        c = CrystallizedCandidate(
+            candidate_id=f"cand_exp_{seed}",
+            kind="moment",
+            body=f"test body {seed}",
+            bridge_state="resolver_approved",
+            sensitivity="private",
+            source_event_ids=[],
+            created_at=(now - timedelta(days=6)).isoformat(),
+        )
+        d = ApprovalDecision(
+            candidate_id=c.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=now.isoformat(),
+            note="test",
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(hours=hours_to_expiry)).isoformat(),
+            recurrence=0,
+        )
+        service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    _write_provisional(1, 24)   # 24h 内过期
+    _write_provisional(2, 47)   # 47h 内过期
+    _write_provisional(3, 49)   # 超出 48h
+
+    result = find_expiring_provisional(store, within_hours=48)
+
+    assert len(result) == 2
+    assert result[0]["hours_remaining"] <= result[1]["hours_remaining"]
+    # 49h 的不可出现
+    ids = {r.get("candidate_id") for r in result}
+    assert "cand_exp_3" not in ids
+
+
+def test_expiring_section_in_digest(tmp_path):
+    """D.2: 临近过期 → digest 区段出现，带 confirm/let_expire token."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    c = CrystallizedCandidate(
+        candidate_id="cand_d2",
+        kind="preference",
+        body="用户偏好:使用暗色主题编辑代码",
+        bridge_state="resolver_approved",
+        sensitivity="private",
+        source_event_ids=[],
+        created_at=(now - timedelta(days=6)).isoformat(),
+    )
+    d = ApprovalDecision(
+        candidate_id=c.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        note="test",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now + timedelta(hours=24)).isoformat(),
+        recurrence=0,
+    )
+    service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    # 写临时文件供 digest 读取
+    from plugins.modules.governance.provisional_sweep import _expiring_list_path as _sweep_expiring_path
+    near = find_expiring_provisional(store, within_hours=48)
+    p = _sweep_expiring_path(store)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(near, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+    # 调 digest 区段渲染
+    from plugins.memory.memory_os.owner_actions import _render_expiring_provisional_section
+    section_text = _render_expiring_provisional_section(store)
+
+    assert "即将过期" in section_text
+    assert "oa_confirm_" in section_text
+    assert "oa_let_expire_" in section_text
+    assert "24h" in section_text or "剩" in section_text
+
+
+def test_owner_confirm_makes_permanent(tmp_path):
+    """D.3: owner confirm → provisional=False + expires_at 清空（核心逃生路）."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    c = CrystallizedCandidate(
+        candidate_id="cand_d3",
+        kind="rule",
+        body="项目默认使用 Python 3.11+",
+        bridge_state="resolver_approved",
+        sensitivity="private",
+        source_event_ids=[],
+        created_at=(now - timedelta(days=5)).isoformat(),
+    )
+    d = ApprovalDecision(
+        candidate_id=c.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        note="test",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now + timedelta(hours=24)).isoformat(),
+        recurrence=0,
+    )
+    service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    # 找到刚写入的 record_id
+    prov_records = service.list_provisional_records()
+    assert len(prov_records) == 1
+    record_id = prov_records[0]["id"]
+
+    # 执行 confirm
+    result = service.confirm_provisional_record(
+        record_id,
+        confirmed_by="owner",
+        now=now,
+    )
+    assert result["canonical_state_changed"] is True
+
+    # 读回确认已是 permanent
+    all_records = service.read_records(result["file_name"])
+    confirmed = [
+        r for r in all_records
+        if r.frontmatter.get("id") == record_id
+    ]
+    assert len(confirmed) == 1
+    fm = confirmed[0].frontmatter
+    assert fm.get("provisional") is False
+    assert fm.get("expires_at") == ""
+    assert fm.get("confirmed_by") == "owner"
+    assert fm.get("confirmed_at")
+
+
+def test_expired_provisional_invalidated(tmp_path):
+    """D.4: owner 不动 → 到期 sweep 照常 invalidate（provisional_expired）."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    c = CrystallizedCandidate(
+        candidate_id="cand_d4",
+        kind="moment",
+        body="expired test body",
+        bridge_state="resolver_approved",
+        sensitivity="private",
+        source_event_ids=[],
+        created_at=(now - timedelta(days=8)).isoformat(),
+    )
+    d = ApprovalDecision(
+        candidate_id=c.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=(now - timedelta(days=7)).isoformat(),
+        note="test",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now - timedelta(hours=1)).isoformat(),  # 已过期
+        recurrence=0,
+    )
+    service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    # 跑 sweep
+    from plugins.modules.governance.provisional_sweep import ProvisionalSweepModule
+    sweep = ProvisionalSweepModule(store.roots.hermes_home, profile="memoryos-test")
+    result = sweep.run_once(store=store)
+    assert result["expired_count"] >= 1
+
+    # 确认记录仍存在但 canonical_state 已变
+    prov_records = service.list_provisional_records()
+    assert len(prov_records) == 0  # 不再是 active
+
+    # 文件仍存在
+    md_files = list(store.roots.crystallized_root.glob("*.md"))
+    assert len(md_files) >= 1
+
+
+def test_thundering_herd_top_n(tmp_path):
+    """D.5: 惊群防护——一次只推 top-N，其余下次."""
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = datetime.now(timezone.utc)
+
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    # 造 12 条临近过期
+    for i in range(12):
+        c = CrystallizedCandidate(
+            candidate_id=f"cand_herd_{i}",
+            kind="moment",
+            body=f"herd body {i}",
+            bridge_state="resolver_approved",
+            sensitivity="private",
+            source_event_ids=[],
+            created_at=(now - timedelta(days=6)).isoformat(),
+        )
+        d = ApprovalDecision(
+            candidate_id=c.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=now.isoformat(),
+            note="test",
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(hours=12)).isoformat(),
+            recurrence=0,
+        )
+        service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
+
+    near = find_expiring_provisional(store, within_hours=48)
+    assert len(near) == 12
+
+    # 模拟 digest top-N（默认 10）
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
+    max_n = resolve_knob("max_expiring_in_digest", default=10)
+    top_n = near[:max_n]
+    assert len(top_n) == 10
+    assert len(near) > len(top_n)  # 2 条留给下次
