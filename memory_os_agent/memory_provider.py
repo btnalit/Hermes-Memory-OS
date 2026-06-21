@@ -13,8 +13,9 @@ from typing import Any
 
 class MemoryProvider(ABC):
     @property
+    @abstractmethod
     def name(self) -> str:
-        return ""
+        """Short identifier for this provider (e.g. 'builtin', 'honcho', 'memory-os')."""
 
     @abstractmethod
     def is_available(self) -> bool:
