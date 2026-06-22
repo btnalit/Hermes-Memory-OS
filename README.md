@@ -412,6 +412,24 @@ The operational baseline has live validation evidence:
   stops are visible as guard evidence rather than production WARN;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and
   bounded expression policy apply have live evidence.
+- **P1a: Graph layer edge injection** — structural + LLM edge proposers feed a
+  config-gated Related Memory section in prefetch context. Edge quality verified,
+  cross-section dedup operational, knob `graph_layer_injection_enabled` (default
+  off).
+- **P1b: Hybrid vector-FTS5 retrieval** — local sentence-transformers embedder
+  (`paraphrase-multilingual-MiniLM-L12-v2`, ~420MB, CPU-only, zero per-call cost)
+  powers cosine-similarity vector search with Reciprocal Rank Fusion union over
+  FTS5 results. Vector edge proposer uses the same embedder for embedding-based
+  edge discovery. Both lanes are knob-gated (`vector_retrieval_enabled`,
+  `vector_edge_proposer_enabled`, default off). Degrades gracefully to pure FTS5
+  when the embedder dependency is absent.
+- **横切A: Silent failure audit** — every `except Exception:` block across the
+  codebase (~60 sites) audited. Zero violations: all bare-exception handlers
+  are legitimate fail-open read paths, explicitly marked fail-open shadow/audit
+  paths, or produce bounded error records. P0.1 (stale FTS5 index entries) was
+  the only real silent-failure bug found and has been fixed.
+- Over 1,500 tests (1,489 PASS, 3 platform-specific skipped, 4 pre-existing
+  Windows-only PermissionError).
 
 This does not mean Memory-OS is a generic autonomous executor. New proposal
 kinds require their own bounded apply contract, rollback, monitor fields, and
