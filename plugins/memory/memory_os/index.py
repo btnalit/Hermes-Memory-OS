@@ -256,6 +256,7 @@ class MemoryOSIndex:
         *,
         record_type: str = "crystallized_record",
         limit: int = 60,
+        min_score: float = 0.30,
     ) -> list[str]:
         """Vector similarity search over memory_embeddings using cosine similarity.
 
@@ -265,7 +266,10 @@ class MemoryOSIndex:
         expected when different models produce different dimensions).
 
         Filters by record_type in the SQL query. Returns list of record_id
-        strings sorted by cosine similarity descending, capped at limit.
+        strings sorted by cosine similarity descending, capped at limit,
+        filtered to cosine similarity >= min_score (default 0.30, empirically
+        calibrated — cross-lingual GT ≥0.37, noise peaks ~0.45 with clean
+        gradient around 0.30).
         Empty list on any failure (fail-open).
         """
         if not self.roots.index_path.exists():
@@ -301,7 +305,8 @@ class MemoryOSIndex:
                 if v_norm == 0.0:
                     continue
                 sim = dot / (q_norm * v_norm)
-                results.append((str(row["record_id"]), sim))
+                if sim >= min_score:
+                    results.append((str(row["record_id"]), sim))
 
             results.sort(key=lambda r: r[1], reverse=True)
             return [rid for rid, _score in results[:limit]]
