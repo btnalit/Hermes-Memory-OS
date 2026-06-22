@@ -108,6 +108,7 @@ class MemoryOSIndex:
         try:
             _initialize_schema(conn)
             before = self.counts()
+            _clear_table(conn, "memory_fts")  # P0.1: prevent stale FTS5 entries from accumulating
             _index_events(conn, store)
             _update_event_source_state(conn, store)
             _clear_table(conn, "working_items")
@@ -578,7 +579,7 @@ def _remove_sqlite_sidecars(path: Path) -> None:
 
 
 def _clear(conn: sqlite3.Connection) -> None:
-    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings"):
+    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings", "memory_fts"):
         _clear_table(conn, table)
 
 
