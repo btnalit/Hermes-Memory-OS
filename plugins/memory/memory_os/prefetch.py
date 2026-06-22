@@ -875,6 +875,28 @@ def _relationship_lines(store: MemoryOSStore) -> list[str]:
     return lines
 
 
+def _rrf_union(
+    fts_ids: list[str],
+    vec_ids: list[str],
+    *,
+    k: int = 60,
+    top_n: int = 60,
+) -> list[str]:
+    """Reciprocal Rank Fusion union of FTS5 and vector result sets.
+
+    score = 1 / (k + rank + 1)
+    Higher k reduces the impact of high rankings; k=60 is standard.
+    """
+    scores: dict[str, float] = {}
+    for rank, rid in enumerate(fts_ids):
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+    for rank, rid in enumerate(vec_ids):
+        scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
+
+    sorted_ids = sorted(scores.keys(), key=lambda rid: scores[rid], reverse=True)
+    return sorted_ids[:top_n]
+
+
 def _crystallized_lines(
     store: MemoryOSStore,
     *,
@@ -910,6 +932,7 @@ def _crystallized_lines(
     route = plan_query_route(query, diagnostic_grounding_enabled=False)
     search_query = str(route.get("search_query", ""))
     relevant_ids: set[str] | None = None
+    fts_ids: list[str] = []
     if index is not None and search_query and hasattr(index, "search"):
         try:
             result = index.search(search_query, limit=60)
@@ -919,11 +942,7 @@ def _crystallized_lines(
                 if isinstance(hit, dict)
                 and str(hit.get("record_type", "")) == "crystallized_record"
             ]
-            if hits:
-                relevant_ids = set(hits)
-            # Empty hits → leave relevant_ids=None so all on-disk records
-            # are included. The index may be stale; never treat it as the
-            # authority that excludes records which exist on disk.
+            fts_ids = hits
         except Exception as exc:
             if error_records is not None:
                 error_records.append(
@@ -936,7 +955,30 @@ def _crystallized_lines(
                         details={"error_type": type(exc).__name__},
                     )
                 )
-            relevant_ids = None
+
+    # ── Vector similarity lane ─────────────────────────────────────
+    from .knob_overrides import resolve_knob as _resolve_knob
+    vec_enabled = _resolve_knob(
+        "vector_retrieval_enabled",
+        default=False,
+        roots=store.roots,
+    )
+    vec_ids: list[str] = []
+    if vec_enabled and index is not None and search_query and hasattr(index, "vector_search"):
+        try:
+            vec_results = index.vector_search(search_query, limit=60)
+            vec_ids = [str(r["record_id"]) for r in vec_results if isinstance(r, dict)]
+        except Exception:
+            vec_ids = []
+
+    # ── RRF union ──────────────────────────────────────────────────
+    if fts_ids and vec_ids:
+        relevant_ids = set(_rrf_union(fts_ids, vec_ids, top_n=60))
+    elif fts_ids:
+        relevant_ids = set(fts_ids)
+    elif vec_ids:
+        relevant_ids = set(vec_ids)
+    # else: leave relevant_ids=None so all on-disk records are included
 
     # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
     permanent_entries: list[tuple[str, str]] = []

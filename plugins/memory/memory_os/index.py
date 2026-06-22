@@ -7,10 +7,12 @@ import hashlib
 import os
 import re
 import sqlite3
+from typing import Any
+
+import numpy as np
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
 from .audit import append_audit
@@ -216,6 +218,62 @@ class MemoryOSIndex:
         try:
             _initialize_schema(conn)
             return _query_edges_sqlite(conn, anchor_ids, depth=depth, relation_types=relation_types, state=state, limit=limit)
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def vector_search(self, query_text: str, *, limit: int = 60) -> list[dict[str, Any]]:
+        """Vector similarity search over memory_embeddings using cosine similarity.
+
+        Pure numpy — no LLM, no network. Skips rows whose embedding shape
+        does not match the query embedding shape (shape mismatch is expected
+        when different models produce different dimensions).
+
+        Returns list of dicts with record_id, record_type, score keys,
+        sorted by score descending, capped at limit. Empty list on any
+        failure (fail-open).
+        """
+        if not self.roots.index_path.exists():
+            return []
+        if self._embedder is None:
+            return []
+        query_vec = self._embedder.embed_query(query_text)
+        if query_vec is None:
+            return []
+
+        conn = sqlite3.connect(self.roots.index_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "select record_type, record_id, embedding from memory_embeddings"
+            ).fetchall()
+
+            results: list[dict[str, Any]] = []
+            q_norm = np.linalg.norm(query_vec)
+            if q_norm == 0:
+                return []
+
+            for row in rows:
+                try:
+                    vec = np.frombuffer(row["embedding"], dtype=np.float32)
+                except Exception:
+                    continue
+                if vec.shape != query_vec.shape:
+                    continue
+                dot = np.dot(query_vec, vec)
+                v_norm = np.linalg.norm(vec)
+                if v_norm == 0:
+                    continue
+                sim = float(dot / (q_norm * v_norm))
+                results.append({
+                    "record_type": row["record_type"],
+                    "record_id": row["record_id"],
+                    "score": sim,
+                })
+
+            results.sort(key=lambda r: r["score"], reverse=True)
+            return results[:limit]
         except Exception:
             return []
         finally:
