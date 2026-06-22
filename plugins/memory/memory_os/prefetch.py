@@ -961,9 +961,13 @@ def _crystallized_lines(
                 )
 
     # ── Vector similarity lane ─────────────────────────────────────
+    from .knob_overrides import resolve_knob as _resolve_knob
     embedder = getattr(index, "_embedder", None)
     vec_ids: list[str] = []
-    if embedder is not None and hasattr(embedder, "is_available") and embedder.is_available():
+    vector_enabled = _resolve_knob(
+        "vector_retrieval_enabled", default=False, roots=store.roots,
+    )
+    if vector_enabled and embedder is not None and hasattr(embedder, "is_available") and embedder.is_available():
         qvec = embedder.embed_query(search_query) if search_query else None
         if qvec is not None and hasattr(index, "vector_search"):
             try:

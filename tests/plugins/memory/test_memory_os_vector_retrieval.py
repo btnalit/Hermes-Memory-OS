@@ -411,10 +411,33 @@ class TestCrystallizedLinesVectorLane:
             )
             svc.write_approved_record(candidate, decision, file_name="test.md")
 
-        # Build index with embedder — vector lane will fire
+        # Build index with embedder — but knob defaults to False
         index = MemoryOSIndex(roots)
         index._embedder = MockEmbedder(available=True)
         index.rebuild_from_store(store)
 
-        lines = _crystallized_lines(store, query="网络搜索", index=index)
-        assert len(lines) >= 1  # RRF union produces results
+        # Enable vector retrieval via knob store
+        override_path = roots.memory_os_root / "system" / "knob_overrides.jsonl"
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        override_record = {
+            "schema_version": "memory-os.knob_override.v0",
+            "id": "ko_test_vector_lane",
+            "knob": "vector_retrieval_enabled",
+            "override_value": True,
+            "prior_value": False,
+            "provisional": False,
+            "expires_at": "",
+            "proposed_by": "test",
+            "approved_via": "test",
+            "state": "active",
+            "ts": "2026-06-22T10:00:00Z",
+        }
+        with override_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(override_record, ensure_ascii=False, sort_keys=True) + "\n")
+
+        try:
+            lines = _crystallized_lines(store, query="网络搜索", index=index)
+            assert len(lines) >= 1  # RRF union produces results
+        finally:
+            if override_path.exists():
+                override_path.unlink()
