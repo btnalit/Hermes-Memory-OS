@@ -425,8 +425,10 @@ def install_plugin(
         operational_helper_paths = _write_operational_helper_scripts(hermes_home, dry_run=dry_run)
 
     llm_packages: dict[str, Any] = {}
+    embedder_package: dict[str, Any] = {}
     if install_system_modules:
         llm_packages = _ensure_llm_packages(dry_run=dry_run)
+        embedder_package = _ensure_embedder_package(dry_run=dry_run)
     owner_cron_onboarding_report: dict[str, object] = {}
     enabled = False
     enable_command: list[str] = []
@@ -653,6 +655,7 @@ def install_plugin(
         "session_mirror_config": session_mirror_config or {},
         "llm_judge_preset": llm_judge_preset,
         "llm_packages": llm_packages,
+        "embedder_package": embedder_package,
         "low_clue_recall_config_written": bool(low_clue_recall_config_path) and not dry_run,
         "low_clue_recall_config_path": str(low_clue_recall_config_path) if low_clue_recall_config_path else "",
         "low_clue_recall_config": low_clue_recall_config or {},
@@ -751,6 +754,56 @@ def _ensure_llm_packages(*, dry_run: bool = False) -> dict[str, Any]:
                         f"without {import_name}",
                         file=sys.stderr,
                     )
+    return result
+
+
+def _ensure_embedder_package(*, dry_run: bool = False) -> dict[str, Any]:
+    """Ensure sentence-transformers is importable for vector retrieval lane.
+
+    The vector retrieval lane is optional and knob-gated (default OFF).
+    When sentence-transformers is not installed, the lane degrades
+    gracefully to pure FTS5 — no loss of functionality, just no semantic
+    search enrichment.
+
+    Returns a dict with package status for the install report.
+    """
+    pip_name = "sentence-transformers"
+    import_name = "sentence_transformers"
+    result: dict[str, Any] = {}
+    try:
+        importlib.import_module(import_name)
+        result = {"available": True, "action": "already_installed"}
+    except ImportError:
+        if dry_run:
+            result = {"available": False, "action": "would_install"}
+            print(
+                f"memory-os-install: {pip_name} not found — would install on live run\n"
+                f"  (optional: vector retrieval lane stays at pure FTS5 without it)",
+                file=sys.stderr,
+            )
+        else:
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", pip_name],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                importlib.import_module(import_name)
+                result = {"available": True, "action": "installed"}
+            except (subprocess.CalledProcessError, ImportError) as exc:
+                result = {
+                    "available": False,
+                    "action": "install_failed",
+                    "error": str(exc)[:200],
+                }
+                print(
+                    f"memory-os-install: WARNING — failed to install {pip_name}: "
+                    f"{str(exc)[:200]}\n"
+                    f"  Vector retrieval lane will stay at pure FTS5 (INV-5 floor).\n"
+                    f"  This is normal — the lane is optional and knob-gated default OFF.",
+                    file=sys.stderr,
+                )
     return result
 
 
