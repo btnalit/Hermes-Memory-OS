@@ -12,6 +12,7 @@ from typing import Any
 
 from .context_router import ContextSection, is_low_clue_recall_query, route_context_sections
 from .crystallized import (
+    CrystallizedMemoryService,
     read_candidate_queue,
     _parse_markdown_records,
     is_active_crystallized_frontmatter,
@@ -1134,6 +1135,95 @@ def _graph_layer_shadow_lines(
     # ── Phase 1: write shadow log, return nothing ──────────────
     _record_graph_layer_shadow(store, anchor_ids, edges)
     return []
+
+
+def _resolve_edge_target_preview(
+    store: MemoryOSStore,
+    record_id: str,
+) -> str | None:
+    """Resolve a record_id to a human-readable body preview for graph edges.
+
+    Returns a clipped+redacted body preview, or None if the record
+    cannot be found / is inactive / has no parseable body.
+
+    Fail-open: any exception -> None (graph injection degrades gracefully).
+    """
+    normalized = str(record_id or "").strip()
+    if not normalized:
+        return None
+    try:
+        svc = CrystallizedMemoryService(store)
+        record = svc.find_record(normalized)
+        if record is None:
+            return None
+        text = _redact(_clip(record.body, 180))
+        if not text or _is_diagnostic_style_seed(text):
+            return None
+        return text
+    except Exception:
+        return None
+
+
+def _graph_layer_injection_lines(
+    store: MemoryOSStore,
+    edges: list[dict],
+    *,
+    seen: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Format graph edges as human-readable injection lines for agent context.
+
+    Each edge produces one line: relation_type, weight, and resolved body
+    preview of the target record. If the target cannot be resolved, falls
+    back to showing the record_id (fail-open -- hash is better than silence).
+
+    Cross-section dedup: records already in `seen` are skipped; newly
+    emitted records are added to `seen`.
+
+    Rules:
+    - Max 8 lines (matches edge query limit=8)
+    - Each line <= 220 chars (matches other section caps)
+    - Edge weight < 0.3 is skipped (low-confidence noise)
+    - Fail-open: any resolution error -> fallback to record_id
+    """
+    MAX_LINES = 8
+    lines: list[str] = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        if len(lines) >= MAX_LINES:
+            break
+
+        weight = float(edge.get("weight", 1.0))
+        if weight < 0.3:
+            continue  # low-confidence edge, not worth agent context
+
+        to_type = str(edge.get("to_record_type", "unknown"))
+        to_id = str(edge.get("to_record_id", ""))
+        relation = str(edge.get("relation_type", "related"))
+
+        if not to_id:
+            continue
+
+        # Cross-section dedup
+        if seen is not None and to_type and to_id:
+            if (to_type, to_id) in seen:
+                continue
+
+        # Resolve target body preview
+        body = _resolve_edge_target_preview(store, to_id)
+        if body:
+            display_text = body
+        else:
+            # Fallback: show record_id so agent can at least reference it
+            display_text = f"[unresolved:{to_id}]"
+
+        weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")
+        lines.append(f"- [{relation}·{weight_str}] {display_text}")
+
+        if seen is not None and to_type and to_id:
+            seen.add((to_type, to_id))
+
+    return lines
 
 
 def _record_graph_layer_shadow(

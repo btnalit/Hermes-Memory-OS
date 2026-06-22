@@ -1349,3 +1349,121 @@ def test_t2_3_6_format_tags_list(tmp_path):
     assert _format_tags(["deploy", "canary"]) == "deploy, canary"
     assert _format_tags([]) == ""
     assert _format_tags(["single"]) == "single"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 1.6 — Edge target resolution helpers (Task 1 of P1a)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_resolve_edge_target_preview_found(tmp_path):
+    """When crystallized record exists, return body preview."""
+    from plugins.memory.memory_os.prefetch import _resolve_edge_target_preview
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # Write a crystallized record
+    svc = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-1",
+        kind="preference",
+        body="用户偏好深色主题界面",
+        source_event_ids=["evt_seed_001"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand-1",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-22T10:00:00Z",
+        note="test",
+        source_state="active",
+    )
+    svc.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    # Non-existent record -> None
+    preview = _resolve_edge_target_preview(store, "nonexistent_id")
+    assert preview is None
+
+    # Find the actual record_id from what was written
+    records = svc.read_records("owner_approved.md")
+    assert len(records) == 1
+    record_id = records[0].frontmatter["id"]
+    preview = _resolve_edge_target_preview(store, record_id)
+    assert preview is not None
+    assert "深色主题" in preview
+
+
+def test_graph_layer_injection_lines_formats_edges(tmp_path):
+    """Injection line formatting: each edge produces relation_type + body preview."""
+    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    svc = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-graph-1",
+        kind="note",
+        body="图谱测试记忆内容",
+        source_event_ids=["evt_seed_002"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand-graph-1",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-22T10:00:00Z",
+        note="test",
+        source_state="active",
+    )
+    svc.write_approved_record(candidate, decision, file_name="test_graph.md")
+
+    records = svc.read_records("test_graph.md")
+    record_id = records[0].frontmatter["id"]
+
+    edges = [
+        {
+            "edge_id": "edge-1",
+            "to_record_type": "crystallized_record",
+            "to_record_id": record_id,
+            "relation_type": "co_occurs",
+            "weight": 0.85,
+            "from_record_type": "crystallized_record",
+            "from_record_id": "cry_src",
+            "state": "active",
+        },
+        {
+            "edge_id": "edge-2",
+            "to_record_type": "crystallized_record",
+            "to_record_id": "nonexistent_cry_999",
+            "relation_type": "similar_to",
+            "weight": 0.60,
+            "from_record_type": "crystallized_record",
+            "from_record_id": "cry_src",
+            "state": "active",
+        },
+    ]
+
+    seen: set[tuple[str, str]] = set()
+    lines = _graph_layer_injection_lines(store, edges, seen=seen)
+
+    # At least one line should be resolved successfully
+    assert len(lines) >= 1
+    # First edge should contain relation_type and body preview
+    assert "co_occurs" in lines[0] or "图谱测试" in lines[0]
+    # Second edge resolution failure -> fallback to record_id
+    assert any("nonexistent_cry_999" in line for line in lines)
+    # seen should contain the successfully resolved record
+    assert ("crystallized_record", record_id) in seen
