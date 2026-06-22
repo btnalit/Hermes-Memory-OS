@@ -1,8 +1,8 @@
-# Hermes-Memory-OS 系统级规划 v4(基于 3.200 生产实测)
+# Hermes-Memory-OS 系统级规划 v5(基于 3.200 生产实测 + Opus 4.8 审查)
 
 > 性质:对 ~42K 行现有代码的系统级勘察 + 3.200 生产探针 + 优先级规划。
-> v4 变更:**3.200 完整探针后修订**——P0 区分"可验"与"数据不足",P1 开发不受生产数据稀疏阻塞,新增数据完整性发现。
-> 核心判断不变:**系统已在成熟位置,但生产验证回路滞后于构建速度。** 补充:**生产验证数据不足不等于新功能不能开发——纯工程项(图谱 injection/向量检索)本地可写可测,P0 门控的是生产开关,不是代码。**
+> v5 变更(Opus 4.8 审查):① P1b 和 P1a 同权——混合检索是基线能力,该无条件建,门控的是默认开关不是代码存在;② "独有贡献"在合成数据上只验机制不验价值,真实评估需 seed 后的生产数据;③ P0.1 stale FTS 要查根因(一致性 bug,会复发),挂横切 A;④ 补充 56→0 provisional 环境重置发现,区分"代码测过"与"生产验证过"。
+> 核心判断:系统已在成熟位置。**生产数据不足阻塞的是开关打开,不是代码开发。混合检索和图谱 injection 作为 lifelong-memory 基线能力该无条件建——config-gated 默认关,本地验证正确性+可降级+不回归。门是"正确性门"(本地永远可达),不是"需不需要门"(每个部署自己决策)。**
 
 ## 0. 系统现状(诚实勘察)
 
@@ -32,163 +32,180 @@ Monitor: 99 PASS / 2 WARN / 1 FAIL (execution_gate_cron_helper_completion_error,
 "1|" 污染: 无 (0 files affected)
 ```
 
-**核心发现:系统在生产中几乎未被"喂饱"。** 2 条结晶、0 条 provisional、1 条边——governance 基础设施全部健康(monitor 99 PASS),但没有足够的记忆体量来触发计划中假设的"过期悬崖""召回 gap""图谱 shadow"等场景。这不是系统缺陷,而是它还没被真正使用。
+**核心发现:系统在生产中几乎未被"喂饱"。** 2 条结晶、0 条 provisional、1 条边——governance 基础设施全部健康(monitor 99 PASS),但没有足够的记忆体量来触发计划中假设的"过期悬崖""召回 gap""图谱 shadow"等场景。
 
-**但这不是阻塞 P1 开发的理由。** P1a 图谱 injection 的 5 个 TODO 是纯工程——本地写、本地测、用本地测试数据验证,不需要等 3.200 攒结晶。P1b 向量检索同理——代码能写,测试能跑。P0 门控的是"生产开关打开",不是"代码能不能写"。
+**额外发现:环境疑似被重置。** `invalidate-not-delete` 原则下,过期 provisional 应保留 expired 记录(标记 invalidated_at,不物理删除)。但 3.200 上 provisional=0 且 expired_provisional=0——如果此前有 56 条 provisional 自然过期,应该有 56 条 expired 记录留下。两者同时为 0 意味着环境被清理/重置过,不是自然演化。**这意味着之前对过期悬崖修复、免疫墙的验证,针对的是一个已不存在的状态;当前稀疏状态下,这些修复在生产中尚未被重新验证。代码测过 ≠ 生产验证过。**
 
-**结论:成熟、重测试、治理领先。不缺功能,缺"它在 3.200 上真为你所用"的确认。生产数据不足阻塞了 P0 部分验证项,但不阻塞 P1 开发推进。**
+**这不阻塞 P1 开发。** P1a 图谱 injection 和 P1b 向量检索是 lifelong-memory 开源框架的**基线能力**,该无条件建——本地可写可测,config-gated 默认关。门是"正确性门"(代码对不对、可不可降级、回不回归),本地永远可达;不是"需不需要门"(每个部署根据自己的数据自己决定开不开)。
 
-## P0(最高,开新功能前必做):闭合生产验证回路
-**理由:这一路每刀"代码验证通过、真实效果待观察"。在产生代码信号,缺生产信号。按你"信号驱动推进",这是当前最该补的信号。**
+**结论:成熟、重测试、治理领先。不缺功能,缺"它在 3.200 上真为你所用"的确认。混合检索和图谱注入作为基线能力该建——别让一台几乎没数据的测试机当路线图裁判。**
 
-**P0 vs P1 关系:P0 验证项阻塞的是"生产开关打开",不是"代码开发"。P1a/P1b 的工程实现可以与 P0 并行推进——代码在本地写、用本地测试数据验证;P0 生产信号达标后再开生产开关。**
+## P0(最高,开功能前必做):闭合生产验证回路
+**理由:这一路每刀"代码验证通过、真实效果待观察"。在产生代码信号,缺生产信号。**
+
+**P0 vs P1 关系:P0 验证项阻塞的是"生产开关打开",不是"代码开发"。P1a/P1b 作为基线能力该无条件建——代码在本地写、用本地测试数据验证正确性;P0 生产信号达标后再开生产开关。**
 
 | # | 验证项 | 怎么验 | 状态 | 不通的后果 |
 |---|---|---|---|---|
 | V1 | **安装缝**:provider 真被宿主加载? | 3.200 跑安装,看 `Smoke test: PASS` | **待验** | 不通→前面所有刀从没在热路径跑过 |
-| V2 | **fact_judge 召回**:durable 率 3.4%→?空响应 17%→? | 拉 verdicts.jsonl 统计 | ⚠️ **数据不足**(verdicts.jsonl 不存在,系统只有 2 条结晶,fact_judge 没有足够输入) | 需先 seed 更多结晶+provisonal 记忆后重新评估 |
-| V3 | **过期悬崖**:recurrence 开始累加?digest 出"临近过期"区段? | 看 owner digest + confirm 重要几条 | ⚠️ **数据不足**(0 provisional,0 recurrence,无过期数据) | 需先有 provisional 记忆才能验证过期悬崖机制 |
+| V2 | **fact_judge 召回**:durable 率 3.4%→?空响应 17%→? | 拉 verdicts.jsonl 统计 | ⚠️ **数据不足**(verdicts.jsonl 不存在,需 seed ≥10 条结晶+provisional) | 代码测过,生产待验证 |
+| V3 | **过期悬崖**:recurrence 累加?digest 出"临近过期"区段? | 看 owner digest + confirm 重要几条 | ⚠️ **数据不足**(0 provisional,0 recurrence。此前 56 条已随环境重置消失,非自然演化) | 代码测过,生产待重新验证 |
 | V4 | **prefetch**:真实会话 Crystallized 真落预算?FTS5 真排序? | 真实会话(非探针)测分段 + 确认 index rebuild 过 | **待验**(index 健康,FTS5 trigram 正常,需真实会话验证) | index=None→纯 mtime,优化没生效 |
-| V5 | **数据完整**:`1\|` 污染文件 | 扫描 + 修复 | ✅ **无污染**(0 files affected,原假设有 3 个污染文件) | — |
-| V6 | **免疫墙**:prod probe | 现有 probe | ✅ **已通过**(持续观察) | — |
-| V7 | **图谱 shadow log**:边质量 + 独有贡献 | 拉 log→统计分布→抽样评估→算 graph_unique | ⚠️ **数据不足**(graph_layer_shadow.jsonl 不存在,只有 1 条边,2 条结晶产生的唯一 pair) | 需 P1a engineering 完成后,开启 injection shadow→积累边数据→再评估。当前无数据可评 |
+| V5 | **数据完整**:`1\|` 污染文件 | 扫描 + 修复 | ✅ **无污染**(0 files affected) | — |
+| V6 | **免疫墙**:prod probe | 现有 probe | ✅ **已通过**(持续观察;此前验证针对已重置环境,当前状态需重新确认) | — |
+| V7 | **图谱 shadow log**:边质量 + 独有贡献 | 拉 log→统计分布→抽样评估→算 graph_unique | ⚠️ **数据不足**(graph_layer_shadow.jsonl 不存在,只有 1 条边) | 需 P1a engineering 完成后,seed 结晶→积累边数据→再评估 |
 
-**P0 交付物**:一份 3.200 生产健康报告。**V1/V4 可直接验;V2/V3/V7 需先 seed 记忆(owner 审批 ≥10-20 条结晶+provisional)才有数据可验。** 这不阻塞 P1 开发——P1a/P1b 工程实现可并行推进。
+**P0 交付物**:一份 3.200 生产健康报告。**V1/V4 可直接验;V2/V3/V7 需先 seed 记忆(owner 审批 ≥10-20 条结晶+provisional)才有数据可验。** 这不阻塞 P1 开发。
 
-### P0.1 数据完整性发现(stale FTS index)
+### P0.1 数据完整性:stale FTS index(需查根因,非仅清理)
 
-**发现**:FTS5 索引中存在 `cry_20260610T074613005735Z_c06c0df327e1`,但磁盘上无对应 crystallized 文件。这是 index 与 canonical store 不一致——违反"文件优先、索引可重建"原则。
+**发现**:FTS5 索引中存在 `cry_20260610T074613005735Z_c06c0df327e1`,但磁盘上无对应 crystallized 文件。
 
-- **修复**:在 3.200 上运行 `index rebuild`(`rebuild_from_store`)清理 stale 记录
-- **优先级**:低(不影响功能,但应在 P0 交付前修复)
-- **根因**:待查——可能是不完整写入或手动删除文件后未重建索引
+**这不是一次性清理问题——是 index 与 canonical store 分叉,违反"文件优先、索引可重建"原则。** 需要回答:为什么分叉?
 
-## P1(检索增强,分两路独立推进)
-**理由:图谱和向量是两条独立路径,共享一个本地嵌入器,但图谱推送零新依赖可以先跑。P1a 工程实现不受 3.200 数据稀疏影响——本地可写可测;生产开关待 P0 门控。**
+可能根因:
+1. 文件被手动删除但未触发 index 同步(删文件操作没走 governed 路径)
+2. 不完整写入:文件写到一半崩溃,index 已提交但磁盘未 flush
+3. index rebuild 从来只建不删(增量追加模式,stale 记录累积)
+
+**处理**:
+- **短期**:rebuild_from_store 清理当前 stale 记录
+- **根因**(挂横切 A):审查所有删除/无效化路径——`invalidate-not-delete` 走的是 mark invalidated_at,物理删除走什么路径?有没有对应的 index 清理?如果 `rebuild_from_store` 是唯一清理 stale 的手段,那它就是"周期性全量重建"而非"增量同步"——这是设计选择还是遗漏?
+- **优先级**:低(不影响当前功能,但会复发;在 P0 交付前至少 rebuild + 记录根因分析)
+
+## P1(检索增强,两路平行推进)
+**理由:图谱 injection 和向量检索都是 lifelong-memory 开源框架的基线能力——该无条件建,config-gated 默认关。两者共享一个本地嵌入器,但图谱推送零新依赖可先完成。**
+
+**关键纠正(v5):P1b 和 P1a 同权——都是"该建"的基线能力。门是"正确性门"(代码对、可降级、不回归),本地永远可达;不是"需不需要门"(那是每个部署基于自己数据自己决策的开关)。**
 
 ### P1a(优先,零新依赖):图谱推送启用 —— 从 shadow 升级到 injection
 **当前状态:structural + llm proposer 产出 candidate edges ✅、crystallization_gate 在 cognitive_loop 查 contradicts ✅、query_edges API 完成 ✅。但 `_graph_layer_shadow_lines`(prefetch.py:1102) 处于 Phase 1 shadow-only——写 `graph_layer_shadow.jsonl` audit log 后 `return []`,图谱边不进入 agent 记忆上下文。图谱对检索贡献=0。**
 
-#### Step 0(真门,不是形式):拉 3.200 上已有的 shadow log 评估边质量
+#### Step 0(生产门):拉 3.200 上已有的 shadow log 评估边质量
 
-**⚠️ 3.200 实测:graph_layer_shadow.jsonl 不存在。** 原因:只有 2 条结晶 → 1 条边 → shadow log 从未被写入(没有足够 pair 触发 `_record_graph_layer_shadow`)。**这门当前无数据可过。**
+**⚠️ 3.200 实测:graph_layer_shadow.jsonl 不存在。** 原因:只有 2 条结晶 → 1 条边 → shadow log 从未被写入。**这门当前无生产数据可过,但不阻塞 engineering。**
 
-**但不阻塞 engineering 推进。** 评估路径:
-1. **短期**(本地):用本地测试数据(≥10 条结晶)跑 cognitive loop → 产生边 → 检查 shadow log 输出 → 人工评估边质量
-2. **中期**(3.200):seed 更多结晶记忆后,shadow log 自然积累 → 再拉 log 做生产评估
-3. **门**:边质量达标(人工抽样通过)→ 开 injection;不达标 → 先修 proposer
+评估分两阶段:
+1. **本地**(现在):用本地测试数据(≥20 条结晶)跑 cognitive loop → 产生边 → 检查 shadow log → 人工评估边质量 → 验证机制正确
+2. **3.200**(seed 后):seed ≥10-20 条结晶→边积累→拉 log 做生产评估
+
+**门:边质量达标(人工抽样通过)→ 开 injection;不达标 → 先修 proposer,不硬推。**
 
 #### Step 1(load-bearing 指标):量图谱去重后的"独有贡献"
 
-**⚠️ 3.200 实测:无足够数据可量。** 但方法论不变:
+**机制验证 vs 价值验证(重要区分):**
 
-逻辑:
-- `Crystallized Memory` 段已按 FTS5 相关性注入结晶记录(permanent ≤15 + provisional ≥5)
-- `Related Memory`(图谱)注入的是"与 anchor 通过边相连的结晶"
-- **最相关的往往也最相连——重叠会很高**
+- **本地合成数据上量**:验证机制 work——图谱注入正常、cross-section dedup 生效、edge target 解析正确、预算不超。回答"代码对不对"。
+- **真实数据上量(seed 后 3.200)**:评估价值——图谱在真实人类记忆的连接结构里到底补了多少新信息。回答"图谱在真实使用里值不值"。
 
-所以真正要量的不是"图谱注入了多少条",而是:
+**合成数据上的"独有贡献"数不能单独决定 P1b 的价值判断。** 真实记忆的连接结构合成数据造不出来——合成数据上的重叠率 ≠ 真实使用中的重叠率。
 
-> **图谱注入了哪些 Crystallized Memory 里没有的记录?——"独有贡献"数**
-
-怎么量(本地测试即可,不依赖 3.200):
-1. 准备 ≥20 条结晶记录(本地测试数据)
+方法:
+1. 准备 ≥20 条结晶记录(本地测试数据,多样化 topic)
 2. 对每条 query,跑 `_crystallized_lines` 拿到 Crystallized Memory 段的 record_id 集合
 3. 对每条 query,跑 `query_edges(anchor_ids)` 拿到图谱段的 record_id 集合
 4. 算 `graph_unique = graph_records - crystallized_records`——图谱独有贡献
 5. 统计 `graph_unique / graph_records` 比例 + 抽样看独有贡献的语义相关性
 
-**这个指标串联 P1a 和 P1b 的决策:**
-
+**这个指标的作用**(在本地合成数据上):
 ```
-独有贡献高(图谱补了 >30% 新记录,且语义相关)
-  → 图谱注入边际价值大, P1a 值得, 可能直接堵上召回 gap
-  → P1b 向量都省了
+独有贡献 >0(机制正常,去重生效)
+  → 图谱 injection 代码正确,可开生产开关(待生产边质量+预算验证)
+  → 不等于"图谱在真实使用中有价值"——那需要 seed 后的生产数据
 
-独有贡献低(相连≈相关, 全重叠, <10% 新记录或新记录不相关)
-  → 图谱注入边际价值小, FTS5+图谱仍漏召回
-  → gap 可能还在语义层, 反而支持 P1b 向量
+独有贡献 =0(全重叠,相连=相关)
+  → 图谱 injection 边际价值可能小,但代码本身没问题
+  → 不影响 P1b 建设——混合检索是基线能力
+  → 真实价值评估等 seed 后生产数据
+
+独有贡献异常(去重失效,同一条记录出现在两段)
+  → bug,修
 ```
 
-**这就是"信号驱动"——量出来,两步都有了依据,不是猜。**
+**P1a 和 P1b 的关系(修正):两个都是基线能力,该平行建设。图谱 injection 优先完成(零新依赖);向量检索平行推进。独有贡献影响的是"每个部署的默认开关推荐",不是"P1b 建不建"。**
 
 #### Step 2(5 个 TODO,按序做,本地可全测)
 
-**纯工程项,不需要 3.200 数据:**
 1. **Edge target→可读内容**:当前 edge 存的是 `record_id`(hash),需 resolve 为人类可读的 body preview
-2. **跨段去重**:同一条记忆不能同时出现在 Related Memory + Crystallized Memory 两个段(Step 1 离线量过,这里是运行时保证)
+2. **跨段去重**:同一条记忆不能同时出现在 Related Memory + Crystallized Memory 两个段
 3. **预算感知**:graph section 纳入 prefetch budget(当前 `Related Memory` 优先级=65,位于 Crystallized(60) 和 Events(80) 之间)
-4. **Config gate 默认关**:`graph_layer_injection_enabled` knob(和 vector 一样 lane_switch,默认 False)
-5. **上线**:3.200 开 injection,monitor 观察 agent 行为变化——**这是唯一需要 3.200 的步骤,且前提是 Step 0 边质量达标 + Step 1 独有贡献达标**
+4. **Config gate 默认关**:`graph_layer_injection_enabled` knob(lane_switch,默认 False,owner 审批后开)
+5. **上线**:3.200 开 injection,monitor 观察——前提:Step 0 边质量达标 + 本地正确性验证通过
 
-**为什么 P1a 优先于 P1b:**
+**为什么 P1a 优先于 P1b(工程顺序,非价值顺序):**
 - **零新依赖**(不装 ONNX/不拉模型,纯工程)
 - **复用已有 edge 数据**(structural + llm proposer 已在 cron 跑)
-- **补的是"图谱没推送"的 gap**,不是"缺语义"的 gap——这两个 gap 不同,图谱推送可能已经能解决部分召回问题
-- **P1a 和 P1b 的决策被"独有贡献"数串联**——量出来,两步都有了依据
-- P0 生产数据(独有贡献)可能显示图谱推送就够,省掉 130MB 嵌入器
+- 图谱 injection 完成后,可以积累生产边数据——这些数据反过来为 P1b 的向量 edge proposer 提供对比基线
 
-### P1b(证据门控):共享本地嵌入器 + 向量检索 + 向量 edge proposer
-**理由 + 红线:按你路线图"先量 gap 再建引擎"。图谱推送(P1a)落地后再评估:是否还有 FTS5 漏 + 图谱边也连不上的语义召回 gap?**
+### P1b(平行,证据门控开关):共享本地嵌入器 + 向量检索 + 向量 edge proposer
+**混合检索(FTS5 + 向量 RRF union)是 lifelong-memory 开源框架的基线能力——该无条件建,config-gated 默认关。**
 
-**同样:P1b 代码可以并行开发(本地测试),证据门控的是生产开关。**
+**门控的是默认开关,不是代码存在。** 正确性门(本地永远可达):代码对、可降级、不回归。每个部署基于自己的数据和需求,自己决定开不开。
 
-- **Phase 0 门控(必过):P1a 独有贡献数据 + 剩余 gap 评估**——P1a Step 1 的"独有贡献"数出来之后:图谱推送落地后,是否还有真实案例——agent 漏召回一条语义相关结晶,FTS5 漏了 + 图谱边也没连上?
-  - **有(实测)** → 建嵌入器(一举两得:检索 union + 向量 edge proposer 替代 llm_edge_proposer 降成本)。
-  - **无** → 图谱推送可能就够,省掉 130MB 依赖。**停在 Phase 0 不亏。**
-- 若过门(顺序):
-  1. 本地嵌入器(onnx bge-small ~130MB,无 torch,**零按次费用**)+ `is_available` 降级。
-  2. 向量检索(hybrid FTS5 union,规约 `hermes-hybrid-retrieval-vector-fts5-union-spec.md` 已写,含前置门控)——FTS5 是确定性地板,向量可降级。
-  3. 向量 edge proposer(图谱最后一块,复用同一嵌入器,**可能反而减少 llm_edge_proposer 的 LLM 成本**)。
-- **守 INV-5**:FTS5/符号召回是确定性地板,向量/图谱是可降级 enrichment。
-- **共享本地嵌入器**:向量检索 + 向量 edge proposer 共用一个 ONNX 模型,零额外依赖。`memory_embeddings` 表已存在(index.py:363,scaffold,空表),接管线即可。
-- **生产开关**:`vector_retrieval_enabled` knob(lane_switch,默认 False),P0 门控达标后才能开。
+- **本地开发**(现在,不等 P1a):
+  1. 本地嵌入器(onnx bge-small ~130MB,无 torch,**零按次费用**)+ `is_available` 降级
+  2. 向量检索(hybrid FTS5 union,规约 `hermes-hybrid-retrieval-vector-fts5-union-spec.md` 已写)——FTS5 是确定性地板,向量可降级
+  3. 向量 edge proposer(图谱最后一块,复用同一嵌入器,**可能反而减少 llm_edge_proposer 的 LLM 成本**)
+  4. Knob 注册:`vector_retrieval_enabled`(lane_switch,默认 False)+ `vector_edge_proposer_enabled`(lane_switch,默认 False)
+  5. 测试:12 项断言(含 knob 集成测试 W.10/W.11/W.12)
+- **守 INV-5**:FTS5/符号召回是确定性地板,向量/图谱是可降级 enrichment
+- **共享本地嵌入器**:向量检索 + 向量 edge proposer 共用一个 ONNX 模型,零额外依赖。`memory_embeddings` 表已存在(index.py:363,scaffold,空表),接管线即可
+- **生产开关决策**(每个部署自己决定,不是代码仓库替部署决定):
+  - **默认关**:`vector_retrieval_enabled` = False
+  - **开启条件**(建议,非强制):P1a injection 已开 + owner 已 seed 足够记忆 + 存在 FTS5+图谱都漏召回的实测案例 + 部署有 ≥130MB 磁盘
+  - **不开启也合理**:图谱 injection 已补上召回 gap,向量边际价值小;或部署磁盘受限
+- **P1a 图谱 injection 优先完成,可以为 P1b 开关决策提供更多信号**,但不是 P1b 建设的前置条件
 
 ## 横切(持续,不占独立周期)
-### A. 韧性:静默失败审计
-过期悬崖暴露的"静默丢弃"是一类不是孤例。fail-loud 解析器已落(D.10),但审一遍其他静默路径:空命中、嵌入器静默失败、edge 查询空…**原则:所有"该有东西却没有"的地方,要么 fail-loud(error_record/finding)、要么有明确降级语义,不静默吞。** P0 生产数据会暴露还有哪些静默面。
+### A. 韧性:静默失败审计(含 P0.1 stale index 根因)
+过期悬崖暴露的"静默丢弃"是一类不是孤例。fail-loud 解析器已落(D.10),但审一遍其他静默路径:空命中、嵌入器静默失败、edge 查询空、**index 与 canonical store 分叉(P0.1)**…**原则:所有"该有东西却没有"的地方,要么 fail-loud(error_record/finding)、要么有明确降级语义,不静默吞。**
+
+**P0.1 stale FTS index 挂入此处:**
+- 审查所有物理删除/无效化路径 → 确认每个路径都有对应的 index 同步
+- 如果 `rebuild_from_store` 是唯一清理 stale 的手段 → 文档化这是"周期性全量重建"设计,不是增量同步;或补齐增量清理
+- 加 monitor 检查:定期对比 FTS index count vs disk record count,发现分叉→error_record
 
 ### B. owner_actions 机会主义拆分(非紧急,但控制平面单点需守)
 **经勘察:它是"良性的大"——302 个符号、零模块级可变状态、低耦合(1.3 互调/函数)、77 测试覆盖。问题只是扁平难导航,不是纠缠或正确性风险。但它是系统唯一的 owner-review 控制平面——approve/reject/feedback/allow/apply 全经此文件。**
-- **不做大爆炸重构**(重构能跑的代码=零功能收益 + 隐 bug 风险)。
-- **守**:每次动 owner_actions 必须 ≥77 测试 PASS,owner-review 相关 spec 测试优先跑。这是控制平面,不是普通模块。
-- **顺手拆**:下次为某功能本来就要动 owner_actions 时(RAGFlow owner-ack / 向量碰 owner 路径 / 图谱 edge 审批),把那一簇抽成模块。本来就在测那块,零额外风险。
+- **不做大爆炸重构**(重构能跑的代码=零功能收益 + 隐 bug 风险)
+- **守**:每次动 owner_actions 必须 ≥77 测试 PASS,owner-review 相关 spec 测试优先跑
+- **顺手拆**:下次为某功能本来就要动 owner_actions 时,把那一簇抽成模块
 - **拆分策略(预声明,不现在执行)**:
   - 按 **proposal kind** 切:`_apply_confirm_provisional_knob_override` → `knob_actions.py`; expression feedback → `expression_actions.py`
   - 按 **delivery** 切:`deliver_owner_review_digest_once` + 相关 → `digest_delivery.py`
-  - 保持 `owner_actions.py` 作为 facade re-export 兼容层(所有外部调用者不感知)
-  - **不在没有功能变更的时候拆**(零功能收益 + 隐 bug 风险)
-- **触发信号**:哪天反复找不到东西 / merge 冲突 / 动一处怕碰别处——那时再专门拆(因无可变全局态,按主题切 + re-export 保兼容,风险也低)。
+  - 保持 `owner_actions.py` 作为 facade re-export 兼容层
+  - **不在没有功能变更的时候拆**
 
 ## 不做 / 明确边界
-- ❌ 不做 owner_actions 大爆炸重构(良性的大,顺手即可)。
-- ❌ gap 未实测达标前不**开启**向量检索生产开关(代码可以写、可以本地测)。守红线的是开关,不是开发。
-- ❌ 不为单机 `1\|` 污染建自动修复机制(且 3.200 实测无污染)。
-- ❌ 向量/图谱不进确定性决策路径(守 INV-5);不为功能请外部大模型(嵌入器本地零费用)。
-- ❌ 不追 benchmark SOTA;治理层是护城河,检索增强不稀释它。
+- ❌ 不做 owner_actions 大爆炸重构(良性的大,顺手即可)
+- ❌ **不因 3.200 数据稀疏推迟 P1b 建设**——混合检索是基线能力,该无条件建。门控的是开关,不是代码
+- ❌ 不让合成数据上的"独有贡献"数单独决定 P1b 开关推荐——真实价值评估靠生产数据
+- ❌ 不对 stale FTS index 只做 rebuild 不查根因——这是一致性 bug,会复发
+- ❌ 不为 `1\|` 污染建自动修复机制(且 3.200 实测无污染)
+- ❌ 向量/图谱不进确定性决策路径(守 INV-5);不为功能请外部大模型(嵌入器本地零费用)
+- ❌ 不追 benchmark SOTA;治理层是护城河,检索增强不稀释它
 
 ## 优先级总览
 ```
-P0   生产验证回路(V1/V4 可验; V2/V3/V7 需 seed 记忆)  ← 并行推进, 不阻塞 P1 开发
-P0.1 修复 stale FTS index (rebuild_from_store)           ← 低优先级, P0 交付前做
+P0   生产验证回路(V1/V4 可验; V2/V3/V7 需 seed)     ← 与 P1 并行推进
+P0.1 stale FTS 根因(rebuild + 查分叉原因)              ← 短期 rebuild,根因挂横切 A
        ↓
-P1a  图谱推送启用(shadow→injection)   ← 5 个 TODO 本地可写可测, Step 0/1 本地测试→达标后 3.200 开 injection
-       ↓ 独有贡献高→注入; 低→图谱边际价值小, 支持 P1b
-P1b  向量+图谱(证据门控)             ← 代码可并行开发本地测, 生产开关待 P1a 独有贡献数据 + P0 达标
-横切A 静默失败审计                     ← P0 副产品, 持续
-横切B owner_actions 顺手拆            ← 非紧急但控制平面单点, 动到那块时顺手, 守 ≥77 测试 + 预声明拆分策略
+P1a  图谱 injection(shadow→injection)   ← 5 TODO 本地可测,零新依赖,先完成
+P1b  向量检索 + 向量 edge proposer      ← 基线能力,平行建设,本地可测,config-gated 默认关
+       ↓ 两者都完成后,生产开关决策:基于 seed 后的生产数据,各部署自己决定
+横切A 静默失败审计(含 P0.1 stale index 根因)   ← 持续
+横切B owner_actions 顺手拆                        ← 非紧急,动到那块时顺手
 ```
 
-## 关键区分:P0 门控 vs P1 开发
+## 关键区分总结
 
-| | P0 生产验证 | P1 工程开发 |
+| | 代码开发 | 生产开关 |
 |---|---|---|
-| **依赖** | 3.200 生产数据 | 本地测试数据 |
-| **阻塞因素** | V2/V3/V7 需 seed ≥10 条结晶 | 无阻塞,可立即开始 |
-| **门控目标** | 生产开关(能不能开 injection/vector) | 代码正确性(功能能不能跑) |
-| **时机** | 与 P1 并行推进 | 现在就做 |
-
-**P0 验证数据不足不是 P1 开发的阻塞器。两个轨道并行:开发轨道写代码+本地测试,生产轨道 seed 记忆→积累数据→验证。交汇点在"生产开关打开",不在"代码开始写"。**
+| **P1a 图谱 injection** | ✅ 无条件建(基线能力,零新依赖) | 边质量 + 去重 + 预算验证通过 → 开 |
+| **P1b 向量检索** | ✅ 无条件建(基线能力,本地嵌入器) | 正确性 + 可降级 + 不回归验证通过,部署自定 |
+| **门性质** | 正确性门(代码对/可降级/不回归),本地永远可达 | 部署决策门(我的数据需要吗?),每个部署自己答 |
+| **"独有贡献"角色** | 验机制(去重生效/注入正常),不影响建不建 | 给信号(图谱补了多少),影响开关推荐,不决定代码存在 |
+| **3.200 角色** | 不影响开发(本地写,本地测) | 验证环境,不是路线图裁判 |
 
 ## 一句话
-系统已在成熟、治理领先的位置(1438 测试、治理脊柱完整)。3.200 生产探针确认:基础设施健康但记忆体量稀疏(2 条结晶)。**P0 生产验证和 P1 工程开发并行推进**——P0 验证项中 V2/V3/V7 需先 seed 记忆,V1/V4 可直接验;P1a 图谱 injection 5 个 TODO 零新依赖本地可测,P1b 向量代码可并行开发。**生产数据不足阻塞的是"开关打开",不是"代码开发"——不要混淆两者。** owner_actions 是良性的大但控制平面单点,顺手拆即可。**别让构建速度甩开验证速度——这是这套系统现在唯一真正的风险。**
+系统已在成熟、治理领先的位置(1438 测试、治理脊柱完整)。3.200 生产探针确认:基础设施健康但记忆体量稀疏,环境疑似被重置(56→0 provisional 非自然演化)。**混合检索和图谱 injection 作为 lifelong-memory 开源框架的基线能力,该无条件建——config-gated 默认关,正确性门本地永远可达。别让一台几乎没数据的测试机决定路线图上有什么代码。** owner_actions 是良性的大但控制平面单点,顺手拆即可。stale FTS index 是一致性 bug,需查根因而非仅清理。**代码测过 ≠ 生产验证过——当前稀疏状态下,过期悬崖修复和 fact_judge 召回在生产中尚未被重新验证。**
