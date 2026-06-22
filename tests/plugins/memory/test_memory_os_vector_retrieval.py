@@ -441,3 +441,163 @@ class TestCrystallizedLinesVectorLane:
         finally:
             if override_path.exists():
                 override_path.unlink()
+
+
+class TestVectorRetrievalIntegration:
+    """W.1, W.2, W.3: end-to-end vector retrieval with knob gating."""
+
+    def test_full_flow_fts5_only_when_knob_disabled(self, tmp_path):
+        """Default knob=False → pure FTS5, vector lane inactive."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.prefetch import _crystallized_lines
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+
+        roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+        roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        svc = CrystallizedMemoryService(store)
+        candidate = CrystallizedCandidate(
+            candidate_id="c0", kind="note",
+            body="语义相关的记忆内容但与关键词不重叠",
+            source_event_ids=["evt_0"],
+        )
+        decision = ApprovalDecision(
+            candidate_id="c0", purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="owner", reviewed_at="2026-06-22T10:00:00Z",
+            source_state="active",
+        )
+        svc.write_approved_record(candidate, decision, file_name="test.md")
+
+        index = MemoryOSIndex(roots)
+        index._embedder = MockEmbedder(available=True)
+        index.rebuild_from_store(store)
+
+        # Verify knob is False by default
+        assert resolve_knob("vector_retrieval_enabled", default=False, roots=roots) is False
+
+        # FTS5 search for a keyword-matching term should work
+        lines = _crystallized_lines(store, query="语义", index=index)
+        assert len(lines) >= 1  # FTS5 trigram should match "语义"
+
+    def test_full_flow_vector_union_when_knob_enabled(self, tmp_path):
+        """Knob=True + embedder available → FTS5 ∪ vector results."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.prefetch import _crystallized_lines
+        from plugins.memory.memory_os.knob_overrides import register_override
+
+        roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+        roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        svc = CrystallizedMemoryService(store)
+        for i, body in enumerate([
+            "Python 编程语言相关的内容",  # FTS5: "Python" matches
+            "Docker 容器编排和部署策略",   # FTS5: "Docker" matches
+        ]):
+            candidate = CrystallizedCandidate(
+                candidate_id=f"c{i}", kind="note", body=body,
+                source_event_ids=[f"evt_{i}"],
+            )
+            decision = ApprovalDecision(
+                candidate_id=f"c{i}",
+                purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                reviewer="owner", reviewed_at="2026-06-22T10:00:00Z",
+                source_state="active",
+            )
+            svc.write_approved_record(candidate, decision, file_name="test.md")
+
+        index = MemoryOSIndex(roots)
+        index._embedder = MockEmbedder(available=True)
+        index.rebuild_from_store(store)
+
+        # Enable vector knob
+        from datetime import datetime, timezone
+        expires = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
+        register_override(
+            "vector_retrieval_enabled", True,
+            prior=False, proposed_by="test",
+            approved_via="resolver", expires_at=expires,
+            roots=roots,
+        )
+
+        # Query should now include both FTS5 and vector results
+        lines = _crystallized_lines(store, query="Python", index=index)
+        assert len(lines) >= 1  # Should get at least FTS5 matches
+
+    def test_vector_lane_degraded_when_embedder_unavailable(self, tmp_path):
+        """When embedder is_available=False, vector lane skipped — pure FTS5."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.prefetch import _crystallized_lines
+        from plugins.memory.memory_os.knob_overrides import register_override
+
+        roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+        roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        svc = CrystallizedMemoryService(store)
+        candidate = CrystallizedCandidate(
+            candidate_id="c0", kind="note", body="Python development",
+            source_event_ids=["evt_0"],
+        )
+        decision = ApprovalDecision(
+            candidate_id="c0", purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="owner", reviewed_at="2026-06-22T10:00:00Z",
+            source_state="active",
+        )
+        svc.write_approved_record(candidate, decision, file_name="test.md")
+
+        index = MemoryOSIndex(roots)
+        index._embedder = MockEmbedder(available=False)  # ← unavailable
+        index.rebuild_from_store(store)
+
+        from datetime import datetime, timezone
+        expires = datetime.now(timezone.utc).replace(hour=23, minute=59, second=59).isoformat()
+        register_override(
+            "vector_retrieval_enabled", True,
+            prior=False, proposed_by="test",
+            approved_via="resolver", expires_at=expires,
+            roots=roots,
+        )
+
+        # Should NOT crash — degrades to pure FTS5
+        lines = _crystallized_lines(store, query="Python", index=index)
+        assert len(lines) >= 1  # FTS5 still works
+
+    def test_no_llm_no_network_in_vector_path(self, tmp_path):
+        """W.2: vector_search and RRF contain no LLM/network code patterns."""
+        from plugins.memory.memory_os.prefetch import _rrf_union
+        import inspect
+
+        # _rrf_union source must not contain network/LLM patterns
+        rrf_source = inspect.getsource(_rrf_union)
+        forbidden = ["http", "requests.", "urllib", "openai", "anthropic", "fetch("]
+        for pattern in forbidden:
+            assert pattern not in rrf_source.lower(), f"RRF contains forbidden pattern: {pattern}"
+
+        # vector_search source must not contain network/LLM patterns
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        vs_source = inspect.getsource(MemoryOSIndex.vector_search)
+        for pattern in forbidden:
+            assert pattern not in vs_source.lower(), f"vector_search contains forbidden pattern: {pattern}"

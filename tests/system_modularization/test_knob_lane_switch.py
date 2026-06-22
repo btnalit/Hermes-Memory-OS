@@ -425,3 +425,20 @@ def test_non_bool_allowed_list_would_not_trigger_type_guard():
     # Sanity: lane_switch allowed[0] is True (a bool), so the guard activates
     spec = OVERRIDABLE_KNOBS["lane_low_clue_recall_enabled"]
     assert isinstance(spec["allowed"][0], bool)  # guard would activate
+
+
+# ── A3.11: vector_retrieval_enabled knob ────────────────────────────────
+
+def test_vector_retrieval_enabled_is_registered_lane_switch():
+    """vector_retrieval_enabled is a registered lane_switch knob."""
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS, knob_override_auto_approvable
+    assert "vector_retrieval_enabled" in OVERRIDABLE_KNOBS
+    spec = OVERRIDABLE_KNOBS["vector_retrieval_enabled"]
+    assert spec["default"] is False
+    assert spec["kind"] == "lane_switch"
+    assert spec["module"] == "prefetch"
+    assert spec["meta"] is False
+    assert False in spec["allowed"]
+    assert True in spec["allowed"]
+    # lane_switch is not auto-approvable
+    assert knob_override_auto_approvable("vector_retrieval_enabled", True) is False

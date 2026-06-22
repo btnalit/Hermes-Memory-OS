@@ -67,6 +67,13 @@ class MemoryOSProvider(MemoryProvider):
         self._consecutive_topic_switch_count = 0
         self._last_owner_review_reply_result: dict[str, Any] | None = None
         self._last_owner_review_reply_query = ""
+        self._embedder = None
+        try:
+            from .embedder import LocalEmbedder
+            self._embedder = LocalEmbedder()
+            # is_available() check is deferred — called during prefetch
+        except Exception:
+            pass  # embedder unavailable → vector lane degrades gracefully
 
     @property
     def name(self) -> str:
@@ -138,6 +145,10 @@ class MemoryOSProvider(MemoryProvider):
         low_clue_raw["enabled"] = _resolve_knob(
             "lane_low_clue_recall_enabled", default=cfg_enabled,
         )
+        # ────────────────────────────────────────────────────────────────
+        # ── Thread embedder onto index for vector retrieval lane ────────
+        if self._embedder is not None and self._index is not None:
+            self._index._embedder = self._embedder
         # ────────────────────────────────────────────────────────────────
         return build_prefetch(
             query,
