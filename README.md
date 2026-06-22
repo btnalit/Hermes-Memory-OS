@@ -15,6 +15,9 @@ Memory-OS is for operators who want an inspectable memory substrate for Hermes:
 
 - profile-local canonical files instead of opaque hosted storage;
 - rebuildable SQLite indexes for search and prefetch;
+- hybrid retrieval: FTS5 full-text search, vector similarity via local embeddings,
+  and graph-layer edge traversal — composable, knob-gated, and degradable to
+  pure FTS5;
 - working memory separated from owner-approved crystallized memory;
 - attribution and feedback ledgers for memory-source quality;
 - owner-visible approval and feedback loops through Hermes;
@@ -287,6 +290,16 @@ auto-install fails (network, permissions), a warning is printed to stderr and
 the install report records `install_failed` per package so the operator can
 follow up.
 
+**Embedder package auto-install.** The installer checks whether
+`sentence-transformers` is importable. If missing, it attempts `pip install
+sentence-transformers` (~420MB download, `paraphrase-multilingual-MiniLM-L12-v2`
+model). The model is downloaded once on first use. If the install or model
+download fails, the installer prints a clear warning and records
+`embedder_package: install_failed` in the report — the vector retrieval lane
+stays at pure FTS5 (the deterministic floor). Vector retrieval and vector edge
+proposer are both knob-gated (default off) and are safe to leave disabled on
+disk-constrained or air-gapped hosts.
+
 **systemctl availability guard.** When `--enable-runtime` or
 `--enable-cognitive-loop` is requested, the installer probes `systemctl --user`
 before attempting `daemon-reload` or `enable --now`. If systemctl is
@@ -301,7 +314,7 @@ This ensures newly-added cron lanes (such as `fact_judge`) are visible to the
 gate runner after an update install, without requiring a full cron onboarding
 re-run.
 
-All three checks are non-fatal — the install completes and the report carries
+All checks are non-fatal — the install completes and the report carries
 enough detail for the operator or Hermes agent to decide on follow-up actions.
 
 ## Architecture
@@ -314,6 +327,18 @@ Hermes agent
 Memory-OS provider
   owns profile-local canonical memory, indexes, prefetch, sync_turn,
   working memory, crystallized candidates, and audit
+
+Memory-OS retrieval (prefetch)
+  FTS5 full-text search (deterministic floor)
+  → vector similarity via local sentence-transformers embedder (optional,
+    knob-gated; degrades to FTS5 when unavailable)
+  → graph-layer edge traversal from search anchors (optional, knob-gated)
+  → Reciprocal Rank Fusion union over all active lanes
+
+Memory-OS edge proposers
+  structural (deterministic heuristics), LLM (Hermes runtime), and vector
+  (cosine similarity over embeddings) — three independent edge sources
+  feeding the graph layer
 
 Memory-OS substrate providers
   optionally expose governed derived projections such as Hindsight, with
@@ -336,6 +361,12 @@ OwnerActionProcessor
 ```text
 memory_os_agent/               Minimal Hermes compatibility surface
 plugins/memory/memory_os/      Memory-OS provider and core services
+  ├── embedder.py              Local sentence-transformers embedder (CPU, ~420MB)
+  ├── index.py                 SQLite index, FTS5 search, vector search
+  ├── prefetch.py              Context assembly: FTS5 + vector + graph lanes
+  ├── structural_edge_proposer.py  Deterministic edge heuristics
+  ├── llm_edge_proposer.py     LLM-class edge proposer (Hermes runtime)
+  └── vector_edge_proposer.py  Embedding-similarity edge proposer
 plugins/memory-os-agent-os/    Hermes shell plugin and review tools
 plugins/system/                Module contracts and coordination primitives
 plugins/modules/               Portable cognition/governance/expression modules
@@ -412,24 +443,6 @@ The operational baseline has live validation evidence:
   stops are visible as guard evidence rather than production WARN;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and
   bounded expression policy apply have live evidence.
-- **P1a: Graph layer edge injection** — structural + LLM edge proposers feed a
-  config-gated Related Memory section in prefetch context. Edge quality verified,
-  cross-section dedup operational, knob `graph_layer_injection_enabled` (default
-  off).
-- **P1b: Hybrid vector-FTS5 retrieval** — local sentence-transformers embedder
-  (`paraphrase-multilingual-MiniLM-L12-v2`, ~420MB, CPU-only, zero per-call cost)
-  powers cosine-similarity vector search with Reciprocal Rank Fusion union over
-  FTS5 results. Vector edge proposer uses the same embedder for embedding-based
-  edge discovery. Both lanes are knob-gated (`vector_retrieval_enabled`,
-  `vector_edge_proposer_enabled`, default off). Degrades gracefully to pure FTS5
-  when the embedder dependency is absent.
-- **横切A: Silent failure audit** — every `except Exception:` block across the
-  codebase (~60 sites) audited. Zero violations: all bare-exception handlers
-  are legitimate fail-open read paths, explicitly marked fail-open shadow/audit
-  paths, or produce bounded error records. P0.1 (stale FTS5 index entries) was
-  the only real silent-failure bug found and has been fixed.
-- Over 1,500 tests (1,489 PASS, 3 platform-specific skipped, 4 pre-existing
-  Windows-only PermissionError).
 
 This does not mean Memory-OS is a generic autonomous executor. New proposal
 kinds require their own bounded apply contract, rollback, monitor fields, and
