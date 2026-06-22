@@ -117,8 +117,16 @@ class MemoryOSIndex:
             _index_crystallized_candidates(conn, self.roots)
             _clear_table(conn, "crystallized_records")
             _index_crystallized_records(conn, self.roots.crystallized_root)
-            _clear_table(conn, "memory_embeddings")
-            _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
+            # Only clear+repopulate embeddings when the embedder is available.
+            # An embedder-less sync (e.g. cron index-sync job) must not wipe
+            # embeddings that were populated by a previous embedder-aware run.
+            _embedder_available = (
+                self._embedder is not None
+                and getattr(self._embedder, "is_available", lambda: False)()
+            )
+            if _embedder_available:
+                _clear_table(conn, "memory_embeddings")
+                _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
             _clear_table(conn, "audit_entries")
             _index_audit_entries(conn, self.roots.audit_path)
             _clear_table(conn, "memory_edges")
