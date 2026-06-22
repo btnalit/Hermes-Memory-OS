@@ -442,3 +442,21 @@ def test_vector_retrieval_enabled_is_registered_lane_switch():
     assert True in spec["allowed"]
     # lane_switch is not auto-approvable
     assert knob_override_auto_approvable("vector_retrieval_enabled", True) is False
+
+
+# ── A3.12: vector_edge_proposer_enabled knob ─────────────────────────────
+
+
+def test_vector_edge_proposer_enabled_is_registered_lane_switch():
+    """vector_edge_proposer_enabled is a registered lane_switch knob."""
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS, knob_override_auto_approvable
+    assert "vector_edge_proposer_enabled" in OVERRIDABLE_KNOBS
+    spec = OVERRIDABLE_KNOBS["vector_edge_proposer_enabled"]
+    assert spec["default"] is False
+    assert spec["kind"] == "lane_switch"
+    assert spec["module"] == "vector_edge_proposer"
+    assert spec["meta"] is False
+    assert False in spec["allowed"]
+    assert True in spec["allowed"]
+    # lane_switch is not auto-approvable
+    assert knob_override_auto_approvable("vector_edge_proposer_enabled", True) is False

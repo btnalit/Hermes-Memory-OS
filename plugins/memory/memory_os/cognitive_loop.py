@@ -207,6 +207,7 @@ class CognitiveLoopRunner:
             ("structural_edge_proposer", self._structural_edge_proposer),
             ("crystallization_gate", self._crystallization_gate),
             ("llm_edge_proposer", self._llm_edge_proposer),
+            ("vector_edge_proposer", self._vector_edge_proposer),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("host_capability_probe", self._host_capability_probe),
             ("signal_collection", self._signal_collection),
@@ -891,6 +892,48 @@ class CognitiveLoopRunner:
             "pair_count": result.get("pair_count", 0),
             "proposed_count": result.get("proposed_count", 0),
             "auto_active_count": result.get("auto_active_count", 0),
+            "duration_ms": result.get("duration_ms", 0),
+            "error": result.get("error", ""),
+        }
+
+    def _vector_edge_proposer(self, context: dict[str, Any]) -> dict[str, Any]:
+        from .vector_edge_proposer import run_vector_proposer
+        from .index import MemoryOSIndex
+        from .knob_overrides import resolve_knob as _resolve_knob
+        from .embedder import LocalEmbedder
+
+        store = self.store
+        # ── Knob gate ──────────────────────────────────────────────────
+        enabled = _resolve_knob(
+            "vector_edge_proposer_enabled",
+            default=False,
+            roots=store.roots,
+        )
+        if not enabled:
+            return {
+                "schema_version": "memory-os.cognitive_loop.vector_edge_proposer.v0",
+                "status": "skipped",
+                "reason": "knob_disabled",
+                "proposed_count": 0,
+            }
+
+        index_path = str(store.roots.index_path)
+        audit_path = str(store.roots.audit_path)
+        index = MemoryOSIndex(store.roots)
+        embedder = LocalEmbedder()
+        result = run_vector_proposer(
+            index_path,
+            index=index,
+            embedder=embedder,
+            audit_path=audit_path,
+        )
+        context["vector_edge_proposer_result"] = result
+        return {
+            "schema_version": "memory-os.cognitive_loop.vector_edge_proposer.v0",
+            "status": result.get("status", "ok"),
+            "record_count": result.get("record_count", 0),
+            "pair_count": result.get("pair_count", 0),
+            "proposed_count": result.get("proposed_count", 0),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }

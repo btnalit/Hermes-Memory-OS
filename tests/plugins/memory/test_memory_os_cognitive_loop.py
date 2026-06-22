@@ -58,6 +58,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "structural_edge_proposer",
         "crystallization_gate",
         "llm_edge_proposer",
+        "vector_edge_proposer",
         "left_brain_pipeline_check",
         "host_capability_probe",
         "signal_collection",
