@@ -28,6 +28,29 @@ BOUNDARIES = {
 BOUNDARY_KEYS = tuple(BOUNDARIES)
 
 
+def _lightweight_embedder_check() -> object | None:
+    """Return a duck-type embedder stub without loading the ~420MB model.
+
+    run_vector_proposer() reads pre-computed embeddings from the SQLite
+    index; it only calls embedder.is_available().  Importing
+    sentence_transformers here avoids loading the full model on every
+    cognitive-loop invocation.
+    """
+    try:
+        import importlib
+
+        importlib.import_module("sentence_transformers")
+    except ImportError:
+        return None
+
+    class _EmbedderAvailable:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    return _EmbedderAvailable()
+
+
 class CognitiveLoopRunner:
     """Run the full Memory-OS test-host cognition loop without send/execute."""
 
@@ -900,7 +923,6 @@ class CognitiveLoopRunner:
         from .vector_edge_proposer import run_vector_proposer
         from .index import MemoryOSIndex
         from .knob_overrides import resolve_knob as _resolve_knob
-        from .embedder import LocalEmbedder
 
         store = self.store
         # ── Knob gate ──────────────────────────────────────────────────
@@ -917,10 +939,15 @@ class CognitiveLoopRunner:
                 "proposed_count": 0,
             }
 
+        # ── Embedder availability check ─────────────────────────────────
+        # Use a lightweight import check instead of instantiating
+        # LocalEmbedder, which loads the ~420MB model just to read
+        # pre-computed embeddings from the SQLite index.
+        embedder = _lightweight_embedder_check()
+
         index_path = str(store.roots.index_path)
         audit_path = str(store.roots.audit_path)
         index = MemoryOSIndex(store.roots)
-        embedder = LocalEmbedder()
         result = run_vector_proposer(
             index_path,
             index=index,

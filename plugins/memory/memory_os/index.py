@@ -64,7 +64,18 @@ class MemoryOSIndex:
             _index_working_items(conn, self.roots.working_root)
             _index_crystallized_candidates(conn, self.roots)
             _index_crystallized_records(conn, self.roots.crystallized_root)
-            _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
+            # Only repopulate embeddings when the embedder is available.
+            # When unavailable, copy from the live index to preserve existing
+            # embeddings across rebuilds (P0.2-class guard — prevents silent
+            # embedding wipe when embedder is not installed or broken).
+            _embedder_available = (
+                self._embedder is not None
+                and getattr(self._embedder, "is_available", lambda: False)()
+            )
+            if _embedder_available:
+                _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
+            elif self.roots.index_path.exists():
+                _copy_embeddings_from_live(conn, self.roots.index_path)
             _index_audit_entries(conn, self.roots.audit_path)
             _index_edges(conn, self.roots)
             conn.commit()
@@ -127,6 +138,14 @@ class MemoryOSIndex:
             if _embedder_available:
                 _clear_table(conn, "memory_embeddings")
                 _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
+            # Clean up orphan embedding rows for records that have been
+            # deleted from crystallized_records.  Safe regardless of
+            # embedder availability — only removes dangling references.
+            conn.execute(
+                "delete from memory_embeddings "
+                "where record_type = 'crystallized_record' "
+                "and record_id not in (select id from crystallized_records)"
+            )
             _clear_table(conn, "audit_entries")
             _index_audit_entries(conn, self.roots.audit_path)
             _clear_table(conn, "memory_edges")
@@ -294,6 +313,7 @@ class MemoryOSIndex:
     def write_governed_edge(
         self,
         *,
+        conn: sqlite3.Connection | None = None,
         from_record_type: str,
         from_record_id: str,
         to_record_type: str,
@@ -307,11 +327,35 @@ class MemoryOSIndex:
         """Write a governed edge to the memory_edges table.
 
         Instance-level wrapper over the module-level write_governed_edge().
-        Opens its own SQLite connection and follows fail-open semantics.
-        Writes to canonical store first (graph/edges.jsonl), then index DB.
+        Follows fail-open semantics. Writes to canonical store first
+        (graph/edges.jsonl), then index DB.
+
+        When *conn* is provided the caller's connection is reused; otherwise a
+        new connection is opened per call. Callers that write many edges in a
+        batch should supply a shared connection to avoid per-edge schema-init
+        and connection overhead.
 
         Returns the edge dict on success, or {} on failure.
         """
+        if conn is not None:
+            # Use caller-provided connection — skip schema init and
+            # connection lifecycle (caller is responsible for both).
+            try:
+                return write_governed_edge(
+                    conn,
+                    self.roots,
+                    from_record_type=from_record_type,
+                    from_record_id=from_record_id,
+                    to_record_type=to_record_type,
+                    to_record_id=to_record_id,
+                    relation_type=relation_type,
+                    weight=weight,
+                    source_event_id=source_event_id,
+                    proposed_by=proposed_by,
+                    state=state,
+                )
+            except Exception:
+                return {}
         if not self.roots.index_path.exists():
             return {}
         conn = sqlite3.connect(self.roots.index_path)
@@ -593,6 +637,24 @@ def _clear(conn: sqlite3.Connection) -> None:
 
 def _clear_table(conn: sqlite3.Connection, table: str) -> None:
     conn.execute(f"delete from {table}")
+
+
+def _copy_embeddings_from_live(staging_conn: sqlite3.Connection, live_path: Path) -> None:
+    """Copy memory_embeddings from the live index into a staging DB.
+
+    Used by rebuild_from_store to preserve embeddings across a rebuild
+    when the embedder is not available (P0.2-class guard — prevents
+    silent embedding wipe).
+    """
+    try:
+        staging_conn.execute(f"ATTACH DATABASE '{live_path}' AS live")
+        staging_conn.execute(
+            "INSERT INTO main.memory_embeddings "
+            "SELECT * FROM live.memory_embeddings"
+        )
+        staging_conn.execute("DETACH live")
+    except sqlite3.Error:
+        pass  # fail-open: live index may not exist, be locked, or be corrupt
 
 
 def _index_events(conn: sqlite3.Connection, store: MemoryOSStore) -> None:

@@ -11,7 +11,7 @@ to zero proposed edges when the dependency is not installed.
 
 from __future__ import annotations
 
-import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +25,9 @@ _COSINE_REFINES_THRESHOLD = 0.75   # very similar → refines
 _COSINE_CO_OCCURS_THRESHOLD = 0.65  # similar → co_occurs
 _COSINE_CONTRADICTS_THRESHOLD = 0.35  # dissimilar + different kind → contradicts
 _MAX_PAIRS = 500
+# At most ~32 records can participate in 500 pairs (n*(n-1)/2 ≤ 500).
+# Add a small margin so we don't truncate early on sparse-embedding datasets.
+_RECORD_LIMIT = int((2 * _MAX_PAIRS) ** 0.5) + 2
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -35,9 +38,9 @@ def _cosine_similarity(vec_a: bytes, vec_b: bytes) -> float | None:
 
     Returns None if shapes mismatch (different embedding dimensions).
     """
-    import numpy as np
-
     try:
+        import numpy as np
+
         a = np.frombuffer(vec_a, dtype=np.float32)
         b = np.frombuffer(vec_b, dtype=np.float32)
     except Exception:
@@ -117,7 +120,9 @@ def run_vector_proposer(
         return {"status": "error", "error": f"cannot_open_index: {index_path}"}
     conn.row_factory = sqlite3.Row
 
-    # Get records with their embeddings
+    # Get records with their embeddings.  Apply a computed LIMIT so we
+    # only fetch as many rows as max_pairs can actually pair.
+    record_limit = max(int((2 * max_pairs) ** 0.5) + 2, 2)
     try:
         rows = conn.execute(
             "select cr.id, cr.kind, me.embedding "
@@ -125,14 +130,13 @@ def run_vector_proposer(
             "inner join memory_embeddings me "
             "  on me.record_type = 'crystallized_record' "
             "  and me.record_id = cr.id "
-            "order by cr.created_at"
+            "order by cr.created_at "
+            "limit ?",
+            (record_limit,),
         ).fetchall()
     except sqlite3.Error:
         conn.close()
         return {"status": "error", "error": "cannot_read_crystallized_records"}
-    finally:
-        # only close if we're not keeping it for enrichment
-        pass
 
     records: list[dict[str, Any]] = []
     for row in rows:
@@ -154,21 +158,6 @@ def run_vector_proposer(
             "proposed_count": 0,
             "pair_count": 0,
         }
-
-    # Enrich with body text for edge metadata (best-effort)
-    try:
-        for rec in records:
-            row = conn.execute(
-                "select text from memory_fts "
-                "where record_type = 'crystallized_record' and record_id = ?",
-                (rec["id"],),
-            ).fetchone()
-            if row:
-                rec["body"] = str(row["text"])
-    except sqlite3.Error:
-        pass  # fail-open — body enrichment is best-effort
-    finally:
-        conn.close()
 
     # ── 2. Collect existing edges for dedup ──────────────────────────────
     existing_edges: set[str] = set()
@@ -227,6 +216,7 @@ def run_vector_proposer(
             # ── Write edge ───────────────────────────────────────────────
             if index and hasattr(index, "write_governed_edge"):
                 edge = index.write_governed_edge(
+                    conn=conn,
                     from_record_type="crystallized_record",
                     from_record_id=rec_a["id"],
                     to_record_type="crystallized_record",
@@ -239,6 +229,8 @@ def run_vector_proposer(
                 )
                 if edge:
                     proposed += 1
+
+    conn.close()
 
     elapsed_ms = int(
         (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
