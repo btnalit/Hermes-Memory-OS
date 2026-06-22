@@ -788,3 +788,101 @@ def test_crystallized_lines_sorts_permanent_before_provisional(tmp_path):
     assert "Permanent" in lines[0]
     assert "Provisional" in lines[1]
     assert "provisional" in lines[1]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P1a Graph Layer Injection — Task 3 integration tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_graph_layer_injection_disabled_by_default(tmp_path):
+    """Default knob=False: Related Memory section is empty (shadow-only)."""
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    store = MemoryOSStore(roots)
+    store.initialize()
+    index = MemoryOSIndex(roots)
+
+    context = build_prefetch(
+        "test query",
+        budget_chars=4000,
+        store=store,
+        index=index,
+    )
+    # Related Memory should not appear when knob defaults off
+    assert "Related Memory" not in context
+
+
+def test_graph_layer_injection_enabled_produces_lines(tmp_path):
+    """knob=True with an active edge produces injection lines.
+
+    Uses a non-existent target record_id so the edge is not
+    cross-section deduped by seen entries from Crystallized Memory
+    or Recent Event Summaries (both of which populate seen).
+    """
+    import sqlite3
+
+    from plugins.memory.memory_os.index import write_governed_edge
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+    (roots.memory_os_root / "system").mkdir(parents=True, exist_ok=True)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # ── Seed an event for FTS5 anchor discovery ──
+    event = EventEnvelope.from_dict(
+        build_event(seed=200, profile="test")
+    )
+    store.append_event(event)
+    anchor_id = event.id
+
+    # ── Build index so FTS5 can find the event ──
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+
+    # ── Write an active edge: event → non-existent target ──
+    # Using a non-existent target avoids cross-section dedup
+    # (Crystallized Memory adds real crystallized_record ids to seen;
+    #  Recent Event Summaries adds selected event ids to seen).
+    conn = sqlite3.connect(str(index.roots.index_path))
+    conn.row_factory = sqlite3.Row
+    write_governed_edge(
+        conn,
+        index.roots,
+        from_record_type="event",
+        from_record_id=anchor_id,
+        to_record_type="event",
+        to_record_id="evt_nonexistent_target_999",
+        relation_type="co_occurs",
+        state="active",
+    )
+    conn.close()
+
+    # ── Enable the knob ──
+    from plugins.memory.memory_os.knob_overrides import register_override as _reg
+    _reg(
+        "graph_layer_injection_enabled",
+        True,
+        prior=False,
+        proposed_by="test",
+        approved_via="test",
+        expires_at="",
+        roots=roots,
+    )
+
+    # ── Prefetch with query matching the event summary ──
+    context = build_prefetch(
+        "event",
+        budget_chars=4000,
+        store=store,
+        index=index,
+    )
+    # Related Memory section should appear (knob enabled + edges present)
+    assert "Related Memory" in context, (
+        f"Expected 'Related Memory' section when knob enabled. Context:\n{context}"
+    )
+    # Should contain the fallback injection line (target doesn't resolve
+    # as a crystallized record, so record_id is shown)
+    assert "co_occurs" in context
+    assert "unresolved" in context

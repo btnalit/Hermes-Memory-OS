@@ -502,7 +502,7 @@ def _build_prefetch_sections(
     # _collect_anchor_ids calls index.search() a second time (微秒级,可忽略).
     # See docstring at _collect_anchor_ids for details.
     _first_anchors = _collect_anchor_ids(query, index)
-    _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index))
+    _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index, seen=seen))
     return sections
 
 
@@ -1099,27 +1099,27 @@ def _graph_layer_shadow_lines(
     anchor_ids: list[str],
     *,
     index: object | None = None,
+    seen: set[tuple[str, str]] | None = None,
 ) -> list[str]:
-    """Phase 1: shadow-only graph layer edge logging — INJECTION DISABLED.
+    """Phase 2: knob-gated graph layer edge injection with shadow audit.
 
-    Under Phase 1 the function writes candidate edges to
+    Under Phase 1 (knob disabled): writes candidate edges to
     system/graph_layer_shadow.jsonl for audit and returns [] so no
     hash-record-id pairs enter the agent's memory-context block.
 
-    Rules (original):
-    - anchor_ids: 第一跳选出的 record_id 集合(来自 FTS5 hit + section records)
+    Under Phase 2 (knob enabled): resolves edge targets to human-readable
+    body previews, applies cross-section dedup, and returns injection lines
+    for the Related Memory section. Shadow log is written regardless.
+
+    Rules:
+    - anchor_ids: 第一跳选出的 record_id 集合(来自 FTS5 hit)
     - 委托 MemoryOSIndex.query_edges() 查询
     - depth=1 (一跳,守 §5a)
     - state='active'
     - 不打断 main prefetch 路径(fail-open: 查询出错返回 [])
     - anchor_ids 为空 → 直接返回 [] (空 shadow 是诚实信号)
-
-    Phase 2+ injection re-enablement requires:
-    - Edge targets resolved to human-readable content (not hash record-ids)
-    - Cross-section dedup (same memory appears in ≤1 section)
-    - Budget awareness (graph section is priced like any other)
-    - Config gate with default=off
-    - Shadow eval passed first
+    - Config gate: graph_layer_injection_enabled knob (default=False)
+    - Cross-section dedup via `seen` set
     """
     if not anchor_ids:
         return []
@@ -1132,9 +1132,21 @@ def _graph_layer_shadow_lines(
     if not edges:
         return []
 
-    # ── Phase 1: write shadow log, return nothing ──────────────
+    # ── Shadow log ALWAYS written (audit trail) ─────────────────
     _record_graph_layer_shadow(store, anchor_ids, edges)
-    return []
+
+    # ── Knob gate ──────────────────────────────────────────────
+    from .knob_overrides import resolve_knob as _resolve_knob
+    injection_enabled = _resolve_knob(
+        "graph_layer_injection_enabled",
+        default=False,
+        roots=store.roots,
+    )
+    if not injection_enabled:
+        return []
+
+    # ── Phase 2 injection ──────────────────────────────────────
+    return _graph_layer_injection_lines(store, edges, seen=seen)
 
 
 def _resolve_edge_target_preview(
