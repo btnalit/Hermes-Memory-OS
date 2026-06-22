@@ -37,3 +37,6 @@ monitor_dashboard/snapshot.generated.json
 design_handoff_memory_os_monitor/
 docs/resolver/
 .superpowers/sdd/
+*.patch
+scripts/prod_check*.py
+scripts/p1a_step2_*.py
