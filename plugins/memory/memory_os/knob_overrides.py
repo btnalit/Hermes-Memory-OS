@@ -61,6 +61,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "vector_retrieval_enabled": {
+        "module": "prefetch",
+        "default": False,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────

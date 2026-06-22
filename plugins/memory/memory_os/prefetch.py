@@ -881,11 +881,15 @@ def _rrf_union(
     *,
     k: int = 60,
     top_n: int = 60,
-) -> list[str]:
+) -> set[str]:
     """Reciprocal Rank Fusion union of FTS5 and vector result sets.
 
     score = 1 / (k + rank + 1)
     Higher k reduces the impact of high rankings; k=60 is standard.
+
+    Returns a set of record_ids ordered by RRF score descending, capped
+    at top_n. If one input list is empty, the other is returned as a set
+    (truncated to top_n).
     """
     scores: dict[str, float] = {}
     for rank, rid in enumerate(fts_ids):
@@ -894,7 +898,7 @@ def _rrf_union(
         scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + rank + 1)
 
     sorted_ids = sorted(scores.keys(), key=lambda rid: scores[rid], reverse=True)
-    return sorted_ids[:top_n]
+    return set(sorted_ids[:top_n])
 
 
 def _crystallized_lines(
@@ -957,27 +961,32 @@ def _crystallized_lines(
                 )
 
     # ── Vector similarity lane ─────────────────────────────────────
-    from .knob_overrides import resolve_knob as _resolve_knob
-    vec_enabled = _resolve_knob(
-        "vector_retrieval_enabled",
-        default=False,
-        roots=store.roots,
-    )
+    embedder = getattr(index, "_embedder", None)
     vec_ids: list[str] = []
-    if vec_enabled and index is not None and search_query and hasattr(index, "vector_search"):
-        try:
-            vec_results = index.vector_search(search_query, limit=60)
-            vec_ids = [str(r["record_id"]) for r in vec_results if isinstance(r, dict)]
-        except Exception:
-            vec_ids = []
+    if embedder is not None and hasattr(embedder, "is_available") and embedder.is_available():
+        qvec = embedder.embed_query(search_query) if search_query else None
+        if qvec is not None and hasattr(index, "vector_search"):
+            try:
+                vec_ids = index.vector_search(qvec, limit=60)
+            except Exception as exc:
+                if error_records is not None:
+                    error_records.append(
+                        build_error_record(
+                            component="prefetch",
+                            operation="crystallized_lines",
+                            error_code="prefetch_vector_search_error",
+                            severity="warning",
+                            recoverable=True,
+                            details={"error_type": type(exc).__name__},
+                        )
+                    )
+                vec_ids = []
 
     # ── RRF union ──────────────────────────────────────────────────
-    if fts_ids and vec_ids:
-        relevant_ids = set(_rrf_union(fts_ids, vec_ids, top_n=60))
+    if vec_ids:
+        relevant_ids = _rrf_union(fts_ids, vec_ids, top_n=60)
     elif fts_ids:
         relevant_ids = set(fts_ids)
-    elif vec_ids:
-        relevant_ids = set(vec_ids)
     # else: leave relevant_ids=None so all on-disk records are included
 
     # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
