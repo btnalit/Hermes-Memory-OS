@@ -392,6 +392,24 @@ def test_register_override_rejects_value_not_in_allowed_non_bool(store_root):
     assert record["override_value"] is True
 
 
+# ── A3.10: graph_layer_injection_enabled knob ──────────────────────────────
+
+def test_graph_layer_injection_enabled_is_registered_lane_switch():
+    """graph_layer_injection_enabled should be a lane_switch knob, default False."""
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS, resolve_knob
+
+    spec = OVERRIDABLE_KNOBS.get("graph_layer_injection_enabled")
+    assert spec is not None, "graph_layer_injection_enabled must be in OVERRIDABLE_KNOBS"
+    assert spec.get("kind") == "lane_switch"
+    assert spec.get("default") is False
+    assert spec.get("allowed") == [True, False]
+    assert spec.get("meta") is False
+
+    # Verify resolve_knob returns default when no override exists
+    result = resolve_knob("graph_layer_injection_enabled", default=False)
+    assert result is False
+
+
 def test_non_bool_allowed_list_would_not_trigger_type_guard():
     """CR-FIX #3: the isinstance(allowed[0], bool) guard means non-bool allowed
     lists (e.g. string enums) would skip the type-strict check and use plain

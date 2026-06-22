@@ -52,6 +52,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "graph_layer_injection_enabled": {
+        "module": "prefetch",
+        "default": False,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────
