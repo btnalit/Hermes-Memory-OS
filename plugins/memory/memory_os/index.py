@@ -9,7 +9,6 @@ import re
 import sqlite3
 from typing import Any
 
-import numpy as np
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -245,6 +244,8 @@ class MemoryOSIndex:
             return []
         if query_vec is None:
             return []
+
+        import numpy as np  # lazy import — numpy is only needed for vector search
 
         conn = sqlite3.connect(self.roots.index_path)
         conn.row_factory = sqlite3.Row
