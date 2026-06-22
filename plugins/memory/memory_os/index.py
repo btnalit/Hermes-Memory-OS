@@ -47,6 +47,7 @@ class MemoryOSIndex:
 
     def __init__(self, roots: MemoryOSRoots) -> None:
         self.roots = roots
+        self._embedder: object | None = None  # set by provider before rebuild
 
     def rebuild_from_store(self, store: MemoryOSStore) -> None:
         self.roots.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +63,7 @@ class MemoryOSIndex:
             _index_working_items(conn, self.roots.working_root)
             _index_crystallized_candidates(conn, self.roots)
             _index_crystallized_records(conn, self.roots.crystallized_root)
+            _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
             _index_audit_entries(conn, self.roots.audit_path)
             _index_edges(conn, self.roots)
             conn.commit()
@@ -113,6 +115,8 @@ class MemoryOSIndex:
             _index_crystallized_candidates(conn, self.roots)
             _clear_table(conn, "crystallized_records")
             _index_crystallized_records(conn, self.roots.crystallized_root)
+            _clear_table(conn, "memory_embeddings")
+            _index_embeddings(conn, self.roots.crystallized_root, self._embedder)
             _clear_table(conn, "audit_entries")
             _index_audit_entries(conn, self.roots.audit_path)
             _clear_table(conn, "memory_edges")
@@ -133,6 +137,7 @@ class MemoryOSIndex:
                     "crystallized_records": f"{before.get('crystallized_records',0)}->{after.get('crystallized_records',0)}",
                     "audit_entries": f"{before.get('audit_entries',0)}->{after.get('audit_entries',0)}",
                     "edges": f"{before.get('edges',0)}->{after.get('edges',0)}",
+                    "memory_embeddings": f"{before.get('memory_embeddings',0)}->{after.get('memory_embeddings',0)}",
                 },
             )
             return after
@@ -157,12 +162,13 @@ class MemoryOSIndex:
                 "crystallized_records": 0,
                 "audit_entries": 0,
                 "edges": 0,
+                "memory_embeddings": 0,
             }
         conn = sqlite3.connect(self.roots.index_path)
         try:
             return {
                 table: conn.execute(f"select count(*) from {table}").fetchone()[0]
-                for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges")
+                for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings")
             }
         finally:
             conn.close()
@@ -511,7 +517,7 @@ def _remove_sqlite_sidecars(path: Path) -> None:
 
 
 def _clear(conn: sqlite3.Connection) -> None:
-    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges"):
+    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings"):
         _clear_table(conn, table)
 
 
@@ -641,6 +647,46 @@ def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Pat
                 title=f"{frontmatter.get('kind', '')} {path.name} {' '.join(frontmatter.get('tags', []))}",
                 text=body,
             )
+
+
+def _index_embeddings(
+    conn: sqlite3.Connection,
+    crystallized_root: Path,
+    embedder: object | None,
+) -> int:
+    """Populate memory_embeddings from active crystallized records.
+
+    Reads all .md files under crystallized_root, embeds body text
+    via the provided embedder, and INSERT OR REPLACE into memory_embeddings.
+
+    embedder=None or embedder.is_available()=False -> returns 0 (table unchanged).
+    Returns the number of records embedded.
+    """
+    if embedder is None or not getattr(embedder, "is_available", lambda: False)():
+        return 0
+    embedding_model = "paraphrase-multilingual-MiniLM-L12-v2"
+    now = datetime.now(timezone.utc).isoformat()
+    count = 0
+    for path in sorted(crystallized_root.glob("*.md")):
+        for frontmatter, body in _markdown_records(path.read_text(encoding="utf-8")):
+            if not is_active_crystallized_frontmatter(frontmatter):
+                continue
+            rid = str(frontmatter.get("id", ""))
+            if not rid:
+                continue
+            blob = embedder.embed(body)
+            if not blob:
+                continue
+            conn.execute(
+                """
+                insert or replace into memory_embeddings
+                (record_type, record_id, embedding_model, embedding, created_at)
+                values (?, ?, ?, ?, ?)
+                """,
+                ("crystallized_record", rid, embedding_model, blob, now),
+            )
+            count += 1
+    return count
 
 
 def _index_crystallized_candidates(conn: sqlite3.Connection, roots: MemoryOSRoots) -> None:
