@@ -268,8 +268,10 @@ class MemoryOSIndex:
         Filters by record_type in the SQL query. Returns list of record_id
         strings sorted by cosine similarity descending, capped at limit,
         filtered to cosine similarity >= min_score (default 0.30, empirically
-        calibrated — cross-lingual GT ≥0.37, noise peaks ~0.45 with clean
-        gradient around 0.30).
+        calibrated from cross-lingual benchmark — removes clearly-unrelated
+        matches (<0.30).  This is noise reduction, not a clean separator:
+        residual noise in 0.30-0.45 overlaps with low-end GT (0.37), and is
+        handled by RRF ranking + result budget + cross-lane dedup.
         Empty list on any failure (fail-open).
         """
         if not self.roots.index_path.exists():

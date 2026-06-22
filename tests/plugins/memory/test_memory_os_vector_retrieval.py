@@ -294,6 +294,132 @@ class TestVectorSearch:
         assert len(results) == 1
         assert isinstance(results[0], str)
 
+    def test_vector_search_min_score_filters_low_cosine(self, tmp_path):
+        """min_score=0.30 excludes <0.30, retains >=0.30, boundary inclusive."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (CrystallizedCandidate,
+                                                           CrystallizedMemoryService)
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+        roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        svc = CrystallizedMemoryService(store)
+        records = [
+            ("high", "high-sim body text here"),
+            ("boundary", "boundary body text"),
+            ("low", "low-sim body"),
+            ("ortho", "orthogonal body text"),
+        ]
+        for rid, body in records:
+            candidate = CrystallizedCandidate(
+                candidate_id=rid, kind="note", body=body,
+                source_event_ids=[f"evt_{rid}"],
+            )
+            decision = ApprovalDecision(
+                candidate_id=rid,
+                purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                reviewer="owner", reviewed_at="2026-06-23T10:00:00Z",
+                source_state="active",
+            )
+            svc.write_approved_record(candidate, decision, file_name="test.md")
+
+        index = MemoryOSIndex(roots)
+        index._embedder = MockEmbedder(available=True)
+        index.rebuild_from_store(store)
+
+        # Overwrite embeddings with precise cosine-controlled unit vectors.
+        # Query = [1, 0, 0, ...] (unit along first axis).  All record vectors
+        # are also unit vectors rotated in the XY plane so dot = cos(theta).
+        DIM = 384
+        qvec = np.zeros(DIM, dtype=np.float32)
+        qvec[0] = 1.0  # unit vector along axis 0
+
+        def _unit_vec(cos_theta: float) -> bytes:
+            v = np.zeros(DIM, dtype=np.float32)
+            v[0] = cos_theta
+            v[1] = np.sqrt(max(0.0, 1.0 - cos_theta * cos_theta))
+            return v.tobytes()
+
+        conn = sqlite3.connect(str(roots.index_path))
+        conn.execute("DELETE FROM memory_embeddings")
+        for rid, cos_val in [("high", 1.0), ("boundary", 0.30), ("low", 0.29), ("ortho", 0.0)]:
+            conn.execute(
+                "INSERT INTO memory_embeddings (record_type, record_id, embedding_model, embedding, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("crystallized_record", rid, "test", _unit_vec(cos_val), "2026-06-23T10:00:00Z"),
+            )
+        conn.commit()
+        conn.close()
+
+        # Default min_score=0.30
+        results = index.vector_search(qvec, limit=10)
+        result_set = set(results)
+        assert "high" in result_set, "cos=1.0 should be retained"
+        assert "boundary" in result_set, "cos=0.30 (boundary) should be retained"
+        assert "low" not in result_set, "cos=0.29 should be excluded"
+        assert "ortho" not in result_set, "cos=0.0 should be excluded"
+        assert len(results) == 2
+
+    def test_vector_search_all_below_min_score_returns_empty(self, tmp_path):
+        """When all cosine scores < min_score, vector_search returns [].
+        This ensures graceful degradation — prefetch falls back to FTS5-only
+        without error."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (CrystallizedCandidate,
+                                                           CrystallizedMemoryService)
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+        roots.memory_os_root.mkdir(parents=True, exist_ok=True)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        svc = CrystallizedMemoryService(store)
+        for rid, body in [("a", "body a"), ("b", "body b")]:
+            candidate = CrystallizedCandidate(
+                candidate_id=rid, kind="note", body=body,
+                source_event_ids=[f"evt_{rid}"],
+            )
+            decision = ApprovalDecision(
+                candidate_id=rid,
+                purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                reviewer="owner", reviewed_at="2026-06-23T10:00:00Z",
+                source_state="active",
+            )
+            svc.write_approved_record(candidate, decision, file_name="test.md")
+
+        index = MemoryOSIndex(roots)
+        index._embedder = MockEmbedder(available=True)
+        index.rebuild_from_store(store)
+
+        # All vectors are orthogonal to the query → cos ≈ 0.0
+        DIM = 384
+        qvec = np.zeros(DIM, dtype=np.float32)
+        qvec[0] = 1.0
+
+        conn = sqlite3.connect(str(roots.index_path))
+        conn.execute("DELETE FROM memory_embeddings")
+        for rid in ("a", "b"):
+            v = np.zeros(DIM, dtype=np.float32)
+            v[1] = 1.0  # orthogonal to query [1, 0, ...] → cos = 0.0
+            conn.execute(
+                "INSERT INTO memory_embeddings (record_type, record_id, embedding_model, embedding, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("crystallized_record", rid, "test", v.tobytes(), "2026-06-23T10:00:00Z"),
+            )
+        conn.commit()
+        conn.close()
+
+        results = index.vector_search(qvec, limit=10)
+        assert results == [], f"all cos=0.0 < 0.30, expected [], got {results}"
+
 
 class TestRRFUnion:
     """W.6: _rrf_union combines FTS5 and vector results via RRF."""
