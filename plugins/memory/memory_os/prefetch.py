@@ -1107,8 +1107,12 @@ def _should_include_candidates(query: str) -> bool:
     return any(re.search(pattern, text, re.I) for pattern in patterns)
 
 
-def _event_lines(store: MemoryOSStore, *, seen: set[tuple[str, str]] | None = None) -> list[str]:
-    selected, _dropped = _select_continuity_events(store)
+def _event_lines(store: MemoryOSStore, *, session_id: str = "", seen: set[tuple[str, str]] | None = None) -> list[str]:
+    if session_id:
+        selected = _select_session_events(store, session_id)
+    else:
+        selected, _dropped = _select_continuity_events(store)
+    selected = sorted(selected, key=lambda e: (e.ts, e.id))  # chronological order for display
     lines: list[str] = []
     for event in selected:
         if _is_diagnostic_style_seed(str(event.summary)):
@@ -1334,13 +1338,24 @@ def _record_graph_layer_shadow(
         pass  # fail-open: shadow loss must not break prefetch
 
 
-def _continuity_bridge_lines(store: MemoryOSStore) -> list[str]:
-    selected, _dropped = _select_continuity_events(store)
-    return [
-        f"- {_event_source_class(event)}/{event.kind}: {_redact(_clip(event.summary, 220))}"
-        for event in selected
-        if _event_source_class(event) in {"cron", "mailbox", "room_family", "state_source", "governance"}
-    ]
+def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "") -> list[str]:
+    selected, _dropped = _select_continuity_events(
+        store, exclude_session_id=session_id or None
+    )
+    if not selected:
+        return []
+    lines = ["— 此前会话 —"]
+    for event in selected:
+        if _event_source_class(event) not in {"cron", "mailbox", "room_family", "state_source", "governance"}:
+            continue
+        lines.append(
+            f"- {_event_source_class(event)}/{event.kind}: "
+            f"{_redact(_clip(event.summary, 220))}"
+        )
+    if len(lines) == 1:
+        # Only the marker, no filtered events survived
+        return []
+    return lines
 
 
 def _deep_reflection_lines(store: MemoryOSStore) -> list[str]:

@@ -8,7 +8,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _crystallized_lines, _fit_budget, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -888,7 +888,7 @@ def test_graph_layer_injection_enabled_produces_lines(tmp_path):
     assert "unresolved" in context
 
 
-def _append_event(store, *, event_id, ts, session_id, source_class="foreground", kind="conversation_turn", summary=""):
+def _append_event(store, *, event_id, ts, session_id, source_class="foreground", kind="conversation_turn", summary="", source="fixture", tags=None):
     """Helper: append a single event with known session_id to the store."""
     from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
     event = EventEnvelope(
@@ -896,9 +896,10 @@ def _append_event(store, *, event_id, ts, session_id, source_class="foreground",
         id=event_id,
         ts=ts,
         profile="memoryos-test",
-        source="fixture",
+        source=source,
         kind=kind,
         summary=summary or f"Event {event_id}",
+        tags=tags or [],
         safe_ref={"session_id": session_id, "source_class": source_class},
     )
     store.append_event(event)
@@ -1020,3 +1021,116 @@ class TestSelectContinuityEventsExcludeSession:
         # Session A events excluded, session B cron fills the cron:1 slot
         assert "evt_b_cron" in selected_ids
         assert all("evt_a" not in eid for eid in selected_ids)
+
+
+class TestEventLinesSessionScoped:
+    def test_only_current_session_events(self, tmp_path):
+        """S.1: events from A+B, current=B → only B events returned."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00",
+                     session_id="session_A", summary="Event from session A")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00",
+                     session_id="session_B", summary="Event from session B")
+
+        lines = _event_lines(store, session_id="session_B")
+        text = "\n".join(lines)
+
+        assert "session B" in text
+        assert "session A" not in text
+
+    def test_deployment_leakage_prevented(self, tmp_path):
+        """S.4: session B has 1 event, session A has 42 → B not overwhelmed."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Session A: 42 events (simulates pre-deployment session)
+        for i in range(42):
+            _append_event(store, event_id=f"evt_a{i:03d}",
+                         ts=f"2026-06-22T{i//2:02d}:{i%60:02d}:00+00:00",
+                         session_id="session_A", summary=f"Old event {i} from A")
+        # Session B: 1 event (simulates post-deployment session)
+        _append_event(store, event_id="evt_b_new",
+                     ts="2026-06-23T12:00:00+00:00",
+                     session_id="session_B", summary="New event from B")
+
+        lines = _event_lines(store, session_id="session_B")
+        text = "\n".join(lines)
+
+        assert "New event from B" in text
+        # Should NOT contain session A events
+        assert "Old event" not in text
+
+    def test_empty_session_id_falls_back_to_old_behavior(self, tmp_path):
+        """S.2: session_id="" → degrades to _select_continuity_events."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00",
+                     session_id="session_A")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00",
+                     session_id="session_B")
+
+        lines = _event_lines(store, session_id="")
+        text = "\n".join(lines)
+
+        # Old behavior: both sessions' events may appear (cross-session by recency)
+        assert len(lines) > 0  # doesn't crash
+
+
+class TestContinuityBridgeLinesSessionAware:
+    def test_excludes_current_session_includes_prior(self, tmp_path):
+        """S.3: Bridge excludes current session B, includes prior session A, with marker."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00",
+                     session_id="session_A", source="cron",
+                     summary="Prior session event")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00",
+                     session_id="session_B", source="cron",
+                     summary="Current session event")
+
+        lines = _continuity_bridge_lines(store, session_id="session_B")
+        text = "\n".join(lines)
+
+        assert "此前会话" in text              # boundary marker present
+        assert "Prior session" in text        # prior session included
+        assert "Current session" not in text  # current session excluded
+
+    def test_no_prior_sessions_returns_empty(self, tmp_path):
+        """When all events belong to current session, Bridge returns []."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00",
+                     session_id="session_B", source="cron")
+
+        lines = _continuity_bridge_lines(store, session_id="session_B")
+        assert lines == []
+
+    def test_empty_session_id_no_exclusion(self, tmp_path):
+        """session_id="" → no exclusion, Bridge behaves as before (fail-safe)."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_x1", ts="2026-06-23T10:00:00+00:00",
+                     session_id="session_X", source="cron")
+
+        lines = _continuity_bridge_lines(store, session_id="")
+        # No crash, may or may not have boundary marker (old-behavior compatible)
+        # The key invariant: doesn't crash, returns something
+        assert isinstance(lines, list)
