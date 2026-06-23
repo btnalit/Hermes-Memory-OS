@@ -224,7 +224,6 @@ class TestResolveRepoRoot:
         empty.mkdir()
         monkeypatch.setattr(mod, "__file__", str(empty / "helper.py"))
         monkeypatch.setattr(mod.Path, "cwd", lambda: empty.resolve())
-        monkeypatch.setattr(mod, "_COMMON_REPO_ROOT_CANDIDATES", [])
         # No config file, no env var, empty dir → auto-detect fails
         try:
             mod._resolve_repo_root()

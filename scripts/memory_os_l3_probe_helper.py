@@ -36,22 +36,12 @@ _MEMORY_OS_IDENTITY_MARKERS = [
 # /opt/custom/path/to/hermes/deployments/production/Hermes-Memory-OS).
 _MAX_WALK_LEVELS = 20
 
-# Common installed clone locations used as a last-resort runtime fallback.
-# Kept as a named constant so tests/deploy probes can narrow or disable this
-# search without depending on whether the host running the suite happens to
-# have a real /opt/Hermes-Memory-OS checkout.
-_COMMON_REPO_ROOT_CANDIDATES = [
-    Path("/opt/Hermes-Memory-OS"),
-    Path.home() / "Hermes-Memory-OS",
-]
-
-
 def _resolve_repo_root() -> Path:
     """Resolve the Memory-OS repository root for probe discovery.
 
     1. MEMORY_OS_REPO_ROOT env var
     2. Config file next to this script (l3_probe_repo_root.txt)
-    3. Auto-detection — walk up from script / cwd / common clone paths
+    3. Auto-detection — walk up from script / cwd
        looking for pyproject.toml + plugins/memory/memory_os/__init__.py
 
     Every candidate is identity-verified before acceptance — a directory
@@ -83,7 +73,7 @@ def _resolve_repo_root() -> Path:
         f"next to this script ({config_file}). "
         "Auto-detection also failed — no directory with pyproject.toml + "
         "plugins/memory/memory_os/__init__.py found from script location, "
-        "cwd, or common clone paths."
+        "or cwd."
     )
 
 
@@ -114,7 +104,6 @@ def _auto_detect_repo_root() -> Path | None:
     Tries, in order:
       - Walk up from this script's directory
       - Walk up from the current working directory
-      - Common clone locations (/opt/Hermes-Memory-OS, ~/Hermes-Memory-OS)
     """
     starts = [
         Path(__file__).resolve().parent,
@@ -124,10 +113,6 @@ def _auto_detect_repo_root() -> Path | None:
         found = _walk_up_for_markers(start, _MEMORY_OS_IDENTITY_MARKERS)
         if found is not None:
             return found
-
-    for path in _COMMON_REPO_ROOT_CANDIDATES:
-        if _has_all_markers(path, _MEMORY_OS_IDENTITY_MARKERS):
-            return path
 
     return None
 
@@ -163,7 +148,7 @@ def main(smoke: bool = False) -> int:
             "schema_version": SCHEMA_VERSION,
             "status": "error",
             "error": f"probe script not found: {PROBE_SCRIPT}",
-            "action": "Is the repo mounted at /opt/Hermes-Memory-OS?",
+            "action": "Set MEMORY_OS_REPO_ROOT or l3_probe_repo_root.txt to the active Memory-OS clone.",
         }))
         return 1
 

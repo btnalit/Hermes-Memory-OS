@@ -487,12 +487,7 @@ if _repo is None:
         elif _c.is_dir():
             raise SystemExit(f"l3_probe_repo_root.txt ({_c}) is not a Memory-OS repo")
 if _repo is None:
-    for _c in [Path("/opt/Hermes-Memory-OS"), Path.home() / "Hermes-Memory-OS"]:
-        if _is_repo(_c):
-            _repo = _c
-            break
-if _repo is None:
-    raise SystemExit("Cannot resolve Memory-OS repo root")
+    raise SystemExit("Cannot resolve Memory-OS repo root; set MEMORY_OS_REPO_ROOT or l3_probe_repo_root.txt")
 p = _repo / "scripts" / "probe_l3_prefetch_behavior.py"
 r = subprocess.run([sys.executable, str(p)], capture_output=True, text=True, timeout=120, cwd=str(_repo))
 all_pass = r.returncode == 0 and "GOVERNANCE PATH" in (r.stdout or "")
