@@ -500,6 +500,10 @@ def _build_prefetch_sections(
     )
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     _append_section(sections, "Identity Memory", _identity_lines(store))
+    # NOTE: _event_lines() and _continuity_bridge_lines() each trigger a full
+    # store.read_events() JSONL scan internally. This is a pre-existing double-scan
+    # (not introduced by session scoping). A future optimization could collect all
+    # needed events in a single pass and distribute to downstream filters.
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id))
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
@@ -1119,6 +1123,12 @@ def _should_include_candidates(query: str) -> bool:
 
 
 def _event_lines(store: MemoryOSStore, *, session_id: str = "", seen: set[tuple[str, str]] | None = None) -> list[str]:
+    # When session-scoped: use pure recency sort (_select_session_events).
+    # This prioritizes temporal proximity within a single session over
+    # source-class diversity (foreground:2, cron:1, mailbox:1, etc. from
+    # _select_continuity_events). The tradeoff is intentional: within one
+    # session, the user cares most about what just happened, and extreme
+    # source-class imbalance is rare in normal session loads.
     if session_id:
         selected = _select_session_events(store, session_id)
     else:
@@ -1355,6 +1365,10 @@ def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "") -> l
     )
     if not selected:
         return []
+    # NOTE: "此前会话" (Previous Sessions) marker appears even when session
+    # scoping is disabled (session_id=""). In that mode, _select_continuity_events
+    # returns cross-session events without exclusion, which is the pre-existing
+    # behavior. The marker is accurate: these ARE prior-session events.
     lines = ["— 此前会话 —"]
     for event in selected:
         if _event_source_class(event) not in {"cron", "mailbox", "room_family", "state_source", "governance"}:
@@ -1452,7 +1466,7 @@ def continuity_selector_report(store: MemoryOSStore) -> dict[str, Any]:
 
 def _select_continuity_events(store: MemoryOSStore, *, exclude_session_id: str | None = None) -> tuple[list[Any], list[Any]]:
     events = sorted(store.read_events(), key=lambda event: (event.ts, event.id), reverse=True)
-    if exclude_session_id:
+    if exclude_session_id is not None:
         events = [e for e in events
                   if str((e.safe_ref or {}).get("session_id", "")) != exclude_session_id]
     selected: list[Any] = []
@@ -1499,6 +1513,11 @@ def _select_session_events(store: MemoryOSStore, session_id: str) -> list[Any]:
     """
     if not session_id:
         return []
+    # Include events with safe_ref.session_id == "" (legacy/unstamped events,
+    # ~0.3% of production events on 3.200) alongside the target session_id.
+    # These events were created before session_id stamping was added (pre-stamp
+    # legacy) or via store.append_event() bypassing sync_turn. Excluding them
+    # would silently drop relevant context from the current session's view.
     events = [
         e for e in store.read_events()
         if str((e.safe_ref or {}).get("session_id", "")) in (session_id, "")

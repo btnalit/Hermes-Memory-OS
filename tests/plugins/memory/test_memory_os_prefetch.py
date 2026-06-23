@@ -1046,6 +1046,31 @@ class TestSelectContinuityEventsExcludeSession:
         assert "evt_b_cron" in selected_ids
         assert all("evt_a" not in eid for eid in selected_ids)
 
+    def test_exclude_empty_string_filters_unstamped_events(self, tmp_path):
+        """When exclude_session_id='' is passed explicitly, unstamped events are excluded."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_continuity_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="ev-legacy", ts="2026-06-23T10:00:00+00:00", session_id="",
+                      kind="conversation_turn", source_class="foreground",
+                      summary="unstamped legacy event")
+        _append_event(store, event_id="ev-s1", ts="2026-06-23T11:00:00+00:00", session_id="s1",
+                      kind="conversation_turn", source_class="foreground",
+                      summary="session s1 event")
+
+        selected, dropped = _select_continuity_events(store, exclude_session_id="")
+
+        selected_ids = {e.id for e in selected}
+        # exclude_session_id="" should exclude events whose session_id is ""
+        # (legacy unstamped events have safe_ref.session_id == "")
+        assert "ev-legacy" not in selected_ids
+        # session s1 event should still be included
+        assert "ev-s1" in selected_ids
+
 
 class TestEventLinesSessionScoped:
     def test_only_current_session_events(self, tmp_path):
