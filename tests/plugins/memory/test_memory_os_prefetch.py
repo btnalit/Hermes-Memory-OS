@@ -954,6 +954,30 @@ class TestSelectSessionEvents:
         result = _select_session_events(store, "session_A")
         assert len(result) == _MAX_CONTINUITY_RECORDS
 
+    def test_includes_legacy_events_without_session_id(self, tmp_path):
+        """Events with no session_id in safe_ref are treated as legacy and included."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_session_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Event with no session_id (legacy / direct store append)
+        _append_event(store, event_id="evt_legacy", ts="2026-06-23T10:00:00+00:00",
+                     session_id="")  # empty → no session_id in safe_ref
+        _append_event(store, event_id="evt_session_a", ts="2026-06-23T11:00:00+00:00",
+                     session_id="session_A")
+        _append_event(store, event_id="evt_session_b", ts="2026-06-23T12:00:00+00:00",
+                     session_id="session_B")
+
+        result = _select_session_events(store, "session_A")
+        ids = [e.id for e in result]
+
+        assert "evt_session_a" in ids       # matching session
+        assert "evt_legacy" in ids          # legacy event — no session_id → included
+        assert "evt_session_b" not in ids   # different session → excluded
+
 
 class TestSelectContinuityEventsExcludeSession:
     def test_excludes_specified_session_events(self, tmp_path):

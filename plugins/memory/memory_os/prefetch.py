@@ -1485,7 +1485,12 @@ def _select_continuity_events(store: MemoryOSStore, *, exclude_session_id: str |
 
 
 def _select_session_events(store: MemoryOSStore, session_id: str) -> list[Any]:
-    """Return events for *session_id* only, ts-descending, capped at _MAX_CONTINUITY_RECORDS.
+    """Return events for *session_id*, ts-descending, capped at _MAX_CONTINUITY_RECORDS.
+
+    Includes events whose safe_ref.session_id matches *session_id*, AND
+    events with no session_id at all (legacy events from before the
+    session_id stamp was added, or events created directly via the store
+    without going through sync_turn).
 
     Pure deterministic function — no LLM, no network (INV-5 safe).
     When session_id is empty the caller should fall back to
@@ -1496,7 +1501,7 @@ def _select_session_events(store: MemoryOSStore, session_id: str) -> list[Any]:
         return []
     events = [
         e for e in store.read_events()
-        if str((e.safe_ref or {}).get("session_id", "")) == session_id
+        if str((e.safe_ref or {}).get("session_id", "")) in (session_id, "")
     ]
     return sorted(events, key=lambda e: (e.ts, e.id), reverse=True)[:_MAX_CONTINUITY_RECORDS]
 
