@@ -36,6 +36,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# Import shared identity markers from the helper (same scripts/ directory)
+try:
+    from memory_os_l3_probe_helper import _MEMORY_OS_IDENTITY_MARKERS
+except ImportError:
+    # Fallback for deploy from non-standard paths
+    _MEMORY_OS_IDENTITY_MARKERS = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
+
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
 from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, write_cron_registry_snapshot
 
@@ -397,8 +404,7 @@ def _verify_written_repo_root(config_file: Path, repo_root: Path) -> None:
     isn't actually a Memory-OS clone, we catch it here rather than
     letting the cron helper silently run against wrong/old source.
     """
-    markers = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
-    missing = [m for m in markers if not (repo_root / m).is_file()]
+    missing = [m for m in _MEMORY_OS_IDENTITY_MARKERS if not (repo_root / m).is_file()]
     if missing:
         raise SystemExit(
             f"Deploy refused: REPO_ROOT ({repo_root}) does not appear to be a "
@@ -420,8 +426,7 @@ def _check_deployed_repo_root(config_file: Path) -> dict:
     if not candidate.is_dir():
         return {"valid": False, "error": f"Path does not exist: {candidate}"}
 
-    markers = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
-    missing = [m for m in markers if not (candidate / m).is_file()]
+    missing = [m for m in _MEMORY_OS_IDENTITY_MARKERS if not (candidate / m).is_file()]
     if missing:
         return {
             "valid": False,

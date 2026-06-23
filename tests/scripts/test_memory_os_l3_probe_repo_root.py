@@ -206,6 +206,16 @@ class TestResolveRepoRoot:
         result = mod._resolve_repo_root()
         assert result.resolve() == repo.resolve()
 
+    def test_max_walk_levels_is_named_constant(self):
+        """#7: Walk cap should be a named constant, not a magic number."""
+        mod = _load_l3_helper()
+        assert hasattr(mod, "_MAX_WALK_LEVELS"), (
+            "_MAX_WALK_LEVELS constant should exist (was magic number 10)"
+        )
+        assert mod._MAX_WALK_LEVELS >= 20, (
+            f"_MAX_WALK_LEVELS should be >= 20 for deep paths, got {mod._MAX_WALK_LEVELS}"
+        )
+
     def test_all_methods_fail_raises_system_exit(self, tmp_path, monkeypatch):
         mod = _load_l3_helper()
         monkeypatch.delenv("MEMORY_OS_REPO_ROOT", raising=False)
@@ -220,3 +230,35 @@ class TestResolveRepoRoot:
             assert False, "should have raised SystemExit"
         except SystemExit as exc:
             assert "Cannot resolve Memory-OS repo root" in str(exc)
+
+
+# ── deploy_l3_probe shared markers (#4) ─────────────────────────────
+
+def test_deploy_l3_probe_imports_shared_markers():
+    """#4: deploy_l3_probe.py should import markers from helper, not duplicate."""
+    import importlib.util
+    deploy_path = Path(__file__).resolve().parents[2] / "scripts" / "deploy_l3_probe.py"
+    spec = importlib.util.spec_from_file_location("deploy_l3_probe", deploy_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+
+    # Verify the module uses the shared constant
+    assert hasattr(module, "_MEMORY_OS_IDENTITY_MARKERS"), (
+        "deploy_l3_probe.py should define/import _MEMORY_OS_IDENTITY_MARKERS"
+    )
+    markers = module._MEMORY_OS_IDENTITY_MARKERS
+    assert "pyproject.toml" in markers
+    assert "plugins/memory/memory_os/__init__.py" in markers
+    # Verify _verify_written_repo_root and _check_deployed_repo_root use it
+    # (no hardcoded marker list in function bodies)
+    import inspect
+    for func_name in ["_verify_written_repo_root", "_check_deployed_repo_root"]:
+        func = getattr(module, func_name, None)
+        if func is None:
+            continue
+        source = inspect.getsource(func)
+        # Should reference the shared constant, not a hardcoded list
+        assert "_MEMORY_OS_IDENTITY_MARKERS" in source or "markers" not in source, (
+            f"{func_name} should use _MEMORY_OS_IDENTITY_MARKERS, not hardcoded list"
+        )

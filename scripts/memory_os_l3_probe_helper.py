@@ -31,6 +31,11 @@ _MEMORY_OS_IDENTITY_MARKERS = [
     "plugins/memory/memory_os/__init__.py",
 ]
 
+# Maximum directory levels to walk up when auto-detecting repo root.
+# 20 levels covers even deeply nested deployment paths (e.g.,
+# /opt/custom/path/to/hermes/deployments/production/Hermes-Memory-OS).
+_MAX_WALK_LEVELS = 20
+
 
 def _resolve_repo_root() -> Path:
     """Resolve the Memory-OS repository root for probe discovery.
@@ -125,7 +130,7 @@ def _auto_detect_repo_root() -> Path | None:
 def _walk_up_for_markers(start: Path, markers: list[str]) -> Path | None:
     """Walk up from *start* until we find a directory containing all *markers*."""
     current = start.resolve()
-    for _ in range(10):  # safety cap: don't walk past filesystem root
+    for _ in range(_MAX_WALK_LEVELS):
         if _has_all_markers(current, markers):
             return current
         parent = current.parent
