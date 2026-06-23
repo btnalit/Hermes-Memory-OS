@@ -22,27 +22,122 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+# ── Memory-OS identity markers ──────────────────────────────────────────
+# A valid repo root must contain ALL of these files.  We check for
+# specific paths (not just pyproject.toml alone) so we don't confuse a
+# random Python project with a Memory-OS clone.
+_MEMORY_OS_IDENTITY_MARKERS = [
+    "pyproject.toml",
+    "plugins/memory/memory_os/__init__.py",
+]
+
+
 def _resolve_repo_root() -> Path:
     """Resolve the Memory-OS repository root for probe discovery.
 
-    1. MEMORY_OS_REPO_ROOT env var (set by deploy_l3_probe.py at deploy time)
-    2. Config file next to this script (written by deploy_l3_probe.py)
+    1. MEMORY_OS_REPO_ROOT env var
+    2. Config file next to this script (l3_probe_repo_root.txt)
+    3. Auto-detection — walk up from script / cwd / common clone paths
+       looking for pyproject.toml + plugins/memory/memory_os/__init__.py
+
+    Every candidate is identity-verified before acceptance — a directory
+    that exists but lacks the marker files is rejected with a diagnostic
+    (fail-loud), not silently accepted.
     """
+    # 1. Env var
     env_val = os.environ.get("MEMORY_OS_REPO_ROOT", "").strip()
     if env_val:
         candidate = Path(env_val)
-        if candidate.is_dir():
+        if _is_memory_os_repo(candidate):
             return candidate
+
+    # 2. Config file
     config_file = Path(__file__).with_name("l3_probe_repo_root.txt")
     if config_file.is_file():
         candidate = Path(config_file.read_text(encoding="utf-8").strip())
-        if candidate.is_dir():
+        if _is_memory_os_repo(candidate):
             return candidate
+
+    # 3. Auto-detection
+    candidate = _auto_detect_repo_root()
+    if candidate is not None:
+        return candidate
+
     raise SystemExit(
         "Cannot resolve Memory-OS repo root. "
         "Set MEMORY_OS_REPO_ROOT env var or ensure l3_probe_repo_root.txt exists "
-        f"next to this script ({Path(__file__).with_name('l3_probe_repo_root.txt')})."
+        f"next to this script ({config_file}). "
+        "Auto-detection also failed — no directory with pyproject.toml + "
+        "plugins/memory/memory_os/__init__.py found from script location, "
+        "cwd, or common clone paths."
     )
+
+
+def _is_memory_os_repo(candidate: Path) -> bool:
+    """Verify *candidate* is a Memory-OS repository root.
+
+    Returns True if the directory exists and contains ALL identity markers.
+    Fails loud (SystemExit) when the directory exists but doesn't look like
+    a Memory-OS repo — this prevents silent acceptance of wrong/old clones.
+    """
+    if not candidate.is_dir():
+        return False
+
+    missing = [m for m in _MEMORY_OS_IDENTITY_MARKERS if not (candidate / m).is_file()]
+    if missing:
+        raise SystemExit(
+            f"Repo root candidate {candidate} does not appear to be a Memory-OS "
+            f"repository. Missing marker files: {', '.join(missing)}. "
+            "Check that MEMORY_OS_REPO_ROOT or l3_probe_repo_root.txt "
+            "points to the correct clone."
+        )
+    return True
+
+
+def _auto_detect_repo_root() -> Path | None:
+    """Walk up from known starting points looking for Memory-OS identity markers.
+
+    Tries, in order:
+      - Walk up from this script's directory
+      - Walk up from the current working directory
+      - Common clone locations (/opt/Hermes-Memory-OS, ~/Hermes-Memory-OS)
+    """
+    starts = [
+        Path(__file__).resolve().parent,
+        Path.cwd(),
+    ]
+    for start in starts:
+        found = _walk_up_for_markers(start, _MEMORY_OS_IDENTITY_MARKERS)
+        if found is not None:
+            return found
+
+    common = [
+        Path("/opt/Hermes-Memory-OS"),
+        Path.home() / "Hermes-Memory-OS",
+    ]
+    for path in common:
+        if _has_all_markers(path, _MEMORY_OS_IDENTITY_MARKERS):
+            return path
+
+    return None
+
+
+def _walk_up_for_markers(start: Path, markers: list[str]) -> Path | None:
+    """Walk up from *start* until we find a directory containing all *markers*."""
+    current = start.resolve()
+    for _ in range(10):  # safety cap: don't walk past filesystem root
+        if _has_all_markers(current, markers):
+            return current
+        parent = current.parent
+        if parent == current:  # reached filesystem root
+            break
+        current = parent
+    return None
+
+
+def _has_all_markers(path: Path, markers: list[str]) -> bool:
+    """Check if *path* contains all relative *markers*."""
+    return all((path / m).is_file() for m in markers)
 
 
 REPO_ROOT = _resolve_repo_root()

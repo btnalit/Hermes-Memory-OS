@@ -177,6 +177,8 @@ def run_apply(hermes_home: Path) -> dict[str, Any]:
     # Write repo root config so the deployed helper can find probe_l3_prefetch_behavior.py
     repo_root_file = DEPLOY_HELPER.with_name("l3_probe_repo_root.txt")
     repo_root_file.write_text(str(REPO_ROOT), encoding="utf-8")
+    # Post-write verify: the path must actually be a Memory-OS repo
+    _verify_written_repo_root(repo_root_file, REPO_ROOT)
     actions.append({
         "action": "write_repo_root_config",
         "path": str(repo_root_file),
@@ -213,6 +215,18 @@ def run_smoke(hermes_home: Path) -> dict[str, Any]:
             "error": f"Helper not found at {helper}",
         }
 
+    # Pre-flight: verify the repo root config points to valid Memory-OS source
+    repo_root_file = helper.with_name("l3_probe_repo_root.txt")
+    repo_root_check = _check_deployed_repo_root(repo_root_file)
+    if not repo_root_check["valid"]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "phase": "smoke",
+            "status": "error",
+            "error": f"Repo root config invalid: {repo_root_check['error']}",
+            "repo_root_check": repo_root_check,
+        }
+
     result = subprocess.run(
         [sys.executable, str(helper), "--smoke"],
         capture_output=True, text=True, timeout=120,
@@ -239,6 +253,7 @@ def run_smoke(hermes_home: Path) -> dict[str, Any]:
         "status": "passed" if passed else "failed",
         "returncode": result.returncode,
         "verdict": verdict,
+        "repo_root_check": repo_root_check,
         "raw_parsed": parsed,
         "stderr_truncated": stderr[-500:] if stderr else None,
     }
@@ -371,6 +386,51 @@ def _ensure_cron_job(hermes_home: Path) -> dict[str, Any]:
     }
 
 
+# ── repo root verification ─────────────────────────────────────────
+
+
+def _verify_written_repo_root(config_file: Path, repo_root: Path) -> None:
+    """Fail-loud if the just-written repo_root doesn't look like Memory-OS source.
+
+    This prevents the "wrong path silently accepted" class of failure:
+    if deploy runs from a non-standard location and writes a path that
+    isn't actually a Memory-OS clone, we catch it here rather than
+    letting the cron helper silently run against wrong/old source.
+    """
+    markers = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
+    missing = [m for m in markers if not (repo_root / m).is_file()]
+    if missing:
+        raise SystemExit(
+            f"Deploy refused: REPO_ROOT ({repo_root}) does not appear to be a "
+            f"Memory-OS repository. Missing marker files: {', '.join(missing)}. "
+            "Run deploy from within a Memory-OS clone, or set REPO_ROOT "
+            "manually in the script before deploying."
+        )
+
+
+def _check_deployed_repo_root(config_file: Path) -> dict:
+    """Verify the deployed l3_probe_repo_root.txt points to valid source."""
+    if not config_file.is_file():
+        return {"valid": False, "error": f"Config file missing: {config_file}"}
+    try:
+        candidate = Path(config_file.read_text(encoding="utf-8").strip())
+    except Exception as exc:
+        return {"valid": False, "error": f"Cannot read config: {exc}"}
+
+    if not candidate.is_dir():
+        return {"valid": False, "error": f"Path does not exist: {candidate}"}
+
+    markers = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
+    missing = [m for m in markers if not (candidate / m).is_file()]
+    if missing:
+        return {
+            "valid": False,
+            "error": f"Path {candidate} is not a Memory-OS repo. Missing: {', '.join(missing)}",
+        }
+
+    return {"valid": True, "repo_root": str(candidate)}
+
+
 # ── main ───────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -403,15 +463,31 @@ _FALLBACK_HELPER = """\
 #!/usr/bin/env python3
 import json, os, subprocess, sys
 from pathlib import Path
+
+def _is_repo(p):
+    return p.is_dir() and (p / "pyproject.toml").is_file() and (p / "plugins/memory/memory_os/__init__.py").is_file()
+
 _repo_env = os.environ.get("MEMORY_OS_REPO_ROOT", "").strip()
+_repo = None
 if _repo_env:
-    _repo = Path(_repo_env)
-else:
+    _c = Path(_repo_env)
+    if _is_repo(_c): _repo = _c
+    elif _c.is_dir():
+        raise SystemExit(f"MEMORY_OS_REPO_ROOT ({_c}) is not a Memory-OS repo")
+if _repo is None:
     _root_txt = Path(__file__).with_name("l3_probe_repo_root.txt")
     if _root_txt.is_file():
-        _repo = Path(_root_txt.read_text(encoding="utf-8").strip())
-    else:
-        _repo = Path("/opt/Hermes-Memory-OS")
+        _c = Path(_root_txt.read_text(encoding="utf-8").strip())
+        if _is_repo(_c): _repo = _c
+        elif _c.is_dir():
+            raise SystemExit(f"l3_probe_repo_root.txt ({_c}) is not a Memory-OS repo")
+if _repo is None:
+    for _c in [Path("/opt/Hermes-Memory-OS"), Path.home() / "Hermes-Memory-OS"]:
+        if _is_repo(_c):
+            _repo = _c
+            break
+if _repo is None:
+    raise SystemExit("Cannot resolve Memory-OS repo root")
 p = _repo / "scripts" / "probe_l3_prefetch_behavior.py"
 r = subprocess.run([sys.executable, str(p)], capture_output=True, text=True, timeout=120, cwd=str(_repo))
 all_pass = r.returncode == 0 and "GOVERNANCE PATH" in (r.stdout or "")
