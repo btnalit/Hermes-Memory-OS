@@ -886,3 +886,137 @@ def test_graph_layer_injection_enabled_produces_lines(tmp_path):
     # as a crystallized record, so record_id is shown)
     assert "co_occurs" in context
     assert "unresolved" in context
+
+
+def _append_event(store, *, event_id, ts, session_id, source_class="foreground", kind="conversation_turn", summary=""):
+    """Helper: append a single event with known session_id to the store."""
+    from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=event_id,
+        ts=ts,
+        profile="memoryos-test",
+        source="fixture",
+        kind=kind,
+        summary=summary or f"Event {event_id}",
+        safe_ref={"session_id": session_id, "source_class": source_class},
+    )
+    store.append_event(event)
+
+
+class TestSelectSessionEvents:
+    def test_returns_only_matching_session(self, tmp_path):
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_session_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00", session_id="session_A")
+        _append_event(store, event_id="evt_a2", ts="2026-06-23T11:00:00+00:00", session_id="session_A")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T10:30:00+00:00", session_id="session_B")
+
+        result = _select_session_events(store, "session_A")
+        ids = [e.id for e in result]
+
+        assert len(ids) == 2
+        assert "evt_b1" not in ids
+        assert ids == ["evt_a2", "evt_a1"]  # ts descending
+
+    def test_returns_empty_for_unknown_session(self, tmp_path):
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_session_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00", session_id="session_A")
+
+        result = _select_session_events(store, "nonexistent")
+        assert result == []
+
+    def test_caps_at_max_continuity_records(self, tmp_path):
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _MAX_CONTINUITY_RECORDS, _select_session_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        for i in range(_MAX_CONTINUITY_RECORDS + 5):
+            _append_event(store, event_id=f"evt_{i:03d}",
+                         ts=f"2026-06-23T{i:02d}:00:00+00:00",
+                         session_id="session_A")
+
+        result = _select_session_events(store, "session_A")
+        assert len(result) == _MAX_CONTINUITY_RECORDS
+
+
+class TestSelectContinuityEventsExcludeSession:
+    def test_excludes_specified_session_events(self, tmp_path):
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_continuity_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00", session_id="session_A")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00", session_id="session_B")
+        _append_event(store, event_id="evt_c1", ts="2026-06-23T12:00:00+00:00", session_id="session_C")
+
+        selected, dropped = _select_continuity_events(store, exclude_session_id="session_B")
+        selected_ids = [e.id for e in selected]
+
+        assert "evt_b1" not in selected_ids
+        assert "evt_a1" in selected_ids
+        assert "evt_c1" in selected_ids
+
+    def test_exclude_session_id_none_preserves_old_behavior(self, tmp_path):
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_continuity_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00", session_id="session_A")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00", session_id="session_B")
+
+        # None → no exclusion, all events eligible
+        selected, dropped = _select_continuity_events(store, exclude_session_id=None)
+        selected_ids = [e.id for e in selected]
+        assert "evt_a1" in selected_ids
+        assert "evt_b1" in selected_ids
+
+        # No keyword → same as None
+        selected2, dropped2 = _select_continuity_events(store)
+        assert len(selected2) == len(selected)
+
+    def test_exclude_session_id_preserves_seed_slot_diversity(self, tmp_path):
+        """Pre-filter: seed slots filled from non-excluded pool, not wasted."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.prefetch import _select_continuity_events
+        from plugins.memory.memory_os.store import MemoryOSStore
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Session A: many foreground events (would dominate recency)
+        for i in range(10):
+            _append_event(store, event_id=f"evt_a{i:02d}",
+                         ts=f"2026-06-23T{i:02d}:00:00+00:00",
+                         session_id="session_A", source_class="foreground")
+        # Session B: one cron event
+        _append_event(store, event_id="evt_b_cron",
+                     ts="2026-06-23T09:00:00+00:00",
+                     session_id="session_B", source_class="cron")
+
+        selected, _ = _select_continuity_events(store, exclude_session_id="session_A")
+        selected_ids = [e.id for e in selected]
+
+        # Session A events excluded, session B cron fills the cron:1 slot
+        assert "evt_b_cron" in selected_ids
+        assert all("evt_a" not in eid for eid in selected_ids)

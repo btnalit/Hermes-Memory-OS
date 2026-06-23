@@ -1424,8 +1424,11 @@ def continuity_selector_report(store: MemoryOSStore) -> dict[str, Any]:
     }
 
 
-def _select_continuity_events(store: MemoryOSStore) -> tuple[list[Any], list[Any]]:
+def _select_continuity_events(store: MemoryOSStore, *, exclude_session_id: str | None = None) -> tuple[list[Any], list[Any]]:
     events = sorted(store.read_events(), key=lambda event: (event.ts, event.id), reverse=True)
+    if exclude_session_id:
+        events = [e for e in events
+                  if str((e.safe_ref or {}).get("session_id", "")) != exclude_session_id]
     selected: list[Any] = []
     selected_ids: set[str] = set()
     buckets: dict[str, list[Any]] = {source_class: [] for source_class in _BRIDGE_SEED_SLOTS}
@@ -1453,6 +1456,23 @@ def _select_continuity_events(store: MemoryOSStore) -> tuple[list[Any], list[Any
     dropped = [event for event in events if event.id not in selected_ids]
     selected = sorted(selected, key=lambda event: (event.ts, event.id))
     return selected, dropped
+
+
+def _select_session_events(store: MemoryOSStore, session_id: str) -> list[Any]:
+    """Return events for *session_id* only, ts-descending, capped at _MAX_CONTINUITY_RECORDS.
+
+    Pure deterministic function — no LLM, no network (INV-5 safe).
+    When session_id is empty the caller should fall back to
+    _select_continuity_events instead; this function returns [] for
+    empty session_id.
+    """
+    if not session_id:
+        return []
+    events = [
+        e for e in store.read_events()
+        if str((e.safe_ref or {}).get("session_id", "")) == session_id
+    ]
+    return sorted(events, key=lambda e: (e.ts, e.id), reverse=True)[:_MAX_CONTINUITY_RECORDS]
 
 
 def _seed_sort_key(event: Any) -> tuple[str, float, str]:
