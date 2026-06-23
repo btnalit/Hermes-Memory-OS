@@ -61,6 +61,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "session_scoped_recent_events": {
+        "module": "prefetch",
+        "default": True,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     "vector_retrieval_enabled": {
         "module": "prefetch",
         "default": False,

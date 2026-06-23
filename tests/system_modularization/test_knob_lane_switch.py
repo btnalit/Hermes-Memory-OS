@@ -460,3 +460,17 @@ def test_vector_edge_proposer_enabled_is_registered_lane_switch():
     assert True in spec["allowed"]
     # lane_switch is not auto-approvable
     assert knob_override_auto_approvable("vector_edge_proposer_enabled", True) is False
+
+
+# ── CR-FIX #6: session_scoped_recent_events knob ────────────────────────────
+
+
+def test_session_scoped_recent_events_knob_registered():
+    """#6: session_scoped_recent_events must be in OVERRIDABLE_KNOBS."""
+    from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+    assert "session_scoped_recent_events" in OVERRIDABLE_KNOBS
+    knob = OVERRIDABLE_KNOBS["session_scoped_recent_events"]
+    assert knob["module"] == "prefetch"
+    assert knob["default"] is True
+    assert knob["kind"] == "lane_switch"
+    assert knob["allowed"] == [True, False]
