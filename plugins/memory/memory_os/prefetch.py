@@ -156,6 +156,7 @@ def build_prefetch(
     budget_chars: int,
     store: MemoryOSStore,
     index: object | None = None,
+    session_id: str = "",
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
@@ -184,6 +185,7 @@ def build_prefetch(
             query,
             store=store,
             index=index,
+            session_id=session_id,
             diagnostic_grounding_enabled=diagnostic_grounding_enabled,
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
@@ -243,6 +245,7 @@ def build_prefetch(
             budget_chars=budget_chars,
             store=store,
             index=index,
+            session_id=session_id,
             diagnostic_grounding_enabled=diagnostic_grounding_enabled,
             runtime_facts=runtime_facts,
             current_task_anchor=current_task_anchor,
@@ -265,6 +268,7 @@ def build_prefetch(
         query,
         store=store,
         index=index,
+        session_id=session_id,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_config,
         substrate_recall_report=substrate_recall_report,
@@ -322,6 +326,7 @@ def build_prefetch_with_observability(
     budget_chars: int,
     store: MemoryOSStore,
     index: object | None = None,
+    session_id: str = "",
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
@@ -331,6 +336,7 @@ def build_prefetch_with_observability(
         query,
         store=store,
         index=index,
+        session_id=session_id,
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_recall_config,
         substrate_recall_report=substrate_recall_report,
@@ -355,6 +361,7 @@ def build_prefetch_section_candidates(
     *,
     store: MemoryOSStore,
     index: object | None = None,
+    session_id: str = "",
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
@@ -383,6 +390,7 @@ def build_prefetch_section_candidates(
             query,
             store=store,
             index=index,
+            session_id=session_id,
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_recall_config,
             substrate_recall_report=substrate_recall_report,
@@ -426,6 +434,7 @@ def _build_context_router_apply_prefetch(
     budget_chars: int,
     store: MemoryOSStore,
     index: object | None = None,
+    session_id: str = "",
     diagnostic_grounding_enabled: bool = True,
     runtime_facts: dict[str, Any] | None = None,
     current_task_anchor: str | None = None,
@@ -437,6 +446,7 @@ def _build_context_router_apply_prefetch(
         query,
         store=store,
         index=index,
+        session_id=session_id,
         diagnostic_grounding_enabled=diagnostic_grounding_enabled,
         runtime_facts=runtime_facts,
         current_task_anchor=current_task_anchor,
@@ -469,6 +479,7 @@ def _build_prefetch_sections(
     *,
     store: MemoryOSStore,
     index: object | None = None,
+    session_id: str = "",
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
@@ -489,7 +500,7 @@ def _build_prefetch_sections(
     )
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     _append_section(sections, "Identity Memory", _identity_lines(store))
-    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store))
+    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id))
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
@@ -497,7 +508,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Crystallized Memory", _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records))
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
-    _append_section(sections, "Recent Event Summaries", _event_lines(store, seen=seen))
+    _append_section(sections, "Recent Event Summaries", _event_lines(store, session_id=session_id, seen=seen))
     # Second-hop graph traversal: anchor_ids come from FTS5 results.
     # _collect_anchor_ids calls index.search() a second time (微秒级,可忽略).
     # See docstring at _collect_anchor_ids for details.

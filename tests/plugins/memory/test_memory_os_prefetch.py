@@ -1134,3 +1134,38 @@ class TestContinuityBridgeLinesSessionAware:
         # No crash, may or may not have boundary marker (old-behavior compatible)
         # The key invariant: doesn't crash, returns something
         assert isinstance(lines, list)
+
+
+class TestBuildPrefetchSessionIdThreading:
+    def test_session_id_threaded_to_sections(self, tmp_path):
+        """S.6: build_prefetch(session_id=B) -> Recent Events locked to B."""
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_a1", ts="2026-06-23T10:00:00+00:00",
+                     session_id="session_A", summary="Old event from A")
+        _append_event(store, event_id="evt_b1", ts="2026-06-23T11:00:00+00:00",
+                     session_id="session_B", summary="New event from B")
+
+        context = build_prefetch(
+            "general query", budget_chars=2200, store=store,
+            session_id="session_B",
+        )
+
+        assert "New event from B" in context
+        assert "Old event from A" not in context
+
+    def test_session_id_default_empty_preserves_old_behavior(self, tmp_path):
+        """Without session_id, old behavior (cross-session continuity) works."""
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        _append_event(store, event_id="evt_x1", ts="2026-06-23T10:00:00+00:00",
+                     session_id="session_X", summary="Some event")
+
+        # Default session_id="" -> no crash, returns context
+        context = build_prefetch("query", budget_chars=2200, store=store)
+        assert isinstance(context, str)

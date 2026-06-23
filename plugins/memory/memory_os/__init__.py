@@ -146,6 +146,12 @@ class MemoryOSProvider(MemoryProvider):
             "lane_low_clue_recall_enabled", default=cfg_enabled,
         )
         # ────────────────────────────────────────────────────────────────
+        # ── A3: session-scoped continuity knob ───────────────────────────
+        session_scoped = _resolve_knob(
+            "session_scoped_recent_events", default=True,
+        )
+        effective_session_id = (session_id or self.session_id) if session_scoped else ""
+        # ────────────────────────────────────────────────────────────────
         # ── Thread embedder onto index for vector retrieval lane ────────
         if self._embedder is not None and self._index is not None:
             self._index._embedder = self._embedder
@@ -155,6 +161,7 @@ class MemoryOSProvider(MemoryProvider):
             budget_chars=int(self._config.get("prefetch_char_budget", 2200)),
             store=self._store,
             index=self._index,
+            session_id=effective_session_id,
             diagnostic_grounding_enabled=memory_os_config.effective_diagnostic_grounding_enabled(
                 self._config,
                 self.profile,
