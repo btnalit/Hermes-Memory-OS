@@ -36,6 +36,15 @@ _MEMORY_OS_IDENTITY_MARKERS = [
 # /opt/custom/path/to/hermes/deployments/production/Hermes-Memory-OS).
 _MAX_WALK_LEVELS = 20
 
+# Common installed clone locations used as a last-resort runtime fallback.
+# Kept as a named constant so tests/deploy probes can narrow or disable this
+# search without depending on whether the host running the suite happens to
+# have a real /opt/Hermes-Memory-OS checkout.
+_COMMON_REPO_ROOT_CANDIDATES = [
+    Path("/opt/Hermes-Memory-OS"),
+    Path.home() / "Hermes-Memory-OS",
+]
+
 
 def _resolve_repo_root() -> Path:
     """Resolve the Memory-OS repository root for probe discovery.
@@ -116,11 +125,7 @@ def _auto_detect_repo_root() -> Path | None:
         if found is not None:
             return found
 
-    common = [
-        Path("/opt/Hermes-Memory-OS"),
-        Path.home() / "Hermes-Memory-OS",
-    ]
-    for path in common:
+    for path in _COMMON_REPO_ROOT_CANDIDATES:
         if _has_all_markers(path, _MEMORY_OS_IDENTITY_MARKERS):
             return path
 
