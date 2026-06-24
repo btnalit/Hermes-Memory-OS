@@ -3974,11 +3974,13 @@ def _merge_runtime_contract_classification(snapshot: dict[str, Any]) -> None:
 
 def collect_snapshot(
     *,
-    host: str = "hermes-media",
+    host: str = "",
+    hermes_home: str = "/root/.hermes",
+    python_bin: str = "python3",
     previous: dict[str, Any] | None = None,
     monitor_profile: str = "live",
 ) -> dict[str, Any]:
-    raw = _ssh_json(host, _remote_probe_script())
+    raw = _run_probe(host, _remote_probe_script(hermes_home), python_bin=python_bin)
     raw["monitor_profile"] = _normalize_monitor_profile(monitor_profile)
     raw["rh31_eval"] = compact_rh31_eval_summary(raw.get("rh31_eval") or {})
     raw["deltas"] = compute_deltas(raw, previous)
@@ -3992,7 +3994,9 @@ def collect_snapshot(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="hermes-media")
+    parser.add_argument("--host", default="")
+    parser.add_argument("--hermes-home", default="/root/.hermes")
+    parser.add_argument("--python-bin", default="python3")
     parser.add_argument("--previous-json")
     parser.add_argument("--snapshot-out")
     parser.add_argument("--output", choices=["summary", "json"], default="summary")
@@ -4007,6 +4011,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         host_profile = resolve_host_runtime_profile(
             host=str(args.host),
+            hermes_home=str(args.hermes_home),
+            python_bin=str(args.python_bin),
             monitor_profile=str(args.monitor_profile or ""),
             require_remote_repo_root=False,
         )
@@ -4020,7 +4026,13 @@ def main(argv: list[str] | None = None) -> int:
             previous = json.loads(previous_path.read_text(encoding="utf-8"))
     monitor_profile = _normalize_monitor_profile(host_profile.monitor_profile)
     started = time.monotonic()
-    snapshot = collect_snapshot(host=args.host, previous=previous, monitor_profile=monitor_profile)
+    snapshot = collect_snapshot(
+        host=args.host,
+        hermes_home=args.hermes_home,
+        python_bin=args.python_bin,
+        previous=previous,
+        monitor_profile=monitor_profile,
+    )
     elapsed = time.monotonic() - started
     snapshot.setdefault("host_runtime_profile", host_profile.to_dict())
     snapshot.setdefault("host_runtime_profile_source", host_profile.profile_source)
@@ -4627,26 +4639,45 @@ def _top_dict(data: dict[str, Any], limit: int) -> dict[str, Any]:
     return dict(sorted(items, key=lambda item: (-item[1], item[0]))[:limit])
 
 
-def _ssh_json(host: str, script: str) -> dict[str, Any]:
-    completed = subprocess.run(
-        ["ssh", host, "python3 -"],
-        input=script,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
+def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str, Any]:
+    """Run a probe script locally or via SSH.
+
+    When *host* is empty, the script runs in a local subprocess.
+    Otherwise it is sent to the named SSH host via stdin.
+    """
+    if host:
+        completed = subprocess.run(
+            ["ssh", host, f"{python_bin} -"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    else:
+        completed = subprocess.run(
+            [python_bin, "-"],
+            input=script,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
     return json.loads(completed.stdout)
 
 
-def _remote_probe_script() -> str:
+def _remote_probe_script(hermes_home: str = "/root/.hermes") -> str:
+    _hh = json.dumps(str(hermes_home))
     return r'''
 import hashlib, json, os, re, subprocess, sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-for _path in ("/root/.hermes/memory-os/runtime/python", "/root/.hermes/plugins/memory_os"):
-    if _path not in sys.path:
+_hermes_home = ''' + _hh + r'''
+for _path in (
+    os.path.join(_hermes_home, "memory-os/runtime/python"),
+    os.path.join(_hermes_home, "plugins/memory_os"),
+):
+    if os.path.isdir(_path) and _path not in sys.path:
         sys.path.insert(0, _path)
 
 def run(cmd, env=None):

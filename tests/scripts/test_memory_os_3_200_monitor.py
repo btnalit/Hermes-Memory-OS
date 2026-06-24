@@ -4359,7 +4359,7 @@ def test_main_can_save_current_snapshot_for_next_delta(tmp_path, monkeypatch, ca
         encoding="utf-8",
     )
 
-    def fake_collect_snapshot(*, host, previous, monitor_profile):
+    def fake_collect_snapshot(*, host, hermes_home, python_bin, previous, monitor_profile):
         assert host == "fake-host"
         assert monitor_profile == "clean_host"
         assert previous["memory_status"]["counts"]["audit_entries"] == 5
