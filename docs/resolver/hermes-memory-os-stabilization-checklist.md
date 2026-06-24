@@ -220,9 +220,19 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
 - [x] **确定性召回地板 (Deterministic Recall Floor v4)** — `e9a3bde`:三项增强,全部落在 `prefetch.py`:
   1. **地板匹配打分** (`_tokenize_for_floor_match` + `_floor_match_score`):纯 Unicode 边界分词 + 子串匹配,零外部依赖,不依赖 FTS5/向量模型/网络/LLM。当 `degradation_level=2`(FTS5+vector 双零命中,query 非空)时按 floor_match_score 降序排列,替代纯 mtime 排序
   2. **关键词表清理 + 停用词过滤** (`_FAST_PATH_STOP_WORDS`):删除 6 个项目术语(提案/治理/证据等),新增 10 个通用内容词(原因/方法/配置/命令等),9 个疑问/功能词作为停用词从 fast_path 过滤至 slow_path。`set_fast_path_keywords()` + `config.py` `fast_path_keywords` 键提供用户级覆盖
-  3. **Permanent 核心基线** (`PERMANENT_BASELINE_N=5`):降级时 top-5 by recurrence 保序前置,仅重排不扩 cap
+  3. **Permanent 核心基线**:降级时所有 permanent 条目按 recurrence 降序排列,确保高频核心记忆在 cap 后存活。仅重排不扩 cap(MAX_PERMANENT=15)
   - `_crystallized_lines()` 返回类型 `list[str]` → `tuple[list[str], int]` 携带 `degradation_level`,section header 动态标注"deterministic floor recall"/"recent — no query match"
   - 已知局限(已入中期路线图):地板仅在 FTS5 返回零命中时触发;FTS5 返回低质量非零命中时被跳过。中期方案:地板作为第三条 lane 进入 RRF 并行融合(`_rrf_union(fts_ids, vec_ids, floor_ids)`)
+
+- [x] **代码审查修复 (8 findings from v4 review)** — `0790984`:针对 v4 实现的全面代码审查(8 angles × 6 candidates → verify → 8 confirmed),全部修复(3 文件,+58/-24):
+  1. **(HIGH) `subprocess.TimeoutExpired` 未捕获** → `install_memory_os_plugin.py` 4 个 except 子句均增加 `TimeoutExpired`(与 `CalledProcessError` 是兄弟类,非子类),防止 pip install 超时时 installer 崩溃
+  2. **(HIGH) 降级 section header 破坏 source_class + budget priority** → `_section_source_class()` + `_budget_keep_priority()` 用 `title.split(" (")[0]` 去掉括号标注后缀再匹配,降级数据不再被误标为 "other" 或降优先级
+  3. **(MEDIUM) 降级路径双重文件读取** → `_floor_match_score` 新增可选 `body_cache` 参数,`_crystallized_lines()` 降级时预读所有 body 一次供排序+主循环共用,消灭 2N 次 I/O
+  4. **(MEDIUM) `_check_vector_available()` 语义与 `LocalEmbedder.is_available()` 不一致** → CLI 的 `vector_available` 加注释标注为 import-only(非 model load),区分于 provider 的全量 embedder 就绪检查
+  5. **(LOW) `plan_query_route()` 每次 prefetch 调用 3 次** → 加 `@functools.lru_cache(maxsize=4)`,`set_fast_path_keywords()` 中 `cache_clear()` 保证覆盖即时生效
+  6. **(LOW) `PERMANENT_BASELINE_N=5` 死常量** → 删除未使用的常量,注释准确描述实际行为(sort by recurrence desc + MAX_PERMANENT cap)
+  7. **(LOW) `_floor_match_score()` O(N×T×B) 无文档** → docstring 增加复杂度说明及适用场景(仅真降级路径,生产 N 小,body 几 KB)
+  8. **(LOW) `_FAST_PATH_CHINESE_KEYWORDS` 与 `_CHINESE_TOPIC_KEYWORDS` 关键字集分歧** → 注释说明两者服务不同目的(查询路由 vs 话题切换检测),分歧是刻意设计
 
 ---
 
@@ -247,6 +257,8 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
 - **E 节**:P0/P1 ✅;P2/P3 可选,未实施
 - **召回可靠性增强 (v4)**:3/3 ✅ 全部完成(地板匹配 + 关键词清理 + Permanent 基线)
   - 已知局限:地板仅在 FTS5 零命中时触发;中期路线图:地板作为第三条 RRF lane 实现并行融合
+- **代码审查修复 (8 findings)**:8/8 ✅ 全部修复(HIGH=2, MEDIUM=2, LOW=4)
+  - 3 文件变动的轻量修复,无架构变更
 
 ## 一句话
-五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
+五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
