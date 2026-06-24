@@ -63,6 +63,7 @@ from .crystallized import (
     read_candidate_queue,
 )
 from .deployment_runtime_manifest import read_deployment_runtime_manifest, write_deployment_runtime_manifest
+from .embedder import LocalEmbedder
 from .host_capability_probe import probe_host_capabilities
 from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, HindsightHttpClient
 from .index import MemoryOSIndex
@@ -129,6 +130,19 @@ from .working import WorkingMemoryService
 _PRIVATE_SAFE_REF_KEYS = {"raw_body", "body", "content", "transcript", "private_body", "raw_transcript"}
 
 
+def _check_vector_available() -> bool:
+    """Check whether local embedding model is available.
+
+    Returns False when sentence-transformers is not installed or the
+    model cannot be loaded. The check runs once per status call — the
+    LocalEmbedder constructor caches the result internally.
+    """
+    try:
+        return LocalEmbedder().is_available()
+    except Exception:
+        return False
+
+
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
     events = store.read_events()
     store_counts = _store_counts(store)
@@ -143,6 +157,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "index_counts": index_counts,
         "index_health": _index_health_summary(store, store_counts, index_counts),
         "prefetch_mode": prefetch_mode,
+        "vector_available": _check_vector_available(),
         "continuity_selector": continuity_selector_report(store),
         "queue_backlog": 0,
         "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),
