@@ -95,8 +95,13 @@ class CrystallizedMemoryService:
             "bridge_state": candidate.bridge_state or decision.source_state,
         }
         if decision.provisional:
+            expires = (decision.expires_at or "").strip()
+            if not expires:
+                raise ValueError(
+                    "provisional crystallized record requires a valid expires_at"
+                )
             frontmatter["provisional"] = True
-            frontmatter["expires_at"] = decision.expires_at or ""
+            frontmatter["expires_at"] = expires
             frontmatter["recurrence"] = str(decision.recurrence)
         if provenance:
             frontmatter["provenance"] = provenance
