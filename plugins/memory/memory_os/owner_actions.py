@@ -161,6 +161,8 @@ ACTION_TYPES = {
     "approve_session_mirror_apply",
     *HINDSIGHT_CURATION_ACTION_TYPES,
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
+    "approve_edge",
+    "reject_edge",
     "confirm_provisional_crystallized_record",
     "reject_provisional_crystallized_record",
     "confirm_provisional_knob_override",
@@ -181,6 +183,7 @@ TERMINAL_ACTIONS_BY_TARGET_TYPE = {
         "confirm_provisional_crystallized_record",
         "reject_provisional_crystallized_record",
     },
+    "edge": {"approve_edge", "reject_edge"},
 }
 
 
@@ -2957,6 +2960,18 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         return _apply_confirm_provisional_knob_override(store, record)
     if action_type == "reject_provisional_knob_override":
         return _apply_reject_provisional_knob_override(store, record)
+    if action_type == "approve_edge":
+        from .index import MemoryOSIndex
+        index = MemoryOSIndex(store.roots)
+        result = index.transition_edge_state(target_id, "active")
+        record["owner_effect"]["owner_approved_edge"] = True
+        return {"edge_id": target_id, "new_state": result.get("state", "active") if result else "failed"}
+    if action_type == "reject_edge":
+        from .index import MemoryOSIndex
+        index = MemoryOSIndex(store.roots)
+        result = index.transition_edge_state(target_id, "invalidated")
+        record["owner_effect"]["owner_rejected_edge"] = True
+        return {"edge_id": target_id, "new_state": result.get("state", "invalidated") if result else "failed"}
     return {}
 
 
@@ -3121,6 +3136,11 @@ def _validate_action_target(
         found = any(o.get("id") == target_id for o in list_active_overrides())
         if not found:
             return "knob_override_not_found_or_not_active"
+    if action_type in {"approve_edge", "reject_edge"}:
+        if target_type != "edge":
+            return "invalid_edge_target"
+        if not target_id or not isinstance(target_id, str) or not target_id.strip():
+            return "invalid_edge_id"
     return ""
 
 
@@ -5094,6 +5114,40 @@ def _rendered_digest_text(
             if len("\n".join(candidate).rstrip()) <= max_chars:
                 lines.append(_expiring)
 
+    # 待审批 edges 区段（owner review for governed edges）
+    if store is not None:
+        try:
+            from .index import MemoryOSIndex, _initialize_schema
+            index = MemoryOSIndex(store.roots)
+            if index.roots.index_path.exists():
+                conn = sqlite3.connect(str(index.roots.index_path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    _initialize_schema(conn)
+                    rows = conn.execute(
+                        "select * from memory_edges where state = 'owner_eligible' order by weight desc limit 20"
+                    ).fetchall()
+                    if rows:
+                        edge_lines = ["## Pending Edge Review", ""]
+                        for row in rows:
+                            edge_id = row["edge_id"]
+                            rel = row["relation_type"]
+                            weight = row["weight"]
+                            from_id = row["from_record_id"]
+                            to_id = row["to_record_id"]
+                            edge_lines.append(
+                                f"- [{rel} w={weight:.2f}] {from_id} -> {to_id}\n"
+                                f"  approve_edge:{edge_id} | reject_edge:{edge_id}"
+                            )
+                        candidate = lines + edge_lines + [""]
+                        if len("\n".join(candidate).rstrip()) <= max_chars:
+                            lines.extend(edge_lines)
+                            lines.append("")
+                finally:
+                    conn.close()
+        except Exception:
+            pass  # fail-open: edge digest must not break main digest
+
     final_overview = _rendered_overview_lines(
         counts or {},
         overflow or {},
@@ -5690,9 +5744,10 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
             "approve_proposal",
             "approve_session_mirror_apply",
             "retain_hindsight_curation",
+            "approve_edge",
         }
     if verb == "reject":
-        return action_type in {"reject_candidate", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override"}
+        return action_type in {"reject_candidate", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override", "reject_edge"}
     if verb == "feedback":
         return action_type == "mark_feedback" or action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
     if verb == "allow":
