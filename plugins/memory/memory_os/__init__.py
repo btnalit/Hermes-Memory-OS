@@ -696,7 +696,7 @@ class MemoryOSProvider(MemoryProvider):
             "index_counts": index_counts,
             "index_health": _tool_index_health(self._roots, len(events), index_counts),
             "prefetch_mode": "indexed" if self._roots.index_path.exists() else "degraded_filesystem",
-            "vector_available": (
+            "vector_available": bool(
                 self._embedder is not None
                 and getattr(self._embedder, "is_available", lambda: False)()
             ),
