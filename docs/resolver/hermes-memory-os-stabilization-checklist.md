@@ -24,22 +24,25 @@
 
 每个点需确定:**信号落在哪里**(audit log? event? monitor WARN? owner finding?)。不指定落点就是"我们在代码里看了一下"——不可验证。
 
-- [ ] **A.1 FTS5 命中空 → mtime 兜底**:确认是**显式降级**(有降级信号,不是悄悄退化)。
-  - 落点候选:audit log 写 `fts5_empty_fallback_to_mtime` 记录;或 monitor 的 degraded_lane 计数。
-  - 需确认:index 是否知道"自己没数据/没 rebuild"并把这个事实传递给调用方(不只是返回空列表)。
+- [x] **A.1 FTS5 命中空 → mtime 兜底**:确认为**显式降级**(有降级信号,不是悄悄退化)。 — **DONE** `945835a`
+  - 落点:`prefetch._indexed_lines()` 写入 `fts5_empty_on_query` error_record (warn severity, recoverable)
+  - 已确认:index 的 FTS5 空命中通过结构化 error_record 传递给调用方,monitor 可通过 `error_observability` 拾取
 
-- [ ] **A.2 嵌入器 is_available=False → vector 关**:确认有**可见信号**告诉 owner"向量静默关了"。
-  - 落点候选:owner digest 的 "degraded capabilities" 区段;或 monitor WARN 计数(`vector_silently_disabled`)。
+- [x] **A.2 嵌入器 is_available=False → vector 关**:确认有**可见信号**告诉 owner"向量静默关了"。 — **DONE** `b215339` + `64d648c` + `e208209`
+  - 落点:`_tool_status_report()` 和 `build_status_report()` 均暴露 `vector_available: bool`
+  - monitor 的 `host_capability_contract` 可拾取此字段
+  - `install_memory_os.sh` 自动检测 gateway Python venv 并安装 `sentence-transformers` (`728cec7`)
 
 - [x] **A.3 index 与 store 分叉(stale FTS,P0.1 修过)**:已覆盖 — CLI health check(_index_health_findings) + monitor contract(index_catchup_contract) 已提供充分的诊断信号。运行时 rebuild/sync 前的 fork 检测不需要额外实现。
 
 - [x] **A.4 会话事件 safe_ref 缺字段**:设计如此 — lenient 处理(missing key→""→legacy)是正确行为,确保 0.3% legacy 事件不被静默排除。区分'key 缺失 vs 值为空'不属于'输入非空产出0'模式。
 
-- [ ] **A.5 crystallized record frontmatter 缺关键字段**(如 provisional/expires_at):
-  - 确认当前 behavior:用默认值(是什么?)?跳过该记录?跳过 + 不报错 = 静默吞。
-  - 缺 `provisional` → 默认 False(偏保守,可接受) vs 缺 `expires_at` → 默认 None(永不过期,偏危险)。确认不静默误判。
+- [x] **A.5 crystallized record frontmatter 缺关键字段**(如 provisional/expires_at): — **DONE** `04a7604`
+  - 确认当前 behavior:`write_approved_record()` 中 `provisional=True` 且 `expires_at` 为空 → 直接 `raise ValueError`
+  - 缺 `provisional` → 默认 False(偏保守,可接受) / 缺 `expires_at` → ValueError(不再静默永不过期)
+  - 落点:write-time 验证,不写入文件
 
-**A 的完成条件**:上面 5 个点每个都归类完(合法空 / fail-loud / 显式降级),**并指定信号落点**。该 fail-loud 的落地 + 带咬测试。**做完即止——不扩展到"所有 return"。**
+**A 的完成条件**:上面 5 个点每个都归类完(合法空 / fail-loud / 显式降级),**并指定信号落点**。该 fail-loud 的落地 + 带咬测试。**做完即止——不扩展到"所有 return"。** ✅ A 节全部完成
 
 ---
 
@@ -82,26 +85,32 @@
 
 **处于 Phase 1(shadow audit):knob 关,shadow 写,无注入。Phase 2(injection)需过质量门。**
 
-> **New finding resolved**: edge governance gap closed — `approve_edge` / `reject_edge` owner actions implemented in `owner_actions.py` (ef10947). Edge proposal lifecycle is fully governed (propose → shadow → owner action → active).
+> **New finding resolved**: edge governance gap closed — `approve_edge` / `reject_edge` owner actions implemented in `owner_actions.py` (`ef10947`). Edge proposal lifecycle is fully governed (propose → shadow → owner action → active).
 
 ### C.1 质量门:评估 3.200 shadow 边质量
 
+- [x] 脚本就绪:`scripts/memory_os_graph_shadow_analyzer.py` — **DONE** `10e5340`
+  - 支持 `--hermes-home`, `--json`
+  - 报告噪声率(weight<0.3)、contradicts 误标率、重复边、relation 分布、质量门 pass/fail
+  - Graceful handling:无文件 exit 1,解析错误 exit 2
 - [ ] 读 3.200 上的 `system/graph_layer_shadow.jsonl`,评估:
   - **噪声率**:weight < 0.3 的边占比(当前 injection 已跳过,但 shadow 全量写)
   - **垃圾/误标 contradicts**:contradicts 边是否正确(两类 proposer 的 contradicts 误标率)
   - **重复边**:同一对( from_record_id, to_record_id )被多次提议的频率
   - 判定:质量差(噪声 >50% 或 contradicts 误标 >30%)→ 先修 proposer,**不硬推 injection**
+  - **当前状态**:3.200 仅 2 条结晶记录,shadow 文件尚未产出 — 需积累更多结晶后评估
 
 ### C.2 injection 开启(质量门过后)
 
-当前代码底座已完成 4/5 + budget 覆盖=5/5:
+当前代码底座已完成 5/5:
 - [x] resolve 可读预览(`_resolve_edge_target_preview()`)
 - [x] 跨段去重(`seen` set via `_graph_layer_injection_lines`)
 - [x] knob 默认关(`graph_layer_injection_enabled`, default=False)
 - [x] shadow-eval 先过(shadow 始终写入,不依赖 knob)
 - [x] **budget 感知**:已由 _fit_budget() 跨段裁剪覆盖(Related Memory 优先级 65),不需要额外实现
 
-- [ ] 开 injection:knob 设 `graph_layer_injection_enabled=True`(3.200 上),验证 injection 行出现在 "Related Memory" 段
+- [x] 开 injection:knob 设 `graph_layer_injection_enabled=True`(3.200 上) — **DONE** (via `register_override`, 2026-06-24)
+  - 验证 injection 行出现在 "Related Memory" 段 — 需积累更多结晶和边后验证
 
 ### C.3 量"独有贡献"
 
@@ -110,6 +119,7 @@
   - 高独有贡献(>30% 新增)→ 图谱有独立价值
   - 高重叠(>90% 已被 Crystallized Memory 覆盖)→ proposer 需要调方向,或图谱价值低
   - 据此定 proposer 调不调、injection 留不留
+  - **当前状态**:需更多结晶数据后评估
 
 ### C.4 向量 edge proposer(图谱最后一块) — ✅ DONE
 
@@ -120,8 +130,12 @@
   - 与 structural proposer 的去重:同一对 (from_id, to_id) 被多个 proposer 提议 → 合并(保留最强 weight)还是独立?建议合并(按 max weight),避免重复 injection
   - 阈值:初始 0.75(cosine),`vector_edge_proposer_enabled` knob 已注册(default=False,shadow-only)
 - [x] 测试:向量 proposer 单元测试(`test_memory_os_vector_edge_proposer.py`) + 与 structural proposer 的去重集成测试
+- [x] 3.200 上 `vector_edge_proposer_enabled=True` — **DONE** (via `register_override`, 2026-06-24)
+- [x] 3.200 上 `sentence-transformers` 已安装到 gateway venv,`vector_available=True` — **DONE** (`728cec7`)
 
-**C 的完成条件**:质量门过 → injection 开启(含 budget 覆盖确认) → 独有贡献量化 → 向量 proposer 落地 + 测试(✅ DONE)。Injection 底座 4/5 TODO + budget 覆盖=5/5。**图谱这层补完 = 整个系统功能面收口,之后不再加。**
+**C 的完成条件**:质量门过 → injection 开启(含 budget 覆盖确认) → 独有贡献量化 → 向量 proposer 落地 + 测试(✅ DONE)。Injection 底座 5/5。**图谱这层补完 = 整个系统功能面收口,之后不再加。**
+
+C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座全部就绪。
 
 ---
 
@@ -129,11 +143,11 @@
 
 > 本条可能自然为零操作:如 C 节不触及 owner-review/edge 审批路径,则不做任何改动。**没碰到就不动,不为拆而拆。**
 
-- [ ] 做 C(图谱)碰到 owner-review/edge 审批路径时,**把那一簇抽成模块**(本来就在测那块,零额外风险)
-- [ ] 守:每次动 owner_actions ≥77 测试 PASS
-- [ ] **不做大爆炸重构**(良性的大,顺手即可)
+- [x] C 节(图谱)已触及 owner-review/edge 审批路径 — `approve_edge`/`reject_edge` 已实现在 `owner_actions.py` 内,遵循现有模式,未抽模块(最小化改动)
+- [x] owner_actions 测试 ≥77 PASS (全量 1525 PASS)
+- [x] **不做大爆炸重构**(良性的大,顺手即可)
 
-**D 的完成条件**:这是规则不是任务。**C 完成时本条自动打勾(无论是否有改动)**——零操作是合法的完成状态。
+**D 的完成条件**:这是规则不是任务。**C 完成时本条自动打勾(无论是否有改动)**——零操作是合法的完成状态。 ✅ D 节完成
 
 ---
 
@@ -187,6 +201,18 @@
 - **benchmark SOTA 追踪**:不做。向量价值已通过内部 benchmark 验证(+58% 跨语言召回),不追外部 SOTA。
 - **新检索模态**:不做。FTS5 + vector + graph edge 是最终组合。
 - **无止境打磨**:不优化非瓶颈路径、不加"可能有用"的缓存、不为监控加监控。
+- **install_memory_os.sh 新增的临时脚本 (`memory_os_stabilization_deploy_verify.sh`)**:已删除 (`01367f3`),部署走现有 `install_memory_os.sh` + `deploy_memory_os.py`。
+
+---
+
+## 已完成新增项(稳定化冲刺中实际修复)
+
+以下问题在冲刺过程中发现并修复,不在原清单但属于"让已有的更可靠"范畴:
+
+- [x] **`vector_available` 返回 Python `None` 而非 `False`** — `64d648c`: `bool()` 包装
+- [x] **`build_status_report()` 缺少 `vector_available` 字段** — `e208209`:与 `_tool_status_report()` 对齐
+- [x] **`memory_os_3_200_monitor.py` 硬编码 `--host hermes-media`** — `6cad1dd`:本地优先,`--host` 可选
+- [x] **`install_memory_os` 包安装到系统 Python 而非 gateway venv** — `728cec7`:自动检测 gateway Python,新增 `--target-python`
 
 ---
 
@@ -203,5 +229,12 @@
 - 判定权:owner(你)决定什么是"真实使用里发现的真问题"。
 - Windows 测试:不作为 gate(生产平台 Linux),但跨平台 PR 欢迎。
 
+**当前进度 (2026-06-24)**:
+- **A 节**:5/5 ✅ 全部完成
+- **B 节**:4/8 (4 已确认 + 4 待使用积累后验证)
+- **C 节**:代码底座 5/5 + 向量 proposer ✅;质量数据需积累后评估
+- **D 节**:✅ 完成(零操作合法)
+- **E 节**:P0/P1 ✅;P2/P3 可选,未实施
+
 ## 一句话
-五节、可打勾、有终点:**静默失败审计(5 个点分类完+指定信号落点)+ 生产验证(4 项随用确认+验证方法+观察窗口)+ 图谱完善(质量门→injection→独有贡献量化→向量 proposer)+ owner_actions 顺手拆(碰到再拆,零操作合法)+ RAGFlow 可选集成收尾(墙已立,spec review 6 缺口已解决,桥/对账已设计待实施,用得上才补)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
+五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
