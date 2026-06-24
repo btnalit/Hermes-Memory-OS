@@ -63,7 +63,6 @@ from .crystallized import (
     read_candidate_queue,
 )
 from .deployment_runtime_manifest import read_deployment_runtime_manifest, write_deployment_runtime_manifest
-from .embedder import LocalEmbedder
 from .host_capability_probe import probe_host_capabilities
 from .adapters.hindsight import HindsightAdapter, HindsightAdapterConfig, HindsightHttpClient
 from .index import MemoryOSIndex
@@ -131,15 +130,16 @@ _PRIVATE_SAFE_REF_KEYS = {"raw_body", "body", "content", "transcript", "private_
 
 
 def _check_vector_available() -> bool:
-    """Check whether local embedding model is available.
+    """Check whether sentence-transformers is importable (import-only, no model load).
 
-    Returns False when sentence-transformers is not installed or the
-    model cannot be loaded. The check runs once per status call — the
-    LocalEmbedder constructor caches the result internally.
+    Returns False when sentence-transformers is not installed.
+    Avoids loading the full ~420MB SentenceTransformer model.
     """
     try:
-        return LocalEmbedder().is_available()
-    except Exception:
+        import importlib
+        importlib.import_module("sentence_transformers")
+        return True
+    except ImportError:
         return False
 
 
