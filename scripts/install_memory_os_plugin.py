@@ -746,6 +746,11 @@ def _ensure_llm_packages(*, dry_run: bool = False, target_python: str = "") -> d
                 [py_bin, "-m", "pip", "install", pip_name],
                 check=True, capture_output=True, text=True, timeout=300,
             )
+            # Verify the import actually works
+            subprocess.run(
+                [py_bin, "-c", f"import {import_name}"],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
             result[import_name] = {"available": True, "action": "installed"}
         except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
             result[import_name] = {
