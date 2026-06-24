@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -66,6 +67,9 @@ _DIAGNOSTIC_QUERY_PATTERNS = (
 
 _ASCII_ENTITY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
 _FAST_PATH_CHINESE_KEYWORDS = (
+    # Generic ops / content words — deliberately excludes:
+    #   - project-internal terms (e.g. 提案/治理/证据/结晶/候选/索引/会话)
+    #   - question / stop words (those go through slow_path full-query search)
     "报错",
     "错误",
     "失败",
@@ -73,18 +77,29 @@ _FAST_PATH_CHINESE_KEYWORDS = (
     "队列",
     "网关",
     "重启",
-    "提案",
-    "治理",
-    "证据",
-    "结晶",
-    "候选",
-    "会话",
     "定时",
     "状态",
-    "索引",
     "延迟",
     "记忆",
+    # Generic cross-domain content / relation words
+    "原因",
+    "方法",
+    "区别",
+    "对比",
+    "配置",
+    "命令",
+    "日志",
+    "文件",
+    "路径",
+    "端口",
 )
+
+_FAST_PATH_STOP_WORDS: frozenset[str] = frozenset({
+    "为什么", "怎么", "什么时候", "哪里", "谁", "多少",
+    "是什么", "怎么样", "哪一个",
+})
+
+_fast_path_keywords_override: list[str] | None = None
 _ROUTE_STOP_ENTITIES = {
     "api_key",
     "key",
@@ -509,7 +524,14 @@ def _build_prefetch_sections(
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
-    _append_section(sections, "Crystallized Memory", _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records))
+    cryst_lines, cryst_degradation = _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records)
+    if cryst_degradation >= 2:
+        cryst_header = "Crystallized Memory (deterministic floor recall)"
+    elif cryst_degradation == 1:
+        cryst_header = "Crystallized Memory (recent — no query match)"
+    else:
+        cryst_header = "Crystallized Memory"
+    _append_section(sections, cryst_header, cryst_lines)
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
     _append_section(sections, "Recent Event Summaries", _event_lines(store, session_id=session_id, seen=seen))
@@ -750,7 +772,16 @@ def plan_query_route(
         for entity in _ASCII_ENTITY_PATTERN.findall(redacted)
         if entity.lower() not in _ROUTE_STOP_ENTITIES
     ]
-    chinese_keywords = [keyword for keyword in _FAST_PATH_CHINESE_KEYWORDS if keyword in redacted]
+    # Resolve keyword table: config override → module default
+    effective_keywords = (
+        _fast_path_keywords_override
+        if _fast_path_keywords_override is not None
+        else _FAST_PATH_CHINESE_KEYWORDS
+    )
+    chinese_keywords = [
+        keyword for keyword in effective_keywords
+        if keyword in redacted and keyword not in _FAST_PATH_STOP_WORDS
+    ]
     keywords = _dedupe(entities or chinese_keywords)
     if keywords:
         search_query = " ".join(keywords[:6])
@@ -767,6 +798,17 @@ def plan_query_route(
         "display_query": slow_query,
         "keywords": [],
     }
+
+
+def set_fast_path_keywords(keywords: list[str] | None) -> None:
+    """Set a config-level override for fast-path Chinese keywords.
+
+    When not None, replaces the module-default _FAST_PATH_CHINESE_KEYWORDS
+    in plan_query_route().  Call from provider.prefetch() after reading config.
+    A None value restores the default.
+    """
+    global _fast_path_keywords_override
+    _fast_path_keywords_override = keywords
 
 
 def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: list[str]) -> None:
@@ -890,6 +932,67 @@ def _relationship_lines(store: MemoryOSStore) -> list[str]:
     return lines
 
 
+# ── Deterministic Recall Floor helpers ──────────────────────────────────
+
+def _tokenize_for_floor_match(query: str) -> list[str]:
+    """Split a query into coarse tokens for deterministic substring matching.
+
+    No external dependencies — pure Unicode boundary splitting.  Returns
+    a list of non-empty, distinct, case-folded tokens suitable for
+    brute-force file-body matching.
+    """
+    text = str(query or "").strip()
+    if not text:
+        return []
+    # Split on Unicode punctuation / whitespace boundaries
+    tokens: list[str] = []
+    current: list[str] = []
+    for ch in text:
+        cat = unicodedata.category(ch)
+        if cat.startswith("Z") or cat.startswith("P"):
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        tokens.append("".join(current))
+    # Dedup preserving order; also include the full query as a fallback token
+    seen: set[str] = set()
+    result: list[str] = []
+    full = text.casefold()
+    if full not in seen:
+        result.append(full)
+        seen.add(full)
+    for token in tokens:
+        cf = token.casefold()
+        if cf and cf not in seen:
+            result.append(cf)
+            seen.add(cf)
+    return result
+
+
+def _floor_match_score(path: Path, tokens: list[str]) -> int:
+    """Score a crystallized .md file by how many tokens appear in its body.
+
+    Each distinct token that appears as a substring in the file body
+    contributes 1 point.  The score is an integer ≥ 0 — higher = more
+    relevant.  Pure deterministic computation: no LLM, no network, no
+    external dependency.
+    """
+    if not tokens:
+        return 0
+    try:
+        body = path.read_text(encoding="utf-8").casefold()
+    except Exception:
+        return 0
+    score = 0
+    for token in tokens:
+        if token in body:
+            score += 1
+    return score
+
+
 def _rrf_union(
     fts_ids: list[str],
     vec_ids: list[str],
@@ -923,7 +1026,7 @@ def _crystallized_lines(
     index: object | None = None,
     seen: set[tuple[str, str]] | None = None,
     error_records: list[dict[str, Any]] | None = None,
-) -> list[str]:
+) -> tuple[list[str], int]:
     """Record-level crystallized memory lines with relevance filtering and caps.
 
     Uses FTS5 index (like Indexed Recall) to find records relevant to the
@@ -940,6 +1043,12 @@ def _crystallized_lines(
     Provisional records (provisional=True) are annotated with countdown
     and sorted after permanent records. High-recurrence provisional records
     receive a high-recurrence marker.
+
+    Returns (lines, degradation_level) where:
+      0 = normal (FTS5 or vector hits, relevance gate active)
+      1 = mtime fallback (no search intent — empty query)
+      2 = deterministic floor recall (non-empty query, FTS5+vector both
+          returned zero hits; floor match scoring applied)
     """
     MAX_TOTAL = 20
     MAX_PROVISIONAL = 5
@@ -1001,23 +1110,42 @@ def _crystallized_lines(
                     )
                 vec_ids = []
 
-    # ── RRF union ──────────────────────────────────────────────────
+    # ── RRF union + degradation level ───────────────────────────────
+    degradation_level = 0
     if vec_ids:
         relevant_ids = _rrf_union(fts_ids, vec_ids, top_n=60)
     elif fts_ids:
         relevant_ids = set(fts_ids)
+    else:
+        # No FTS5 or vector hits — fallback path.
+        # Distinguish: empty query → level 1 (pure recency, no search intent);
+        # non-empty query → level 2 (deterministic floor recall with floor match).
+        if search_query.strip():
+            degradation_level = 2
+        else:
+            degradation_level = 1
     # else: leave relevant_ids=None so all on-disk records are included
 
     # (rid, line) for permanent, (expires_at_sort_key, rid, line, recurrence) for provisional
-    permanent_entries: list[tuple[str, str]] = []
+    permanent_entries: list[tuple[str, str, int]] = []  # (rid, line, recurrence)
     provisional_entries: list[tuple[datetime, str, str, int]] = []
 
+    # ── File traversal ──────────────────────────────────────────────
     # When FTS5 provides relevance, sort by filename (stable, predictable).
-    # When no FTS5 relevance is available, sort by mtime descending so the
-    # most recently modified records — including just-written probe nonces —
-    # appear first and survive the cap.
+    # When relevance is absent:
+    #   - level 2 (deterministic floor recall): sort by floor match score
+    #     descending — query-aware brute-force matching puts relevant
+    #     records first so the cap truncates non-matches from the bottom
+    #   - level 1 (empty query / pure recency): sort by mtime descending
     paths = list(store.roots.crystallized_root.glob("*.md"))
-    if relevant_ids is None:
+    if degradation_level == 2:
+        # Deterministic floor recall — score every file against query tokens
+        floor_tokens = _tokenize_for_floor_match(search_query)
+        if floor_tokens:
+            paths.sort(key=lambda p: _floor_match_score(p, floor_tokens), reverse=True)
+        else:
+            paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    elif relevant_ids is None:
         paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     else:
         paths.sort()
@@ -1068,15 +1196,30 @@ def _crystallized_lines(
                 )
                 provisional_entries.append((expires_dt, rid, line, recurrence))
             else:
-                permanent_entries.append((rid, f"- {path.name}/{kind}: {text}"))
+                recurrence = 0
+                try:
+                    recurrence = int(frontmatter.get("recurrence", "0"))
+                except (ValueError, TypeError):
+                    pass
+                permanent_entries.append((rid, f"- {path.name}/{kind}: {text}", recurrence))
 
     # Sort provisional entries: closest expiry first
     provisional_entries.sort(key=lambda e: e[0])
 
+    # ── Permanent core baseline (degradation only) ──────────────────
+    # When FTS5+vector both returned zero hits (degradation_level >= 1),
+    # ensure the top-N permanent records by recurrence appear in the output.
+    # This prevents high-recurrence core memories from being dropped by the
+    # cap when the query-aware ranking is unavailable or degraded.
+    # Reorder-only — does not expand the cap.
+    PERMANENT_BASELINE_N = 5
+    if degradation_level >= 1 and permanent_entries:
+        permanent_entries.sort(key=lambda e: (-e[2], e[0]))
+
     # ── Apply caps and track seen only for surviving records ──────
     result: list[str] = []
     # Cap permanent records at MAX_PERMANENT (15) — reserve floor for provisional
-    for rid, line in permanent_entries[:MAX_PERMANENT]:
+    for rid, line, _recurrence in permanent_entries[:MAX_PERMANENT]:
         result.append(line)
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))
@@ -1089,7 +1232,7 @@ def _crystallized_lines(
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))
 
-    return result
+    return result, degradation_level
 
 
 def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:

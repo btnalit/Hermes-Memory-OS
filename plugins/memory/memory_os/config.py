@@ -11,6 +11,7 @@ from uuid import uuid4
 DEFAULT_CONFIG: dict[str, Any] = {
     "capture_policy": "summary_only",
     "prefetch_char_budget": 20000,
+    "fast_path_keywords": None,
     "hindsight_adapter_enabled": False,
     "allow_full_local_capture": False,
     "diagnostic_grounding_enabled": None,
@@ -132,6 +133,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "key": "prefetch_char_budget",
             "description": "Maximum Memory-OS prefetch characters",
             "default": DEFAULT_CONFIG["prefetch_char_budget"],
+        },
+        {
+            "key": "fast_path_keywords",
+            "description": "Optional custom Chinese keyword list for fast-path query routing (null = use built-in defaults)",
+            "default": DEFAULT_CONFIG["fast_path_keywords"],
         },
         {
             "key": "hindsight_adapter_enabled",

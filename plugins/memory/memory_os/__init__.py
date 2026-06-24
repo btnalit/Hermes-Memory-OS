@@ -33,7 +33,7 @@ from .owner_actions import (
     owner_review_surface_report,
     parse_owner_review_reply,
 )
-from .prefetch import build_prefetch
+from .prefetch import build_prefetch, set_fast_path_keywords
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, IDENTITY_MANIFEST_SCHEMA_VERSION, EventEnvelope
 from .status_tool_contract import (
@@ -155,6 +155,12 @@ class MemoryOSProvider(MemoryProvider):
         # ── Thread embedder onto index for vector retrieval lane ────────
         if self._embedder is not None and self._index is not None:
             self._index._embedder = self._embedder
+        # ── Apply config-level fast_path keyword override ──────────────
+        _fast_path_cfg = self._config.get("fast_path_keywords")
+        if isinstance(_fast_path_cfg, list) and _fast_path_cfg:
+            set_fast_path_keywords([str(k) for k in _fast_path_cfg if k])
+        else:
+            set_fast_path_keywords(None)  # restore module default
         # ────────────────────────────────────────────────────────────────
         return build_prefetch(
             query,

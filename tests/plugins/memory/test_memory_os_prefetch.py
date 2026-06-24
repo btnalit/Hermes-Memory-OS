@@ -733,7 +733,7 @@ def test_crystallized_lines_annotates_provisional_with_countdown(tmp_path):
     )
     service.write_approved_record(candidate, decision, file_name="owner_approved.md")
 
-    lines = _crystallized_lines(store)
+    lines, _crystallized_degradation = _crystallized_lines(store)
     assert len(lines) == 1
     assert "provisional" in lines[0]
     assert "剩" in lines[0]
@@ -782,7 +782,7 @@ def test_crystallized_lines_sorts_permanent_before_provisional(tmp_path):
     )
     service.write_approved_record(cand_perm, dec_perm, file_name="owner_approved.md")
 
-    lines = _crystallized_lines(store)
+    lines, _crystallized_degradation = _crystallized_lines(store)
     assert len(lines) == 2
     # Permanent record should be first
     assert "Permanent" in lines[0]
