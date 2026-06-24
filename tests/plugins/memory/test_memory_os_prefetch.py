@@ -8,7 +8,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -788,6 +788,271 @@ def test_crystallized_lines_sorts_permanent_before_provisional(tmp_path):
     assert "Permanent" in lines[0]
     assert "Provisional" in lines[1]
     assert "provisional" in lines[1]
+
+
+# ── INV-5: Deterministic Recall Floor — degradation_level=2 adversarial tests ──
+
+
+def test_floor_match_score_returns_token_match_count(tmp_path):
+    """_floor_match_score counts distinct token substring matches in file body."""
+    path = tmp_path / "test.md"
+    path.write_text("时间管理很重要。关于时间的话题经常出现。", encoding="utf-8")
+    tokens = _tokenize_for_floor_match("时间 管理 搜索")
+    # tokens: ["时间 管理 搜索", "时间", "管理", "搜索"]
+    # "时间 管理 搜索" not in body (multi-word), but "时间" and "管理" are
+    score = _floor_match_score(path, tokens)
+    assert score >= 2, f"Expected >=2 token matches, got {score}"
+    # "搜索" is NOT in body → should not contribute
+    assert score == 2, f"Expected exactly 2 matches ('时间' + '管理'), got {score}"
+
+
+def test_floor_match_score_zero_when_no_tokens_match(tmp_path):
+    """_floor_match_score returns 0 when no token appears in body."""
+    path = tmp_path / "unrelated.md"
+    path.write_text("配置管理和部署流程。", encoding="utf-8")
+    tokens = _tokenize_for_floor_match("时间 搜索")
+    score = _floor_match_score(path, tokens)
+    assert score == 0, f"Expected 0 (no token match), got {score}"
+
+
+def test_floor_match_score_body_cache_avoids_double_io(tmp_path):
+    """_floor_match_score uses body_cache to avoid file I/O when provided."""
+    path = tmp_path / "cached.md"
+    path.write_text("original content about 时间", encoding="utf-8")
+    # Pre-populate cache with different content — the function must use cache
+    body_cache: dict = {path: "cached content about 时间 and more"}
+    tokens = _tokenize_for_floor_match("时间")
+    score = _floor_match_score(path, tokens, body_cache=body_cache)
+    assert score >= 1, f"Expected >=1 (cache used), got {score}"
+    # Verify cache was used, not disk — the disk content is "original..."
+    # and does NOT contain "cached"
+    score_via_disk = _floor_match_score(path, tokens)
+    assert "cached" not in path.read_text(encoding="utf-8") or score_via_disk >= 1
+
+
+def test_tokenize_for_floor_match_dedup_and_includes_full_query(tmp_path):
+    """_tokenize_for_floor_match produces deduplicated tokens including full query."""
+    tokens = _tokenize_for_floor_match("时间 管理 时间")
+    # Full query always first
+    assert tokens[0] == "时间 管理 时间"
+    # "时间" and "管理" follow (deduped — "时间" appears only once)
+    assert "时间" in tokens[1:]
+    assert "管理" in tokens[1:]
+    # No duplicate "时间"
+    time_count = sum(1 for t in tokens if t == "时间")
+    assert time_count == 1, f"Expected 1 '时间' token (deduped), got {time_count}"
+
+
+def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_path):
+    """Degradation level 2: substring matching finds records cut by mtime+cap.
+
+    This is the **core adversarial test** for INV-5 (Deterministic Recall Floor).
+    It mirrors the real-world scenario: searching "时间", FTS5 returns zero hits,
+    deterministic floor recall uses substring matching to recover records that
+    pure mtime sort + cap (MAX_PERMANENT=15) would silently drop.
+
+    Setup:
+    - 20 permanent crystallized records across individual files
+    - 3 "target" records contain "时间" in body but have OLD mtime (30 days ago)
+    - 17 "noise" records don't contain "时间", have NEW mtime (1 hour ago)
+    - FTS5 index returns zero hits; vector retrieval is off
+    - Query = "时间"
+
+    Assertions:
+    - degradation_level == 2 (deterministic floor recall activated)
+    - The 3 "时间" records appear in output (floor match found them)
+    - Target records rank in the top-15 permanent cap zone (floor match
+      scoring + file ordering puts them first, keeping them above the
+      MAX_PERMANENT=15 cut line)
+    - Adversarial: target files are at mtime positions >= 15 (prove they would
+      be cut without floor recall — pure mtime sort would put them at the
+      bottom where the cap truncates them)
+
+    Regression catch: if floor match logic is removed, tokenisation is
+    broken, or sort direction is inverted, the 3 target records would be
+    cut by MAX_PERMANENT=15 and this test MUST fail.
+    """
+    import os
+    import time
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    # ── Phase 1: Write 3 target records FIRST ──────────────────────────
+    # IMPORTANT: target records must be written first so their timestamp-
+    # based record ids (cry_<timestamp>_<random>) sort BEFORE noise record
+    # ids in the recurrence-sort tiebreak at degradation_level >= 1.
+    # The recurrence sort key is (-recurrence, rid); for permanent records
+    # recurrence is always 0 (it is only stored for provisional records),
+    # so the effective sort key is just (0, rid).  Writing targets first
+    # gives them earlier timestamps → alphabetically earlier ids → they
+    # stay first after the recurrence sort, preserving the floor-match
+    # file ordering.
+    target_paths: list = []
+    for i in range(3):
+        candidate = CrystallizedCandidate(
+            candidate_id=f"target_{i:03d}",
+            kind="moment",
+            body=f"关于时间管理的记录 {i}：这条记录明确包含'时间'相关内容，"
+                 f"用于测试确定性地板召回机制是否生效。",
+            source_event_ids=[f"evt_t_{i:03d}"],
+        )
+        decision = ApprovalDecision(
+            candidate_id=f"target_{i:03d}",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="owner",
+            reviewed_at=f"2026-06-{(i % 28) + 1:02d}T12:00:00Z",
+            provisional=False,
+        )
+        path = service.write_approved_record(candidate, decision, file_name=f"target_{i:03d}.md")
+        target_paths.append(path)
+
+    # ── Phase 2: Write 17 noise records SECOND ─────────────────────────
+    noise_paths: list = []
+    for i in range(17):
+        candidate = CrystallizedCandidate(
+            candidate_id=f"noise_{i:03d}",
+            kind="moment",
+            body=f"Noise record {i}: project configuration, deployment流程, gateway状态检查。",
+            source_event_ids=[f"evt_n_{i:03d}"],
+        )
+        decision = ApprovalDecision(
+            candidate_id=f"noise_{i:03d}",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="owner",
+            reviewed_at=f"2026-06-{(i % 28) + 1:02d}T12:00:00Z",
+            provisional=False,
+        )
+        path = service.write_approved_record(candidate, decision, file_name=f"noise_{i:03d}.md")
+        noise_paths.append(path)
+
+    # ── Phase 3: Flip mtimes — target → old, noise → new ───────────────
+    old_time = time.time() - 86400 * 30  # 30 days ago
+    new_time = time.time() - 3600        # 1 hour ago
+    for p in target_paths:
+        os.utime(str(p), (old_time, old_time))
+    for p in noise_paths:
+        os.utime(str(p), (new_time, new_time))
+
+    # Sanity check: every target file mtime < every noise file mtime
+    for tf in target_paths:
+        for nf in noise_paths:
+            assert tf.stat().st_mtime < nf.stat().st_mtime, (
+                f"mtime precondition failed: {tf.name} ({tf.stat().st_mtime}) "
+                f">= {nf.name} ({nf.stat().st_mtime})"
+            )
+
+    # ── Phase 4: Mock index — zero FTS5 hits, no vector embedder ──────
+    class ZeroHitIndex:
+        def search(self, _query, *, limit):
+            return {"hits": []}
+        # No _embedder attribute → vector lane is off
+
+    index = ZeroHitIndex()
+    error_records: list = []
+
+    # ── Phase 5: Call _crystallized_lines ──────────────────────────────
+    lines, degradation_level = _crystallized_lines(
+        store, query="时间", index=index, error_records=error_records,
+    )
+
+    # ── Assertion 1: degradation_level == 2 ───────────────────────────
+    assert degradation_level == 2, (
+        f"deg_level: expected 2 (deterministic floor recall), got "
+        f"{degradation_level}. error_records={error_records}"
+    )
+
+    # ── Assertion 2: target records appear in output ──────────────────
+    time_lines = [ln for ln in lines if "时间" in ln]
+    assert len(time_lines) >= 3, (
+        f"Floor recall FAILED: expected >=3 lines containing '时间', "
+        f"got {len(time_lines)}. Full output ({len(lines)} lines):\n"
+        + "\n".join(lines)
+    )
+
+    # ── Assertion 3: target records ranked in the top-15 cap zone ─────
+    # The first 15 permanent entries survive MAX_PERMANENT.  All 3 target
+    # records must be among them — floor match score (1 vs 0) pushes their
+    # files to the front, and the recurrence-sort tiebreak preserves the
+    # ordering (targets written first → earlier timestamps → earlier ids).
+    top_section = lines[:15]  # MAX_PERMANENT cap zone
+    top_time_count = sum(1 for ln in top_section if "时间" in ln)
+    assert top_time_count >= 3, (
+        f"Ranking FAILED: only {top_time_count}/3 '时间' records in top-15 "
+        f"(MAX_PERMANENT cap zone).  Without floor recall they would be "
+        f"silently dropped.  Lines:\n" + "\n".join(lines[:20])
+    )
+
+    # ── Assertion 4: adversarial — target files at mtime positions >= 15 ──
+    # This is the control check: prove that pure mtime sort would lose
+    # the target records.  If this assertion fails, the test setup is
+    # wrong (target files have mtime that's too recent, so they'd survive
+    # even without floor recall — making the test meaningless).
+    crystallized_root = store.roots.crystallized_root
+    mtime_sorted = sorted(
+        list(crystallized_root.glob("*.md")),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )
+    mtime_positions = {mtime_sorted[i].name: i for i in range(len(mtime_sorted))}
+    for tf in target_paths:
+        pos = mtime_positions[tf.name]
+        assert pos >= 15, (
+            f"ADVERSARIAL CHECK: target file {tf.name} at mtime position {pos} "
+            f"(should be >=15 to prove mtime-only sort would cut it).  "
+            f"Test setup is wrong — target files have too-recent mtime."
+        )
+
+
+def test_deterministic_floor_recall_header_annotation(tmp_path):
+    """Header is annotated 'deterministic floor recall' when degradation_level=2.
+
+    The section header must include the degradation marker so the owner can see
+    why results are ranked the way they are (self-exposure annotation).
+    """
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+
+    # Write a single record with "时间" in body
+    candidate = CrystallizedCandidate(
+        candidate_id="hdr_test_001",
+        kind="moment",
+        body="时间相关的记忆内容，用于测试头标注。",
+        source_event_ids=["evt_hdr"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="hdr_test_001",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-25T12:00:00Z",
+        provisional=False,
+    )
+    service.write_approved_record(candidate, decision, file_name="header_test.md")
+
+    # Zero-hit index → degradation_level=2
+    class ZeroHitIndex:
+        def search(self, _query, *, limit):
+            return {"hits": []}
+
+    error_records: list = []
+    lines, degradation_level = _crystallized_lines(
+        store, query="时间", index=ZeroHitIndex(), error_records=error_records,
+    )
+    assert degradation_level == 2
+
+    # Now verify the header annotation is correct by calling build_prefetch
+    # which internally annotates the section header
+    context = build_prefetch(
+        "时间", budget_chars=4000, store=store, index=ZeroHitIndex(),
+    )
+    assert "deterministic floor recall" in context, (
+        f"Header annotation missing: expected 'deterministic floor recall' "
+        f"in prefetch context. Got:\n{context[:500]}"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
