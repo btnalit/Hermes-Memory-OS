@@ -385,5 +385,7 @@ def test_memory_os_status_tool_reports_local_store_not_hindsight(tmp_path):
     assert report["event_count"] == 1
     assert report["hindsight_adapter_enabled"] is False
     assert report["uses_hindsight_http_api"] is False
+    assert "vector_available" in report
+    assert isinstance(report["vector_available"], bool)
     assert "172.18.0.99" not in rendered
     assert "api_url" not in rendered
