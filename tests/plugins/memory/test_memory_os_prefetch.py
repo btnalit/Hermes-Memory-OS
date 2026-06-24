@@ -844,33 +844,46 @@ def test_tokenize_for_floor_match_dedup_and_includes_full_query(tmp_path):
 
 
 def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_path):
-    """Degradation level 2: substring matching finds records cut by mtime+cap.
+    """Degradation level 2: floor match recovers records that all other sort
+    paths (mtime, rid) would cut.
 
-    This is the **core adversarial test** for INV-5 (Deterministic Recall Floor).
-    It mirrors the real-world scenario: searching "时间", FTS5 returns zero hits,
-    deterministic floor recall uses substring matching to recover records that
-    pure mtime sort + cap (MAX_PERMANENT=15) would silently drop.
+    This is the **core adversarial test** for INV-5 (Deterministic Recall
+    Floor).  It proves that substring matching is the ONLY mechanism that
+    keeps query-relevant records from being silently truncated.
+
+    The test design eliminates TWO self-canceling properties that made the
+    original version a false adversarial:
+
+    1. **Record count > MAX_TOTAL (20)** — 33 records (30 noise + 3 target)
+       so the cap actually truncates.  The original had exactly 20 records,
+       which meant all records were injected regardless of sort order.
+
+    2. **Target records written LAST → alphabetically LATER record IDs** —
+       so the recurrence-sort tiebreak (rid-alphabetical, since permanent
+       recurrence is always 0) puts targets at the END, not the front.
+       Combined with old mtime (30 days ago), every non-floor sort path
+       pushes targets to the bottom where MAX_PERMANENT=15 cuts them.
 
     Setup:
-    - 20 permanent crystallized records across individual files
-    - 3 "target" records contain "时间" in body but have OLD mtime (30 days ago)
-    - 17 "noise" records don't contain "时间", have NEW mtime (1 hour ago)
+    - 30 noise records written FIRST (alphabetically earlier IDs, NEW mtime)
+    - 3 target records written LAST (alphabetically later IDs, OLD mtime)
+    - All 33 are permanent, recurrence=0
     - FTS5 index returns zero hits; vector retrieval is off
-    - Query = "时间"
+    - Query = "时间" (non-empty → degradation_level=2)
 
-    Assertions:
-    - degradation_level == 2 (deterministic floor recall activated)
-    - The 3 "时间" records appear in output (floor match found them)
-    - Target records rank in the top-15 permanent cap zone (floor match
-      scoring + file ordering puts them first, keeping them above the
-      MAX_PERMANENT=15 cut line)
-    - Adversarial: target files are at mtime positions >= 15 (prove they would
-      be cut without floor recall — pure mtime sort would put them at the
-      bottom where the cap truncates them)
+    Correct behaviour:
+    - degradation_level == 2
+    - Floor match scores target files high (contain "时间"), noise files
+      zero → target files sorted first → target records enter top of
+      permanent_entries → survive MAX_PERMANENT=15 cap
+    - Target records appear IN the top-15 permanent cap zone AND rank
+      before noise records (floor_score actually moved them up)
 
     Regression catch: if floor match logic is removed, tokenisation is
-    broken, or sort direction is inverted, the 3 target records would be
-    cut by MAX_PERMANENT=15 and this test MUST fail.
+    broken, _floor_match_score returns zero for matching content, or the
+    recurrence sort (level-1 only) is incorrectly re-applied at level 2,
+    the 3 target records fall to the bottom (old mtime + late IDs) and are
+    cut by MAX_PERMANENT=15 — this test MUST fail.
     """
     import os
     import time
@@ -880,16 +893,35 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
     store = _store(tmp_path)
     service = CrystallizedMemoryService(store)
 
-    # ── Phase 1: Write 3 target records FIRST ──────────────────────────
-    # IMPORTANT: target records must be written first so their timestamp-
-    # based record ids (cry_<timestamp>_<random>) sort BEFORE noise record
-    # ids in the recurrence-sort tiebreak at degradation_level >= 1.
-    # The recurrence sort key is (-recurrence, rid); for permanent records
-    # recurrence is always 0 (it is only stored for provisional records),
-    # so the effective sort key is just (0, rid).  Writing targets first
-    # gives them earlier timestamps → alphabetically earlier ids → they
-    # stay first after the recurrence sort, preserving the floor-match
-    # file ordering.
+    # ── Phase 1: Write 30 noise records FIRST ───────────────────────────
+    # Noise written first → earlier timestamps → alphabetically EARLIER
+    # record IDs (cry_<ts>_<random>).  In any rid-alphabetical sort, noise
+    # sorts BEFORE targets.  Combined with NEW mtime, noise dominates both
+    # fallback sort paths — only floor match can pull targets forward.
+    noise_paths: list = []
+    for i in range(30):
+        candidate = CrystallizedCandidate(
+            candidate_id=f"noise_{i:03d}",
+            kind="moment",
+            body=f"Noise record {i}: project configuration, deployment流程, "
+                 f"gateway状态检查, system monitoring, log rotation policy。",
+            source_event_ids=[f"evt_n_{i:03d}"],
+        )
+        decision = ApprovalDecision(
+            candidate_id=f"noise_{i:03d}",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="owner",
+            reviewed_at=f"2026-06-{(i % 28) + 1:02d}T12:00:00Z",
+            provisional=False,
+        )
+        path = service.write_approved_record(candidate, decision, file_name=f"noise_{i:03d}.md")
+        noise_paths.append(path)
+
+    # ── Phase 2: Write 3 target records LAST ─────────────────────────────
+    # Targets written last → later timestamps → alphabetically LATER record
+    # IDs.  In rid-alphabetical sort, targets sort AFTER all 30 noise
+    # records.  Only floor match (substring "时间" → score >= 1) can pull
+    # them from the bottom to the front of permanent_entries.
     target_paths: list = []
     for i in range(3):
         candidate = CrystallizedCandidate(
@@ -909,26 +941,7 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
         path = service.write_approved_record(candidate, decision, file_name=f"target_{i:03d}.md")
         target_paths.append(path)
 
-    # ── Phase 2: Write 17 noise records SECOND ─────────────────────────
-    noise_paths: list = []
-    for i in range(17):
-        candidate = CrystallizedCandidate(
-            candidate_id=f"noise_{i:03d}",
-            kind="moment",
-            body=f"Noise record {i}: project configuration, deployment流程, gateway状态检查。",
-            source_event_ids=[f"evt_n_{i:03d}"],
-        )
-        decision = ApprovalDecision(
-            candidate_id=f"noise_{i:03d}",
-            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
-            reviewer="owner",
-            reviewed_at=f"2026-06-{(i % 28) + 1:02d}T12:00:00Z",
-            provisional=False,
-        )
-        path = service.write_approved_record(candidate, decision, file_name=f"noise_{i:03d}.md")
-        noise_paths.append(path)
-
-    # ── Phase 3: Flip mtimes — target → old, noise → new ───────────────
+    # ── Phase 3: Flip mtimes — target → old, noise → new ─────────────────
     old_time = time.time() - 86400 * 30  # 30 days ago
     new_time = time.time() - 3600        # 1 hour ago
     for p in target_paths:
@@ -936,7 +949,14 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
     for p in noise_paths:
         os.utime(str(p), (new_time, new_time))
 
-    # Sanity check: every target file mtime < every noise file mtime
+    # Sanity: total count exceeds MAX_TOTAL=20 so cap actually truncates
+    crystallized_root = store.roots.crystallized_root
+    all_md = list(crystallized_root.glob("*.md"))
+    assert len(all_md) == 33, (
+        f"Expected 33 crystallized files, got {len(all_md)}"
+    )
+
+    # Sanity: every target mtime < every noise mtime (mtime sort → targets last)
     for tf in target_paths:
         for nf in noise_paths:
             assert tf.stat().st_mtime < nf.stat().st_mtime, (
@@ -944,7 +964,25 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
                 f">= {nf.name} ({nf.stat().st_mtime})"
             )
 
-    # ── Phase 4: Mock index — zero FTS5 hits, no vector embedder ──────
+    # Sanity: every target record ID > every noise record ID alphabetically
+    # (rid sort → targets last).  Extract IDs from written file content.
+    def _rid_from_file(p):
+        text = p.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.startswith("id: "):
+                return line.split("id: ", 1)[1].strip()
+        return ""
+    noise_ids = [_rid_from_file(p) for p in noise_paths]
+    target_ids = [_rid_from_file(p) for p in target_paths]
+    max_noise_id = max(noise_ids)
+    for tid in target_ids:
+        assert tid > max_noise_id, (
+            f"ID precondition failed: target id {tid} <= max noise id "
+            f"{max_noise_id}. Targets must be written AFTER noise so their "
+            f"alphabetically-later IDs sort to the end in fallback paths."
+        )
+
+    # ── Phase 4: Mock index — zero FTS5 hits, no vector embedder ─────────
     class ZeroHitIndex:
         def search(self, _query, *, limit):
             return {"hits": []}
@@ -953,18 +991,18 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
     index = ZeroHitIndex()
     error_records: list = []
 
-    # ── Phase 5: Call _crystallized_lines ──────────────────────────────
+    # ── Phase 5: Call _crystallized_lines ─────────────────────────────────
     lines, degradation_level = _crystallized_lines(
         store, query="时间", index=index, error_records=error_records,
     )
 
-    # ── Assertion 1: degradation_level == 2 ───────────────────────────
+    # ── Assertion 1: degradation_level == 2 ──────────────────────────────
     assert degradation_level == 2, (
         f"deg_level: expected 2 (deterministic floor recall), got "
         f"{degradation_level}. error_records={error_records}"
     )
 
-    # ── Assertion 2: target records appear in output ──────────────────
+    # ── Assertion 2: target records appear in output ─────────────────────
     time_lines = [ln for ln in lines if "时间" in ln]
     assert len(time_lines) >= 3, (
         f"Floor recall FAILED: expected >=3 lines containing '时间', "
@@ -972,12 +1010,11 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
         + "\n".join(lines)
     )
 
-    # ── Assertion 3: target records ranked in the top-15 cap zone ─────
-    # The first 15 permanent entries survive MAX_PERMANENT.  All 3 target
-    # records must be among them — floor match score (1 vs 0) pushes their
-    # files to the front, and the recurrence-sort tiebreak preserves the
-    # ordering (targets written first → earlier timestamps → earlier ids).
-    top_section = lines[:15]  # MAX_PERMANENT cap zone
+    # ── Assertion 3: all 3 targets in the top-15 permanent cap zone ──────
+    # MAX_PERMANENT=15 — only the first 15 permanent entries survive.
+    # Floor match scoring (>=1 for targets, 0 for noise) must push target
+    # files to the front so their entries land in this zone.
+    top_section = lines[:15]
     top_time_count = sum(1 for ln in top_section if "时间" in ln)
     assert top_time_count >= 3, (
         f"Ranking FAILED: only {top_time_count}/3 '时间' records in top-15 "
@@ -985,23 +1022,57 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
         f"silently dropped.  Lines:\n" + "\n".join(lines[:20])
     )
 
-    # ── Assertion 4: adversarial — target files at mtime positions >= 15 ──
-    # This is the control check: prove that pure mtime sort would lose
-    # the target records.  If this assertion fails, the test setup is
-    # wrong (target files have mtime that's too recent, so they'd survive
-    # even without floor recall — making the test meaningless).
-    crystallized_root = store.roots.crystallized_root
-    mtime_sorted = sorted(
-        list(crystallized_root.glob("*.md")),
-        key=lambda p: p.stat().st_mtime, reverse=True,
-    )
+    # ── Assertion 4: target records rank BEFORE noise records ────────────
+    # Floor match must not just include targets — it must promote them above
+    # noise.  Find the first and last occurrence of "时间" and verify the
+    # last target still appears before the first noise-dominated zone.
+    # Since noise bodies don't contain "时间", any line without "时间" is
+    # noise (or provisional placeholder — but there are none here).
+    first_noise_idx = None
+    last_target_idx = None
+    for idx, ln in enumerate(lines):
+        if "时间" in ln:
+            last_target_idx = idx
+        elif first_noise_idx is None:
+            first_noise_idx = idx
+    # It's possible the first few lines are all targets (if first_noise_idx
+    # is after all targets), which is expected.  Check that all targets
+    # precede the noise-dominated tail.
+    if first_noise_idx is not None and last_target_idx is not None:
+        assert last_target_idx < len(lines) - 5, (
+            f"Floor match ordering FAILED: last target at index {last_target_idx}, "
+            f"but expected targets to rank before noise tail. "
+            f"Lines:\n" + "\n".join(lines)
+        )
+
+    # ── Assertion 5: adversarial mtime check ─────────────────────────────
+    # Prove that pure mtime sort would lose the target records.  All target
+    # files must be at mtime position >= 15 (below the permanent cap line).
+    mtime_sorted = sorted(all_md, key=lambda p: p.stat().st_mtime, reverse=True)
     mtime_positions = {mtime_sorted[i].name: i for i in range(len(mtime_sorted))}
     for tf in target_paths:
         pos = mtime_positions[tf.name]
         assert pos >= 15, (
-            f"ADVERSARIAL CHECK: target file {tf.name} at mtime position {pos} "
-            f"(should be >=15 to prove mtime-only sort would cut it).  "
-            f"Test setup is wrong — target files have too-recent mtime."
+            f"ADVERSARIAL CHECK (mtime): target file {tf.name} at mtime "
+            f"position {pos} (should be >=15 to prove mtime-only sort would "
+            f"cut it).  Test setup is wrong — target files have too-recent mtime."
+        )
+
+    # ── Assertion 6: adversarial rid check ───────────────────────────────
+    # Prove that pure rid-alphabetical sort would also lose the targets.
+    # Since targets were written LAST, their IDs are alphabetically later
+    # than all noise IDs.  In any sort keyed by rid (including the level-1
+    # recurrence sort where (-recurrence=0, rid) reduces to rid), targets
+    # sort to positions 30-32 (the last 3 out of 33).
+    rid_sorted = sorted(all_md, key=lambda p: _rid_from_file(p))
+    rid_positions = {rid_sorted[i].name: i for i in range(len(rid_sorted))}
+    for tf in target_paths:
+        pos = rid_positions[tf.name]
+        assert pos >= 30, (
+            f"ADVERSARIAL CHECK (rid): target file {tf.name} at rid position "
+            f"{pos} (should be >=30, i.e. last 3 of 33, to prove rid-only sort "
+            f"would cut it).  Test setup is wrong — targets have unexpectedly "
+            f"early IDs for their write order."
         )
 
 

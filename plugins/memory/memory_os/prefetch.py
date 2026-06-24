@@ -1239,14 +1239,17 @@ def _crystallized_lines(
     # Sort provisional entries: closest expiry first
     provisional_entries.sort(key=lambda e: e[0])
 
-    # ── Permanent recurrence baseline (degradation only) ─────────────
-    # When FTS5+vector both returned zero hits (degradation_level >= 1),
-    # sort all permanent entries by recurrence descending so the most-
-    # recurrent records survive the per-class cap (MAX_PERMANENT=15).
-    # This prevents high-recurrence core memories from being dropped by
-    # the cap when query-aware ranking is unavailable or degraded.
+    # ── Permanent recurrence baseline (mtime fallback only) ───────────
+    # At degradation_level=1 (empty query, pure recency), sort permanent
+    # entries by recurrence descending so the most-recurrent records
+    # survive the per-class cap (MAX_PERMANENT=15).  This prevents high-
+    # recurrence core memories from being dropped when query-aware ranking
+    # is unavailable.
+    # At degradation_level=2 (deterministic floor recall), the floor match
+    # file ordering is preserved — recurrence sort would override the
+    # query-aware substring-match ordering and defeat floor recall.
     # Reorder-only — does not expand the cap.
-    if degradation_level >= 1 and permanent_entries:
+    if degradation_level == 1 and permanent_entries:
         permanent_entries.sort(key=lambda e: (-e[2], e[0]))
 
     # ── Apply caps and track seen only for surviving records ──────

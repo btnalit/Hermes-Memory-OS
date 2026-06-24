@@ -234,14 +234,13 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
   7. **(LOW) `_floor_match_score()` O(N×T×B) 无文档** → docstring 增加复杂度说明及适用场景(仅真降级路径,生产 N 小,body 几 KB)
   8. **(LOW) `_FAST_PATH_CHINESE_KEYWORDS` 与 `_CHINESE_TOPIC_KEYWORDS` 关键字集分歧** → 注释说明两者服务不同目的(查询路由 vs 话题切换检测),分歧是刻意设计
 
-- [x] **INV-5 核心场景反证测试** — `d04f2ab`:针对确定性地板召回的专项反证测试(TRAP-04 补洞——落地不带反证测试):
-  - `test_floor_match_score_returns_token_match_count` — 单元测试:token 子串匹配计分
-  - `test_floor_match_score_zero_when_no_tokens_match` — 单元测试:零分边界
-  - `test_floor_match_score_body_cache_avoids_double_io` — 单元测试:body_cache 避免双读
-  - `test_tokenize_for_floor_match_dedup_and_includes_full_query` — 单元测试:tokenizer 去重+全查询 token
-  - **`test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut`** — 核心反证测试:复刻真实场景——库里 20 条结晶,3 条 body 含"时间"但 mtime 靠后,17 条噪声 mtime 靠前;FTS5 返回零命中+向量关;query="时间"。断言:(1)degradation_level==2 激活地板;(2)3 条"时间"记录出现在输出中;(3)排在前 15 的永久 cap 区内;(4)反证:含"时间"的文件在 mtime 排序中位于 ≥15 位,证明纯 mtime 会截掉它们。**如果有人移除地板逻辑/改排序方向/破坏 tokenizer,此测试 MUST FAIL。**
-  - `test_deterministic_floor_recall_header_annotation` — 集成测试:验证 `build_prefetch` 输出的 "deterministic floor recall" 标注
-  - 注:当前 recurrence sort(`degradation_level>=1 → sort by (-recurrence, rid)`)对永久记录(recurrence 恒为 0)按 id 字母序重排,地板匹配的文件排序被 recurrence sort 的 rid 平局打破覆盖——target 先写(timestamp 更早→id 字母序更小)才能保持排序一致。此行为已知且可接受(高 recurrence 记录优先,同 recurrence 下 timestamp 顺序自然保持),但未充分文档化;中期路线图中地板作为第三条 RRF lane 可消除此耦合。
+- [x] **INV-5 核心场景反证测试** — `d04f2ab` + 修复:`d04f2ab` 的原版核心反证测试被证实为**假反证**(TRAP-04 升级版——带测试、测试 PASS、但测试不咬):
+  - **假反证根因(双重抵消)**:(1)20 条记录 ≤ MAX_TOTAL=20 → cap 永不截断;(2)target 先写(id 字母序最小)→ recurrence sort `(-recurrence=0, rid)` 在 level>=1 时天然把 target 排最前,地板逻辑完全被绕过。验证:禁用地板子串打分 → 测试仍然 PASS。
+  - **修复(代码层)**:`prefetch.py:1249` `degradation_level >= 1` → `degradation_level == 1`,recurrence sort 不再覆盖 level=2 的地板文件排序
+  - **修复(测试层)**:重写核心反证测试——30 条噪声先写(id 小、mtime 新)+ 3 条 target 后写(id 大、mtime 老),共 33 条 > MAX_TOTAL=20。mtime 排序和 rid 排序都把 target 排末尾(位 30-32),只有地板子串匹配能把它们拉进前 15。新增断言 4(target 排在噪声前,地板真把它推上去了)+ 断言 6(rid 位置反证 ≥30)
+  - **验证**:禁用地板逻辑 → 测试 FAIL ✓;启用地板逻辑 → 测试 PASS ✓
+  - 其他 5 条辅助测试不变(`test_floor_match_score_*`, `test_tokenize_for_floor_match_*`, `test_deterministic_floor_recall_header_annotation`)
+  - 注:这是系统化调试的铁律例证——不是"测试 PASS=安心",而是"你能确认移掉被测逻辑后测试必然红吗?"
 
 ---
 
@@ -268,9 +267,9 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
   - 已知局限:地板仅在 FTS5 零命中时触发;中期路线图:地板作为第三条 RRF lane 实现并行融合
 - **代码审查修复 (8 findings)**:8/8 ✅ 全部修复(HIGH=2, MEDIUM=2, LOW=4)
   - 3 文件变动的轻量修复,无架构变更
-- **INV-5 核心场景反证测试**:6/6 ✅ (4 单元 + 1 核心反证 + 1 集成)
-  - 补上 TRAP-04 缺口——核心功能落地带专项反证,测试咬死地板路径
-  - 复刻真实场景:搜"时间",FTS5 零命中,地板靠子串找回,反证验证 mtime 排序会截掉
+- **INV-5 核心场景反证测试**:6/6 ✅ (4 单元 + 1 核心反证 + 1 集成) → 后修复为**真·反证**
+  - 原版假反证已被发现并修复(TRAP-04 升级版:测试 PASS 但不咬)
+  - 修复后:禁用地板 → 测试 MUST FAIL;启用地板 → PASS。反证真正成立。
 
 ## 一句话
-五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)+ INV-5 反证测试(6/6 ✅)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
+五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)+ INV-5 反证测试(6/6 ✅,已修复为真·反证)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
