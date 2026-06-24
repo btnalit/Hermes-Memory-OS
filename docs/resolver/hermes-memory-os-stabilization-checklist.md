@@ -234,6 +234,15 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
   7. **(LOW) `_floor_match_score()` O(N×T×B) 无文档** → docstring 增加复杂度说明及适用场景(仅真降级路径,生产 N 小,body 几 KB)
   8. **(LOW) `_FAST_PATH_CHINESE_KEYWORDS` 与 `_CHINESE_TOPIC_KEYWORDS` 关键字集分歧** → 注释说明两者服务不同目的(查询路由 vs 话题切换检测),分歧是刻意设计
 
+- [x] **INV-5 核心场景反证测试** — `d04f2ab`:针对确定性地板召回的专项反证测试(TRAP-04 补洞——落地不带反证测试):
+  - `test_floor_match_score_returns_token_match_count` — 单元测试:token 子串匹配计分
+  - `test_floor_match_score_zero_when_no_tokens_match` — 单元测试:零分边界
+  - `test_floor_match_score_body_cache_avoids_double_io` — 单元测试:body_cache 避免双读
+  - `test_tokenize_for_floor_match_dedup_and_includes_full_query` — 单元测试:tokenizer 去重+全查询 token
+  - **`test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut`** — 核心反证测试:复刻真实场景——库里 20 条结晶,3 条 body 含"时间"但 mtime 靠后,17 条噪声 mtime 靠前;FTS5 返回零命中+向量关;query="时间"。断言:(1)degradation_level==2 激活地板;(2)3 条"时间"记录出现在输出中;(3)排在前 15 的永久 cap 区内;(4)反证:含"时间"的文件在 mtime 排序中位于 ≥15 位,证明纯 mtime 会截掉它们。**如果有人移除地板逻辑/改排序方向/破坏 tokenizer,此测试 MUST FAIL。**
+  - `test_deterministic_floor_recall_header_annotation` — 集成测试:验证 `build_prefetch` 输出的 "deterministic floor recall" 标注
+  - 注:当前 recurrence sort(`degradation_level>=1 → sort by (-recurrence, rid)`)对永久记录(recurrence 恒为 0)按 id 字母序重排,地板匹配的文件排序被 recurrence sort 的 rid 平局打破覆盖——target 先写(timestamp 更早→id 字母序更小)才能保持排序一致。此行为已知且可接受(高 recurrence 记录优先,同 recurrence 下 timestamp 顺序自然保持),但未充分文档化;中期路线图中地板作为第三条 RRF lane 可消除此耦合。
+
 ---
 
 ## 边界声明(这份清单的"完"在哪)
@@ -259,6 +268,9 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
   - 已知局限:地板仅在 FTS5 零命中时触发;中期路线图:地板作为第三条 RRF lane 实现并行融合
 - **代码审查修复 (8 findings)**:8/8 ✅ 全部修复(HIGH=2, MEDIUM=2, LOW=4)
   - 3 文件变动的轻量修复,无架构变更
+- **INV-5 核心场景反证测试**:6/6 ✅ (4 单元 + 1 核心反证 + 1 集成)
+  - 补上 TRAP-04 缺口——核心功能落地带专项反证,测试咬死地板路径
+  - 复刻真实场景:搜"时间",FTS5 零命中,地板靠子串找回,反证验证 mtime 排序会截掉
 
 ## 一句话
-五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
+五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)+ INV-5 反证测试(6/6 ✅)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
