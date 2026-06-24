@@ -672,6 +672,22 @@ run_installer() {
   args+=("--hindsight" "${HINDSIGHT_MODE}")
   [[ "${DRY_RUN}" == "1" ]] && args+=("--dry-run")
 
+  # ── Auto-detect gateway Python for package installs ──────────────────
+  if [[ -z "${TARGET_PYTHON:-}" ]]; then
+    for _candidate in \
+      /usr/local/lib/hermes-agent/venv/bin/python \
+      /opt/hermes-agent/venv/bin/python; do
+      if [[ -x "${_candidate}" ]]; then
+        TARGET_PYTHON="${_candidate}"
+        break
+      fi
+    done
+  fi
+  if [[ -n "${TARGET_PYTHON:-}" && -x "${TARGET_PYTHON}" ]]; then
+    args+=("--target-python" "${TARGET_PYTHON}")
+    echo "  Detected gateway Python: ${TARGET_PYTHON}"
+  fi
+
   echo "Running installer:"
   printf '  %q' "${args[@]}"
   echo

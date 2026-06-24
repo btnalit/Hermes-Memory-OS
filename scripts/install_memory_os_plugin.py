@@ -308,6 +308,7 @@ def install_plugin(
     llm_judge_preset: str | None = None,
     systemd_dir: Path | None = None,
     hindsight_mode: str = "auto",
+    target_python: str = "",
     dry_run: bool = False,
     skip_verify: bool = False,
 ) -> dict[str, object]:
@@ -427,8 +428,8 @@ def install_plugin(
     llm_packages: dict[str, Any] = {}
     embedder_package: dict[str, Any] = {}
     if install_system_modules:
-        llm_packages = _ensure_llm_packages(dry_run=dry_run)
-        embedder_package = _ensure_embedder_package(dry_run=dry_run)
+        llm_packages = _ensure_llm_packages(dry_run=dry_run, target_python=target_python)
+        embedder_package = _ensure_embedder_package(dry_run=dry_run, target_python=target_python)
     owner_cron_onboarding_report: dict[str, object] = {}
     enabled = False
     enable_command: list[str] = []
@@ -712,99 +713,121 @@ def _validate_agent_source(source: Path) -> None:
         raise SystemExit(f"Memory-OS agent compatibility source is missing: {', '.join(missing)}")
 
 
-def _ensure_llm_packages(*, dry_run: bool = False) -> dict[str, Any]:
-    """Ensure openai and anthropic are importable; auto-install if missing.
+def _ensure_llm_packages(*, dry_run: bool = False, target_python: str = "") -> dict[str, Any]:
+    """Ensure openai and anthropic are importable for the gateway Python.
 
-    Returns a dict with per-package status so the caller can surface
-    warnings in the install report.
+    When *target_python* is empty, falls back to sys.executable.
     """
+    py_bin = str(target_python or "").strip() or sys.executable
     packages = {"openai": "openai", "anthropic": "anthropic"}
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {"target_python": py_bin}
     for import_name, pip_name in packages.items():
+        # Check importability in the target Python
         try:
-            importlib.import_module(import_name)
+            subprocess.run(
+                [py_bin, "-c", f"import {import_name}"],
+                check=True, capture_output=True, text=True, timeout=30,
+            )
             result[import_name] = {"available": True, "action": "already_installed"}
-        except ImportError:
-            if dry_run:
-                result[import_name] = {"available": False, "action": "would_install"}
-                print(
-                    f"memory-os-install: {pip_name} not found — would install on live run",
-                    file=sys.stderr,
-                )
-            else:
-                try:
-                    subprocess.run(
-                        [sys.executable, "-m", "pip", "install", pip_name],
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                    )
-                    importlib.import_module(import_name)
-                    result[import_name] = {"available": True, "action": "installed"}
-                except (subprocess.CalledProcessError, ImportError) as exc:
-                    result[import_name] = {
-                        "available": False,
-                        "action": "install_failed",
-                        "error": str(exc)[:200],
-                    }
-                    print(
-                        f"memory-os-install: WARNING — failed to install {pip_name}: "
-                        f"{str(exc)[:200]}\n"
-                        f"  fact_judge cron lane will produce judge_empty_response "
-                        f"without {import_name}",
-                        file=sys.stderr,
-                    )
+            continue
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+            pass
+
+        if dry_run:
+            result[import_name] = {"available": False, "action": "would_install"}
+            print(
+                f"memory-os-install: {pip_name} not found for {py_bin} — would install on live run",
+                file=sys.stderr,
+            )
+            continue
+
+        try:
+            subprocess.run(
+                [py_bin, "-m", "pip", "install", pip_name],
+                check=True, capture_output=True, text=True, timeout=300,
+            )
+            result[import_name] = {"available": True, "action": "installed"}
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+            result[import_name] = {
+                "available": False,
+                "action": "install_failed",
+                "error": str(exc)[:200],
+            }
+            print(
+                f"memory-os-install: WARNING — failed to install {pip_name} "
+                f"for {py_bin}: {str(exc)[:200]}\n"
+                f"  fact_judge cron lane will produce judge_empty_response "
+                f"without {import_name}",
+                file=sys.stderr,
+            )
     return result
 
 
-def _ensure_embedder_package(*, dry_run: bool = False) -> dict[str, Any]:
-    """Ensure sentence-transformers is importable for vector retrieval lane.
+def _ensure_embedder_package(*, dry_run: bool = False, target_python: str = "") -> dict[str, Any]:
+    """Ensure sentence-transformers is importable for the gateway Python.
 
     The vector retrieval lane is optional and knob-gated (default OFF).
     When sentence-transformers is not installed, the lane degrades
     gracefully to pure FTS5 — no loss of functionality, just no semantic
     search enrichment.
 
-    Returns a dict with package status for the install report.
+    *target_python* is the Python binary that the Hermes gateway uses.
+    When empty, falls back to sys.executable (the Python running this
+    installer).  On hosts where the gateway runs in its own venv, pass
+    the venv Python so packages land in the right environment.
     """
     pip_name = "sentence-transformers"
     import_name = "sentence_transformers"
-    result: dict[str, Any] = {}
+    py_bin = str(target_python or "").strip() or sys.executable
+    result: dict[str, Any] = {"target_python": py_bin}
+
+    # ── Check importability in the target Python ───────────────────────
     try:
-        importlib.import_module(import_name)
-        result = {"available": True, "action": "already_installed"}
-    except ImportError:
-        if dry_run:
-            result = {"available": False, "action": "would_install"}
-            print(
-                f"memory-os-install: {pip_name} not found — would install on live run\n"
-                f"  (optional: vector retrieval lane stays at pure FTS5 without it)",
-                file=sys.stderr,
-            )
-        else:
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", pip_name],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                importlib.import_module(import_name)
-                result = {"available": True, "action": "installed"}
-            except (subprocess.CalledProcessError, ImportError) as exc:
-                result = {
-                    "available": False,
-                    "action": "install_failed",
-                    "error": str(exc)[:200],
-                }
-                print(
-                    f"memory-os-install: WARNING — failed to install {pip_name}: "
-                    f"{str(exc)[:200]}\n"
-                    f"  Vector retrieval lane will stay at pure FTS5 (INV-5 floor).\n"
-                    f"  This is normal — the lane is optional and knob-gated default OFF.",
-                    file=sys.stderr,
-                )
-    return result
+        subprocess.run(
+            [py_bin, "-c", f"import {import_name}"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        result.update({"available": True, "action": "already_installed"})
+        return result
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    if dry_run:
+        result.update({"available": False, "action": "would_install"})
+        print(
+            f"memory-os-install: {pip_name} not found for {py_bin} — would install on live run\n"
+            f"  (optional: vector retrieval lane stays at pure FTS5 without it)",
+            file=sys.stderr,
+        )
+        return result
+
+    # ── pip install into the target Python ────────────────────────────
+    try:
+        subprocess.run(
+            [py_bin, "-m", "pip", "install", pip_name],
+            check=True, capture_output=True, text=True, timeout=300,
+        )
+        subprocess.run(
+            [py_bin, "-c", f"import {import_name}"],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        result.update({"available": True, "action": "installed"})
+        return result
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        result.update({
+            "available": False,
+            "action": "install_failed",
+            "error": str(exc)[:200],
+        })
+        print(
+            f"memory-os-install: WARNING — failed to install {pip_name} "
+            f"for {py_bin}: {str(exc)[:200]}\n"
+            f"  Vector retrieval lane will stay at pure FTS5 (INV-5 floor).\n"
+            f"  This is normal — the lane is optional and knob-gated default OFF.\n"
+            f"  To install manually: {py_bin} -m pip install {pip_name}",
+            file=sys.stderr,
+        )
+        return result
 
 
 def _systemctl_available() -> bool:
@@ -1673,6 +1696,15 @@ def main() -> int:
     parser.add_argument("--expression-feedback-schedule", default="0 5 * * 0", help="Right-brain expression feedback cron schedule")
     parser.add_argument("--memory-sources-feedback-schedule", default="30 10 * * *", help="MemorySources feedback cron schedule")
     parser.add_argument(
+        "--target-python",
+        default="",
+        help=(
+            "Python binary for the Hermes gateway runtime. "
+            "Packages (sentence-transformers, openai, anthropic) are installed "
+            "for this Python. When empty, defaults to the Python running this installer."
+        ),
+    )
+    parser.add_argument(
         "--deep-reflection-preset",
         choices=sorted(DEEP_REFLECTION_PRESETS),
         help=(
@@ -1746,6 +1778,7 @@ def main() -> int:
         deep_reflection_preset=args.deep_reflection_preset,
         memory_sources_preset=args.memory_sources_preset,
         llm_judge_preset=args.llm_judge_preset,
+        target_python=getattr(args, "target_python", "") or "",
         hindsight_mode=args.hindsight,
         dry_run=args.dry_run,
         skip_verify=args.skip_verify,
