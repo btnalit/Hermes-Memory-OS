@@ -37,6 +37,7 @@ from .memory_sources import (
 )
 from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
+from .jsonl_io import build_error_record
 from .store import MemoryOSStore
 from .candidate_clusters import (
     candidate_cluster_action_target,
@@ -5145,8 +5146,22 @@ def _rendered_digest_text(
                             lines.append("")
                 finally:
                     conn.close()
-        except Exception:
-            pass  # fail-open: edge digest must not break main digest
+        except Exception as exc:
+            # fail-open: edge digest must not break main digest
+            try:
+                _append_jsonl(
+                    store.roots.memory_os_root / "system" / "error_records.jsonl",
+                    build_error_record(
+                        component="owner_actions._rendered_digest_text",
+                        operation="edge_digest_query",
+                        error_code="edge_digest_query_failed",
+                        severity="warn",
+                        recoverable=True,
+                        details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+                    ),
+                )
+            except Exception:
+                pass
 
     final_overview = _rendered_overview_lines(
         counts or {},
