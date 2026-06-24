@@ -1594,8 +1594,20 @@ def _indexed_lines(
                 )
             )
         return []
+    hits = result.get("hits", [])
+    if not hits and search_query.strip() and error_records is not None:
+        error_records.append(
+            build_error_record(
+                component="prefetch._indexed_lines",
+                operation="fts5_empty_on_query",
+                error_code="prefetch_indexed_search_empty",
+                severity="warn",
+                recoverable=True,
+                details={"message": "FTS5 returned zero indexed hits for non-empty query — possible stale/missing FTS index"},
+            )
+        )
     lines: list[str] = []
-    for hit in result.get("hits", []):
+    for hit in hits:
         if not isinstance(hit, dict):
             continue
         record_type = str(hit.get("record_type", ""))
