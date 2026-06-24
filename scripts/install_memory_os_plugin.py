@@ -730,7 +730,7 @@ def _ensure_llm_packages(*, dry_run: bool = False, target_python: str = "") -> d
             )
             result[import_name] = {"available": True, "action": "already_installed"}
             continue
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
         if dry_run:
@@ -752,7 +752,7 @@ def _ensure_llm_packages(*, dry_run: bool = False, target_python: str = "") -> d
                 check=True, capture_output=True, text=True, timeout=30,
             )
             result[import_name] = {"available": True, "action": "installed"}
-        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
             result[import_name] = {
                 "available": False,
                 "action": "install_failed",
@@ -794,7 +794,7 @@ def _ensure_embedder_package(*, dry_run: bool = False, target_python: str = "") 
         )
         result.update({"available": True, "action": "already_installed"})
         return result
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError):
         pass
 
     if dry_run:
@@ -818,7 +818,7 @@ def _ensure_embedder_package(*, dry_run: bool = False, target_python: str = "") 
         )
         result.update({"available": True, "action": "installed"})
         return result
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
         result.update({
             "available": False,
             "action": "install_failed",

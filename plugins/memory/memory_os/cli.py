@@ -157,7 +157,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "index_counts": index_counts,
         "index_health": _index_health_summary(store, store_counts, index_counts),
         "prefetch_mode": prefetch_mode,
-        "vector_available": _check_vector_available(),
+        "vector_available": _check_vector_available(),  # import-only check (no model load); provider's tool_status reports full embedder readiness
         "continuity_selector": continuity_selector_report(store),
         "queue_backlog": 0,
         "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import unicodedata
@@ -69,6 +70,9 @@ _ASCII_ENTITY_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{1,}|[A-Z0-9_-]{2,}")
 _FAST_PATH_CHINESE_KEYWORDS = (
     # Generic ops / content words — deliberately excludes:
     #   - project-internal terms (e.g. 提案/治理/证据/结晶/候选/索引/会话)
+    #     NOTE: these same terms appear in _CHINESE_TOPIC_KEYWORDS in __init__.py
+    #     for task-continuity detection — the two lists serve different purposes
+    #     (query routing vs. topic-change detection) and are intentionally divergent.
     #   - question / stop words (those go through slow_path full-query search)
     "报错",
     "错误",
@@ -544,6 +548,8 @@ def _build_prefetch_sections(
 
 
 def _section_source_class(title: str) -> str:
+    # Strip degradation annotation suffix (e.g. "Crystallized Memory (deterministic floor recall)")
+    base_title = title.split(" (")[0] if " (" in title else title
     mapping = {
         "Current Foreground Task": "foreground",
         "Recall Clarification Guard": "recall_guard",
@@ -560,7 +566,7 @@ def _section_source_class(title: str) -> str:
         "Related Memory": "graph_layer",
         "Diagnostic Grounding": "diagnostic",
     }
-    return mapping.get(title, "other")
+    return mapping.get(base_title, "other")
 
 
 def _section_metadata(title: str) -> dict[str, Any]:
@@ -755,6 +761,7 @@ def _recall_clarification_guard_lines(
     ]
 
 
+@functools.lru_cache(maxsize=4)
 def plan_query_route(
     query: str,
     *,
@@ -809,6 +816,7 @@ def set_fast_path_keywords(keywords: list[str] | None) -> None:
     """
     global _fast_path_keywords_override
     _fast_path_keywords_override = keywords
+    plan_query_route.cache_clear()
 
 
 def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: list[str]) -> None:
@@ -972,20 +980,33 @@ def _tokenize_for_floor_match(query: str) -> list[str]:
     return result
 
 
-def _floor_match_score(path: Path, tokens: list[str]) -> int:
+def _floor_match_score(path: Path, tokens: list[str], *, body_cache: dict[Path, str] | None = None) -> int:
     """Score a crystallized .md file by how many tokens appear in its body.
 
     Each distinct token that appears as a substring in the file body
     contributes 1 point.  The score is an integer ≥ 0 — higher = more
     relevant.  Pure deterministic computation: no LLM, no network, no
     external dependency.
+
+    Complexity: O(N_body * |tokens|) per file — Python substring ``in``
+    on the full file body.  Acceptable because (a) crystallized records
+    are typically small (few KB each), (b) N is bounded by the file count
+    (usually single digits in production), and (c) this only fires in the
+    true fallback path (FTS5+vector both returned zero hits).
+
+    If *body_cache* is provided, body lookups use the pre-read cache
+    to avoid duplicate disk I/O when the caller also needs the raw body
+    for line-building.
     """
     if not tokens:
         return 0
-    try:
-        body = path.read_text(encoding="utf-8").casefold()
-    except Exception:
-        return 0
+    if body_cache is not None and path in body_cache:
+        body = body_cache[path].casefold()
+    else:
+        try:
+            body = path.read_text(encoding="utf-8").casefold()
+        except Exception:
+            return 0
     score = 0
     for token in tokens:
         if token in body:
@@ -1138,11 +1159,18 @@ def _crystallized_lines(
     #     records first so the cap truncates non-matches from the bottom
     #   - level 1 (empty query / pure recency): sort by mtime descending
     paths = list(store.roots.crystallized_root.glob("*.md"))
+    # Pre-read cache for degradation floor path — avoids double file I/O
+    # (the same bodies serve both floor-match sorting and line-building).
+    body_cache: dict[Path, str] = {}
     if degradation_level == 2:
-        # Deterministic floor recall — score every file against query tokens
         floor_tokens = _tokenize_for_floor_match(search_query)
         if floor_tokens:
-            paths.sort(key=lambda p: _floor_match_score(p, floor_tokens), reverse=True)
+            for p in paths:
+                try:
+                    body_cache[p] = p.read_text(encoding="utf-8")
+                except Exception:
+                    body_cache[p] = ""
+            paths.sort(key=lambda p: _floor_match_score(p, floor_tokens, body_cache=body_cache), reverse=True)
         else:
             paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     elif relevant_ids is None:
@@ -1150,10 +1178,15 @@ def _crystallized_lines(
     else:
         paths.sort()
     for path in paths:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except Exception:
-            continue
+        # Use pre-read body from degradation floor path if available,
+        # otherwise read from disk (normal FTS5/recency path).
+        if body_cache and path in body_cache:
+            content = body_cache[path]
+        else:
+            try:
+                content = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
         for frontmatter, body in _parse_markdown_records(content):
             if not is_active_crystallized_frontmatter(frontmatter):
                 continue
@@ -1206,13 +1239,13 @@ def _crystallized_lines(
     # Sort provisional entries: closest expiry first
     provisional_entries.sort(key=lambda e: e[0])
 
-    # ── Permanent core baseline (degradation only) ──────────────────
+    # ── Permanent recurrence baseline (degradation only) ─────────────
     # When FTS5+vector both returned zero hits (degradation_level >= 1),
-    # ensure the top-N permanent records by recurrence appear in the output.
-    # This prevents high-recurrence core memories from being dropped by the
-    # cap when the query-aware ranking is unavailable or degraded.
+    # sort all permanent entries by recurrence descending so the most-
+    # recurrent records survive the per-class cap (MAX_PERMANENT=15).
+    # This prevents high-recurrence core memories from being dropped by
+    # the cap when query-aware ranking is unavailable or degraded.
     # Reorder-only — does not expand the cap.
-    PERMANENT_BASELINE_N = 5
     if degradation_level >= 1 and permanent_entries:
         permanent_entries.sort(key=lambda e: (-e[2], e[0]))
 
@@ -1949,7 +1982,8 @@ def _next_budget_drop_index(sections: list[tuple[str, list[str]]], kept: list[bo
 
 def _budget_keep_priority(title: str) -> int:
     """Higher value means survive budget pressure longer."""
-
+    # Strip degradation annotation suffix (e.g. "Crystallized Memory (deterministic floor recall)")
+    base_title = title.split(" (")[0] if " (" in title else title
     priorities = {
         "Identity Memory": 10,
         "Continuity Bridge": 20,
@@ -1967,7 +2001,7 @@ def _budget_keep_priority(title: str) -> int:
         "Diagnostic Grounding": 120,
         "Current Memory-OS Runtime Facts": 130,
     }
-    return priorities.get(title, 50)
+    return priorities.get(base_title, 50)
 
 
 def _clip(value: str, limit: int) -> str:
