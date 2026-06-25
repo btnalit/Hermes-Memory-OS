@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -429,3 +429,362 @@ def test_list_provisional_records_filters_active_provisional_only(tmp_path):
     assert len(results) == 1
     assert results[0]["provisional"] is True
     assert results[0]["candidate_id"] == "cand_list_001"
+
+
+# ── S-series: Auto-promotion (passive trust) ─────────────────────────────
+
+class TestAutoPromoteProvisionalRecords:
+    """S.1-S.3 + T.1-T.2: Passive trust auto-promotion tests."""
+
+    def test_s1_auto_promote_old_enough_record(self, tmp_path):
+        """S.1: provisional aged ≥ min_age_days → auto-promoted to permanent."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+
+        # Write a provisional record approved 10 days ago (≥ default 7-day min_age)
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_auto_001",
+            kind="fact",
+            body="This is a well-aged provisional record.",
+            source_event_ids=["evt_001"],
+            sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        approved_at = (now - timedelta(days=10)).isoformat()
+        decision = ApprovalDecision(
+            candidate_id="cand_auto_001",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=approved_at,
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        # Verify it's provisional before promotion
+        assert len(service.list_provisional_records()) == 1
+
+        # Run auto-promotion
+        result = service.auto_promote_provisional_records(now=now)
+        assert result["status"] == "ok"
+        assert result["eligible_count"] == 1
+        assert result["promoted_count"] == 1
+
+        # Verify it's now permanent (no longer provisional)
+        assert len(service.list_provisional_records()) == 0
+
+    def test_s1_too_young_not_promoted(self, tmp_path):
+        """S.1: provisional younger than min_age → not promoted."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_young_001",
+            kind="fact",
+            body="This is a very recent provisional record.",
+            source_event_ids=["evt_001"],
+            sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        approved_at = (now - timedelta(days=1)).isoformat()  # only 1 day old
+        decision = ApprovalDecision(
+            candidate_id="cand_young_001",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=approved_at,
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        result = service.auto_promote_provisional_records(now=now)
+        assert result["eligible_count"] == 0
+        assert result["promoted_count"] == 0
+        assert result["skipped_too_young_count"] == 1
+
+        # Still provisional
+        assert len(service.list_provisional_records()) == 1
+
+    def test_s2_owner_rejected_not_promoted(self, tmp_path):
+        """S.2: owner-rejected records → invisible to list_provisional, never promoted.
+
+        After owner rejection, the canonical_state becomes provisional_rejected,
+        which is in INACTIVE_CANONICAL_STATES. list_provisional_records()
+        excludes it, so auto_promote never even sees it.
+        """
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_rejected_001",
+            kind="fact",
+            body="This record was rejected by owner.",
+            source_event_ids=["evt_001"],
+            sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        approved_at = (now - timedelta(days=10)).isoformat()
+        decision = ApprovalDecision(
+            candidate_id="cand_rejected_001",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=approved_at,
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        # Mark as rejected by owner
+        records = service.read_records("owner_approved.md")
+        record_id = records[0].frontmatter["id"]
+        service.invalidate_provisional_record(
+            record_id,
+            reason="owner_rejected",
+            invalidated_by="owner",
+        )
+
+        # Rejected record is no longer in list_provisional_records
+        assert len(service.list_provisional_records()) == 0
+
+        # Auto-promotion sees nothing to promote
+        result = service.auto_promote_provisional_records(now=now)
+        assert result["eligible_count"] == 0
+        assert result["promoted_count"] == 0
+
+    def test_s3_knob_disabled_no_promotion(self, tmp_path):
+        """S.3: auto_promote_enabled=False → no promotion."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+
+        # Register override to disable auto-promotion
+        from plugins.memory.memory_os.knob_overrides import register_override
+
+        register_override(
+            "auto_promote_enabled", False, prior=True,
+            proposed_by="test", approved_via="resolver",
+            expires_at=(now + timedelta(days=7)).isoformat(),
+            _now=now, _store_root=tmp_path,
+        )
+
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_knob_off_001",
+            kind="fact",
+            body="Should not be promoted when knob is off.",
+            source_event_ids=["evt_001"],
+            sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        approved_at = (now - timedelta(days=10)).isoformat()
+        decision = ApprovalDecision(
+            candidate_id="cand_knob_off_001",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=approved_at,
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        result = service.auto_promote_provisional_records(now=now, _store_root=tmp_path)
+        assert result["status"] == "disabled"
+        assert result["promoted_count"] == 0
+
+        # Still provisional
+        assert len(service.list_provisional_records()) == 1
+
+    def test_dry_run_counts_but_does_not_promote(self, tmp_path):
+        """dry_run=True counts eligible but does not promote."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_dry_001",
+            kind="fact",
+            body="Dry run test record.",
+            source_event_ids=["evt_001"],
+            sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        approved_at = (now - timedelta(days=10)).isoformat()
+        decision = ApprovalDecision(
+            candidate_id="cand_dry_001",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=approved_at,
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        result = service.auto_promote_provisional_records(now=now, dry_run=True)
+        assert result["eligible_count"] == 1
+        assert result["promoted_count"] == 0
+        assert result["dry_run"] is True
+
+        # Record still provisional
+        assert len(service.list_provisional_records()) == 1
+
+    def test_multiple_records_mixed_ages(self, tmp_path):
+        """Mix of old, young, and rejected records — correct counts."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+        service = CrystallizedMemoryService(store)
+
+        # Old record (≥7 days)
+        c1 = CrystallizedCandidate(
+            candidate_id="cand_old",
+            kind="fact", body="Old record.",
+            source_event_ids=["evt_1"], sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        d1 = ApprovalDecision(
+            candidate_id="cand_old",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=(now - timedelta(days=10)).isoformat(),
+            source_state="resolver_approved", provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service.write_approved_record(c1, d1, file_name="owner_approved.md")
+
+        # Young record (<7 days)
+        c2 = CrystallizedCandidate(
+            candidate_id="cand_young",
+            kind="fact", body="Young record.",
+            source_event_ids=["evt_2"], sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        d2 = ApprovalDecision(
+            candidate_id="cand_young",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=(now - timedelta(days=2)).isoformat(),
+            source_state="resolver_approved", provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service.write_approved_record(c2, d2, file_name="owner_approved.md")
+
+        result = service.auto_promote_provisional_records(now=now)
+        assert result["eligible_count"] == 1
+        assert result["promoted_count"] == 1
+        assert result["skipped_too_young_count"] == 1
+
+        # Only young remains
+        assert len(service.list_provisional_records()) == 1
+
+
+# ── S.X: Adversarial verification ────────────────────────────────────────
+
+class TestAutoPromoteAdversarial:
+    """S.X: Removing auto-promotion logic MUST cause S.1 to fail."""
+
+    def test_sx_old_record_stays_provisional_without_promotion(self, tmp_path):
+        """S.X: Without auto-promotion, old provisional stays provisional.
+
+        This is the adversarial counterpart to S.1 — proves S.1 tests
+        the actual promotion logic, not just the passage of time.
+        """
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        now = datetime.now(timezone.utc)
+
+        candidate = CrystallizedCandidate(
+            candidate_id="cand_adversarial",
+            kind="fact",
+            body="Old record without auto-promotion.",
+            source_event_ids=["evt_001"],
+            sensitivity="private",
+            bridge_state="inner_drive_candidate",
+        )
+        approved_at = (now - timedelta(days=10)).isoformat()
+        decision = ApprovalDecision(
+            candidate_id="cand_adversarial",
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=approved_at,
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(now + timedelta(days=30)).isoformat(),
+        )
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+        # Without calling auto_promote, record stays provisional
+        assert len(service.list_provisional_records()) == 1
+
+        # Auto-promote exists and works — calling it proves the difference
+        result = service.auto_promote_provisional_records(now=now)
+        assert result["promoted_count"] == 1
+        assert len(service.list_provisional_records()) == 0

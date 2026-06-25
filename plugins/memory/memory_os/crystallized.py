@@ -606,6 +606,108 @@ class CrystallizedMemoryService:
                     })
         return results
 
+    def auto_promote_provisional_records(
+        self,
+        *,
+        now: datetime | None = None,
+        dry_run: bool = False,
+        _store_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Auto-promote provisional records that have lived long enough.
+
+        Passive trust model (S1 from source-gate spec): a provisional record
+        that has not been rejected by the owner and has been alive for
+        ≥ auto_promote_min_age_days is auto-confirmed to permanent.
+
+        Governance: reversible (invalidate), audited, owner can block via
+        auto_promote_enabled=False knob.
+        """
+        _now = _datetime(now)
+        from .knob_overrides import resolve_knob
+
+        enabled = resolve_knob("auto_promote_enabled", default=True, _store_root=_store_root)
+        if not enabled:
+            return {
+                "schema_version": "memory-os.auto_promote.v0",
+                "status": "disabled",
+                "reason": "knob auto_promote_enabled=False",
+                "eligible_count": 0,
+                "promoted_count": 0,
+                "skipped_rejected_count": 0,
+                "skipped_too_young_count": 0,
+            }
+
+        min_age_days = resolve_knob("auto_promote_min_age_days", default=7, _store_root=_store_root)
+        cutoff_dt = _now - timedelta(days=min_age_days)
+
+        eligible_count = 0
+        promoted_count = 0
+        skipped_rejected_count = 0
+        skipped_too_young_count = 0
+        error_records: list[dict[str, Any]] = []
+
+        for record in self.list_provisional_records():
+            record_id = str(record.get("id") or "")
+            if not record_id:
+                continue
+
+            # Never auto-promote owner-rejected records
+            canonical_state = str(record.get("canonical_state") or "")
+            if canonical_state == "provisional_rejected":
+                skipped_rejected_count += 1
+                continue
+
+            # Check age threshold
+            approved_at_str = str(record.get("approved_at") or "").strip()
+            if not approved_at_str:
+                skipped_too_young_count += 1
+                continue
+            try:
+                approved_dt = datetime.fromisoformat(approved_at_str)
+            except ValueError:
+                skipped_too_young_count += 1
+                continue
+
+            if approved_dt > cutoff_dt:
+                skipped_too_young_count += 1
+                continue
+
+            eligible_count += 1
+
+            if dry_run:
+                continue
+
+            try:
+                self.confirm_provisional_record(
+                    record_id,
+                    confirmed_by="auto_promote",
+                    now=_now,
+                )
+                promoted_count += 1
+            except Exception:
+                from .jsonl_io import build_error_record
+
+                error_records.append(
+                    build_error_record(
+                        component="crystallized.auto_promote",
+                        operation="confirm_provisional_record",
+                        error_code="CONFIRM_FAILED",
+                        severity="warn",
+                        recoverable=True,
+                    )
+                )
+
+        return {
+            "schema_version": "memory-os.auto_promote.v0",
+            "status": "ok" if not error_records else "partial",
+            "eligible_count": eligible_count,
+            "promoted_count": promoted_count if not dry_run else 0,
+            "skipped_rejected_count": skipped_rejected_count,
+            "skipped_too_young_count": skipped_too_young_count,
+            "dry_run": dry_run,
+            "error_records": error_records,
+        }
+
     def _ensure_crystallized_approval(
         self,
         candidate: CrystallizedCandidate,
