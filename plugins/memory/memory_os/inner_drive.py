@@ -55,26 +55,41 @@ _SOURCE_GATE_CJK_WEAK_MARKERS: frozenset[str] = frozenset({
 # is treated as a discourse connector (e.g. "好的" at start of reply).
 _SOURCE_GATE_WEAK_MARKER_MAX_LEN = 30
 
-_SOURCE_GATE_LATIN_MARKERS: frozenset[str] = frozenset({
-    "hello", "thanks", "show me",
-    "hi", "bye", "ok",
-    "show", "check", "run", "build", "test", "deploy",
+# ── Latin markers ──────────────────────────────────────────────────────
+# Split into strong (process/command — block in any segment) and weak
+# (acknowledgment/greeting — only block when user also has no substance).
+
+_SOURCE_GATE_STRONG_LATIN_MARKERS: frozenset[str] = frozenset({
+    # Process / command words
+    "show me", "show", "check", "run", "build", "test", "deploy",
     "push", "pull", "commit", "merge", "rebase",
     "look at", "take a look", "let me see",
-    "wait", "hold on", "one sec", "just a moment",
     "what is", "how to", "tell me about",
+    "wait", "hold on", "one sec", "just a moment",
 })
 
-# Pre-compiled word-boundary patterns for Latin markers
-_SOURCE_GATE_LATIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+_SOURCE_GATE_WEAK_LATIN_MARKERS: frozenset[str] = frozenset({
+    # Acknowledgments / greetings
+    "hello", "thanks", "hi", "bye", "ok",
+})
+
+# Pre-compiled word-boundary patterns
+_SOURCE_GATE_STRONG_LATIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(r"\b" + re.escape(m) + r"\b", re.IGNORECASE)
-    for m in _SOURCE_GATE_LATIN_MARKERS
+    for m in _SOURCE_GATE_STRONG_LATIN_MARKERS
 )
 
-# Layer B: compiled regex patterns for sentence-structure fragment detection.
-# These catch process/navigation/confirmation patterns that substring
-# matching alone would miss.
-_SOURCE_GATE_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+_SOURCE_GATE_WEAK_LATIN_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(r"\b" + re.escape(m) + r"\b", re.IGNORECASE)
+    for m in _SOURCE_GATE_WEAK_LATIN_MARKERS
+)
+
+# ── Layer B: regex sentence-structure patterns ─────────────────────────
+# Split into strong (process/navigation/command — block in any segment)
+# and weak (acknowledgment/confirmation — only block when user also has
+# no substance).
+
+_SOURCE_GATE_STRONG_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p)
     for p in [
         # Pure info requests
@@ -83,23 +98,71 @@ _SOURCE_GATE_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"搜一下.*",
         # Process confirmations
         r"(试试|试一下|感觉一下|感受一下|体验一下).*",
-        r".*(好不好|行不行|对不对|可不可以|能不能行)\s*$",
-        r".*(可以吗|行吗|对吗|好吗|怎么样)\s*$",
         # Navigation / commands
         r"打开.*(看看|页面|文件|项目|应用)",
         r"帮我.*(查|找|搜索|看看|打开|运行|部署|测试)",
-        # Ultra-short: single-character or very short inputs
-        r"^[嗯好行可哦噢]$",
+        # Ultra-short process words
         r"^(继续|稍等|等一下|马上|待会|好了|完了|搞定)$",
         # English short commands (word-anchored)
         r"^(show|check|run|build|test|deploy)(\s+me)?(\s+the\b)?\s*\w*\s*$",
         r"^(push|pull|commit|merge|rebase)(\s+\w+)?$",
         r"^(what is|how to|tell me about|look at|take a look)\s.*$",
-        r"^(wait|hold on|one sec|just a moment|got it|okay|ok|sure|thanks|thank you)\s*$",
+        r"^(wait|hold on|one sec|just a moment)\s*$",
+    ]
+)
+
+_SOURCE_GATE_WEAK_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p)
+    for p in [
+        # Confirmation questions
+        r".*(好不好|行不行|对不对|可不可以|能不能行)\s*$",
+        r".*(可以吗|行吗|对吗|好吗|怎么样)\s*$",
+        # Ultra-short single-char acknowledgments
+        r"^[嗯好行可哦噢]$",
+        # English acknowledgments
+        r"^(got it|okay|ok|sure|thanks|thank you)\s*$",
     ]
 )
 
 _SOURCE_GATE_SKIP_REASON = "source_gate:obvious_fragment"
+
+
+def _segment_is_weak_fragment(segment: str) -> bool:
+    """Check if a single segment is a fragment by *weak* markers only.
+
+    Used to determine whether the user segment has substance — weak markers
+    in the assistant segment cannot override a substantive user segment.
+
+    Returns True if the segment looks like just an acknowledgment/confirmation
+    with no real content.
+    """
+    if not segment or not segment.strip():
+        return True  # empty = fragment
+
+    seg_len = len(segment)
+
+    # Weak CJK markers (short segments only — long segments with
+    # embedded acknowledgment words like "好的，我觉得..." have substance).
+    if seg_len <= _SOURCE_GATE_WEAK_MARKER_MAX_LEN:
+        for marker in _SOURCE_GATE_CJK_WEAK_MARKERS:
+            if len(marker) >= 2 and marker in segment:
+                return True
+
+    # Weak Latin patterns (short segments only, same rationale as CJK).
+    if seg_len <= _SOURCE_GATE_WEAK_MARKER_MAX_LEN:
+        seg_lower = segment.lower()
+        for pattern in _SOURCE_GATE_WEAK_LATIN_PATTERNS:
+            if pattern.search(seg_lower):
+                return True
+
+    # Weak Layer B patterns (these already encode structural constraints
+    # like ^...$ anchoring — no additional length guard needed).
+    seg_lower = segment.lower()
+    for pattern in _SOURCE_GATE_WEAK_FRAGMENT_PATTERNS:
+        if pattern.search(seg_lower):
+            return True
+
+    return False
 
 
 def _is_obvious_fragment(summary: str) -> bool:
@@ -108,17 +171,15 @@ def _is_obvious_fragment(summary: str) -> bool:
     Returns True if the summary looks like an obvious fragment that should
     not enter the candidate queue. False = pass through to downstream gates.
 
-    Two-layer detection:
-      Layer A — substring (CJK) / word-boundary (Latin) marker match
-      Layer B — regex sentence-structure match
+    Two-phase detection with user-segment primacy:
+      Phase 1 (Strong): process/command patterns — any segment hit → block.
+        These are unambiguous process instructions where blocking is always correct.
+      Phase 2 (Weak): acknowledgment/confirmation patterns — only block if the
+        user segment ALSO has no substance. Assistant saying "好的"/"ok" should
+        NEVER override a user stating a technical decision.
 
     The _turn_summary format is "User: <clip180> | Assistant: <clip180>".
-    We extract both segments and check each independently — if EITHER
-    segment is a fragment, the whole turn is treated as a fragment.
-
-    Length guard for CJK markers: segments longer than
-    _SOURCE_GATE_MAX_FRAGMENT_SEGMENT_LEN chars are assumed to contain
-    substantive content — a marker hit there is just a discourse connector.
+    We extract both segments and check them independently.
 
     Fail-safe: ambiguous cases return False (allow through).
     """
@@ -138,32 +199,44 @@ def _is_obvious_fragment(summary: str) -> bool:
 
     segments = [s for s in (user_segment, assistant_segment) if s]
 
+    # ── Phase 1: Strong markers ──────────────────────────────────────
+    # Process/command patterns — any segment hit = block immediately.
+    # These are unambiguous: "帮我查", "更新部署看看", "show", "check", etc.
     for segment in segments:
-        seg_lower = segment.lower()
-        seg_len = len(segment)
-
-        # Layer A (CJK): substring match, two-tier.
-        # Tier 1 (strong): specific process phrases — flag unconditionally.
+        # Strong CJK markers — substring match
         for marker in _SOURCE_GATE_CJK_STRONG_MARKERS:
             if len(marker) >= 2 and marker in segment:
                 return True
-        # Tier 2 (weak): generic confirmations — only flag in very short
-        # segments where the marker IS the message, not a discourse prefix.
-        if seg_len <= _SOURCE_GATE_WEAK_MARKER_MAX_LEN:
-            for marker in _SOURCE_GATE_CJK_WEAK_MARKERS:
-                if len(marker) >= 2 and marker in segment:
-                    return True
 
-        # Layer A (Latin): word-boundary regex match.
-        # Prevents "hi" matching inside "architecture" or "wait" inside "await".
-        for pattern in _SOURCE_GATE_LATIN_PATTERNS:
+        seg_lower = segment.lower()
+
+        # Strong Latin patterns — word-boundary regex
+        for pattern in _SOURCE_GATE_STRONG_LATIN_PATTERNS:
             if pattern.search(seg_lower):
                 return True
 
-        # Layer B: regex sentence-structure
-        for pattern in _SOURCE_GATE_FRAGMENT_PATTERNS:
+        # Strong Layer B patterns — sentence-structure regex
+        for pattern in _SOURCE_GATE_STRONG_FRAGMENT_PATTERNS:
             if pattern.search(seg_lower):
                 return True
+
+    # ── Phase 2: Weak markers ────────────────────────────────────────
+    # Acknowledgments/confirmations — only block when BOTH segments are
+    # weak fragments (or the whole turn is extremely short).
+    #
+    # This is the key asymmetry fix: assistant saying "好的"/"ok" must
+    # not override user stating a technical decision. And conversely,
+    # a substantive assistant reply means the turn as a whole has value
+    # even when the user segment is just an acknowledgment.
+    #
+    # Rule: weak markers only cause a block if BOTH segments are weak
+    # fragments, or the whole turn is extremely short.
+
+    user_is_weak = _segment_is_weak_fragment(user_segment)
+    asst_is_weak = _segment_is_weak_fragment(assistant_segment) if assistant_segment else True
+
+    if user_is_weak and asst_is_weak:
+        return True  # both segments are weak → block
 
     return False
 

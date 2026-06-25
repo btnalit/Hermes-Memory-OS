@@ -410,10 +410,12 @@ class TestSourceGateFragmentDetection:
         assert decision.working_kind == "lingering"  # working still active
 
     def test_g6_user_fragment_in_substantive_turn(self):
-        """G.6: Fragment user-segment + substantive assistant → still fragment.
+        """G.6: Fragment user-segment + substantive assistant → allowed.
 
-        The user's message is a fragment even though the assistant replied
-        substantively. Either segment being a fragment → overall fragment.
+        The assistant's substantive reply means the turn as a whole has value,
+        even though the user segment is just an acknowledgment. Under the
+        corrected rule, weak markers only block when BOTH segments are weak
+        fragments — the assistant's substance salvages the turn.
         """
         decision = classify_event_for_inner_drive(
             _event(
@@ -421,13 +423,16 @@ class TestSourceGateFragmentDetection:
                 summary="User: 好的 | Assistant: PostgreSQL uses MVCC for concurrency control, which allows readers to not block writers",
             )
         )
-        assert decision.candidate_allowed is False
-        assert decision.skip_reason == "source_gate:obvious_fragment"
+        assert decision.candidate_allowed is True
+        assert decision.skip_reason == ""
 
     def test_g6_assistant_fragment_in_substantive_turn(self):
-        """G.6: Substantive user + fragment assistant → still fragment.
+        """G.6: Substantive user + fragment assistant → allowed (key fix).
 
-        Assistant's short confirmation doesn't salvage the turn.
+        The user stated a technical decision. The assistant's brief "ok"
+        is a normal conversational acknowledgment, not evidence that the
+        turn lacks value. User-segment primacy: assistant weak markers
+        MUST NOT override user knowledge.
         """
         decision = classify_event_for_inner_drive(
             _event(
@@ -435,8 +440,35 @@ class TestSourceGateFragmentDetection:
                 summary="User: We need to implement a distributed lock using Redis Redlock algorithm | Assistant: ok",
             )
         )
-        assert decision.candidate_allowed is False
-        assert decision.skip_reason == "source_gate:obvious_fragment"
+        assert decision.candidate_allowed is True
+        assert decision.skip_reason == ""
+
+    def test_g6_cjk_weak_marker_in_assistant_allowed(self):
+        """G.6: CJK weak marker ("好的") in assistant + knowledge in user → allowed.
+
+        This is the exact scenario Opus 4.8 identified:
+        "User: 我决定用PostgreSQL做主库 | Assistant: 好的"
+        The user made a technical decision — assistant's "好的" must not block it.
+        """
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 我决定用PostgreSQL做主库 | Assistant: 好的",
+            )
+        )
+        assert decision.candidate_allowed is True
+        assert decision.skip_reason == ""
+
+    def test_g6_cjk_weak_marker_in_assistant_allowed_2(self):
+        """G.6: CJK weak marker ("收到") in assistant + knowledge in user → allowed."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 后端用Go，前端用React，数据库用PostgreSQL | Assistant: 收到",
+            )
+        )
+        assert decision.candidate_allowed is True
+        assert decision.skip_reason == ""
 
     def test_g6_both_substantive_allowed(self):
         """G.6: Both segments substantive → candidate_allowed=True."""
