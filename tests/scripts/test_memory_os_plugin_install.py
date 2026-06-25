@@ -966,6 +966,67 @@ def test_install_shell_exposes_one_command_operational_product_install():
     assert "--run-owner-cron-onboarding" in text
 
 
+def test_d2_verify_install_fail_loud_structure():
+    """D2 smoke: verify_install must exit non-zero when core timers are absent.
+
+    This is a structural guard — it doesn't execute the shell script (which
+    requires systemctl and Hermes binaries), but verifies the critical D2
+    invariants are present in the source so regressions are caught at review
+    time. If someone accidentally removes exit 1 or the is-active/is-enabled
+    dual checks, this test fails.
+    """
+    text = Path("scripts/install_memory_os.sh").read_text(encoding="utf-8")
+
+    # Locate the verify_install function body
+    func_start = text.find("verify_install() {")
+    assert func_start != -1, "verify_install function not found"
+    # Find the closing } that ends the function (matching brace on its own line)
+    func_body = text[func_start:text.find("\n}\n", func_start)]
+
+    # ── D2.1: fail-loud — exit 1 must be the only exit in the function ──
+    assert "exit 1" in func_body, (
+        "D2 fail-loud: verify_install must exit 1 on core component failures"
+    )
+
+    # ── D2.2: early-return guard for --skip-verify and --dry-run ──
+    assert "${SKIP_VERIFY}" in func_body
+    assert "${DRY_RUN}" in func_body
+    assert "return 0" in func_body, (
+        "D2 guard: verify_install must early-return 0 when SKIP_VERIFY or DRY_RUN is set"
+    )
+
+    # ── D2.3: dual check — both is-active AND is-enabled for core timers ──
+    assert "is-active" in func_body, (
+        "D2 dual check: must verify timer is-active (runtime state)"
+    )
+    assert "is-enabled" in func_body, (
+        "D2 dual check: must verify timer is-enabled (persistent state)"
+    )
+
+    # ── D2.4: non-systemd degradation — WARN instead of fail ──
+    assert "systemctl not available" in func_body, (
+        "D2 non-systemd: must WARN instead of fail when systemctl is unavailable"
+    )
+
+    # ── D2.5: error output routed to stderr ──
+    assert ">&2" in func_body, (
+        "D2 stderr: fail-loud boxed error must go to stderr (>&2)"
+    )
+
+    # ── D2.6: collected failure reporting — failures accumulate before exit ──
+    assert "verify_failures" in func_body, (
+        "D2 collected: failures must be accumulated in verify_failures array"
+    )
+    assert "${#verify_failures[@]}" in func_body or "verify_failures" in func_body, (
+        "D2 collected: verify_failures array must be checked before exit"
+    )
+
+    # ── D2.7: fix guidance in error message ──
+    assert "--skip-verify" in func_body, (
+        "D2 guidance: error message must mention --skip-verify escape hatch"
+    )
+
+
 def test_test_host_wrapper_delegates_to_interactive_installer_defaults():
     text = Path("scripts/install_memory_os_test_host.sh").read_text(encoding="utf-8")
 
