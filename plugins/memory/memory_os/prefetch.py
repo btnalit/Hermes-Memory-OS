@@ -523,7 +523,7 @@ def _build_prefetch_sections(
     # store.read_events() JSONL scan internally. This is a pre-existing double-scan
     # (not introduced by session scoping). A future optimization could collect all
     # needed events in a single pass and distribute to downstream filters.
-    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id))
+    _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id, seen=seen))
     _append_section(
         sections,
         "Recent Cross-Session",
@@ -531,6 +531,7 @@ def _build_prefetch_sections(
             store,
             session_id=session_id,
             error_records=error_records,
+            seen=seen,
         ),
     )
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
@@ -1570,6 +1571,7 @@ def _recent_cross_session_lines(
     max_items: int = 5,
     max_age_hours: int = 48,
     error_records: list[dict[str, Any]] | None = None,
+    seen: set[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Source-gate-passed events from recent sessions (not current).
 
@@ -1645,6 +1647,9 @@ def _recent_cross_session_lines(
         eid = str(event.id).strip()
         if eid not in source_gate_passed_ids:
             continue
+        # Dedup: skip events already injected by Continuity Bridge (earlier section)
+        if seen is not None and eid and ("event", eid) in seen:
+            continue
         event_session = str((event.safe_ref or {}).get("session_id", ""))
         if event_session == session_id:
             continue
@@ -1657,6 +1662,8 @@ def _recent_cross_session_lines(
         summary = _clip(str(event.summary), 180)
         if not summary.strip() or _is_diagnostic_style_seed(summary):
             continue
+        if seen is not None and eid:
+            seen.add(("event", eid))
         collected.append((ts, summary))
 
     if not collected:
@@ -1675,7 +1682,7 @@ def _recent_cross_session_lines(
     return lines
 
 
-def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "") -> list[str]:
+def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "", seen: set[tuple[str, str]] | None = None) -> list[str]:
     selected, _dropped = _select_continuity_events(
         store, exclude_session_id=session_id or None
     )
@@ -1689,6 +1696,12 @@ def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "") -> l
     for event in selected:
         if _event_source_class(event) not in {"cron", "mailbox", "room_family", "state_source", "governance"}:
             continue
+        # Dedup: skip events already injected by earlier sections
+        if seen is not None and event.id:
+            key = ("event", event.id)
+            if key in seen:
+                continue
+            seen.add(key)
         lines.append(
             f"- {_event_source_class(event)}/{event.kind}: "
             f"{_redact(_clip(event.summary, 220))}"
