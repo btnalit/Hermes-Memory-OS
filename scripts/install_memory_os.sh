@@ -553,7 +553,10 @@ select_options() {
     default_enable_cognitive_loop="yes"
   fi
   if [[ "${MODE}" == "production-safe" ]]; then
-    default_enable_owner_cron_onboarding="no"
+    :  # owner_cron_onboarding stays default "yes" — index-sync is a core
+    :  # component (D1: heartbeat + cognitive_loop + index-sync must all
+    :  # be default-on).  Users who don't want cron registration can pass
+    :  # --no-enable-owner-cron-onboarding.
   fi
 
   [[ -n "${INSTALL_SHELL}" ]] || { ask_yes_no "Install/update memory-os-agent-os shell plugin?" "${default_shell}" && INSTALL_SHELL=1 || INSTALL_SHELL=0; }
@@ -739,10 +742,16 @@ verify_install() {
   echo
   echo "Memory-OS install verification"
   echo "------------------------------"
+
+  local verify_failures=()
+
+  # ── Doctor check (always run) ──────────────────────────────────────
   HERMES_HOME="${HERMES_HOME}" hermes memory
   HERMES_HOME="${HERMES_HOME}" \
     PYTHONPATH="${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}" \
     "${PYTHON_BIN}" -m plugins.memory.memory_os doctor
+
+  # ── Shell plugin checks ────────────────────────────────────────────
   if [[ "${INSTALL_SHELL}" == "1" ]]; then
     HERMES_HOME="${HERMES_HOME}" hermes memory-os-agent-os status >/dev/null
     HERMES_HOME="${HERMES_HOME}" hermes memory-os-agent-os doctor >/dev/null
@@ -755,18 +764,87 @@ verify_install() {
       hermes memory-os-agent-os doctor >/dev/null
     fi
   fi
-  if [[ "${ENABLE_RUNTIME}" == "1" ]] && command_exists systemctl; then
-    systemctl --user is-active hermes-memory-os-heartbeat.timer
-    systemctl --user is-enabled hermes-memory-os-heartbeat.timer
+
+  # ── Core component verification (D2: fail-loud) ────────────────────
+  # Core three per deployment spec: heartbeat, cognitive_loop, index-sync.
+  # Each must be active/enabled when the corresponding flag is set.
+  # Failures are collected and reported together before non-zero exit.
+
+  if command_exists systemctl; then
+    # ── Heartbeat timer (core #1) ────────────────────────────────
+    if [[ "${ENABLE_RUNTIME}" == "1" ]]; then
+      if systemctl --user is-active hermes-memory-os-heartbeat.timer >/dev/null 2>&1; then
+        echo "  [PASS] heartbeat timer is active"
+      else
+        verify_failures+=("heartbeat timer is not active (ENABLE_RUNTIME=1)")
+      fi
+      if systemctl --user is-enabled hermes-memory-os-heartbeat.timer >/dev/null 2>&1; then
+        echo "  [PASS] heartbeat timer is enabled"
+      else
+        verify_failures+=("heartbeat timer is not enabled (ENABLE_RUNTIME=1)")
+      fi
+    fi
+
+    # ── Cognitive-loop timer (core #2) ───────────────────────────
+    if [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]]; then
+      if systemctl --user is-active hermes-memory-os-cognitive-loop.timer >/dev/null 2>&1; then
+        echo "  [PASS] cognitive-loop timer is active"
+      else
+        verify_failures+=("cognitive-loop timer is not active (ENABLE_COGNITIVE_LOOP=1)")
+      fi
+      if systemctl --user is-enabled hermes-memory-os-cognitive-loop.timer >/dev/null 2>&1; then
+        echo "  [PASS] cognitive-loop timer is enabled"
+      else
+        verify_failures+=("cognitive-loop timer is not enabled (ENABLE_COGNITIVE_LOOP=1)")
+      fi
+    fi
+  else
+    # Non-systemd: warn but don't fail — manual scheduling is expected.
+    if [[ "${ENABLE_RUNTIME}" == "1" ]]; then
+      echo "  [WARN] systemctl not available — cannot verify heartbeat timer"
+      echo "         Ensure heartbeat is scheduled via an alternative mechanism"
+    fi
+    if [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]]; then
+      echo "  [WARN] systemctl not available — cannot verify cognitive-loop timer"
+      echo "         Ensure cognitive-loop is scheduled via an alternative mechanism"
+    fi
   fi
-  if [[ "${ENABLE_COGNITIVE_LOOP}" == "1" ]] && command_exists systemctl; then
-    systemctl --user is-active hermes-memory-os-cognitive-loop.timer
-    systemctl --user is-enabled hermes-memory-os-cognitive-loop.timer
+
+  # ── Index-sync onboarding (core #3) ────────────────────────────────
+  # Best-effort: the onboarding script handles its own errors; we verify
+  # that the onboarding was requested and the index-sync script exists.
+  if [[ "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" ]]; then
+    local index_sync_script="${HERMES_HOME}/scripts/memory_os_index_sync.py"
+    if [[ -f "${index_sync_script}" ]]; then
+      echo "  [PASS] index-sync script installed (owner cron onboarding was run)"
+    else
+      echo "  [WARN] index-sync script not found at ${index_sync_script}"
+      echo "         Owner cron onboarding may not have completed successfully"
+    fi
   fi
+
+  # ── Cognitive-loop Python status ───────────────────────────────────
   if [[ "${INSTALL_COGNITIVE_LOOP}" == "1" ]]; then
     HERMES_HOME="${HERMES_HOME}" \
       PYTHONPATH="${HERMES_HOME}/memory-os/runtime/python:${HERMES_HOME}/plugins:${PYTHONPATH:-}" \
       "${PYTHON_BIN}" -m plugins.memory.memory_os cognitive-loop status >/dev/null
+  fi
+
+  # ── Fail-loud: report all core failures and exit non-zero ──────────
+  if [[ ${#verify_failures[@]} -gt 0 ]]; then
+    echo
+    echo "╔══════════════════════════════════════════════════════════════╗" >&2
+    echo "║  CORE COMPONENT VERIFICATION FAILED                         ║" >&2
+    echo "╠══════════════════════════════════════════════════════════════╣" >&2
+    for failure in "${verify_failures[@]}"; do
+      printf "║  ✗ %-54s ║\n" "${failure}" >&2
+    done
+    echo "╠══════════════════════════════════════════════════════════════╣" >&2
+    echo "║  These are required for Memory-OS to function.              ║" >&2
+    echo "║  Re-run the installer to fix, or use --skip-verify to       ║" >&2
+    echo "║  bypass (not recommended for production).                   ║" >&2
+    echo "╚══════════════════════════════════════════════════════════════╝" >&2
+    exit 1
   fi
 }
 
