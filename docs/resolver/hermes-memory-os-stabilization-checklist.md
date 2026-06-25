@@ -198,6 +198,90 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
 
 ---
 
+## F. 记忆质量 · 源头治理(新增, 按 hermes-memory-os-source-gate-quality-spec.md 实施)
+
+> **第一性根因**: 会话记录(event)被默认等同于记忆候选 — `conversation_turn → candidate_allowed=default=True`(inner_drive.py:105),每轮对话自动够格成永久记忆。碎片是这个源头默认造出来的,下游 fact_judge/resolver/owner 门槛在**抗洪**而非**精筛**。
+> 性质:**可靠性修复, 非新功能。** 核心动作: `candidate_allowed` 从 `True`(每轮必记)翻转为"基于内容判断" — 记录与记忆分离。
+> 纪律:不新建模块、不破 fact_judge"只判断"契约、不在热路径调 LLM(INV-5)、复用现成标记/机制、治理(可逆/审计/owner)贯穿。
+> 规约:`docs/resolver/hermes-memory-os-source-gate-quality-spec.md`(内部规划文档, 未入 git — 已对比 HEAD ef648e2 代码 + 3.200 环境审查, 8 项关切已纳入)
+
+### F.0 规约审查结论(2026-06-25)
+
+对比代码库 HEAD ef648e2 + 3.200 环境审查规约, 发现 8 项关切(F1-F8), 均已纳入规约修正:
+- **F1 (HIGH)**: `_TRANSIENT_MARKERS` 当前仅 15 个 token(全部问候/确认), 不足以覆盖中文过程碎片 → 两层扩展(层 A 精确子串 30-50+ 中文标记 + 层 B 句式正则)
+- **F2 (HIGH)**: recurrence 有两条 bump 路径 — 自动 near-duplicate(对 moment 恒 0) + owner 手动 renew(有效)。S1 不依赖 recurrence 自动递增
+- **F3 (MEDIUM)**: `_turn_summary` 格式 `"User: ... | Assistant: ..."` → `_is_obvious_fragment` 必须对 User/Assistant 段分别检测
+- **F4 (MEDIUM)**: S2 TTL 写入链已追踪(`_cluster_and_promote` → `write_approved_record` → `provisional_sweep`)
+- **F5 (MEDIUM)**: S1 信号模型收敛为被动信任(时间驱动, 单一模型), 不采纳 recurrence/印证
+- **F6 (LOW)**: `classify_event_for_inner_drive` 零测试覆盖 → 阶段〇先建测试地基
+- **F7 (LOW)**: 3.200 兼容性确认 — 纯函数变更, 通过 `active-closure` profile hourly heartbeat 进入, 零摩擦
+- **F8 (LOW)**: 新 knob 边界已定义(`auto_promote_enabled`, `auto_promote_min_age_days`, `moment_provisional_ttl_days`)
+
+### F.1 阶段〇: 测试地基
+
+- [ ] **创建 `tests/plugins/memory/test_memory_os_inner_drive.py`**
+  - 覆盖 `classify_event_for_inner_drive` 现有 7 种 event kind 分支 (G.0 基础契约)
+  - 确保后续碎片逻辑在测试地基上实施, 非在无覆盖代码上叠加
+  - 目标: ≥10 条基础断言, 覆盖 conversation_turn / memory_write / conversation_turn_mirrored / journal_card_observed / cron_job_run / runtime_heartbeat / unknown kind
+
+### F.2 阶段一: 源头确定性门 + moment 短 TTL(零风险, 确定性)
+
+**源头门 (`classify_event_for_inner_drive`, inner_drive.py)**:
+- [ ] **F.2.1 default 翻转**: `conversation_turn` 分支 `candidate_allowed` 从 `default=True` 改为 `not _is_obvious_fragment(event.summary)`
+  - `candidate_explicit` 显式指定优先(保留现有入口)
+  - fail-safe: 判不准就放行(allowed=True)
+  - `skip_reason` 写 `"source_gate:obvious_fragment"`(复用现有字段)
+- [ ] **F.2.2 `_is_obvious_fragment(summary)` 实现**:
+  - 层 A 精确子串: 扩展 `_TRANSIENT_MARKERS` 至 30-50+ 中文过程标记(fact_judge 同源受益)
+  - 层 B 句式正则: 仅 `_is_obvious_fragment` 内部, 覆盖纯信息请求/过程确认/导航指令/极短输入/英文简短指令
+  - User/Assistant 段分别检测(F3): 正则提取 `User: (.*?) \| Assistant: (.*)`, 任一碎片 → 整体判 fragment
+  - 冷启动模式从 3.200 `owner_approved.md` 现有 moment 观测反向提取
+- [ ] **F.2.3 G 系测试(≥6 条, 核心反证 G.X 必须攻防验证)**:
+  - G.1: 明显碎片 → `candidate_allowed=False` → 不进 candidates.jsonl, working 仍有【核心】
+  - G.2: 含知识对话 → `candidate_allowed=True` → 进队列
+  - G.3: `candidate_explicit=True` → 覆盖默认
+  - G.4: 判不准 → fail-safe 放行
+  - G.5: working 分支不受影响
+  - G.6: User/Assistant 分别检测(F3)
+  - G.X: 移除 `_is_obvious_fragment` → G.1 必 FAIL(攻防)
+
+**moment 短 TTL (crystallized.py)**:
+- [ ] **F.2.4 `write_approved_record` per-kind TTL 覆写**:
+  - `candidate.kind == "moment"` 且 `decision.provisional` → 覆写 `expires_at` 使用 knob `moment_provisional_ttl_days`(默认 3 天)
+  - 非 moment 类型使用常规 TTL(默认 7 天)
+  - `provisional_sweep` 现有逻辑不变(不区分类型, moment 更短 TTL 自然生效)
+
+**配置 (knob_overrides.py)**:
+- [ ] **F.2.5 注册 3 个新 knob 到 `OVERRIDABLE_KNOBS`**:
+  - `auto_promote_enabled`: lane_switch, default=True, allowed=[True,False]
+  - `auto_promote_min_age_days`: threshold, default=7, bounds=[3,30], ab_metric="promotion_rate"
+  - `moment_provisional_ttl_days`: threshold, default=3, bounds=[1,14], ab_metric="moment_ttl_days"
+
+### F.3 阶段二: 被动信任自动晋升
+
+- [ ] **F.3.1 自动晋升触发逻辑**:
+  - 遍历 `list_provisional_records()`(crystallized.py:565) 的 active provisional
+  - 检查 `approved_at` 距今 ≥ `auto_promote_min_age_days`(默认 7 天)
+  - `canonical_state` 非 `provisional_rejected`(owner 否决过的不晋升)
+  - 达标 → `confirm_provisional_record`(现成操作, provisional=False 清 expires_at)
+  - knob `auto_promote_enabled=False` → 不晋升(knob 可逆)
+- [ ] **F.3.2 S 系测试(≥3 条, 核心反证 S.X 必须攻防验证)**:
+  - S.1: provisional 多轮未否决 + 存活超 N 天 → 自动晋升 permanent【核心】
+  - S.2: owner 否决过 → 不晋升(可拦)
+  - S.3: `auto_promote_enabled=False` → 不晋升(knob 可逆)
+  - S.X: 移除自动晋升 → permanent 不增长 → S.1 必 FAIL(攻防)
+  - T.1: 自动晋升的 permanent 仍可 revoke/invalidate(可逆)
+  - T.2: 源头门 `skip_reason` / 晋升 / 降级全程 audit 可追溯
+
+### F.4 阶段三(可选): fact_judge 精修
+
+- [ ] **F.4.1 fact_judge prompt 微调**: 更明确拒隐性碎片(它本就在判 durable, 只是强化 transient 识别)
+- [ ] **F.4.2 层 B 句式模式持续扩展**: 从 `skip_reason` audit 日志驱动迭代新碎片模式
+
+**F 的完成条件**: 阶段〇(测试地基) → 阶段一(F.2.1-2.5 全部打勾 + 全量测试 PASS + G.X 攻防验证通过 + 静态检查 PASS) → 阶段二(F.3.1-3.2 打勾 + S.X 攻防验证) → 阶段三可选。**做完阶段二 = F 打勾。**
+
+---
+
 ## 不在本清单内的已知项(显式排除)
 以下已知问题/任务**明确不做**,避免"清单打完勾还有一堆事"的错觉:
 
@@ -245,7 +329,7 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
 ---
 
 ## 边界声明(这份清单的"完"在哪)
-**做完 A+B+C+D+E = 扎实了。**(E 可选:用得上 RAGFlow 才补,用不上留空也算完。) 之后:
+**做完 A+B+C+D+E+F = 扎实了。**(E 可选:用得上 RAGFlow 才补,用不上留空也算完 — 但需显式记录留空决定。) F 节是可靠性修复(非新功能), 做完阶段二 = F 打勾; 阶段三可选。之后:
 - 功能面收口(C 图谱补完,不再加模块/功能)。
 - 可靠性收口(A 静默失败治完、B 生产信号补上)。
 - 进入「使用 + 维护」模式:真的用它,让记忆攒起来,在真实使用里发现真问题再修(像会话拼接那样——用出来的,不是想出来的)。
@@ -263,6 +347,7 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
 - **C 节**:代码底座 5/5 + 向量 proposer ✅;质量数据需积累后评估
 - **D 节**:✅ 完成(零操作合法)
 - **E 节**:P0/P1 ✅;P2/P3 可选,未实施
+- **F 节**:规约已审查(8 项关切已纳入) + 阶段〇-三待实施, 0/4
 - **召回可靠性增强 (v4)**:3/3 ✅ 全部完成(地板匹配 + 关键词清理 + Permanent 基线)
   - 已知局限:地板仅在 FTS5 零命中时触发;中期路线图:地板作为第三条 RRF lane 实现并行融合
 - **代码审查修复 (8 findings)**:8/8 ✅ 全部修复(HIGH=2, MEDIUM=2, LOW=4)
@@ -272,4 +357,4 @@ C.1 质量数据和 C.3 独有贡献量化依赖真实使用积累;代码底座�
   - 修复后:禁用地板 → 测试 MUST FAIL;启用地板 → PASS。反证真正成立。
 
 ## 一句话
-五节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)+ INV-5 反证测试(6/6 ✅,已修复为真·反证)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
+六节、可打勾、有终点:**静默失败审计(5/5 ✅)+ 生产验证(4 确认 + 4 随用积累)+ 图谱完善(代码底座就绪,质量门待数据积累)+ owner_actions 顺手拆(✅)+ RAGFlow 可选集成收尾(墙已立,桥待按需实施)+ 记忆质量源头治理(规约已审查, 8 关切已纳入, 待实施)+ 召回可靠性增强(v4,3/3 ✅)+ 代码审查修复(8/8 ✅)+ INV-5 反证测试(6/6 ✅,已修复为真·反证)**。做完这些,系统从"还能加什么"切换到"已有的真可靠"。**有边界、做完即止——之后是用它、维护它,不是继续建它。**
