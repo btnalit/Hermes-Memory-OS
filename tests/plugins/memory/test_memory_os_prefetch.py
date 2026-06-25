@@ -9,7 +9,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _build_prefetch_sections, _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -1822,3 +1822,115 @@ def test_recent_cross_session_respects_max_items_cap(tmp_path):
     # With 8 events and knob default 5, we expect 5 items + header.
     assert len(lines) == 6, f"Expected 6 lines (header + 5 items), got {len(lines)}: {lines}"
     assert any("跨会话·待结晶" in line for line in lines)
+
+
+def test_cross_session_dedup_prevents_duplicate_injection(tmp_path):
+    """A cron event satisfying both Bridge and Recent conditions appears only once.
+
+    Continuity Bridge selects events by source-class diversity (cron/mailbox/
+    governance). Recent Cross-Session selects by source-gate (candidates.jsonl)
+    within 48h. A cron event that passed source gate within 48h from another
+    session qualifies for BOTH — the shared `seen` set must prevent it from
+    being injected twice.
+
+    Counterfactual: without `seen`, the same event appears in both sections.
+    """
+    store = _store(tmp_path)
+    other_session_id = "sess_other_dedup_test"
+    current_session_id = "sess_current_dedup_test"
+    event_id = "evt_dual_eligible_001"
+    unique_marker = "UNIQUE_DEDUP_MARKER_9a4f"
+
+    # candidates.jsonl — makes event pass source gate (Recent Cross-Session)
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text(
+        json.dumps(
+            {
+                "candidate_id": "cand_dual_eligible",
+                "kind": "moment",
+                "body": "dual eligible candidate for dedup test",
+                "source_event_ids": [event_id],
+                "tags": ["inner-drive"],
+                "sensitivity": "private",
+                "bridge_state": "inner_drive_candidate",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    # cron event — source="cron" + source_module="cron_mirror" makes
+    # _event_source_class return "cron", which passes Continuity Bridge's
+    # source class filter. Within 48h ensures Recent Cross-Session accepts it.
+    # Different session_id ensures both sections consider it "cross-session."
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=event_id,
+        ts=(datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(),
+        profile="test",
+        source="cron",
+        kind="cron_job_run",
+        summary=f"cron job output containing {unique_marker}",
+        safe_ref={
+            "session_id": other_session_id,
+            "source_module": "cron_mirror",
+        },
+        tags=["cron"],
+    )
+    store.append_event(event)
+
+    # ── Normal path: shared seen prevents duplicate injection ──────────
+    sections = _build_prefetch_sections(
+        "test dedup query",
+        store=store,
+        session_id=current_session_id,
+    )
+
+    bridge_lines: list[str] = []
+    recent_lines: list[str] = []
+    for title, lines in sections:
+        if title == "Continuity Bridge":
+            bridge_lines = lines
+        elif title == "Recent Cross-Session":
+            recent_lines = lines
+
+    bridge_has = any(unique_marker in line for line in bridge_lines)
+    recent_has = any(unique_marker in line for line in recent_lines)
+
+    # Must appear in at least one section — the event IS a valid cross-session
+    # cron event with source-gate clearance.
+    assert bridge_has or recent_has, (
+        f"{unique_marker} not found in either Continuity Bridge "
+        f"or Recent Cross-Session. Bridge lines: {bridge_lines}, "
+        f"Recent lines: {recent_lines}"
+    )
+
+    # THE CORE ASSERTION: must NOT appear in both sections.
+    assert not (bridge_has and recent_has), (
+        f"DEDUP FAILED: {unique_marker} appeared in BOTH Continuity Bridge "
+        f"({bridge_has}) and Recent Cross-Session ({recent_has}). "
+        f"Bridge: {[l for l in bridge_lines if unique_marker in l]}, "
+        f"Recent: {[l for l in recent_lines if unique_marker in l]}"
+    )
+
+    # ── Counterfactual: without seen, the event WOULD appear in both ───
+    bridge_no_seen = _continuity_bridge_lines(
+        store, session_id=current_session_id
+    )
+    recent_no_seen = _recent_cross_session_lines(
+        store, session_id=current_session_id
+    )
+    assert any(
+        unique_marker in line for line in bridge_no_seen
+    ), (
+        "Counterfactual broken: event should appear in Continuity Bridge "
+        "when called without seen, but it does not. The test setup may be wrong."
+    )
+    assert any(
+        unique_marker in line for line in recent_no_seen
+    ), (
+        "Counterfactual broken: event should appear in Recent Cross-Session "
+        "when called without seen, but it does not. The test setup may be wrong."
+    )
