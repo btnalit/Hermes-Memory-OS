@@ -73,6 +73,17 @@ def main() -> int:
     store.initialize()
 
     index = MemoryOSIndex(roots)
+    # E1: cron path must set embedder, else index-time embeddings are skipped
+    # and vector search silently degrades to FTS5 (provider path sets it at
+    # MemoryOSProvider.prefetch via self._index._embedder = self._embedder).
+    try:
+        from plugins.memory.memory_os.embedder import LocalEmbedder
+
+        _embedder = LocalEmbedder()
+        if _embedder.is_available():
+            index._embedder = _embedder
+    except Exception:
+        pass  # graceful degrade: embedder unavailable -> keep FTS5 floor
     now = datetime.now(timezone.utc)
 
     if not roots.index_path.exists():
