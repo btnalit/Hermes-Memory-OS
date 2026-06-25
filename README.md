@@ -43,11 +43,12 @@ HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --operational 
 
 - the `memory_os` Hermes memory provider;
 - the `memory-os-agent-os` Hermes shell plugin;
-- portable Memory-OS runtime modules;
+- portable Memory-OS runtime modules (including `deep_reflection` and `speak_gate`, both default-enabled);
 - heartbeat runtime;
-- the current cognitive-loop integration harness;
-- active-closure Hermes cron onboarding for owner review and proposal
-  follow-up.
+- the cognitive-loop integration harness (default-enabled per D1);
+- active-closure Hermes cron onboarding (9 jobs: owner review digest, proposal
+  follow-up, index sync, working cleanup, L3 probe, candidate aggregation,
+  fact judge, expression feedback, memory sources feedback).
 
 The installer auto-detects the owner-facing Hermes channel from
 `$HERMES_HOME/channel_directory.json`. Telegram is used only when Telegram is
@@ -70,12 +71,16 @@ Interactive install is also available:
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh
 ```
 
-Conservative install without the operational cron set:
+Conservative install with the same core defaults but non-interactive:
 
 ```bash
 HERMES_HOME=/root/.hermes bash scripts/install_memory_os.sh --yes --production-safe \
   --hindsight off
 ```
+
+`--production-safe` uses the same core defaults as `--operational` (all three
+core components enabled: heartbeat, cognitive_loop, index-sync onboarding) but
+is non-interactive. Use `--no-enable-*` flags to selectively disable components.
 
 Install helpers but do not enable recurring cron jobs:
 
@@ -117,23 +122,31 @@ python scripts/deploy_memory_os.py \
 
 ## What Gets Scheduled
 
-The operational preset defaults to the `active-closure` Hermes cron profile.
-That profile creates or verifies only the jobs required for the current
-automatic governance closure:
+The installer defaults to the `active-closure` Hermes cron profile (9 jobs).
+These are the jobs required for the full automatic governance closure loop:
 
 | Job | Deliver | Agent | Purpose |
 | --- | --- | --- | --- |
-| `memory-os-owner-review-digest` | owner channel | yes | sends only approval items and real alerts to the owner |
+| `memory-os-owner-review-digest` | owner channel | yes | sends approval items and real alerts to the owner |
 | `memory-os-proposal-followups-opsgate` | `local` | no | routes approved proposals through OpsGate/report-only follow-up |
 | `memory-os-index-sync` | `local` | no | keeps the SQLite search index in sync with canonical files |
+| `memory-os-working-cleanup` | `local` | no | expires aged working-memory items |
+| `memory-os-l3-probe-verification` | `local` | no | verifies L3 code provenance and module integrity |
+| `memory-os-candidate-aggregation` | `local` | no | clusters related working-memory events into reviewable candidates |
+| `memory-os-fact-judge` | `local` | no | durable-fact LLM judge for candidate quality screening |
+| `memory-os-expression-feedback-request` | owner channel | yes | asks owner for tokenized right-brain expression quality ratings |
+| `memory-os-memory-sources-feedback-request` | owner channel | yes | asks owner for tokenized memory recall quality ratings |
 
-The full registry also contains optional cron jobs for candidate aggregation,
-durable-fact judging, right-brain expression, module cadence reporting,
-expression outcome capture, and feedback prompts. They are not part of the
-default open-source active-closure install because the current self-operating
-loop already gets signal collection, projection, advisor findings, heartbeat,
-and cognitive-loop evidence from runtime/systemd paths. Install them only when
-that product surface is intentionally needed:
+The `full` cron profile adds 3 optional expression/cadence jobs on top of
+active-closure:
+
+| Job | Deliver | Agent | Purpose |
+| --- | --- | --- | --- |
+| `memory-os-right-brain-expression` | `origin` | yes | low-frequency right-brain expression through Hermes |
+| `memory-os-module-cadence-report` | `local` | no | records module generated/skipped/error/duplicate counters |
+| `memory-os-right-brain-expression-outcome` | `local` | no | records expression outcomes for feedback linkage |
+
+Switch to the full profile:
 
 ```bash
 HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
@@ -141,18 +154,6 @@ HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
   --owner-cron-owner-approved \
   --owner-cron-profile full
 ```
-
-Full-profile optional jobs:
-
-| Job | Deliver | Agent | Purpose |
-| --- | --- | --- | --- |
-| `memory-os-candidate-aggregation` | `local` | no | clusters related working-memory events into reviewable candidates |
-| `memory-os-fact-judge` | `local` | no | durable-fact LLM judge for candidate quality screening |
-| `memory-os-right-brain-expression` | `origin` | yes | low-frequency right-brain expression through Hermes |
-| `memory-os-module-cadence-report` | `local` | no | records module generated/skipped/error/duplicate counters |
-| `memory-os-right-brain-expression-outcome` | `local` | no | records expression outcomes for feedback linkage |
-| `memory-os-expression-feedback-request` | owner channel | yes | asks for tokenized right-brain expression feedback |
-| `memory-os-memory-sources-feedback-request` | owner channel | yes | asks for tokenized MemorySources feedback |
 
 Hermes owns the scheduler, transport, retry behavior, origin/local routing, and
 agent wording. Memory-OS owns the helper outputs, tokens, state transitions,
@@ -267,7 +268,10 @@ Memory-OS keeps these boundaries by default:
 - no identity writes without explicit owner-approved path;
 - no unapproved crystallized memory writes;
 - no ungoverned Hindsight export or raw-turn retain;
-- no cleanup or shadow-journal apply without a separate gate.
+- no cleanup or shadow-journal apply without a separate gate;
+- source gate (deterministic fragment detection) at the candidate-entry boundary:
+  process fragments blocked, user knowledge preserved — fail-safe by default
+  (ambiguous cases pass through to downstream gates).
 
 Canonical data lives under the Hermes profile. SQLite indexes are rebuildable.
 Review, feedback, and apply operations are audited.
@@ -314,8 +318,11 @@ This ensures newly-added cron lanes (such as `fact_judge`) are visible to the
 gate runner after an update install, without requiring a full cron onboarding
 re-run.
 
-All checks are non-fatal — the install completes and the report carries
-enough detail for the operator or Hermes agent to decide on follow-up actions.
+Environment adaptation checks (LLM packages, embedder, systemctl availability)
+are non-fatal — the install completes and the report carries enough detail for
+follow-up. **Post-install core component verification (D2) is fatal by default:**
+if heartbeat or cognitive-loop timers are not active after install, the script
+exits non-zero with a boxed failure summary. Use `--skip-verify` to bypass.
 
 ## Architecture
 
@@ -327,6 +334,12 @@ Hermes agent
 Memory-OS provider
   owns profile-local canonical memory, indexes, prefetch, sync_turn,
   working memory, crystallized candidates, and audit
+
+Memory-OS inner drive (source gate)
+  deterministic fragment detection at conversation-turn boundary —
+  process fragments blocked, user knowledge preserved with user-segment primacy
+  → passive trust auto-promotion: surviving provisional records graduate to
+    permanent memory after the owner review window
 
 Memory-OS retrieval (prefetch)
   FTS5 full-text search (deterministic floor)
@@ -350,6 +363,7 @@ Memory-OS Agent OS shell
 Portable modules
   produce bounded artifacts: evidence scores, proposals, expression drafts,
   cadence reports, feedback signals, and OpsGate reports
+  (deep_reflection and speak_gate are default-enabled)
 
 OwnerActionProcessor
   is the state-changing entry point for approve, reject, feedback, allow,
@@ -361,9 +375,13 @@ OwnerActionProcessor
 ```text
 memory_os_agent/               Minimal Hermes compatibility surface
 plugins/memory/memory_os/      Memory-OS provider and core services
+  ├── inner_drive.py           Source gate: deterministic fragment detection,
+  │                            passive trust auto-promotion
+  ├── crystallized.py          Owner-approved canonical memory, candidate triage
   ├── embedder.py              Local sentence-transformers embedder (CPU, ~420MB)
   ├── index.py                 SQLite index, FTS5 search, vector search
-  ├── prefetch.py              Context assembly: FTS5 + vector + graph lanes
+  ├── prefetch.py              Context assembly: FTS5 + vector + graph lanes,
+  │                            deterministic recall floor
   ├── structural_edge_proposer.py  Deterministic edge heuristics
   ├── llm_edge_proposer.py     LLM-class edge proposer (Hermes runtime)
   └── vector_edge_proposer.py  Embedding-similarity edge proposer
@@ -429,12 +447,22 @@ Do not rely on conversation history as the source of truth.
 The operational baseline has live validation evidence:
 
 - operational installer path completed;
-- active-closure Hermes cron profile present and verified;
+- active-closure Hermes cron profile (9 jobs) present and verified;
+- deployment core guarantee (D1/D2): cognitive_loop default-on, post-install
+  core component verification fail-loud;
+- source gate (F.2): deterministic fragment detection prevents conversation
+  noise from entering the candidate queue — process fragments blocked, user
+  knowledge preserved with user-segment primacy;
+- passive trust auto-promotion (F.3): provisional records that survive the
+  owner review window are automatically promoted to permanent memory;
 - fast cron and boundary/runtime probes available for lightweight
-  deploy/audit checks before the full monitor and wired into
+  deploy/audit checks before the full monitor, wired into
   `deploy_memory_os.py` postcheck/apply sequencing;
 - neutral monitor entrypoint `scripts/memory_os_monitor.py` is available, while
   `scripts/memory_os_3_200_monitor.py` remains the compatibility entrypoint;
+- deterministic recall floor (v4): when FTS5 and vector return zero hits,
+  Unicode-boundary floor matching + permanent baseline keeps core memory
+  accessible;
 - owner channel auto-detected from `channel_directory.json`;
 - current 3.200 full monitor status is PASS with `WARN=[]`, `FAIL=[]`, and
   `evidence_labels=['live_monitor_pass']`; the index catch-up contract now
@@ -443,6 +471,9 @@ The operational baseline has live validation evidence:
   stops are visible as guard evidence rather than production WARN;
 - owner-approved crystallized memory, feedback ledger, proposal follow-up, and
   bounded expression policy apply have live evidence.
+
+Full test suite: 1584 passed, 0 failed, 3 skipped. Static checks (write surface,
+import cycle, static hygiene) all pass.
 
 This does not mean Memory-OS is a generic autonomous executor. New proposal
 kinds require their own bounded apply contract, rollback, monitor fields, and
