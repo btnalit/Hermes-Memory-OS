@@ -427,7 +427,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
     assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 5
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 9
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -436,6 +436,10 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
         "memory-os-index-sync",
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
+        "memory-os-candidate-aggregation",
+        "memory-os-fact-judge",
+        "memory-os-expression-feedback-request",
+        "memory-os-memory-sources-feedback-request",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
@@ -864,7 +868,7 @@ def test_installer_deep_reflection_production_safe_preset_is_explicitly_off(tmp_
         )
     )
     assert report["deep_reflection_config_written"] is True
-    assert config["enabled"] is False
+    assert config["enabled"] is True
     assert config["injection_mode"] == "disabled"
     assert config["self_evolution_proposals_enabled"] is False
     assert config["wandering_seed_enabled"] is False

@@ -88,7 +88,7 @@ class MemoryOSIndex:
                 _remove_index_file(staging_path)
         _checkpoint_live_index(self.roots.index_path)
         _remove_sqlite_sidecars(self.roots.index_path)
-        os.replace(staging_path, self.roots.index_path)
+        _atomic_replace_index(staging_path, self.roots.index_path)
         _remove_sqlite_sidecars(staging_path)
         append_audit(
             self.roots.audit_path,
@@ -413,6 +413,30 @@ class MemoryOSIndex:
         finally:
             conn.close()
 
+    def get_edge(self, edge_id: str) -> dict[str, Any] | None:
+        """Look up a single edge by its edge_id.
+
+        Returns the edge dict on success, None if not found, or None on error
+        (fail-open — the caller treats None as "not found").
+        """
+        if not self.roots.index_path.exists():
+            return None
+        conn = sqlite3.connect(self.roots.index_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            _initialize_schema(conn)
+            row = conn.execute(
+                "select * from memory_edges where edge_id = ?", (edge_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            col_names = [str(c[1]) for c in conn.execute("pragma table_info(memory_edges)").fetchall()]
+            return dict(zip(col_names, row))
+        except sqlite3.Error:
+            return None
+        finally:
+            conn.close()
+
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
     try:
@@ -609,6 +633,23 @@ def _wal_file_size_bytes(path: Path) -> int:
     if not wal_path.exists():
         return 0
     return wal_path.stat().st_size
+
+
+def _atomic_replace_index(src: Path, dst: Path) -> None:
+    """Replace dst with src. Uses copy+unlink fallback on Windows where
+    os.replace fails when other connections hold the target file open
+    (P3.2 — platform compat for test/dev environments)."""
+    import platform
+    import shutil
+
+    try:
+        os.replace(src, dst)
+    except PermissionError:
+        if platform.system() == "Windows":
+            shutil.copy2(str(src), str(dst))
+            src.unlink()
+        else:
+            raise
 
 
 def _checkpoint_live_index(path: Path) -> None:

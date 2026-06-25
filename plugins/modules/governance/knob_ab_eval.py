@@ -231,7 +231,7 @@ class KnobABEvalModule:
                 OVERRIDABLE_KNOBS,
                 list_active_overrides,
             )
-            active = list_active_overrides()
+            active = list_active_overrides(_store_root=self.hermes_home)
             active_count = len([
                 o for o in active
                 if OVERRIDABLE_KNOBS.get(str(o.get("knob") or ""), {}).get("ab_metric")

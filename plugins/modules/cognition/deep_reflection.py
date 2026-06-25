@@ -55,7 +55,7 @@ def deep_reflection_manifest() -> dict[str, Any]:
             ],
         },
         "defaults": {
-            "enabled": False,
+            "enabled": True,
             "delivery_mode": "no-send",
             "injection_mode": "disabled",
             "profile_scope": "per-profile",

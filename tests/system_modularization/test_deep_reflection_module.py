@@ -30,7 +30,7 @@ def test_deep_reflection_manifest_installs_through_lifecycle(tmp_path):
     enabled = lifecycle.enable("deep_reflection")
 
     assert status.installed is True
-    assert status.enabled is False
+    assert status.enabled is True
     assert enabled.enabled is True
     assert enabled.delivery_mode == "no-send"
     assert lifecycle.doctor("deep_reflection").status == "ok"

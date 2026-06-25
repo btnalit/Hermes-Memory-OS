@@ -97,27 +97,13 @@ class CrystallizedMemoryService:
         if decision.provisional:
             expires = (decision.expires_at or "").strip()
             if not expires:
-                raise ValueError(
+                raise CrystallizedApprovalError(
                     "provisional crystallized record requires a valid expires_at"
                 )
-            # Per-kind TTL cap: moment records must not exceed
-            # moment_provisional_ttl_days from now. If the upstream
-            # already set a shorter TTL, keep the shorter one.
-            # Uses datetime comparison because ISO string formats may differ.
-            # Spec: docs/resolver/hermes-memory-os-source-gate-quality-spec.md §S2
-            if candidate.kind == "moment":
-                from .knob_overrides import resolve_knob
-
-                ttl_days = resolve_knob("moment_provisional_ttl_days", default=3)
-                max_expires_dt = _datetime(now) + timedelta(days=ttl_days)
-                try:
-                    upstream_dt = datetime.fromisoformat(expires)
-                    if upstream_dt > max_expires_dt:
-                        # Cap: moment records expire in ≤ ttl_days
-                        expires = max_expires_dt.isoformat()
-                except ValueError:
-                    # Unparseable upstream expiry — use moment cap
-                    expires = max_expires_dt.isoformat()
+            # TTL validation: moment records prescribed by
+            # docs/resolver/hermes-memory-os-source-gate-quality-spec.md §S2.
+            # The cap is applied at auto-generation time (auto_promote), not
+            # here — owner-approved expires_at values are preserved as-is.
             frontmatter["provisional"] = True
             frontmatter["expires_at"] = expires
             frontmatter["recurrence"] = str(decision.recurrence)
@@ -664,7 +650,7 @@ class CrystallizedMemoryService:
                 continue
             try:
                 approved_dt = datetime.fromisoformat(approved_at_str)
-            except ValueError:
+            except (ValueError, TypeError):
                 skipped_too_young_count += 1
                 continue
 

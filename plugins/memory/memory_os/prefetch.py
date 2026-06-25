@@ -980,7 +980,7 @@ def _tokenize_for_floor_match(query: str) -> list[str]:
     return result
 
 
-def _floor_match_score(path: Path, tokens: list[str], *, body_cache: dict[Path, str] | None = None) -> int:
+def _floor_match_score(path: Path, tokens: list[str], *, body_cache: dict[Path, str] | None = None, error_records: list[dict[str, Any]] | None = None) -> int:
     """Score a crystallized .md file by how many tokens appear in its body.
 
     Each distinct token that appears as a substring in the file body
@@ -1006,6 +1006,14 @@ def _floor_match_score(path: Path, tokens: list[str], *, body_cache: dict[Path, 
         try:
             body = path.read_text(encoding="utf-8").casefold()
         except Exception:
+            if error_records is not None:
+                error_records.append(build_error_record(
+                    component="prefetch._floor_match_score",
+                    operation="read_crystallized_body",
+                    error_code="floor_match_read_error",
+                    severity="warning",
+                    recoverable=True,
+                ))
             return 0
     score = 0
     for token in tokens:
@@ -1170,7 +1178,15 @@ def _crystallized_lines(
                     body_cache[p] = p.read_text(encoding="utf-8")
                 except Exception:
                     body_cache[p] = ""
-            paths.sort(key=lambda p: _floor_match_score(p, floor_tokens, body_cache=body_cache), reverse=True)
+                    if error_records is not None:
+                        error_records.append(build_error_record(
+                            component="prefetch._crystallized_lines",
+                            operation="body_cache_pre_read",
+                            error_code="body_cache_read_error",
+                            severity="warning",
+                            recoverable=True,
+                        ))
+            paths.sort(key=lambda p: _floor_match_score(p, floor_tokens, body_cache=body_cache, error_records=error_records), reverse=True)
         else:
             paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     elif relevant_ids is None:
@@ -1780,7 +1796,7 @@ def _indexed_lines(
                 component="prefetch._indexed_lines",
                 operation="fts5_empty_on_query",
                 error_code="prefetch_indexed_search_empty",
-                severity="warn",
+                severity="warning",
                 recoverable=True,
                 details={"message": "FTS5 returned zero indexed hits for non-empty query — possible stale/missing FTS index"},
             )

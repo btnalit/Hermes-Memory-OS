@@ -92,9 +92,9 @@ _SOURCE_GATE_FRAGMENT_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
         r"^[嗯好行可哦噢]$",
         r"^(继续|稍等|等一下|马上|待会|好了|完了|搞定)$",
         # English short commands (word-anchored)
-        r"^(show|check|run|build|test|deploy)(\s+me)?(\s+the)?\s*\w*\s*$",
+        r"^(show|check|run|build|test|deploy)(\s+me)?(\s+the\b)?\s*\w*\s*$",
         r"^(push|pull|commit|merge|rebase)(\s+\w+)?$",
-        r"^(what is|how to|tell me about|look at|take a look)\s",
+        r"^(what is|how to|tell me about|look at|take a look)\s.*$",
         r"^(wait|hold on|one sec|just a moment|got it|okay|ok|sure|thanks|thank you)\s*$",
     ]
 )

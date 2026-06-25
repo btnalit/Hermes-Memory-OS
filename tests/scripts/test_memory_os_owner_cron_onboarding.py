@@ -207,13 +207,17 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 5
+    assert len(report["operational_cron_jobs"]) == 9
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
         "memory-os-index-sync",
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
+        "memory-os-candidate-aggregation",
+        "memory-os-fact-judge",
+        "memory-os-expression-feedback-request",
+        "memory-os-memory-sources-feedback-request",
     }
     index_sync = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-index-sync"][0]
     assert index_sync["script"] == "memory_os_cron_index_sync_gate.py"
@@ -424,11 +428,11 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
             {
                 "jobs": [
                     {
-                        "id": "job_memory_sources_feedback",
-                        "name": "memory-os-memory-sources-feedback-request",
+                        "id": "job_right_brain_expression",
+                        "name": "memory-os-right-brain-expression",
                         "enabled": True,
                         "deliver": "telegram",
-                        "script": "memory_os_cron_memory_sources_feedback_request_gate.py",
+                        "script": "memory_os_cron_right_brain_expression_gate.py",
                         "no_agent": False,
                         "prompt": "",
                     },
@@ -458,10 +462,10 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
     assert report["cron_profile"] == "active-closure"
     assert report["paused_optional_cron_jobs"] == [
         {
-            "name": "memory-os-memory-sources-feedback-request",
-            "job_id": "job_memory_sources_feedback",
-            "registry_key": "memory_sources_feedback_request",
-            "script": "memory_os_cron_memory_sources_feedback_request_gate.py",
+            "name": "memory-os-right-brain-expression",
+            "job_id": "job_right_brain_expression",
+            "registry_key": "right_brain_expression",
+            "script": "memory_os_cron_right_brain_expression_gate.py",
             "was_enabled": True,
             "status": "paused",
         }
@@ -473,7 +477,8 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
     assert by_name["memory-os-index-sync"]["enabled"] is True
     assert by_name["memory-os-index-sync"]["script"] == "memory_os_cron_index_sync_gate.py"
     assert by_name["memory-os-index-sync"]["no_agent"] is True
-    assert by_name["memory-os-memory-sources-feedback-request"]["enabled"] is False
+    # Right-brain expression stays optional (not in active-closure) and gets paused
+    assert by_name["memory-os-right-brain-expression"]["enabled"] is False
 
 
 def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypatch):

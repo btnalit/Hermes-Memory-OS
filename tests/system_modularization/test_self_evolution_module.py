@@ -167,7 +167,7 @@ def test_self_evolution_skips_duplicate_unresolved_proposal(tmp_path):
     assert status["proposal_count"] == 1
     assert status["novelty_skipped_count"] == 1
     assert status["duplicate_unresolved_proposal_count"] == 1
-    assert len(ops_gate.read_reports()) == 4  # proposal_create + knob-tune x3 (min_cluster_size, max_speak_per_hour, max_provisional)
+    assert len(ops_gate.read_reports()) == 6  # proposal_create + knob-tune x5 (min_cluster_size, max_speak_per_hour, max_provisional, auto_promote_min_age_days, moment_provisional_ttl_days)
 
 
 def test_self_evolution_cadence_skips_same_day_same_signal_after_closed_proposal(tmp_path):
@@ -203,7 +203,7 @@ def test_self_evolution_cadence_skips_same_day_same_signal_after_closed_proposal
     assert second["reason"] == "cadence_same_day_same_signal"
     assert second["cadence_input_fingerprint"] == first["cadence_input_fingerprint"]
     assert len(proposal_queue.read_queue()["items"]) == 1
-    assert len(ops_gate.read_reports()) == 4  # proposal_create + knob-tune x3 (min_cluster_size, max_speak_per_hour, max_provisional)
+    assert len(ops_gate.read_reports()) == 6  # proposal_create + knob-tune x5 (min_cluster_size, max_speak_per_hour, max_provisional, auto_promote_min_age_days, moment_provisional_ttl_days)
     assert status["proposal_count"] == 1
     assert status["cadence_skipped_count"] == 1
     assert status["same_signal_skipped_count"] == 1

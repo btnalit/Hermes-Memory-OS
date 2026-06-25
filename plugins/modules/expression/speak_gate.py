@@ -29,7 +29,7 @@ def speak_gate_manifest() -> dict[str, Any]:
             "writes": ["local_artifact.speak_gate_would_send"],
         },
         "defaults": {
-            "enabled": False,
+            "enabled": True,
             "delivery_mode": "would-send",
             "profile_scope": "per-profile",
         },

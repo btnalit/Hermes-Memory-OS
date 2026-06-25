@@ -30,6 +30,10 @@ ACTIVE_CLOSURE_CRON_KEYS = frozenset({
     "index_sync",
     "working_cleanup",
     "l3_probe_verification",
+    "candidate_aggregation",
+    "fact_judge",
+    "expression_feedback_request",
+    "memory_sources_feedback_request",
 })
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
 DEFAULT_RIGHT_BRAIN_SCHEDULE = "30 4 * * 0"

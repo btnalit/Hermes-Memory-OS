@@ -2965,13 +2965,15 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
         from .index import MemoryOSIndex
         index = MemoryOSIndex(store.roots)
         result = index.transition_edge_state(target_id, "active")
-        record["owner_effect"]["owner_approved_edge"] = True
+        if result and result.get("state") == "active":
+            record["owner_effect"]["owner_approved_edge"] = True
         return {"edge_id": target_id, "new_state": result.get("state", "active") if result else "failed"}
     if action_type == "reject_edge":
         from .index import MemoryOSIndex
         index = MemoryOSIndex(store.roots)
         result = index.transition_edge_state(target_id, "invalidated")
-        record["owner_effect"]["owner_rejected_edge"] = True
+        if result and result.get("state") == "invalidated":
+            record["owner_effect"]["owner_rejected_edge"] = True
         return {"edge_id": target_id, "new_state": result.get("state", "invalidated") if result else "failed"}
     return {}
 
@@ -3142,6 +3144,11 @@ def _validate_action_target(
             return "invalid_edge_target"
         if not target_id or not isinstance(target_id, str) or not target_id.strip():
             return "invalid_edge_id"
+        from .index import MemoryOSIndex
+        index = MemoryOSIndex(store.roots)
+        edge = index.get_edge(target_id)
+        if edge is None:
+            return "edge_not_found"
     return ""
 
 

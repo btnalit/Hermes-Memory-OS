@@ -53,7 +53,7 @@ MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
 DEEP_REFLECTION_PRESETS: dict[str, dict[str, object]] = {
     "production-safe": {
-        "enabled": False,
+        "enabled": True,
         "injection_mode": "disabled",
         "working_updates_enabled": False,
         "self_evolution_proposals_enabled": False,
@@ -97,7 +97,7 @@ DEEP_REFLECTION_PRESETS: dict[str, dict[str, object]] = {
 
 
 DEEP_REFLECTION_CONFIG_DEFAULTS: dict[str, object] = {
-    "enabled": False,
+    "enabled": True,
     "injection_mode": "disabled",
     "max_cards": 2,
     "max_chars_total": 600,

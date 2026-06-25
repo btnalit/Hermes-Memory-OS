@@ -470,13 +470,22 @@ class CognitiveLoopRunner:
         module = ProvisionalModule(self.hermes_home, profile=self.profile)
         written = module.write_provisional(candidates)
         promotion = module.evaluate_promotions()
+
+        # Wire auto_promote_provisional_records into the cognitive loop
+        # so F.3 provisional→permanent auto-promotion runs in production.
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+        auto_promote_svc = CrystallizedMemoryService(self.store)
+        auto_promote_result = auto_promote_svc.auto_promote_provisional_records()
+
         result = {
             "schema_version": "memory-os.cognitive_loop.provisional.v0",
             "module": "provisional",
             "status": "ok",
             "provisional_count": int(written.get("provisional_count") or 0),
             "would_promote_count": int(promotion.get("would_promote_count") or 0),
-            "auto_promote_live_applied": False,
+            "auto_promote_live_applied": bool(auto_promote_result.get("promoted", 0) > 0),
+            "auto_promote_checked": int(auto_promote_result.get("checked", 0) or 0),
+            "auto_promote_promoted": int(auto_promote_result.get("promoted", 0) or 0),
             "actual_send": False,
             "actual_execute": False,
             "actual_crystallized_approval": False,
