@@ -114,6 +114,31 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": "moment_ttl_days",
     },
+    "recent_cross_session_enabled": {
+        "module": "prefetch",
+        "default": True,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "recent_cross_session_max_age_hours": {
+        "module": "prefetch",
+        "default": 48,
+        "bounds": [6, 168],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "cross_session_recall_window_hours",
+    },
+    "recent_cross_session_max_items": {
+        "module": "prefetch",
+        "default": 5,
+        "bounds": [1, 10],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "cross_session_max_items",
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────

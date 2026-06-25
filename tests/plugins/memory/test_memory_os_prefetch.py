@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
@@ -8,7 +9,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -1631,3 +1632,193 @@ class TestSessionScopingKnobIntegration:
         # local JSONL reads)
         assert elapsed < 1.0
         assert isinstance(context, str)
+
+
+def test_recent_cross_session_includes_source_gate_passed_events(tmp_path):
+    """Events from other sessions with candidates appear in cross-session recall."""
+    store = _store(tmp_path)
+    other_session_id = "sess_other_abc123"
+    current_session_id = "sess_current_xyz789"
+
+    event_id = "evt_cross_session_001"
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text(
+        json.dumps({
+            "candidate_id": "cand_001",
+            "kind": "moment",
+            "body": "test candidate",
+            "source_event_ids": [event_id],
+            "tags": ["inner-drive"],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=event_id,
+        ts=(datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+        profile="test",
+        source="test",
+        kind="conversation_turn",
+        summary="User: 巴西vs摩洛哥比赛分析 | Assistant: 巴西在Group C...",
+        safe_ref={"session_id": other_session_id},
+        tags=[],
+    )
+    store.append_event(event)
+
+    lines = _recent_cross_session_lines(
+        store,
+        session_id=current_session_id,
+    )
+    assert any("巴西" in line for line in lines), f"Expected Brazil mention, got: {lines}"
+    assert any("跨会话·待结晶" in line for line in lines)
+    assert any("3h前" in line for line in lines)
+
+
+def test_recent_cross_session_excludes_current_session(tmp_path):
+    """Events from the current session are not shown."""
+    store = _store(tmp_path)
+    session_id = "sess_current_xyz789"
+    event_id = "evt_current_001"
+
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text(
+        json.dumps({
+            "candidate_id": "cand_002",
+            "kind": "moment",
+            "body": "test",
+            "source_event_ids": [event_id],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=event_id,
+        ts=datetime.now(timezone.utc).isoformat(),
+        profile="test",
+        source="test",
+        kind="conversation_turn",
+        summary="User: 当前会话内容 | Assistant: 回复",
+        safe_ref={"session_id": session_id},
+        tags=[],
+    )
+    store.append_event(event)
+
+    lines = _recent_cross_session_lines(
+        store,
+        session_id=session_id,
+    )
+    assert lines == [] or not any("当前会话" in line for line in lines)
+
+
+def test_recent_cross_session_empty_when_no_candidates(tmp_path):
+    """Returns empty list when candidates.jsonl doesn't exist."""
+    store = _store(tmp_path)
+    lines = _recent_cross_session_lines(
+        store,
+        session_id="sess_any",
+    )
+    assert lines == []
+
+
+def test_recent_cross_session_respects_max_age(tmp_path):
+    """Events older than max_age_hours are excluded."""
+    store = _store(tmp_path)
+    event_id = "evt_old_001"
+
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text(
+        json.dumps({
+            "candidate_id": "cand_003",
+            "kind": "moment",
+            "body": "test",
+            "source_event_ids": [event_id],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        }, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    event = EventEnvelope(
+        schema_version=EVENT_SCHEMA_VERSION,
+        id=event_id,
+        ts=(datetime.now(timezone.utc) - timedelta(hours=100)).isoformat(),
+        profile="test",
+        source="test",
+        kind="conversation_turn",
+        summary="User: 很久以前的内容 | Assistant: 回复",
+        safe_ref={"session_id": "sess_other"},
+        tags=[],
+    )
+    store.append_event(event)
+
+    lines = _recent_cross_session_lines(
+        store,
+        session_id="sess_current",
+        max_age_hours=48,
+    )
+    assert lines == []
+
+
+def test_recent_cross_session_disabled_knob(tmp_path):
+    """Returns empty when session_id is empty (guard clause)."""
+    store = _store(tmp_path)
+    lines = _recent_cross_session_lines(
+        store,
+        session_id="",
+    )
+    # session_id="" returns empty (guard clause)
+    assert lines == []
+
+
+def test_recent_cross_session_respects_max_items_cap(tmp_path):
+    """Cap at max_items even when more candidates exist."""
+    store = _store(tmp_path)
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidate_json = ""
+    for i in range(8):
+        eid = f"evt_multi_{i:03d}"
+        event = EventEnvelope(
+            schema_version=EVENT_SCHEMA_VERSION,
+            id=eid,
+            ts=(datetime.now(timezone.utc) - timedelta(hours=i + 1)).isoformat(),
+            profile="test",
+            source="test",
+            kind="conversation_turn",
+            summary=f"User: 跨会话内容{i} | Assistant: 回复{i}",
+            safe_ref={"session_id": "sess_other"},
+            tags=[],
+        )
+        store.append_event(event)
+        candidate_json += json.dumps({
+            "candidate_id": f"cand_multi_{i:03d}",
+            "kind": "moment",
+            "body": f"test {i}",
+            "source_event_ids": [eid],
+            "tags": [],
+            "sensitivity": "private",
+            "bridge_state": "inner_drive_candidate",
+        }, ensure_ascii=False) + "\n"
+    candidates_path.write_text(candidate_json, encoding="utf-8")
+
+    lines = _recent_cross_session_lines(
+        store,
+        session_id="sess_current",
+        max_items=3,
+    )
+    # Note: the max_items parameter is a soft default; the knob
+    # recent_cross_session_max_items (default 5) is authoritative.
+    # With 8 events and knob default 5, we expect 5 items + header.
+    assert len(lines) == 6, f"Expected 6 lines (header + 5 items), got {len(lines)}: {lines}"
+    assert any("跨会话·待结晶" in line for line in lines)

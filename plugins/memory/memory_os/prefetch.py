@@ -7,7 +7,7 @@ import json
 import re
 import unicodedata
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -524,6 +524,15 @@ def _build_prefetch_sections(
     # (not introduced by session scoping). A future optimization could collect all
     # needed events in a single pass and distribute to downstream filters.
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id))
+    _append_section(
+        sections,
+        "Recent Cross-Session",
+        _recent_cross_session_lines(
+            store,
+            session_id=session_id,
+            error_records=error_records,
+        ),
+    )
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
@@ -1552,6 +1561,118 @@ def _record_graph_layer_shadow(
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     except Exception:
         pass  # fail-open: shadow loss must not break prefetch
+
+
+def _recent_cross_session_lines(
+    store: MemoryOSStore,
+    *,
+    session_id: str = "",
+    max_items: int = 5,
+    max_age_hours: int = 48,
+    error_records: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Source-gate-passed events from recent sessions (not current).
+
+    Bridges the gap between working memory decay (~hours) and crystallized
+    availability (~7 days). Only includes events that passed source gate
+    (have a corresponding candidate in candidates.jsonl), are from a
+    different session, and are within the recency window.
+
+    Each line carries a "[跨会话·待结晶]" marker so the agent knows this
+    is not yet owner-confirmed memory.
+    """
+    if not session_id:
+        return []
+
+    from .knob_overrides import resolve_knob as _resolve_knob
+
+    enabled = _resolve_knob(
+        "recent_cross_session_enabled", default=True,
+    )
+    if not enabled:
+        return []
+
+    resolved_max_items = _resolve_knob(
+        "recent_cross_session_max_items", default=5,
+    )
+    resolved_max_age_hours = _resolve_knob(
+        "recent_cross_session_max_age_hours", default=48,
+    )
+    limit = max(int(resolved_max_items or max_items), 1)
+    age_hours = max(int(resolved_max_age_hours or max_age_hours), 1)
+
+    # Collect source_event_ids from candidates.jsonl — these are the
+    # source-gate signature: only events that passed source gate have
+    # a corresponding candidate record.
+    candidates_path = store.roots.crystallized_root / "candidates.jsonl"
+    source_gate_passed_ids: set[str] = set()
+    if candidates_path.exists():
+        try:
+            for line in candidates_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                for eid in rec.get("source_event_ids", []):
+                    eid_str = str(eid).strip()
+                    if eid_str:
+                        source_gate_passed_ids.add(eid_str)
+        except Exception:
+            if error_records is not None:
+                error_records.append(
+                    build_error_record(
+                        component="prefetch",
+                        operation="recent_cross_session_lines",
+                        error_code="candidates_read_error",
+                        severity="warning",
+                        recoverable=True,
+                    )
+                )
+
+    if not source_gate_passed_ids:
+        return []
+
+    # Read events, filter to cross-session + source-gate-passed + recent
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=age_hours)
+    collected: list[tuple[datetime, str]] = []
+
+    for event in store.read_events():
+        eid = str(event.id).strip()
+        if eid not in source_gate_passed_ids:
+            continue
+        event_session = str((event.safe_ref or {}).get("session_id", ""))
+        if event_session == session_id:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(event.ts))
+        except (ValueError, TypeError):
+            continue
+        if ts < cutoff:
+            continue
+        summary = _clip(str(event.summary), 180)
+        if not summary.strip() or _is_diagnostic_style_seed(summary):
+            continue
+        collected.append((ts, summary))
+
+    if not collected:
+        return []
+
+    collected.sort(key=lambda x: x[0], reverse=True)
+
+    lines: list[str] = []
+    for ts, summary in collected[:limit]:
+        age_h = max(1, int((now - ts).total_seconds() / 3600))
+        lines.append(
+            f"- [跨会话·待结晶·{age_h}h前] {_redact(summary)}"
+        )
+
+    lines.insert(0, "— 近期跨会话 (source gate 通过, 待 owner 结晶) —")
+    return lines
 
 
 def _continuity_bridge_lines(store: MemoryOSStore, *, session_id: str = "") -> list[str]:
