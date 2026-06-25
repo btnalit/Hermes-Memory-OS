@@ -43,9 +43,28 @@ _DURABLE_MARKERS: frozenset[str] = frozenset({
 })
 
 _TRANSIENT_MARKERS: frozenset[str] = frozenset({
+    # Original seed (greetings / confirmations)
     "谢谢", "收到", "hello", "thanks", "open", "show me",
     "天气", "今天", "hi", "bye", "再见", "好的",
     "ok", "明白了", "知道了", "不用谢",
+    # Extended: Chinese process markers (shared with inner_drive source gate)
+    "更新部署看看", "部署看看", "验证结果如何", "检查一下",
+    "试试看", "感觉一下", "感受一下", "体验一下",
+    "好不好", "行不行", "对不对", "可不可以",
+    "查一下", "看一下", "搜一下", "找一下",
+    "帮我查", "帮我找", "帮我搜索", "帮我看看",
+    "打开看看", "打开页面", "打开文件", "打开项目",
+    "运行一下", "跑一下", "测一下", "编译一下",
+    "部署一下", "提交一下", "推送一下", "拉一下代码",
+    "继续", "嗯", "好的", "好", "行", "可以",
+    "稍等", "等一下", "马上", "待会",
+    "这个是什么", "这是什么", "怎么用", "怎么操作",
+    # Extended: English short commands / fragments
+    "show", "check", "run", "build", "test", "deploy",
+    "push", "pull", "commit", "merge", "rebase",
+    "look at", "take a look", "let me see",
+    "wait", "hold on", "one sec", "just a moment",
+    "what is", "how to", "tell me about",
 })
 
 

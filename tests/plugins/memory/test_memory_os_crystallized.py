@@ -185,7 +185,7 @@ def test_write_approved_record_with_provisional_true_adds_provisional_frontmatte
 
     candidate = CrystallizedCandidate(
         candidate_id="cand_prov_001",
-        kind="moment",
+        kind="fact",  # non-moment: uses caller-supplied TTL unchanged
         body="User mentioned liking rainy days.",
         source_event_ids=["evt_001"],
         sensitivity="private",
@@ -270,7 +270,7 @@ def test_invalidate_provisional_record_sets_canonical_state_and_preserves_record
     # First write a provisional record
     candidate = CrystallizedCandidate(
         candidate_id="cand_inv_001",
-        kind="moment",
+        kind="fact",  # non-moment: uses caller-supplied TTL unchanged
         body="Temporary memory that will expire.",
         source_event_ids=["evt_001"],
         sensitivity="private",

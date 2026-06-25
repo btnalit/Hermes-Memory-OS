@@ -23,7 +23,7 @@ from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _event(*, kind="conversation_turn", summary="User: hello | Assistant: hi there",
+def _event(*, kind="conversation_turn", summary="User: I decided to use PostgreSQL for the database | Assistant: That is a solid choice, PostgreSQL has strong ACID compliance and good scalability",
            safe_ref=None, source="telegram", tags=None, body_policy="summary_only",
            event_id=None, sensitivity="private") -> EventEnvelope:
     """Construct a minimal EventEnvelope for classification tests."""
@@ -280,6 +280,200 @@ class TestReturnType:
         assert isinstance(decision.working_weight, float)
         assert isinstance(decision.candidate_allowed, bool)
         assert isinstance(decision.skip_reason, str)
+
+
+# ── G-series: Source gate fragment detection ─────────────────────────────
+# These tests validate _is_obvious_fragment behavior (F.2.3).
+
+class TestSourceGateFragmentDetection:
+    """G.1-G.6: Source gate correctly identifies fragments vs knowledge."""
+
+    def test_g1_obvious_fragment_blocked(self):
+        """G.1: Obvious fragment → candidate_allowed=False, working still set."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 更新部署看看 | Assistant: 部署完成，服务已重启",
+            )
+        )
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == "source_gate:obvious_fragment"
+        assert decision.working_kind == "lingering"  # working unaffected
+
+    def test_g1_process_inquiry_blocked(self):
+        """G.1: 查一下 / 看一下 style process inquiry → fragment."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 查一下服务状态怎么样 | Assistant: 服务运行正常，CPU 45%",
+            )
+        )
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == "source_gate:obvious_fragment"
+
+    def test_g1_short_confirm_blocked(self):
+        """G.1: Ultra-short confirmation ('好的', '嗯') → fragment."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 好的 | Assistant: 收到",
+            )
+        )
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == "source_gate:obvious_fragment"
+
+    def test_g1_layer_b_navigation_blocked(self):
+        """G.1: Layer B regex catches navigation/command patterns."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 打开页面看看部署状态 | Assistant: 页面已打开，显示部署成功",
+            )
+        )
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == "source_gate:obvious_fragment"
+
+    def test_g2_knowledge_dialogue_allowed(self):
+        """G.2: Knowledge-containing dialogue → candidate_allowed=True."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: I decided to use PostgreSQL for the database | Assistant: That is a solid choice, PostgreSQL has strong ACID compliance and good scalability",
+            )
+        )
+        assert decision.candidate_allowed is True
+        assert decision.skip_reason == ""
+
+    def test_g2_technical_decision_allowed(self):
+        """G.2: Technical decision → candidate_allowed=True."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 我们决定把认证模块从JWT迁移到OAuth2，需要更新所有微服务的认证中间件 | Assistant: 好的，OAuth2确实更安全，支持令牌刷新和撤销机制，我来更新架构文档并制定迁移计划",
+            )
+        )
+        assert decision.candidate_allowed is True
+
+    def test_g2_preference_statement_allowed(self):
+        """G.2: User states a preference → candidate_allowed=True."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: I prefer using async/await over raw promises | Assistant: Noted, async/await确实更清晰",
+            )
+        )
+        assert decision.candidate_allowed is True
+
+    def test_g3_candidate_explicit_overrides_gate(self):
+        """G.3: candidate_explicit=True overrides source gate (fragment→allowed)."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 好的 | Assistant: 收到",
+                safe_ref={"candidate_allowed": True},
+            )
+        )
+        assert decision.candidate_allowed is True
+
+    def test_g3_candidate_explicit_false_blocks_knowledge(self):
+        """G.3: candidate_explicit=False blocks even knowledge dialogue."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: We decided to use Rust for the backend | Assistant: Great choice, Rust has excellent performance",
+                safe_ref={"candidate_allowed": False},
+            )
+        )
+        assert decision.candidate_allowed is False
+
+    def test_g4_ambiguous_not_blocked(self):
+        """G.4: Ambiguous dialogue → fail-safe allows through."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: Can we discuss the architecture for a moment | Assistant: Sure, what aspect would you like to focus on",
+            )
+        )
+        # "Can we discuss..." is somewhat process-y but has substance
+        # Fail-safe: if unsure, allow through
+        assert decision.candidate_allowed is True
+
+    def test_g5_working_branch_unaffected_by_fragment(self):
+        """G.5: Fragment still gets working memory — recent memory preserved."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 好的 | Assistant: 收到",
+            )
+        )
+        assert decision.candidate_allowed is False  # blocked from candidate
+        assert decision.working_kind == "lingering"  # working still active
+
+    def test_g6_user_fragment_in_substantive_turn(self):
+        """G.6: Fragment user-segment + substantive assistant → still fragment.
+
+        The user's message is a fragment even though the assistant replied
+        substantively. Either segment being a fragment → overall fragment.
+        """
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 好的 | Assistant: PostgreSQL uses MVCC for concurrency control, which allows readers to not block writers",
+            )
+        )
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == "source_gate:obvious_fragment"
+
+    def test_g6_assistant_fragment_in_substantive_turn(self):
+        """G.6: Substantive user + fragment assistant → still fragment.
+
+        Assistant's short confirmation doesn't salvage the turn.
+        """
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: We need to implement a distributed lock using Redis Redlock algorithm | Assistant: ok",
+            )
+        )
+        assert decision.candidate_allowed is False
+        assert decision.skip_reason == "source_gate:obvious_fragment"
+
+    def test_g6_both_substantive_allowed(self):
+        """G.6: Both segments substantive → candidate_allowed=True."""
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: We need to implement a distributed lock using Redis Redlock algorithm | Assistant: Redlock has known issues with clock skew, consider using a consensus-based approach like Raft instead",
+            )
+        )
+        assert decision.candidate_allowed is True
+
+
+# ── G.X: Adversarial verification ────────────────────────────────────────
+
+class TestSourceGateAdversarial:
+    """G.X: Removing source gate logic MUST cause fragment tests to fail."""
+
+    def test_gx_fragment_detection_is_the_cause(self, monkeypatch):
+        """G.X: If _is_obvious_fragment always returns False, G.1 MUST fail.
+
+        This proves the test is truly testing the source gate, not some
+        other mechanism. Disable the gate → fragment should pass through.
+        """
+        # Disable fragment detection
+        import plugins.memory.memory_os.inner_drive as mod
+
+        monkeypatch.setattr(mod, "_is_obvious_fragment", lambda _summary: False)
+
+        decision = classify_event_for_inner_drive(
+            _event(
+                kind="conversation_turn",
+                summary="User: 好的 | Assistant: 收到",
+            )
+        )
+        # With gate disabled, fragment passes through
+        assert decision.candidate_allowed is True
+        assert decision.skip_reason == ""
 
 
 # ── Degenerate / edge inputs ─────────────────────────────────────────────

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +100,24 @@ class CrystallizedMemoryService:
                 raise ValueError(
                     "provisional crystallized record requires a valid expires_at"
                 )
+            # Per-kind TTL cap: moment records must not exceed
+            # moment_provisional_ttl_days from now. If the upstream
+            # already set a shorter TTL, keep the shorter one.
+            # Uses datetime comparison because ISO string formats may differ.
+            # Spec: docs/resolver/hermes-memory-os-source-gate-quality-spec.md §S2
+            if candidate.kind == "moment":
+                from .knob_overrides import resolve_knob
+
+                ttl_days = resolve_knob("moment_provisional_ttl_days", default=3)
+                max_expires_dt = _datetime(now) + timedelta(days=ttl_days)
+                try:
+                    upstream_dt = datetime.fromisoformat(expires)
+                    if upstream_dt > max_expires_dt:
+                        # Cap: moment records expire in ≤ ttl_days
+                        expires = max_expires_dt.isoformat()
+                except ValueError:
+                    # Unparseable upstream expiry — use moment cap
+                    expires = max_expires_dt.isoformat()
             frontmatter["provisional"] = True
             frontmatter["expires_at"] = expires
             frontmatter["recurrence"] = str(decision.recurrence)

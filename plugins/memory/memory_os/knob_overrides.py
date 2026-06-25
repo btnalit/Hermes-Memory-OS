@@ -88,6 +88,32 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # ── Source gate quality knobs (F.8) ────────────────────────────────
+    "auto_promote_enabled": {
+        "module": "crystallized",
+        "default": True,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "auto_promote_min_age_days": {
+        "module": "crystallized",
+        "default": 7,
+        "bounds": [3, 30],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "promotion_rate",
+    },
+    "moment_provisional_ttl_days": {
+        "module": "crystallized",
+        "default": 3,
+        "bounds": [1, 14],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "moment_ttl_days",
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────
