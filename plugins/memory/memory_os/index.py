@@ -15,7 +15,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from .audit import append_audit
-from .crystallized import is_active_crystallized_frontmatter, read_candidate_queue
+from .crystallized import (
+    is_active_crystallized_frontmatter,
+    read_candidate_queue,
+    read_candidate_triage,
+    resolve_candidate_effective_state,
+)
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
@@ -62,7 +67,7 @@ class MemoryOSIndex:
             _index_events(conn, store)
             _update_event_source_state(conn, store)
             _index_working_items(conn, self.roots.working_root)
-            _index_crystallized_candidates(conn, self.roots)
+            _index_crystallized_candidates(conn, self.roots, store)
             _index_crystallized_records(conn, self.roots.crystallized_root)
             # Only repopulate embeddings when the embedder is available.
             # When unavailable, copy from the live index to preserve existing
@@ -125,7 +130,7 @@ class MemoryOSIndex:
             _clear_table(conn, "working_items")
             _index_working_items(conn, self.roots.working_root)
             _clear_table(conn, "crystallized_candidates")
-            _index_crystallized_candidates(conn, self.roots)
+            _index_crystallized_candidates(conn, self.roots, store)
             _clear_table(conn, "crystallized_records")
             _index_crystallized_records(conn, self.roots.crystallized_root)
             # Only clear+repopulate embeddings when the embedder is available.
@@ -869,8 +874,17 @@ def _index_embeddings(
     return count
 
 
-def _index_crystallized_candidates(conn: sqlite3.Connection, roots: MemoryOSRoots) -> None:
+def _index_crystallized_candidates(
+    conn: sqlite3.Connection, roots: MemoryOSRoots, store: MemoryOSStore | None = None
+) -> None:
+    triage: list[dict[str, Any]] = []
+    if store is not None:
+        triage = read_candidate_triage(store)
     for candidate in read_candidate_queue(roots):
+        effective_state = (
+            resolve_candidate_effective_state(candidate, triage) if triage
+            else candidate.bridge_state
+        )
         conn.execute(
             """
             insert or replace into crystallized_candidates
@@ -884,7 +898,7 @@ def _index_crystallized_candidates(conn: sqlite3.Connection, roots: MemoryOSRoot
                 json.dumps(candidate.source_event_ids, ensure_ascii=False, sort_keys=True),
                 json.dumps(candidate.tags or [], ensure_ascii=False, sort_keys=True),
                 candidate.sensitivity,
-                candidate.bridge_state,
+                effective_state,
                 json.dumps(candidate.provenance or {}, ensure_ascii=False, sort_keys=True),
             ),
         )

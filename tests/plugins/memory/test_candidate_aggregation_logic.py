@@ -415,10 +415,9 @@ class TestDemoteAged:
         assert result["demoted_count"] == 0
 
     def test_owner_eligible_bridge_state_skipped(self, tmp_path):
-        """Candidates already owner_eligible are skipped."""
+        """Fresh owner_eligible candidates (< 14 days) are not auto-demoted."""
         store = _store_with_gate(tmp_path)
         eligible = _cand("cand-eligible", body="记住：规则",
-                          created_at="2026-05-01T00:00:00Z",
                           bridge_state="owner_eligible")
         processed: set[str] = set()
         result = _demote_aged([eligible], store, processed,

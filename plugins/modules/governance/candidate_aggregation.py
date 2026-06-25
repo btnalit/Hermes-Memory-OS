@@ -27,6 +27,7 @@ from plugins.memory.memory_os.crystallized import (
     append_candidate_triage,
     read_candidate_queue,
     read_candidate_triage,
+    resolve_candidate_effective_state,
 )
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -106,12 +107,18 @@ def run_candidate_aggregation_lane(
     candidates = read_candidate_queue(store)
     triage_records = read_candidate_triage(store)
 
-    # Build a set of already-triaged candidate_ids so we don't re-triage
+    # Build a set of terminally-triaged candidate_ids.
+    # Only exclude candidates whose latest triage was a terminal state
+    # (demoted, fleeting). Promoted candidates remain in pending so
+    # _demote_aged can re-evaluate stale owner_eligible ones.
+    # triage_records is newest-first (read_candidate_triage reverses),
+    # so the first record seen for a cid is the latest action.
     already_triaged: set[str] = set()
     for rec in triage_records:
         cid = rec.get("candidate_id")
-        if cid:
-            already_triaged.add(cid)
+        if cid and cid not in already_triaged:
+            if rec.get("target_state") in ("demoted", "fleeting"):
+                already_triaged.add(cid)
 
     pending = [c for c in candidates if c.candidate_id not in already_triaged]
 
@@ -130,14 +137,12 @@ def run_candidate_aggregation_lane(
 
     rejected_results = _auto_demote_rejected(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
     promote_results = _cluster_and_promote(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
-    demote_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    demote_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
     fleeting_results = _tag_fleeting(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
 
-    compact_count = 0
-    if promote_results["promoted_count"] + demote_results["demoted_count"] > 0:
-        from plugins.memory.memory_os.crystallized import compact_candidate_queue
-        archive = store.roots.memory_os_root / "system" / "candidate_archive.jsonl"
-        compact_count = compact_candidate_queue(store, archive_path=archive, retention_days=7)
+    from plugins.memory.memory_os.crystallized import compact_candidate_queue
+    archive = store.roots.memory_os_root / "system" / "candidate_archive.jsonl"
+    compact_count = compact_candidate_queue(store, archive_path=archive, retention_days=7)
 
     return {
         "candidates_read": len(candidates),
@@ -633,6 +638,9 @@ def _cluster_and_promote(
 # ── Age-out demote ──────────────────────────────────────────────────────
 
 
+_OWNER_ELIGIBLE_STALE_TTL_SECONDS = 14 * 86400  # 14 days
+
+
 def _demote_aged(
     candidates: list[CrystallizedCandidate],
     store: MemoryOSStore,
@@ -641,20 +649,48 @@ def _demote_aged(
     envelope_id: str = "",
     now: datetime | None = None,
     ttl_seconds: int = CANDIDATE_DEMOTE_TTL_SECONDS,
+    triage_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Auto-demote candidates past TTL with no triage action.
 
-    Skips candidates already written by earlier pipeline stages via processed_ids.
+    Uses resolve_candidate_effective_state() to check the effective state
+    (considering triage overlay) rather than raw bridge_state, because
+    promoted candidates still have bridge_state=inner_drive_candidate in
+    the append-only candidates.jsonl.
+
+    Owner_eligible candidates get a longer stale TTL (14 days) to give
+    the owner time to process them before auto-demotion.
     """
     _now = now or datetime.now(timezone.utc)
     demoted_count = 0
+    _triage = triage_records if triage_records is not None else []
 
     for c in candidates:
         if c.candidate_id in processed_ids:
             continue
-        if c.bridge_state in ("owner_eligible", "demoted", "fleeting"):
+        effective = resolve_candidate_effective_state(c, _triage)
+        if effective in ("demoted", "fleeting"):
             continue
         age = _candidate_age_seconds(c.created_at, _now)
+
+        if effective == "owner_eligible":
+            if age > _OWNER_ELIGIBLE_STALE_TTL_SECONDS:
+                append_candidate_triage(
+                    store,
+                    candidate_id=c.candidate_id,
+                    action="demote",
+                    target_state="demoted",
+                    reason=(
+                        f"stale owner_eligible (age={age:.0f}s > "
+                        f"stale_ttl={_OWNER_ELIGIBLE_STALE_TTL_SECONDS}s)"
+                    ),
+                    execution_gate_envelope_id=envelope_id,
+                    now=_now,
+                )
+                processed_ids.add(c.candidate_id)
+                demoted_count += 1
+            continue
+
         if age > ttl_seconds:
             append_candidate_triage(
                 store,
