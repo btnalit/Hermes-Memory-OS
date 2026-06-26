@@ -2664,13 +2664,16 @@ def test_render_digest_keeps_telegram_text_bounded_without_partial_item(tmp_path
 
 
 def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
+    import datetime as _dt
+
     store = _store(tmp_path)
     module_root = tmp_path / "system-modules" / "wandering_mind"
     module_root.mkdir(parents=True)
+    now = _dt.datetime.now(_dt.timezone.utc)
     output_record = {
         "schema_version": "hermes.wandering_mind_output.v0",
         "id": "wout_owner_preview_001",
-        "ts": "2026-05-26T00:00:00+00:00",
+        "ts": now.isoformat(),
         "profile": "main",
         "module": "wandering_mind",
         "source_event_id": "evt_preview_001",
@@ -2680,7 +2683,7 @@ def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
     would_send = {
         "schema_version": "hermes.delivery_would_send.v0",
         "id": "wsend_owner_preview_001",
-        "ts": "2026-05-26T00:00:01+00:00",
+        "ts": now.isoformat(),
         "profile": "main",
         "module": "wandering_mind",
         "mode": "would_send",
@@ -2730,13 +2733,16 @@ def test_render_digest_shows_bounded_speak_expression_preview(tmp_path):
 
 
 def test_render_digest_hides_transcript_like_speak_expression_preview(tmp_path):
+    import datetime as _dt
+
     store = _store(tmp_path)
     module_root = tmp_path / "system-modules" / "wandering_mind"
     module_root.mkdir(parents=True)
+    now = _dt.datetime.now(_dt.timezone.utc)
     output_record = {
         "schema_version": "hermes.wandering_mind_output.v0",
         "id": "wout_raw_preview_001",
-        "ts": "2026-05-26T00:00:00+00:00",
+        "ts": now.isoformat(),
         "profile": "main",
         "module": "wandering_mind",
         "source_event_id": "evt_preview_001",
@@ -2746,7 +2752,7 @@ def test_render_digest_hides_transcript_like_speak_expression_preview(tmp_path):
     would_send = {
         "schema_version": "hermes.delivery_would_send.v0",
         "id": "wsend_raw_preview_001",
-        "ts": "2026-05-26T00:00:01+00:00",
+        "ts": now.isoformat(),
         "profile": "main",
         "module": "wandering_mind",
         "mode": "would_send",
@@ -2787,13 +2793,16 @@ def test_render_digest_hides_transcript_like_speak_expression_preview(tmp_path):
 
 
 def test_allow_speak_once_sends_once_when_explicit_delivery_enabled(tmp_path, monkeypatch):
+    import datetime as _dt
+
     store = _store(tmp_path)
     module_root = tmp_path / "system-modules" / "wandering_mind"
     module_root.mkdir(parents=True)
+    now = _dt.datetime.now(_dt.timezone.utc)
     output_record = {
         "schema_version": "hermes.wandering_mind_output.v0",
         "id": "wout_live_001",
-        "ts": "2026-05-26T00:00:00+00:00",
+        "ts": now.isoformat(),
         "profile": "main",
         "module": "wandering_mind",
         "output": "今晚别忘了给自己留一点安静的时间。",
@@ -2802,7 +2811,7 @@ def test_allow_speak_once_sends_once_when_explicit_delivery_enabled(tmp_path, mo
     would_send = {
         "schema_version": "hermes.delivery_would_send.v0",
         "id": "wsend_live_001",
-        "ts": "2026-05-26T00:00:01+00:00",
+        "ts": now.isoformat(),
         "profile": "main",
         "module": "wandering_mind",
         "mode": "would_send",
