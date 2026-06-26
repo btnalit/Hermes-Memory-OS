@@ -80,6 +80,10 @@ _MIN_SUBSTANTIVE_CHARS = 15
 # Auto-demote candidates that have been rejected N+ times by owner
 _REJECTION_THRESHOLD = 3
 
+# Terminal triage states — candidates in these states are permanently excluded
+# from the pending set and skipped by all pipeline stages.
+_TERMINAL_STATES = ("demoted", "fleeting", "absorbed")
+
 
 # ── Public lane API ─────────────────────────────────────────────────────
 
@@ -109,15 +113,19 @@ def run_candidate_aggregation_lane(
 
     # Build a set of terminally-triaged candidate_ids.
     # Only exclude candidates whose latest triage was a terminal state
-    # (demoted, fleeting). Promoted candidates remain in pending so
-    # _demote_aged can re-evaluate stale owner_eligible ones.
+    # (demoted, fleeting, absorbed). Promoted candidates remain in pending
+    # so _demote_aged can re-evaluate stale owner_eligible ones.
     # triage_records is newest-first (read_candidate_triage reverses),
     # so the first record seen for a cid is the latest action.
+    # Uses a separate seen_cids accumulator so that older terminal records
+    # for a cid don't sneak past when the latest action is non-terminal.
     already_triaged: set[str] = set()
+    seen_cids: set[str] = set()
     for rec in triage_records:
         cid = rec.get("candidate_id")
-        if cid and cid not in already_triaged:
-            if rec.get("target_state") in ("demoted", "fleeting"):
+        if cid and cid not in seen_cids:
+            seen_cids.add(cid)
+            if rec.get("target_state") in _TERMINAL_STATES:
                 already_triaged.add(cid)
 
     pending = [c for c in candidates if c.candidate_id not in already_triaged]
@@ -135,10 +143,10 @@ def run_candidate_aggregation_lane(
     # one stage — prevents duplicate/contradictory triage records.
     processed_ids: set[str] = set()
 
-    rejected_results = _auto_demote_rejected(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    rejected_results = _auto_demote_rejected(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
     promote_results = _cluster_and_promote(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
     demote_results = _demote_aged(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
-    fleeting_results = _tag_fleeting(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now)
+    fleeting_results = _tag_fleeting(pending, store, processed_ids, envelope_id=execution_gate_envelope_id, now=_now, triage_records=triage_records)
 
     from plugins.memory.memory_os.crystallized import compact_candidate_queue
     archive = store.roots.memory_os_root / "system" / "candidate_archive.jsonl"
@@ -169,20 +177,30 @@ def _auto_demote_rejected(
     *,
     envelope_id: str = "",
     now: datetime | None = None,
+    triage_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Auto-demote candidates whose rejection_count >= _REJECTION_THRESHOLD.
 
     Prevents repeated presentation of candidates the owner has explicitly
     rejected multiple times. Uses the rejection_count on the candidate
     dataclass (populated from candidates.jsonl).
+
+    Uses resolve_candidate_effective_state() for the skip guard so that
+    promoted candidates (whose raw bridge_state is still
+    inner_drive_candidate in the append-only candidates.jsonl) are
+    correctly identified and skipped.
     """
     _now = now or datetime.now(timezone.utc)
     demoted_count = 0
+    _triage = triage_records if triage_records is not None else []
 
     for c in candidates:
         if c.candidate_id in processed_ids:
             continue
-        if c.bridge_state in ("demoted", "fleeting"):
+        effective = resolve_candidate_effective_state(c, _triage)
+        if effective in _TERMINAL_STATES:
+            continue
+        if effective == "owner_eligible":
             continue
         if c.rejection_count >= _REJECTION_THRESHOLD:
             append_candidate_triage(
@@ -669,12 +687,14 @@ def _demote_aged(
         if c.candidate_id in processed_ids:
             continue
         effective = resolve_candidate_effective_state(c, _triage)
-        if effective in ("demoted", "fleeting"):
+        if effective in _TERMINAL_STATES:
             continue
         age = _candidate_age_seconds(c.created_at, _now)
 
         if effective == "owner_eligible":
-            if age > _OWNER_ELIGIBLE_STALE_TTL_SECONDS:
+            # Guard against missing/invalid created_at (returns inf), which
+            # would otherwise trigger immediate demotion for legacy candidates.
+            if age != float("inf") and age > _OWNER_ELIGIBLE_STALE_TTL_SECONDS:
                 append_candidate_triage(
                     store,
                     candidate_id=c.candidate_id,
@@ -845,18 +865,26 @@ def _tag_fleeting(
     *,
     envelope_id: str = "",
     now: datetime | None = None,
+    triage_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Tag no-decision-content candidates as fleeting.
 
-    Skips candidates already written by earlier pipeline stages via processed_ids.
+    Uses resolve_candidate_effective_state() for the skip guard so that
+    promoted candidates (whose raw bridge_state is still
+    inner_drive_candidate in the append-only candidates.jsonl) are
+    correctly identified and skipped.
     """
     _now = now or datetime.now(timezone.utc)
     fleeting_count = 0
+    _triage = triage_records if triage_records is not None else []
 
     for c in candidates:
         if c.candidate_id in processed_ids:
             continue
-        if c.bridge_state in ("owner_eligible", "demoted", "fleeting"):
+        effective = resolve_candidate_effective_state(c, _triage)
+        if effective in _TERMINAL_STATES:
+            continue
+        if effective == "owner_eligible":
             continue
         if _is_fleeting_candidate(c):
             append_candidate_triage(
