@@ -839,12 +839,24 @@ def _current_task_anchor_lines(anchor: str | None) -> list[str]:
         return []
     text = _redact(_clip_multiline(str(anchor), 700))
     lines: list[str] = []
+    response_rule_line = ""
     for line in text.splitlines():
         clean = line.strip()
         if not clean or clean.startswith("###"):
             continue
-        lines.append(clean if clean.startswith("-") else f"- {clean}")
-    return lines[:6]
+        formatted = clean if clean.startswith("-") else f"- {clean}"
+        # Always preserve the response/compression rule line — it is the
+        # compression survival instruction and must never be clipped.
+        if formatted.startswith("- response rule:") or formatted.startswith(
+            "- compression rule:"
+        ):
+            response_rule_line = formatted
+            continue
+        lines.append(formatted)
+    # Take at most 6 non-rule lines, then append the rule so it is always
+    # visible regardless of how many fields (completed_operations, anchor_ops,
+    # session lines) the anchor carries.
+    return lines[:6] + ([response_rule_line] if response_rule_line else [])
 
 
 def _identity_lines(store: MemoryOSStore) -> list[str]:

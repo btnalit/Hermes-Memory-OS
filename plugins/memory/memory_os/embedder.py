@@ -3,11 +3,21 @@
 Uses sentence-transformers with paraphrase-multilingual-MiniLM-L12-v2.
 Deterministic: same input -> same output vector. CPU-only, no network.
 INV-5 safe: is_available() guard -> vector lane degrades to FTS5 floor.
+
+Windows: sentence-transformers model loading is known-unstable on Windows
+(segfault / MemoryError in native torch dependencies). The embedder
+gracefully returns unavailable on Windows so the vector lane falls back
+to FTS5 without crashing.
 """
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
+
+
+_WINDOWS = sys.platform == "win32"
 
 
 class LocalEmbedder:
@@ -27,11 +37,15 @@ class LocalEmbedder:
         """Check whether the embedding model can be loaded.
 
         Cached: the check runs once and the result is memoized.
-        Returns False when sentence-transformers is not installed or
-        the model cannot be downloaded/loaded.
+        Returns False when sentence-transformers is not installed, the
+        model cannot be downloaded/loaded, or the platform is Windows
+        (sentence-transformers native deps are unstable on win32).
         """
         if self._available is not None:
             return self._available
+        if _WINDOWS:
+            self._available = False
+            return False
         try:
             from sentence_transformers import SentenceTransformer
 
