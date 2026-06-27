@@ -23,6 +23,7 @@ from plugins.memory.memory_os.__init__ import (
     _format_current_task_anchor,
     _format_deferred_task_anchor,
     _format_resumed_deferred_task_anchor,
+    _is_owner_action_anchor,
     _looks_like_operation_context,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -718,4 +719,79 @@ def test_a16b_cancellation_anchor_not_resurrected(tmp_path):
     assert recovered == "", (
         f"A.16b FAIL: _read_latest_active_task_anchor resurrected cancelled anchor: "
         f"{recovered[:80]}..."
+    )
+
+
+def test_a17_capture_turn_operations_preserves_resumed_anchor_response_rule(tmp_path):
+    """A.17: _capture_turn_operations must not rebuild resumed anchor format.
+
+    Resumed deferred-task anchors carry ``response rule: Continue this deferred
+    foreground task``.  ``_capture_turn_operations`` calls
+    ``_format_current_task_anchor`` to rebuild, which replaces that specialized
+    response rule with the generic ``compression rule: Continue this foreground
+    task after compaction`` — losing the critical "deferred" instruction that
+    tells the agent *which* task to continue.
+
+    The resumed anchor has ``- current task:`` extracted from the ORIGINAL
+    pre-deferral anchor (read from deferred JSONL), so the existing
+    ``not current_task`` guard does NOT protect it — it is misidentified as a
+    standard-format anchor and silently rebuilt.
+    """
+    provider = _init_provider(tmp_path)
+    provider.prefetch("部署 redis 集群")
+
+    # Save the original anchor (has "- current task:"), which is what
+    # _write_deferred_current_task_anchor persists to deferred JSONL.
+    original_anchor = provider._current_task_anchor
+    assert "- current task:" in original_anchor
+
+    # Simulate: defer
+    provider._write_deferred_current_task_anchor(
+        anchor=original_anchor,
+        deferral="先推迟",
+        session_id=provider.session_id,
+    )
+    deferred_anchor = _format_deferred_task_anchor(
+        deferral="先推迟",
+        previous_anchor=original_anchor,
+        session_id=provider.session_id,
+    )
+    provider._current_task_anchor = deferred_anchor
+    provider._write_active_task_anchor(anchor=deferred_anchor)
+
+    # Simulate: resume — in real code _read_latest_deferred_current_task_anchor
+    # returns the ORIGINAL pre-deferral anchor, not the deferred-format one
+    resume_anchor = _format_resumed_deferred_task_anchor(
+        anchor=original_anchor,  # ← matches real _read_latest_deferred_current_task_anchor
+        session_id=provider.session_id,
+    )
+    provider._current_task_anchor = resume_anchor
+    provider._write_active_task_anchor(anchor=resume_anchor)
+
+    # Sanity: the resumed anchor has the response rule
+    assert "response rule: Continue this deferred foreground task" in provider._current_task_anchor, (
+        "A.17 precondition FAIL: resume anchor missing response rule"
+    )
+    # Sanity: the resumed anchor has "- current task:" from the original anchor
+    assert "- current task:" in provider._current_task_anchor, (
+        "A.17 precondition FAIL: resumed anchor missing current_task line"
+    )
+
+    # Simulate: _capture_turn_operations with operation-context messages
+    provider._capture_turn_operations(
+        [
+            {"role": "assistant", "content": "I'll check the server status"},
+            {"role": "tool", "content": "terminal: redis-server process running on port 6379"},
+        ],
+        session_id=provider.session_id,
+    )
+
+    assert "response rule: Continue this deferred foreground task" in provider._current_task_anchor, (
+        "A.17 FAIL: _capture_turn_operations replaced resumed anchor's "
+        "'response rule: Continue this deferred foreground task' with the "
+        "generic compression rule — the agent would not know to continue "
+        "the deferred task after compaction recovery"
+    )
+    assert "- owner resumed a deferred foreground task" in provider._current_task_anchor, (
+        "A.17 FAIL: _capture_turn_operations stripped 'owner resumed' marker"
     )

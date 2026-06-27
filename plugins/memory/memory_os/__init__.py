@@ -278,7 +278,11 @@ class MemoryOSProvider(MemoryProvider):
         merged = list(dict.fromkeys(previous_completed + new_ops))[-6:]
         current_task = _extract_anchor_current_task(self._current_task_anchor)
         if not current_task:
-            return  # Don't touch non-standard anchor formats (cancelled, deferred, ambiguous)
+            return  # Non-standard anchor formats without current_task (cancelled, deferred, ambiguous)
+        if _is_owner_action_anchor(self._current_task_anchor):
+            return  # Owner-action anchors (resumed, deferred, cancelled) carry specialized
+            # response rules that _format_current_task_anchor would replace with the
+            # generic compression rule — do not rebuild these formats.
         self._current_task_anchor = _format_current_task_anchor(
             task=current_task,
             operations=[],
@@ -1374,6 +1378,26 @@ def _extract_anchor_operation_lines(anchor: str) -> list[str]:
         if clean.startswith("- assistant:") or clean.startswith("- tool:"):
             operations.append(clean[2:].strip())
     return operations[-6:]
+
+
+def _is_owner_action_anchor(anchor: str) -> bool:
+    """Return True if the anchor is a non-standard owner-action format.
+
+    Owner-action formats (deferred, cancelled, resumed) carry specialized
+    response rules that ``_format_current_task_anchor`` does not produce.
+    ``_capture_turn_operations`` must not rebuild these anchors because the
+    rebuild would replace the specialized response rule (e.g. "Continue this
+    deferred foreground task") with the generic compression rule.
+    """
+    for line in str(anchor or "").splitlines():
+        clean = line.strip()
+        if clean.startswith("- owner "):
+            return True
+        if clean.startswith("- current task:"):
+            # Standard anchors have "- current task:" as the first content
+            # line; owner-action anchors start with "- owner ..." instead.
+            return False
+    return False
 
 
 def _content_text(content: Any) -> str:
