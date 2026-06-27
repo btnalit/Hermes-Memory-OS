@@ -972,8 +972,7 @@ class MemoryOSProvider(MemoryProvider):
     def _write_active_task_anchor(self, *, anchor: str, session_id: str = "", status: str = "active") -> None:
         if self._roots is None:
             return
-        if status == "active":
-            self._supersede_active_anchors()
+        self._supersede_active_anchors()
         record = _active_task_anchor_record(
             anchor=anchor,
             session_id=session_id or self.session_id,
@@ -999,9 +998,12 @@ class MemoryOSProvider(MemoryProvider):
     def _read_latest_active_task_anchor(self) -> str:
         """Return the latest active (incomplete) foreground anchor from disk.
 
-        Reads ``active_task_anchor.jsonl`` in reverse; returns the most recent
-        anchor whose status is ``"active"`` and whose profile matches (or is
-        empty).  Completed / cancelled anchors are skipped.
+        Reads ``active_task_anchor.jsonl`` in reverse; the *most recent*
+        record (first valid line encountered in reverse) determines current
+        state.  If its status is ``"active"`` the anchor is returned;
+        any other status (completed, cancelled, superseded) means there
+        is no active anchor — older ``"active"`` lines are immutable in
+        append-only JSONL and are superseded by the most recent record.
         """
         if self._roots is None:
             return ""
@@ -1017,13 +1019,16 @@ class MemoryOSProvider(MemoryProvider):
                 continue
             if not isinstance(record, dict):
                 continue
-            if str(record.get("status") or "") != "active":
-                continue
             if str(record.get("profile") or self.profile) not in {self.profile, ""}:
                 continue
+            # Most recent record for this profile decides the state
+            status = str(record.get("status") or "")
+            if status != "active":
+                return ""
             anchor = str(record.get("anchor") or "")
             if anchor.strip():
                 return anchor
+            return ""
         return ""
 
     def _clear_active_task_anchor(self) -> None:

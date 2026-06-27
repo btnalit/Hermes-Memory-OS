@@ -659,3 +659,63 @@ def test_ax2_disable_f1_fix_breaks_a6(monkeypatch, tmp_path):
     assert "install nginx" not in anchor_after.lower(), (
         "A.X2: without F1 fix, completed_operations should be absent from compaction anchor"
     )
+
+
+# ── A.16  _read_latest_active_task_anchor does not resurrect cleared/cancelled anchors ──
+
+
+def test_a16_read_latest_active_anchor_does_not_resurrect_cleared_anchor(tmp_path):
+    """A.16: after _clear_active_task_anchor, recovery must NOT return the old anchor.
+
+    JSONL is append-only — old ``"active"`` lines are immutable.  This test
+    verifies that ``_read_latest_active_task_anchor`` uses most-recent-record
+    semantics rather than scanning for *any* ``"active"`` record.
+    """
+    provider = _init_provider(tmp_path)
+    provider.prefetch("部署 redis 集群")
+
+    # Sanity: anchor is active
+    assert provider._current_task_anchor, "expected active anchor after prefetch"
+    recovered = provider._read_latest_active_task_anchor()
+    assert recovered == provider._current_task_anchor, (
+        "recovered anchor should match in-memory anchor"
+    )
+
+    # Clear the anchor (simulates topic switch or ambiguous recall;
+    # callers always follow _clear_active_task_anchor with clearing the
+    # in-memory state — replicate that here)
+    provider._clear_active_task_anchor()
+    provider._current_task_anchor = ""
+
+    # Recovery must NOT resurrect the old anchor
+    recovered_after = provider._read_latest_active_task_anchor()
+    assert recovered_after == "", (
+        f"A.16 FAIL: _read_latest_active_task_anchor resurrected cleared anchor: "
+        f"{recovered_after[:80]}..."
+    )
+
+
+def test_a16b_cancellation_anchor_not_resurrected(tmp_path):
+    """A.16b: cancellation path must also prevent resurrection on recovery."""
+    provider = _init_provider(tmp_path)
+    provider.prefetch("部署 redis 集群")
+
+    anchor_before = provider._current_task_anchor
+    assert anchor_before, "expected active anchor"
+
+    # Simulate cancellation: write cancelled anchor directly
+    cancelled = _format_cancelled_task_anchor(
+        cancellation="取消这个任务",
+        previous_anchor=anchor_before,
+        session_id=provider.session_id,
+        completed_operations=_extract_anchor_operation_lines(anchor_before),
+    )
+    provider._write_active_task_anchor(anchor=cancelled, status="cancelled")
+    provider._current_task_anchor = ""
+
+    # Recovery must not return the old active anchor
+    recovered = provider._read_latest_active_task_anchor()
+    assert recovered == "", (
+        f"A.16b FAIL: _read_latest_active_task_anchor resurrected cancelled anchor: "
+        f"{recovered[:80]}..."
+    )
