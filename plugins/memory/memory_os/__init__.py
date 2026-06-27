@@ -275,7 +275,7 @@ class MemoryOSProvider(MemoryProvider):
             return
         # Merge: existing completed_operations + new turn operations
         previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
-        merged = (previous_completed + new_ops)[-6:]
+        merged = list(dict.fromkeys(previous_completed + new_ops))[-6:]
         current_task = _extract_anchor_current_task(self._current_task_anchor)
         self._current_task_anchor = _format_current_task_anchor(
             task=current_task,
