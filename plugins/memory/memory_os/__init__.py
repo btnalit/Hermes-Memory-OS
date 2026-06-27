@@ -579,7 +579,13 @@ class MemoryOSProvider(MemoryProvider):
         return result
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
-        self._current_task_anchor = _build_current_task_anchor(messages, session_id=self.session_id)
+        # Extract completed_operations from current anchor before rebuilding
+        previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
+        self._current_task_anchor = _build_current_task_anchor(
+            messages,
+            session_id=self.session_id,
+            completed_operations=previous_completed,
+        )
         # C1+C2: persist the compaction-time anchor (includes operations + completed)
         if self._current_task_anchor:
             self._write_active_task_anchor(anchor=self._current_task_anchor)
@@ -971,6 +977,16 @@ class MemoryOSProvider(MemoryProvider):
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
+        self._audit(
+            "active_task_anchor_recorded",
+            "ok",
+            {
+                "record_id": record["record_id"],
+                "session_id": record["session_id"],
+                "profile": record["profile"],
+                "status": status,
+            },
+        )
 
     def _read_latest_active_task_anchor(self) -> str:
         """Return the latest active (incomplete) foreground anchor from disk.
@@ -1144,7 +1160,11 @@ def _redact_secrets(value: str) -> str:
     return redacted
 
 
-def _build_current_task_anchor(messages: list[dict[str, Any]], *, session_id: str = "") -> str:
+def _build_current_task_anchor(
+    messages: list[dict[str, Any]], *,
+    session_id: str = "",
+    completed_operations: list[str] | None = None,
+) -> str:
     latest_user_index: int | None = None
     latest_user_text = ""
     for index in range(len(messages) - 1, -1, -1):
@@ -1171,6 +1191,7 @@ def _build_current_task_anchor(messages: list[dict[str, Any]], *, session_id: st
         task=latest_user_text,
         operations=operations[-4:],
         session_id=session_id,
+        completed_operations=completed_operations,
     )
 
 
