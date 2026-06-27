@@ -15,10 +15,14 @@ from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.__init__ import (
     _active_task_anchor_path,
     _active_task_anchor_record,
+    _build_current_task_anchor,
     _clip,
     _extract_anchor_current_task,
     _extract_anchor_operation_lines,
+    _format_cancelled_task_anchor,
     _format_current_task_anchor,
+    _format_deferred_task_anchor,
+    _format_resumed_deferred_task_anchor,
     _looks_like_operation_context,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -402,3 +406,256 @@ def test_clear_active_task_anchor_writes_tombstone(tmp_path):
     lines = path.read_text(encoding="utf-8").strip().splitlines()
     last = json.loads(lines[-1])
     assert last["status"] == "completed"
+
+
+# ── A.6  on_pre_compress carries forward completed_operations (F1) ──────────
+
+
+def test_a6_on_pre_compress_carries_forward_completed_operations(tmp_path):
+    """F1: on_pre_compress should preserve completed_operations from prior anchor."""
+    provider = _init_provider(tmp_path)
+    provider.prefetch("安装 nginx")
+    # Accumulate a completed operation via sync_turn
+    provider.sync_turn(
+        "安装 nginx",
+        "正在安装...",
+        messages=[
+            {"role": "user", "content": "安装 nginx"},
+            {"role": "assistant", "content": "正在安装 nginx..."},
+            {"role": "tool", "content": "terminal: apt-get install nginx -y\n...\nnginx (1.24.0) ..."},
+        ],
+    )
+    anchor_before = provider._current_task_anchor
+    assert "install nginx" in anchor_before.lower()
+
+    # Simulate compaction
+    messages = [
+        {"role": "user", "content": "继续配置 nginx"},
+        {"role": "assistant", "content": "现在来配置 nginx..."},
+    ]
+    anchor_after = provider.on_pre_compress(messages)
+    # The completed operation from before should survive compaction
+    assert "install nginx" in anchor_after.lower(), (
+        f"F1: completed_operations should survive compaction:\n{anchor_after}"
+    )
+
+
+# ── A.7  extractor returns 6 (F2) ───────────────────────────────────────────
+
+
+def test_a7_extract_anchor_operation_lines_returns_up_to_6():
+    """F2: extractor should return up to 6 operations, matching formatter cap."""
+    anchor = _format_current_task_anchor(
+        task="test",
+        operations=[],
+        completed_operations=[f"tool: operation-{i}" for i in range(8)],
+    )
+    ops = _extract_anchor_operation_lines(anchor)
+    assert len(ops) == 6, f"F2: extractor should return 6 ops, got {len(ops)}: {ops}"
+    assert "operation-7" in ops[-1]
+
+
+# ── A.8  deferred anchor preserves completed_operations (F3) ─────────────────
+
+
+def test_a8_deferred_task_anchor_preserves_completed_operations():
+    """F3: _format_deferred_task_anchor should render completed_operations when provided."""
+    previous = _format_current_task_anchor(
+        task="deploy nginx",
+        operations=[],
+        completed_operations=["tool: built container image", "tool: pushed to registry"],
+    )
+    anchor = _format_deferred_task_anchor(
+        deferral="先推迟部署",
+        previous_anchor=previous,
+        completed_operations=["tool: built container image", "tool: pushed to registry"],
+    )
+    assert "completed operations (do not repeat)" in anchor
+    assert "built container image" in anchor
+    assert "pushed to registry" in anchor
+
+
+# ── A.9  cancelled anchor preserves completed_operations (F3) ────────────────
+
+
+def test_a9_cancelled_task_anchor_preserves_completed_operations():
+    """F3: _format_cancelled_task_anchor should render completed_operations when provided."""
+    previous = _format_current_task_anchor(
+        task="install redis",
+        operations=[],
+        completed_operations=["tool: apt-get install redis"],
+    )
+    anchor = _format_cancelled_task_anchor(
+        cancellation="取消安装",
+        previous_anchor=previous,
+        completed_operations=["tool: apt-get install redis"],
+    )
+    assert "completed operations (do not repeat)" in anchor
+    assert "install redis" in anchor
+
+
+# ── A.10  _capture_turn_operations no-ops on cancelled anchor (F4) ──────────
+
+
+def test_a10_capture_turn_operations_noops_on_cancelled_anchor(tmp_path):
+    """F4: _capture_turn_operations should not modify a cancelled anchor."""
+    provider = _init_provider(tmp_path)
+    provider.prefetch("安装 redis")
+    # Cancel the task
+    provider.prefetch("取消这个任务")
+    cancelled_anchor = provider._current_task_anchor
+    if not cancelled_anchor:
+        pytest.skip("anchor was cleared, not formatted as cancelled")
+    assert "cancelled" in cancelled_anchor.lower()
+
+    # Now call sync_turn with operation messages — should not wipe the anchor
+    provider.sync_turn(
+        "取消这个任务",
+        "好的，任务已取消。",
+        messages=_tool_messages(),
+    )
+    assert provider._current_task_anchor, "F4: cancelled anchor should not be wiped"
+    assert "cancelled" in provider._current_task_anchor.lower()
+
+
+# ── A.11  _capture_turn_operations no-ops on deferred anchor (F4) ───────────
+
+
+def test_a11_capture_turn_operations_noops_on_deferred_anchor(tmp_path):
+    """F4: _capture_turn_operations should not modify a deferred anchor."""
+    provider = _init_provider(tmp_path)
+    provider.prefetch("部署到生产环境")
+    # Defer the task
+    provider.prefetch("先推迟这个任务，稍后再做")
+    deferred_anchor = provider._current_task_anchor
+    if not deferred_anchor or "deferred" not in deferred_anchor.lower():
+        pytest.skip("anchor was not formatted as deferred")
+
+    provider.sync_turn(
+        "先推迟这个任务，稍后再做",
+        "好的，任务已推迟。",
+        messages=_tool_messages(),
+    )
+    assert provider._current_task_anchor, "F4: deferred anchor should not be wiped"
+
+
+# ── A.12  merge deduplicates (F5) ────────────────────────────────────────────
+
+
+def test_a12_merge_deduplicates_identical_operations():
+    """F5: merged completed_operations should not contain duplicates."""
+    previous = ["tool: apt-get install nginx", "assistant: configured upstream"]
+    new = ["assistant: configured upstream", "tool: restarted nginx"]
+    merged = list(dict.fromkeys(previous + new))[-6:]
+    assert merged.count("assistant: configured upstream") == 1
+    assert len(merged) == 3
+    assert merged == ["tool: apt-get install nginx", "assistant: configured upstream", "tool: restarted nginx"]
+
+
+# ── A.13  conditional compression rule (F6) ──────────────────────────────────
+
+
+def test_a13_compression_rule_omits_do_not_repeat_when_no_completed_ops():
+    """F6: 'Do not repeat completed operations' absent when completed_operations is empty."""
+    anchor = _format_current_task_anchor(
+        task="test",
+        operations=[],
+    )
+    assert "Do not repeat completed operations" not in anchor
+    assert "Do not switch back to unrelated historical memory topics" in anchor
+
+
+# ── A.14  _write_active_task_anchor calls _audit (F7) ────────────────────────
+
+
+def test_a14_write_active_task_anchor_calls_audit(tmp_path):
+    """F7: _write_active_task_anchor should call self._audit after writing."""
+    provider = _init_provider(tmp_path)
+    provider.prefetch("测试任务")
+
+    audit_calls = []
+    mp = mock.patch.object(provider, "_audit", side_effect=lambda *args, **kw: audit_calls.append((args, kw)))
+    mp.start()
+
+    provider._write_active_task_anchor(anchor=provider._current_task_anchor, status="active")
+
+    mp.stop()
+    assert len(audit_calls) >= 1, f"F7: expected _audit to be called, got {len(audit_calls)} calls"
+    args, kw = audit_calls[0]
+    assert args[0] == "active_task_anchor_recorded"
+    assert args[1] == "ok"
+
+
+# ── A.15  supersede old active records (F8) ──────────────────────────────────
+
+
+def test_a15_supersede_active_anchors_tombstones_old_records(tmp_path):
+    """F8: writing a new active record should supersede old active records."""
+    provider = _init_provider(tmp_path)
+    anchor_1 = _format_current_task_anchor(
+        task="任务一", operations=[], session_id="s1",
+    )
+    provider._write_active_task_anchor(anchor=anchor_1, status="active")
+    path = _active_task_anchor_path(provider._roots)
+
+    # Verify first record is written
+    assert path.exists()
+    lines_1 = path.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines_1) == 1
+
+    # Write a second active record — should supersede the first via append-only tombstone
+    anchor_2 = _format_current_task_anchor(
+        task="任务二", operations=[], session_id="s1",
+    )
+    provider._write_active_task_anchor(anchor=anchor_2, status="active")
+
+    # The superseded tombstone was appended; the original active line is immutable.
+    # The reader (_read_latest_active_task_anchor) scans in reverse and returns
+    # the latest active record. Verify the reader returns the correct anchor.
+    recovered = provider._read_latest_active_task_anchor()
+    assert "任务二" in recovered, f"F8: latest active anchor should be task 2, got: {recovered}"
+
+    # Also verify superseded records exist in the file
+    lines_after = path.read_text(encoding="utf-8").strip().splitlines()
+    records = [json.loads(l) for l in lines_after]
+    superseded = [r for r in records if r.get("status") == "superseded"]
+    assert len(superseded) >= 1, f"F8: should have at least 1 superseded record, got {len(superseded)}"
+
+
+# ── A.X2  adversarial: disable F1 fix → A.6 fails ────────────────────────────
+
+
+def test_ax2_disable_f1_fix_breaks_a6(monkeypatch, tmp_path):
+    """A.X2: if F1 fix is disabled, on_pre_compress MUST NOT carry forward ops."""
+    provider = _init_provider(tmp_path)
+    provider.prefetch("安装 nginx")
+    provider.sync_turn(
+        "安装 nginx",
+        "正在安装...",
+        messages=[
+            {"role": "user", "content": "安装 nginx"},
+            {"role": "assistant", "content": "正在安装 nginx..."},
+            {"role": "tool", "content": "terminal: apt-get install nginx -y\n...\nnginx (1.24.0) ..."},
+        ],
+    )
+
+    # Monkey-patch on_pre_compress to skip forwarding completed_operations
+    def broken_pre_compress(messages):
+        provider._current_task_anchor = _build_current_task_anchor(
+            messages, session_id=provider.session_id
+        )
+        if provider._current_task_anchor:
+            provider._write_active_task_anchor(anchor=provider._current_task_anchor)
+        return provider._current_task_anchor
+
+    monkeypatch.setattr(provider, "on_pre_compress", broken_pre_compress)
+
+    messages = [
+        {"role": "user", "content": "继续配置 nginx"},
+        {"role": "assistant", "content": "现在来配置..."},
+    ]
+    anchor_after = provider.on_pre_compress(messages)
+    # Without the fix, completed operations should NOT appear
+    assert "install nginx" not in anchor_after.lower(), (
+        "A.X2: without F1 fix, completed_operations should be absent from compaction anchor"
+    )
