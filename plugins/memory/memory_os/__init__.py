@@ -796,10 +796,12 @@ class MemoryOSProvider(MemoryProvider):
                 deferral=text,
                 session_id=session_id or self.session_id,
             )
+            previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
             self._current_task_anchor = _format_deferred_task_anchor(
                 deferral=text,
                 previous_anchor=self._current_task_anchor,
                 session_id=session_id or self.session_id,
+                completed_operations=previous_completed,
             )
             self._write_active_task_anchor(anchor=self._current_task_anchor)
             self._foreground_task_only_prefetch = True
@@ -807,9 +809,11 @@ class MemoryOSProvider(MemoryProvider):
         if decision.intent == "explicit_deferred_resume":
             deferred_anchor = self._read_latest_deferred_current_task_anchor()
             if deferred_anchor:
+                deferred_completed = _extract_anchor_operation_lines(deferred_anchor)
                 self._current_task_anchor = _format_resumed_deferred_task_anchor(
                     anchor=deferred_anchor,
                     session_id=session_id or self.session_id,
+                    completed_operations=deferred_completed,
                 )
                 self._write_active_task_anchor(anchor=self._current_task_anchor)
                 self._foreground_task_only_prefetch = True
@@ -822,10 +826,12 @@ class MemoryOSProvider(MemoryProvider):
             self._foreground_task_only_prefetch = True
             return
         if decision.intent == "cancellation":
+            previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
             self._current_task_anchor = _format_cancelled_task_anchor(
                 cancellation=text,
                 previous_anchor=self._current_task_anchor,
                 session_id=session_id or self.session_id,
+                completed_operations=previous_completed,
             )
             self._write_active_task_anchor(anchor=self._current_task_anchor, status="cancelled")
             self._foreground_task_only_prefetch = True
@@ -966,6 +972,8 @@ class MemoryOSProvider(MemoryProvider):
     def _write_active_task_anchor(self, *, anchor: str, session_id: str = "", status: str = "active") -> None:
         if self._roots is None:
             return
+        if status == "active":
+            self._supersede_active_anchors()
         record = _active_task_anchor_record(
             anchor=anchor,
             session_id=session_id or self.session_id,
@@ -1026,6 +1034,35 @@ class MemoryOSProvider(MemoryProvider):
             anchor=self._current_task_anchor,
             status="completed",
         )
+
+    def _supersede_active_anchors(self) -> None:
+        """Mark all currently-active anchor records as superseded.
+
+        Appends a tombstone record for each active record found, so
+        ``_read_latest_active_task_anchor`` skips them.
+        """
+        if self._roots is None:
+            return
+        path = _active_task_anchor_path(self._roots)
+        if not path.exists():
+            return
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if record.get("status") == "active":
+                superseded = dict(record)
+                superseded["record_id"] = record.get("record_id", "unknown")
+                superseded["status"] = "superseded"
+                superseded["superseded_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(superseded, ensure_ascii=False, sort_keys=True))
+                    handle.write("\n")
 
 
 def register(ctx) -> None:
@@ -1226,7 +1263,10 @@ def _format_current_task_anchor(
     return _clip_multiline("\n".join(output), 1200)
 
 
-def _format_cancelled_task_anchor(*, cancellation: str, previous_anchor: str, session_id: str = "") -> str:
+def _format_cancelled_task_anchor(
+    *, cancellation: str, previous_anchor: str, session_id: str = "",
+    completed_operations: list[str] | None = None,
+) -> str:
     output = [
         "### Memory-OS Current Task Anchor",
         f"- owner cancelled or rejected the foreground task: {_redact_task_text(_clip(cancellation, 240))}",
@@ -1236,6 +1276,10 @@ def _format_cancelled_task_anchor(*, cancellation: str, previous_anchor: str, se
         output.append(f"- cancelled task: {_redact_task_text(_clip(previous_task, 220))}")
     if session_id:
         output.append(f"- session: {session_id}")
+    if completed_operations:
+        output.append("- completed operations (do not repeat):")
+        for op in completed_operations[-6:]:
+            output.append(f"  - {_redact_task_text(_clip(op, 220))}")
     output.append(
         "- response rule: Acknowledge the cancellation and stop the foreground task. "
         "Do not pivot to unrelated system-memory, provider-status, or historical architecture topics "
@@ -1244,7 +1288,10 @@ def _format_cancelled_task_anchor(*, cancellation: str, previous_anchor: str, se
     return _clip_multiline("\n".join(output), 1200)
 
 
-def _format_deferred_task_anchor(*, deferral: str, previous_anchor: str, session_id: str = "") -> str:
+def _format_deferred_task_anchor(
+    *, deferral: str, previous_anchor: str, session_id: str = "",
+    completed_operations: list[str] | None = None,
+) -> str:
     output = [
         "### Memory-OS Current Task Anchor",
         f"- owner deferred the foreground task: {_redact_task_text(_clip(deferral, 240))}",
@@ -1254,6 +1301,10 @@ def _format_deferred_task_anchor(*, deferral: str, previous_anchor: str, session
         output.append(f"- deferred task: {_redact_task_text(_clip(previous_task, 220))}")
     if session_id:
         output.append(f"- session: {session_id}")
+    if completed_operations:
+        output.append("- completed operations (do not repeat):")
+        for op in completed_operations[-6:]:
+            output.append(f"  - {_redact_task_text(_clip(op, 220))}")
     output.append(
         "- response rule: Acknowledge the deferral and preserve this task for a later explicit resume. "
         "Do not pivot to unrelated historical memory topics."
@@ -1261,17 +1312,24 @@ def _format_deferred_task_anchor(*, deferral: str, previous_anchor: str, session
     return _clip_multiline("\n".join(output), 1200)
 
 
-def _format_resumed_deferred_task_anchor(*, anchor: str, session_id: str = "") -> str:
+def _format_resumed_deferred_task_anchor(
+    *, anchor: str, session_id: str = "",
+    completed_operations: list[str] | None = None,
+) -> str:
     task = _extract_anchor_current_task(anchor)
-    operations = _extract_anchor_operation_lines(anchor)
+    anchor_ops = _extract_anchor_operation_lines(anchor)
     lines = [
         "### Memory-OS Current Task Anchor",
         "- owner resumed a deferred foreground task",
     ]
     if task:
         lines.append(f"- current task: {_redact_task_text(_clip(task, 240))}")
-    if operations:
-        lines.append(f"- latest task state: {_redact_task_text(_clip(operations[-1], 260))}")
+    if completed_operations:
+        lines.append("- completed operations (do not repeat):")
+        for op in completed_operations[-6:]:
+            lines.append(f"  - {_redact_task_text(_clip(op, 220))}")
+    if anchor_ops:
+        lines.append(f"- latest task state: {_redact_task_text(_clip(anchor_ops[-1], 260))}")
     if session_id:
         lines.append(f"- resumed in session: {session_id}")
     lines.append(
