@@ -277,6 +277,8 @@ class MemoryOSProvider(MemoryProvider):
         previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
         merged = list(dict.fromkeys(previous_completed + new_ops))[-6:]
         current_task = _extract_anchor_current_task(self._current_task_anchor)
+        if not current_task:
+            return  # Don't touch non-standard anchor formats (cancelled, deferred, ambiguous)
         self._current_task_anchor = _format_current_task_anchor(
             task=current_task,
             operations=[],
