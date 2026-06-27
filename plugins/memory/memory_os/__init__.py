@@ -1193,11 +1193,13 @@ def _format_current_task_anchor(
         output.append("- active tool/process state:")
         for operation in operations:
             output.append(f"  - {_redact_task_text(_clip(operation, 220))}")
-    output.append(
+    rule = (
         "- compression rule: Continue this foreground task after compaction. "
-        "Do not switch back to unrelated historical memory topics. "
-        "Do not repeat completed operations."
+        "Do not switch back to unrelated historical memory topics."
     )
+    if completed_operations:
+        rule += " Do not repeat completed operations."
+    output.append(rule)
     return _clip_multiline("\n".join(output), 1200)
 
 
