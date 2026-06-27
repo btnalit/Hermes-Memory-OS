@@ -98,6 +98,11 @@ class MemoryOSProvider(MemoryProvider):
         self._worker_stop = threading.Event()
         if kwargs.get("worker_autostart", True):
             self._start_worker()
+        # C2: recover active foreground anchor from disk after restart / session switch
+        if not self._current_task_anchor:
+            recovered = self._read_latest_active_task_anchor()
+            if recovered:
+                self._current_task_anchor = recovered
 
     def _sync_identity_manifest(self) -> None:
         """Sync computed identity sources to identity/manifest.json."""
@@ -242,6 +247,43 @@ class MemoryOSProvider(MemoryProvider):
             },
         )
         self._enqueue(event, drop_action="sync_turn_dropped")
+        # ── C1: capture operations from this turn's messages ──────────────
+        self._capture_turn_operations(messages, session_id=session_id)
+
+    def _capture_turn_operations(
+        self, messages: Any, *, session_id: str = ""
+    ) -> None:
+        """Scan turn messages for operation context and append to anchor.
+
+        Reuses ``_looks_like_operation_context`` — the same deterministic
+        marker matcher used by ``_build_current_task_anchor``.  No LLM or
+        network calls (INV-5).
+        """
+        if not isinstance(messages, list) or not self._current_task_anchor:
+            return
+        new_ops: list[str] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role", ""))
+            if role not in {"assistant", "tool"}:
+                continue
+            text = _content_text(message.get("content"))
+            if _looks_like_operation_context(text):
+                new_ops.append(f"{role}: {_clip(text, 180)}")
+        if not new_ops:
+            return
+        # Merge: existing completed_operations + new turn operations
+        previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
+        merged = (previous_completed + new_ops)[-6:]
+        current_task = _extract_anchor_current_task(self._current_task_anchor)
+        self._current_task_anchor = _format_current_task_anchor(
+            task=current_task,
+            operations=[],
+            completed_operations=merged,
+            session_id=session_id or self.session_id,
+        )
+        self._write_active_task_anchor(anchor=self._current_task_anchor)
 
     def _owner_review_reply_processed(self, message: str) -> bool:
         return bool(
@@ -536,6 +578,9 @@ class MemoryOSProvider(MemoryProvider):
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         self._current_task_anchor = _build_current_task_anchor(messages, session_id=self.session_id)
+        # C1+C2: persist the compaction-time anchor (includes operations + completed)
+        if self._current_task_anchor:
+            self._write_active_task_anchor(anchor=self._current_task_anchor)
         return self._current_task_anchor
 
     def on_memory_write(
@@ -748,6 +793,7 @@ class MemoryOSProvider(MemoryProvider):
                 previous_anchor=self._current_task_anchor,
                 session_id=session_id or self.session_id,
             )
+            self._write_active_task_anchor(anchor=self._current_task_anchor)
             self._foreground_task_only_prefetch = True
             return
         if decision.intent == "explicit_deferred_resume":
@@ -757,12 +803,14 @@ class MemoryOSProvider(MemoryProvider):
                     anchor=deferred_anchor,
                     session_id=session_id or self.session_id,
                 )
+                self._write_active_task_anchor(anchor=self._current_task_anchor)
                 self._foreground_task_only_prefetch = True
                 return
             self._current_task_anchor = _format_ambiguous_deferred_resume_anchor(
                 query=text,
                 session_id=session_id or self.session_id,
             )
+            self._write_active_task_anchor(anchor=self._current_task_anchor)
             self._foreground_task_only_prefetch = True
             return
         if decision.intent == "cancellation":
@@ -771,12 +819,14 @@ class MemoryOSProvider(MemoryProvider):
                 previous_anchor=self._current_task_anchor,
                 session_id=session_id or self.session_id,
             )
+            self._write_active_task_anchor(anchor=self._current_task_anchor, status="cancelled")
             self._foreground_task_only_prefetch = True
             return
         if decision.intent == "continue_current_task":
             self._foreground_task_only_prefetch = True
             return
         if decision.intent == "ambiguous_recall":
+            self._clear_active_task_anchor()
             self._current_task_anchor = ""
             self._consecutive_topic_switch_count = 0
             self._foreground_task_only_prefetch = False
@@ -791,6 +841,7 @@ class MemoryOSProvider(MemoryProvider):
         if self._current_task_anchor and self._is_topic_switch(text):
             self._consecutive_topic_switch_count += 1
             if self._consecutive_topic_switch_count >= 2:
+                self._clear_active_task_anchor()
                 self._current_task_anchor = ""
                 self._consecutive_topic_switch_count = 0
                 self._foreground_task_only_prefetch = False
@@ -806,11 +857,15 @@ class MemoryOSProvider(MemoryProvider):
         if self._current_task_anchor and not _extract_query_features(text):
             return
 
+        # ── Carry forward completed operations from the previous anchor ──
+        previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
         self._current_task_anchor = _format_current_task_anchor(
             task=text,
             operations=[],
+            completed_operations=previous_completed,
             session_id=session_id or self.session_id,
         )
+        self._write_active_task_anchor(anchor=self._current_task_anchor)
         self._foreground_task_only_prefetch = False
 
     def _is_topic_switch(self, query: str) -> bool:
@@ -897,6 +952,62 @@ class MemoryOSProvider(MemoryProvider):
             if anchor.strip():
                 return anchor
         return ""
+
+    # ── Active task anchor persistence (C2) ────────────────────────────────
+
+    def _write_active_task_anchor(self, *, anchor: str, session_id: str = "", status: str = "active") -> None:
+        if self._roots is None:
+            return
+        record = _active_task_anchor_record(
+            anchor=anchor,
+            session_id=session_id or self.session_id,
+            profile=self.profile,
+            status=status,
+        )
+        path = _active_task_anchor_path(self._roots)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+    def _read_latest_active_task_anchor(self) -> str:
+        """Return the latest active (incomplete) foreground anchor from disk.
+
+        Reads ``active_task_anchor.jsonl`` in reverse; returns the most recent
+        anchor whose status is ``"active"`` and whose profile matches (or is
+        empty).  Completed / cancelled anchors are skipped.
+        """
+        if self._roots is None:
+            return ""
+        path = _active_task_anchor_path(self._roots)
+        if not path.exists():
+            return ""
+        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if str(record.get("status") or "") != "active":
+                continue
+            if str(record.get("profile") or self.profile) not in {self.profile, ""}:
+                continue
+            anchor = str(record.get("anchor") or "")
+            if anchor.strip():
+                return anchor
+        return ""
+
+    def _clear_active_task_anchor(self) -> None:
+        """Write a tombstone record to mark the active anchor as completed."""
+        if not self._current_task_anchor:
+            return
+        self._write_active_task_anchor(
+            anchor=self._current_task_anchor,
+            status="completed",
+        )
 
 
 def register(ctx) -> None:
@@ -1061,7 +1172,10 @@ def _build_current_task_anchor(messages: list[dict[str, Any]], *, session_id: st
     )
 
 
-def _format_current_task_anchor(*, task: str, operations: list[str], session_id: str = "") -> str:
+def _format_current_task_anchor(
+    *, task: str, operations: list[str], session_id: str = "",
+    completed_operations: list[str] | None = None,
+) -> str:
     task = _redact_task_text(_clip(task, 240))
     if not task:
         return ""
@@ -1071,13 +1185,18 @@ def _format_current_task_anchor(*, task: str, operations: list[str], session_id:
     ]
     if session_id:
         output.append(f"- session: {session_id}")
+    if completed_operations:
+        output.append("- completed operations (do not repeat):")
+        for op in completed_operations[-6:]:
+            output.append(f"  - {_redact_task_text(_clip(op, 220))}")
     if operations:
         output.append("- active tool/process state:")
         for operation in operations:
             output.append(f"  - {_redact_task_text(_clip(operation, 220))}")
     output.append(
         "- compression rule: Continue this foreground task after compaction. "
-        "Do not switch back to unrelated historical memory topics."
+        "Do not switch back to unrelated historical memory topics. "
+        "Do not repeat completed operations."
     )
     return _clip_multiline("\n".join(output), 1200)
 
@@ -1435,6 +1554,33 @@ def _deferred_task_record(*, anchor: str, deferral: str, session_id: str, profil
         "session_id": str(session_id or ""),
         "deferral": _redact_task_text(_clip(deferral, 240)),
         "anchor": _clip_multiline(anchor, 1200),
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+
+
+# ── Active task anchor persistence (C2: compaction stability) ──────────────
+# Foreground task anchors survive process restart and cross-session compaction.
+# These records are working-state, not canonical memory — they never enter
+# the crystallized / candidate pipeline.
+
+
+def _active_task_anchor_path(roots: MemoryOSRoots) -> Any:
+    return roots.memory_os_root / "system" / "active_task_anchor.jsonl"
+
+
+def _active_task_anchor_record(
+    *, anchor: str, session_id: str, profile: str, status: str = "active"
+) -> dict[str, Any]:
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    seed = f"{created_at}:{session_id}:{anchor}"
+    return {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": f"ata_{_sha256(seed)[:16]}",
+        "created_at": created_at,
+        "profile": profile or "memoryos-test",
+        "session_id": str(session_id or ""),
+        "anchor": _clip_multiline(anchor, 1200),
+        "status": status,
         "storage_policy": "runtime_system_metadata_not_canonical_memory",
     }
 
