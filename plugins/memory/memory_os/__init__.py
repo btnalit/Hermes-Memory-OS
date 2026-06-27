@@ -1285,7 +1285,7 @@ def _extract_anchor_operation_lines(anchor: str) -> list[str]:
         clean = line.strip()
         if clean.startswith("- assistant:") or clean.startswith("- tool:"):
             operations.append(clean[2:].strip())
-    return operations[-4:]
+    return operations[-6:]
 
 
 def _content_text(content: Any) -> str:
