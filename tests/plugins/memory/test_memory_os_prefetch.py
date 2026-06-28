@@ -2044,3 +2044,188 @@ def test_px_counterfactual_old_priority_would_drop_last_session(monkeypatch):
     assert "### Crystallized Memory" in trimmed, (
         "Counterfactual failed: with patched priority=15, Crystallized(60) should survive over Last Session(15)"
     )
+
+
+# ── L3 Followup: foreground_only mode must retain Last Session ──────────────
+# Q.1–Q.4 + Q.X: verify that foreground_task_only=True does not exclude
+# the Last Session anchor — the agent needs temporal context from the
+# previous session to correctly continue/resume work.
+
+
+def _write_last_session_anchor(store, session_id, foreground_summary, hours_ago=3):
+    """Helper: write a minimal last_session_anchor record to the store."""
+    anchor_dir = store.roots.memory_os_root / "system"
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+    ended_at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    record = {
+        "session_id": session_id,
+        "ended_at": ended_at,
+        "foreground_summary": foreground_summary,
+        "schema_version": "memory-os.last_session_anchor.v0",
+    }
+    anchor_path = anchor_dir / "last_session_anchor.jsonl"
+    with anchor_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    return anchor_path
+
+
+def test_q1_foreground_only_includes_last_session(tmp_path):
+    """Q.1: foreground_task_only=True with a Last Session anchor → Last Session
+    is retained in the injected context alongside Current Foreground Task."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    _write_last_session_anchor(
+        store, session_id="prev-session-001",
+        foreground_summary="Analyzed Group L match data, defense counter-attack success 72%",
+    )
+
+    context = build_prefetch(
+        "继续",
+        budget_chars=20000,
+        store=store,
+        session_id="current-session-001",
+        current_task_anchor=(
+            "### Memory-OS Current Task Anchor\n"
+            "- current task: Review Group L data\n"
+            "- compression rule: Continue this foreground task after compaction."
+        ),
+        foreground_task_only=True,
+    )
+    assert "上一次会话" in context
+    assert "Group L" in context
+
+
+def test_q2_foreground_only_no_anchor_file_does_not_error(tmp_path):
+    """Q.2: When no last_session_anchor.jsonl exists, foreground_only still
+    returns Current Foreground Task without error (fail-open)."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    context = build_prefetch(
+        "继续",
+        budget_chars=20000,
+        store=store,
+        session_id="current-session-001",
+        current_task_anchor=(
+            "### Memory-OS Current Task Anchor\n"
+            "- current task: Deploy config\n"
+            "- compression rule: Continue this foreground task after compaction."
+        ),
+        foreground_task_only=True,
+    )
+    assert "Deploy config" in context
+    # No anchor file → Last Session not injected
+    assert "上一次会话" not in context
+
+
+def test_q3_normal_path_unchanged(tmp_path):
+    """Q.3: foreground_task_only=False — the normal path is not disturbed.
+    Last Session still appears at its usual position (from _build_prefetch_sections:527)."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    _write_last_session_anchor(
+        store, session_id="prev-session-002",
+        foreground_summary="Fixed compaction stability bugs F1-F8",
+    )
+
+    context = build_prefetch(
+        "新任务",
+        budget_chars=20000,
+        store=store,
+        session_id="current-session-002",
+        foreground_task_only=False,
+    )
+    assert "上一次会话" in context
+    assert "compaction stability" in context
+
+
+def test_q4_foreground_only_tight_budget_task_before_last_session(tmp_path):
+    """Q.4: Under foreground_only with tight budget, Current Foreground Task
+    (priority 105) survives. Last Session (priority 62) may be dropped — but
+    the current task anchor must never be sacrificed."""
+    assert _budget_keep_priority("Current Foreground Task") > _budget_keep_priority("Last Session"), (
+        "Precondition: Current Foreground Task (105) must outrank Last Session (62)"
+    )
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    _write_last_session_anchor(
+        store, session_id="prev-session-003",
+        foreground_summary="Tuned bge-m3 threshold to 0.72",
+    )
+
+    # Ample budget → both sections present
+    ample = build_prefetch(
+        "继续",
+        budget_chars=20000,
+        store=store,
+        session_id="current-session-003",
+        current_task_anchor=(
+            "### Memory-OS Current Task Anchor\n"
+            "- current task: Review deployment script\n"
+            "- compression rule: Continue this foreground task after compaction."
+        ),
+        foreground_task_only=True,
+    )
+    assert "Review deployment script" in ample
+    assert "bge-m3" in ample
+
+    # Tight budget → Current Foreground Task must survive
+    tight = build_prefetch(
+        "继续",
+        budget_chars=180,
+        store=store,
+        session_id="current-session-003",
+        current_task_anchor=(
+            "### Memory-OS Current Task Anchor\n"
+            "- current task: Review deployment script\n"
+            "- compression rule: Continue this foreground task after compaction."
+        ),
+        foreground_task_only=True,
+    )
+    assert "Review deployment script" in tight, (
+        "Current Foreground Task must survive even under extreme budget pressure"
+    )
+
+
+def test_qx_counterfactual_remove_append_loses_last_session(monkeypatch, tmp_path):
+    """Q.X: If the foreground_only branch does NOT append Last Session,
+    the anchor is absent — verifying the append is the cause, not correlation."""
+    import plugins.memory.memory_os.prefetch as prefetch_module
+
+    original_append = prefetch_module._append_section
+    def noop_last_session(sections, title, lines):
+        # Intercept only the foreground_only path: sections list with exactly
+        # 1 entry (Current Foreground Task) and title "Last Session".
+        if title == "Last Session" and len(sections) == 1:
+            return
+        return original_append(sections, title, lines)
+    monkeypatch.setattr(prefetch_module, "_append_section", noop_last_session)
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    _write_last_session_anchor(
+        store, session_id="prev-session-004",
+        foreground_summary="Deployed memory-os v2.1 to hermes-media",
+    )
+
+    context = build_prefetch(
+        "继续",
+        budget_chars=20000,
+        store=store,
+        session_id="current-session-004",
+        current_task_anchor=(
+            "### Memory-OS Current Task Anchor\n"
+            "- current task: Check deploy status\n"
+            "- compression rule: Continue this foreground task after compaction."
+        ),
+        foreground_task_only=True,
+    )
+    assert "上一次会话" not in context
+    assert "hermes-media" not in context
+    assert "Check deploy status" in context

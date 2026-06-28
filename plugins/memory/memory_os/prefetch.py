@@ -231,6 +231,10 @@ def build_prefetch(
     current_task_section: list[tuple[str, list[str]]] = []
     _append_section(current_task_section, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     if foreground_task_only and current_task_section:
+        _append_section(
+            current_task_section, "Last Session",
+            _last_session_lines(store, session_id=session_id, seen=None),
+        )
         context = _fit_budget(_format(current_task_section), budget_chars)
         selected_sections = [
             ContextSection(
