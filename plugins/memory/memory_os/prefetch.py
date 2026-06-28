@@ -2215,7 +2215,7 @@ def _budget_keep_priority(title: str) -> int:
     base_title = title.split(" (")[0] if " (" in title else title
     priorities = {
         "Identity Memory": 10,
-        "Last Session": 15,
+        "Last Session": 62,  # above Crystallized Memory(60): temporal anchor outranks older crystallized under budget
         "Continuity Bridge": 20,
         "Conversation Carryover": 30,
         "Working Memory": 40,

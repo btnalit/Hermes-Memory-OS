@@ -9,7 +9,7 @@ from plugins.memory.memory_os.fixtures import (
     build_working_item,
 )
 from plugins.memory.memory_os.index import MemoryOSIndex
-from plugins.memory.memory_os.prefetch import _build_prefetch_sections, _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
+from plugins.memory.memory_os.prefetch import _budget_keep_priority, _build_prefetch_sections, _continuity_bridge_lines, _crystallized_lines, _event_lines, _fit_budget, _floor_match_score, _recent_cross_session_lines, _tokenize_for_floor_match, build_prefetch, build_prefetch_with_observability, continuity_selector_report
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -1933,4 +1933,114 @@ def test_cross_session_dedup_prevents_duplicate_injection(tmp_path):
     ), (
         "Counterfactual broken: event should appear in Recent Cross-Session "
         "when called without seen, but it does not. The test setup may be wrong."
+    )
+
+
+# ── Prefetch Budget Priority Fix: Last Session > Crystallized ──────────────
+# P.1–P.4 + P.X: verify that Last Session (62) outranks Crystallized Memory (60)
+# under budget pressure, so the temporal anchor survives when budget is tight.
+
+
+def test_p1_last_session_priority_above_crystallized():
+    """P.1: _budget_keep_priority("Last Session") > _budget_keep_priority("Crystallized Memory")."""
+    assert _budget_keep_priority("Last Session") == 62
+    assert _budget_keep_priority("Crystallized Memory") == 60
+    assert _budget_keep_priority("Last Session") > _budget_keep_priority("Crystallized Memory")
+
+
+def test_p2_budget_tight_last_session_survives_crystallized_dropped():
+    """P.2: When budget fits only Last Session or Crystallized (not both),
+    Last Session survives and Crystallized is dropped."""
+    context = "\n".join(
+        [
+            "## Memory-OS Context",
+            "",
+            "### Last Session",
+            "- 上一次会话(5h前): Analyzed Group L match data, defense counter-attack success 72%",
+            "",
+            "### Crystallized Memory",
+            "- " + "crystallized historical data filler line. " * 18,
+        ]
+    )
+    # Budget: enough for header + Last Session, but NOT header + Last Session + Crystallized
+    budget = len(
+        "## Memory-OS Context\n\n### Last Session\n- 上一次会话(5h前): Analyzed Group L match data, defense counter-attack success 72%"
+    ) + 20
+
+    trimmed = _fit_budget(context, budget)
+
+    assert len(trimmed) <= budget
+    assert "### Last Session" in trimmed
+    assert "Group L" in trimmed
+    assert "### Crystallized Memory" not in trimmed
+
+
+def test_p3_last_session_priority_below_current_foreground():
+    """P.3: Last Session (62) must not outrank Current Foreground Task (105)."""
+    assert _budget_keep_priority("Last Session") == 62
+    assert _budget_keep_priority("Current Foreground Task") == 105
+    assert _budget_keep_priority("Last Session") < _budget_keep_priority("Current Foreground Task")
+
+
+def test_p4_budget_ample_both_last_session_and_crystallized_survive():
+    """P.4: With ample budget, both Last Session and Crystallized are preserved."""
+    context = "\n".join(
+        [
+            "## Memory-OS Context",
+            "",
+            "### Last Session",
+            "- 上一次会话(5h前): Analyzed Group L match data",
+            "",
+            "### Crystallized Memory",
+            "- Group B analysis: defense counter success rate 68%",
+        ]
+    )
+
+    trimmed = _fit_budget(context, 2000)
+
+    assert "### Last Session" in trimmed
+    assert "Group L" in trimmed
+    assert "### Crystallized Memory" in trimmed
+    assert "Group B" in trimmed
+
+
+def test_px_counterfactual_old_priority_would_drop_last_session(monkeypatch):
+    """P.X: If Last Session priority were still 15 (< Crystallized 60),
+    a tight budget drops Last Session before Crystallized — the old bug."""
+    import plugins.memory.memory_os.prefetch as prefetch_module
+
+    original = prefetch_module._budget_keep_priority
+
+    def patched(title: str) -> int:
+        base = title.split(" (")[0] if " (" in title else title
+        if base == "Last Session":
+            return 15  # old buggy value
+        return original(title)
+
+    monkeypatch.setattr(prefetch_module, "_budget_keep_priority", patched)
+
+    context = "\n".join(
+        [
+            "## Memory-OS Context",
+            "",
+            "### Last Session",
+            "- 上一次会话(5h前): Analyzed Group L match data",
+            "",
+            "### Crystallized Memory",
+            "- Group B analysis: defense counter success rate 68%",
+            "- Group A historical data: midfield possession 55%",
+            "- Group C tactical review: wing attack 42%",
+        ]
+    )
+    # Budget: fits Last Session (~96 chars) but not Last Session + Crystallized (~231 chars)
+    budget = 120
+
+    trimmed = _fit_budget(context, budget)
+
+    # Under the old priority (15 < 60), Last Session should be dropped first
+    assert "### Last Session" not in trimmed, (
+        "Counterfactual failed: with patched priority=15, Last Session should be dropped before Crystallized(60)"
+    )
+    assert "### Crystallized Memory" in trimmed, (
+        "Counterfactual failed: with patched priority=15, Crystallized(60) should survive over Last Session(15)"
     )
