@@ -1,4 +1,5 @@
 # Hermes Memory-OS
+![Uploading ChatGPT Image 2026年6月28日 16_14_27.png…]()
 
 Hermes Memory-OS is a file-first memory and governance runtime for long-running
 Hermes agents.
