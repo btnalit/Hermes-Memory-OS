@@ -524,6 +524,7 @@ def _build_prefetch_sections(
     # (not introduced by session scoping). A future optimization could collect all
     # needed events in a single pass and distribute to downstream filters.
     _append_section(sections, "Continuity Bridge", _continuity_bridge_lines(store, session_id=session_id, seen=seen))
+    _append_section(sections, "Last Session", _last_session_lines(store, session_id=session_id, seen=seen))
     _append_section(
         sections,
         "Recent Cross-Session",
@@ -565,6 +566,7 @@ def _section_source_class(title: str) -> str:
         "Recall Clarification Guard": "recall_guard",
         "Identity Memory": "identity",
         "Continuity Bridge": "bridge",
+        "Last Session": "last_session",
         "Conversation Carryover": "carryover",
         "Working Memory": "working",
         "Relationship Memory": "relationship",
@@ -1576,6 +1578,68 @@ def _record_graph_layer_shadow(
         pass  # fail-open: shadow loss must not break prefetch
 
 
+def _last_session_lines(
+    store: MemoryOSStore,
+    *,
+    session_id: str = "",
+    seen: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Read the most recent non-current session anchor.
+
+    Scans ``last_session_anchor.jsonl``, selects the anchor with the latest
+    ``ended_at`` whose ``session_id`` differs from the current session.
+    Returns a single-line injection or empty list (fail-open).
+
+    The returned line uses a factual-tone marker ("上一次会话") — never
+    the "[跨会话·待结晶]" marker used by Recent Cross-Session.
+    """
+    if not session_id:
+        return []
+
+    path = store.roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+    if not path.exists():
+        return []
+
+    now = datetime.now(timezone.utc)
+    best: tuple[datetime, dict[str, Any]] | None = None
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        # Exclude current session's own anchor
+        if str(record.get("session_id", "")) == session_id:
+            continue
+        foreground = str(record.get("foreground_summary", "")).strip()
+        if not foreground:
+            continue
+        try:
+            ended_at = datetime.fromisoformat(str(record.get("ended_at", "")))
+        except (ValueError, TypeError):
+            continue
+        if best is None or ended_at > best[0]:
+            best = (ended_at, record)
+
+    if best is None:
+        return []
+
+    ended_ts, record = best
+    foreground_summary = str(record.get("foreground_summary", ""))
+    age_h = max(1, int((now - ended_ts).total_seconds() / 3600))
+
+    # Session-level dedup marker: signals to downstream sections that this
+    # session's content has been summarized as a session-level anchor.
+    if seen is not None:
+        seen.add(("last_session", str(record.get("session_id", ""))))
+
+    return [f"- 上一次会话({age_h}h前): {_redact(foreground_summary)}"]
+
+
 def _recent_cross_session_lines(
     store: MemoryOSStore,
     *,
@@ -2151,6 +2215,7 @@ def _budget_keep_priority(title: str) -> int:
     base_title = title.split(" (")[0] if " (" in title else title
     priorities = {
         "Identity Memory": 10,
+        "Last Session": 15,
         "Continuity Bridge": 20,
         "Conversation Carryover": 30,
         "Working Memory": 40,

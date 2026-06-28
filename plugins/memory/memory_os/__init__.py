@@ -516,7 +516,30 @@ class MemoryOSProvider(MemoryProvider):
         memory_os_config.save_config(values, hermes_home)
 
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
-        return None
+        if not self.session_id or self._roots is None:
+            return
+        foreground_summary = _extract_foreground_session_summary(messages)
+        if not foreground_summary.strip():
+            return
+        ended_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        record = _last_session_anchor_record(
+            session_id=self.session_id,
+            foreground_summary=foreground_summary,
+            ended_at=ended_at,
+        )
+        path = _last_session_anchor_path(self._roots)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+        self._audit(
+            "last_session_anchor_recorded",
+            "ok",
+            {
+                "session_id": record["session_id"],
+                "ended_at": record["ended_at"],
+            },
+        )
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
         self._last_owner_review_reply_result = None
@@ -1530,6 +1553,65 @@ def _looks_like_operation_context(text: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def _extract_foreground_session_summary(messages: list[dict[str, Any]]) -> str:
+    """Deterministically extract a 1-3 line foreground summary from session messages.
+
+    Reuses ``_looks_like_operation_context`` — the same deterministic marker
+    matcher used by the task anchor.  No LLM or network calls (INV-5).
+
+    Returns "" if no substantive foreground content is found (empty sessions,
+    purely system events, etc.).
+    """
+    user_topics: list[str] = []
+    operation_lines: list[str] = []
+    last_substantive_assistant = ""
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role", ""))
+        text = _content_text(message.get("content")).strip()
+        if not text:
+            continue
+        if role == "user":
+            first_line = text.split("\n")[0].strip()
+            if len(first_line) > 3:
+                user_topics.append(first_line)
+        elif role in {"assistant", "tool"}:
+            if _looks_like_operation_context(text):
+                operation_lines.append(_clip(text, 150))
+            if role == "assistant" and len(text) > 20:
+                last_substantive_assistant = text
+
+    lines: list[str] = []
+
+    # Guard: require at least one user message or substantive assistant message
+    # to produce a meaningful foreground summary. Pure tool/system messages
+    # without user interaction do not constitute foreground content.
+    if not user_topics and not last_substantive_assistant:
+        return ""
+
+    # Line 1: First substantive user topic (what was asked)
+    if user_topics:
+        lines.append(_clip(user_topics[0], 200))
+
+    # Line 2: Key operation (deduplicated, at most one)
+    unique_ops = list(dict.fromkeys(operation_lines))
+    for op in unique_ops[:1]:
+        if len(lines) < 2:
+            lines.append(op)
+
+    # Line 3: Last substantive assistant conclusion
+    if last_substantive_assistant and len(lines) < 3:
+        conclusion = _clip(last_substantive_assistant, 200)
+        if conclusion not in lines:
+            lines.append(conclusion)
+
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
 def _is_continue_current_task_query(text: str) -> bool:
     normalized = " ".join(str(text or "").strip().lower().split())
     if not normalized:
@@ -1694,6 +1776,21 @@ def _active_task_anchor_record(
         "anchor": _clip_multiline(anchor, 1200),
         "status": status,
         "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+
+
+def _last_session_anchor_path(roots: MemoryOSRoots) -> Any:
+    return roots.memory_os_root / "system" / "last_session_anchor.jsonl"
+
+
+def _last_session_anchor_record(
+    *, session_id: str, foreground_summary: str, ended_at: str
+) -> dict[str, Any]:
+    return {
+        "session_id": str(session_id or ""),
+        "ended_at": ended_at,
+        "foreground_summary": _clip_multiline(foreground_summary, 700),
+        "schema_version": "memory-os.last_session_anchor.v0",
     }
 
 

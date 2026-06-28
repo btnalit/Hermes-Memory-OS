@@ -18,6 +18,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/__init__.py::MemoryOSProvider._write_deferred_current_task_anchor::path.open_a::path": "legacy_manual_task_anchor",
     "plugins/memory/memory_os/__init__.py::MemoryOSProvider._write_active_task_anchor::path.open_a::path": "working_state_anchor_persistence",
     "plugins/memory/memory_os/__init__.py::MemoryOSProvider._supersede_active_anchors::path.open_a::path": "working_state_anchor_persistence",
+    "plugins/memory/memory_os/__init__.py::MemoryOSProvider.on_session_end::path.open_a::path": "working_state_anchor_persistence",
     "plugins/memory/memory_os/audit.py::append_audit::path.open_a::audit_path": "audit_only",
     "plugins/memory/memory_os/cleanup.py::_archive_event_action::path.open_a::archive_path": "retention_archive",
     "plugins/memory/memory_os/cognitive_loop.py::CognitiveLoopRunner._append_report::path.open_a::self.reports_path": "cycle_report",
