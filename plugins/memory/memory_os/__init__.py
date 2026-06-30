@@ -98,11 +98,15 @@ class MemoryOSProvider(MemoryProvider):
         self._worker_stop = threading.Event()
         if kwargs.get("worker_autostart", True):
             self._start_worker()
-        # C2: recover active foreground anchor from disk after restart / session switch
-        if not self._current_task_anchor:
-            recovered = self._read_latest_active_task_anchor()
-            if recovered:
-                self._current_task_anchor = recovered
+        # C2: recover active foreground anchor from disk after restart / session switch.
+        # Always clear the in-memory anchor first — this prevents stale anchors from
+        # surviving across provider instances that share the same process (e.g., session
+        # reuse without re-instantiation).  Recovery is gated by a 24 h age limit:
+        # anchors older than this are treated as stale and discarded.
+        self._current_task_anchor = ""
+        recovered = self._read_latest_active_task_anchor(max_age_hours=24)
+        if recovered:
+            self._current_task_anchor = recovered
 
     def _sync_identity_manifest(self) -> None:
         """Sync computed identity sources to identity/manifest.json."""
@@ -540,6 +544,10 @@ class MemoryOSProvider(MemoryProvider):
                 "ended_at": record["ended_at"],
             },
         )
+        # ── C2: tombstone the active anchor so the next session does not
+        # recover a zombie anchor from this completed session.
+        self._clear_active_task_anchor()
+        self._current_task_anchor = ""
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
         self._last_owner_review_reply_result = None
@@ -1022,7 +1030,7 @@ class MemoryOSProvider(MemoryProvider):
             },
         )
 
-    def _read_latest_active_task_anchor(self) -> str:
+    def _read_latest_active_task_anchor(self, *, max_age_hours: int = 0) -> str:
         """Return the latest active (incomplete) foreground anchor from disk.
 
         Reads ``active_task_anchor.jsonl`` in reverse; the *most recent*
@@ -1031,12 +1039,19 @@ class MemoryOSProvider(MemoryProvider):
         any other status (completed, cancelled, superseded) means there
         is no active anchor — older ``"active"`` lines are immutable in
         append-only JSONL and are superseded by the most recent record.
+
+        Args:
+            max_age_hours: When > 0, anchors older than this many hours are
+                rejected (returns "").  Default 0 = no age limit (backward
+                compatible for internal callers that write anchors within
+                the same session).
         """
         if self._roots is None:
             return ""
         path = _active_task_anchor_path(self._roots)
         if not path.exists():
             return ""
+        now = datetime.now(timezone.utc)
         for line in reversed(path.read_text(encoding="utf-8").splitlines()):
             if not line.strip():
                 continue
@@ -1052,8 +1067,36 @@ class MemoryOSProvider(MemoryProvider):
             status = str(record.get("status") or "")
             if status != "active":
                 return ""
+            # ── Age gate: reject anchors older than max_age_hours ──────
+            if max_age_hours > 0:
+                try:
+                    created_at = datetime.fromisoformat(
+                        str(record.get("created_at", "")).replace("Z", "+00:00")
+                    )
+                    age_h = (now - created_at).total_seconds() / 3600
+                    if age_h > max_age_hours:
+                        return ""
+                except (ValueError, TypeError):
+                    pass  # unparseable date → fall through to recovery
+            # ───────────────────────────────────────────────────────────
             anchor = str(record.get("anchor") or "")
             if anchor.strip():
+                # ── Cross-session marker: when the anchor was written by
+                # a different session, prepend a source label so the LLM
+                # knows this context was carried over, not created now. ──
+                anchor_session_id = str(record.get("session_id", ""))
+                if anchor_session_id and anchor_session_id != self.session_id:
+                    try:
+                        created_at = datetime.fromisoformat(
+                            str(record.get("created_at", "")).replace("Z", "+00:00")
+                        )
+                        age_h = max(1, int((now - created_at).total_seconds() / 3600))
+                    except (ValueError, TypeError):
+                        age_h = 1
+                    marker = (
+                        f"- [跨会话恢复, {age_h}h前, 原会话: {anchor_session_id}]\n"
+                    )
+                    anchor = marker + anchor
                 return anchor
             return ""
         return ""
