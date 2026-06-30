@@ -1340,6 +1340,9 @@ def _build_current_task_anchor(
         if role not in {"assistant", "tool"}:
             continue
         text = _content_text(message.get("content"))
+        # Skip pure JSON tool output — structured data is not operation context.
+        if role == "tool" and text[:1] in {"{", "["}:
+            continue
         if _looks_like_operation_context(text):
             operations.append(f"{role}: {_clip(text, 180)}")
     return _format_current_task_anchor(
