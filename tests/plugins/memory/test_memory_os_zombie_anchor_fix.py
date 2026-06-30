@@ -325,3 +325,94 @@ def test_multiple_session_ends_dont_stack_tombstones(tmp_path):
     records = _read_jsonl(anchor_path)
     # Most recent record should still be "completed"
     assert records[-1]["status"] == "completed"
+
+
+# ── Regression: on_session_end tombstones even w/o foreground ───────────
+
+
+def test_on_session_end_tombstones_without_foreground(tmp_path):
+    """Session with no user foreground (pure tool/system) should still
+    get its active anchor tombstoned — the tombstone must fire before
+    the foreground guard, not after it."""
+    provider = _init_provider(tmp_path, session_id="session-nofg")
+    # Create an active anchor
+    provider.on_pre_compress(_foreground_messages())
+
+    # End session with pure tool messages (no user content → no foreground summary)
+    provider.on_session_end([
+        {"role": "tool", "content": "proc_xyz: clean shutdown"},
+    ])
+    provider.shutdown()
+
+    anchor_path = _active_task_anchor_path(provider._roots)
+    records = _read_jsonl(anchor_path)
+    assert len(records) >= 2
+    assert records[-1]["status"] == "completed", (
+        f"Tombstone NOT written for session with no foreground: {records[-1]}"
+    )
+
+
+# ── Regression: unparseable timestamp rejected when age-gated ──────────
+
+
+def test_unparseable_timestamp_rejected_with_age_gate(tmp_path):
+    """When max_age_hours > 0 and created_at is unparseable, the anchor
+    should be REJECTED (not silently recovered)."""
+    provider = _init_provider(tmp_path, session_id="session-now")
+
+    anchor_path = _active_task_anchor_path(provider._roots)
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    bad_record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_baddate",
+        "created_at": "garbage-not-a-date",
+        "profile": "memoryos-test",
+        "session_id": "session-old",
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: 损坏时间戳任务\n- session: session-old",
+        "status": "active",
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    anchor_path.write_text(
+        json.dumps(bad_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    recovered = provider._read_latest_active_task_anchor(max_age_hours=24)
+    provider.shutdown()
+
+    assert recovered == "", (
+        f"Anchor with unparseable timestamp should be rejected when age-gated,"
+        f" got: {recovered!r}"
+    )
+
+
+# ── Regression: unparseable timestamp still recovered w/o age gate ──────
+
+
+def test_unparseable_timestamp_recovered_without_age_gate(tmp_path):
+    """When max_age_hours=0 (default), unparseable timestamps should still
+    be recovered (backward-compatible fail-open)."""
+    provider = _init_provider(tmp_path, session_id="session-now")
+
+    anchor_path = _active_task_anchor_path(provider._roots)
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    bad_record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_baddate2",
+        "created_at": "garbage-not-a-date",
+        "profile": "memoryos-test",
+        "session_id": "session-other",
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: 无年龄门任务\n- session: session-other",
+        "status": "active",
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    anchor_path.write_text(
+        json.dumps(bad_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    recovered = provider._read_latest_active_task_anchor()
+    provider.shutdown()
+
+    assert recovered != "", "Without age gate, even bad-timestamp anchors should recover"
+    assert "无年龄门任务" in recovered

@@ -47,6 +47,11 @@ from .substrates.local_artifact import LocalArtifactProvider
 from .substrates.router import SubstrateRouter
 
 
+# ── C2: maximum age (hours) for recovering a cross-session active anchor.
+# Anchors older than this are treated as stale and discarded on initialize().
+ANCHOR_RECOVERY_MAX_AGE_HOURS = 24
+
+
 class MemoryOSProvider(MemoryProvider):
     """Profile-local Memory-OS provider."""
 
@@ -101,10 +106,13 @@ class MemoryOSProvider(MemoryProvider):
         # C2: recover active foreground anchor from disk after restart / session switch.
         # Always clear the in-memory anchor first — this prevents stale anchors from
         # surviving across provider instances that share the same process (e.g., session
-        # reuse without re-instantiation).  Recovery is gated by a 24 h age limit:
-        # anchors older than this are treated as stale and discarded.
+        # reuse without re-instantiation).  Recovery is gated by
+        # ANCHOR_RECOVERY_MAX_AGE_HOURS: anchors older than this are treated as stale
+        # and discarded.
         self._current_task_anchor = ""
-        recovered = self._read_latest_active_task_anchor(max_age_hours=24)
+        recovered = self._read_latest_active_task_anchor(
+            max_age_hours=ANCHOR_RECOVERY_MAX_AGE_HOURS,
+        )
         if recovered:
             self._current_task_anchor = recovered
 
@@ -522,6 +530,12 @@ class MemoryOSProvider(MemoryProvider):
     def on_session_end(self, messages: list[dict[str, Any]]) -> None:
         if not self.session_id or self._roots is None:
             return
+        # ── C2: tombstone the active anchor so the next session does not
+        # recover a zombie anchor from this completed session.  This must
+        # happen *before* the foreground guard so sessions without user
+        # content (pure system/tool) still get tombstoned.
+        self._clear_active_task_anchor()
+        self._current_task_anchor = ""
         foreground_summary = _extract_foreground_session_summary(messages)
         if not foreground_summary.strip():
             return
@@ -544,10 +558,6 @@ class MemoryOSProvider(MemoryProvider):
                 "ended_at": record["ended_at"],
             },
         )
-        # ── C2: tombstone the active anchor so the next session does not
-        # recover a zombie anchor from this completed session.
-        self._clear_active_task_anchor()
-        self._current_task_anchor = ""
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs: Any) -> None:
         self._last_owner_review_reply_result = None
@@ -1068,16 +1078,24 @@ class MemoryOSProvider(MemoryProvider):
             if status != "active":
                 return ""
             # ── Age gate: reject anchors older than max_age_hours ──────
+            # Parse created_at once for both the age gate and the
+            # cross-session marker below.
+            created_at = None
+            try:
+                created_at = datetime.fromisoformat(
+                    str(record.get("created_at", "")).replace("Z", "+00:00")
+                )
+            except (ValueError, TypeError):
+                pass  # unparseable — handled per-branch below
             if max_age_hours > 0:
-                try:
-                    created_at = datetime.fromisoformat(
-                        str(record.get("created_at", "")).replace("Z", "+00:00")
-                    )
-                    age_h = (now - created_at).total_seconds() / 3600
-                    if age_h > max_age_hours:
-                        return ""
-                except (ValueError, TypeError):
-                    pass  # unparseable date → fall through to recovery
+                if created_at is None:
+                    # Unparseable timestamp with age gate active → reject.
+                    # A corrupt created_at cannot prove freshness; treating
+                    # it as stale is the safe default.
+                    return ""
+                age_h = (now - created_at).total_seconds() / 3600
+                if age_h > max_age_hours:
+                    return ""
             # ───────────────────────────────────────────────────────────
             anchor = str(record.get("anchor") or "")
             if anchor.strip():
@@ -1086,15 +1104,19 @@ class MemoryOSProvider(MemoryProvider):
                 # knows this context was carried over, not created now. ──
                 anchor_session_id = str(record.get("session_id", ""))
                 if anchor_session_id and anchor_session_id != self.session_id:
-                    try:
-                        created_at = datetime.fromisoformat(
-                            str(record.get("created_at", "")).replace("Z", "+00:00")
+                    if created_at is not None:
+                        age_min = int(
+                            (now - created_at).total_seconds() / 60
                         )
-                        age_h = max(1, int((now - created_at).total_seconds() / 3600))
-                    except (ValueError, TypeError):
-                        age_h = 1
+                        if age_min < 60:
+                            age_label = f"{max(1, age_min)}m前"
+                        else:
+                            age_label = f"{age_min // 60}h前"
+                    else:
+                        age_label = "?"
                     marker = (
-                        f"- [跨会话恢复, {age_h}h前, 原会话: {anchor_session_id}]\n"
+                        f"- [跨会话恢复, {age_label},"
+                        f" 原会话: {anchor_session_id}]\n"
                     )
                     anchor = marker + anchor
                 return anchor
