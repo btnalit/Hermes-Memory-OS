@@ -534,7 +534,18 @@ class MemoryOSProvider(MemoryProvider):
         # recover a zombie anchor from this completed session.  This must
         # happen *before* the foreground guard so sessions without user
         # content (pure system/tool) still get tombstoned.
+        #
+        # Two-layer defense:
+        # 1. _clear_active_task_anchor — writes a completed tombstone for
+        #    the in-memory anchor (the normal path).  Internally calls
+        #    _supersede_active_anchors via _write_active_task_anchor.
+        # 2. _supersede_active_anchors — safety net: when the in-memory
+        #    anchor was lost (e.g. _build_current_task_anchor returned ""
+        #    and overwrote it), scan the disk directly and mark every
+        #    active record as superseded.
         self._clear_active_task_anchor()
+        if not self._current_task_anchor:
+            self._supersede_active_anchors()
         self._current_task_anchor = ""
         foreground_summary = _extract_foreground_session_summary(messages)
         if not foreground_summary.strip():
@@ -626,13 +637,20 @@ class MemoryOSProvider(MemoryProvider):
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         # Extract completed_operations from current anchor before rebuilding
         previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
-        self._current_task_anchor = _build_current_task_anchor(
+        new_anchor = _build_current_task_anchor(
             messages,
             session_id=self.session_id,
             completed_operations=previous_completed,
         )
-        # C1+C2: persist the compaction-time anchor (includes operations + completed)
-        if self._current_task_anchor:
+        # C2: only overwrite the in-memory anchor when the builder produced a
+        # non-empty result.  If the message list has no user foreground (pure
+        # tool/system turns), _build_current_task_anchor returns "" — keeping
+        # the previous anchor avoids a silent no-op in _clear_active_task_anchor
+        # at session end (which would skip the tombstone and leave an active
+        # record on disk forever).
+        if new_anchor:
+            self._current_task_anchor = new_anchor
+            # C1+C2: persist the compaction-time anchor (includes operations + completed)
             self._write_active_task_anchor(anchor=self._current_task_anchor)
         return self._current_task_anchor
 

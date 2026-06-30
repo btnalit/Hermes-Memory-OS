@@ -323,8 +323,13 @@ def test_multiple_session_ends_dont_stack_tombstones(tmp_path):
 
     anchor_path = _active_task_anchor_path(provider._roots)
     records = _read_jsonl(anchor_path)
-    # Most recent record should still be "completed"
-    assert records[-1]["status"] == "completed"
+    # Most recent record should not be "active" (append-only JSONL means
+    # the original active record is still on disk; the tombstone/
+    # supersede records are the terminal state).  Both "completed" and
+    # "superseded" are valid terminal states.
+    assert records[-1]["status"] in {"completed", "superseded"}, (
+        f"Expected completed or superseded, got: {records[-1]['status']}"
+    )
 
 
 # ── Regression: on_session_end tombstones even w/o foreground ───────────
@@ -416,3 +421,165 @@ def test_unparseable_timestamp_recovered_without_age_gate(tmp_path):
 
     assert recovered != "", "Without age gate, even bad-timestamp anchors should recover"
     assert "无年龄门任务" in recovered
+
+
+# ── on_pre_compress: preserve in-memory anchor when builder returns "" ────
+
+
+def test_on_pre_compress_preserves_anchor_when_no_user_foreground(tmp_path):
+    """When _build_current_task_anchor returns '' (no user messages), the
+    in-memory anchor should NOT be overwritten so _clear_active_task_anchor
+    can still tombstone it at session end."""
+    provider = _init_provider(tmp_path, session_id="session-pf")
+
+    # Set up a known in-memory anchor (simulating recovery from disk)
+    provider._current_task_anchor = (
+        "### Memory-OS Current Task Anchor\n"
+        "- current task: 已恢复的部署任务\n"
+        "- session: session-pf"
+    )
+
+    # Call on_pre_compress with messages that have NO user role
+    result = provider.on_pre_compress([
+        {"role": "tool", "content": "proc_xyz: background heartbeat"},
+        {"role": "assistant", "content": "checkpoint saved"},
+    ])
+
+    # The in-memory anchor should survive — not be replaced with ""
+    assert provider._current_task_anchor != "", (
+        "on_pre_compress should preserve the previous anchor when no user foreground exists"
+    )
+    assert "已恢复的部署任务" in provider._current_task_anchor
+    # And the return value should also reflect the preserved anchor
+    assert "已恢复的部署任务" in result
+    provider.shutdown()
+
+
+def test_on_pre_compress_preserves_anchor_allows_tombstone(tmp_path):
+    """Full chain: preserved anchor → on_session_end can still tombstone it."""
+    provider = _init_provider(tmp_path, session_id="session-chain")
+
+    # First, a normal pre_compress with user content writes an active anchor
+    provider.on_pre_compress([
+        {"role": "user", "content": "部署生产环境"},
+        {"role": "assistant", "content": "terminal: deploy production"},
+    ])
+
+    anchor_path = _active_task_anchor_path(provider._roots)
+    records_before = _read_jsonl(anchor_path)
+    assert records_before[-1]["status"] == "active"
+
+    # Then a tool-only pre_compress — this must NOT nuke the in-memory anchor
+    provider.on_pre_compress([
+        {"role": "tool", "content": "proc_xyz: health check OK"},
+    ])
+
+    # The in-memory anchor should still have the original task
+    assert "部署生产环境" in provider._current_task_anchor, (
+        "on_pre_compress with no user foreground should not overwrite the anchor"
+    )
+
+    # End the session — tombstone MUST be written
+    provider.on_session_end([
+        {"role": "tool", "content": "proc_xyz: clean shutdown"},
+    ])
+    provider.shutdown()
+
+    records_after = _read_jsonl(anchor_path)
+    # The last two records should be the tombstone chain (superseded → completed).
+    # The original "active" record is at position -3 (append-only keeps it).
+    statuses = [r["status"] for r in records_after]
+    assert "completed" in statuses, (
+        f"Tombstone NOT written after tool-only compress + session end."
+        f" Statuses: {statuses}"
+    )
+    assert "active" not in statuses[-2:], (
+        f"Recent records should not contain active status."
+        f" Last 2 statuses: {statuses[-2:]}"
+    )
+
+
+# ── on_session_end: _supersede_active_anchors safety net ────────────────
+
+
+def test_on_session_end_supersedes_without_in_memory_anchor(tmp_path):
+    """When _current_task_anchor is empty, on_session_end must still scan
+    the disk and supersede any active records (safety net)."""
+    provider = _init_provider(tmp_path, session_id="session-net")
+
+    # Manually write an active record to disk WITHOUT setting the in-memory field
+    anchor_path = _active_task_anchor_path(provider._roots)
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    orphan_record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_orphan",
+        "created_at": now,
+        "profile": "memoryos-test",
+        "session_id": "session-net",
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: 孤立任务\n- session: session-net",
+        "status": "active",
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    anchor_path.write_text(
+        json.dumps(orphan_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    # Ensure in-memory anchor is empty (simulating the bug scenario)
+    provider._current_task_anchor = ""
+
+    # End the session — even without in-memory anchor, the disk must be cleaned
+    provider.on_session_end([
+        {"role": "tool", "content": "proc_xyz: shutdown"},
+    ])
+    provider.shutdown()
+
+    records = _read_jsonl(anchor_path)
+    # Most recent record should be superseded (from _supersede_active_anchors)
+    assert len(records) >= 2, f"Expected at least 2 records, got {len(records)}"
+    assert records[-1]["status"] == "superseded", (
+        f"Safety net failed: expected 'superseded' as last record,"
+        f" got {records[-1]['status']}"
+    )
+
+
+def test_on_session_end_both_tombstone_and_supersede(tmp_path):
+    """Normal path: on_session_end writes a completed tombstone.  The
+    internal _supersede_active_anchors inside _write_active_task_anchor
+    already cleans up the prior active record."""
+    provider = _init_provider(tmp_path, session_id="session-both")
+
+    # Create an active anchor normally
+    provider.on_pre_compress([
+        {"role": "user", "content": "正常任务"},
+        {"role": "assistant", "content": "terminal: run task"},
+    ])
+
+    anchor_path = _active_task_anchor_path(provider._roots)
+    records_before = _read_jsonl(anchor_path)
+    assert records_before[-1]["status"] == "active"
+
+    # End session normally
+    provider.on_session_end([
+        {"role": "user", "content": "结束"},
+    ])
+    provider.shutdown()
+
+    records_after = _read_jsonl(anchor_path)
+    statuses = [r["status"] for r in records_after]
+
+    # Normal path: _clear_active_task_anchor writes completed (which internally
+    # supersedes the active first).  The direct _supersede_active_anchors is NOT
+    # called because _current_task_anchor is set.  So we get:
+    #   active → superseded → completed
+    assert "completed" in statuses, f"Expected completed tombstone, got statuses: {statuses}"
+    assert records_after[-1]["status"] == "completed", (
+        f"Last record should be 'completed' in normal path,"
+        f" got {records_after[-1]['status']}"
+    )
+    # The original active record is at -3; the last two (superseded, completed) should
+    # contain no active status.
+    assert statuses[-2:].count("active") == 0, (
+        f"No active status expected in last 2 records, got: {statuses[-2:]}"
+    )
