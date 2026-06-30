@@ -22,7 +22,7 @@ INACTIVE_CANONICAL_STATES = {
 }
 
 # Triage action types for candidate_aggregation lane
-CANDIDATE_TRIAGE_ACTIONS = frozenset({"promote", "demote", "fleeting", "discard"})
+CANDIDATE_TRIAGE_ACTIONS = frozenset({"promote", "demote", "fleeting", "discard", "flag", "dedup_absorb"})
 CANDIDATE_TRIAGE_FILE = "candidate_triage.jsonl"
 
 # Default TTL for auto-demote (72 hours)

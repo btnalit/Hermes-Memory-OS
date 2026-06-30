@@ -145,6 +145,10 @@ _DIAGNOSTIC_STYLE_SEED_PATTERNS = (
     re.compile(r"event_kinds", re.I),
     re.compile(r"crystallized candidates?", re.I),
     re.compile(r"crystallized records?", re.I),
+    # Smoke / test pattern seeds — prevent synthetic test messages from
+    # leaking into agent context via crystallized / cross-session / working memory sections.
+    re.compile(r"\bsmoke\s+(user|assistant|test|event)\s+msg\b", re.I),
+    re.compile(r"\bsmoke\s+test\s+(message|event|record)\b", re.I),
     re.compile(r"audit entries", re.I),
     re.compile(r"working items", re.I),
     re.compile(r"\bRH-\d+", re.I),
@@ -537,6 +541,7 @@ def _build_prefetch_sections(
             session_id=session_id,
             error_records=error_records,
             seen=seen,
+            query=query,
         ),
     )
     _append_section(sections, "Conversation Carryover", _deep_reflection_lines(store))
@@ -1652,6 +1657,7 @@ def _recent_cross_session_lines(
     max_age_hours: int = 48,
     error_records: list[dict[str, Any]] | None = None,
     seen: set[tuple[str, str]] | None = None,
+    query: str = "",
 ) -> list[str]:
     """Source-gate-passed events from recent sessions (not current).
 
@@ -1659,6 +1665,10 @@ def _recent_cross_session_lines(
     availability (~7 days). Only includes events that passed source gate
     (have a corresponding candidate in candidates.jsonl), are from a
     different session, and are within the recency window.
+
+    When *query* is non-empty, collected events are ranked by token overlap
+    with the query (soft boost) — events that share terms with the current
+    task float to the top, reducing cross-session noise.
 
     Each line carries a "[跨会话·待结晶]" marker so the agent knows this
     is not yet owner-confirmed memory.
@@ -1750,6 +1760,23 @@ def _recent_cross_session_lines(
         return []
 
     collected.sort(key=lambda x: x[0], reverse=True)
+
+    # ── Query-aware soft ranking ──────────────────────────────────────
+    # When the caller passes a non-empty query, boost events whose summary
+    # shares tokens with the current task.  This keeps the section narrower
+    # and more relevant without dropping events entirely when there's no
+    # overlap (no-overlap items still appear after overlap items).
+    if query and len(collected) > 1:
+        query_tokens = _extract_query_tokens(query)
+        if query_tokens:
+            scored: list[tuple[int, datetime, str]] = []
+            for ts, summary in collected:
+                summary_lower = summary.lower()
+                score = sum(1 for token in query_tokens if token in summary_lower)
+                scored.append((score, ts, summary))
+            # Stable sort: higher score first, then newer first within same score
+            scored.sort(key=lambda x: (-x[0], x[1]), reverse=False)
+            collected = [(ts, s) for _, ts, s in scored]
 
     lines: list[str] = []
     for ts, summary in collected[:limit]:
@@ -2044,6 +2071,45 @@ def _should_ground_diagnostic_query(
     if not text:
         return False
     return any(pattern.search(text) for pattern in _DIAGNOSTIC_QUERY_PATTERNS)
+
+
+def _extract_query_tokens(query: str) -> list[str]:
+    """Extract meaningful search tokens from a mixed-language query.
+
+    Returns a list of lowercase tokens suitable for substring matching
+    against event summaries.  CJK segments are split into overlapping
+    character bigrams; ASCII words shorter than 3 chars are dropped.
+    """
+    import re
+    tokens: list[str] = []
+    normalized = str(query or "").lower().strip()
+    if not normalized:
+        return tokens
+    # ASCII words (3+ chars, excluding common stop words)
+    for token in re.findall(r"[a-z0-9]{3,}", normalized):
+        if token not in _QUERY_STOP_WORDS:
+            tokens.append(token)
+    # CJK character bigrams for Chinese/Japanese/Korean segments
+    for segment in re.findall(r"[一-鿿぀-ゟ゠-ヿ가-힯]+", normalized):
+        for i in range(len(segment) - 1):
+            tokens.append(segment[i : i + 2])
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for token in tokens:
+        if token not in seen:
+            seen.add(token)
+            unique.append(token)
+    return unique
+
+
+_QUERY_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "can",
+    "had", "her", "was", "one", "our", "out", "has", "have", "from",
+    "this", "that", "with", "will", "your", "what", "when", "they",
+    "them", "then", "than", "some", "just", "also", "very", "been",
+    "were", "does", "did", "its",
+})
 
 
 def _is_diagnostic_style_seed(text: str) -> bool:

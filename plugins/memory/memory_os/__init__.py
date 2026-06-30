@@ -281,6 +281,9 @@ class MemoryOSProvider(MemoryProvider):
             if role not in {"assistant", "tool"}:
                 continue
             text = _content_text(message.get("content"))
+            # Skip pure JSON tool output — structured data is not operation context.
+            if role == "tool" and text[:1] in {"{", "["}:
+                continue
             if _looks_like_operation_context(text):
                 new_ops.append(f"{role}: {_clip(text, 180)}")
         if not new_ops:
@@ -1661,7 +1664,11 @@ def _extract_foreground_session_summary(messages: list[dict[str, Any]]) -> str:
             if len(first_line) > 3:
                 user_topics.append(first_line)
         elif role in {"assistant", "tool"}:
-            if _looks_like_operation_context(text):
+            # Skip pure JSON tool output — structured data (skill_view meta,
+            # tool-call result envelopes) is not human-readable operation context.
+            if role == "tool" and text[:1] in {"{", "["}:
+                pass
+            elif _looks_like_operation_context(text):
                 operation_lines.append(_clip(text, 150))
             if role == "assistant" and len(text) > 20:
                 last_substantive_assistant = text
