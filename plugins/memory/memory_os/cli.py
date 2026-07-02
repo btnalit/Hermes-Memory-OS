@@ -945,8 +945,141 @@ def cleanup_report(
     return cleanup_plan(store, now=now, policy=policy)
 
 
+def _cmd_vector_calibrate(args: argparse.Namespace) -> int:
+    """Analyze pairwise cosine distribution and suggest edge thresholds."""
+    import numpy as np  # type: ignore[import-untyped]
+
+    from .roots import MemoryOSRoots
+    from .vector_edge_proposer import _cosine_similarity
+
+    roots = MemoryOSRoots.from_profile()
+    index_path = Path(args.index_path) if args.index_path else roots.index_path
+
+    if not index_path.exists():
+        print(f"Index not found: {index_path}")
+        return 1
+
+    # Read embeddings
+    conn = sqlite3.connect(str(index_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "select record_id, embedding from memory_embeddings "
+        "where record_type = 'crystallized_record' "
+        "order by created_at desc"
+    ).fetchall()
+    conn.close()
+
+    records = [(str(r["record_id"]), bytes(r["embedding"])) for r in rows if r["embedding"]]
+    if len(records) < 10:
+        print(f"Need >= 10 records with embeddings, got {len(records)}")
+        print("Not enough data for calibration -- run with more crystallized records.")
+        return 1
+
+    # Compute pairwise cosine similarities
+    sims: list[float] = []
+    sample_size = min(args.sample_size, len(records) * (len(records) - 1) // 2)
+    count = 0
+    for i in range(len(records)):
+        if count >= sample_size:
+            break
+        for j in range(i + 1, len(records)):
+            if count >= sample_size:
+                break
+            sim = _cosine_similarity(records[i][1], records[j][1])
+            if sim is not None:
+                sims.append(sim)
+                count += 1
+
+    if not sims:
+        print("No valid similarities computed.")
+        return 1
+
+    sims_arr = np.array(sims, dtype=np.float64)
+    p50 = float(np.percentile(sims_arr, 50))
+    p75 = float(np.percentile(sims_arr, 75))
+    p90 = float(np.percentile(sims_arr, 90))
+    p95 = float(np.percentile(sims_arr, 95))
+
+    # Suggested thresholds (heuristic):
+    # refines ~ p90 (top 10% most similar)
+    # co_occurs ~ p75 (top 25%)
+    # contradicts ~ p10 (bottom 10%), but default to 0.20 as floor
+    suggested_refines = round(max(p90, 0.50), 2)
+    suggested_co_occurs = round(max(p75, 0.30), 2)
+    suggested_contradicts = round(max(float(np.percentile(sims_arr, 10)), 0.20), 2)
+
+    from .knob_overrides import resolve_knob
+
+    current_refines = resolve_knob("vector_edge_refines_threshold", default=0.75, roots=roots)
+    current_co_occurs = resolve_knob("vector_edge_co_occurs_threshold", default=0.65, roots=roots)
+    current_contradicts = resolve_knob("vector_edge_contradicts_threshold", default=0.35, roots=roots)
+
+    print(f"Pairwise cosine distribution (n={len(sims_arr)} pairs, {len(records)} records):")
+    print(f"  p50 (median):  {p50:.4f}")
+    print(f"  p75:           {p75:.4f}")
+    print(f"  p90:           {p90:.4f}")
+    print(f"  p95:           {p95:.4f}")
+    print()
+    print("  Current knobs -> Suggested:")
+    print(f"  refines:       {current_refines:.2f} -> {suggested_refines:.2f}")
+    print(f"  co_occurs:     {current_co_occurs:.2f} -> {suggested_co_occurs:.2f}")
+    print(f"  contradicts:   {current_contradicts:.2f} -> {suggested_contradicts:.2f}")
+
+    if args.apply:
+        confirm = input("\nApply suggested thresholds? [y/N]: ").strip().lower()
+        if confirm not in ("y", "yes"):
+            print("Aborted -- no knobs changed.")
+            return 0
+
+        from datetime import datetime, timezone as tz
+        from .knob_overrides import register_override
+
+        now = datetime.now(tz.utc)
+        for knob_name, suggested, current in [
+            ("vector_edge_refines_threshold", suggested_refines, current_refines),
+            ("vector_edge_co_occurs_threshold", suggested_co_occurs, current_co_occurs),
+            ("vector_edge_contradicts_threshold", suggested_contradicts, current_contradicts),
+        ]:
+            if abs(suggested - current) < 0.01:
+                print(f"  {knob_name}: unchanged ({suggested:.2f} ~ {current:.2f})")
+                continue
+            try:
+                record = register_override(
+                    name=knob_name,
+                    value=suggested,
+                    prior=current,
+                    proposed_by="calibrate-thresholds",
+                    approved_via="CLI",
+                    expires_at="",
+                    roots=roots,
+                )
+                print(f"  {knob_name}: {current:.2f} -> {suggested:.2f} [{record['id']}]")
+            except ValueError as exc:
+                print(f"  {knob_name}: FAILED -- {exc}")
+
+    return 0
+
+
 def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="memory_os_command")
+    vector_parser = subs.add_parser("vector")
+    vector_subs = vector_parser.add_subparsers(dest="vector_command")
+    calibrate_parser = vector_subs.add_parser(
+        "calibrate-thresholds",
+        help="Analyze pairwise cosine distribution and suggest edge thresholds",
+    )
+    calibrate_parser.add_argument(
+        "--apply", action="store_true",
+        help="Apply suggested thresholds to knob overrides (requires confirmation)",
+    )
+    calibrate_parser.add_argument(
+        "--index-path", type=str, default=None,
+        help="Path to index DB (default: resolved from HERMES_HOME)",
+    )
+    calibrate_parser.add_argument(
+        "--sample-size", type=int, default=500,
+        help="Max record pairs to sample (default: 500)",
+    )
     subs.add_parser("status")
     subs.add_parser("doctor")
     hindsight_parser = subs.add_parser("hindsight")
@@ -1332,6 +1465,11 @@ def memory_os_command(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if args.memory_os_command == "vector":
+        if args.vector_command == "calibrate-thresholds":
+            return _cmd_vector_calibrate(args)
+        print("Unknown vector sub-command. Try: vector calibrate-thresholds", file=sys.stderr)
+        return 1
     store = MemoryOSStore(
         MemoryOSRoots.from_hermes_home(
             _active_hermes_home(args),
