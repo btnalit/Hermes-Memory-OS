@@ -164,6 +164,7 @@ ACTION_TYPES = {
     *EXPRESSION_FEEDBACK_ACTION_TYPES,
     "approve_edge",
     "reject_edge",
+    "approve_external_evidence",
     "confirm_provisional_crystallized_record",
     "reject_provisional_crystallized_record",
     "confirm_provisional_knob_override",
@@ -171,7 +172,7 @@ ACTION_TYPES = {
 }
 
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
-    "candidate": {"approve_candidate", "reject_candidate"},
+    "candidate": {"approve_candidate", "reject_candidate", "approve_external_evidence"},
     "candidate_cluster": {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"},
     "crystallized_record": {"revoke_crystallized", "demote_crystallized"},
     "proposal": {"approve_proposal", "reject_proposal", "apply_proposal"},
@@ -2724,6 +2725,36 @@ def _empty_rendered_digest(store: MemoryOSStore, *, owner_id: str) -> dict[str, 
 def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, note: str, rating: str) -> dict[str, Any]:
     action_type = str(record["action_type"])
     target_id = str(record["target_id"])
+    if action_type == "approve_external_evidence":
+        from .provenance import candidate_external_ref
+        candidate = _find_candidate(store, target_id)
+        assert candidate is not None
+        external_ref = candidate_external_ref(candidate, store=store) or ""
+
+        action_ctx = record.get("action_context") or {}
+        acked_ref = str(action_ctx.get("acked_external_ref") or external_ref)
+
+        decision = ApprovalDecision(
+            candidate_id=candidate.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer=str(record["owner_id"]),
+            reviewed_at=str(record["created_at"]),
+            note=note,
+            external_evidence_ack=True,
+            acked_external_ref=acked_ref,
+        )
+        path = CrystallizedMemoryService(store).write_approved_record(
+            candidate,
+            decision,
+            file_name="owner_approved.md",
+        )
+        record["owner_effect"]["owner_approved_external_evidence"] = True
+        record["owner_effect"]["owner_approved_crystallized_write"] = True
+        return {
+            "crystallized_path": str(path),
+            "candidate_id": target_id,
+            "acked_external_ref": acked_ref,
+        }
     if action_type == "approve_candidate":
         candidate = _find_candidate(store, target_id)
         assert candidate is not None
@@ -3063,6 +3094,16 @@ def _validate_action_target(
 ) -> str:
     if action_type in {"approve_candidate", "reject_candidate"} and not _find_candidate(store, target_id):
         return "candidate_not_found"
+    if action_type == "approve_external_evidence":
+        candidate = _find_candidate(store, target_id)
+        if candidate is None:
+            return "candidate_not_found"
+        from .provenance import candidate_external_ref, is_tainted
+        if not is_tainted(candidate, store=store):
+            return "candidate_not_tainted"
+        if not candidate_external_ref(candidate, store=store):
+            return "external_evidence_ref_unresolved"
+        return ""
     if action_type in {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"}:
         if target_type != "candidate_cluster":
             return "invalid_candidate_cluster_target"
@@ -3713,6 +3754,11 @@ def _attach_owner_reply_context(record: dict[str, Any], context: dict[str, Any])
         record["action_context"] = {
             "session_mirror_approval": _bounded_session_mirror_approval(session_mirror_approval),
         }
+    acked_ref = context.get("acked_external_ref")
+    if acked_ref is not None:
+        if "action_context" not in record:
+            record["action_context"] = {}
+        record["action_context"]["acked_external_ref"] = str(acked_ref)
 
 
 def _candidate_cluster_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
@@ -7721,7 +7767,7 @@ def _normalize_target(action_type: str, target: str) -> tuple[str, str]:
             "provisional_crystallized_record": "provisional_crystallized_record",
         }.get(prefix.strip(), prefix.strip())
         return normalized_prefix, suffix.strip()
-    if action_type in {"approve_candidate", "reject_candidate"}:
+    if action_type in {"approve_candidate", "reject_candidate", "approve_external_evidence"}:
         return "candidate", value
     if action_type in {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"}:
         return "candidate_cluster", value
