@@ -106,6 +106,30 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "vector_edge_refines_threshold": {
+        "module": "vector_edge_proposer",
+        "default": 0.75,
+        "bounds": [0.5, 1.0],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "refines_rate",
+    },
+    "vector_edge_co_occurs_threshold": {
+        "module": "vector_edge_proposer",
+        "default": 0.65,
+        "bounds": [0.3, 1.0],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "co_occurs_rate",
+    },
+    "vector_edge_contradicts_threshold": {
+        "module": "vector_edge_proposer",
+        "default": 0.35,
+        "bounds": [0.0, 0.8],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "contradicts_rate",
+    },
     # ── Source gate quality knobs (F.8) ────────────────────────────────
     "auto_promote_enabled": {
         "module": "crystallized",

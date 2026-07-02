@@ -962,6 +962,7 @@ class CognitiveLoopRunner:
             index=index,
             embedder=embedder,
             audit_path=audit_path,
+            roots=store.roots,
         )
         context["vector_edge_proposer_result"] = result
         return {

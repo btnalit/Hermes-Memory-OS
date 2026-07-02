@@ -19,11 +19,8 @@ from typing import Any
 
 from .audit import append_audit
 
-# ── Thresholds ───────────────────────────────────────────────────────────────
+# ── Thresholds (defaults — overridable via knobs) ────────────────────────────
 
-_COSINE_REFINES_THRESHOLD = 0.75   # very similar → refines
-_COSINE_CO_OCCURS_THRESHOLD = 0.65  # similar → co_occurs
-_COSINE_CONTRADICTS_THRESHOLD = 0.35  # dissimilar + different kind → contradicts
 _MAX_PAIRS = 500
 # At most ~32 records can participate in 500 pairs (n*(n-1)/2 ≤ 500).
 # Add a small margin so we don't truncate early on sparse-embedding datasets.
@@ -58,21 +55,32 @@ def _detect_relation_from_similarity(
     sim: float,
     kind_a: str,
     kind_b: str,
+    *,
+    roots: object | None = None,
 ) -> str | None:
     """Map cosine similarity + kind match/mismatch → edge relation_type.
+
+    Thresholds are read from knobs (overridable). Falls back to built-in
+    defaults when knobs are unavailable or no override is set.
 
     Returns None if no edge should be proposed (similarity in the
     ambiguous mid-range).
     """
-    if sim >= _COSINE_REFINES_THRESHOLD:
+    from .knob_overrides import resolve_knob
+
+    _refines = resolve_knob("vector_edge_refines_threshold", default=0.75, roots=roots)
+    _co_occurs = resolve_knob("vector_edge_co_occurs_threshold", default=0.65, roots=roots)
+    _contradicts = resolve_knob("vector_edge_contradicts_threshold", default=0.35, roots=roots)
+
+    if sim >= _refines:
         if kind_a == kind_b:
             return "refines"
         else:
             return "co_occurs"
-    if sim >= _COSINE_CO_OCCURS_THRESHOLD:
+    if sim >= _co_occurs:
         return "co_occurs"
     # Dissimilar + different categories → potential contradiction
-    if sim <= _COSINE_CONTRADICTS_THRESHOLD and kind_a != kind_b:
+    if sim <= _contradicts and kind_a != kind_b:
         return "contradicts"
     return None
 
@@ -87,6 +95,7 @@ def run_vector_proposer(
     embedder: object | None = None,
     audit_path: str | None = None,
     max_pairs: int = _MAX_PAIRS,
+    roots: object | None = None,
 ) -> dict[str, Any]:
     """Run the vector edge proposer across all crystallized record pairs.
 
@@ -99,6 +108,7 @@ def run_vector_proposer(
         embedder: LocalEmbedder instance (needed for embeddings).
         audit_path: Optional audit path.
         max_pairs: Maximum number of pairs to evaluate.
+        roots: MemoryOSRoots for knob resolution; None falls back to defaults.
 
     Returns a summary dict.
     """
@@ -202,6 +212,7 @@ def run_vector_proposer(
                 sim,
                 rec_a["kind"],
                 rec_b["kind"],
+                roots=roots,
             )
             if rtype is None:
                 continue
