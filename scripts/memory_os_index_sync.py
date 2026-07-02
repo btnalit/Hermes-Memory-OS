@@ -24,13 +24,36 @@ from plugins.memory.memory_os.crystallized import is_active_crystallized_frontma
 
 
 def _canonical_counts(store: MemoryOSStore) -> dict[str, int]:
-    """Count canonical filesystem records for drift comparison."""
+    """Count canonical filesystem records for drift comparison.
+
+    Counting methodology MUST match the index's semantics, not raw filesystem
+    counts. Three deliberate choices:
+
+    1. **working_items**: counted per *item* inside each ``<kind>.json``
+       document (index stores one row per item), not per .json file.
+    2. **crystallized_candidates**: counted by *distinct* candidate_id
+       (index uses INSERT OR REPLACE with candidate_id as primary key).
+    3. **audit_entries**: snapshot taken BEFORE sync so the index_sync
+       process's own ``append_audit`` call is not counted against it
+       (caller must count this BEFORE running sync/rebuild).
+    """
     roots = store.roots
     event_lines = 0
     for path in sorted(roots.events_root.glob("*/*.jsonl")):
         event_lines += len([l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()])
-    working = len(list(roots.working_root.glob("*.json")))
-    candidates = len(list(read_candidate_queue(roots)))
+    # Count items inside working-memory JSON documents, not files.
+    working = 0
+    for path in sorted(roots.working_root.glob("*.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            working += len(doc.get("items", []))
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Count distinct candidate_ids to match index's PRIMARY KEY dedup.
+    candidate_ids: set[str] = set()
+    for c in read_candidate_queue(roots):
+        candidate_ids.add(c.candidate_id)
+    candidates = len(candidate_ids)
     crystallized = 0
     for path in sorted(roots.crystallized_root.glob("*.md")):
         content = path.read_text(encoding="utf-8")
@@ -86,6 +109,10 @@ def main() -> int:
         pass  # graceful degrade: embedder unavailable -> keep FTS5 floor
     now = datetime.now(timezone.utc)
 
+    # Snapshot canonical counts BEFORE sync/rebuild so that the
+    # index_sync process's own audit entry is not counted against it.
+    canonical = _canonical_counts(store)
+
     if not roots.index_path.exists():
         # First-use: full rebuild
         ok = index.try_rebuild_from_store(store)
@@ -101,7 +128,6 @@ def main() -> int:
             status = "error"
 
     # Drift check: index vs canonical filesystem
-    canonical = _canonical_counts(store)
     drifts = _drift_report(counts, canonical)
     drift_ok = len(drifts) == 0
 
