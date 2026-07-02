@@ -473,26 +473,46 @@ def run_benchmark(limit: int = 8) -> dict[str, Any]:
     from plugins.memory.memory_os.roots import MemoryOSRoots
     from plugins.memory.memory_os.store import MemoryOSStore
     from plugins.memory.memory_os.index import MemoryOSIndex
-    from plugins.memory.memory_os.embedder import LocalEmbedder
 
-    embedder = LocalEmbedder()
-    if not embedder.is_available():
-        return {
-            "status": "skipped",
-            "reason": "embedder_unavailable",
-            "diagnostic": (
-                "LocalEmbedder.is_available() returned False.  "
-                "Check that sentence-transformers is installed and the model "
-                "paraphrase-multilingual-MiniLM-L12-v2 can be loaded."
-            ),
-        }
+    embedder = None  # set below after roots are initialized
 
     # ── Create isolated environment ───────────────────────────────────────
     tmp_dir = tempfile.mkdtemp(prefix="memory_os_benchmark_")
     tmp_path = Path(tmp_dir)
+    # ── Set up roots with vector knob enabled ────────────────────────────
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="benchmark")
+
+    # Enable vector retrieval in this isolated benchmark env so
+    # build_embedder (which respects the knob) can instantiate.
+    override_dir = roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    (override_dir / "knob_overrides.jsonl").write_text(
+        json.dumps({
+            "knob": "vector_retrieval_enabled",
+            "override_value": True,
+            "state": "active",
+            "reason": "benchmark",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    from plugins.memory.memory_os.embedder import build_embedder
+    embedder = build_embedder(roots)
+
+    if embedder is None or not getattr(embedder, "is_available", lambda: False)():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {
+            "status": "skipped",
+            "reason": "embedder_unavailable",
+            "diagnostic": (
+                "build_embedder() returned None or embedder unavailable.  "
+                "Check that sentence-transformers is installed and the "
+                "vector_retrieval_enabled knob is active."
+            ),
+        }
+
     try:
         # ── Set up store and seed records ──────────────────────────────────
-        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="benchmark")
         store = MemoryOSStore(roots)
         store.initialize()
 
