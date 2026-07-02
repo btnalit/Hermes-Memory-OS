@@ -83,6 +83,7 @@ class MemoryOSIndex:
                 _copy_embeddings_from_live(conn, self.roots.index_path)
             _index_audit_entries(conn, self.roots.audit_path)
             _index_edges(conn, self.roots)
+            _index_entities(conn, self.roots.crystallized_root)
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
@@ -155,6 +156,8 @@ class MemoryOSIndex:
             _index_audit_entries(conn, self.roots.audit_path)
             _clear_table(conn, "memory_edges")
             _index_edges(conn, self.roots)
+            _clear_table(conn, "entity_index")
+            _index_entities(conn, self.roots.crystallized_root)
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
@@ -172,6 +175,7 @@ class MemoryOSIndex:
                     "audit_entries": f"{before.get('audit_entries',0)}->{after.get('audit_entries',0)}",
                     "edges": f"{before.get('edges',0)}->{after.get('edges',0)}",
                     "memory_embeddings": f"{before.get('memory_embeddings',0)}->{after.get('memory_embeddings',0)}",
+                    "entity_index": f"{before.get('entity_index',0)}->{after.get('entity_index',0)}",
                 },
             )
             return after
@@ -197,12 +201,13 @@ class MemoryOSIndex:
                 "audit_entries": 0,
                 "edges": 0,
                 "memory_embeddings": 0,
+                "entity_index": 0,
             }
         conn = sqlite3.connect(self.roots.index_path)
         try:
             return {
                 table: conn.execute(f"select count(*) from {table}").fetchone()[0]
-                for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings")
+                for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings", "entity_index")
             }
         finally:
             conn.close()
@@ -538,6 +543,15 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             invalidated_at text,
             proposed_by text not null default 'structural'
         );
+        create table if not exists entity_index (
+            entity_id text not null,
+            entity_text text not null,
+            record_id text not null,
+            role text not null,
+            proposed_by text not null default 'structural',
+            created_at text not null,
+            primary key (entity_id, record_id, role)
+        );
         """
     )
     _ensure_column(conn, "events", "record_hash", "text not null default ''")
@@ -684,7 +698,7 @@ def _remove_sqlite_sidecars(path: Path) -> None:
 
 
 def _clear(conn: sqlite3.Connection) -> None:
-    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings", "memory_fts"):
+    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings", "memory_fts", "entity_index"):
         _clear_table(conn, table)
 
 
@@ -980,6 +994,55 @@ def _index_edges(conn: sqlite3.Connection, roots: MemoryOSRoots) -> int:
         except (json.JSONDecodeError, sqlite3.Error, Exception):
             continue
     conn.commit()
+    return count
+
+
+def _index_entities(conn: sqlite3.Connection, crystallized_root: Path) -> int:
+    """Index entities from crystallized records into entity_index table.
+
+    Reads each .md file, parses frontmatter for the record id, then
+    extracts entities from the body text using deterministic rules
+    (paths, URLs, UUIDs, capitalized phrases).  The table is fully
+    cleared and repopulated each call.
+    """
+    from .entity_extractor import extract_entities
+    from datetime import datetime, timezone
+
+    conn.execute("delete from entity_index")
+    now = datetime.now(timezone.utc).isoformat()
+    count = 0
+
+    for path in sorted(crystallized_root.glob("*.md")):
+        content = path.read_text(encoding="utf-8")
+        # Parse frontmatter to extract record id
+        record_id = ""
+        body_start = 0
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                frontmatter_text = parts[1]
+                body_text = parts[2]
+                for line in frontmatter_text.strip().split("\n"):
+                    if line.startswith("id:"):
+                        record_id = line.split(":", 1)[1].strip()
+                        break
+            else:
+                body_text = content
+        else:
+            body_text = content
+
+        if not record_id:
+            continue
+
+        entities = extract_entities(body_text, record_id=record_id)
+        for ent in entities:
+            conn.execute(
+                "insert or ignore into entity_index (entity_id, entity_text, record_id, role, proposed_by, created_at) "
+                "values (?, ?, ?, ?, ?, ?)",
+                (ent["entity_id"], ent["entity_text"], ent["record_id"], ent["role"], ent["proposed_by"], now),
+            )
+            count += 1
+
     return count
 
 
