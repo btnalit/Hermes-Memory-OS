@@ -1,0 +1,9 @@
+{
+  "ragflow_evidence": {
+    "enabled": false,
+    "base_url": "",
+    "api_key": "",
+    "dataset_id": "",
+    "profile": ""
+  }
+}
