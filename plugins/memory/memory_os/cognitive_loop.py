@@ -978,6 +978,12 @@ class CognitiveLoopRunner:
 
     def _contradiction_lane(self, context: dict[str, Any]) -> dict[str, Any]:
         """Run LLM/evidence contradiction detection (shadow-only)."""
+        from .knob_overrides import resolve_knob as _resolve_knob
+
+        enabled = _resolve_knob("llm_contradiction_lane_enabled", default=False, roots=self.store.roots)
+        if not enabled:
+            return {"status": "skipped", "reason": "knob_disabled"}
+
         from .llm_contradiction_lane import run_contradiction_lane
 
         embedder = getattr(self, "_embedder", None)
