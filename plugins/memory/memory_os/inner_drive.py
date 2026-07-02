@@ -336,6 +336,14 @@ def classify_event_for_inner_drive(event: EventEnvelope) -> InnerDriveEventDecis
             candidate_allowed=allowed,
             skip_reason="" if allowed else _SOURCE_GATE_SKIP_REASON,
         )
+    if kind == "external_evidence_intake":
+        return InnerDriveEventDecision(
+            source_class=source_class,
+            drive_policy=explicit_policy or "eligible",
+            working_kind="lingering",
+            working_weight=0.45,
+            candidate_allowed=_candidate_allowed(candidate_explicit, default=True),
+        )
     if kind == "memory_write":
         return InnerDriveEventDecision(
             source_class=source_class,
