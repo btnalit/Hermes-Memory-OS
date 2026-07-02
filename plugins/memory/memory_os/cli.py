@@ -1116,11 +1116,16 @@ def _cmd_vector_reembed(args: argparse.Namespace) -> int:
         print("  Dry run — no changes made.")
         return 0
 
-    # Re-index all embeddings
+    # Recompute all embeddings with the current model
     from .index import _index_embeddings
 
     crystallized_root = roots.crystallized_root
-    _index_embeddings(index_path, crystallized_root, embedder)
+    conn_reembed = sqlite3.connect(str(index_path))
+    try:
+        _index_embeddings(conn_reembed, crystallized_root, embedder)
+        conn_reembed.commit()
+    finally:
+        conn_reembed.close()
 
     # Count result
     conn = sqlite3.connect(str(index_path))
