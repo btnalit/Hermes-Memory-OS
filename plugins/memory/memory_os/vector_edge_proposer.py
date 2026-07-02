@@ -79,9 +79,7 @@ def _detect_relation_from_similarity(
             return "co_occurs"
     if sim >= _co_occurs:
         return "co_occurs"
-    # Dissimilar + different categories → potential contradiction
-    if sim <= _contradicts and kind_a != kind_b:
-        return "contradicts"
+    # contradicts detection moved to llm_contradiction_lane.py (owner-gated)
     return None
 
 

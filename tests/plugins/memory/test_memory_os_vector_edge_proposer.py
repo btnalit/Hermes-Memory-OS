@@ -202,7 +202,8 @@ def test_detect_co_occurs_mid_sim():
 
 
 def test_detect_contradicts_low_sim_different_kind():
-    assert _detect_relation_from_similarity(0.20, "note", "decision") == "contradicts"
+    # contradicts now handled by llm_contradiction_lane.py (owner-gated)
+    assert _detect_relation_from_similarity(0.20, "note", "decision") is None
 
 
 def test_detect_none_mid_sim_same_kind_below_co_occurs():
