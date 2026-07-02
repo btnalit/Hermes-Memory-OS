@@ -225,10 +225,20 @@ def run_contradiction_lane(
     # ── 3. LLM claim extraction + contradiction judgment ──────────────
     from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
 
-    llm_config = {}  # Will be resolved by _resolve_hermes_default_runtime
-    resolved = _resolve_hermes_default_runtime(llm_config)
+    # Reuse the same LLM config pattern as llm_edge_proposer
+    _DEFAULT_LLM_CONFIG: dict[str, Any] = {
+        "enabled": True,
+        "mode": "bounded_vote",
+        "provider": "hermes_default",
+        "temperature": 0,
+        "timeout_ms": 15000,
+        "max_tokens": 512,
+        "on_error": "deterministic_fallback",
+    }
+    resolved = _resolve_hermes_default_runtime(_DEFAULT_LLM_CONFIG)
     if not resolved.get("ok"):
         return {"status": "skipped", "reason": "llm_runtime_unavailable", "contradictions_found": 0}
+    llm_config = dict(_DEFAULT_LLM_CONFIG)
 
     contradictions_found = 0
     edge_writer: object | None = None
