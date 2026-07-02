@@ -175,7 +175,7 @@ class MemoryOSIndex:
                     "crystallized_candidates": f"{before.get('crystallized_candidates',0)}->{after.get('crystallized_candidates',0)}",
                     "crystallized_records": f"{before.get('crystallized_records',0)}->{after.get('crystallized_records',0)}",
                     "audit_entries": f"{before.get('audit_entries',0)}->{after.get('audit_entries',0)}",
-                    "edges": f"{before.get('edges',0)}->{after.get('edges',0)}",
+                    "memory_edges": f"{before.get('memory_edges',0)}->{after.get('memory_edges',0)}",
                     "memory_embeddings": f"{before.get('memory_embeddings',0)}->{after.get('memory_embeddings',0)}",
                     "entity_index": f"{before.get('entity_index',0)}->{after.get('entity_index',0)}",
                 },
@@ -201,7 +201,7 @@ class MemoryOSIndex:
                 "crystallized_candidates": 0,
                 "crystallized_records": 0,
                 "audit_entries": 0,
-                "edges": 0,
+                "memory_edges": 0,
                 "memory_embeddings": 0,
                 "entity_index": 0,
             }
