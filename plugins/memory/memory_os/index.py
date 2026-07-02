@@ -1008,7 +1008,16 @@ def _entity_index_enabled(store: MemoryOSStore) -> bool:
     try:
         from .knob_overrides import resolve_knob
         return bool(resolve_knob("entity_index_enabled", default=False, roots=store.roots))
-    except Exception:
+    except Exception as _exc:
+        from .jsonl_io import build_error_record as _build_error_record
+        _build_error_record(
+            component="entity_index",
+            operation="knob_resolution",
+            error_code="ENTITY_INDEX_KNOB_FAILED",
+            severity="warning",
+            recoverable=True,
+            details={"error": str(_exc)},
+        )
         return False
 
 

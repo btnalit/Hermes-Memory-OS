@@ -390,3 +390,30 @@ class TestEntityIndexCognitiveLoop:
         result = runner._entity_index({})
         assert result["status"] == "ok"
         assert result["entities_indexed"] > 0
+
+
+# ── Whitespace collapse ─────────────────────────────────────────────
+
+
+def test_entity_id_whitespace_collapse() -> None:
+    """Entity IDs are identical regardless of internal whitespace variation."""
+    from plugins.memory.memory_os.entity_extractor import _normalize_entity_id
+
+    eid_single = _normalize_entity_id("John Smith")
+    eid_double = _normalize_entity_id("John  Smith")
+    eid_tab = _normalize_entity_id("John\tSmith")
+    assert eid_single == eid_double, "double-space should collapse to single"
+    assert eid_single == eid_tab, "tab should collapse to space"
+
+
+def test_entity_extraction_whitespace_collapse() -> None:
+    """Extracting same entity with different whitespace produces single entry."""
+    from plugins.memory.memory_os.entity_extractor import extract_entities
+    entities = extract_entities(
+        "Alice Bob met. Alice  Bob discussed.",
+        record_id="rec_001",
+    )
+    alice_bob_entries = [e for e in entities if e["entity_text"] == "Alice Bob"]
+    assert len(alice_bob_entries) == 1, (
+        f"expected exactly one 'Alice Bob' entry, got {alice_bob_entries}"
+    )

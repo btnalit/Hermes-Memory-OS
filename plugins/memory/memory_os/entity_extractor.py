@@ -41,7 +41,8 @@ _ID_PATTERN = re.compile(
 
 def _normalize_entity_id(entity_text: str) -> str:
     """Generate a stable, deterministic entity_id from entity text."""
-    normalized = entity_text.strip().lower()
+    import re as _re
+    normalized = _re.sub(r"\s+", " ", entity_text.strip().lower())
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"ent_{digest}"
 
