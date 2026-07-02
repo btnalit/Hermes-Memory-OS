@@ -118,15 +118,16 @@ def run_contradiction_lane(
     from .jsonl_io import build_error_record as _build_error_record
 
     start_time = datetime.now(timezone.utc)
+    error_records: list[dict[str, Any]] = []
 
     # ── Guard: lane disabled ─────────────────────────────────────────
     enabled = resolve_knob("llm_contradiction_lane_enabled", default=False, roots=roots)
     if not enabled:
-        return {"status": "skipped", "reason": "lane_disabled", "contradictions_found": 0}
+        return {"status": "skipped", "reason": "lane_disabled", "contradictions_found": 0, "error_records": error_records}
 
     # ── Guard: embedder not available ─────────────────────────────────
     if embedder is None or not getattr(embedder, "is_available", lambda: False)():
-        return {"status": "skipped", "reason": "embedder_unavailable", "contradictions_found": 0}
+        return {"status": "skipped", "reason": "embedder_unavailable", "contradictions_found": 0, "error_records": error_records}
 
     # ── Guard: LLM not available ──────────────────────────────────────
     llm_available = False
@@ -135,21 +136,21 @@ def run_contradiction_lane(
         judge_status = _judge_avail({})
         llm_available = judge_status.get("available", False)
     except Exception as _exc:
-        _build_error_record(
+        error_records.append(_build_error_record(
             component="llm_contradiction_lane",
             operation="judge_availability_check",
             error_code="JUDGE_CHECK_FAILED",
             severity="warning",
             recoverable=True,
             details={"error": str(_exc)},
-        )
+        ))
     if not llm_available:
-        return {"status": "skipped", "reason": "llm_unavailable", "contradictions_found": 0}
+        return {"status": "skipped", "reason": "llm_unavailable", "contradictions_found": 0, "error_records": error_records}
 
     # ── 1. Read crystallized records with embeddings ──────────────────
     index_path = getattr(store.roots, "index_path", None)
     if index_path is None:
-        return {"status": "error", "error": "no_index_path"}
+        return {"status": "error", "error": "no_index_path", "error_records": error_records}
 
     conn = sqlite3.connect(str(index_path))
     conn.row_factory = sqlite3.Row
@@ -170,7 +171,7 @@ def run_contradiction_lane(
         ).fetchall()
     except sqlite3.Error:
         conn.close()
-        return {"status": "error", "error": "cannot_read_crystallized_records"}
+        return {"status": "error", "error": "cannot_read_crystallized_records", "error_records": error_records}
 
     records: list[dict[str, Any]] = []
     for row in rows:
@@ -188,7 +189,7 @@ def run_contradiction_lane(
 
     if len(records) < 2:
         conn.close()
-        return {"status": "skipped", "reason": f"need >=2 records, got {len(records)}", "contradictions_found": 0}
+        return {"status": "skipped", "reason": f"need >=2 records, got {len(records)}", "contradictions_found": 0, "error_records": error_records}
 
     # ── 2. Build high-similarity candidate pairs (same kind, sim >= 0.75) ─
     candidate_pairs: list[dict[str, Any]] = []
@@ -228,6 +229,7 @@ def run_contradiction_lane(
             "pairs_evaluated": pairs_evaluated,
             "candidate_pairs": 0,
             "contradictions_found": 0,
+            "error_records": error_records,
         }
 
     # ── 3. LLM claim extraction + contradiction judgment ──────────────
@@ -245,7 +247,7 @@ def run_contradiction_lane(
     }
     resolved = _resolve_hermes_default_runtime(_DEFAULT_LLM_CONFIG)
     if not resolved.get("ok"):
-        return {"status": "skipped", "reason": "llm_runtime_unavailable", "contradictions_found": 0}
+        return {"status": "skipped", "reason": "llm_runtime_unavailable", "contradictions_found": 0, "error_records": error_records}
     llm_config = dict(_DEFAULT_LLM_CONFIG)
 
     contradictions_found = 0
@@ -268,14 +270,14 @@ def run_contradiction_lane(
         try:
             response = _call_hermes_runtime_model(prompt, llm_config)
         except Exception as _exc:
-            _build_error_record(
+            error_records.append(_build_error_record(
                 component="llm_contradiction_lane",
                 operation="hermes_runtime_call",
                 error_code="LLM_CALL_FAILED",
                 severity="warning",
                 recoverable=True,
                 details={"error": str(_exc)[:200], "record_a": pair["a"]["id"], "record_b": pair["b"]["id"]},
-            )
+            ))
             continue
 
         if not response or not response.strip():
@@ -286,7 +288,6 @@ def run_contradiction_lane(
             parsed = json.loads(response.strip())
         except json.JSONDecodeError:
             # Extract outermost JSON object (handles nested braces in claim values)
-            import re as _re
             start = response.find("{")
             if start == -1:
                 continue
@@ -358,4 +359,5 @@ def run_contradiction_lane(
         "contradictions_found": contradictions_found,
         "duration_ms": elapsed_ms,
         "begin_at": start_time.isoformat(),
+        "error_records": error_records,
     }
