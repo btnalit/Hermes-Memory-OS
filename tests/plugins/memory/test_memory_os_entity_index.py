@@ -290,3 +290,85 @@ def test_entity_index_counts(tmp_path: Path) -> None:
     assert after_counts["entity_index"] > 0, (
         f"expected >0 entity_index after rebuild, got {after_counts}"
     )
+
+
+# ── Cognitive loop integration (V2-P1, Task 2) ──────────────────────────
+
+
+class TestEntityIndexCognitiveLoop:
+    """V2-P1: cognitive_loop integration tests for entity index extraction stage."""
+
+    def test_entity_index_knob_defaults_disabled(self, tmp_path: Path) -> None:
+        """entity_index_enabled knob defaults to False when no override file."""
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        enabled = resolve_knob("entity_index_enabled", default=False, roots=roots)
+        assert enabled is False
+
+    def test_entity_index_stage_skipped_when_disabled(self, tmp_path: Path) -> None:
+        """Stage returns skipped when knob is disabled (default)."""
+        from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        runner = CognitiveLoopRunner(store)
+        result = runner._entity_index({})
+        assert result["status"] == "skipped"
+        assert result["reason"] == "knob_disabled"
+
+    def test_entity_index_runs_when_knob_enabled(self, tmp_path: Path) -> None:
+        """When knob enabled via override, stage extracts entities."""
+        from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Enable knob via override file (must match resolve_knob expected format)
+        override_dir = roots.memory_os_root / "system"
+        override_dir.mkdir(parents=True, exist_ok=True)
+        override_file = override_dir / "knob_overrides.jsonl"
+        override_file.write_text(
+            json.dumps({
+                "knob": "entity_index_enabled",
+                "override_value": True,
+                "state": "active",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        # Create a crystallized record with entity-containing text
+        store.append_crystallized_record(
+            "test_entity_record.md",
+            {
+                "id": "rec-001",
+                "kind": "moment",
+                "created_at": "2024-01-01T00:00:00Z",
+                "approved_by": "test",
+                "approved_at": "2024-01-01T00:00:00Z",
+                "source_event_ids": [],
+                "tags": [],
+                "sensitivity": "private",
+                "hindsight_indexed": False,
+            },
+            "The production path /var/log/app was configured on Server Alpha.",
+        )
+
+        # Initialize index first (so index_path exists)
+        index = MemoryOSIndex(roots)
+        index.try_rebuild_from_store(store)
+
+        # Run entity_index stage
+        runner = CognitiveLoopRunner(store)
+        result = runner._entity_index({})
+        assert result["status"] == "ok"
+        assert result["entities_indexed"] > 0

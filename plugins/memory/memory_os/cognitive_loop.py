@@ -232,6 +232,7 @@ class CognitiveLoopRunner:
             ("llm_edge_proposer", self._llm_edge_proposer),
             ("vector_edge_proposer", self._vector_edge_proposer),
             ("contradiction_lane", self._contradiction_lane),
+            ("entity_index", self._entity_index),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("host_capability_probe", self._host_capability_probe),
             ("signal_collection", self._signal_collection),
@@ -1008,6 +1009,53 @@ class CognitiveLoopRunner:
                 "pairs_evaluated": result.get("pairs_evaluated", 0),
                 "candidate_pairs": result.get("candidate_pairs", 0),
                 "contradictions_found": result.get("contradictions_found", 0),
+            },
+        )
+        return result
+
+    def _entity_index(self, context: dict[str, Any]) -> dict[str, Any]:
+        """V2-P1: Entity index extraction stage.
+
+        Extracts entities from crystallized records and populates the
+        entity_index table. Deterministic only (no LLM). Shadow observe
+        — knob default=False, no auto-action on entity data.
+        """
+        from .knob_overrides import resolve_knob as _resolve_knob
+
+        enabled = _resolve_knob("entity_index_enabled", default=False, roots=self.store.roots)
+        if not enabled:
+            return {"status": "skipped", "reason": "knob_disabled"}
+
+        import sqlite3
+        from .index import _index_entities, _initialize_schema
+
+        index_path = getattr(self.store.roots, "index_path", None)
+        if index_path is None or not index_path.exists():
+            return {"status": "skipped", "reason": "no_index"}
+
+        try:
+            conn = sqlite3.connect(str(index_path))
+            try:
+                _initialize_schema(conn)
+                count = _index_entities(conn, self.store.roots.crystallized_root)
+                conn.commit()
+            finally:
+                conn.close()
+            result: dict[str, Any] = {"status": "ok", "entities_indexed": count}
+        except Exception as exc:
+            result = {"status": "error", "error": str(exc)}
+
+        context["entity_index_result"] = result
+
+        from .audit import append_audit
+        append_audit(
+            self.store.roots.audit_path,
+            action="entity_index_run",
+            status=result.get("status", "error"),
+            target="entity_index",
+            details={
+                "entities_indexed": result.get("entities_indexed", 0),
+                "enabled": enabled,
             },
         )
         return result
