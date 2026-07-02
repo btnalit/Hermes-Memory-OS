@@ -86,3 +86,33 @@ class LocalEmbedder:
             return None
         vec = self._model.encode([text], show_progress_bar=False)[0]
         return vec.astype(np.float32)
+
+
+def build_embedder(roots) -> LocalEmbedder | None:
+    """Factory: build a LocalEmbedder from knob configuration.
+
+    Reads vector_retrieval_enabled, vector_embedder_model, and
+    vector_embedder_device from the knob override store. Returns None
+    when vector retrieval is disabled or the embedder is unavailable.
+
+    This is the single entry point for all embedder instantiation —
+    replaces ad-hoc ``LocalEmbedder()`` calls across the codebase.
+    """
+    from .knob_overrides import resolve_knob
+
+    enabled = resolve_knob("vector_retrieval_enabled", default=False, roots=roots)
+    if not enabled:
+        return None
+
+    model = resolve_knob(
+        "vector_embedder_model",
+        default="paraphrase-multilingual-MiniLM-L12-v2",
+        roots=roots,
+    )
+    device = resolve_knob(
+        "vector_embedder_device",
+        default="auto",
+        roots=roots,
+    )
+    emb = LocalEmbedder(model_name=str(model), device=str(device))
+    return emb if emb.is_available() else None

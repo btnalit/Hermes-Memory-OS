@@ -88,6 +88,24 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "vector_embedder_model": {
+        "module": "embedder",
+        "default": "paraphrase-multilingual-MiniLM-L12-v2",
+        "kind": "threshold",
+        "bounds": None,
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "vector_embedder_device": {
+        "module": "embedder",
+        "default": "auto",
+        "kind": "threshold",
+        "bounds": None,
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── Source gate quality knobs (F.8) ────────────────────────────────
     "auto_promote_enabled": {
         "module": "crystallized",

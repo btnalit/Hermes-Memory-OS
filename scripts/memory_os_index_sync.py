@@ -77,10 +77,12 @@ def main() -> int:
     # and vector search silently degrades to FTS5 (provider path sets it at
     # MemoryOSProvider.prefetch via self._index._embedder = self._embedder).
     try:
-        from plugins.memory.memory_os.embedder import LocalEmbedder
+        from plugins.memory.memory_os.embedder import build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
 
-        _embedder = LocalEmbedder()
-        if _embedder.is_available():
+        _roots = MemoryOSRoots.from_hermes_home(str(hermes_home))
+        _embedder = build_embedder(_roots)
+        if _embedder is not None:
             index._embedder = _embedder
     except Exception:
         pass  # graceful degrade: embedder unavailable -> keep FTS5 floor

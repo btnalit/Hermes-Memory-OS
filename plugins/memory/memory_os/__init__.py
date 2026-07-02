@@ -73,12 +73,6 @@ class MemoryOSProvider(MemoryProvider):
         self._last_owner_review_reply_result: dict[str, Any] | None = None
         self._last_owner_review_reply_query = ""
         self._embedder = None
-        try:
-            from .embedder import LocalEmbedder
-            self._embedder = LocalEmbedder()
-            # is_available() check is deferred — called during prefetch
-        except Exception:
-            pass  # embedder unavailable → vector lane degrades gracefully
 
     @property
     def name(self) -> str:
@@ -95,6 +89,13 @@ class MemoryOSProvider(MemoryProvider):
         self.profile = str(kwargs.get("agent_identity") or kwargs.get("profile") or "memoryos-test")
         self._config = memory_os_config.load_config(self.hermes_home)
         self._roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        # Initialize embedder from knobs (D1: moved from __init__ so roots is available)
+        self._embedder = None
+        try:
+            from .embedder import build_embedder
+            self._embedder = build_embedder(self._roots)
+        except Exception:
+            pass  # embedder unavailable -> vector lane degrades gracefully
         self._store = MemoryOSStore(self._roots)
         self._store.initialize()
         self._index = MemoryOSIndex(self._roots)
