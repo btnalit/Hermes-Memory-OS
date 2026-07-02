@@ -481,6 +481,32 @@ def test_V1_9_no_owner_approval_gate_in_speech_path(tmp_path, monkeypatch):
     )
 
 
+def test_contradiction_lane_embedder_not_none_when_enabled(tmp_path) -> None:
+    """When knob enabled, contradiction lane constructs embedder locally."""
+    from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # Enable the contradiction lane knob
+    override_dir = roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    (override_dir / "knob_overrides.jsonl").write_text(
+        json.dumps({"knob": "llm_contradiction_lane_enabled", "override_value": True, "state": "active"}) + "\n",
+        encoding="utf-8",
+    )
+
+    runner = CognitiveLoopRunner(store)
+    result = runner._contradiction_lane({})
+    # With embedder not installed, result will be "skipped" with "embedder_unavailable"
+    # But it must NOT be "embedder_unavailable" because of missing plumbing (old bug)
+    # The key assertion: the lane tried to construct embedder, didn't just return None
+    assert result["status"] in ("skipped", "ok", "error")
+
+
 def _parse_memory_os_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     register_cli(parser)

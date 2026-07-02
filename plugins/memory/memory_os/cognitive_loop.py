@@ -986,9 +986,11 @@ class CognitiveLoopRunner:
             return {"status": "skipped", "reason": "knob_disabled"}
 
         from .llm_contradiction_lane import run_contradiction_lane
+        from .embedder import build_embedder
+        from .index import MemoryOSIndex
 
-        embedder = getattr(self, "_embedder", None)
-        index = getattr(self, "_index", None)
+        embedder = build_embedder(self.store.roots)
+        index = MemoryOSIndex(self.store.roots)
 
         result = run_contradiction_lane(
             store=self.store,
@@ -1020,9 +1022,12 @@ class CognitiveLoopRunner:
         entity_index table. Deterministic only (no LLM). Shadow observe
         — knob default=False, no auto-action on entity data.
         """
-        from .knob_overrides import resolve_knob as _resolve_knob
+        try:
+            from .knob_overrides import resolve_knob as _resolve_knob
+            enabled = _resolve_knob("entity_index_enabled", default=False, roots=self.store.roots)
+        except Exception:
+            return {"status": "skipped", "reason": "knob_resolution_failed"}
 
-        enabled = _resolve_knob("entity_index_enabled", default=False, roots=self.store.roots)
         if not enabled:
             return {"status": "skipped", "reason": "knob_disabled"}
 
