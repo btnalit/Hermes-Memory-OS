@@ -1060,6 +1060,82 @@ def _cmd_vector_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_vector_reembed(args: argparse.Namespace) -> int:
+    """Recompute all crystallized record embeddings with the currently configured model."""
+    import sqlite3
+    from pathlib import Path
+
+    from .roots import MemoryOSRoots
+    from .embedder import build_embedder
+
+    roots = MemoryOSRoots.from_profile()
+    index_path = Path(args.index_path) if args.index_path else roots.index_path
+
+    if not index_path.exists():
+        print(f"Index not found: {index_path}")
+        return 1
+
+    embedder = build_embedder(roots)
+    if embedder is None:
+        print("Embedder unavailable. Check vector_retrieval_enabled knob.")
+        return 1
+
+    if args.model:
+        # Override model name for this run only
+        embedder._model_name = args.model
+
+    model_name = embedder.model_name
+    print(f"Reembedding with model: {model_name}")
+
+    # Read all crystallized records
+    conn = sqlite3.connect(str(index_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "select id, file_name from crystallized_records"
+    ).fetchall()
+    record_count = len(rows)
+    conn.close()
+
+    print(f"Records to process: {record_count}")
+    if record_count == 0:
+        print("No crystallized records found.")
+        return 0
+
+    if args.dry_run:
+        # Count existing embeddings for current model
+        conn = sqlite3.connect(str(index_path))
+        existing = conn.execute(
+            "select count(*) from memory_embeddings "
+            "where record_type = 'crystallized_record' "
+            "and embedding_model = ?",
+            (model_name,),
+        ).fetchone()[0]
+        conn.close()
+        print(f"  Existing embeddings for {model_name}: {existing}")
+        print(f"  Would reembed: {record_count - existing} new/changed records")
+        print("  Dry run — no changes made.")
+        return 0
+
+    # Re-index all embeddings
+    from .index import _index_embeddings
+
+    crystallized_root = roots.crystallized_root
+    _index_embeddings(index_path, crystallized_root, embedder)
+
+    # Count result
+    conn = sqlite3.connect(str(index_path))
+    new_count = conn.execute(
+        "select count(*) from memory_embeddings "
+        "where record_type = 'crystallized_record' "
+        "and embedding_model = ?",
+        (model_name,),
+    ).fetchone()[0]
+    conn.close()
+
+    print(f"Done. {new_count} embeddings stored with model='{model_name}'.")
+    return 0
+
+
 def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="memory_os_command")
     vector_parser = subs.add_parser("vector")
@@ -1079,6 +1155,22 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     calibrate_parser.add_argument(
         "--sample-size", type=int, default=500,
         help="Max record pairs to sample (default: 500)",
+    )
+    reembed_parser = vector_subs.add_parser(
+        "reembed",
+        help="Recompute all embeddings with the currently configured model",
+    )
+    reembed_parser.add_argument(
+        "--model", type=str, default=None,
+        help="Model name override (default: read from vector_embedder_model knob)",
+    )
+    reembed_parser.add_argument(
+        "--index-path", type=str, default=None,
+        help="Path to index DB",
+    )
+    reembed_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Count records that would be reembedded, do not write",
     )
     subs.add_parser("status")
     subs.add_parser("doctor")
@@ -1468,7 +1560,9 @@ def memory_os_command(args: argparse.Namespace) -> int:
     if args.memory_os_command == "vector":
         if args.vector_command == "calibrate-thresholds":
             return _cmd_vector_calibrate(args)
-        print("Unknown vector sub-command. Try: vector calibrate-thresholds", file=sys.stderr)
+        elif args.vector_command == "reembed":
+            return _cmd_vector_reembed(args)
+        print("Unknown vector sub-command. Try: vector calibrate-thresholds or vector reembed", file=sys.stderr)
         return 1
     store = MemoryOSStore(
         MemoryOSRoots.from_hermes_home(
