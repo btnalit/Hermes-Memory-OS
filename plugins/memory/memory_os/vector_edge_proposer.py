@@ -79,7 +79,11 @@ def _detect_relation_from_similarity(
             return "co_occurs"
     if sim >= _co_occurs:
         return "co_occurs"
-    # contradicts detection moved to llm_contradiction_lane.py (owner-gated)
+    if sim <= _contradicts and kind_a != kind_b:
+        return "contradicts"
+    # Note: llm_contradiction_lane.py provides additional high-similarity,
+    # same-kind contradiction detection (owner-gated, knob-controlled).
+    # This low-similarity cross-kind path complements it.
     return None
 
 

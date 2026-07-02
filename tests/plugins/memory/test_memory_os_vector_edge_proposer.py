@@ -202,8 +202,8 @@ def test_detect_co_occurs_mid_sim():
 
 
 def test_detect_contradicts_low_sim_different_kind():
-    # contradicts now handled by llm_contradiction_lane.py (owner-gated)
-    assert _detect_relation_from_similarity(0.20, "note", "decision") is None
+    """Low-similarity cross-kind pairs produce contradicts edges."""
+    assert _detect_relation_from_similarity(0.20, "note", "decision") == "contradicts"
 
 
 def test_detect_none_mid_sim_same_kind_below_co_occurs():
@@ -212,6 +212,21 @@ def test_detect_none_mid_sim_same_kind_below_co_occurs():
 
 def test_detect_none_low_sim_same_kind():
     assert _detect_relation_from_similarity(0.10, "note", "note") is None
+
+
+def test_low_similarity_cross_kind_contradicts_restored() -> None:
+    """Low-similarity cross-kind pairs still produce contradicts edges."""
+    from plugins.memory.memory_os.vector_edge_proposer import _detect_relation_from_similarity
+    # sim=0.30 <= 0.35, kind_a != kind_b -> should return "contradicts"
+    result = _detect_relation_from_similarity(0.30, "note", "moment", roots=None)
+    assert result == "contradicts", f"expected 'contradicts', got {result!r}"
+
+
+def test_contradicts_not_triggered_same_kind() -> None:
+    """Low similarity but same kind should NOT trigger contradicts."""
+    from plugins.memory.memory_os.vector_edge_proposer import _detect_relation_from_similarity
+    result = _detect_relation_from_similarity(0.30, "note", "note", roots=None)
+    assert result is None, f"expected None for same-kind, got {result!r}"
 
 
 # ── Integration: run_vector_proposer ──────────────────────────────────────────

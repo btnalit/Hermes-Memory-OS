@@ -102,6 +102,30 @@ def build_embedder(roots) -> LocalEmbedder | None:
 
     enabled = resolve_knob("vector_retrieval_enabled", default=False, roots=roots)
     if not enabled:
+        # Startup diagnostic: if embeddings exist but knob is off, warn the operator.
+        # This handles the upgrade case where embeddings were previously computed
+        # but the new knob defaults to False.
+        _index_path = getattr(roots, "index_path", None)
+        if _index_path is not None and _index_path.exists():
+            try:
+                import sqlite3 as _sqlite3
+                _conn = _sqlite3.connect(str(_index_path))
+                try:
+                    _count = _conn.execute(
+                        "select count(*) from memory_embeddings"
+                    ).fetchone()[0]
+                    if _count > 0:
+                        import logging as _logging
+                        _logging.warning(
+                            "vector_retrieval_enabled=False but %d embeddings exist in index. "
+                            "Set knob 'vector_retrieval_enabled' to True to restore vector search. "
+                            "See: memory-os vector calibrate-thresholds",
+                            _count,
+                        )
+                finally:
+                    _conn.close()
+            except Exception:
+                pass  # Index not accessible — silently skip diagnostic
         return None
 
     model = resolve_knob(
