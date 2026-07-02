@@ -952,7 +952,8 @@ def _cmd_vector_calibrate(args: argparse.Namespace) -> int:
     from .roots import MemoryOSRoots
     from .vector_edge_proposer import _cosine_similarity
 
-    roots = MemoryOSRoots.from_profile()
+    hermes_home = _active_hermes_home(args)
+    roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=getattr(args, "profile", None))
     index_path = Path(args.index_path) if args.index_path else roots.index_path
 
     if not index_path.exists():
@@ -1068,7 +1069,8 @@ def _cmd_vector_reembed(args: argparse.Namespace) -> int:
     from .roots import MemoryOSRoots
     from .embedder import build_embedder
 
-    roots = MemoryOSRoots.from_profile()
+    hermes_home = _active_hermes_home(args)
+    roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=getattr(args, "profile", None))
     index_path = Path(args.index_path) if args.index_path else roots.index_path
 
     if not index_path.exists():
@@ -1150,6 +1152,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         help="Analyze pairwise cosine distribution and suggest edge thresholds",
     )
     calibrate_parser.add_argument(
+        "--hermes-home", type=str, default=None,
+        help="Override HERMES_HOME directory (default: $HERMES_HOME or ~/.hermes)",
+    )
+    calibrate_parser.add_argument(
+        "--profile", type=str, default=None,
+        help="Profile name override",
+    )
+    calibrate_parser.add_argument(
         "--apply", action="store_true",
         help="Apply suggested thresholds to knob overrides (requires confirmation)",
     )
@@ -1164,6 +1174,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     reembed_parser = vector_subs.add_parser(
         "reembed",
         help="Recompute all embeddings with the currently configured model",
+    )
+    reembed_parser.add_argument(
+        "--hermes-home", type=str, default=None,
+        help="Override HERMES_HOME directory (default: $HERMES_HOME or ~/.hermes)",
+    )
+    reembed_parser.add_argument(
+        "--profile", type=str, default=None,
+        help="Profile name override",
     )
     reembed_parser.add_argument(
         "--model", type=str, default=None,

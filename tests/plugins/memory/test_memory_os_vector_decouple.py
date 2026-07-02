@@ -323,3 +323,20 @@ Test.
             "D.X FAIL: embedding_model should NOT be hardcoded MiniLM "
             "when embedder is bge-m3"
         )
+
+
+def test_vector_cli_respects_hermes_home_flag(tmp_path: Path) -> None:
+    """Vector commands accept and use --hermes-home flag."""
+    import argparse
+    from plugins.memory.memory_os.cli import register_cli
+
+    parser = argparse.ArgumentParser()
+    register_cli(parser)
+
+    # Verify --hermes-home is registered on calibrate-thresholds
+    args = parser.parse_args(["vector", "calibrate-thresholds", "--hermes-home", str(tmp_path)])
+    assert args.hermes_home == str(tmp_path)
+
+    # Verify --hermes-home is registered on reembed
+    args2 = parser.parse_args(["vector", "reembed", "--hermes-home", str(tmp_path)])
+    assert args2.hermes_home == str(tmp_path)
