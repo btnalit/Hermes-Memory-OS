@@ -29,18 +29,31 @@ def _canonical_counts(store: MemoryOSStore) -> dict[str, int]:
     Counting methodology MUST match the index's semantics, not raw filesystem
     counts. Three deliberate choices:
 
-    1. **working_items**: counted per *item* inside each ``<kind>.json``
+    1. **events**: counted via JSONL parse (same parser as ``_index_events``)
+       so malformed/unparseable lines are excluded, without triggering
+       quarantine side effects from ``store.read_events()``.
+    2. **working_items**: counted per *item* inside each ``<kind>.json``
        document (index stores one row per item), not per .json file.
-    2. **crystallized_candidates**: counted by *distinct* candidate_id
+    3. **crystallized_candidates**: counted by *distinct* candidate_id
        (index uses INSERT OR REPLACE with candidate_id as primary key).
-    3. **audit_entries**: snapshot taken BEFORE sync so the index_sync
+    4. **crystallized_records**: uses the same ``_markdown_records`` +
+       ``is_active_crystallized_frontmatter`` pipeline as ``_index_crystallized_records``.
+    5. **audit_entries**: snapshot taken BEFORE sync so the index_sync
        process's own ``append_audit`` call is not counted against it
        (caller must count this BEFORE running sync/rebuild).
     """
     roots = store.roots
     event_lines = 0
     for path in sorted(roots.events_root.glob("*/*.jsonl")):
-        event_lines += len([l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()])
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict) and "id" in obj:
+                    event_lines += 1
+            except json.JSONDecodeError:
+                pass  # malformed → not indexed, exclude from canonical
     # Count items inside working-memory JSON documents, not files.
     working = 0
     for path in sorted(roots.working_root.glob("*.json")):
