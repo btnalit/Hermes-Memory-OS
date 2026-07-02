@@ -78,10 +78,8 @@ def main() -> int:
     # MemoryOSProvider.prefetch via self._index._embedder = self._embedder).
     try:
         from plugins.memory.memory_os.embedder import build_embedder
-        from plugins.memory.memory_os.roots import MemoryOSRoots
 
-        _roots = MemoryOSRoots.from_hermes_home(str(hermes_home))
-        _embedder = build_embedder(_roots)
+        _embedder = build_embedder(roots)
         if _embedder is not None:
             index._embedder = _embedder
     except Exception:
