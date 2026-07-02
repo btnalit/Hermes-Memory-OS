@@ -849,7 +849,7 @@ def _index_embeddings(
     """
     if embedder is None or not getattr(embedder, "is_available", lambda: False)():
         return 0
-    embedding_model = "paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_model = getattr(embedder, "model_name", "paraphrase-multilingual-MiniLM-L12-v2")
     now = datetime.now(timezone.utc).isoformat()
     count = 0
     for path in sorted(crystallized_root.glob("*.md")):
