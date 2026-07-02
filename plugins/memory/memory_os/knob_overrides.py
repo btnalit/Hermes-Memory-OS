@@ -130,6 +130,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": "contradicts_rate",
     },
+    "llm_contradiction_lane_enabled": {
+        "module": "contradiction_lane",
+        "default": False,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── Source gate quality knobs (F.8) ────────────────────────────────
     "auto_promote_enabled": {
         "module": "crystallized",

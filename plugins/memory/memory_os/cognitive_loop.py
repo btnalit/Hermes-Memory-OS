@@ -231,6 +231,7 @@ class CognitiveLoopRunner:
             ("crystallization_gate", self._crystallization_gate),
             ("llm_edge_proposer", self._llm_edge_proposer),
             ("vector_edge_proposer", self._vector_edge_proposer),
+            ("contradiction_lane", self._contradiction_lane),
             ("left_brain_pipeline_check", self._left_brain_pipeline_check),
             ("host_capability_probe", self._host_capability_probe),
             ("signal_collection", self._signal_collection),
@@ -974,6 +975,36 @@ class CognitiveLoopRunner:
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }
+
+    def _contradiction_lane(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Run LLM/evidence contradiction detection (shadow-only)."""
+        from .llm_contradiction_lane import run_contradiction_lane
+
+        embedder = getattr(self, "_embedder", None)
+        index = getattr(self, "_index", None)
+
+        result = run_contradiction_lane(
+            store=self.store,
+            index=index,
+            embedder=embedder,
+            roots=self.store.roots if hasattr(self.store, "roots") else None,
+            max_pairs=100,
+        )
+        context["contradiction_lane_result"] = result
+
+        from .audit import append_audit
+        append_audit(
+            self.store.roots.audit_path,
+            action="contradiction_lane_run",
+            status=result.get("status", "error"),
+            target="contradiction_lane",
+            details={
+                "pairs_evaluated": result.get("pairs_evaluated", 0),
+                "candidate_pairs": result.get("candidate_pairs", 0),
+                "contradictions_found": result.get("contradictions_found", 0),
+            },
+        )
+        return result
 
     def _left_brain_pipeline_check(self, context: dict[str, Any]) -> dict[str, Any]:
         from plugins.modules.governance.pipeline_checker import LeftBrainPipelineCheckModule
