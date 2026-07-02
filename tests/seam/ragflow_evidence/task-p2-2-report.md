@@ -3,7 +3,7 @@
 ## Status: DONE
 
 ## Commit
-- `adc5f61`
+- `ae49b4a`
 
 ## Files Created
 - `plugins/seam/ragflow_evidence/__init__.py` — module docstring
