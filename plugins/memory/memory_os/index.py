@@ -83,7 +83,8 @@ class MemoryOSIndex:
                 _copy_embeddings_from_live(conn, self.roots.index_path)
             _index_audit_entries(conn, self.roots.audit_path)
             _index_edges(conn, self.roots)
-            _index_entities(conn, self.roots.crystallized_root)
+            if _entity_index_enabled(store):
+                _index_entities(conn, self.roots.crystallized_root)
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
@@ -156,8 +157,9 @@ class MemoryOSIndex:
             _index_audit_entries(conn, self.roots.audit_path)
             _clear_table(conn, "memory_edges")
             _index_edges(conn, self.roots)
-            _clear_table(conn, "entity_index")
-            _index_entities(conn, self.roots.crystallized_root)
+            if _entity_index_enabled(store):
+                _clear_table(conn, "entity_index")
+                _index_entities(conn, self.roots.crystallized_root)
             conn.commit()
             _checkpoint_wal(conn)
             conn.commit()
@@ -698,7 +700,7 @@ def _remove_sqlite_sidecars(path: Path) -> None:
 
 
 def _clear(conn: sqlite3.Connection) -> None:
-    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings", "memory_fts", "entity_index"):
+    for table in ("events", "working_items", "crystallized_candidates", "crystallized_records", "audit_entries", "memory_edges", "memory_embeddings", "memory_fts"):
         _clear_table(conn, table)
 
 
@@ -995,6 +997,19 @@ def _index_edges(conn: sqlite3.Connection, roots: MemoryOSRoots) -> int:
             continue
     conn.commit()
     return count
+
+
+def _entity_index_enabled(store: MemoryOSStore) -> bool:
+    """Check whether entity_index extraction is enabled via knob.
+
+    Shared gate for rebuild, sync, and cognitive_loop — ensures entity_index
+    is only populated when the operator has explicitly enabled the feature.
+    """
+    try:
+        from .knob_overrides import resolve_knob
+        return bool(resolve_knob("entity_index_enabled", default=False, roots=store.roots))
+    except Exception:
+        return False
 
 
 def _index_entities(conn: sqlite3.Connection, crystallized_root: Path) -> int:

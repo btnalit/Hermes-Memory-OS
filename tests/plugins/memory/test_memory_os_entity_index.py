@@ -57,6 +57,23 @@ def _seed_crystallized(
     return ids
 
 
+def _enable_entity_index_knob(roots: MemoryOSRoots) -> None:
+    """Write a knob override to enable entity_index for testing."""
+    override_dir = roots.memory_os_root / "system"
+    override_dir.mkdir(parents=True, exist_ok=True)
+    override_file = override_dir / "knob_overrides.jsonl"
+    override_file.write_text(
+        json.dumps({
+            "knob": "entity_index_enabled",
+            "override_value": True,
+            "state": "active",
+            "reason": "test",
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _build_index(
     tmp_path: Path, records: list[dict[str, Any]]
 ) -> tuple[MemoryOSStore, MemoryOSIndex]:
@@ -64,6 +81,7 @@ def _build_index(
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-index-test")
     store = MemoryOSStore(roots)
     _seed_crystallized(store, records)
+    _enable_entity_index_knob(roots)
     index = MemoryOSIndex(roots)
     index.rebuild_from_store(store)
     return store, index
