@@ -28,10 +28,17 @@ class LocalEmbedder:
     not installed. CPU inference only -- no GPU, no network, no API keys.
     """
 
-    def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2") -> None:
+    def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
+                 device: str = "auto") -> None:
         self._model_name = model_name
+        self._device = device
         self._model = None
         self._available: bool | None = None  # tri-state: None=unchecked
+
+    @property
+    def model_name(self) -> str:
+        """Public read-only accessor for the configured model name."""
+        return self._model_name
 
     def is_available(self) -> bool:
         """Check whether the embedding model can be loaded.
@@ -49,7 +56,7 @@ class LocalEmbedder:
         try:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self._model_name)
+            self._model = SentenceTransformer(self._model_name, device=self._device)
             # Warm-up: run a tiny inference to catch runtime errors early
             self._model.encode(["warmup"], show_progress_bar=False)
             self._available = True
