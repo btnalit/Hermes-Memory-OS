@@ -115,6 +115,7 @@ def run_contradiction_lane(
     — all contradictions go through owner review.
     """
     from .knob_overrides import resolve_knob
+    from .jsonl_io import build_error_record as _build_error_record
 
     start_time = datetime.now(timezone.utc)
 
@@ -133,8 +134,15 @@ def run_contradiction_lane(
         from .low_clue_recall import low_clue_judge_availability as _judge_avail
         judge_status = _judge_avail({})
         llm_available = judge_status.get("available", False)
-    except Exception:
-        pass
+    except Exception as _exc:
+        _build_error_record(
+            component="llm_contradiction_lane",
+            operation="judge_availability_check",
+            error_code="JUDGE_CHECK_FAILED",
+            severity="warning",
+            recoverable=True,
+            details={"error": str(_exc)},
+        )
     if not llm_available:
         return {"status": "skipped", "reason": "llm_unavailable", "contradictions_found": 0}
 
@@ -259,8 +267,16 @@ def run_contradiction_lane(
 
         try:
             response = _call_hermes_runtime_model(prompt, llm_config)
-        except Exception:
-            continue  # LLM call failed -> skip this pair
+        except Exception as _exc:
+            _build_error_record(
+                component="llm_contradiction_lane",
+                operation="hermes_runtime_call",
+                error_code="LLM_CALL_FAILED",
+                severity="warning",
+                recoverable=True,
+                details={"error": str(_exc)[:200], "record_a": pair["a"]["id"], "record_b": pair["b"]["id"]},
+            )
+            continue
 
         if not response or not response.strip():
             continue
@@ -269,13 +285,26 @@ def run_contradiction_lane(
         try:
             parsed = json.loads(response.strip())
         except json.JSONDecodeError:
-            # Try to extract JSON from response
-            import re
-            m = re.search(r'\{[^{}]*"claim_a"[^{}]*"claim_b"[^{}]*\}', response, re.DOTALL)
-            if not m:
+            # Extract outermost JSON object (handles nested braces in claim values)
+            import re as _re
+            start = response.find("{")
+            if start == -1:
+                continue
+            # Find matching close brace
+            depth = 0
+            end = -1
+            for _i in range(start, len(response)):
+                if response[_i] == "{":
+                    depth += 1
+                elif response[_i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = _i
+                        break
+            if end == -1:
                 continue
             try:
-                parsed = json.loads(m.group(0))
+                parsed = json.loads(response[start:end + 1])
             except json.JSONDecodeError:
                 continue
 
@@ -289,9 +318,11 @@ def run_contradiction_lane(
             continue
 
         # ── 4. Write contradiction candidate edge ─────────────────────
-        contradictions_found += 1
+        if dry_run:
+            contradictions_found += 1
+            continue
 
-        if dry_run or edge_writer is None:
+        if edge_writer is None:
             continue
 
         evidence = (
@@ -301,7 +332,7 @@ def run_contradiction_lane(
         )
 
         if hasattr(edge_writer, "write_governed_edge"):
-            edge_writer.write_governed_edge(
+            result = edge_writer.write_governed_edge(
                 from_record_type="crystallized_record",
                 from_record_id=rec_a["id"],
                 to_record_type="crystallized_record",
@@ -315,6 +346,8 @@ def run_contradiction_lane(
                 # The edge's weight carries the similarity score; the
                 # structured evidence is logged via audit.
             )
+            if result and result != {}:
+                contradictions_found += 1
 
     elapsed_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
 

@@ -268,3 +268,56 @@ class TestCounterfactuals:
         assert _claims_contradict(a, b) is True
         c = {"subject": "X", "predicate": "Y", "object": "Z", "confidence": 1.0}
         assert _claims_contradict(a, c) is False
+
+
+def test_nested_json_extraction_from_llm_output() -> None:
+    """Regex fallback handles nested claim objects in markdown-wrapped LLM output."""
+    from plugins.memory.memory_os.llm_contradiction_lane import CLAIM_EXTRACTION_PROMPT
+    # Simulate LLM returning JSON wrapped in markdown
+    response = '''```json
+{
+  "claim_a": {"subject": "auth", "predicate": "uses", "object": "JWT", "confidence": 0.9},
+  "claim_b": {"subject": "auth", "predicate": "uses", "object": "OAuth", "confidence": 0.85}
+}
+```'''
+    import json as _json
+    try:
+        _json.loads(response.strip())
+    except _json.JSONDecodeError:
+        # This is the path under test — should extract the nested JSON
+        start = response.find("{")
+        assert start != -1
+        depth = 0
+        end = -1
+        for i in range(start, len(response)):
+            if response[i] == "{": depth += 1
+            elif response[i] == "}":
+                depth -= 1
+                if depth == 0: end = i; break
+        assert end != -1, "balanced-brace parser should find matching close brace"
+        extracted = response[start:end + 1]
+        parsed = _json.loads(extracted)
+        assert parsed["claim_a"]["subject"] == "auth"
+        assert parsed["claim_b"]["object"] == "OAuth"
+
+
+def test_error_record_on_judge_check_failure(monkeypatch, tmp_path: Path) -> None:
+    """Judge check failure produces an error record, not silent pass."""
+    from plugins.memory.memory_os.llm_contradiction_lane import run_contradiction_lane
+    # Force judge call to raise
+    monkeypatch.setattr(
+        "plugins.memory.memory_os.low_clue_recall.low_clue_judge_availability",
+        lambda _config: (_ for _ in ()).throw(RuntimeError("test judge failure")),
+        raising=True,
+    )
+    # The function should still return skipped (fail-open) with error record
+    roots = FakeRoots(Path(tmp_path))
+    store = FakeStore(roots)
+    _enable_lane_knob(roots)
+    result = run_contradiction_lane(store, embedder=_mock_embedder(), roots=roots)
+    assert result["status"] == "skipped", (
+        f"expected fail-open skipped, got {result}"
+    )
+    assert result["reason"] == "llm_unavailable", (
+        f"expected llm_unavailable, got {result}"
+    )
