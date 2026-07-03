@@ -233,6 +233,45 @@ def test_rh26_extra_allowed_heading_no_anomaly():
     assert anomalies == []
 
 
+def test_rh26_degradation_suffix_stripped_before_matching():
+    """Heading with degradation suffix matches contract heading without suffix.
+
+    e.g. "Crystallized Memory (deterministic floor recall)" ≈ "Crystallized Memory"
+    — the suffix is runtime metadata, not part of the heading contract.
+    """
+    probes = [
+        {
+            "id": "candidate_vs_crystallized",
+            "chars": 2000,
+            "headings": [
+                "Crystallized Review Candidates",
+                "Crystallized Memory (deterministic floor recall)",
+            ],
+        },
+    ]
+    anomalies = find_rh26_heading_anomalies(probes)
+    # Both contract headings matched after suffix stripping → no anomaly
+    assert anomalies == []
+
+
+def test_rh26_degradation_suffix_does_not_mask_real_missing():
+    """Suffix stripping must not paper over a genuinely missing heading."""
+    probes = [
+        {
+            "id": "candidate_vs_crystallized",
+            "chars": 500,
+            # Only the degraded heading — "Crystallized Review Candidates" genuinely absent
+            "headings": ["Crystallized Memory (deterministic floor recall)"],
+        },
+    ]
+    anomalies = find_rh26_heading_anomalies(probes)
+    assert len(anomalies) == 1
+    assert anomalies[0]["severity"] == "fail"
+    assert anomalies[0]["code"] == "rh26_missing_expected_heading"
+    # "Crystallized Memory" matched via suffix strip, only "Crystallized Review Candidates" missing
+    assert anomalies[0]["missing"] == ["Crystallized Review Candidates"]
+
+
 def test_compute_deltas_tracks_count_growth_and_audit_ratios():
     current = {
         "memory_status": {

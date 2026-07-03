@@ -399,14 +399,33 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
 }
 
 
+def _strip_degradation_suffix(heading: str) -> str:
+    """Strip degradation annotation suffix for heading contract matching.
+
+    prefetch.py appends informational suffixes such as
+    ``"Crystallized Memory (deterministic floor recall)"`` when the
+    embedding / FTS5 retrieval runs at degradation level >= 2.  The
+    suffix is runtime metadata — not part of the heading contract — and
+    is already stripped by ``_section_source_class`` and
+    ``_budget_keep_priority`` (prefetch.py).  This function applies the
+    same normalization to probe response headings so the comparison is
+    "contract heading" to "contract heading".
+    """
+    return heading.split(" (")[0] if " (" in heading else heading
+
+
 def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     anomalies: list[dict[str, Any]] = []
     for probe in probes:
         prompt_id = str(probe.get("id") or "")
-        actual = list(probe.get("headings") or [])
-        expected = EXPECTED_RH26_HEADINGS.get(prompt_id)
-        if expected is None:
+        # Normalize away degradation suffixes so "Crystallized Memory
+        # (deterministic floor recall)" matches the contract heading
+        # "Crystallized Memory" (see _strip_degradation_suffix).
+        actual = [_strip_degradation_suffix(h) for h in (probe.get("headings") or [])]
+        expected_raw = EXPECTED_RH26_HEADINGS.get(prompt_id)
+        if expected_raw is None:
             continue
+        expected = [_strip_degradation_suffix(h) for h in expected_raw]
         if prompt_id == "casual_memory_system_change":
             if not actual or all(heading in SAFE_CASUAL_HEADINGS for heading in actual):
                 continue
@@ -421,7 +440,8 @@ def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, 
                 }
             )
             continue
-        allowed = set(expected) | ALLOWED_RH26_EXTRA_HEADINGS.get(prompt_id, set())
+        allowed_raw = set(expected_raw) | ALLOWED_RH26_EXTRA_HEADINGS.get(prompt_id, set())
+        allowed = {_strip_degradation_suffix(h) for h in allowed_raw}
         missing_expected = [h for h in expected if h not in actual]
         extra_unexpected = [h for h in actual if h not in allowed]
 
