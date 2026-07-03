@@ -4799,8 +4799,8 @@ def load_json_cmd(cmd, env=None):
 
 def memory_os_cli(args):
     env = dict(os.environ)
-    env["HERMES_HOME"] = "/root/.hermes"
-    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins:" + env.get("PYTHONPATH", "")
+    env["HERMES_HOME"] = _hermes_home
+    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python:" + _hermes_home + "/plugins:" + env.get("PYTHONPATH", "")
     return load_json_cmd(["python3", "-m", "plugins.memory.memory_os"] + list(args), env=env)
 
 def compaction_stats():
@@ -6557,9 +6557,9 @@ def _execution_gate_cron_adapter_probe_summary():
     #
     # NOTE: this function runs inside _remote_probe_script()'s generated
     # string — REPO_ROOT (module-level) is NOT in scope here.  All
-    # candidates must use hermes_home, _hermes_home (enclosing-scope
-    # string), absolute paths, or os.environ.
-    hermes_home = os.environ.get("HERMES_HOME", "/root/.hermes")
+    # candidates must use _hermes_home (enclosing-scope string), absolute
+    # paths, or os.environ.
+    hermes_home = _hermes_home
     candidates = [
         Path(hermes_home) / "scripts" / "memory_os_cron_adapter_probe.py",
         Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py"),
@@ -6572,7 +6572,10 @@ def _execution_gate_cron_adapter_probe_summary():
             break
     if script is None:
         return {"status": "unavailable", "reason": "probe_script_missing"}
-    result = run(["python3", str(script), "--hermes-home", hermes_home, "--output", "json"])
+    result = run(
+        ["python3", str(script), "--hermes-home", hermes_home, "--output", "json"],
+        env={**os.environ, "HERMES_HOME": hermes_home},
+    )
     if not result.get("ok"):
         return {"status": "error", "reason": "probe_command_failed", "code": result.get("code")}
     try:
@@ -7104,8 +7107,8 @@ def _latest_recorded_owner_utterance():
 
 def owner_review_ingress_guard_summary():
     env = dict(os.environ)
-    env["HERMES_HOME"] = "/root/.hermes"
-    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python:/root/.hermes/plugins:" + env.get("PYTHONPATH", "")
+    env["HERMES_HOME"] = _hermes_home
+    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python:" + _hermes_home + "/plugins:" + env.get("PYTHONPATH", "")
     code = """
 import json
 import importlib.util

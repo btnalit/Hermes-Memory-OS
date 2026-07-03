@@ -464,3 +464,164 @@ class TestBatchEmbedderDeviceKnob:
         assert resolved["vector_embedder_batch_device"] == "cuda:0", (
             "D2: batch device must be independently overridable from online device"
         )
+
+
+class TestBuildEmbedderBatchDevice:
+    """D2: build_embedder(batch=True) consumes vector_embedder_batch_device.
+
+    These tests verify that the batch knob actually controls embedder
+    device selection, not just that the knob is registered.
+    """
+
+    def test_build_embedder_online_uses_vector_embedder_device(self, tmp_path: Path):
+        """build_embedder(roots) uses vector_embedder_device (not batch knob)."""
+        import json
+        from plugins.memory.memory_os.embedder import build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+        knob_path = system_dir / "knob_overrides.jsonl"
+        knob_path.write_text("\n".join([
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_online", "knob": "vector_embedder_device",
+                "override_value": "cpu", "prior_value": "auto",
+                "bounds": None, "allowed": None, "provisional": False,
+                "expires_at": "", "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_batch", "knob": "vector_embedder_batch_device",
+                "override_value": "cuda:0", "prior_value": "auto",
+                "bounds": None, "allowed": None, "provisional": False,
+                "expires_at": "", "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+        ]) + "\n", encoding="utf-8")
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        # Online path: must NOT read batch_device knob
+        emb = build_embedder(roots)
+        # If embedder is unavailable (no sentence-transformers), test still
+        # validates that the factory didn't crash and returned correctly
+        if emb is not None:
+            assert emb._device == "cpu", (
+                f"Online build_embedder should use vector_embedder_device=cpu, "
+                f"got {emb._device}"
+            )
+
+    def test_build_embedder_batch_uses_batch_device_when_set(self, tmp_path: Path):
+        """build_embedder(roots, batch=True) reads vector_embedder_batch_device."""
+        import json
+        from plugins.memory.memory_os.embedder import build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+        knob_path = system_dir / "knob_overrides.jsonl"
+        knob_path.write_text("\n".join([
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_online", "knob": "vector_embedder_device",
+                "override_value": "cuda", "prior_value": "auto",
+                "bounds": None, "allowed": None, "provisional": False,
+                "expires_at": "", "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_batch", "knob": "vector_embedder_batch_device",
+                "override_value": "cpu", "prior_value": "auto",
+                "bounds": None, "allowed": None, "provisional": False,
+                "expires_at": "", "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+        ]) + "\n", encoding="utf-8")
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        emb = build_embedder(roots, batch=True)
+        if emb is not None:
+            assert emb._device == "cpu", (
+                f"Batch build_embedder should use vector_embedder_batch_device=cpu, "
+                f"got {emb._device}"
+            )
+
+    def test_build_embedder_batch_falls_back_to_online_device_when_auto(self, tmp_path: Path):
+        """When batch_device='auto', batch uses same device as online path."""
+        import json
+        from plugins.memory.memory_os.embedder import build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+        knob_path = system_dir / "knob_overrides.jsonl"
+        knob_path.write_text(json.dumps({
+            "schema_version": "memory-os.knob_override.v0",
+            "id": "ko_online", "knob": "vector_embedder_device",
+            "override_value": "cpu", "prior_value": "auto",
+            "bounds": None, "allowed": None, "provisional": False,
+            "expires_at": "", "proposed_by": "test", "approved_via": "test",
+            "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+        }) + "\n", encoding="utf-8")
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        emb = build_embedder(roots, batch=True)
+        if emb is not None:
+            assert emb._device == "cpu", (
+                f"Batch with auto fallback should use online device=cpu, "
+                f"got {emb._device}"
+            )
+
+    def test_build_embedder_without_batch_default_behavior_unchanged(self, tmp_path: Path):
+        """Default path (batch=False) behavior is backward-compatible.
+
+        Counterfactual: if batch=True accidentally became the default,
+        this test would fail because the online device knob would be ignored.
+        """
+        import json
+        from plugins.memory.memory_os.embedder import build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+        knob_path = system_dir / "knob_overrides.jsonl"
+        # Set batch_device to something different — it must NOT affect default path
+        knob_path.write_text("\n".join([
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_online", "knob": "vector_embedder_device",
+                "override_value": "cpu", "prior_value": "auto",
+                "bounds": None, "allowed": None, "provisional": False,
+                "expires_at": "", "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_batch", "knob": "vector_embedder_batch_device",
+                "override_value": "cuda:0", "prior_value": "auto",
+                "bounds": None, "allowed": None, "provisional": False,
+                "expires_at": "", "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+        ]) + "\n", encoding="utf-8")
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path)
+        emb = build_embedder(roots)  # batch=False default
+        if emb is not None:
+            assert emb._device == "cpu", (
+                f"Default build_embedder must use vector_embedder_device=cpu "
+                f"not batch_device. Got {emb._device}"
+            )
+
+    def test_index_sync_calls_build_embedder_with_batch_true(self):
+        """Counterfactual: index_sync must pass batch=True to build_embedder."""
+        import inspect
+        import scripts.memory_os_index_sync as idx_sync
+
+        source = inspect.getsource(idx_sync)
+        assert "build_embedder(roots, batch=True)" in source, (
+            "index_sync must call build_embedder with batch=True "
+            "so it uses vector_embedder_batch_device"
+        )

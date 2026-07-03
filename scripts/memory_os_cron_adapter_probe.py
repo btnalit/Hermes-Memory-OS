@@ -13,28 +13,71 @@ from pathlib import Path
 from typing import Any
 
 # Location-agnostic path resolution.
-# Always add the script's own repository root first — this handles repo
-# checkouts regardless of whether HERMES_HOME is set globally.
-# When HERMES_HOME points to a different directory (installed deployment),
-# also add the installed runtime paths as secondary sources so
-# plugins.memory.memory_os can be imported from the installed layout.
-_repo_root = Path(__file__).resolve().parents[1]
-# Always add the script's own repository root — this is the primary source
-# for plugins.memory.memory_os in repo checkouts.
-if str(_repo_root) not in sys.path:
-    sys.path.insert(0, str(_repo_root))
-# When HERMES_HOME is set (installed deployment), also add the installed
-# runtime paths.  These are secondary: the repo root above takes priority.
-# The _runtime_py.exists() guard prevents adding non-existent paths on
-# machines that have HERMES_HOME set but no Memory-OS install under it.
-_HERMES_HOME = os.environ.get("HERMES_HOME", "")
-if _HERMES_HOME:
-    _hermes = Path(_HERMES_HOME)
-    _runtime_py = _hermes / "memory-os" / "runtime" / "python"
-    if _runtime_py.exists() and str(_runtime_py) not in sys.path:
-        sys.path.insert(0, str(_runtime_py))
-    if str(_hermes) not in sys.path:
-        sys.path.insert(0, str(_hermes))
+#
+# Priority order (highest first):
+#   1. Repo self-root (the repository containing this script).
+#   2. CLI --hermes-home runtime (preparsed before argparse).
+#   3. Env HERMES_HOME runtime.
+#   4. Self-location inference (when script is at <home>/scripts/…).
+#
+# Paths are collected into a list then applied in reverse order with
+# insert(0) so that the first candidate ends up at sys.path[0].
+# This ensures a repo checkout is never shadowed by an installed runtime
+# even when HERMES_HOME is set globally.
+_self = Path(__file__).absolute()
+_repo_root = _self.parents[1]
+_path_candidates: list[Path] = []
+
+# 1) Repo self-root — must always be the highest-priority source
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    _path_candidates.append(_repo_root)
+
+
+def _preparse_hermes_home(argv: list[str]) -> str:
+    """Extract --hermes-home from raw argv before argparse runs.
+
+    This lets module-level imports use the CLI-specified home even when
+    HERMES_HOME is not exported in the environment (systemd, cron, CI).
+    """
+    for i, arg in enumerate(argv):
+        if arg == "--hermes-home" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--hermes-home="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+_cli_home = _preparse_hermes_home(sys.argv[1:])
+_env_home = os.environ.get("HERMES_HOME", "")
+
+# 2-3) CLI and env HERMES_HOME runtime paths (lower priority than repo root)
+for _home_str in (_cli_home, _env_home):
+    if not _home_str:
+        continue
+    _home = Path(_home_str)
+    _runtime = _home / "memory-os" / "runtime" / "python"
+    if _runtime.exists():
+        _path_candidates.append(_runtime)
+    _path_candidates.append(_home)
+
+# 4) Self-location inference: when script is copied to <home>/scripts/…
+#    and neither --hermes-home nor HERMES_HOME env is set.
+#    No _inferred!=_repo_root guard — in the installed-copy case they are
+#    equal, but step 1 already skipped (no plugins/ under repo_root), so
+#    self-location is the only path that can find the runtime modules.
+_inferred = _self.parents[1]
+_runtime_inferred = _inferred / "memory-os" / "runtime" / "python"
+if _runtime_inferred.exists():
+    if _runtime_inferred not in _path_candidates:
+        _path_candidates.append(_runtime_inferred)
+    if _inferred not in _path_candidates:
+        _path_candidates.append(_inferred)
+
+# Apply: reversed + insert(0) so _path_candidates[0] ends up at sys.path[0].
+for _base in reversed(_path_candidates):
+    _base_str = str(_base)
+    if _base_str not in sys.path:
+        sys.path.insert(0, _base_str)
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, specs_from_snapshot
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter

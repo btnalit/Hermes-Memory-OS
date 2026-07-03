@@ -5511,3 +5511,57 @@ def _healthy_expression_artifacts() -> dict:
         "right_brain_adapter_outcome_feedback_count": 0,
         "right_brain_adapter_latest_outcome_feedback_count": 0,
     }
+
+
+# ── Subprocess env passing tests ──
+
+
+def test_remote_probe_script_memory_os_cli_uses_hermes_home_not_hardcoded():
+    """memory_os_cli() in the generated probe uses _hermes_home, not '/root/.hermes'."""
+    script = monitor._remote_probe_script()
+
+    # The old hardcoded pattern must not appear in memory_os_cli
+    assert 'env["HERMES_HOME"] = "/root/.hermes"' not in script, (
+        "memory_os_cli must use _hermes_home variable, not hardcoded /root/.hermes"
+    )
+
+    # The new dynamic pattern must appear
+    assert 'env["HERMES_HOME"] = _hermes_home' in script, (
+        "memory_os_cli must set HERMES_HOME from _hermes_home"
+    )
+    assert 'env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python:"' in script, (
+        "PYTHONPATH must be built from _hermes_home"
+    )
+
+
+def test_remote_probe_script_owner_review_ingress_guard_uses_hermes_home():
+    """owner_review_ingress_guard_summary() uses _hermes_home, not hardcoded."""
+    script = monitor._remote_probe_script()
+
+    # Count occurrences of the hardcoded path — should be fewer after the fix
+    # (some remain in other functions not in scope for this fix)
+    hardcoded_count = script.count('env["HERMES_HOME"] = "/root/.hermes"')
+    # Before fix: at least 2 (memory_os_cli + owner_review_ingress_guard_summary)
+    # After fix: 0 in the fixed functions
+    assert hardcoded_count == 0, (
+        f"Expected 0 hardcoded HERMES_HOME env assignments in generated script, "
+        f"found {hardcoded_count}"
+    )
+
+
+def test_remote_probe_script_cron_adapter_probe_passes_env():
+    """_execution_gate_cron_adapter_probe_summary passes env to run()."""
+    script = monitor._remote_probe_script()
+
+    # The run() call must include env= parameter with HERMES_HOME
+    assert 'env={**os.environ, "HERMES_HOME": hermes_home}' in script, (
+        "cron adapter probe subprocess must receive HERMES_HOME in env"
+    )
+
+
+def test_remote_probe_script_hermes_home_variable_still_defined():
+    """_hermes_home variable is injected into the generated script (preexisting)."""
+    script = monitor._remote_probe_script()
+    assert "_hermes_home = " in script, (
+        "_hermes_home must be defined in the generated probe script"
+    )

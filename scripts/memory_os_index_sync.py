@@ -115,7 +115,7 @@ def main() -> int:
     try:
         from plugins.memory.memory_os.embedder import build_embedder
 
-        _embedder = build_embedder(roots)
+        _embedder = build_embedder(roots, batch=True)
         if _embedder is not None:
             index._embedder = _embedder
     except Exception:

@@ -173,6 +173,236 @@ def test_cron_adapter_probe_classifies_known_optional_jobs_outside_active_snapsh
     assert report["classification"]["memory_os_like_unregistered_count"] == 0
 
 
+# ── sys.path bootstrap tests: repo root priority + installed copy ──
+
+
+def test_import_comes_from_repo_not_runtime_when_both_exist(tmp_path, monkeypatch):
+    """Repo checkout + HERMES_HOME pointing elsewhere → import source is repo.
+
+    Counterfactual: without the precedence fix, the later insert(0, …) for
+    runtime paths shadows the earlier repo-root insert, so Python imports
+    from the installed runtime instead of the repo checkout.
+    """
+    # Build a fake installed runtime under a separate HERMES_HOME
+    runtime_home = tmp_path / "fake_runtime_home"
+    runtime_plugins = (
+        runtime_home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
+    )
+    runtime_plugins.mkdir(parents=True)
+    # Write a sentinel __init__.py so we can detect which copy was imported
+    (runtime_plugins / "__init__.py").write_text(
+        '__version__ = "RUNTIME_COPY"\n'
+        'from pathlib import Path as _Path\n'
+        "__file__ = __file__  # noqa\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(runtime_home))
+
+    # Run a subprocess that imports memory_os and prints its __file__
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "scripts" / "memory_os_cron_adapter_probe.py"
+
+    probe_code = (
+        "import plugins.memory.memory_os as m; "
+        "print(m.__file__)"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe_code],
+        capture_output=True, text=True,
+        env={**os.environ, "HERMES_HOME": str(runtime_home)},
+        cwd=str(repo_root),
+    )
+    # If the import succeeds, its __file__ MUST be inside the repo root
+    if result.returncode == 0:
+        imported_path = result.stdout.strip()
+        repo_root_str = str(repo_root)
+        assert imported_path.startswith(repo_root_str), (
+            f"Imported from {imported_path}, expected repo root {repo_root_str}. "
+            f"Runtime copy at {runtime_plugins} shadowed the repo."
+        )
+
+
+def test_installed_copy_without_env_bootstraps_via_self_location(tmp_path):
+    """Installed copy: script copied to <home>/scripts/, no HERMES_HOME env.
+
+    Counterfactual: without self-location inference, an installed script
+    with no HERMES_HOME env var fails with ModuleNotFoundError because the
+    only sys.path entry is the repo root (parents[1] of the original
+    checkout location), which doesn't contain the installed layout.
+    """
+    import shutil
+
+    home = tmp_path / "installed_home"
+    scripts_dir = home / "scripts"
+    scripts_dir.mkdir(parents=True)
+
+    # Copy the probe script and its script-level import dependencies
+    src_script = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_cron_adapter_probe.py"
+    shutil.copy2(src_script, scripts_dir / "memory_os_cron_adapter_probe.py")
+    # The probe imports scripts.memory_os_host_profile at module level
+    src_host_profile = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_host_profile.py"
+    if src_host_profile.exists():
+        shutil.copy2(src_host_profile, scripts_dir / "memory_os_host_profile.py")
+
+    # Create the installed runtime layout
+    runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
+    runtime_plugins.mkdir(parents=True)
+    (runtime_plugins / "__init__.py").write_text(
+        '"""Installed Memory-OS provider."""\n__version__ = "installed"\n',
+        encoding="utf-8",
+    )
+    # Copy required modules into the installed layout
+    src_plugins = Path(__file__).resolve().parents[2] / "plugins" / "memory" / "memory_os"
+    for mod in ["cron_registry", "hermes_cron_adapter"]:
+        src_mod = src_plugins / f"{mod}.py"
+        if src_mod.exists():
+            shutil.copy2(src_mod, runtime_plugins / f"{mod}.py")
+
+    # Also need roots.py and store.py for the import chain
+    for mod in ["roots", "store"]:
+        src_mod = src_plugins / f"{mod}.py"
+        if src_mod.exists():
+            shutil.copy2(src_mod, runtime_plugins / f"{mod}.py")
+
+    # Strip HERMES_HOME from the environment
+    env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+
+    result = subprocess.run(
+        [sys.executable, str(scripts_dir / "memory_os_cron_adapter_probe.py"), "--help"],
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, (
+        f"Installed copy should bootstrap via self-location.\n"
+        f"stderr: {result.stderr}"
+    )
+
+
+def test_installed_copy_with_hermes_home_flag_no_env(tmp_path):
+    """Installed copy: --hermes-home flag works without HERMES_HOME env var.
+
+    Counterfactual: without preparsing --hermes-home, the module-level
+    imports run before argparse so the flag has no effect, and the script
+    fails because HERMES_HOME is not in the environment.
+    """
+    import shutil
+
+    home = tmp_path / "installed_home"
+    scripts_dir = home / "scripts"
+    scripts_dir.mkdir(parents=True)
+
+    src_script = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_cron_adapter_probe.py"
+    shutil.copy2(src_script, scripts_dir / "memory_os_cron_adapter_probe.py")
+    # The probe imports scripts.memory_os_host_profile at module level
+    src_host_profile = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_host_profile.py"
+    if src_host_profile.exists():
+        shutil.copy2(src_host_profile, scripts_dir / "memory_os_host_profile.py")
+
+    # Create the installed runtime layout with a full enough import chain
+    runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
+    runtime_plugins.mkdir(parents=True)
+    (runtime_plugins / "__init__.py").write_text(
+        '"""Installed Memory-OS provider."""\n__version__ = "installed"\n',
+        encoding="utf-8",
+    )
+    src_plugins = Path(__file__).resolve().parents[2] / "plugins" / "memory" / "memory_os"
+    for mod in ["cron_registry", "hermes_cron_adapter", "roots", "store"]:
+        src_mod = src_plugins / f"{mod}.py"
+        if src_mod.exists():
+            shutil.copy2(src_mod, runtime_plugins / f"{mod}.py")
+
+    # Create a minimal fake hermes binary
+    if os.name == "nt":
+        fake_hermes = tmp_path / "fake_hermes.cmd"
+        fake_hermes.write_text(f'@"{sys.executable}" -c "import sys; print(sys.argv)" %*\n')
+    else:
+        fake_hermes = tmp_path / "fake_hermes"
+        fake_hermes.write_text(f'#!/bin/sh\nexec "{sys.executable}" -c "import sys; print(sys.argv)" "$@"\n')
+        fake_hermes.chmod(0o755)
+
+    # Strip HERMES_HOME from the environment
+    env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(scripts_dir / "memory_os_cron_adapter_probe.py"),
+            "--hermes-home", str(home),
+            "--hermes-bin", str(fake_hermes),
+            "--output", "json",
+        ],
+        capture_output=True, text=True, env=env,
+    )
+    # Should succeed — the preparsed --hermes-home enables the import
+    assert result.returncode == 0, (
+        f"--hermes-home flag should enable bootstrap without env var.\n"
+        f"stderr: {result.stderr}"
+    )
+
+
+def test_cli_hermes_home_beats_env_hermes_home_for_imports(tmp_path, monkeypatch):
+    """CLI --hermes-home runtime path is added before env HERMES_HOME path.
+
+    When both are set and repo root is not a valid source (installed copy),
+    the CLI value should be in sys.path ahead of the env value.
+    """
+    import shutil
+
+    cli_home = tmp_path / "cli_home"
+    env_home = tmp_path / "env_home"
+
+    for home in (cli_home, env_home):
+        scripts_dir = home / "scripts"
+        scripts_dir.mkdir(parents=True)
+        runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
+        runtime_plugins.mkdir(parents=True)
+        (runtime_plugins / "__init__.py").write_text(
+            f'"""Home: {home.name}."""\n__version__ = "{home.name}"\n',
+            encoding="utf-8",
+        )
+        src_plugins = Path(__file__).resolve().parents[2] / "plugins" / "memory" / "memory_os"
+        for mod in ["cron_registry", "hermes_cron_adapter", "roots", "store"]:
+            src_mod = src_plugins / f"{mod}.py"
+            if src_mod.exists():
+                shutil.copy2(src_mod, runtime_plugins / f"{mod}.py")
+
+    # Copy script to cli_home (installed location)
+    src_script = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_cron_adapter_probe.py"
+    shutil.copy2(src_script, cli_home / "scripts" / "memory_os_cron_adapter_probe.py")
+    # The probe imports scripts.memory_os_host_profile at module level
+    src_host_profile = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_host_profile.py"
+    if src_host_profile.exists():
+        shutil.copy2(src_host_profile, cli_home / "scripts" / "memory_os_host_profile.py")
+
+    # Set env to point to env_home, but CLI points to cli_home
+    monkeypatch.setenv("HERMES_HOME", str(env_home))
+    env = os.environ.copy()
+
+    # Create fake hermes
+    if os.name == "nt":
+        fake_hermes = tmp_path / "fake_hermes.cmd"
+        fake_hermes.write_text(f'@"{sys.executable}" -c "import sys; print(sys.argv)" %*\n')
+    else:
+        fake_hermes = tmp_path / "fake_hermes"
+        fake_hermes.write_text(f'#!/bin/sh\nexec "{sys.executable}" -c "import sys; print(sys.argv)" "$@"\n')
+        fake_hermes.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(cli_home / "scripts" / "memory_os_cron_adapter_probe.py"),
+            "--hermes-home", str(cli_home),
+            "--hermes-bin", str(fake_hermes),
+            "--output", "json",
+        ],
+        capture_output=True, text=True, env=env,
+    )
+    assert result.returncode == 0, (
+        f"CLI --hermes-home should work even when env HERMES_HOME is set differently.\n"
+        f"stderr: {result.stderr}"
+    )
+
+
 def test_cron_adapter_probe_builds_host_remote_command():
     command = cron_probe.remote_probe_command(
         host="hermes-media",

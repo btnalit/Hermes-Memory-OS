@@ -88,12 +88,17 @@ class LocalEmbedder:
         return vec.astype(np.float32)
 
 
-def build_embedder(roots) -> LocalEmbedder | None:
+def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
     """Factory: build a LocalEmbedder from knob configuration.
 
     Reads vector_retrieval_enabled, vector_embedder_model, and
     vector_embedder_device from the knob override store. Returns None
     when vector retrieval is disabled or the embedder is unavailable.
+
+    When *batch* is True, reads vector_embedder_batch_device for device
+    selection (falling back to vector_embedder_device when the batch
+    knob is "auto").  This lets offline batch/index/reembed jobs use a
+    different device than the online gateway path.
 
     This is the single entry point for all embedder instantiation —
     replaces ad-hoc ``LocalEmbedder()`` calls across the codebase.
@@ -138,5 +143,13 @@ def build_embedder(roots) -> LocalEmbedder | None:
         default="auto",
         roots=roots,
     )
+    if batch:
+        batch_device = resolve_knob(
+            "vector_embedder_batch_device",
+            default="auto",
+            roots=roots,
+        )
+        if str(batch_device) != "auto":
+            device = batch_device
     emb = LocalEmbedder(model_name=str(model), device=str(device))
     return emb if emb.is_available() else None

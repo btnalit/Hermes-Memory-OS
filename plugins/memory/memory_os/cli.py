@@ -1077,7 +1077,7 @@ def _cmd_vector_reembed(args: argparse.Namespace) -> int:
         print(f"Index not found: {index_path}")
         return 1
 
-    embedder = build_embedder(roots)
+    embedder = build_embedder(roots, batch=True)
     if embedder is None:
         print("Embedder unavailable. Check vector_retrieval_enabled knob.")
         return 1
