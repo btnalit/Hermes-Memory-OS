@@ -6641,6 +6641,7 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     boundary_true = 0
     boundary_observed = 0
     boundary_unobserved = 0
+    boundary_not_required = 0
     now = datetime.now(timezone.utc)
     jobs_by_name = jobs_by_name or {}
     for lane in sorted(expected_lanes):
@@ -6669,7 +6670,9 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
             error.append(lane)
         if record.get("postcheck_boundary_true") is True:
             boundary_true += 1
-        if postcheck.get("postcheck_boundary_observed") is True:
+        if postcheck.get("postcheck_boundary_not_required") is True:
+            boundary_not_required += 1
+        elif postcheck.get("postcheck_boundary_observed") is True:
             boundary_observed += 1
         else:
             boundary_unobserved += 1

@@ -4212,8 +4212,12 @@ def _provisional_crystallized_review_items(store: MemoryOSStore, closed: set[str
         else:
             priority = "fyi"
 
-        # Summary
-        body_text = _bounded_text(str(r.get("body") or ""), 180)
+        # Summary — suppress body text when it looks like raw transcript
+        raw_body = str(r.get("body") or "").strip()
+        if _contains_transcript_marker(raw_body):
+            body_text = "(摘要隐藏：内容包含原始对话片段)"
+        else:
+            body_text = _bounded_text(raw_body, 180)
         summary_parts = [f"(剩{remaining_days}d) {body_text}"]
         if recurrence_count >= 3:
             summary_parts.insert(0, f"⚠high-recurrence({recurrence_count}x): ")
@@ -4463,6 +4467,10 @@ def _contains_transcript_marker(value: str) -> bool:
         "用户：",
         "助手:",
         "助手：",
+        "菸草:",
+        "菸草：",
+        "agentcoco:",
+        "agentcoco：",
         "| assistant:",
         "| user:",
     )
@@ -4899,7 +4907,7 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
             str(item.get("reason") or "LeftBrainAdvisor 提出 Hindsight curation 建议；Memory-OS 只记录 owner 决策，不写/删 Hindsight。"),
             220,
         )
-    return _bounded_text(str(item.get("summary") or "只是状态趋势。"), 220)
+    return _bounded_text(_safe_review_summary(item.get("summary"), fallback="只是状态趋势。"), 220)
 
 
 def _safe_review_summary(value: Any, *, fallback: str) -> str:
@@ -5069,9 +5077,13 @@ def _render_expiring_provisional_section(store: MemoryOSStore) -> str:
     ]
     for r in expiring:
         record_id = str(r.get("id") or "")
-        body = str(r.get("body") or "")
-        if len(body) > 120:
-            body = body[:117] + "..."
+        raw_body = str(r.get("body") or "").strip()
+        if _contains_transcript_marker(raw_body):
+            body = "(摘要隐藏：内容包含原始对话片段)"
+        else:
+            body = raw_body
+            if len(body) > 120:
+                body = body[:117] + "..."
         hours = int(r.get("hours_remaining", 0))
         external_ref = str(r.get("external_ref") or "")
         ref_line = f"\n    外部参考: {external_ref}" if external_ref else ""
@@ -8115,22 +8127,7 @@ def _safe_list(value: Any) -> list[str]:
 
 def _candidate_needs_consolidation(value: str) -> bool:
     text = " ".join(str(value or "").split())
-    lowered = text.lower()
-    transcript_markers = (
-        "user:",
-        "assistant:",
-        "用户:",
-        "用户：",
-        "助手:",
-        "助手：",
-        "菸草:",
-        "菸草：",
-        "agentcoco:",
-        "agentcoco：",
-        "| assistant:",
-        "| user:",
-    )
-    if any(marker in lowered for marker in transcript_markers):
+    if _contains_transcript_marker(text):
         return True
     if "evt_" in text and len(text) > 120:
         return True

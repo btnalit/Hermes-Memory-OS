@@ -4316,3 +4316,185 @@ def test_reject_provisional_sets_provisional_rejected_state(tmp_path):
     fm = records_after[0].frontmatter
     assert fm["canonical_state"] == "provisional_rejected"
     assert is_active_crystallized_frontmatter(fm) is False
+
+
+# ── Transcript marker leak counterfactuals ──────────────────────────
+
+
+def test_provisional_crystallized_body_with_transcript_marker_is_suppressed(tmp_path):
+    """Counterfactual: provisional body with 'User:' must be suppressed in queue item."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    import datetime as _dt
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    expires_at = (now + _dt.timedelta(days=2)).isoformat()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_transcript_body",
+        kind="moment",
+        body="User: 这段对话包含原始转录标记 | Assistant: 应该被摘要隐藏",
+        source_event_ids=["evt_transcript_body"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_transcript_body",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=expires_at,
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    items = owner_actions_module._provisional_crystallized_review_items(store, closed=set())
+    assert len(items) == 1
+    item = items[0]
+    # Counterfactual: without the fix, summary would contain "User:" / "Assistant:"
+    assert "User:" not in item["summary"]
+    assert "Assistant:" not in item["summary"]
+    assert "摘要隐藏" in item["summary"]
+
+
+def test_provisional_crystallized_clean_body_passed_through(tmp_path):
+    """Clean provisional body is rendered normally (not falsely suppressed)."""
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    import datetime as _dt
+
+    store = _store(tmp_path)
+    service = CrystallizedMemoryService(store)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    expires_at = (now + _dt.timedelta(days=2)).isoformat()
+
+    candidate = CrystallizedCandidate(
+        candidate_id="cand_clean",
+        kind="moment",
+        body="这个候选记忆描述了一个用户偏好：喜欢简洁的中文回答。",
+        source_event_ids=["evt_clean"],
+    )
+    decision = ApprovalDecision(
+        candidate_id="cand_clean",
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=now.isoformat(),
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=expires_at,
+    )
+    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+
+    items = owner_actions_module._provisional_crystallized_review_items(store, closed=set())
+    assert len(items) == 1
+    item = items[0]
+    # Clean body should pass through normally
+    assert "摘要隐藏" not in item["summary"]
+    assert "简洁的中文回答" in item["summary"]
+
+
+def test_expiring_provisional_body_with_transcript_marker_is_suppressed(tmp_path):
+    """Counterfactual: _render_expiring_provisional_section suppresses transcript-like bodies."""
+    import json as _json
+
+    store = _store(tmp_path)
+    list_dir = store.roots.memory_os_root / "system"
+    list_dir.mkdir(parents=True, exist_ok=True)
+    list_path = list_dir / "expiring_provisional.json"
+    list_path.write_text(
+        _json.dumps(
+            [
+                {
+                    "id": "prov_transcript_001",
+                    "body": "User: 我需要帮助 | Assistant: 好的，我来帮你。",
+                    "recurrence": 1,
+                    "expires_at": "2026-07-04T00:00:00Z",
+                    "hours_remaining": 24,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    section = owner_actions_module._render_expiring_provisional_section(store)
+    # Counterfactual: without the fix, "User:" and "Assistant:" would leak into the section
+    assert "User:" not in section
+    assert "Assistant:" not in section
+    assert "摘要隐藏" in section
+
+
+def test_expiring_provisional_clean_body_passed_through(tmp_path):
+    """Clean expiring provisional body renders normally."""
+    import json as _json
+
+    store = _store(tmp_path)
+    list_dir = store.roots.memory_os_root / "system"
+    list_dir.mkdir(parents=True, exist_ok=True)
+    list_path = list_dir / "expiring_provisional.json"
+    list_path.write_text(
+        _json.dumps(
+            [
+                {
+                    "id": "prov_clean",
+                    "body": "用户偏好使用深色模式界面。",
+                    "recurrence": 1,
+                    "expires_at": "2026-07-04T00:00:00Z",
+                    "hours_remaining": 24,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    section = owner_actions_module._render_expiring_provisional_section(store)
+    assert "摘要隐藏" not in section
+    assert "深色模式" in section
+
+
+def test_contains_transcript_marker_includes_all_consolidation_markers():
+    """_contains_transcript_marker must detect all markers that _candidate_needs_consolidation used."""
+    # Markers that were previously only in _candidate_needs_consolidation
+    for marker in ("菸草:", "菸草：", "agentcoco:", "agentcoco："):
+        assert owner_actions_module._contains_transcript_marker(
+            f"some text {marker} more text"
+        ), f"_contains_transcript_marker should detect {marker!r}"
+
+
+def test_candidate_needs_consolidation_delegates_to_contains_transcript_marker():
+    """_candidate_needs_consolidation delegates to _contains_transcript_marker for markers."""
+    # Every standard transcript marker triggers both functions
+    for text in (
+        "User: hello",
+        "Assistant: hi there",
+        "用户: 你好",
+        "用户：你好",
+        "助手: 你好",
+        "助手：你好",
+        "| assistant: response",
+        "| user: query",
+    ):
+        assert owner_actions_module._candidate_needs_consolidation(text) is True, \
+            f"_candidate_needs_consolidation should return True for {text!r}"
+        assert owner_actions_module._contains_transcript_marker(text) is True, \
+            f"_contains_transcript_marker should return True for {text!r}"
+
+
+def test_proposal_body_with_transcript_marker_not_in_agenda_text(tmp_path):
+    """Counterfactual: proposal body with transcript markers must not leak into agenda digest."""
+    store = _store(tmp_path)
+    proposal = ProposalQueueModule(tmp_path, profile="main")
+    proposal.create_candidate(
+        store=store,
+        title="一个正常的 proposal 标题",
+        body="具体改动: User: 这是原始对话 | Assistant: 不应该出现在 digest 里",
+        source_refs=["feedback:raw_body"],
+        kind="memory_sources_policy",
+    )
+
+    rendered = render_owner_review_digest(store, digest_mode="agenda")
+    text = rendered["text"]
+
+    # Counterfactual: without the fix, "User:" / "Assistant:" in body would leak
+    assert "User:" not in text
+    assert "Assistant:" not in text
+    # Clean title should still appear
+    assert "正常的 proposal 标题" in text

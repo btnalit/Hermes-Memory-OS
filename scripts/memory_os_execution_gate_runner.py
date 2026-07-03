@@ -81,6 +81,7 @@ def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = 
             smoke_mode=smoke_mode,
             boundary=boundary,
             helper_report={},
+            requires_boundary_report=spec.get("requires_boundary_report", True),
         )
         sys.stderr.write(f"Memory-OS cron helper missing: {helper.name}\n")
         return 2
@@ -110,6 +111,7 @@ def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = 
         smoke_mode=smoke_mode,
         boundary=observed_boundary,
         helper_report=helper_report,
+        requires_boundary_report=spec.get("requires_boundary_report", True),
     )
     if completed.stdout:
         sys.stdout.write(completed.stdout)
@@ -213,9 +215,19 @@ def _append_completion(
     smoke_mode: str,
     boundary: dict[str, Any],
     helper_report: dict[str, Any],
+    requires_boundary_report: bool = True,
 ) -> None:
     now = datetime.now(timezone.utc)
-    observed = helper_report.get("schema_version") == HELPER_REPORT_SCHEMA_VERSION
+    if not requires_boundary_report:
+        # Helpers that declare requires_boundary_report=False are designed
+        # to run without boundary evidence (no_agent local helpers with no
+        # external-send surface).  Mark them as boundary-not-required so
+        # the monitor can exempt them from boundary_unobserved counting.
+        observed = True
+        boundary_not_required = True
+    else:
+        observed = helper_report.get("schema_version") == HELPER_REPORT_SCHEMA_VERSION
+        boundary_not_required = False
     _append_jsonl(
         _records_path(hermes_home),
         {
@@ -230,6 +242,7 @@ def _append_completion(
                 "returncode": returncode,
                 "boundary": boundary,
                 "postcheck_boundary_observed": observed,
+                "postcheck_boundary_not_required": boundary_not_required,
                 "helper_report_schema_version": str(helper_report.get("schema_version") or ""),
                 "smoke_mode": smoke_mode,
             },
