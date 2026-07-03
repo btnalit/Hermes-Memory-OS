@@ -109,6 +109,15 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "vector_embedder_batch_device": {
+        "module": "embedder",
+        "default": "auto",
+        "kind": "threshold",
+        "bounds": None,
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     "vector_edge_refines_threshold": {
         "module": "vector_edge_proposer",
         "default": 0.75,

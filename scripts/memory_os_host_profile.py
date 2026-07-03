@@ -70,9 +70,15 @@ def resolve_host_runtime_profile(
 ) -> HostRuntimeProfile:
     host_alias = str(host or "").strip()
     known = KNOWN_HOST_RUNTIME_PROFILES.get(host_alias, {})
-    if require_remote_repo_root and host_alias and not known and not str(remote_repo_root or "").strip():
+
+    # ── Resolution order: CLI > MEMORY_OS_REPO_ROOT env > known-host > default ──
+    cli_remote_repo_root = str(remote_repo_root or "").strip()
+    env_remote_repo_root = os.environ.get("MEMORY_OS_REPO_ROOT", "").strip()
+
+    if require_remote_repo_root and host_alias and not known and not cli_remote_repo_root and not env_remote_repo_root:
         raise ValueError(
-            "--remote-repo-root is required for --host when the host has no known Memory-OS runtime root"
+            "--remote-repo-root is required for --host when the host has no known Memory-OS runtime root "
+            "(set MEMORY_OS_REPO_ROOT env var or pass --remote-repo-root)"
         )
 
     base_remote_repo_root = str(known.get("remote_repo_root") or "")
@@ -80,7 +86,7 @@ def resolve_host_runtime_profile(
     base_python_bin = str(known.get("python_bin") or ("python3" if host_alias else "python"))
     base_monitor_profile = str(known.get("monitor_profile") or default_monitor_profile or "live")
 
-    effective_remote_repo_root = str(remote_repo_root or "").strip() or base_remote_repo_root or os.environ.get("MEMORY_OS_REPO_ROOT", "")
+    effective_remote_repo_root = cli_remote_repo_root or env_remote_repo_root or base_remote_repo_root
     effective_hermes_home = str(hermes_home or "").strip() or base_hermes_home
     effective_python_bin = str(python_bin or "").strip() or base_python_bin
     effective_monitor_profile = str(monitor_profile or "").strip() or base_monitor_profile

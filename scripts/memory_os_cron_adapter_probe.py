@@ -12,16 +12,29 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Location-agnostic path resolution: when HERMES_HOME is set the probe runs
-# from the installed location (HERMES_HOME/scripts/); otherwise it runs from
-# a repo checkout and derives the root from its own file path.
+# Location-agnostic path resolution.
+# Always add the script's own repository root first — this handles repo
+# checkouts regardless of whether HERMES_HOME is set globally.
+# When HERMES_HOME points to a different directory (installed deployment),
+# also add the installed runtime paths as secondary sources so
+# plugins.memory.memory_os can be imported from the installed layout.
+_repo_root = Path(__file__).resolve().parents[1]
+# Always add the script's own repository root — this is the primary source
+# for plugins.memory.memory_os in repo checkouts.
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+# When HERMES_HOME is set (installed deployment), also add the installed
+# runtime paths.  These are secondary: the repo root above takes priority.
+# The _runtime_py.exists() guard prevents adding non-existent paths on
+# machines that have HERMES_HOME set but no Memory-OS install under it.
 _HERMES_HOME = os.environ.get("HERMES_HOME", "")
 if _HERMES_HOME:
-    _base = Path(_HERMES_HOME)
-else:
-    _base = Path(__file__).resolve().parents[1]
-if str(_base) not in sys.path:
-    sys.path.insert(0, str(_base))
+    _hermes = Path(_HERMES_HOME)
+    _runtime_py = _hermes / "memory-os" / "runtime" / "python"
+    if _runtime_py.exists() and str(_runtime_py) not in sys.path:
+        sys.path.insert(0, str(_runtime_py))
+    if str(_hermes) not in sys.path:
+        sys.path.insert(0, str(_hermes))
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, specs_from_snapshot
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter

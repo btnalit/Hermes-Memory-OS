@@ -340,3 +340,127 @@ def test_vector_cli_respects_hermes_home_flag(tmp_path: Path) -> None:
     # Verify --hermes-home is registered on reembed
     args2 = parser.parse_args(["vector", "reembed", "--hermes-home", str(tmp_path)])
     assert args2.hermes_home == str(tmp_path)
+
+
+class TestBatchEmbedderDeviceKnob:
+    """D2: vector_embedder_batch_device knob is registered and overridable."""
+
+    def test_batch_device_knob_in_overridable_knobs(self):
+        """vector_embedder_batch_device is present in OVERRIDABLE_KNOBS."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        assert "vector_embedder_batch_device" in OVERRIDABLE_KNOBS, (
+            "D2: vector_embedder_batch_device must be in OVERRIDABLE_KNOBS "
+            "so register_override() does not reject it"
+        )
+
+    def test_batch_device_knob_has_expected_spec(self):
+        """vector_embedder_batch_device has correct module, default, and kind."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        spec = OVERRIDABLE_KNOBS["vector_embedder_batch_device"]
+        assert spec["module"] == "embedder"
+        assert spec["default"] == "auto"
+        assert spec["kind"] == "threshold"
+        assert spec["meta"] is False
+
+    def test_batch_device_resolves_default(self):
+        """Resolving vector_embedder_batch_device returns default 'auto'."""
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        result = resolve_knob("vector_embedder_batch_device", default="auto",
+                              _store_root=None)
+        assert result == "auto"
+
+    def test_batch_device_override_via_jsonl(self, tmp_path: Path):
+        """Overriding vector_embedder_batch_device via JSONL works."""
+        import json
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+        knob_path = system_dir / "knob_overrides.jsonl"
+        knob_path.write_text(json.dumps({
+            "schema_version": "memory-os.knob_override.v0",
+            "id": "ko_batch_test",
+            "knob": "vector_embedder_batch_device",
+            "override_value": "cuda:0",
+            "prior_value": "auto",
+            "bounds": None,
+            "allowed": None,
+            "provisional": False,
+            "expires_at": "",
+            "proposed_by": "test",
+            "approved_via": "test",
+            "state": "confirmed",
+            "ts": "2026-01-01T00:00:00Z",
+        }) + "\n", encoding="utf-8")
+
+        from plugins.memory.memory_os.knob_overrides import resolve_knob
+        result = resolve_knob("vector_embedder_batch_device", default="auto",
+                              _store_root=system_dir)
+        assert result == "cuda:0", (
+            f"D2: override should produce 'cuda:0', got {result}"
+        )
+
+    def test_batch_device_register_override_does_not_raise(self, tmp_path: Path):
+        """register_override accepts vector_embedder_batch_device (no ValueError)."""
+        from plugins.memory.memory_os.knob_overrides import register_override
+
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+
+        # Must not raise "not in OVERRIDABLE_KNOBS"
+        record = register_override(
+            "vector_embedder_batch_device",
+            "cuda:0",
+            prior="auto",
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2027-01-01T00:00:00Z",
+            _store_root=system_dir,
+        )
+        assert record["knob"] == "vector_embedder_batch_device"
+        assert record["override_value"] == "cuda:0"
+
+    def test_batch_device_independent_of_online_device(self, tmp_path: Path):
+        """batch_device and online device can differ (D2 core invariant)."""
+        import json
+        system_dir = tmp_path / "memory-os" / "system"
+        system_dir.mkdir(parents=True)
+        knob_path = system_dir / "knob_overrides.jsonl"
+
+        # Set batch_device=cuda:0 but online device=cpu
+        lines = [
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_batch",
+                "knob": "vector_embedder_batch_device",
+                "override_value": "cuda:0",
+                "prior_value": "auto",
+                "bounds": None, "allowed": None,
+                "provisional": False, "expires_at": "",
+                "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+            json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "ko_online",
+                "knob": "vector_embedder_device",
+                "override_value": "cpu",
+                "prior_value": "auto",
+                "bounds": None, "allowed": None,
+                "provisional": False, "expires_at": "",
+                "proposed_by": "test", "approved_via": "test",
+                "state": "confirmed", "ts": "2026-01-01T00:00:00Z",
+            }),
+        ]
+        knob_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        from plugins.memory.memory_os.knob_overrides import resolve_knobs
+        resolved = resolve_knobs(
+            {
+                "vector_embedder_device": "auto",
+                "vector_embedder_batch_device": "auto",
+            },
+            _store_root=system_dir,
+        )
+        assert resolved["vector_embedder_device"] == "cpu"
+        assert resolved["vector_embedder_batch_device"] == "cuda:0", (
+            "D2: batch device must be independently overridable from online device"
+        )
