@@ -272,35 +272,13 @@ def resolve_knob(name: str, default: Any, *,
     """Deterministic: return active override value if present+unexpired, else default.
 
     No LLM, no network, no side effects — safe for hot paths (INV-5).
-    """
-    now = _now or datetime.now(timezone.utc)
-    store_path = _override_store_path(roots, _store_root=_store_root)
-    if not store_path.exists():
-        return default
 
-    # Read from newest to oldest — first active hit wins.
-    # If the newest record for a knob is not active/confirmed (e.g. reverted),
-    # mark it as seen so older active entries for that knob are skipped.
-    # If the newest record is an expired provisional, treat it as a no-op
-    # and keep looking at older records.
-    definitively_seen: set[str] = set()
-    for record in _read_jsonl_reversed(store_path):
-        knob = str(record.get("knob") or "")
-        if knob != name:
-            continue
-        if knob in definitively_seen:
-            continue  # already resolved by a newer record
-        if not _is_active_state(record):
-            # Newest record for this knob is inactive (reverted etc.) — skip
-            definitively_seen.add(knob)
-            continue
-        expires_str = str(record.get("expires_at") or "").strip()
-        if expires_str and _is_expired(expires_str, now) and _is_provisional_state(record):
-            # Expired provisional is a no-op — check older records for this knob
-            continue
-        definitively_seen.add(knob)
-        return record.get("override_value", default)
-    return default
+    Delegates to :func:`resolve_knobs` so the resolution loop has a single
+    implementation shared with ``list_active_overrides``.
+    """
+    return resolve_knobs(
+        {name: default}, roots=roots, _now=_now, _store_root=_store_root,
+    )[name]
 
 
 def resolve_knobs(
@@ -324,6 +302,7 @@ def resolve_knobs(
 
     results: dict[str, Any] = dict(queries)
     definitively_seen: set[str] = set()
+    _all_queries = len(queries)
     for record in _read_jsonl_reversed(store_path):
         knob = str(record.get("knob") or "")
         if knob not in queries:
@@ -332,12 +311,16 @@ def resolve_knobs(
             continue
         if not _is_active_state(record):
             definitively_seen.add(knob)
+            if len(definitively_seen) == _all_queries:
+                break
             continue
         expires_str = str(record.get("expires_at") or "").strip()
         if expires_str and _is_expired(expires_str, now) and _is_provisional_state(record):
             continue
         definitively_seen.add(knob)
         results[knob] = record.get("override_value", queries[knob])
+        if len(definitively_seen) == _all_queries:
+            break
     return results
 
 

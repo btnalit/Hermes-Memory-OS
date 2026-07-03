@@ -1678,6 +1678,9 @@ def _recent_cross_session_lines(
 
     from .knob_overrides import resolve_knobs as _resolve_knobs
 
+    # Defaults must match the function signature (max_items=5, max_age_hours=48).
+    # The function-parameter values are fallbacks used when a knob override
+    # cannot be coerced to int (e.g. hand-edited JSONL with non-numeric value).
     resolved = _resolve_knobs(
         {
             "recent_cross_session_enabled": True,
@@ -1689,8 +1692,20 @@ def _recent_cross_session_lines(
     if not resolved["recent_cross_session_enabled"]:
         return []
 
-    limit = max(int(resolved["recent_cross_session_max_items"] or max_items), 1)
-    age_hours = max(int(resolved["recent_cross_session_max_age_hours"] or max_age_hours), 1)
+    def _safe_int_knob(value: Any, fallback: int) -> int:
+        """Coerce a knob override value to int with floor of 1.
+
+        Guards against non-numeric or None override values (e.g. from
+        hand-edited JSONL); falls back to *fallback* on any coercion error.
+        An explicit override of 0 is floored to 1 (the knob's minimum).
+        """
+        try:
+            return max(int(value), 1)
+        except (ValueError, TypeError):
+            return max(int(fallback), 1)
+
+    limit = _safe_int_knob(resolved["recent_cross_session_max_items"], max_items)
+    age_hours = _safe_int_knob(resolved["recent_cross_session_max_age_hours"], max_age_hours)
 
     # Collect source_event_ids from candidates.jsonl — these are the
     # source-gate signature: only events that passed source gate have

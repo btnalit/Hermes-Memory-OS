@@ -116,27 +116,23 @@ class MemoryOSProvider(MemoryProvider):
         )
         if recovered:
             self._current_task_anchor = recovered
-            # ── Compact-resume defense: write a superseded tombstone
-            # immediately after recovering a cross-session anchor.  When
-            # Hermes compacts and continues without calling on_session_end
-            # on the old session, the original "active" record survives on
-            # disk.  Without this tombstone the next compact-continuation
-            # (or session restart) would resurrect the same zombie anchor
-            # again — the three-layer defense relies on on_session_end
-            # having written a tombstone, which compact skips.
-            #
-            # _write_active_task_anchor internally calls
-            # _supersede_active_anchors() first, so the on-disk chain
-            # becomes: … → active(zombie) → superseded(old) → superseded(this).
-            # The next _read_latest_active_task_anchor sees "superseded"
-            # and returns "" — clean break.
-            #
-            # Same-session recovery (unusual but possible) is safe:
-            # the tombstone is written but the in-memory anchor is set;
-            # the next normal _write_active_task_anchor call supersedes
-            # it and writes a fresh "active" record.
+            # ── Compact-resume defense: Hermes may compact without calling
+            # on_session_end, leaving a zombie "active" record on disk.
+            # Writing a "superseded" tombstone ensures the next restart
+            # sees no active anchor.  _write_active_task_anchor internally
+            # calls _supersede_active_anchors() first (which also writes
+            # a tombstone for the original record_id — intentional double
+            # write for audit trail), then appends this tombstone.
+            # Same-session recovery is safe: the next normal anchor write
+            # supersedes this tombstone and writes a fresh "active" record.
+            _tombstone_anchor = recovered
+            _marker_prefix = "[跨会话恢复,"
+            if _tombstone_anchor.startswith(_marker_prefix):
+                _nl = _tombstone_anchor.find("\n")
+                if _nl >= 0:
+                    _tombstone_anchor = _tombstone_anchor[_nl + 1:]
             self._write_active_task_anchor(
-                anchor=recovered,
+                anchor=_tombstone_anchor,
                 status="superseded",
             )
 
@@ -1097,6 +1093,14 @@ class MemoryOSProvider(MemoryProvider):
         any other status (completed, cancelled, superseded) means there
         is no active anchor — older ``"active"`` lines are immutable in
         append-only JSONL and are superseded by the most recent record.
+
+        .. important::
+
+           This is a read-only inspection method.  When the returned anchor
+           originates from a different session (cross-session recovery), the
+           caller **must** write a tombstone (``status="superseded"``) after
+           recovery to prevent zombie anchor resurrection on the next restart.
+           See :meth:`initialize` for the canonical tombstone pattern.
 
         Args:
             max_age_hours: When > 0, anchors older than this many hours are
