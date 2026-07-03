@@ -6552,11 +6552,16 @@ def execution_gate_cron_summary():
 
 def _execution_gate_cron_adapter_probe_summary():
     # Resolve the probe script via HERMES_HOME first (installed location),
-    # then fall back to repo-relative and common clone locations.
+    # then fall back to common clone locations for hosts where the probe
+    # hasn't been installed yet.
+    #
+    # NOTE: this function runs inside _remote_probe_script()'s generated
+    # string — REPO_ROOT (module-level) is NOT in scope here.  All
+    # candidates must use hermes_home, _hermes_home (enclosing-scope
+    # string), absolute paths, or os.environ.
     hermes_home = os.environ.get("HERMES_HOME", "/root/.hermes")
     candidates = [
         Path(hermes_home) / "scripts" / "memory_os_cron_adapter_probe.py",
-        REPO_ROOT / "scripts" / "memory_os_cron_adapter_probe.py",
         Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py"),
         Path.home() / "Hermes-Memory-OS" / "scripts" / "memory_os_cron_adapter_probe.py",
     ]
