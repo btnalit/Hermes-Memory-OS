@@ -353,19 +353,29 @@ def test_on_demand_module_shows_idle_not_missing(tmp_path):
 # ── Full-monitor integration tests (Task 1) ──────────────────────────────
 
 
-def _write_monitor_artifact(memory_root: Path, status: str, fail_codes=None, warn_codes=None, age_seconds: int = 0):
-    """Write a synthetic full-monitor artifact for testing."""
+def _write_monitor_artifact(memory_root: Path, status: str, fail_codes=None, warn_codes=None, age_seconds: int = 0, *, use_results_key: bool = False):
+    """Write a synthetic full-monitor artifact for testing.
+
+    Uses the production ``classification`` key shape by default
+    (``memory_os_3_200_monitor.py`` writes ``classification`` at the
+    top level).  Pass ``use_results_key=True`` to exercise the legacy
+    ``results`` fallback path.
+    """
     artifacts_dir = memory_root / "system" / "monitor_artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
-    artifact = {
+    classification = {
+        "status": status,
+        "fail": [{"code": c} for c in (fail_codes or [])],
+        "warn": [{"code": c} for c in (warn_codes or [])],
+    }
+    artifact: dict = {
         "schema_version": "memory-os.monitor.v0",
         "generated_at": "2026-07-03T15:00:00Z",
-        "results": {
-            "status": status,
-            "fail": [{"code": c} for c in (fail_codes or [])],
-            "warn": [{"code": c} for c in (warn_codes or [])],
-        },
     }
+    if use_results_key:
+        artifact["results"] = classification
+    else:
+        artifact["classification"] = classification
     path = artifacts_dir / "monitor_2026-07-03T150000.json"
     path.write_text(json.dumps(artifact, ensure_ascii=False), encoding="utf-8")
     # Set mtime to simulate artifact age
@@ -461,3 +471,56 @@ def test_full_monitor_pass_does_not_break_existing_pass(tmp_path):
         f"Got {snapshot['monitor']['status']}, sections: "
         + ", ".join(f"{s['key']}={s['warn']}w" for s in snapshot["monitor"]["sections"] if s["warn"])
     )
+
+
+def test_full_monitor_reads_live_classification_artifact_shape(tmp_path):
+    """Production artifact shape uses ``classification`` key, not ``results``.
+
+    ``memory_os_3_200_monitor.py --snapshot-out`` writes::
+
+        {"classification": {"status": "FAIL", "fail": [...], "warn": [...]}}
+
+    The dashboard must read this shape correctly.  This is a regression
+    test for the bug where ``_full_monitor_snapshot()`` only read the
+    non-existent ``results`` key and returned ``unknown`` for every real
+    production artifact.
+    """
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    # Write using the default production shape (classification key)
+    _write_monitor_artifact(
+        home / "memory-os", "FAIL",
+        fail_codes=["gateway_inactive", "heartbeat_timer_inactive"],
+        warn_codes=["cognitive_loop_no_cycle_yet"],
+    )
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    fm = snapshot["fullMonitor"]
+    assert fm["status"] == "FAIL", f"Production classification artifact must be read as FAIL, got {fm['status']}"
+    assert "gateway_inactive" in fm["fail_codes"], f"fail_codes={fm['fail_codes']}"
+    assert "cognitive_loop_no_cycle_yet" in fm["warn_codes"], f"warn_codes={fm['warn_codes']}"
+    assert fm["stale"] is False
+    assert snapshot["monitor"]["status"] == "FAIL"
+
+
+def test_full_monitor_fallback_to_legacy_results_key(tmp_path):
+    """Legacy ``results`` key is still readable as a backward-compat fallback."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    # Write using the legacy results key
+    _write_monitor_artifact(
+        home / "memory-os", "WARN",
+        warn_codes=["something_warned"],
+        use_results_key=True,
+    )
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    fm = snapshot["fullMonitor"]
+    assert fm["status"] == "WARN", f"Legacy results artifact must still be readable, got {fm['status']}"
+    assert "something_warned" in fm["warn_codes"]

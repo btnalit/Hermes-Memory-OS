@@ -714,9 +714,19 @@ def _rh26_snapshot(memory_root: Path) -> dict[str, Any]:
     if artifact is None:
         return {"status": "unknown", "fail_codes": [], "warn_codes": []}
     data = _read_json(artifact)
-    results = data.get("results") if isinstance(data, dict) else {}
-    if not isinstance(results, dict):
-        results = {}
+    # Production artifacts use "classification" (memory_os_3_200_monitor.py);
+    # fall back to "results" for older / test artifact shapes.
+    results: dict[str, Any] = {}
+    if isinstance(data, dict):
+        results = (
+            data.get("classification")
+            if isinstance(data.get("classification"), dict)
+            else data.get("results")
+            if isinstance(data.get("results"), dict)
+            else {}
+        )
+        if not isinstance(results, dict):
+            results = {}
     rh26 = {}
     for entry in results.get("fail", []):
         if isinstance(entry, dict) and "rh26" in str(entry.get("code", "")):
@@ -853,7 +863,15 @@ def _full_monitor_snapshot(memory_root: Path) -> dict[str, Any]:
     age = int(time.time() - artifact.stat().st_mtime)
     results: dict[str, Any] = {}
     if isinstance(data, dict):
-        results = data.get("results") if isinstance(data.get("results"), dict) else {}
+        # Production artifacts use "classification" (memory_os_3_200_monitor.py);
+        # fall back to "results" for older / test artifact shapes.
+        results = (
+            data.get("classification")
+            if isinstance(data.get("classification"), dict)
+            else data.get("results")
+            if isinstance(data.get("results"), dict)
+            else {}
+        )
         if not isinstance(results, dict):
             results = {}
     fail_entries = results.get("fail") if isinstance(results.get("fail"), list) else []
