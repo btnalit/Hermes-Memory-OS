@@ -1676,22 +1676,21 @@ def _recent_cross_session_lines(
     if not session_id:
         return []
 
-    from .knob_overrides import resolve_knob as _resolve_knob
+    from .knob_overrides import resolve_knobs as _resolve_knobs
 
-    enabled = _resolve_knob(
-        "recent_cross_session_enabled", default=True,
+    resolved = _resolve_knobs(
+        {
+            "recent_cross_session_enabled": True,
+            "recent_cross_session_max_items": 5,
+            "recent_cross_session_max_age_hours": 48,
+        },
+        roots=store.roots,
     )
-    if not enabled:
+    if not resolved["recent_cross_session_enabled"]:
         return []
 
-    resolved_max_items = _resolve_knob(
-        "recent_cross_session_max_items", default=5,
-    )
-    resolved_max_age_hours = _resolve_knob(
-        "recent_cross_session_max_age_hours", default=48,
-    )
-    limit = max(int(resolved_max_items or max_items), 1)
-    age_hours = max(int(resolved_max_age_hours or max_age_hours), 1)
+    limit = max(int(resolved["recent_cross_session_max_items"] or max_items), 1)
+    age_hours = max(int(resolved["recent_cross_session_max_age_hours"] or max_age_hours), 1)
 
     # Collect source_event_ids from candidates.jsonl — these are the
     # source-gate signature: only events that passed source gate have

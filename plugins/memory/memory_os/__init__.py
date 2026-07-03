@@ -185,11 +185,13 @@ class MemoryOSProvider(MemoryProvider):
         cfg_enabled = bool(low_clue_raw.get("enabled"))
         low_clue_raw["enabled"] = _resolve_knob(
             "lane_low_clue_recall_enabled", default=cfg_enabled,
+            roots=self._roots,
         )
         # ────────────────────────────────────────────────────────────────
         # ── A3: session-scoped continuity knob ───────────────────────────
         session_scoped = _resolve_knob(
             "session_scoped_recent_events", default=True,
+            roots=self._roots,
         )
         effective_session_id = (session_id or self.session_id) if session_scoped else ""
         # ────────────────────────────────────────────────────────────────
@@ -858,6 +860,7 @@ class MemoryOSProvider(MemoryProvider):
                     default=bool((self._config.get("low_clue_recall") or {}).get("enabled"))
                     if isinstance(self._config.get("low_clue_recall"), dict)
                     else False,
+                    roots=self._roots,
                 ),
                 "judge_availability": low_clue_judge_availability(self._config.get("low_clue_recall")),
             },

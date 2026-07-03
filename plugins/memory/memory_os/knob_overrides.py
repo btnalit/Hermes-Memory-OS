@@ -303,6 +303,44 @@ def resolve_knob(name: str, default: Any, *,
     return default
 
 
+def resolve_knobs(
+    queries: dict[str, Any],
+    *,
+    roots: MemoryOSRoots | None = None,
+    _now: datetime | None = None,
+    _store_root: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve multiple knobs from a single file read (INV-5 hot-path safe).
+
+    Each key in *queries* is a knob name; each value is the default.
+    Returns a dict with the same keys mapped to resolved values.
+    Reads the knob-override store at most once — substantially cheaper
+    than calling :func:`resolve_knob` repeatedly for the same store.
+    """
+    now = _now or datetime.now(timezone.utc)
+    store_path = _override_store_path(roots, _store_root=_store_root)
+    if not store_path.exists():
+        return dict(queries)
+
+    results: dict[str, Any] = dict(queries)
+    definitively_seen: set[str] = set()
+    for record in _read_jsonl_reversed(store_path):
+        knob = str(record.get("knob") or "")
+        if knob not in queries:
+            continue
+        if knob in definitively_seen:
+            continue
+        if not _is_active_state(record):
+            definitively_seen.add(knob)
+            continue
+        expires_str = str(record.get("expires_at") or "").strip()
+        if expires_str and _is_expired(expires_str, now) and _is_provisional_state(record):
+            continue
+        definitively_seen.add(knob)
+        results[knob] = record.get("override_value", queries[knob])
+    return results
+
+
 # ── Write ───────────────────────────────────────────────────────────────
 
 def register_override(
