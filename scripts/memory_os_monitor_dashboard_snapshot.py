@@ -29,16 +29,26 @@ from scripts.memory_os_module_cadence_report import build_cadence_report
 
 
 SCHEMA_VERSION = "memory-os.monitor_dashboard_snapshot.v0"
-DEFAULT_PROFILE = "main"
-EXPECTED_CRON_NAMES = (
+DEFAULT_PROFILE = "default"
+CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-owner-review-digest",
+    "memory-os-proposal-followups-opsgate",
+    "memory-os-index-sync",
+    "memory-os-working-cleanup",
+    "memory-os-candidate-aggregation",
+    "memory-os-fact-judge",
+    "memory-os-expression-feedback-request",
+    "memory-os-memory-sources-feedback-request",
+})
+OPTIONAL_MEMORY_OS_CRON = frozenset({
     "memory-os-right-brain-expression",
     "memory-os-module-cadence-report",
     "memory-os-right-brain-expression-outcome",
-    "memory-os-proposal-followups-opsgate",
-    "memory-os-expression-feedback-request",
-    "memory-os-memory-sources-feedback-request",
-)
+    "memory-os-l3-probe-verification",
+})
+# Keep legacy tuple for backward-compatible reference; health now uses the
+# frozensets above so paused optional jobs don't contribute to WARN.
+EXPECTED_CRON_NAMES = tuple(sorted(CORE_MEMORY_OS_CRON))
 BOUNDARY_ROWS = (
     ("actual_send", "Direct platform send", "blocked"),
     ("actual_execute", "External execution", "blocked"),
@@ -104,6 +114,11 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     feedback = _feedback_snapshot(memory_root)
     boundary = _boundary_snapshot(cadence_report, status_report, hindsight)
     audit = _audit_snapshot(memory_root)
+    full_monitor = _full_monitor_snapshot(memory_root)
+    rh26 = _rh26_snapshot(memory_root)
+    execution_gate = _execution_gate_snapshot(memory_root)
+    owner_aging = _owner_aging_snapshot(memory_root)
+    session_mirror = _session_mirror_snapshot(hermes_home)
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     monitor = _monitor_snapshot(
         now=now,
@@ -117,6 +132,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         expression=expression,
         hindsight=hindsight,
         boundary=boundary,
+        full_monitor=full_monitor,
     )
     snapshot = {
         "schema_version": SCHEMA_VERSION,
@@ -133,6 +149,11 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "feedback": feedback,
         "boundary": boundary,
         "audit": audit,
+        "fullMonitor": full_monitor,
+        "rh26": rh26,
+        "executionGate": execution_gate,
+        "ownerReviewAging": owner_aging,
+        "sessionMirror": session_mirror,
     }
     _fill_audit_from_monitor_if_empty(snapshot)
     return snapshot
@@ -155,9 +176,15 @@ def _meta_snapshot(
         "profile": profile,
         "hermes_home": str(hermes_home),
         "provider": "memory_os",
+        "canonical_provider": "memory_os",
+        "canonical_store": str(hermes_home / "memory-os"),
         "shell_plugin": "memory-os-agent-os",
         "install_mode": install_mode,
-        "hindsight_mode": str(hindsight.get("mode") or "off"),
+        "hindsight_role": "optional adapter / projection only",
+        "hindsight_projection_mode": str(hindsight.get("mode") or "off"),
+        "uses_hindsight_http_api": False,
+        "hindsight_adapter_enabled": str(hindsight.get("mode") or "off") not in ("off", ""),
+        "hindsight_mode": str(hindsight.get("mode") or "off"),  # legacy alias
         "host": host["hostname"],
         "host_fqdn": host["fqdn"],
         "environment": host["environment"],
@@ -183,8 +210,14 @@ def _monitor_snapshot(
     expression: dict[str, Any],
     hindsight: dict[str, Any],
     boundary: list[dict[str, str]],
+    full_monitor: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    missing_cron = len(set(EXPECTED_CRON_NAMES) - {str(job.get("name") or "") for job in cron_jobs})
+    missing_core = sum(1 for name in CORE_MEMORY_OS_CRON if not any(
+        str(job.get("name") or "") == name and job.get("enabled", True) for job in cron_jobs
+    ))
+    optional_paused = sum(1 for name in OPTIONAL_MEMORY_OS_CRON if any(
+        str(job.get("name") or "") == name and not job.get("enabled", True) for job in cron_jobs
+    ))
     module_error = int(cadence_report.get("current_window_error_count") or 0)
     module_findings = int(cadence_report.get("finding_count") or 0)
     index_warn = 0 if memory.get("index_fresh") else 1
@@ -192,12 +225,12 @@ def _monitor_snapshot(
     sections = [
         {"key": "provider", "label": "Provider 核心", "checks": 6, "warn": 0 if status_report else 1, "fail": 0},
         {"key": "indexes", "label": "SQLite 索引", "checks": 5, "warn": index_warn, "fail": 0},
-        {"key": "cron", "label": "Cron 作业", "checks": 7, "warn": missing_cron, "fail": 0},
+        {"key": "cron", "label": "Cron 作业", "checks": len(CORE_MEMORY_OS_CRON), "warn": missing_core, "fail": 0},
         {
             "key": "owner_review",
             "label": "Owner 审批",
             "checks": 6,
-            "warn": 1 if int(owner.get("counts", {}).get("action_required_shown") or 0) else 0,
+            "warn": 1 if int(owner.get("counts", {}).get("action_required") or 0) else 0,
             "fail": 0,
         },
         {"key": "modules", "label": "模块 cadence", "checks": 18, "warn": module_findings, "fail": module_error},
@@ -221,6 +254,21 @@ def _monitor_snapshot(
     warn = sum(int(item["warn"]) for item in sections)
     fail = sum(int(item["fail"]) for item in sections)
     status = "FAIL" if fail else "WARN" if warn else "PASS"
+
+    # Merge full-monitor status — the definitive health signal overrides
+    # the dashboard's own section-based heuristic when the two disagree.
+    if full_monitor:
+        full_status = str(full_monitor.get("status") or "").upper()
+        if full_status == "FAIL":
+            status = "FAIL"
+            fail += 1
+        elif full_status == "WARN" and status != "FAIL":
+            status = "WARN"
+            warn += 1
+        elif full_monitor.get("stale") and status == "PASS":
+            status = "WARN"
+            warn += 1
+
     run_seed = f"{profile}:{now.isoformat()}:{checks_total}:{warn}:{fail}"
     return {
         "status": status,
@@ -293,10 +341,21 @@ def _kpi(
 
 def _cron_snapshot(cron_jobs: list[dict[str, Any]]) -> dict[str, Any]:
     jobs = [_cron_job_snapshot(job) for job in cron_jobs]
+    core_jobs = [j for j in jobs if j["name"] in CORE_MEMORY_OS_CRON]
+    optional_jobs = [j for j in jobs if j["name"] in OPTIONAL_MEMORY_OS_CRON]
+    other_jobs = [j for j in jobs if j["name"] not in CORE_MEMORY_OS_CRON | OPTIONAL_MEMORY_OS_CRON]
     return {
-        "enabled": sum(1 for job in cron_jobs if job.get("enabled", True)),
+        "enabled": sum(1 for j in core_jobs if j["status"] == "ok"),
         "total": len(cron_jobs),
+        "core_total": len(core_jobs),
+        "optional_total": len(optional_jobs),
+        "other_total": len(other_jobs),
         "jobs": jobs,
+        "classifications": {
+            "core": [j["name"] for j in core_jobs],
+            "optional": [j["name"] for j in optional_jobs],
+            "other": [j["name"] for j in other_jobs],
+        },
     }
 
 
@@ -307,11 +366,20 @@ def _cron_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     agent_value = job.get("agent")
     if agent_value is None:
         agent_value = deliver not in {"local", "none", ""}
+    schedule = job.get("schedule") or ""
+    if isinstance(schedule, dict):
+        schedule = str(schedule.get("display") or schedule.get("expr") or schedule.get("kind") or "")
+    schedule = str(schedule)
     return {
         "name": name,
         "deliver": deliver,
         "agent": bool(agent_value),
-        "schedule": str(job.get("schedule") or ""),
+        "classification": (
+            "core" if name in CORE_MEMORY_OS_CRON else
+            "optional" if name in OPTIONAL_MEMORY_OS_CRON else
+            "other"
+        ),
+        "schedule": schedule,
         "last": str(job.get("last") or job.get("last_run_at") or "n/a"),
         "last_ms": _safe_int(job.get("last_ms") or job.get("duration_ms")),
         "next": str(job.get("next") or job.get("next_run_at") or "n/a"),
@@ -320,7 +388,50 @@ def _cron_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _owner_review_backlog_snapshot(memory_root: Path) -> dict[str, Any]:
+    """Aggregate real owner-review backlog from candidate states.
+
+    Returns both *total* backlog counts (across all candidates) and the
+    *visible* subset from the latest rendered digest, so the dashboard
+    can show when the digest is a partial agenda view.
+    """
+    candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
+    pending_total = 0
+    action_required = 0
+    review_suggested = 0
+    fyi = 0
+    for c in candidates:
+        state = str(c.get("canonical_state") or c.get("bridge_state") or "")
+        if state in ("owner_eligible", "pending"):
+            pending_total += 1
+            severity = str(c.get("owner_severity") or "")
+            if severity == "action_required":
+                action_required += 1
+            elif severity == "review_suggested":
+                review_suggested += 1
+            else:
+                fyi += 1
+
+    latest_digest = _latest_jsonl(memory_root / "system" / "owner_review_rendered_digests.jsonl")
+    sections = latest_digest.get("sections") if isinstance(latest_digest.get("sections"), dict) else {}
+    return {
+        "backlog": {
+            "pending_total": pending_total,
+            "action_required": action_required,
+            "review_suggested": review_suggested,
+            "fyi": fyi,
+        },
+        "latest_digest_visible": {
+            "action_required_shown": len(sections.get("action_required") or []),
+            "review_suggested_shown": len(sections.get("review_suggested") or []),
+            "fyi_shown": len(sections.get("fyi") or []),
+        },
+        "digest_mode": str(latest_digest.get("digest_mode") or "unknown"),
+    }
+
+
 def _owner_review_snapshot(memory_root: Path) -> dict[str, Any]:
+    backlog = _owner_review_backlog_snapshot(memory_root)
     latest_digest = _latest_jsonl(memory_root / "system" / "owner_review_rendered_digests.jsonl")
     sections = latest_digest.get("sections") if isinstance(latest_digest.get("sections"), dict) else {}
     items = []
@@ -337,11 +448,17 @@ def _owner_review_snapshot(memory_root: Path) -> dict[str, Any]:
     by_result = Counter(str(item.get("result") or item.get("status") or "") for item in actions)
     by_type = Counter(str(item.get("action_type") or "") for item in actions)
     return {
-        "mode": str(latest_digest.get("digest_mode") or latest_digest.get("mode") or "agenda"),
+        "mode": backlog["digest_mode"],
         "counts": {
-            "action_required_shown": len(sections.get("action_required") or []),
-            "review_suggested_shown": len(sections.get("review_suggested") or []),
-            "fyi_shown": len(sections.get("fyi") or []),
+            # Real backlog totals — not limited to latest-digest visibility
+            "pending_total": backlog["backlog"]["pending_total"],
+            "action_required": backlog["backlog"]["action_required"],
+            "review_suggested": backlog["backlog"]["review_suggested"],
+            "fyi": backlog["backlog"]["fyi"],
+            # Latest digest visible subset (may be less than totals)
+            "action_required_shown": backlog["latest_digest_visible"]["action_required_shown"],
+            "review_suggested_shown": backlog["latest_digest_visible"]["review_suggested_shown"],
+            "fyi_shown": backlog["latest_digest_visible"]["fyi_shown"],
         },
         "states": {
             "pending": len(items),
@@ -373,15 +490,20 @@ def _owner_queue_item(item: dict[str, Any], severity: str) -> dict[str, Any]:
 
 
 def _memory_snapshot(memory_root: Path) -> dict[str, Any]:
-    working_records = _count_files(memory_root / "working", "*.json")
-    candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
-    crystallized_records, classes = _crystallized_counts(memory_root / "crystallized")
     index_path = memory_root / "index" / "memory_os.db"
+    working_records = _working_item_count(memory_root, index_path)
+    candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
+    crystallized_records = _crystallized_record_count(memory_root, index_path, candidates)
+    crystallized_raw, classes = _crystallized_counts(memory_root / "crystallized")
     fts_rows = _sqlite_count(index_path, "fts_entries") or _sqlite_count(index_path, "events")
     return {
         "working": working_records,
+        "working_files": _count_files(memory_root / "working", "*.json"),
         "crystallized": crystallized_records,
+        "crystallized_raw_segments": crystallized_raw,
+        "crystallized_markdown_files": _count_files(memory_root / "crystallized", "*.md"),
         "candidates": len(candidates),
+        "candidates_raw_rows": len(candidates),
         "canonical_files": _count_files(memory_root, "*"),
         "index_mb": round(index_path.stat().st_size / (1024 * 1024), 1) if index_path.exists() else 0,
         "index_fresh": index_path.exists(),
@@ -391,6 +513,27 @@ def _memory_snapshot(memory_root: Path) -> dict[str, Any]:
         "crystallized_trend": _flat_series(crystallized_records, 21),
         "classes": _class_rows(classes),
     }
+
+
+def _working_item_count(memory_root: Path, index_path: Path) -> int:
+    """Return working-item count, preferring the SQLite index."""
+    count = _sqlite_count(index_path, "working_items")
+    if count > 0:
+        return count
+    current = _read_json(memory_root / "working" / "current.json")
+    if isinstance(current, dict) and isinstance(current.get("items"), list):
+        return len(current["items"])
+    return _count_files(memory_root / "working", "*.json")
+
+
+def _crystallized_record_count(memory_root: Path, index_path: Path, candidates: list[dict[str, Any]] | None = None) -> int:
+    """Return approved crystallized record count, preferring the SQLite index."""
+    count = _sqlite_count(index_path, "crystallized_records")
+    if count > 0:
+        return count
+    if candidates is None:
+        candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
+    return sum(1 for c in candidates if c.get("canonical_state") == "crystallized")
 
 
 def _render_last_status(*, raw_status: str | None, cadence_class: str) -> str:
@@ -416,12 +559,14 @@ def _modules_snapshot(cadence_report: dict[str, Any]) -> dict[str, Any]:
                 "run": _safe_int(counters.get("run_count")),
                 "gen": _safe_int(counters.get("generated_count")),
                 "skip": _safe_int(counters.get("skipped_count")),
-                "err": _safe_int(counters.get("error_count")),
+                "err": _safe_int(counters.get("error_count")),           # historical cumulative
+                "current_err": _safe_int(counters.get("current_window_error_count")),  # current window
                 "dup": _safe_int(counters.get("duplicate_count")),
                 "last": _render_last_status(
                     raw_status=counters.get("last_status"),
                     cadence_class=str(item.get("target_cadence_class") or ""),
                 ),
+                "last_reason": str(counters.get("last_reason") or ""),
                 "split": bool(item.get("production_split_recommended"))
                 and not bool(item.get("module_local_skip_gate_visible")),
             }
@@ -560,6 +705,89 @@ def _audit_snapshot(memory_root: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _rh26_snapshot(memory_root: Path) -> dict[str, Any]:
+    """Read the most recent RH-26 probe artifact for heading anomaly status.
+
+    Uses the same two-location search as ``_full_monitor_snapshot``.
+    """
+    artifact = _find_monitor_artifact(memory_root)
+    if artifact is None:
+        return {"status": "unknown", "fail_codes": [], "warn_codes": []}
+    data = _read_json(artifact)
+    results = data.get("results") if isinstance(data, dict) else {}
+    if not isinstance(results, dict):
+        results = {}
+    rh26 = {}
+    for entry in results.get("fail", []):
+        if isinstance(entry, dict) and "rh26" in str(entry.get("code", "")):
+            rh26 = entry
+            break
+    if not rh26:
+        for entry in results.get("warn", []):
+            if isinstance(entry, dict) and "rh26" in str(entry.get("code", "")):
+                rh26 = entry
+                break
+    return {
+        "status": results.get("status", "unknown"),
+        "fail_codes": [str(e.get("code") or "") for e in (results.get("fail") or []) if isinstance(e, dict)],
+        "warn_codes": [str(e.get("code") or "") for e in (results.get("warn") or []) if isinstance(e, dict)],
+        "rh26_detail": rh26,
+    }
+
+
+def _execution_gate_snapshot(memory_root: Path) -> dict[str, Any]:
+    """Read ExecutionGate envelope ledger for completion / violation counts."""
+    envelopes = _read_jsonl(memory_root / "system" / "execution_gate_envelopes.jsonl")
+    completions = sum(1 for e in envelopes if e.get("phase") == "completed")
+    violations = sum(1 for e in envelopes if e.get("boundary_violation"))
+    return {
+        "total_envelopes": len(envelopes),
+        "completions": completions,
+        "boundary_violations": violations,
+        "status": "warn" if violations > 0 else "ok",
+    }
+
+
+def _owner_aging_snapshot(memory_root: Path) -> dict[str, Any]:
+    """Read candidate ages for owner-review aging distribution."""
+    candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
+    now = datetime.now(timezone.utc)
+    aging: dict[str, int] = {"<24h": 0, "1-7d": 0, "7-30d": 0, ">30d": 0}
+    for c in candidates:
+        state = str(c.get("canonical_state") or c.get("bridge_state") or "")
+        if state not in ("owner_eligible", "pending"):
+            continue
+        created = _parse_datetime(c.get("created_at") or c.get("approved_at"))
+        if not created:
+            continue
+        age_hours = (now - created).total_seconds() / 3600
+        if age_hours < 24:
+            aging["<24h"] += 1
+        elif age_hours < 168:
+            aging["1-7d"] += 1
+        elif age_hours < 720:
+            aging["7-30d"] += 1
+        else:
+            aging[">30d"] += 1
+    return {"aging_buckets": aging, "pending_total": sum(aging.values())}
+
+
+def _session_mirror_snapshot(hermes_home: Path) -> dict[str, Any]:
+    """Read SessionMirror status from its evidence files.
+
+    System modules live at ``hermes_home/system-modules/``, NOT under
+    ``memory-os/`` (which is the canonical store root).
+    """
+    mirror_dir = hermes_home / "system-modules" / "session_mirror"
+    if not mirror_dir.exists():
+        return {"status": "not_configured", "session_count": 0}
+    sessions = _read_jsonl(mirror_dir / "mirrored_sessions.jsonl")
+    return {
+        "status": "active" if sessions else "no_sessions",
+        "session_count": len(sessions),
+    }
+
+
 def _fill_audit_from_monitor_if_empty(snapshot: dict[str, Any]) -> None:
     if snapshot.get("audit"):
         return
@@ -573,6 +801,74 @@ def _fill_audit_from_monitor_if_empty(snapshot: dict[str, Any]) -> None:
             "tone": _status_tone(mon["status"]),
         }
     ]
+
+
+def _find_monitor_artifact(memory_root: Path) -> Path | None:
+    """Return the most recent monitor JSON artifact, or None.
+
+    Searches two locations in priority order:
+
+    1. ``system/monitor_artifacts/*.json`` — dedicated monitor output directory
+    2. ``system/monitor_*.json`` — monitor output written directly to system/
+    """
+    # Primary: dedicated artifacts directory
+    artifacts_dir = memory_root / "system" / "monitor_artifacts"
+    if artifacts_dir.exists():
+        candidates = sorted(artifacts_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            return candidates[0]
+    # Secondary: monitor_*.json written directly to system/
+    system_dir = memory_root / "system"
+    if system_dir.exists():
+        candidates = sorted(system_dir.glob("monitor_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def _full_monitor_snapshot(memory_root: Path) -> dict[str, Any]:
+    """Read the most recent full-monitor JSON artifact (read-only).
+
+    Returns structured status with fail/warn codes, artifact age, and a
+    ``stale`` flag so the dashboard can surface artifact freshness
+    independently.  If no artifact is found the result is
+    ``status: "unknown"`` with ``stale: true`` — the dashboard treats
+    this as a WARN (the monitor pipeline may not be configured to persist
+    artifacts to disk).
+    """
+    unknown: dict[str, Any] = {
+        "status": "unknown",
+        "stale": True,
+        "fail_codes": [],
+        "warn_codes": [],
+        "generated_at": None,
+        "artifact_path": None,
+        "artifact_age_seconds": -1,
+    }
+
+    artifact = _find_monitor_artifact(memory_root)
+    if artifact is None:
+        return unknown
+    data = _read_json(artifact)
+    age = int(time.time() - artifact.stat().st_mtime)
+    results: dict[str, Any] = {}
+    if isinstance(data, dict):
+        results = data.get("results") if isinstance(data.get("results"), dict) else {}
+        if not isinstance(results, dict):
+            results = {}
+    fail_entries = results.get("fail") if isinstance(results.get("fail"), list) else []
+    warn_entries = results.get("warn") if isinstance(results.get("warn"), list) else []
+    fail_codes = [str(r.get("code") or "") for r in fail_entries if isinstance(r, dict)]
+    warn_codes = [str(r.get("code") or "") for r in warn_entries if isinstance(r, dict)]
+    return {
+        "status": str(results.get("status") or "unknown"),
+        "fail_codes": fail_codes,
+        "warn_codes": warn_codes,
+        "generated_at": str(data.get("generated_at") or "") if isinstance(data, dict) else None,
+        "artifact_path": str(artifact),
+        "artifact_age_seconds": max(age, 0),
+        "stale": age > 3600,
+    }
 
 
 def _safe_status_report(hermes_home: Path, memory_root: Path, profile: str) -> dict[str, Any]:

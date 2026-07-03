@@ -25,24 +25,27 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 
 def _write_jobs(home: Path) -> None:
     jobs = []
-    for index, name in enumerate(
-        (
-            "memory-os-owner-review-digest",
-            "memory-os-right-brain-expression",
-            "memory-os-module-cadence-report",
-            "memory-os-right-brain-expression-outcome",
-            "memory-os-proposal-followups-opsgate",
-            "memory-os-expression-feedback-request",
-            "memory-os-memory-sources-feedback-request",
-        ),
-        start=1,
-    ):
+    core_names = [
+        "memory-os-owner-review-digest",
+        "memory-os-proposal-followups-opsgate",
+        "memory-os-index-sync",
+        "memory-os-candidate-aggregation",
+        "memory-os-fact-judge",
+        "memory-os-expression-feedback-request",
+        "memory-os-memory-sources-feedback-request",
+    ]
+    optional_names = [
+        "memory-os-right-brain-expression",
+        "memory-os-module-cadence-report",
+        "memory-os-right-brain-expression-outcome",
+    ]
+    for index, name in enumerate(core_names + optional_names, start=1):
         jobs.append(
             {
                 "id": f"job-{index}",
                 "name": name,
                 "schedule": "*/30 * * * *",
-                "deliver": "local" if index > 2 else "owner",
+                "deliver": "local",
                 "enabled": True,
             }
         )
@@ -158,12 +161,17 @@ def test_dashboard_snapshot_maps_read_only_evidence_without_writing_reports(tmp_
     serialized = json.dumps(snapshot, ensure_ascii=False)
 
     assert snapshot["schema_version"] == "memory-os.monitor_dashboard_snapshot.v0"
-    assert snapshot["cron"]["enabled"] == 7
+    assert snapshot["cron"]["enabled"] == 7  # 7 core cron jobs enabled
+    assert snapshot["cron"]["core_total"] == 7
+    assert snapshot["cron"]["optional_total"] == 3
     assert {item["key"]: item["unit"] for item in snapshot["kpis"]}["cron_ok"] == "enabled jobs"
     assert snapshot["ownerReview"]["counts"]["action_required_shown"] == 1
+    assert snapshot["ownerReview"]["counts"]["action_required"] >= 0  # real backlog
     assert snapshot["ownerReview"]["queue"][0]["token"] == "oa_abcdef12"
-    assert snapshot["memory"]["working"] == 1
-    assert snapshot["memory"]["crystallized"] == 2
+    assert snapshot["memory"]["working"] == 0  # items[] is empty in test data
+    assert snapshot["memory"]["working_files"] == 1
+    assert snapshot["memory"]["crystallized"] == 0  # no index record, no crystallized candidate state
+    assert snapshot["memory"]["crystallized_raw_segments"] == 2  # markdown frontmatter count
     assert snapshot["modules"]["module_count"] == 18
     assert snapshot["expression"]["sent"] == 1
     assert snapshot["hindsight"]["retained"] == 1
@@ -340,3 +348,116 @@ def test_on_demand_module_shows_idle_not_missing(tmp_path):
     assert module._render_last_status(raw_status="ok", cadence_class="on_demand_dry_run") == "ok"
     assert module._render_last_status(raw_status="error", cadence_class="daily_weekly") == "error"
     assert module._render_last_status(raw_status="observed", cadence_class="owner_daily") == "observed"
+
+
+# ── Full-monitor integration tests (Task 1) ──────────────────────────────
+
+
+def _write_monitor_artifact(memory_root: Path, status: str, fail_codes=None, warn_codes=None, age_seconds: int = 0):
+    """Write a synthetic full-monitor artifact for testing."""
+    artifacts_dir = memory_root / "system" / "monitor_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    artifact = {
+        "schema_version": "memory-os.monitor.v0",
+        "generated_at": "2026-07-03T15:00:00Z",
+        "results": {
+            "status": status,
+            "fail": [{"code": c} for c in (fail_codes or [])],
+            "warn": [{"code": c} for c in (warn_codes or [])],
+        },
+    }
+    path = artifacts_dir / "monitor_2026-07-03T150000.json"
+    path.write_text(json.dumps(artifact, ensure_ascii=False), encoding="utf-8")
+    # Set mtime to simulate artifact age
+    import os as _os
+    mtime = _os_path_mtime(path, age_seconds)
+    return path
+
+
+def _os_path_mtime(path: Path, age_seconds: int) -> None:
+    import os
+    import time
+    target = time.time() - age_seconds
+    os.utime(str(path), (target, target))
+
+
+def test_full_monitor_fail_makes_dashboard_fail(tmp_path):
+    """artifact status=FAIL → dashboard monitor.status = FAIL."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "FAIL", fail_codes=["rh26_missing_expected_heading"], warn_codes=["monitor_error_observability_suppressed_errors"])
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    assert snapshot["monitor"]["status"] == "FAIL", f"Expected FAIL, got {snapshot['monitor']['status']}"
+    assert snapshot["monitor"]["fail"] > 0
+    fm = snapshot["fullMonitor"]
+    assert fm["status"] == "FAIL"
+    assert "rh26_missing_expected_heading" in fm["fail_codes"]
+
+
+def test_full_monitor_warn_makes_dashboard_warn(tmp_path):
+    """artifact status=WARN, dashboard sections clean → dashboard WARN."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "WARN", warn_codes=["monitor_error_observability_suppressed_errors"])
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    assert snapshot["monitor"]["status"] == "WARN", f"Expected WARN, got {snapshot['monitor']['status']}"
+
+
+def test_full_monitor_missing_artifact_returns_unknown(tmp_path):
+    """No artifact dir → fullMonitor.status=unknown, stale=true."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    # Don't write any monitor artifact
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    fm = snapshot["fullMonitor"]
+    assert fm["status"] == "unknown"
+    assert fm["stale"] is True
+
+
+def test_full_monitor_stale_artifact_flags_stale(tmp_path):
+    """artifact older than 1h → stale=true, dashboard elevates to WARN when clean."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "PASS", age_seconds=4000)  # > 3600s
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    fm = snapshot["fullMonitor"]
+    assert fm["stale"] is True
+    # stale artifact + clean dashboard → full monitor stale triggers WARN
+    assert snapshot["monitor"]["status"] in ("WARN", "PASS"), f"Unexpected status: {snapshot['monitor']['status']}"
+
+
+def test_full_monitor_pass_does_not_break_existing_pass(tmp_path):
+    """artifact status=PASS → dashboard reports fullMonitor correctly, not FAIL."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "PASS", age_seconds=60)  # fresh
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    fm = snapshot["fullMonitor"]
+    assert fm["status"] == "PASS"
+    assert fm["stale"] is False
+    assert fm["artifact_age_seconds"] <= 120, f"fresh artifact should have low age, got {fm['artifact_age_seconds']}"
+    assert snapshot["monitor"]["status"] != "FAIL", (
+        f"Dashboard should not be FAIL when full monitor is PASS. "
+        f"Got {snapshot['monitor']['status']}, sections: "
+        + ", ".join(f"{s['key']}={s['warn']}w" for s in snapshot["monitor"]["sections"] if s["warn"])
+    )

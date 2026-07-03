@@ -196,7 +196,18 @@
   function headerBar(data) {
     const d = data.meta || {};
     const mon = data.monitor || {};
+    const fm = data.fullMonitor || {};
     const tone = mon.status === "PASS" ? "good" : mon.status === "WARN" ? "warn" : "fail";
+    // Full-monitor annotation line
+    let fmLine = "";
+    if (fm.status && fm.status !== "unknown") {
+      const fmTone = fm.status === "FAIL" ? "fail" : fm.status === "WARN" ? "warn" : "good";
+      const codes = (fm.fail_codes || []).concat(fm.warn_codes || []).slice(0, 5).map(esc).join(", ");
+      const age = fm.artifact_age_seconds != null ? (fm.artifact_age_seconds < 120 ? "just now" : Math.round(fm.artifact_age_seconds / 60) + "m ago") : "";
+      fmLine = `<div class="status-sub fm-status"><span class="dot dot-${fmTone}"></span> full monitor <b>${esc(fm.status)}</b>${codes ? ": " + codes : ""}${age ? " · " + age : ""}${fm.stale ? " · <span class=\"pill pill-warn\">stale</span>" : ""}</div>`;
+    } else {
+      fmLine = `<div class="status-sub fm-status"><span class="dot dot-warn"></span> full monitor <b>no artifact</b><span class="pill pill-warn">stale</span></div>`;
+    }
     return `
       <header class="topbar">
         <div class="brand">
@@ -209,13 +220,15 @@
         <div class="topbar-mid">
           <span class="kv"><i>profile</i>${esc(d.profile)}</span>
           <span class="kv"><i>host</i>${esc(d.host)} · ${esc(d.environment)}</span>
-          <span class="kv"><i>hindsight</i>${esc(d.hindsight_mode)}</span>
+          <span class="kv"><i>provider</i>${esc(d.canonical_provider || d.provider)} (canonical)</span>
+          <span class="kv"><i>hindsight</i>${esc(d.hindsight_role || d.hindsight_projection_mode || "off")}</span>
           <span class="kv"><i>uptime</i>${esc(d.uptime)}</span>
         </div>
         <div class="topbar-right">
           <div class="status-block">
             <div class="status-pill status-${tone}"><span class="status-led"></span> monitor ${esc(mon.status)}</div>
             <div class="status-sub">${fmt(mon.pass)}/${fmt(mon.checks_total)} checks · ${fmt(mon.warn)} warn · ${fmt(mon.fail)} fail</div>
+            ${fmLine}
           </div>
           <div class="run-block">
             <div class="run-line"><i>run</i>${esc(mon.run_id)}</div>
@@ -285,14 +298,15 @@
     return panel({
       kicker: "owner action processor",
       title: "Owner 审批队列",
-      sub: "oa_ action tokens",
+      sub: "oa_ action tokens · ${esc(o.mode)} mode",
       className: "span-4",
       body: `
         <div class="oreview-counts">
-          <div class="ocount oc-action"><b>${fmt(o.counts && o.counts.action_required_shown)}</b><span>action_required</span></div>
-          <div class="ocount oc-review"><b>${fmt(o.counts && o.counts.review_suggested_shown)}</b><span>review_suggested</span></div>
-          <div class="ocount oc-fyi"><b>${fmt(o.counts && o.counts.fyi_shown)}</b><span>fyi</span></div>
+          <div class="ocount oc-action"><b>${fmt(o.counts && o.counts.action_required)}</b><span>action_required</span>${(o.counts && o.counts.action_required_shown !== o.counts.action_required) ? `<small> (${fmt(o.counts.action_required_shown)} shown)</small>` : ""}</div>
+          <div class="ocount oc-review"><b>${fmt(o.counts && o.counts.review_suggested)}</b><span>review_suggested</span>${(o.counts && o.counts.review_suggested_shown !== o.counts.review_suggested) ? `<small> (${fmt(o.counts.review_suggested_shown)} shown)</small>` : ""}</div>
+          <div class="ocount oc-fyi"><b>${fmt(o.counts && o.counts.fyi)}</b><span>fyi</span>${(o.counts && o.counts.fyi_shown !== o.counts.fyi) ? `<small> (${fmt(o.counts.fyi_shown)} shown)</small>` : ""}</div>
         </div>
+        ${(o.counts && o.counts.pending_total != null && (o.counts.pending_total !== (o.counts.action_required_shown||0)+(o.counts.review_suggested_shown||0)+(o.counts.fyi_shown||0))) ? `<div class="digest-note dim">latest digest shows visible subset only · total backlog: ${fmt(o.counts.pending_total)} pending</div>` : ""}
         <div class="oreview-donut">
           ${donut(segments, 104, 13, { value: fmt(states.pending), label: "pending" })}
           <div class="donut-legend">
@@ -322,9 +336,12 @@
 
   function cronPanel(data) {
     const c = data.cron || {};
-    const rows = (c.jobs || []).map((j) => `
+    const rows = (c.jobs || []).map((j) => {
+      const clsTone = j.classification === "core" ? "good" : j.classification === "optional" ? "muted" : "warn";
+      return `
       <tr>
         <td class="mono strong">${esc(String(j.name || "").replace("memory-os-", ""))}</td>
+        <td>${pill(j.classification || "other", clsTone)}</td>
         <td class="mono dim">${esc(j.deliver)}</td>
         <td>${j.agent ? pill("agent", "accent") : pill("local", "muted")}</td>
         <td class="mono dim">${esc(j.schedule)}</td>
@@ -332,16 +349,20 @@
         <td class="mono dim">${esc(j.next)}</td>
         <td class="mono ta-r">${fmt(j.last_ms)}</td>
         <td><span class="cell-status">${dot(j.status === "ok" ? "good" : "warn")}${esc(j.status)}</span></td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
+    const subParts = [`${fmt(c.enabled)}/${fmt(c.core_total || c.total)} core`];
+    if (c.optional_total) subParts.push(`${c.optional_total} optional`);
+    if (c.other_total) subParts.push(`${c.other_total} other`);
     return panel({
       kicker: "hermes cron",
       title: "Cron 作业",
-      sub: `${fmt(c.enabled)}/${fmt(c.total)} enabled`,
+      sub: subParts.join(" · "),
       className: "span-12",
-      right: pill(c.enabled === c.total ? "all ok" : "partial", c.enabled === c.total ? "good" : "warn"),
+      right: pill(c.enabled === (c.core_total || c.total) ? "all core ok" : "partial", c.enabled === (c.core_total || c.total) ? "good" : "warn"),
       body: `
         <table class="tbl">
-          <thead><tr><th>job</th><th>deliver</th><th>agent</th><th>schedule</th><th>last</th><th>next</th><th class="ta-r">ms</th><th>status</th></tr></thead>
+          <thead><tr><th>job</th><th>class</th><th>deliver</th><th>agent</th><th>schedule</th><th>last</th><th>next</th><th class="ta-r">ms</th><th>status</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`,
     });
@@ -449,9 +470,9 @@
       right: pill(`index ${m.index_fresh ? "fresh" : "stale"}`, m.index_fresh ? "good" : "warn"),
       body: `
         <div class="mem-stats">
-          <div class="mem-stat"><b>${fmt(m.working)}</b><span>working</span></div>
-          <div class="mem-stat"><b>${fmt(m.crystallized)}</b><span>crystallized</span></div>
-          <div class="mem-stat"><b>${fmt(m.candidates)}</b><span>candidates</span></div>
+          <div class="mem-stat"><b>${fmt(m.working)}</b><span>working items</span>${m.working_files != null && m.working_files !== m.working ? `<small> (${fmt(m.working_files)} files)</small>` : ""}</div>
+          <div class="mem-stat"><b>${fmt(m.crystallized)}</b><span>approved records</span>${m.crystallized_raw_segments != null && m.crystallized_raw_segments !== m.crystallized ? `<small> / ${fmt(m.crystallized_raw_segments)} raw segments</small>` : ""}</div>
+          <div class="mem-stat"><b>${fmt(m.candidates)}</b><span>candidates</span>${m.candidates_raw_rows != null ? `<small> (${fmt(m.candidates_raw_rows)} raw rows)</small>` : ""}</div>
           <div class="mem-stat"><b>${fmt(m.canonical_files)}</b><span>canonical files</span></div>
           <div class="mem-stat"><b>${num(m.index_mb).toFixed(1)}<i>MB</i></b><span>sqlite index</span></div>
           <div class="mem-stat"><b>${fmt(m.fts_rows)}</b><span>fts rows</span></div>
@@ -517,19 +538,23 @@
       { label: "duplicate", value: t.duplicate_count, color: "var(--warn)" },
     ];
     const stTone = { ok: "good", skipped: "muted", error: "fail", missing: "warn", observed: "accent" };
-    const rows = (mo.rows || []).map((r) => `
-      <tr class="${num(r.err) > 0 ? "row-err" : ""}">
+    const rows = (mo.rows || []).map((r) => {
+      const currErr = num(r.current_err) || num(r.err);
+      return `
+      <tr class="${currErr > 0 ? "row-err" : ""}">
         <td class="mono strong">${esc(r.module)}</td>
         <td class="mono dim">${esc(r.runner)}</td>
         <td class="mono dim">${esc(r.cadence)}</td>
         <td class="mono ta-r">${fmt(r.run)}</td>
         <td class="mono ta-r">${fmt(r.gen)}</td>
         <td class="mono ta-r dim">${fmt(r.skip)}</td>
-        <td class="mono ta-r ${num(r.err) ? "v-err" : "dim"}">${fmt(r.err)}</td>
+        <td class="mono ta-r ${currErr ? "v-err" : "dim"}">${currErr ? fmt(currErr) : "-"}</td>
+        <td class="mono ta-r dim">${num(r.err) && num(r.err) !== currErr ? fmt(num(r.err)) : "-"}</td>
         <td class="mono ta-r ${num(r.dup) ? "v-warn" : "dim"}">${fmt(r.dup)}</td>
         <td><span class="cell-status">${dot(stTone[r.last] || "muted")}${esc(r.last)}</span></td>
         <td>${r.split ? pill("pending", "warn") : '<span class="dim mono">-</span>'}</td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
     return panel({
       kicker: "module_cadence_report.v0",
       title: "模块 cadence",
@@ -551,7 +576,7 @@
             </div>
           </div>
           <table class="tbl tbl-compact">
-            <thead><tr><th>module</th><th>runner</th><th>cadence class</th><th class="ta-r">run</th><th class="ta-r">gen</th><th class="ta-r">skip</th><th class="ta-r">err</th><th class="ta-r">dup</th><th>last</th><th>split</th></tr></thead>
+            <thead><tr><th>module</th><th>runner</th><th>cadence class</th><th class="ta-r">run</th><th class="ta-r">gen</th><th class="ta-r">skip</th><th class="ta-r">cur err</th><th class="ta-r">hist err</th><th class="ta-r">dup</th><th>last</th><th>split</th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>`,
@@ -561,9 +586,9 @@
   function hindsightPanel(data) {
     const h = data.hindsight || {};
     return panel({
-      kicker: "derived projection",
+      kicker: "derived projection · NOT canonical",
       title: "Hindsight 投影账本",
-      sub: h.recall,
+      sub: "optional adapter / projection only · " + (h.recall || ""),
       className: "span-6",
       right: pill(h.mode, "accent"),
       body: `
@@ -633,6 +658,27 @@
     });
   }
 
+  function mosMonitorCards(data) {
+    const fm = data.fullMonitor || {};
+    const rh = data.rh26 || {};
+    const eg = data.executionGate || {};
+    const oa = data.ownerReviewAging || {};
+    const sm = data.sessionMirror || {};
+    const cards = [
+      { kicker: "RH-26 probe", title: "Heading Anomalies", body: fm.status === "unknown" ? `<span class="dim">no monitor artifact</span>` : `${pill(rh.status || fm.status, rh.status === "FAIL" ? "fail" : "good")}${(rh.fail_codes||[]).map(function(c){return " "+esc(c)}).join("")}${(rh.warn_codes||[]).map(function(c){return " "+esc(c)}).join("")}` },
+      { kicker: "ExecutionGate", title: "Envelopes", body: eg.status === "ok" ? `${fmt(eg.completions)} completed · 0 violations` : `${fmt(eg.completions)} completed · ${fmt(eg.boundary_violations)} violations ${pill("warn","warn")}` },
+      { kicker: "OwnerReviewAging", title: "Pending Age", body: oa.aging_buckets ? Object.entries(oa.aging_buckets).map(function(e){return `<span>${esc(e[0])}: <b>${fmt(e[1])}</b></span>`}).join(" · ") : `<span class="dim">no data</span>` },
+      { kicker: "SessionMirror", title: "Sessions", body: `${pill(sm.status || "unknown", sm.status==="active"?"good":"muted")} · ${fmt(sm.session_count)} sessions` },
+    ];
+    return panel({
+      kicker: "Memory-OS monitor",
+      title: "监控面板",
+      sub: "full monitor + probe status",
+      className: "span-12",
+      body: `<div class="mos-cards">${cards.map(function(c){return `<div class="mos-card"><div class="card-kicker dim">${esc(c.kicker)}</div><div class="card-title">${esc(c.title)}</div><div class="card-body">${c.body}</div></div>`}).join("")}</div>`,
+    });
+  }
+
   function dashboard(data) {
     return `
       <div class="mos">
@@ -651,10 +697,12 @@
           ${cronPanel(data)}
           ${ownerQueueList(data)}
           ${modulesPanel(data)}
+          ${mosMonitorCards(data)}
         </div>
         <footer class="mos-foot">
           <span>${esc(data.meta.product)} · ${esc(data.meta.version)} · ${esc(data.meta.monitor_build)}</span>
           <span class="mono dim">generated ${esc(data.meta.generated_at)} · ${esc(data.meta.hermes_home)}</span>
+          <span class="mono dim trend-note">trend charts: current snapshot only (no historical archive)</span>
         </footer>
       </div>`;
   }
