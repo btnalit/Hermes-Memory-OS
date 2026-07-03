@@ -14,6 +14,9 @@ from uuid import uuid4
 
 from .roots import MemoryOSRoots
 
+# ── Dedup sentinel — must be a unique object that cannot appear in JSON ──
+_SENTINEL = object()
+
 # ── Overridable knob registry ──────────────────────────────────────────
 # Boundary: only knobs listed here can be overridden. base/Hermes knobs
 # are never listed → V3 physically cannot touch them.
@@ -135,6 +138,23 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "default": False,
         "kind": "lane_switch",
         "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "llm_contradiction_same_topic_threshold": {
+        "module": "contradiction_lane",
+        "default": 0.75,
+        "bounds": [0.0, 1.0],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "contradiction_candidate_rate",
+    },
+    "llm_contradiction_candidate_source": {
+        "module": "contradiction_lane",
+        "default": "cosine",
+        "kind": "lane_switch",
+        "allowed": ["cosine", "entity"],
         "meta": False,
         "scope": "upper_layer",
         "ab_metric": None,
@@ -337,6 +357,30 @@ def register_override(
     now = _now or datetime.now(timezone.utc)
     store_path = _override_store_path(roots, _store_root=_store_root)
     store_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ── Dedup: skip write when the effective value is already the target ──
+    # Uses a sentinel default so we can distinguish "no override exists"
+    # from "override exists and its value happens to equal the registry
+    # default". Prevents self_evolution no-change proposal spam and any
+    # other duplicate-override source from bloating the JSONL file.
+    if store_path.exists():
+        try:
+            current_effective = resolve_knob(
+                name, default=_SENTINEL, roots=roots, _store_root=_store_root,
+            )
+        except Exception:
+            current_effective = _SENTINEL
+        if current_effective is not _SENTINEL and current_effective == value:
+            return {
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "skipped",
+                "knob": name,
+                "override_value": value,
+                "prior_value": prior,
+                "state": "skipped",
+                "reason": "value_unchanged",
+                "ts": now.isoformat(),
+            }
 
     record = {
         "schema_version": "memory-os.knob_override.v0",
