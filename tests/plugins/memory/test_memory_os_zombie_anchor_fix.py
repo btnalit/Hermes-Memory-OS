@@ -583,3 +583,270 @@ def test_on_session_end_both_tombstone_and_supersede(tmp_path):
     assert statuses[-2:].count("active") == 0, (
         f"No active status expected in last 2 records, got: {statuses[-2:]}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Compact-resume defense: initialize() writes superseded tombstone after
+# cross-session anchor recovery (Layer 4 — closes the on_session_end gap)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def test_compact_defense_cross_session_recovery_writes_tombstone(tmp_path):
+    """After initialize() recovers a cross-session anchor, the most recent
+    record on disk MUST be status='superseded' — proving the compact-resume
+    defense fired."""
+    # Set up: manually write an active anchor from session-old (1h ago)
+    anchor_dir = tmp_path / "memory-os" / "system"
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+    anchor_path = anchor_dir / "active_task_anchor.jsonl"
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    old_record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_defense_zombie",
+        "created_at": recent_time,
+        "profile": "memoryos-test",
+        "session_id": "session-old",
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: 僵尸任务防御测试\n- session: session-old",
+        "status": "active",
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    anchor_path.write_text(
+        json.dumps(old_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    # Act: initialize with a DIFFERENT session_id — this triggers recovery
+    # AND must write the superseded tombstone.
+    provider = _init_provider(tmp_path, session_id="session-new")
+    recovered = provider._current_task_anchor
+
+    # Assert 1: the anchor WAS recovered (with cross-session marker)
+    assert recovered != "", "Cross-session anchor should be recovered"
+    assert "跨会话恢复" in recovered, "Cross-session marker expected"
+    assert "僵尸任务防御测试" in recovered
+
+    # Assert 2: the most recent record on disk is "superseded"
+    records = _read_jsonl(anchor_path)
+    assert len(records) >= 2, f"Expected ≥2 records (original + tombstone), got {len(records)}"
+    assert records[-1]["status"] == "superseded", (
+        f"Compact-resume defense FAILED: expected 'superseded' as last record,"
+        f" got {records[-1]['status']}. Records: {[r['status'] for r in records]}"
+    )
+
+    provider.shutdown()
+
+
+def test_compact_defense_tombstone_prevents_future_zombie_resurrection(tmp_path):
+    """Full chain: Session A writes anchor → Session B recovers + tombstones
+    → Session C does NOT recover.  This is the core e2e test for the
+    compact-resume defense."""
+    # ── Session A: write an active anchor ────────────────────────────
+    p_a = _init_provider(tmp_path, session_id="session-a")
+    p_a.on_pre_compress(_foreground_messages())
+    # Simulate: on_pre_compress fired but on_session_end was SKIPPED (compact)
+    anchor_path = _active_task_anchor_path(p_a._roots)
+    records_after_a = _read_jsonl(anchor_path)
+    assert records_after_a[-1]["status"] == "active", "Session A should have active anchor"
+    p_a.shutdown()
+
+    # ── Session B: compact continuation — recovers + tombstones ──────
+    p_b = _init_provider(tmp_path, session_id="session-b")
+    recovered_b = p_b._current_task_anchor
+    assert recovered_b != "", "Session B should recover session A's anchor"
+    assert "跨会话恢复" in recovered_b
+    records_after_b = _read_jsonl(anchor_path)
+    assert records_after_b[-1]["status"] == "superseded", (
+        f"Session B MUST write superseded tombstone."
+        f" Last status: {records_after_b[-1]['status']}"
+    )
+    p_b.shutdown()
+
+    # ── Session C: should NOT recover — tombstone blocks it ──────────
+    p_c = _init_provider(tmp_path, session_id="session-c")
+    assert p_c._current_task_anchor == "", (
+        f"Session C MUST NOT recover the zombie anchor."
+        f" Got: {p_c._current_task_anchor!r}"
+    )
+    context = p_c.prefetch("新任务", session_id="session-c")
+    p_c.shutdown()
+
+    # Current Foreground Task must NOT contain session A's task
+    if "### Current Foreground Task" in context:
+        fg_start = context.index("### Current Foreground Task")
+        fg_section = context[fg_start:]
+        next_section = fg_section.find("\n###", 5)
+        fg_text = fg_section[:next_section] if next_section != -1 else fg_section
+        assert "ComfyUI" not in fg_text, (
+            f"Zombie anchor resurrected in Session C despite tombstone:\n{fg_text}"
+        )
+
+
+def test_compact_defense_counterfactual_without_tombstone_zombie_survives(tmp_path):
+    """COUNTERFACTUAL: Prove that WITHOUT the tombstone write, the zombie
+    anchor WOULD survive across multiple sessions.
+
+    This test bypasses initialize() and calls _read_latest_active_task_anchor
+    directly (with default max_age_hours=0, no age gate).  It demonstrates
+    the pre-fix behavior: every new session that reads the disk sees the
+    same active anchor — indefinitely."""
+    provider = _init_provider(tmp_path, session_id="session-now")
+
+    # Write ONE active anchor from a different session (1h ago)
+    anchor_path = _active_task_anchor_path(provider._roots)
+    anchor_path.parent.mkdir(parents=True, exist_ok=True)
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    zombie_record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_counterfactual",
+        "created_at": recent_time,
+        "profile": "memoryos-test",
+        "session_id": "session-zombie",
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: 永生的僵尸任务\n- session: session-zombie",
+        "status": "active",
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    anchor_path.write_text(
+        json.dumps(zombie_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    # Read it once — it should be there (cross-session marker)
+    first_read = provider._read_latest_active_task_anchor(max_age_hours=24)
+    assert "永生的僵尸任务" in first_read, "First read should find the anchor"
+    assert "跨会话恢复" in first_read, "Should have cross-session marker"
+
+    # Simulate another session: read AGAIN (same session_id is fine since
+    # we're using _read_latest_active_task_anchor directly, which only
+    # compares to self.session_id).  Without the tombstone, the zombie
+    # is still there.
+    second_read = provider._read_latest_active_task_anchor(max_age_hours=24)
+    assert "永生的僵尸任务" in second_read, (
+        "COUNTERFACTUAL: Without tombstone, zombie SHOULD survive second read."
+        " This proves the fix is necessary — the old behavior allows infinite"
+        " resurrection."
+    )
+
+    # And a third time — still there
+    third_read = provider._read_latest_active_task_anchor(max_age_hours=24)
+    assert "永生的僵尸任务" in third_read, (
+        "COUNTERFACTUAL: Third read also finds zombie.  Without the tombstone,"
+        " the anchor survives forever (within 24h age gate)."
+    )
+
+    provider.shutdown()
+
+
+def test_compact_defense_simulation_no_on_session_end(tmp_path):
+    """Simulate the EXACT compact-continuation flow that produces the bug:
+
+    1. Session A: on_pre_compress (writes active) → NO on_session_end
+    2. Session B: initialize → recovers + tombstones
+    3. Session C: initialize → clean start, no zombie
+
+    This is the most realistic reproduction of the Claude Code compact flow."""
+    # ── Step 1: Session A — compact happens, on_session_end skipped ──
+    p_a = _init_provider(tmp_path, session_id="session-compact-a")
+    p_a.on_pre_compress([
+        {"role": "user", "content": "部署生产环境并监控"},
+        {"role": "assistant", "content": "terminal: deploy production"},
+    ])
+    anchor_path = _active_task_anchor_path(p_a._roots)
+    records_step1 = _read_jsonl(anchor_path)
+    assert records_step1[-1]["status"] == "active"
+    assert records_step1[-1]["session_id"] == "session-compact-a"
+    # NOTE: deliberately NOT calling on_session_end — simulating compact
+    p_a.shutdown()
+
+    # ── Step 2: Session B — compact continuation ─────────────────────
+    p_b = _init_provider(tmp_path, session_id="session-compact-b")
+    recovered = p_b._current_task_anchor
+    assert recovered != "", "Session B should recover the anchor"
+    assert "跨会话恢复" in recovered, "Cross-session marker expected"
+    assert "部署生产环境" in recovered
+
+    # Verify tombstone was written
+    records_step2 = _read_jsonl(anchor_path)
+    assert records_step2[-1]["status"] == "superseded", (
+        f"Compact defense MUST write superseded after cross-session recovery."
+        f" Last status: {records_step2[-1]['status']}"
+    )
+    p_b.shutdown()
+
+    # ── Step 3: Session C — clean start ──────────────────────────────
+    p_c = _init_provider(tmp_path, session_id="session-compact-c")
+    assert p_c._current_task_anchor == "", (
+        f"Session C MUST start clean. Got: {p_c._current_task_anchor!r}"
+    )
+    context = p_c.prefetch("新任务：检查日志", session_id="session-compact-c")
+    p_c.shutdown()
+
+    # Verify no zombie contamination
+    if "### Current Foreground Task" in context:
+        fg_start = context.index("### Current Foreground Task")
+        fg_section = context[fg_start:]
+        next_section = fg_section.find("\n###", 5)
+        fg_text = fg_section[:next_section] if next_section != -1 else fg_section
+        assert "部署生产环境" not in fg_text, (
+            f"Zombie survived compact defense! Context:\n{fg_text}"
+        )
+
+
+def test_compact_defense_same_session_recovery_is_safe(tmp_path):
+    """Same-session anchor recovery + tombstone must NOT break normal
+    session operations (on_pre_compress → on_session_end chain)."""
+    # Write an active anchor from session-same (1h ago)
+    anchor_dir = tmp_path / "memory-os" / "system"
+    anchor_dir.mkdir(parents=True, exist_ok=True)
+    anchor_path = anchor_dir / "active_task_anchor.jsonl"
+    recent_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    same_record = {
+        "schema_version": "memory-os.active_task_anchor.v0",
+        "record_id": "ata_same_session_defense",
+        "created_at": recent_time,
+        "profile": "memoryos-test",
+        "session_id": "session-same",
+        "anchor": "### Memory-OS Current Task Anchor\n- current task: 同会话任务\n- session: session-same",
+        "status": "active",
+        "storage_policy": "runtime_system_metadata_not_canonical_memory",
+    }
+    anchor_path.write_text(
+        json.dumps(same_record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    # Initialize with SAME session_id
+    provider = _init_provider(tmp_path, session_id="session-same")
+    assert "同会话任务" in provider._current_task_anchor, "Same-session anchor should recover"
+    # The tombstone WAS written (initialize always writes it after recovery)
+    records_after_init = _read_jsonl(anchor_path)
+    assert records_after_init[-1]["status"] == "superseded", (
+        f"Even same-session recovery writes tombstone. Got: {records_after_init[-1]['status']}"
+    )
+
+    # Now run normal session lifecycle: on_pre_compress → on_session_end
+    provider.on_pre_compress([
+        {"role": "user", "content": "继续同会话的新任务"},
+        {"role": "assistant", "content": "terminal: run new task"},
+    ])
+    records_after_compress = _read_jsonl(anchor_path)
+    # After on_pre_compress: the old active was superseded by the new active
+    statuses_compress = [r["status"] for r in records_after_compress]
+    assert "active" in statuses_compress[-2:], (
+        f"on_pre_compress should write new active record."
+        f" Last 2 statuses: {statuses_compress[-2:]}"
+    )
+
+    provider.on_session_end([
+        {"role": "user", "content": "结束"},
+    ])
+    provider.shutdown()
+
+    records_final = _read_jsonl(anchor_path)
+    assert records_final[-1]["status"] == "completed", (
+        f"on_session_end should still write completed tombstone."
+        f" Last status: {records_final[-1]['status']}"
+    )
+    # The final status chain must NOT end with "active"
+    assert records_final[-1]["status"] != "active", (
+        "Session ended but last record is still 'active' — zombie created!"
+    )

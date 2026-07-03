@@ -116,6 +116,29 @@ class MemoryOSProvider(MemoryProvider):
         )
         if recovered:
             self._current_task_anchor = recovered
+            # ── Compact-resume defense: write a superseded tombstone
+            # immediately after recovering a cross-session anchor.  When
+            # Hermes compacts and continues without calling on_session_end
+            # on the old session, the original "active" record survives on
+            # disk.  Without this tombstone the next compact-continuation
+            # (or session restart) would resurrect the same zombie anchor
+            # again — the three-layer defense relies on on_session_end
+            # having written a tombstone, which compact skips.
+            #
+            # _write_active_task_anchor internally calls
+            # _supersede_active_anchors() first, so the on-disk chain
+            # becomes: … → active(zombie) → superseded(old) → superseded(this).
+            # The next _read_latest_active_task_anchor sees "superseded"
+            # and returns "" — clean break.
+            #
+            # Same-session recovery (unusual but possible) is safe:
+            # the tombstone is written but the in-memory anchor is set;
+            # the next normal _write_active_task_anchor call supersedes
+            # it and writes a fresh "active" record.
+            self._write_active_task_anchor(
+                anchor=recovered,
+                status="superseded",
+            )
 
     def _sync_identity_manifest(self) -> None:
         """Sync computed identity sources to identity/manifest.json."""
