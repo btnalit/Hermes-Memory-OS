@@ -717,6 +717,22 @@ run_installer() {
 	    echo "  ⚠️  memory_os_cron_working_cleanup_gate.py not found at ${cleanup_gate_src}"
 	  fi
 
+	  # Install monitor probe scripts (used by memory_os_3_200_monitor.py).
+	  # These were historically only available in the source checkout;
+	  # installing them to HERMES_HOME/scripts/ decouples the monitor from
+	  # the repo location.
+	  mkdir -p "${HERMES_HOME}/scripts"
+	  for _probe_name in memory_os_cron_adapter_probe.py memory_os_host_profile.py; do
+	    local _probe_src="${REPO_ROOT}/scripts/${_probe_name}"
+	    local _probe_dst="${HERMES_HOME}/scripts/${_probe_name}"
+	    if [[ -f "${_probe_src}" ]]; then
+	      install -m 755 "${_probe_src}" "${_probe_dst}"
+	      echo "  ✅ ${_probe_name} installed to ${_probe_dst}"
+	    else
+	      echo "  ⚠️  ${_probe_name} not found at ${_probe_src}"
+	    fi
+	  done
+
   # Create working memory cleanup cron (no_agent, watchdog pattern)
   if command_exists hermes && [[ "${DRY_RUN}" != "1" ]]; then
     local cron_name="memory-os-working-cleanup"

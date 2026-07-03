@@ -5,15 +5,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+# Location-agnostic path resolution: when HERMES_HOME is set the probe runs
+# from the installed location (HERMES_HOME/scripts/); otherwise it runs from
+# a repo checkout and derives the root from its own file path.
+_HERMES_HOME = os.environ.get("HERMES_HOME", "")
+if _HERMES_HOME:
+    _base = Path(_HERMES_HOME)
+else:
+    _base = Path(__file__).resolve().parents[1]
+if str(_base) not in sys.path:
+    sys.path.insert(0, str(_base))
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, specs_from_snapshot
 from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter

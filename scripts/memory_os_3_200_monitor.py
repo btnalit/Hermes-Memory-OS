@@ -6551,23 +6551,23 @@ def execution_gate_cron_summary():
     return summary
 
 def _execution_gate_cron_adapter_probe_summary():
-    # Resolve the cron adapter probe script relative to this monitor's own
-    # location (REPO_ROOT).  Previously hardcoded to /opt/Hermes-Memory-OS
-    # which silently returned "unavailable" when the repo was cloned elsewhere.
-    script = REPO_ROOT / "scripts" / "memory_os_cron_adapter_probe.py"
-    if not script.exists():
-        # Belt-and-suspenders: try a couple of common clone locations before
-        # giving up, so the probe still works after a repo relocation.
-        for candidate in [
-            Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py"),
-            Path.home() / "Hermes-Memory-OS" / "scripts" / "memory_os_cron_adapter_probe.py",
-        ]:
-            if candidate.exists():
-                script = candidate
-                break
-        else:
-            return {"status": "unavailable", "reason": "probe_script_missing"}
-    result = run(["python3", str(script), "--hermes-home", "/root/.hermes", "--output", "json"])
+    # Resolve the probe script via HERMES_HOME first (installed location),
+    # then fall back to repo-relative and common clone locations.
+    hermes_home = os.environ.get("HERMES_HOME", "/root/.hermes")
+    candidates = [
+        Path(hermes_home) / "scripts" / "memory_os_cron_adapter_probe.py",
+        REPO_ROOT / "scripts" / "memory_os_cron_adapter_probe.py",
+        Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py"),
+        Path.home() / "Hermes-Memory-OS" / "scripts" / "memory_os_cron_adapter_probe.py",
+    ]
+    script = None
+    for candidate in candidates:
+        if candidate.exists():
+            script = candidate
+            break
+    if script is None:
+        return {"status": "unavailable", "reason": "probe_script_missing"}
+    result = run(["python3", str(script), "--hermes-home", hermes_home, "--output", "json"])
     if not result.get("ok"):
         return {"status": "error", "reason": "probe_command_failed", "code": result.get("code")}
     try:
