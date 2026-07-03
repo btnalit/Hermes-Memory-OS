@@ -6551,9 +6551,22 @@ def execution_gate_cron_summary():
     return summary
 
 def _execution_gate_cron_adapter_probe_summary():
-    script = Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py")
+    # Resolve the cron adapter probe script relative to this monitor's own
+    # location (REPO_ROOT).  Previously hardcoded to /opt/Hermes-Memory-OS
+    # which silently returned "unavailable" when the repo was cloned elsewhere.
+    script = REPO_ROOT / "scripts" / "memory_os_cron_adapter_probe.py"
     if not script.exists():
-        return {"status": "unavailable", "reason": "probe_script_missing"}
+        # Belt-and-suspenders: try a couple of common clone locations before
+        # giving up, so the probe still works after a repo relocation.
+        for candidate in [
+            Path("/opt/Hermes-Memory-OS/scripts/memory_os_cron_adapter_probe.py"),
+            Path.home() / "Hermes-Memory-OS" / "scripts" / "memory_os_cron_adapter_probe.py",
+        ]:
+            if candidate.exists():
+                script = candidate
+                break
+        else:
+            return {"status": "unavailable", "reason": "probe_script_missing"}
     result = run(["python3", str(script), "--hermes-home", "/root/.hermes", "--output", "json"])
     if not result.get("ok"):
         return {"status": "error", "reason": "probe_command_failed", "code": result.get("code")}

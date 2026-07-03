@@ -3,9 +3,16 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass
 
 
+# Default repo-root on remote SSH targets.  This is a sensible convention,
+# not a hard requirement — the install/deploy tooling derives its own
+# REPO_ROOT from the script location.  Override per host via:
+#   1. --remote-repo-root <path>          (CLI, always wins)
+#   2. MEMORY_OS_REPO_ROOT env var         (session-wide default)
+#   3. known-host profile entry             (per-host in KNOWN_HOST_RUNTIME_PROFILES)
 DEFAULT_REMOTE_REPO_ROOT = "/opt/Hermes-Memory-OS"
 DEFAULT_HERMES_HOME = "/root/.hermes"
 
@@ -73,7 +80,7 @@ def resolve_host_runtime_profile(
     base_python_bin = str(known.get("python_bin") or ("python3" if host_alias else "python"))
     base_monitor_profile = str(known.get("monitor_profile") or default_monitor_profile or "live")
 
-    effective_remote_repo_root = str(remote_repo_root or "").strip() or base_remote_repo_root
+    effective_remote_repo_root = str(remote_repo_root or "").strip() or base_remote_repo_root or os.environ.get("MEMORY_OS_REPO_ROOT", "")
     effective_hermes_home = str(hermes_home or "").strip() or base_hermes_home
     effective_python_bin = str(python_bin or "").strip() or base_python_bin
     effective_monitor_profile = str(monitor_profile or "").strip() or base_monitor_profile
