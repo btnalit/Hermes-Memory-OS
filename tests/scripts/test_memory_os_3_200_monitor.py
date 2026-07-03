@@ -130,13 +130,16 @@ def test_rh26_heading_anomalies_flag_background_context_on_cancel_and_casual():
 
     anomalies = find_rh26_heading_anomalies(probes)
 
+    # cancel_failed_video: only extra unexpected "Working Memory" → warning
     assert {
         "id": "cancel_failed_video",
-        "severity": "fail",
-        "code": "unexpected_rh26_headings",
+        "severity": "warning",
+        "code": "rh26_extra_unexpected_heading",
         "expected": ["Current Foreground Task"],
         "actual": ["Current Foreground Task", "Working Memory"],
+        "extra": ["Working Memory"],
     } in anomalies
+    # casual_memory_system_change: forbidden headings → still fail
     assert {
         "id": "casual_memory_system_change",
         "severity": "fail",
@@ -166,6 +169,68 @@ def test_rh26_heading_anomalies_warn_on_unclassified_casual_context():
             "actual": ["Working Memory"],
         }
     ]
+
+
+def test_rh26_extra_only_unexpected_heading_warns():
+    """Extra heading not in ALLOWED_RH26_EXTRA_HEADINGS → warning, not fail."""
+    probes = [
+        {
+            "id": "cancel_failed_video",
+            "chars": 500,
+            "headings": ["Current Foreground Task", "New Unknown Section"],
+        },
+    ]
+    anomalies = find_rh26_heading_anomalies(probes)
+    assert len(anomalies) == 1
+    assert anomalies[0]["severity"] == "warning"
+    assert anomalies[0]["code"] == "rh26_extra_unexpected_heading"
+    assert anomalies[0]["extra"] == ["New Unknown Section"]
+
+
+def test_rh26_missing_expected_heading_fails():
+    """Missing a required expected heading → still hard fail."""
+    probes = [
+        {
+            "id": "diagnostic_current_architecture",
+            "chars": 200,
+            # Missing "Diagnostic Grounding" — required heading
+            "headings": ["Current Memory-OS Runtime Facts"],
+        },
+    ]
+    anomalies = find_rh26_heading_anomalies(probes)
+    assert len(anomalies) == 1
+    assert anomalies[0]["severity"] == "fail"
+    assert anomalies[0]["code"] == "rh26_missing_expected_heading"
+    assert anomalies[0]["missing"] == ["Diagnostic Grounding"]
+
+
+def test_rh26_casual_forbidden_heading_still_fails():
+    """casual_memory_system_change with a forbidden heading → still fail (unchanged)."""
+    probes = [
+        {
+            "id": "casual_memory_system_change",
+            "chars": 900,
+            "headings": ["Current Foreground Task"],
+        },
+    ]
+    anomalies = find_rh26_heading_anomalies(probes)
+    assert len(anomalies) == 1
+    assert anomalies[0]["severity"] == "fail"
+    assert anomalies[0]["code"] == "casual_context_forbidden_heading"
+
+
+def test_rh26_extra_allowed_heading_no_anomaly():
+    """Extra heading listed in ALLOWED_RH26_EXTRA_HEADINGS → no anomaly."""
+    probes = [
+        {
+            "id": "candidate_vs_crystallized",
+            "chars": 1200,
+            # "Indexed Recall" is in ALLOWED_RH26_EXTRA_HEADINGS for this prompt
+            "headings": ["Crystallized Review Candidates", "Crystallized Memory", "Indexed Recall"],
+        },
+    ]
+    anomalies = find_rh26_heading_anomalies(probes)
+    assert anomalies == []
 
 
 def test_compute_deltas_tracks_count_growth_and_audit_ratios():

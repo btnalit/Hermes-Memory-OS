@@ -494,33 +494,17 @@ class SelfEvolutionGovernorModule:
     def _knob_tune_proposals(self) -> list[dict[str, Any]]:
         """Generate knob_tune proposals for overridable non-meta knobs.
 
-        First cut: propose current value (to=from, a no-change) — validates
+        Previously proposed current values (to=from, a no-change) to validate
         the auto-approve+enact mechanism without changing production behavior.
-        The tuning strategy evolves later.
+        That validation phase is complete — the mechanism works end-to-end
+        (proposal → ops_gate → auto-approve → register_override).
+
+        Future tuning strategies will produce actual value changes here.
+        No-change proposals are skipped to prevent knob_overrides.jsonl bloat
+        (register_override already has a _SENTINEL dedup guard as belt-and-
+        suspenders — see knob_overrides.py:register_override).
         """
-        from plugins.memory.memory_os.knob_overrides import (
-            OVERRIDABLE_KNOBS,
-            resolve_knob,
-        )
-
-        proposals: list[dict[str, Any]] = []
-        for knob_name, spec in OVERRIDABLE_KNOBS.items():
-            if spec.get("meta") is True:
-                continue
-            current = resolve_knob(knob_name, default=spec["default"])
-            bounds = spec.get("bounds", [])
-            if not bounds:
-                continue
-
-            proposals.append({
-                "kind": "knob_tune",
-                "knob": knob_name,
-                "from": current,
-                "to": current,
-                "bounds": bounds,
-                "module": spec.get("module", ""),
-            })
-        return proposals
+        return []
 
     def _write_blocked_attempt_result(
         self,

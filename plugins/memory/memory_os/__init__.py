@@ -1159,12 +1159,22 @@ class MemoryOSProvider(MemoryProvider):
 
         Appends a tombstone record for each active record found, so
         ``_read_latest_active_task_anchor`` skips them.
+
+        Idempotent: skips record_ids that already have a terminal tombstone
+        (superseded / completed / cancelled) anywhere in the file.  This
+        prevents the repeated-append bloat observed on 3.200 (24,201
+        superseded records produced by consecutive calls).
         """
         if self._roots is None:
             return
         path = _active_task_anchor_path(self._roots)
         if not path.exists():
             return
+
+        # Single pass: collect already-tombstoned record_ids and active
+        # records at the same time so we don't read a 39MB file twice.
+        tombstoned: set[str] = set()
+        active_candidates: list[dict[str, Any]] = []
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -1174,14 +1184,138 @@ class MemoryOSProvider(MemoryProvider):
                 continue
             if not isinstance(record, dict):
                 continue
-            if record.get("status") == "active":
-                superseded = dict(record)
-                superseded["record_id"] = record.get("record_id", "unknown")
-                superseded["status"] = "superseded"
-                superseded["superseded_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                with path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(superseded, ensure_ascii=False, sort_keys=True))
-                    handle.write("\n")
+            status = str(record.get("status") or "")
+            rid = str(record.get("record_id") or "")
+            if status in {"superseded", "completed", "cancelled"} and rid:
+                tombstoned.add(rid)
+            elif status == "active" and rid:
+                active_candidates.append(record)
+
+        for record in active_candidates:
+            rid = str(record.get("record_id") or "")
+            if rid in tombstoned:
+                continue  # already tombstoned
+            superseded = dict(record)
+            superseded["record_id"] = rid or "unknown"
+            superseded["status"] = "superseded"
+            superseded["superseded_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(superseded, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+            tombstoned.add(rid)
+
+
+def compact_active_task_anchors(
+    hermes_home: str | Path,
+    *,
+    max_superseded: int = 100,
+    dry_run: bool = True,
+    backup: bool = True,
+) -> dict[str, Any]:
+    """Compact active_task_anchor.jsonl.
+
+    Preservation rules:
+    - All non-superseded records (active, completed, cancelled) are kept
+    - The most recent *max_superseded* superseded records are kept (tail)
+    - Malformed lines are silently dropped (fail-open)
+
+    dry_run=True → report what would happen without writing.
+    backup=True + dry_run=False → atomic replace after backing up original.
+    """
+    import os as _os
+    from datetime import datetime, timezone
+
+    home = Path(hermes_home).expanduser().resolve()
+    roots = MemoryOSRoots.from_hermes_home(home)
+    path = _active_task_anchor_path(roots)
+
+    result: dict[str, Any] = {
+        "status": "ok",
+        "path": str(path),
+        "dry_run": dry_run,
+        "lines_before": 0,
+        "lines_after": 0,
+        "non_superseded": 0,
+        "superseded_before": 0,
+        "superseded_dropped": 0,
+        "superseded_kept": 0,
+        "malformed": 0,
+        "backup_path": None,
+    }
+
+    if not path.exists():
+        result["status"] = "no_file"
+        return result
+
+    # Single-pass read: separate non-superseded from superseded
+    non_superseded: list[dict[str, Any]] = []
+    superseded: list[dict[str, Any]] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        result["lines_before"] += 1
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            result["malformed"] += 1
+            continue
+        if not isinstance(record, dict):
+            result["malformed"] += 1
+            continue
+        status = str(record.get("status") or "")
+        if status == "superseded":
+            superseded.append(record)
+        else:
+            non_superseded.append(record)
+
+    result["non_superseded"] = len(non_superseded)
+    result["superseded_before"] = len(superseded)
+
+    # Keep the most recent max_superseded superseded (tail)
+    kept_superseded = superseded[-max_superseded:] if len(superseded) > max_superseded else superseded
+    result["superseded_kept"] = len(kept_superseded)
+    result["superseded_dropped"] = len(superseded) - len(kept_superseded)
+
+    # Build output: non-superseded first (preserving original order), then
+    # kept superseded tail
+    output = non_superseded + kept_superseded
+    result["lines_after"] = len(output)
+
+    if result["lines_before"] == result["lines_after"] and result["malformed"] == 0:
+        result["status"] = "no_change"
+        return result
+
+    if dry_run:
+        return result
+
+    # ── Execute ──────────────────────────────────────────────────────
+    backup_path: Path | None = None
+    if backup:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = path.with_name(f"{path.name}.compact.{ts}.bak")
+        try:
+            backup_path.write_bytes(path.read_bytes())
+            result["backup_path"] = str(backup_path)
+        except OSError as exc:
+            result["status"] = "backup_failed"
+            result["error"] = str(exc)
+            return result
+
+    from .jsonl_io import write_jsonl
+
+    tmp_path = path.with_name(f".{path.name}.compact.tmp")
+    try:
+        write_jsonl(tmp_path, output, ensure_parent=False)
+        _os.replace(tmp_path, path)
+    except OSError as exc:
+        result["status"] = "write_failed"
+        result["error"] = str(exc)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return result
+
+    return result
 
 
 def register(ctx) -> None:

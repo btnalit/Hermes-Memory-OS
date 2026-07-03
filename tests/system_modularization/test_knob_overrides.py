@@ -269,6 +269,132 @@ class TestMaxSpeakPerHourKnob:
         assert result == 5
 
 
+class TestRegisterOverrideDedup:
+    """Dedup guard: register_override skips write when current value == target."""
+
+    def test_dedup_skips_duplicate_same_value(self, tmp_path):
+        """Duplicate register_override with same value returns skipped record."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        first = register_override(
+            "min_cluster_size", 4,
+            prior=2, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        assert first["state"] == "active"
+        assert first["override_value"] == 4
+
+        second = register_override(
+            "min_cluster_size", 4,  # same value
+            prior=4, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        assert second["state"] == "skipped"
+        assert second["reason"] == "value_unchanged"
+        assert second["override_value"] == 4
+
+    def test_dedup_does_not_grow_jsonl_for_duplicates(self, tmp_path):
+        """JSONL line count stays at 1 after duplicate register_override."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        register_override(
+            "max_provisional", 25,
+            prior=30, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        store_path = _override_store_path(None, _store_root=tmp_path)
+        lines_before = sum(1 for _ in open(store_path) if _.strip())
+
+        register_override(
+            "max_provisional", 25,  # same value → skipped
+            prior=25, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        lines_after = sum(1 for _ in open(store_path) if _.strip())
+        assert lines_after == lines_before == 1
+
+    def test_dedup_resolve_knob_unchanged_after_skip(self, tmp_path):
+        """resolve_knob returns same value after duplicate is skipped."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        register_override(
+            "vector_edge_refines_threshold", 0.85,
+            prior=0.75, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        before = resolve_knob("vector_edge_refines_threshold", default=0.75, _store_root=tmp_path)
+        assert before == 0.85
+
+        # Duplicate — should be skipped
+        register_override(
+            "vector_edge_refines_threshold", 0.85,
+            prior=0.85, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        after = resolve_knob("vector_edge_refines_threshold", default=0.75, _store_root=tmp_path)
+        assert after == 0.85  # unchanged
+
+    def test_dedup_allows_different_value(self, tmp_path):
+        """Different value still writes — dedup only blocks identical values."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        register_override(
+            "vector_edge_co_occurs_threshold", 0.70,
+            prior=0.65, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        result = register_override(
+            "vector_edge_co_occurs_threshold", 0.80,  # different
+            prior=0.70, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        assert result["state"] == "active"  # written, not skipped
+
+    def test_dedup_first_write_always_allowed(self, tmp_path):
+        """First-ever override for a knob is always written (no prior in store)."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        # No overrides exist for this knob yet. The sentinel check: since
+        # resolve_knob returns _SENTINEL (no active override), _SENTINEL !=
+        # value → write proceeds normally.
+        result = register_override(
+            "moment_provisional_ttl_days", 5,
+            prior=3, proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        assert result["state"] == "active"
+
+    def test_dedup_registered_knob_with_allowed_values(self, tmp_path):
+        """Dedup works for lane_switch knobs (allowed list, not bounds)."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(days=7)).isoformat()
+
+        first = register_override(
+            "llm_contradiction_candidate_source", "entity",
+            prior="cosine", proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        assert first["state"] == "active"
+
+        second = register_override(
+            "llm_contradiction_candidate_source", "entity",  # same
+            prior="entity", proposed_by="test", approved_via="test",
+            expires_at=expires, _now=now, _store_root=tmp_path,
+        )
+        assert second["state"] == "skipped"
+
+
 class TestSpeakRateLimitIntegration:
     def test_A1_1_sentinel_pattern_max_per_hour_param(self, tmp_path):
         """A1.1: under_speak_limit accepts max_per_hour param (sentinel pattern)."""

@@ -623,6 +623,99 @@ def test_a15_supersede_active_anchors_tombstones_old_records(tmp_path):
     assert len(superseded) >= 1, f"F8: should have at least 1 superseded record, got {len(superseded)}"
 
 
+def test_a16_supersede_active_anchors_is_idempotent(tmp_path):
+    """_supersede_active_anchors called twice produces only 1 superseded per active."""
+    provider = _init_provider(tmp_path)
+    path = _active_task_anchor_path(provider._roots)
+
+    # Write 3 active anchors
+    for i in range(3):
+        anchor = _format_current_task_anchor(
+            task=f"task_{i}", operations=[], session_id=f"s{i}",
+        )
+        provider._write_active_task_anchor(anchor=anchor, status="active")
+
+    # First supersede call
+    provider._supersede_active_anchors()
+    records_1 = [json.loads(l) for l in path.read_text(encoding="utf-8").strip().splitlines()]
+    superseded_1 = [r for r in records_1 if r.get("status") == "superseded"]
+    assert len(superseded_1) == 3
+
+    # Second call — should NOT produce more superseded (idempotent)
+    provider._supersede_active_anchors()
+    records_2 = [json.loads(l) for l in path.read_text(encoding="utf-8").strip().splitlines()]
+    superseded_2 = [r for r in records_2 if r.get("status") == "superseded"]
+    assert len(superseded_2) == 3, f"idempotent: expected 3 superseded, got {len(superseded_2)}"
+
+
+def test_compact_active_task_anchors_preserves_non_superseded(tmp_path):
+    """compact_active_task_anchors keeps all active/completed/cancelled."""
+    from plugins.memory.memory_os.__init__ import compact_active_task_anchors
+
+    provider = _init_provider(tmp_path)
+    path = _active_task_anchor_path(provider._roots)
+
+    anchor = _format_current_task_anchor(task="active_task", operations=[], session_id="s1")
+    provider._write_active_task_anchor(anchor=anchor, status="active")
+    provider._write_active_task_anchor(anchor=anchor, status="completed")
+    provider._write_active_task_anchor(anchor=anchor, status="cancelled")
+
+    result = compact_active_task_anchors(tmp_path, max_superseded=10, dry_run=False, backup=False)
+    # At least 3 non-superseded are preserved (_write_active_task_anchor may
+    # tombstone internally, producing extra records, but all
+    # active/completed/cancelled must survive).
+    assert result["non_superseded"] >= 3
+    assert result["superseded_dropped"] == 0
+
+
+def test_compact_active_task_anchors_drops_old_superseded(tmp_path):
+    """compact drops superseded beyond max_superseded, keeps recent ones."""
+    from plugins.memory.memory_os.__init__ import compact_active_task_anchors
+
+    provider = _init_provider(tmp_path)
+    path = _active_task_anchor_path(provider._roots)
+
+    # 1 active + N superseded (exact count depends on internal tombstoning)
+    anchor = _format_current_task_anchor(task="keep_me", operations=[], session_id="s1")
+    provider._write_active_task_anchor(anchor=anchor, status="active")
+    for i in range(200):
+        provider._write_active_task_anchor(
+            anchor=_format_current_task_anchor(task=f"old_{i}", operations=[], session_id=f"s{i}"),
+            status="superseded",
+        )
+
+    # Count actual superseded before compact
+    all_records_before = [json.loads(l) for l in path.read_text(encoding="utf-8").strip().splitlines()]
+    superseded_before = sum(1 for r in all_records_before if r.get("status") == "superseded")
+
+    result = compact_active_task_anchors(tmp_path, max_superseded=50, dry_run=False, backup=False)
+    assert result["non_superseded"] >= 1  # active survives
+    assert result["superseded_kept"] <= 50
+
+    # Verify: active record still present
+    records_after = [json.loads(l) for l in path.read_text(encoding="utf-8").strip().splitlines()]
+    assert any(r.get("status") == "active" for r in records_after)
+
+
+def test_compact_active_task_anchors_dry_run_no_write(tmp_path):
+    """dry_run reports what would happen without modifying the file."""
+    from plugins.memory.memory_os.__init__ import compact_active_task_anchors
+
+    provider = _init_provider(tmp_path)
+    path = _active_task_anchor_path(provider._roots)
+
+    anchor = _format_current_task_anchor(task="t", operations=[], session_id="s1")
+    provider._write_active_task_anchor(anchor=anchor, status="active")
+    for _ in range(50):
+        provider._write_active_task_anchor(anchor=anchor, status="superseded")
+
+    original = path.read_text(encoding="utf-8")
+    result = compact_active_task_anchors(tmp_path, max_superseded=10, dry_run=True)
+    assert result["dry_run"] is True
+    assert result["non_superseded"] >= 1
+    assert path.read_text(encoding="utf-8") == original  # unchanged
+
+
 # ── A.X2  adversarial: disable F1 fix → A.6 fails ────────────────────────────
 
 

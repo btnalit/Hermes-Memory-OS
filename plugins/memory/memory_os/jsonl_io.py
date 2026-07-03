@@ -220,6 +220,111 @@ def write_jsonl(path: str | Path, records: Iterable[dict[str, Any]], *, ensure_p
     )
 
 
+def jsonl_compact(
+    path: str | Path,
+    keep_predicate: "Callable[[dict[str, Any]], bool]",
+    *,
+    max_lines: int | None = None,
+    dry_run: bool = True,
+    backup: bool = True,
+) -> dict[str, Any]:
+    """Compact a JSONL file: keep only records matching *keep_predicate*.
+
+    When *max_lines* is set, additionally caps the output to the most recent
+    N kept records (preserving tail — JSONL append order).  Malformed lines
+    are silently dropped (fail-open: compaction is not a correctness-critical
+    operation and must not lose data from a parse error).
+
+    dry_run=True → report what would happen without writing.
+    backup=True + dry_run=False → atomically replace after backing up the
+    original to ``<path>.compact.bak``.
+
+    Returns a structured result dict with ``status``, ``lines_before``,
+    ``lines_after``, ``kept``, ``dropped``, ``malformed``, ``dry_run``,
+    ``backup_path``, and any ``error``.
+    """
+    from datetime import datetime, timezone
+
+    target = Path(path)
+    result: dict[str, Any] = {
+        "status": "ok",
+        "path": str(target),
+        "dry_run": dry_run,
+        "lines_before": 0,
+        "lines_after": 0,
+        "kept": 0,
+        "dropped": 0,
+        "malformed": 0,
+        "backup_path": None,
+    }
+
+    if not target.exists():
+        result["status"] = "no_file"
+        return result
+
+    # ── Read ────────────────────────────────────────────────────────
+    kept: list[dict[str, Any]] = []
+    for raw_line in target.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        result["lines_before"] += 1
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            result["malformed"] += 1
+            continue
+        if keep_predicate(record):
+            kept.append(record)
+
+    result["kept"] = len(kept)
+    result["dropped"] = result["lines_before"] - result["kept"] - result["malformed"]
+
+    # ── Apply max_lines cap (most recent) ───────────────────────────
+    if max_lines is not None and len(kept) > max_lines:
+        kept = kept[-max_lines:]
+        result["max_lines_applied"] = True
+    else:
+        result["max_lines_applied"] = False
+
+    result["lines_after"] = len(kept)
+
+    # ── No-op when nothing changes ──────────────────────────────────
+    if result["lines_before"] == result["lines_after"] and result["malformed"] == 0:
+        result["status"] = "no_change"
+        return result
+
+    if dry_run:
+        return result
+
+    # ── Backup ──────────────────────────────────────────────────────
+    backup_path: Path | None = None
+    if backup:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = target.with_name(f"{target.name}.compact.{ts}.bak")
+        try:
+            backup_path.write_bytes(target.read_bytes())
+            result["backup_path"] = str(backup_path)
+        except OSError as exc:
+            result["status"] = "backup_failed"
+            result["error"] = str(exc)
+            return result
+
+    # ── Atomic replace ──────────────────────────────────────────────
+    tmp_path = target.with_name(f".{target.name}.compact.tmp")
+    try:
+        write_jsonl(tmp_path, kept, ensure_parent=False)
+        os.replace(tmp_path, target)
+    except OSError as exc:
+        result["status"] = "write_failed"
+        result["error"] = str(exc)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return result
+
+    return result
+
+
 def write_json_atomic(path: str | Path, data: Any, *, ensure_parent: bool = True) -> None:
     target = Path(path)
     if ensure_parent:

@@ -422,14 +422,36 @@ def find_rh26_heading_anomalies(probes: list[dict[str, Any]]) -> list[dict[str, 
             )
             continue
         allowed = set(expected) | ALLOWED_RH26_EXTRA_HEADINGS.get(prompt_id, set())
-        if not all(heading in actual for heading in expected) or any(heading not in allowed for heading in actual):
+        missing_expected = [h for h in expected if h not in actual]
+        extra_unexpected = [h for h in actual if h not in allowed]
+
+        if missing_expected:
+            # Missing a required heading — hard fail (the probe response is
+            # structurally incomplete, likely indicating a real problem).
             anomalies.append(
                 {
                     "id": prompt_id,
                     "severity": "fail",
-                    "code": "unexpected_rh26_headings",
+                    "code": "rh26_missing_expected_heading",
                     "expected": expected,
                     "actual": actual,
+                    "missing": missing_expected,
+                }
+            )
+        elif extra_unexpected:
+            # Extra heading that isn't in the allowed set — warning only.
+            # Heading drift (e.g. a new prefetch section appearing) is a
+            # content-level signal, not a service-health failure.  The
+            # heading should be reviewed and either added to
+            # ALLOWED_RH26_EXTRA_HEADINGS or investigated.
+            anomalies.append(
+                {
+                    "id": prompt_id,
+                    "severity": "warning",
+                    "code": "rh26_extra_unexpected_heading",
+                    "expected": expected,
+                    "actual": actual,
+                    "extra": extra_unexpected,
                 }
             )
     return anomalies
