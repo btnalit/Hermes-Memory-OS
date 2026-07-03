@@ -4,7 +4,11 @@ Replaces fragile vector-distance contradiction detection (low cosine →
 unrelated) with a high-similarity + LLM claim-extraction approach.
 
 Path A: uses cosine similarity for candidate discovery (shared-topic pairs).
-Path B (future): uses entity index for candidate discovery (V2-P1).
+Path B: uses entity index for candidate discovery (V2-P1).
+
+Candidate discovery is swappable via the ``llm_contradiction_candidate_source``
+knob ("cosine" | "entity"). The same-topic similarity threshold is per-model
+calibratable via ``llm_contradiction_same_topic_threshold`` (default 0.75).
 
 Guardrails:
 1. Shadow-only — contradictions stay as candidate edges, never auto-invalidate.
@@ -96,6 +100,278 @@ def _format_evidence(record_id: str, body: str, claim: dict) -> str:
     )
 
 
+# ── Candidate source dispatch ────────────────────────────────────────────
+
+def _find_contradiction_candidates(
+    store: Any,
+    *,
+    max_pairs: int = 100,
+    roots: object | None = None,
+    error_records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Find candidate record pairs for contradiction checking.
+
+    Dispatches to the active candidate source based on the
+    ``llm_contradiction_candidate_source`` knob:
+
+    - ``"cosine"`` (default): O(N²) same-kind cosine comparison
+    - ``"entity"``: entity-index shared-entity discovery (V2-P1)
+
+    Returns (candidate_pairs, pairs_evaluated). Each candidate pair is
+    ``{"a": record_dict, "b": record_dict, "similarity": float}``.
+    """
+    from .knob_overrides import resolve_knob
+
+    source = resolve_knob(
+        "llm_contradiction_candidate_source", default="cosine", roots=roots,
+    )
+    if source == "entity":
+        return _find_entity_candidates(
+            store, max_pairs=max_pairs, roots=roots, error_records=error_records,
+        )
+    return _find_cosine_candidates(
+        store, max_pairs=max_pairs, roots=roots, error_records=error_records,
+    )
+
+
+def _find_cosine_candidates(
+    store: Any,
+    *,
+    max_pairs: int = 100,
+    roots: object | None = None,
+    error_records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Cosine-similarity-based candidate discovery (default).
+
+    Reads crystallized records with embeddings from the index, then builds
+    candidate pairs via O(N²) same-kind cosine comparison. The similarity
+    threshold is controlled by the ``llm_contradiction_same_topic_threshold``
+    knob (default 0.75 — calibrate per embedding model via D5's
+    ``calibrate-thresholds`` CLI).
+    """
+    from .knob_overrides import resolve_knob
+    from .vector_edge_proposer import _cosine_similarity
+
+    _errs = error_records or []
+    index_path = getattr(store.roots, "index_path", None)
+    if index_path is None:
+        return [], 0
+
+    same_topic_threshold: float = float(
+        resolve_knob(
+            "llm_contradiction_same_topic_threshold", default=0.75, roots=roots,
+        )
+    )
+
+    conn = sqlite3.connect(str(index_path))
+    conn.row_factory = sqlite3.Row
+
+    record_limit = max(int((2 * max_pairs) ** 0.5) + 2, 2)
+    try:
+        rows = conn.execute(
+            "select cr.id, cr.kind, cr.body, me.embedding "
+            "from crystallized_records cr "
+            "inner join memory_embeddings me "
+            "  on me.record_type = 'crystallized_record' "
+            "  and me.record_id = cr.id "
+            "order by cr.created_at desc "
+            "limit ?",
+            (record_limit,),
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return [], 0
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        rid = str(row["id"] or "")
+        embedding = row["embedding"]
+        body = str(row["body"] or "")
+        if not rid or not embedding or not body:
+            continue
+        records.append({
+            "id": rid,
+            "kind": str(row["kind"] or ""),
+            "body": body,
+            "embedding": bytes(embedding),
+        })
+
+    if len(records) < 2:
+        conn.close()
+        return [], 0
+
+    # Build high-similarity candidate pairs (same kind, sim >= threshold)
+    candidate_pairs: list[dict[str, Any]] = []
+    pairs_evaluated = 0
+
+    for i in range(len(records)):
+        if pairs_evaluated >= max_pairs:
+            break
+        for j in range(i + 1, len(records)):
+            if pairs_evaluated >= max_pairs:
+                break
+            pairs_evaluated += 1
+
+            rec_a = records[i]
+            rec_b = records[j]
+
+            # Only compare same-kind records (same topic domain)
+            if rec_a["kind"] != rec_b["kind"]:
+                continue
+
+            sim = _cosine_similarity(rec_a["embedding"], rec_b["embedding"])
+            if sim is None or sim < same_topic_threshold:
+                continue
+
+            candidate_pairs.append({
+                "a": rec_a,
+                "b": rec_b,
+                "similarity": sim,
+            })
+
+    conn.close()
+    return candidate_pairs, pairs_evaluated
+
+
+def _find_entity_candidates(
+    store: Any,
+    *,
+    max_pairs: int = 100,
+    roots: object | None = None,
+    error_records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Entity-index-based candidate discovery (V2-P1).
+
+    Uses ``entity_extractor.shared_entity_pairs()`` to find record pairs
+    that share entities, then loads embeddings and computes cosine
+    similarity for the similarity score field. Falls back to empty result
+    when the entity_index table is not available or not populated.
+
+    Swappable via ``llm_contradiction_candidate_source = "entity"`` —
+    main function ``run_contradiction_lane()`` does not change.
+    """
+    from .knob_overrides import resolve_knob
+    from .jsonl_io import build_error_record as _build_error_record
+    from .vector_edge_proposer import _cosine_similarity
+
+    _errs = error_records or []
+    index_path = getattr(store.roots, "index_path", None)
+    if index_path is None:
+        return [], 0
+
+    conn = sqlite3.connect(str(index_path))
+    conn.row_factory = sqlite3.Row
+
+    # Check entity_index table exists
+    try:
+        table_check = conn.execute(
+            "select name from sqlite_master where type='table' and name='entity_index'"
+        ).fetchone()
+    except sqlite3.Error:
+        conn.close()
+        return [], 0
+
+    if table_check is None:
+        conn.close()
+        return [], 0
+
+    # Get shared-entity pairs from the entity index
+    try:
+        from .entity_extractor import shared_entity_pairs
+
+        entity_pairs = shared_entity_pairs(
+            conn, min_shared_entities=1, max_pairs=max_pairs,
+        )
+    except Exception as _exc:
+        _errs.append(_build_error_record(
+            component="llm_contradiction_lane",
+            operation="entity_candidate_discovery",
+            error_code="ENTITY_PAIRS_FAILED",
+            severity="warning",
+            recoverable=True,
+            details={"error": str(_exc)[:200]},
+        ))
+        conn.close()
+        return [], 0
+
+    if not entity_pairs:
+        conn.close()
+        return [], 0
+
+    # Collect unique record IDs from entity pairs
+    pair_ids: set[str] = set()
+    for ep in entity_pairs:
+        pair_ids.add(ep["record_a"])
+        pair_ids.add(ep["record_b"])
+
+    # Load full records + embeddings for those IDs
+    placeholders = ",".join(["?" for _ in pair_ids])
+    try:
+        rows = conn.execute(
+            f"select cr.id, cr.kind, cr.body, me.embedding "
+            f"from crystallized_records cr "
+            f"inner join memory_embeddings me "
+            f"  on me.record_type = 'crystallized_record' "
+            f"  and me.record_id = cr.id "
+            f"where cr.id in ({placeholders})",
+            list(pair_ids),
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return [], 0
+
+    record_map: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        rid = str(row["id"] or "")
+        embedding = row["embedding"]
+        body = str(row["body"] or "")
+        if not rid or not embedding or not body:
+            continue
+        record_map[rid] = {
+            "id": rid,
+            "kind": str(row["kind"] or ""),
+            "body": body,
+            "embedding": bytes(embedding),
+        }
+
+    conn.close()
+
+    if len(record_map) < 2:
+        return [], 0
+
+    # Apply same-topic threshold (per-model calibratable)
+    same_topic_threshold: float = float(
+        resolve_knob(
+            "llm_contradiction_same_topic_threshold", default=0.75, roots=roots,
+        )
+    )
+
+    candidate_pairs: list[dict[str, Any]] = []
+    pairs_evaluated = 0
+
+    for ep in entity_pairs:
+        if pairs_evaluated >= max_pairs:
+            break
+        pairs_evaluated += 1
+
+        rec_a = record_map.get(ep["record_a"])
+        rec_b = record_map.get(ep["record_b"])
+        if rec_a is None or rec_b is None:
+            continue
+
+        sim = _cosine_similarity(rec_a["embedding"], rec_b["embedding"])
+        if sim is None or sim < same_topic_threshold:
+            continue
+
+        candidate_pairs.append({
+            "a": rec_a,
+            "b": rec_b,
+            "similarity": sim,
+        })
+
+    return candidate_pairs, pairs_evaluated
+
+
 # ── Main entry point ─────────────────────────────────────────────────────
 
 def run_contradiction_lane(
@@ -109,10 +385,11 @@ def run_contradiction_lane(
 ) -> dict[str, Any]:
     """Run the LLM/evidence contradiction lane.
 
-    Finds record pairs with high cosine similarity (same topic), extracts
-    structured claims via LLM, and writes contradiction candidate edges
-    to memory_edges (state=candidate, proposed_by=llm). Never auto-invalidates
-    — all contradictions go through owner review.
+    Finds record pairs via a swappable candidate source (cosine similarity
+    by default; entity-index-based in V2), extracts structured claims via
+    LLM, and writes contradiction candidate edges to memory_edges
+    (state=candidate, proposed_by=llm). Never auto-invalidates — all
+    contradictions go through owner review.
     """
     from .knob_overrides import resolve_knob
     from .jsonl_io import build_error_record as _build_error_record
@@ -147,80 +424,10 @@ def run_contradiction_lane(
     if not llm_available:
         return {"status": "skipped", "reason": "llm_unavailable", "contradictions_found": 0, "error_records": error_records}
 
-    # ── 1. Read crystallized records with embeddings ──────────────────
-    index_path = getattr(store.roots, "index_path", None)
-    if index_path is None:
-        return {"status": "error", "error": "no_index_path", "error_records": error_records}
-
-    conn = sqlite3.connect(str(index_path))
-    conn.row_factory = sqlite3.Row
-
-    from .vector_edge_proposer import _cosine_similarity
-
-    record_limit = max(int((2 * max_pairs) ** 0.5) + 2, 2)
-    try:
-        rows = conn.execute(
-            "select cr.id, cr.kind, cr.body, me.embedding "
-            "from crystallized_records cr "
-            "inner join memory_embeddings me "
-            "  on me.record_type = 'crystallized_record' "
-            "  and me.record_id = cr.id "
-            "order by cr.created_at desc "
-            "limit ?",
-            (record_limit,),
-        ).fetchall()
-    except sqlite3.Error:
-        conn.close()
-        return {"status": "error", "error": "cannot_read_crystallized_records", "error_records": error_records}
-
-    records: list[dict[str, Any]] = []
-    for row in rows:
-        rid = str(row["id"] or "")
-        embedding = row["embedding"]
-        body = str(row["body"] or "")
-        if not rid or not embedding or not body:
-            continue
-        records.append({
-            "id": rid,
-            "kind": str(row["kind"] or ""),
-            "body": body,
-            "embedding": bytes(embedding),
-        })
-
-    if len(records) < 2:
-        conn.close()
-        return {"status": "skipped", "reason": f"need >=2 records, got {len(records)}", "contradictions_found": 0, "error_records": error_records}
-
-    # ── 2. Build high-similarity candidate pairs (same kind, sim >= 0.75) ─
-    candidate_pairs: list[dict[str, Any]] = []
-    pairs_evaluated = 0
-
-    for i in range(len(records)):
-        if pairs_evaluated >= max_pairs:
-            break
-        for j in range(i + 1, len(records)):
-            if pairs_evaluated >= max_pairs:
-                break
-            pairs_evaluated += 1
-
-            rec_a = records[i]
-            rec_b = records[j]
-
-            # Only compare same-kind records (same topic domain)
-            if rec_a["kind"] != rec_b["kind"]:
-                continue
-
-            sim = _cosine_similarity(rec_a["embedding"], rec_b["embedding"])
-            if sim is None or sim < 0.75:
-                continue
-
-            candidate_pairs.append({
-                "a": rec_a,
-                "b": rec_b,
-                "similarity": sim,
-            })
-
-    conn.close()
+    # ── 1. Find candidate pairs (swappable source) ───────────────────
+    candidate_pairs, pairs_evaluated = _find_contradiction_candidates(
+        store, max_pairs=max_pairs, roots=roots, error_records=error_records,
+    )
 
     if not candidate_pairs:
         return {
@@ -232,7 +439,7 @@ def run_contradiction_lane(
             "error_records": error_records,
         }
 
-    # ── 3. LLM claim extraction + contradiction judgment ──────────────
+    # ── 2. LLM claim extraction + contradiction judgment ──────────────
     from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
 
     # Reuse the same LLM config pattern as llm_edge_proposer
@@ -318,7 +525,7 @@ def run_contradiction_lane(
         if not _claims_contradict(claim_a, claim_b):
             continue
 
-        # ── 4. Write contradiction candidate edge ─────────────────────
+        # ── 3. Write contradiction candidate edge ─────────────────────
         if dry_run:
             contradictions_found += 1
             continue
