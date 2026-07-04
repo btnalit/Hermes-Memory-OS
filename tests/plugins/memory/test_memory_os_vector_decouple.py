@@ -217,16 +217,17 @@ class TestBuildEmbedder:
 class TestVectorEdgeThresholdKnobs:
     """D4: vector_edge thresholds read from knobs, not hardcoded constants."""
 
-    def test_default_thresholds_match_current_constants(self):
+    def test_default_thresholds_match_current_constants(self, tmp_path: Path):
         """Default knob values equal the current hardcoded constants."""
         from plugins.memory.memory_os.knob_overrides import resolve_knob
 
+        # Use tmp_path to isolate from production /root/.hermes knob overrides
         refines = resolve_knob("vector_edge_refines_threshold", default=0.75,
-                               _store_root=None)
+                               _store_root=tmp_path)
         co_occurs = resolve_knob("vector_edge_co_occurs_threshold", default=0.65,
-                                 _store_root=None)
+                                 _store_root=tmp_path)
         contradicts = resolve_knob("vector_edge_contradicts_threshold", default=0.35,
-                                   _store_root=None)
+                                   _store_root=tmp_path)
         assert refines == 0.75
         assert co_occurs == 0.65
         assert contradicts == 0.35
@@ -362,11 +363,12 @@ class TestBatchEmbedderDeviceKnob:
         assert spec["kind"] == "threshold"
         assert spec["meta"] is False
 
-    def test_batch_device_resolves_default(self):
+    def test_batch_device_resolves_default(self, tmp_path: Path):
         """Resolving vector_embedder_batch_device returns default 'auto'."""
         from plugins.memory.memory_os.knob_overrides import resolve_knob
+        # Use tmp_path to isolate from production /root/.hermes knob overrides
         result = resolve_knob("vector_embedder_batch_device", default="auto",
-                              _store_root=None)
+                              _store_root=tmp_path)
         assert result == "auto"
 
     def test_batch_device_override_via_jsonl(self, tmp_path: Path):

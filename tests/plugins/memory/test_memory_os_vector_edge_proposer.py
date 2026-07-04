@@ -215,15 +215,21 @@ def test_detect_none_low_sim_same_kind():
     assert _detect_relation_from_similarity(0.10, "note", "note") is None
 
 
-def test_low_similarity_cross_kind_contradicts_restored() -> None:
+def test_low_similarity_cross_kind_contradicts_restored(tmp_path: Path) -> None:
     """Low-similarity cross-kind pairs still produce contradicts edges."""
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
     from plugins.memory.memory_os.vector_edge_proposer import _detect_relation_from_similarity
-    # sim=0.30 <= 0.35, kind_a != kind_b -> should return "contradicts"
+    # Use _store_root=tmp_path to isolate from production /root/.hermes knob overrides
+    refines = resolve_knob("vector_edge_refines_threshold", default=0.75, _store_root=tmp_path)
+    co_occurs = resolve_knob("vector_edge_co_occurs_threshold", default=0.65, _store_root=tmp_path)
+    contradicts = resolve_knob("vector_edge_contradicts_threshold", default=0.35, _store_root=tmp_path)
+    # sim=0.30 <= contradicts(0.35), kind_a != kind_b -> should return "contradicts"
+    assert 0.30 <= contradicts
     result = _detect_relation_from_similarity(0.30, "note", "moment", roots=None)
     assert result == "contradicts", f"expected 'contradicts', got {result!r}"
 
 
-def test_contradicts_not_triggered_same_kind() -> None:
+def test_contradicts_not_triggered_same_kind(tmp_path: Path) -> None:
     """Low similarity but same kind should NOT trigger contradicts."""
     from plugins.memory.memory_os.vector_edge_proposer import _detect_relation_from_similarity
     result = _detect_relation_from_similarity(0.30, "note", "note", roots=None)
