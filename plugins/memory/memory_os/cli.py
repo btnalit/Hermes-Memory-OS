@@ -145,12 +145,13 @@ def _check_vector_available() -> bool:
 
 
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
+    events = store.read_events()  # needed for recent_event_summaries below
     stats, freshness = read_event_stats(store.roots)
     _stats_usable = freshness in ("fresh", "acceptable", "warning")
     if stats is not None and stats.total_event_count > 0 and _stats_usable:
         event_count = stats.total_event_count
     else:
-        event_count = len(store.read_events())
+        event_count = len(events)
     store_counts = _store_counts(store, event_count=event_count)
     index_counts = MemoryOSIndex(store.roots).counts()
     prefetch_mode = _prefetch_mode(store)
