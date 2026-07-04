@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit
-from .jsonl_io import append_jsonl_locked
+from .jsonl_io import append_jsonl_locked, append_jsonl_lines_locked, locked_jsonl_file
 from .ids import new_crystallized_id
 from .schema import CRYSTALLIZED_SCHEMA_VERSION
 from .store import MemoryOSStore, _format_frontmatter
@@ -995,6 +997,10 @@ def compact_candidate_queue(
     Others are appended to archive and excluded from the main file.
     Returns count of archived candidates.
     Never deletes anything (append-only, INV-3).
+
+    Holds a shared sidecar lock with append_candidate_queue so concurrent
+    appends cannot be lost during the read→replace window (§3.3).
+    A conservation assertion catches silent write-loss (§3.4A fail-closed).
     """
     candidates_path = store.roots.crystallized_root / "candidates.jsonl"
     if not candidates_path.exists():
@@ -1002,47 +1008,81 @@ def compact_candidate_queue(
 
     now = datetime.now(timezone.utc)
     triage = read_candidate_triage(store)
-    lines = candidates_path.read_text(encoding="utf-8").splitlines()
-    active: list[str] = []
-    archived: list[str] = []
-    archived_count = 0
 
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        raw = json.loads(line)
-        cand = CrystallizedCandidate(
-            candidate_id=str(raw["candidate_id"]),
-            kind=str(raw["kind"]),
-            body=str(raw["body"]),
-            source_event_ids=[str(i) for i in raw.get("source_event_ids", [])],
-            sensitivity=str(raw.get("sensitivity", "private")),
-            tags=[str(t) for t in (raw.get("tags") or [])],
-            bridge_state=str(raw.get("bridge_state", "")),
-            created_at=str(raw.get("created_at") or ""),
-            provenance=dict(raw.get("provenance") or {}) or None,
+    with locked_jsonl_file(candidates_path) as target:
+        # Re-read under lock — prevents TOCTOU between read and replace
+        lines = target.read_text(encoding="utf-8").splitlines()
+        active: list[str] = []
+        archived: list[str] = []
+        archived_count = 0
+
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            raw = json.loads(line_stripped)
+            cand = CrystallizedCandidate(
+                candidate_id=str(raw["candidate_id"]),
+                kind=str(raw["kind"]),
+                body=str(raw["body"]),
+                source_event_ids=[str(i) for i in raw.get("source_event_ids", [])],
+                sensitivity=str(raw.get("sensitivity", "private")),
+                tags=[str(t) for t in (raw.get("tags") or [])],
+                bridge_state=str(raw.get("bridge_state", "")),
+                created_at=str(raw.get("created_at") or ""),
+                provenance=dict(raw.get("provenance") or {}) or None,
+            )
+            effective = resolve_candidate_effective_state(cand, triage)
+            age = _candidate_age_seconds(cand.created_at, now)
+
+            if effective == "owner_eligible" or age < retention_days * 86400:
+                active.append(line_stripped)
+            else:
+                archived.append(line_stripped)
+                archived_count += 1
+
+        # Conservation assertion (§3.4A — fail-closed)
+        # Every non-blank line must end up in either active or archived
+        blank_count = sum(1 for l in lines if not l.strip())
+        if len(lines) - blank_count != len(active) + len(archived):
+            append_audit(
+                store.roots.audit_path,
+                action="candidate_compact_conservation",
+                status="violation",
+                target=str(candidates_path),
+                details={
+                    "lines_before": len(lines),
+                    "blank": blank_count,
+                    "active": len(active),
+                    "archived": len(archived),
+                },
+            )
+            return 0  # Abort — do NOT replace the file
+
+        # Atomic replace (direct IO — same file under lock, avoid reentrant guard)
+        tmp_path = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        tmp_path.write_text(
+            "\n".join(active) + "\n" if active else "", encoding="utf-8"
         )
-        effective = resolve_candidate_effective_state(cand, triage)
-        age = _candidate_age_seconds(cand.created_at, now)
+        os.replace(tmp_path, target)
 
-        if effective == "owner_eligible" or age < retention_days * 86400:
-            active.append(line)
-        else:
-            archived.append(line)
-            archived_count += 1
+        # Archive via locked append (different file — allowed)
+        if archived and archive_path is not None:
+            archived_records = [json.loads(line) for line in archived]
+            append_jsonl_lines_locked(archive_path, archived_records)
 
-    # Rewrite main file with active candidates only
-    candidates_path.write_text("\n".join(active) + "\n", encoding="utf-8")
-
-    # Append archived to archive file (never delete)
-    if archived and archive_path is not None:
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        if archive_path.exists():
-            existing = archive_path.read_text(encoding="utf-8").rstrip() + "\n"
-        else:
-            existing = ""
-        archive_path.write_text(existing + "\n".join(archived) + "\n", encoding="utf-8")
+        # Conservation OK baseline audit
+        append_audit(
+            store.roots.audit_path,
+            action="candidate_compact_conservation",
+            status="ok",
+            target=str(candidates_path),
+            details={
+                "lines_before": len(lines),
+                "active": len(active),
+                "archived": archived_count,
+            },
+        )
 
     append_audit(
         store.roots.audit_path,
