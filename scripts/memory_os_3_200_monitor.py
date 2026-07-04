@@ -4883,8 +4883,9 @@ def session_activity_stats(recent_window=250):
         "by_kind": dict(by_kind),
     }
 
-def audit_action_stats(recent_window=250):
-    records = _read_jsonl("/root/.hermes/memory-os/audit/write_audit.jsonl")
+def audit_action_stats(recent_window=250, hermes_home: str = "/root/.hermes"):
+    audit_path = Path(hermes_home) / "memory-os" / "audit" / "write_audit.jsonl"
+    records = read_audit_records(audit_path)
     action_counts = Counter()
     recent_action_counts = Counter()
     owner_review_reply_input_modes = Counter()
@@ -5056,6 +5057,7 @@ from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.audit import read_audit_records
 home="/root/.hermes"
 roots=MemoryOSRoots.from_hermes_home(home, profile="default")
 store=MemoryOSStore(roots)

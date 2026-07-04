@@ -17,6 +17,7 @@ REPO_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from plugins.memory.memory_os.audit import read_audit_records
 from plugins.memory.memory_os.index import MemoryOSIndex, _markdown_records
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -74,8 +75,8 @@ def _canonical_counts(store: MemoryOSStore) -> dict[str, int]:
             if is_active_crystallized_frontmatter(frontmatter):
                 crystallized += 1
     audit_lines = 0
-    if roots.audit_path.exists():
-        audit_lines = len([l for l in roots.audit_path.read_text(encoding="utf-8").splitlines() if l.strip()])
+    if roots.audit_path.parent.exists():
+        audit_lines = len(read_audit_records(roots.audit_path))
     return {
         "events": event_lines,
         "working_items": working,

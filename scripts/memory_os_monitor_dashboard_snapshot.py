@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.memory_os_module_cadence_report import build_cadence_report
+from plugins.memory.memory_os.audit import read_audit_records
 
 
 SCHEMA_VERSION = "memory-os.monitor_dashboard_snapshot.v0"
@@ -692,7 +693,7 @@ def _boundary_snapshot(cadence_report: dict[str, Any], status_report: dict[str, 
 
 def _audit_snapshot(memory_root: Path) -> list[dict[str, str]]:
     rows = []
-    for record in _read_jsonl(memory_root / "audit" / "write_audit.jsonl")[-8:]:
+    for record in read_audit_records(memory_root / "audit" / "write_audit.jsonl")[-8:]:
         rows.append(
             {
                 "t": _time_label(record.get("ts") or record.get("created_at")),
