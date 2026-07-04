@@ -119,6 +119,7 @@ from .session_mirror import SessionMirror
 from .session_mirror import read_session_mirror_apply_records
 from .shadow_journal import ShadowJournalIngestion
 from .state_source_mirror import StateSourceMirror
+from .event_stats import read_event_stats
 from .store import MemoryOSStore
 from .signal_collectors import collect_signal_sources
 from .signal_source_registry import evaluate_signal_source_requirements, signal_source_specs, validate_signal_source_specs
@@ -144,8 +145,13 @@ def _check_vector_available() -> bool:
 
 
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
-    events = store.read_events()
-    store_counts = _store_counts(store)
+    stats, freshness = read_event_stats(store.roots)
+    _stats_usable = freshness in ("fresh", "acceptable", "warning")
+    if stats is not None and stats.total_event_count > 0 and _stats_usable:
+        event_count = stats.total_event_count
+    else:
+        event_count = len(store.read_events())
+    store_counts = _store_counts(store, event_count=event_count)
     index_counts = MemoryOSIndex(store.roots).counts()
     prefetch_mode = _prefetch_mode(store)
     config = load_config(store.roots.hermes_home)
@@ -3545,8 +3551,9 @@ def _target_roots_from_arg(target_root: str, *, profile: str) -> MemoryOSRoots:
     return MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
 
 
-def _store_counts(store: MemoryOSStore) -> dict[str, int]:
-    events = store.read_events()
+def _store_counts(store: MemoryOSStore, *, event_count: int | None = None) -> dict[str, int]:
+    if event_count is None:
+        event_count = len(store.read_events())
     working_items = 0
     for path in sorted(store.roots.working_root.glob("*.json")):
         try:
@@ -3566,7 +3573,7 @@ def _store_counts(store: MemoryOSStore) -> dict[str, int]:
             1 for frontmatter, _body in records if is_active_crystallized_frontmatter(frontmatter)
         )
     return {
-        "events": len(events),
+        "events": event_count,
         "working_items": working_items,
         "crystallized_candidates": len(read_candidate_queue(store.roots)),
         "crystallized_records": crystallized_records,

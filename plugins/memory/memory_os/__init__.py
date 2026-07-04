@@ -23,7 +23,7 @@ from . import config as memory_os_config
 from .adapters.hindsight import HindsightHttpClient
 from .audit import append_audit, read_audit_entries
 from .crystallized import read_candidate_queue
-from .event_stats import read_event_stats
+from .event_stats import build_event_stats, read_event_stats, write_event_stats
 from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
@@ -823,6 +823,14 @@ class MemoryOSProvider(MemoryProvider):
             event_kinds = Counter(event.kind for event in events)
             latest_event_ts = max((event.ts for event in events), default=None)
             event_count = len(events)
+            # Rebuild cache so the next status call can use O(1) path
+            try:
+                event_dicts = [e.to_dict() for e in events]
+                stats = build_event_stats(event_dicts)
+                stats.events_root = str(self._roots.events_root)
+                write_event_stats(self._roots, stats)
+            except Exception:
+                pass  # best-effort; never fail status for stats writeback
         index_counts = self._index.counts() if self._index else {}
         adapter_enabled = bool(self._config.get("hindsight_adapter_enabled"))
         uses_hindsight_http_api = False
@@ -839,6 +847,12 @@ class MemoryOSProvider(MemoryProvider):
             "platform": self.platform,
             "canonical_store": str(self._roots.memory_os_root),
             "storage_model": "local_filesystem_jsonl_markdown",
+            "event_stats_cache": {
+                "used": _stats_usable if stats is not None else False,
+                "freshness": freshness,
+                "total_event_count": stats.total_event_count if stats is not None else 0,
+                "consistency": "eventual_until_next_heartbeat",
+            },
             "event_count": event_count,
             "event_sources": dict(event_sources),
             "event_kinds": dict(event_kinds),
