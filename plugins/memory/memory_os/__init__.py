@@ -23,6 +23,7 @@ from . import config as memory_os_config
 from .adapters.hindsight import HindsightHttpClient
 from .audit import append_audit, read_audit_entries
 from .crystallized import read_candidate_queue
+from .event_stats import read_event_stats
 from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
@@ -808,10 +809,19 @@ class MemoryOSProvider(MemoryProvider):
                 "provider": "memory_os",
                 "status": "not_initialized",
             }
-        events = self._store.read_events()
-        event_sources = Counter(event.source for event in events)
-        event_kinds = Counter(event.kind for event in events)
-        latest_event_ts = max((event.ts for event in events), default=None)
+        # Try event_stats cache first (O(1)); fall back to full scan
+        stats, _freshness = read_event_stats(self._roots)
+        if stats is not None and stats.total_event_count > 0:
+            event_count = stats.total_event_count
+            event_sources = Counter(stats.by_source)
+            event_kinds = Counter(stats.by_kind)
+            latest_event_ts = stats.latest_event_ts
+        else:
+            events = self._store.read_events()
+            event_sources = Counter(event.source for event in events)
+            event_kinds = Counter(event.kind for event in events)
+            latest_event_ts = max((event.ts for event in events), default=None)
+            event_count = len(events)
         index_counts = self._index.counts() if self._index else {}
         adapter_enabled = bool(self._config.get("hindsight_adapter_enabled"))
         uses_hindsight_http_api = False
@@ -828,7 +838,7 @@ class MemoryOSProvider(MemoryProvider):
             "platform": self.platform,
             "canonical_store": str(self._roots.memory_os_root),
             "storage_model": "local_filesystem_jsonl_markdown",
-            "event_count": len(events),
+            "event_count": event_count,
             "event_sources": dict(event_sources),
             "event_kinds": dict(event_kinds),
             "latest_event_ts": latest_event_ts,
@@ -841,7 +851,7 @@ class MemoryOSProvider(MemoryProvider):
             "crystallized_records_label": "approved crystallized memory records",
             "audit_entries": len(read_audit_entries(self._roots.audit_path)),
             "index_counts": index_counts,
-            "index_health": _tool_index_health(self._roots, len(events), index_counts),
+            "index_health": _tool_index_health(self._roots, event_count, index_counts),
             "prefetch_mode": "indexed" if self._roots.index_path.exists() else "degraded_filesystem",
             "vector_available": bool(
                 self._embedder is not None

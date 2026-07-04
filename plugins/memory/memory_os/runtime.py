@@ -10,6 +10,7 @@ from typing import Any
 from .audit import append_audit
 from .crystallized import append_candidate_queue, read_candidate_queue
 from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
+from .event_stats import build_event_stats, write_event_stats
 from .index import MemoryOSIndex
 from .inner_drive import InnerDriveEngine, select_events_for_inner_drive
 from .jsonl_io import build_error_record, write_json_atomic
@@ -94,6 +95,14 @@ class MemoryOSRuntime:
         )
         session_mirror_auto_apply = auto_apply_graduated_session_mirror(self.store)
         events = sorted(self.store.read_events(), key=lambda event: event.ts)
+        # Write event_stats cache for O(1) status/monitor reads
+        try:
+            event_dicts = [e.to_dict() for e in events]
+            stats = build_event_stats(event_dicts)
+            stats.events_root = str(self.store.roots.events_root)
+            write_event_stats(self.store.roots, stats)
+        except Exception:
+            pass  # stats are best-effort; never fail heartbeat for stats
         pending, cap_deferred = select_events_for_inner_drive(
             events,
             processed_ids,
