@@ -190,29 +190,35 @@ def test_cosine_similarity_invalid_bytes_returns_none():
 # ── Unit: _detect_relation_from_similarity ────────────────────────────────────
 
 
-def test_detect_refines_high_sim_same_kind():
-    assert _detect_relation_from_similarity(0.85, "note", "note") == "refines"
+def test_detect_refines_high_sim_same_kind(tmp_path: Path) -> None:
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    assert _detect_relation_from_similarity(0.85, "note", "note", roots=roots) == "refines"
 
 
-def test_detect_co_occurs_high_sim_different_kind():
-    assert _detect_relation_from_similarity(0.85, "note", "decision") == "co_occurs"
+def test_detect_co_occurs_high_sim_different_kind(tmp_path: Path) -> None:
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    assert _detect_relation_from_similarity(0.85, "note", "decision", roots=roots) == "co_occurs"
 
 
-def test_detect_co_occurs_mid_sim():
-    assert _detect_relation_from_similarity(0.70, "note", "note") == "co_occurs"
+def test_detect_co_occurs_mid_sim(tmp_path: Path) -> None:
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    assert _detect_relation_from_similarity(0.70, "note", "note", roots=roots) == "co_occurs"
 
 
-def test_detect_contradicts_low_sim_different_kind():
+def test_detect_contradicts_low_sim_different_kind(tmp_path: Path) -> None:
     """Low-similarity cross-kind pairs produce contradicts edges."""
-    assert _detect_relation_from_similarity(0.20, "note", "decision") == "contradicts"
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    assert _detect_relation_from_similarity(0.20, "note", "decision", roots=roots) == "contradicts"
 
 
-def test_detect_none_mid_sim_same_kind_below_co_occurs():
-    assert _detect_relation_from_similarity(0.50, "note", "note") is None
+def test_detect_none_mid_sim_same_kind_below_co_occurs(tmp_path: Path) -> None:
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    assert _detect_relation_from_similarity(0.50, "note", "note", roots=roots) is None
 
 
-def test_detect_none_low_sim_same_kind():
-    assert _detect_relation_from_similarity(0.10, "note", "note") is None
+def test_detect_none_low_sim_same_kind(tmp_path: Path) -> None:
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    assert _detect_relation_from_similarity(0.10, "note", "note", roots=roots) is None
 
 
 def test_low_similarity_cross_kind_contradicts_restored(tmp_path: Path) -> None:
@@ -220,19 +226,21 @@ def test_low_similarity_cross_kind_contradicts_restored(tmp_path: Path) -> None:
     from plugins.memory.memory_os.knob_overrides import resolve_knob
     from plugins.memory.memory_os.vector_edge_proposer import _detect_relation_from_similarity
     # Use _store_root=tmp_path to isolate from production /root/.hermes knob overrides
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
     refines = resolve_knob("vector_edge_refines_threshold", default=0.75, _store_root=tmp_path)
     co_occurs = resolve_knob("vector_edge_co_occurs_threshold", default=0.65, _store_root=tmp_path)
     contradicts = resolve_knob("vector_edge_contradicts_threshold", default=0.35, _store_root=tmp_path)
     # sim=0.30 <= contradicts(0.35), kind_a != kind_b -> should return "contradicts"
     assert 0.30 <= contradicts
-    result = _detect_relation_from_similarity(0.30, "note", "moment", roots=None)
+    result = _detect_relation_from_similarity(0.30, "note", "moment", roots=roots)
     assert result == "contradicts", f"expected 'contradicts', got {result!r}"
 
 
 def test_contradicts_not_triggered_same_kind(tmp_path: Path) -> None:
     """Low similarity but same kind should NOT trigger contradicts."""
     from plugins.memory.memory_os.vector_edge_proposer import _detect_relation_from_similarity
-    result = _detect_relation_from_similarity(0.30, "note", "note", roots=None)
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    result = _detect_relation_from_similarity(0.30, "note", "note", roots=roots)
     assert result is None, f"expected None for same-kind, got {result!r}"
 
 
