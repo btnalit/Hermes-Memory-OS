@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..jsonl_io import append_jsonl_locked
+from ..jsonl_io import append_jsonl_locked, locked_jsonl_file
 
 
 class ProjectionLedger:
@@ -62,14 +62,15 @@ class ProjectionLedger:
         if not self.path.exists():
             return []
         records: list[dict[str, Any]] = []
-        with self.path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    value = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(value, dict):
-                    records.append(value)
+        with locked_jsonl_file(self.path) as target:
+            with target.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict):
+                        records.append(value)
         return records
 
 

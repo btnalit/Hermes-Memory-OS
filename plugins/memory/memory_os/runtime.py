@@ -10,7 +10,7 @@ from typing import Any
 from .audit import append_audit
 from .crystallized import append_candidate_queue, read_candidate_queue
 from .execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
-from .event_stats import build_event_stats, write_event_stats
+from .event_stats import build_event_stats, event_stats_path, write_event_stats
 from .index import MemoryOSIndex
 from .inner_drive import InnerDriveEngine, select_events_for_inner_drive
 from .jsonl_io import build_error_record, write_json_atomic
@@ -101,21 +101,64 @@ class MemoryOSRuntime:
             stats = build_event_stats(event_dicts)
             stats.events_root = str(self.store.roots.events_root)
             write_event_stats(self.store.roots, stats)
-        except Exception:
-            pass  # stats are best-effort; never fail heartbeat for stats
+        except Exception as _stats_exc:
+            # stats are best-effort; never fail heartbeat for stats
+            _stats_error = build_error_record(
+                component="runtime",
+                operation="heartbeat_write_event_stats",
+                error_code="event_stats_write_failed",
+                severity="warning",
+                recoverable=True,
+                path=event_stats_path(self.store.roots),
+                details={
+                    "error_type": type(_stats_exc).__name__,
+                    "message": str(_stats_exc)[:200],
+                },
+            )
+            try:
+                _snap_state = self._read_state()
+                _snap_state["suppressed_error_count"] = int(_snap_state.get("suppressed_error_count") or 0) + 1
+                _recent = [
+                    str(c) for c in (
+                        _snap_state.get("recent_error_codes")
+                        if isinstance(_snap_state.get("recent_error_codes"), list)
+                        else []
+                    ) if str(c)
+                ]
+                _recent.append("event_stats_write_failed")
+                _snap_state["recent_error_codes"] = _recent[-5:]
+                _snap_state["last_error_record"] = _stats_error
+                self._write_state(_snap_state)
+            except Exception:
+                pass  # state write itself failed — nothing more we can do
         pending, cap_deferred = select_events_for_inner_drive(
             events,
             processed_ids,
             max_events=max_events,
             max_events_per_source_class=max_events_per_source_class,
         )
+        # Secondary dedup: events that slid out of the 2000-ID window may
+        # already have candidates — check the candidate queue to avoid
+        # re-processing them (duplicate WorkingItems + CrystallizedCandidates).
+        _existing_candidate_event_ids: set[str] = set()
+        for _existing in read_candidate_queue(self.store):
+            for _seid in _existing.source_event_ids:
+                _existing_candidate_event_ids.add(_seid)
         engine = InnerDriveEngine(self.store)
         processed_now: list[str] = []
         policy_skipped_now: list[str] = []
         source_class_counts: dict[str, int] = {}
         candidate_created_count = 0
         working_created_count = 0
+        newly_processed_count = 0
         for event in pending:
+            # Skip events that already have a candidate (window-overflow dedup);
+            # still track in processed_now for ID windowing but do NOT count
+            # toward cumulative processed_event_count_total (already counted).
+            if event.id in _existing_candidate_event_ids:
+                processed_ids.add(event.id)
+                processed_now.append(event.id)
+                continue
             result = engine.process_event(event)
             source_class = result.decision.source_class
             source_class_counts[source_class] = source_class_counts.get(source_class, 0) + 1
@@ -128,6 +171,7 @@ class MemoryOSRuntime:
                 policy_skipped_now.append(event.id)
             processed_ids.add(event.id)
             processed_now.append(event.id)
+            newly_processed_count += 1
 
         working = WorkingMemoryService(self.store)
         decayed_documents: list[str] = []
@@ -149,8 +193,8 @@ class MemoryOSRuntime:
                 "schema_version": "memory-os.runtime_state.v0",
                 "last_attempt_at": current_ts,
                 "last_heartbeat_at": current_ts,
-                "processed_event_count": len(processed_ids),
-                "processed_event_count_total": state.get("processed_event_count_total", 0) + len(processed_now),
+                "processed_event_count": state.get("processed_event_count_total", 0) + newly_processed_count,
+                "processed_event_count_total": state.get("processed_event_count_total", 0) + newly_processed_count,
                 "last_processed_event_id": latest_processed_event_id,
                 "last_processed_event_ts": current_ts,
                 "recent_processed_event_ids": windowed_ids,

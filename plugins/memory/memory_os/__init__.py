@@ -809,9 +809,10 @@ class MemoryOSProvider(MemoryProvider):
                 "provider": "memory_os",
                 "status": "not_initialized",
             }
-        # Try event_stats cache first (O(1)); fall back to full scan
-        stats, _freshness = read_event_stats(self._roots)
-        if stats is not None and stats.total_event_count > 0:
+        # Try event_stats cache first (O(1)); fall back to full scan when stale
+        stats, freshness = read_event_stats(self._roots)
+        _stats_usable = freshness in ("fresh", "acceptable", "warning")
+        if stats is not None and stats.total_event_count > 0 and _stats_usable:
             event_count = stats.total_event_count
             event_sources = Counter(stats.by_source)
             event_kinds = Counter(stats.by_kind)

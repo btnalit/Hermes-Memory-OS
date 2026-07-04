@@ -3650,6 +3650,8 @@ def test_reply_parser_unknown_anchor_needs_clarification_without_mutation(tmp_pa
 
 
 def test_hindsight_curation_finding_gets_owner_gated_decision_tokens(tmp_path):
+    from datetime import datetime as _dt, timezone as _tz
+
     store = _store(tmp_path)
     advisor_root = tmp_path / "system-modules" / "left_brain_advisor"
     advisor_root.mkdir(parents=True)
@@ -3658,7 +3660,7 @@ def test_hindsight_curation_finding_gets_owner_gated_decision_tokens(tmp_path):
             {
                 "schema_version": "memory-os.left_brain_advisor.v0",
                 "report_id": "lba_hcur",
-                "created_at": "2026-06-03T01:00:00Z",
+                "created_at": _dt.now(_tz.utc).isoformat(),
                 "findings": [
                     {
                         "schema_version": "memory-os.left_brain_advisor_finding.v0",
