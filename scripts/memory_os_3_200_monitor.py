@@ -4811,7 +4811,7 @@ def compaction_stats():
     return {"recent_count": starts, "focus_none_count": focus_none}
 
 def hook_marker_counts():
-    r = run(["grep", "-R", '"action": "agent_os_shell_session_', "/root/.hermes/memory-os/audit"])
+    r = run(["grep", "-R", '"action": "agent_os_shell_session_', os.path.join(_hermes_home, "memory-os/audit")])
     text = r["out"] if r["ok"] else ""
     started = text.count("agent_os_shell_session_started")
     reset = text.count("agent_os_shell_session_reset")
@@ -4848,7 +4848,7 @@ def _read_json(path):
     return parsed if isinstance(parsed, dict) else {}
 
 def session_activity_stats(recent_window=250):
-    root = Path("/root/.hermes/memory-os/events")
+    root = Path(_hermes_home) / "memory-os" / "events"
     records = []
     if root.exists():
         for path in sorted(root.glob("*/*.jsonl")):
@@ -4883,7 +4883,9 @@ def session_activity_stats(recent_window=250):
         "by_kind": dict(by_kind),
     }
 
-def audit_action_stats(recent_window=250, hermes_home: str = "/root/.hermes"):
+def audit_action_stats(recent_window=250, hermes_home=None):
+    if hermes_home is None:
+        hermes_home = _hermes_home
     audit_path = Path(hermes_home) / "memory-os" / "audit" / "write_audit.jsonl"
     records = read_audit_records(audit_path)
     action_counts = Counter()
@@ -4924,7 +4926,7 @@ def audit_action_stats(recent_window=250, hermes_home: str = "/root/.hermes"):
     }
 
 def heartbeat_state(max_age_seconds=900):
-    path = Path("/root/.hermes/memory-os/runtime/heartbeat_state.json")
+    path = Path(_hermes_home) / "memory-os" / "runtime" / "heartbeat_state.json"
     if not path.exists():
         return {"exists": False, "fresh": False, "age_seconds": None}
     try:
@@ -4986,7 +4988,7 @@ def heartbeat_state(max_age_seconds=900):
     }
 
 def working_status():
-    root = Path("/root/.hermes/memory-os/working")
+    root = Path(_hermes_home) / "memory-os" / "working"
     documents = {}
     if not root.exists():
         return {"documents": documents}
@@ -5019,8 +5021,8 @@ def working_status():
 def enrich_memory_sources_stats(stats):
     if not isinstance(stats, dict):
         return stats
-    records = _read_jsonl("/root/.hermes/memory-os/system/memory_sources.jsonl")
-    feedback_records = _read_jsonl("/root/.hermes/memory-os/system/memory_sources_feedback.jsonl")
+    records = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/memory_sources.jsonl"))
+    feedback_records = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/memory_sources_feedback.jsonl"))
     selected_headings = Counter()
     dropped_headings = Counter()
     selected_source_classes = Counter()
@@ -5058,7 +5060,7 @@ from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.audit import read_audit_records
-home="/root/.hermes"
+home=""" + json.dumps(_hermes_home) + r"""
 roots=MemoryOSRoots.from_hermes_home(home, profile="default")
 store=MemoryOSStore(roots)
 config=load_config(home)
@@ -5080,7 +5082,7 @@ for cid, query, anchor_text in cases:
 print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 """
     env = dict(os.environ)
-    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"
+    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python"
     r = run(["python3", "-c", code], env=env)
     return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
 
@@ -5093,7 +5095,7 @@ from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.prefetch import build_prefetch
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
-home="/root/.hermes"
+home=""" + json.dumps(_hermes_home) + r"""
 roots=MemoryOSRoots.from_hermes_home(home, profile="default")
 store=MemoryOSStore(roots)
 config=load_config(home)
@@ -5123,7 +5125,7 @@ for cid, query, anchor_text, expected_route, expected_heading in cases:
 print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 """
     env = dict(os.environ)
-    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"
+    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python"
     r = run(["python3", "-c", code], env=env)
     return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
 
@@ -5131,7 +5133,7 @@ def deep_reflection_status():
     code = r"""
 import json
 from plugins.modules.cognition.deep_reflection import DeepReflectionModule
-status = DeepReflectionModule("/root/.hermes", profile="default").status()
+status = DeepReflectionModule(""" + json.dumps(_hermes_home) + r""", profile="default").status()
 keys = [
   "enabled","injection_mode","working_updates_enabled","llm_enabled",
   "self_evolution_proposals_enabled","wandering_seed_enabled",
@@ -5168,8 +5170,8 @@ def read_jsonl(path):
         if isinstance(value, dict):
             out.append(value)
     return out
-policy = read_json("/root/.hermes/system-modules/deep_reflection/policy.json")
-policy_applies = read_jsonl("/root/.hermes/system-modules/deep_reflection/policy_applies.jsonl")
+policy = read_json(os.path.join(""" + json.dumps(_hermes_home) + r""", "system-modules/deep_reflection/policy.json"))
+policy_applies = read_jsonl(os.path.join(""" + json.dumps(_hermes_home) + r""", "system-modules/deep_reflection/policy_applies.jsonl"))
 summary.update({
   "policy_present": bool(policy),
   "policy_version": int(policy.get("policy_version") or 0) if policy else 0,
@@ -5181,12 +5183,12 @@ summary.update({
 print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
 """
     env = dict(os.environ)
-    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"
+    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python"
     r = run(["python3", "-c", code], env=env)
     return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
 
 def low_clue_recall_probe():
-    cfg_path = Path("/root/.hermes/memory-os/config.json")
+    cfg_path = Path(_hermes_home) / "memory-os" / "config.json"
     cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
     low_clue_cfg = cfg.get("low_clue_recall") if isinstance(cfg.get("low_clue_recall"), dict) else {}
     judge = low_clue_cfg.get("llm_judge") if isinstance(low_clue_cfg.get("llm_judge"), dict) else {}
@@ -5277,7 +5279,7 @@ def module_artifact_summary():
             from plugins.memory.memory_os.roots import MemoryOSRoots
             from plugins.memory.memory_os.store import MemoryOSStore
 
-            roots = MemoryOSRoots.from_hermes_home("/root/.hermes", profile="default")
+            roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
             store = MemoryOSStore(roots)
             return build_prefetch_with_observability(
                 "memory-os monitor prefetch observability",
@@ -5308,20 +5310,20 @@ def module_artifact_summary():
             }
 
     prefetch_observability = prefetch_observability_summary()
-    expression_feedback = _read_jsonl("/root/.hermes/memory-os/system/expression_feedback_ledger.jsonl")
-    speak_permission_tickets = _read_jsonl("/root/.hermes/memory-os/system/speak_permission_tickets.jsonl")
+    expression_feedback = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/expression_feedback_ledger.jsonl"))
+    speak_permission_tickets = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/speak_permission_tickets.jsonl"))
     right_brain_expression_requests = _read_jsonl(
-        "/root/.hermes/system-modules/right_brain_expression_adapter/requests.jsonl"
+        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/requests.jsonl")
     )
     right_brain_expression_policy = _read_json(
-        "/root/.hermes/system-modules/right_brain_expression_adapter/policy.json"
+        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/policy.json")
     )
     right_brain_expression_policy_applies = _read_jsonl(
-        "/root/.hermes/system-modules/right_brain_expression_adapter/policy_applies.jsonl"
+        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/policy_applies.jsonl")
     )
     repo_roots = (
-        "/root/.hermes/plugins/memory_os",
-        "/root/.hermes/memory-os/runtime/python",
+        os.path.join(_hermes_home, "plugins/memory_os"),
+        os.path.join(_hermes_home, "memory-os/runtime/python"),
     )
     def repo_file_exists(*parts):
         return any(os.path.exists(os.path.join(root, *parts)) for root in repo_roots)
@@ -5337,10 +5339,10 @@ def module_artifact_summary():
         return {}
 
     proposal_queue_legacy_template_cleanup_applies = _read_jsonl(
-        "/root/.hermes/system-modules/proposal_queue/legacy_template_cleanup_applies.jsonl"
+        os.path.join(_hermes_home, "system-modules/proposal_queue/legacy_template_cleanup_applies.jsonl")
     )
     right_brain_expression_outcomes = _read_jsonl(
-        "/root/.hermes/system-modules/right_brain_expression_adapter/outcomes.jsonl"
+        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/outcomes.jsonl")
     )
     latest_right_brain_expression_request = (
         right_brain_expression_requests[-1]
@@ -5383,7 +5385,7 @@ def module_artifact_summary():
         for item in expression_feedback_linked
         if latest_right_brain_outcome_id and str(item.get("outcome_id") or "") == latest_right_brain_outcome_id
     )
-    ops_gate_reports = _read_jsonl("/root/.hermes/system-modules/ops_gate/reports.jsonl")
+    ops_gate_reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/ops_gate/reports.jsonl"))
     proposal_followup_action_counts = {}
     for report_item in ops_gate_reports:
         if not isinstance(report_item, dict):
@@ -5412,7 +5414,7 @@ def module_artifact_summary():
         "household_artifact_exists": household.get("artifact_exists"),
       },
       "wandering": {
-        "output_count": len(_read_jsonl("/root/.hermes/system-modules/wandering_mind/outputs.jsonl")),
+        "output_count": len(_read_jsonl(os.path.join(_hermes_home, "system-modules/wandering_mind/outputs.jsonl"))),
         "would_send_count": wandering.get("would_send_count"),
       },
       "evidence": {
@@ -5650,7 +5652,7 @@ def module_artifact_summary():
         "latest_cadence_skipped": deep_reflection.get("latest_cadence_skipped"),
         "latest_skip_reason": deep_reflection.get("latest_skip_reason"),
         "cadence_skipped_count": deep_reflection.get("cadence_skipped_count"),
-        "wandering_seed_count": len(_read_jsonl("/root/.hermes/system-modules/deep_reflection/wandering_seeds.jsonl")),
+        "wandering_seed_count": len(_read_jsonl(os.path.join(_hermes_home, "system-modules/deep_reflection/wandering_seeds.jsonl"))),
       },
       "ops_gate": {
         "report_count": ops_gate.get("report_count"),
@@ -5833,7 +5835,7 @@ def expression_artifact_summary():
         else {}
     )
     speak_permission = modules.get("speak_permission") if isinstance(modules.get("speak_permission"), dict) else {}
-    reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
+    reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/cognitive_loop/reports.jsonl"))
     wandering_result_count = 0
     wandering_would_send_result_count = 0
     wandering_silent_count = 0
@@ -5956,7 +5958,7 @@ def cognitive_loop_step_evidence():
       "heartbeat_post",
       "doctor_boundary_report",
     ]
-    reports = _read_jsonl("/root/.hermes/system-modules/cognitive_loop/reports.jsonl")
+    reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/cognitive_loop/reports.jsonl"))
     latest = reports[-1] if reports and isinstance(reports[-1], dict) else {}
     if not latest:
         return {
@@ -6003,7 +6005,7 @@ def cognitive_loop_step_evidence():
     }
 
 def module_cadence_summary():
-    reports = _read_jsonl("/root/.hermes/system-modules/module_cadence/reports.jsonl")
+    reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/module_cadence/reports.jsonl"))
     latest = reports[-1] if reports and isinstance(reports[-1], dict) else {}
     boundary = latest.get("boundary") if isinstance(latest.get("boundary"), dict) else {}
     module_counters = {}
@@ -6057,7 +6059,7 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.session_mirror import SessionMirror, _read_event_records
 from plugins.memory.memory_os.store import MemoryOSStore
 
-home = "/root/.hermes"
+home = """ + json.dumps(_hermes_home) + r"""
 roots = MemoryOSRoots.from_hermes_home(home, profile="default")
 store = MemoryOSStore(roots)
 mirror = SessionMirror(store)
@@ -6169,7 +6171,7 @@ result = {
 print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 """
     env = dict(os.environ)
-    env["PYTHONPATH"] = "/root/.hermes/memory-os/runtime/python"
+    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python"
     report = load_json_cmd(["python3", "-c", code], env=env)
     if isinstance(report, dict) and report.get("_error"):
         report.setdefault("schema_version", "memory-os.session_mirror_correlation_probe.v2")
@@ -6215,7 +6217,7 @@ def session_mirror_auto_apply_permit_integrity(latest_apply, latest_governance):
       if isinstance(latest_governance.get("execution_gate_permit_resolution"), dict)
       else {}
     )
-    records = _read_jsonl("/root/.hermes/memory-os/system/execution_gate_envelopes.jsonl")
+    records = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/execution_gate_envelopes.jsonl"))
     permits = [
       record for record in records
       if isinstance(record, dict)
@@ -6431,7 +6433,7 @@ def execution_gate_cron_summary():
     known_specs_by_wrapper = {str(item.get("wrapper_script") or ""): item for item in known_specs}
     known_specs_by_raw = {str(item.get("raw_script") or ""): item for item in known_specs}
     adapter_probe = _execution_gate_cron_adapter_probe_summary()
-    jobs_path = Path("/root/.hermes/cron/jobs.json")
+    jobs_path = Path(_hermes_home) / "cron" / "jobs.json"
     try:
         loaded = json.loads(jobs_path.read_text(encoding="utf-8")) if jobs_path.exists() else {"jobs": []}
     except Exception as exc:
@@ -6587,7 +6589,7 @@ def _execution_gate_cron_adapter_probe_summary():
     return loaded if isinstance(loaded, dict) else {"status": "error", "reason": "probe_json_not_object"}
 
 def _memory_os_cron_specs_from_snapshot():
-    snapshot_path = Path("/root/.hermes/memory-os/system/memory_os_cron_registry.json")
+    snapshot_path = Path(_hermes_home) / "memory-os" / "system" / "memory_os_cron_registry.json"
     try:
         loaded = json.loads(snapshot_path.read_text(encoding="utf-8")) if snapshot_path.exists() else {}
     except Exception:
@@ -6617,7 +6619,7 @@ def _enabled_job_count(jobs):
     return sum(1 for item in jobs if item.get("enabled") is True)
 
 def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
-    records_path = Path("/root/.hermes/memory-os/system/execution_gate_envelopes.jsonl")
+    records_path = Path(_hermes_home) / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
     completions = {}
     if records_path.exists():
         try:
@@ -7090,7 +7092,7 @@ def _first_rendered_owner_utterance(rendered):
     return ""
 
 def _latest_recorded_owner_utterance():
-    path = Path("/root/.hermes/memory-os/system/owner_review_rendered_digests.jsonl")
+    path = Path(_hermes_home) / "memory-os" / "system" / "owner_review_rendered_digests.jsonl"
     if not path.exists():
         return ""
     try:
@@ -7151,7 +7153,7 @@ control_plane = {
     "reply_fallback_used_count": 0,
 }
 try:
-    plugin_path = Path("/root/.hermes/plugins/memory-os-agent-os/__init__.py")
+    plugin_path = Path(_hermes_home) / "plugins" / "memory-os-agent-os" / "__init__.py"
     if plugin_path.exists():
         control_plane["gateway_hook_plugin_present"] = True
         spec = importlib.util.spec_from_file_location("memory_os_agent_os_monitor_probe", plugin_path)
@@ -7276,10 +7278,10 @@ owner_review_agenda_digest = owner_review_agenda_digest_summary()
 owner_review_reply_dry_run = owner_review_reply_dry_run_summary()
 owner_review_surface = owner_review_surface_summary()
 owner_review_ingress_guard = owner_review_ingress_guard_summary()
-cfg_path = Path("/root/.hermes/memory-os/config.json")
+cfg_path = Path(_hermes_home) / "memory-os" / "config.json"
 cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
-df = run(["df", "-h", "/root/.hermes/memory-os"])["out"]
-du = run(["du", "-sh", "/root/.hermes/memory-os"])["out"]
+df = run(["df", "-h", os.path.join(_hermes_home, "memory-os")])["out"]
+du = run(["du", "-sh", os.path.join(_hermes_home, "memory-os")])["out"]
 heartbeat_list = run(["systemctl", "--user", "list-timers", "hermes-memory-os-heartbeat.timer", "--no-pager"])["out"]
 
 print(json.dumps({
@@ -7341,7 +7343,7 @@ print(json.dumps({
   "module_cadence": module_cadence_summary(),
   "expression_artifacts": expression_artifact_summary(),
   "session_mirror": session_mirror_summary(),
-  "audit_actions": audit_action_stats(),
+  "audit_actions": audit_action_stats(hermes_home=_hermes_home),
   "working_status": working_status(),
   "memory_os_config": {"l4": cfg.get("l4", {})},
   "context_router": cfg.get("context_router", {}),

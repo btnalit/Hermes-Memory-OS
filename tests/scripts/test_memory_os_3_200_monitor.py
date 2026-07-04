@@ -5565,3 +5565,89 @@ def test_remote_probe_script_hermes_home_variable_still_defined():
     assert "_hermes_home = " in script, (
         "_hermes_home must be defined in the generated probe script"
     )
+
+
+# ── Patch A: audit_action_stats + all hardcoded /root/.hermes → _hermes_home ───
+
+
+def test_remote_probe_script_no_hardcoded_root_hermes_with_custom_home():
+    """With custom hermes_home, generated script contains zero /root/.hermes."""
+    script = monitor._remote_probe_script("/tmp/custom-hermes")
+    assert "/root/.hermes" not in script, (
+        "Generated probe script must not contain hardcoded /root/.hermes "
+        "when a custom hermes_home is passed"
+    )
+
+
+def test_remote_probe_script_audit_action_stats_receives_hermes_home():
+    """audit_action_stats() called with hermes_home=_hermes_home in probe output."""
+    script = monitor._remote_probe_script("/tmp/custom-hermes")
+    assert "audit_action_stats(hermes_home=_hermes_home)" in script, (
+        "audit_action_stats must be called with hermes_home=_hermes_home"
+    )
+    assert '"audit_actions": audit_action_stats()' not in script, (
+        "audit_action_stats must not be called without hermes_home parameter"
+    )
+
+
+def test_remote_probe_script_custom_home_embedded():
+    """Custom hermes_home is correctly embedded as _hermes_home variable."""
+    script = monitor._remote_probe_script("/tmp/unusual-path")
+    assert '_hermes_home = "/tmp/unusual-path"' in script, (
+        "Custom hermes_home must be assigned to _hermes_home in generated script"
+    )
+
+
+def test_remote_probe_script_all_key_functions_use_hermes_home_variable():
+    """Every path in previously-hardcoded functions references _hermes_home."""
+    script = monitor._remote_probe_script("/tmp/custom-hermes")
+    checks = [
+        'Path(_hermes_home) / "memory-os" / "events"',
+        'Path(_hermes_home) / "memory-os" / "runtime" / "heartbeat_state.json"',
+        'Path(_hermes_home) / "memory-os" / "working"',
+        'os.path.join(_hermes_home, "memory-os/audit")',
+        'os.path.join(_hermes_home, "memory-os/system/memory_sources.jsonl")',
+        'DeepReflectionModule(""" + json.dumps(_hermes_home) + r""", profile="default")',
+        'MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")',
+    ]
+    for check in checks:
+        assert check in script, f"Expected {check!r} in generated probe script"
+
+
+def test_remote_probe_script_custom_home_compiles():
+    """Generated probe script with custom home is syntactically valid Python."""
+    script = monitor._remote_probe_script("/tmp/custom-hermes")
+    compile(script, "<probe_custom>", "exec")
+
+
+def test_remote_probe_script_default_still_uses_root_hermes():
+    """Default parameter (no arg) still embeds /root/.hermes as the home."""
+    script = monitor._remote_probe_script()
+    assert '_hermes_home = "/root/.hermes"' in script, (
+        "Default _remote_probe_script() must embed /root/.hermes as _hermes_home"
+    )
+
+
+def test_counterfactual_audit_action_stats_defaults_to_none():
+    """audit_action_stats signature defaults to None, resolves from _hermes_home."""
+    script = monitor._remote_probe_script("/tmp/custom-hermes")
+    assert "def audit_action_stats(recent_window=250, hermes_home=None):" in script, (
+        "audit_action_stats must default to None and resolve from _hermes_home"
+    )
+    assert "if hermes_home is None:" in script, (
+        "audit_action_stats must check for None hermes_home"
+    )
+    assert "        hermes_home = _hermes_home" in script, (
+        "audit_action_stats must fall back to _hermes_home when hermes_home is None"
+    )
+
+
+def test_counterfactual_hook_marker_counts_uses_hermes_home():
+    """hook_marker_counts() grep path uses os.path.join with _hermes_home."""
+    script = monitor._remote_probe_script("/tmp/custom-hermes")
+    assert 'os.path.join(_hermes_home, "memory-os/audit")' in script, (
+        "hook_marker_counts must use os.path.join(_hermes_home, ...)"
+    )
+    assert '"/root/.hermes/memory-os/audit"' not in script, (
+        "hook_marker_counts must not hardcode /root/.hermes/memory-os/audit"
+    )
