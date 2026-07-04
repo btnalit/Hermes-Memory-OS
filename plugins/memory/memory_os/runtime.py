@@ -17,6 +17,20 @@ from .session_mirror import auto_apply_graduated_session_mirror
 from .store import MemoryOSStore
 from .working import ALLOWED_WORKING_KINDS, WorkingMemoryService
 
+RECENT_PROCESSED_EVENT_IDS_LIMIT = 2000
+
+
+def _dedupe_preserve_order(ids: list[str]) -> list[str]:
+    """Deduplicate while preserving most-recent-first insertion order."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for eid in reversed(ids):
+        if eid not in seen:
+            seen.add(eid)
+            result.append(eid)
+    result.reverse()
+    return result
+
 
 class MemoryOSRuntime:
     """Advance canonical events into working memory and approval candidates."""
@@ -56,7 +70,11 @@ class MemoryOSRuntime:
         current: datetime,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        already_processed_ids = {str(event_id) for event_id in state.get("processed_event_ids", [])}
+        # Windowed read: recent_processed_event_ids first, fall back to legacy processed_event_ids
+        recent_ids = state.get("recent_processed_event_ids")
+        if recent_ids is None:
+            recent_ids = state.get("processed_event_ids", [])
+        already_processed_ids = {str(event_id) for event_id in recent_ids}
         processed_ids = set(already_processed_ids)
         runtime_gate = start_execution_gate_envelope(
             self.store,
@@ -114,14 +132,21 @@ class MemoryOSRuntime:
 
         latest_processed_event_id = processed_now[-1] if processed_now else str(state.get("last_processed_event_id") or "")
         current_ts = current.isoformat()
+        # Windowed ID tracking — preserve insertion order, never sorted() by id
+        prev_recent = list(state.get("recent_processed_event_ids") or state.get("processed_event_ids", []))
+        windowed_ids = _dedupe_preserve_order(prev_recent + processed_now)[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
         self._write_state(
             {
                 "schema_version": "memory-os.runtime_state.v0",
                 "last_attempt_at": current_ts,
                 "last_heartbeat_at": current_ts,
                 "processed_event_count": len(processed_ids),
+                "processed_event_count_total": state.get("processed_event_count_total", 0) + len(processed_now),
                 "last_processed_event_id": latest_processed_event_id,
-                "processed_event_ids": sorted(processed_ids),
+                "last_processed_event_ts": current_ts,
+                "recent_processed_event_ids": windowed_ids,
+                "recent_processed_event_ids_limit": RECENT_PROCESSED_EVENT_IDS_LIMIT,
+                "processed_event_ids_compacted": True,
             }
         )
         index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
@@ -192,8 +217,23 @@ class MemoryOSRuntime:
 
     def _read_state(self) -> dict[str, Any]:
         if not self._state_path.exists():
-            return {"schema_version": "memory-os.runtime_state.v0", "processed_event_ids": []}
-        return json.loads(self._state_path.read_text(encoding="utf-8"))
+            return {
+                "schema_version": "memory-os.runtime_state.v0",
+                "recent_processed_event_ids": [],
+                "processed_event_count_total": 0,
+            }
+        state = json.loads(self._state_path.read_text(encoding="utf-8"))
+        # Legacy migration: if old-format processed_event_ids exists but recent_ doesn't
+        if "recent_processed_event_ids" not in state:
+            legacy_ids = state.get("processed_event_ids", [])
+            state["recent_processed_event_ids"] = (
+                _dedupe_preserve_order(legacy_ids)[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
+            )
+            state["processed_event_count_total"] = state.get("processed_event_count", len(legacy_ids))
+            state["processed_event_ids_compacted"] = True
+        state.setdefault("recent_processed_event_ids_limit", RECENT_PROCESSED_EVENT_IDS_LIMIT)
+        state.setdefault("processed_event_count_total", state.get("processed_event_count", 0))
+        return state
 
     def _write_state(self, state: dict[str, Any]) -> None:
         write_json_atomic(self._state_path, state)
