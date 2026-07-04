@@ -1059,17 +1059,32 @@ def compact_candidate_queue(
             )
             return 0  # Abort — do NOT replace the file
 
-        # Atomic replace (direct IO — same file under lock, avoid reentrant guard)
+        # Archive via locked append FIRST — fail before touching main file.
+        # If archive append fails, candidates.jsonl is untouched (no data loss).
+        if archived and archive_path is not None:
+            try:
+                archived_records = [json.loads(line) for line in archived]
+                append_jsonl_lines_locked(archive_path, archived_records)
+            except Exception:
+                append_audit(
+                    store.roots.audit_path,
+                    action="candidate_compact_conservation",
+                    status="error",
+                    target=str(candidates_path),
+                    details={
+                        "phase": "archive_append_failed",
+                        "archived_count": len(archived),
+                        "active_kept": len(active),
+                    },
+                )
+                raise  # candidates.jsonl untouched — no data loss
+
+        # Atomic replace only after archive succeeded
         tmp_path = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
         tmp_path.write_text(
             "\n".join(active) + "\n" if active else "", encoding="utf-8"
         )
         os.replace(tmp_path, target)
-
-        # Archive via locked append (different file — allowed)
-        if archived and archive_path is not None:
-            archived_records = [json.loads(line) for line in archived]
-            append_jsonl_lines_locked(archive_path, archived_records)
 
         # Conservation OK baseline audit
         append_audit(
