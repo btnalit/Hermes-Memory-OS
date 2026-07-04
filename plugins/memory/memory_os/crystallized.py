@@ -1064,7 +1064,37 @@ def compact_candidate_queue(
         if archived and archive_path is not None:
             try:
                 archived_records = [json.loads(line) for line in archived]
-                append_jsonl_lines_locked(archive_path, archived_records)
+                # Dedup: skip records whose candidate_id already exists in archive.
+                # Prevents duplicate archive rows when os.replace() fails after a
+                # prior successful archive append (safe but leaves duplicate entries).
+                if archive_path.exists():
+                    existing_ids: set[str] = set()
+                    for _line in archive_path.read_text(encoding="utf-8").splitlines():
+                        if not _line.strip():
+                            continue
+                        try:
+                            _cid = json.loads(_line).get("candidate_id")
+                            if _cid:
+                                existing_ids.add(_cid)
+                        except (json.JSONDecodeError, AttributeError):
+                            # Skip malformed lines and non-dict JSON values
+                            continue
+                    _before = len(archived_records)
+                    archived_records = [
+                        r for r in archived_records
+                        if r.get("candidate_id") not in existing_ids
+                    ]
+                    _skipped = _before - len(archived_records)
+                    if _skipped > 0:
+                        append_audit(
+                            store.roots.audit_path,
+                            action="candidate_compact_dedup",
+                            status="ok",
+                            target=str(candidates_path),
+                            details={"skipped_duplicates": _skipped},
+                        )
+                if archived_records:
+                    append_jsonl_lines_locked(archive_path, archived_records)
             except Exception:
                 append_audit(
                     store.roots.audit_path,
