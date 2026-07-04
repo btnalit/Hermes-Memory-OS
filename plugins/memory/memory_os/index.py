@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .audit import append_audit
+from .audit import append_audit, read_audit_records
 from .crystallized import (
     is_active_crystallized_frontmatter,
     read_candidate_queue,
@@ -928,12 +928,10 @@ def _index_crystallized_candidates(
 
 
 def _index_audit_entries(conn: sqlite3.Connection, audit_path: Path) -> None:
-    if not audit_path.exists():
-        return
-    for line in audit_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    records = read_audit_records(audit_path)
+    for entry in records:
+        if entry.get("action") == "malformed_audit_entry":
             continue
-        entry = json.loads(line)
         conn.execute(
             """
             insert or replace into audit_entries
