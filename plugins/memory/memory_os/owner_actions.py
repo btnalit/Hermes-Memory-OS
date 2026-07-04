@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from .approval import ApprovalDecision, ApprovalPurpose
-from .audit import append_audit
+from .audit import append_audit, read_audit_records
 from .config import load_config
 from .crystallized import (
     CrystallizedCandidate,
@@ -1110,7 +1110,7 @@ def _proposal_followup_auto_route_owner_comparison_counts(store: MemoryOSStore) 
 
 def _proposal_followup_auto_route_success_count(store: MemoryOSStore) -> int:
     count = 0
-    for record in _read_jsonl(store.roots.audit_path):
+    for record in read_audit_records(store.roots.audit_path):
         if record.get("action") != "proposal_followup_auto_route_to_ops_gate":
             continue
         details = record.get("details") if isinstance(record.get("details"), dict) else {}

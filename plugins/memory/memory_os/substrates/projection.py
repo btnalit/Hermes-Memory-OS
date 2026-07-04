@@ -6,16 +6,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..jsonl_io import append_jsonl_locked
+
 
 class ProjectionLedger:
     def __init__(self, path: Path) -> None:
         self.path = path
 
     def append(self, record: dict[str, Any]) -> None:
-        # TODO(data-plane): use append_jsonl_locked for inter-process safety
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        append_jsonl_locked(self.path, record, durable=True)
 
     def record_retain(
         self,

@@ -8,6 +8,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from plugins.memory.memory_os.audit import read_audit_entries
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
@@ -1074,7 +1076,7 @@ def test_shell_session_hooks_skip_without_hermes_home(monkeypatch, tmp_path):
 
 def _audit_entries(hermes_home: Path) -> list[dict[str, Any]]:
     audit_path = hermes_home / "memory-os" / "audit" / "write_audit.jsonl"
-    return [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines()]
+    return read_audit_entries(audit_path)
 
 
 def _clear_imported_memory_os_modules() -> None:

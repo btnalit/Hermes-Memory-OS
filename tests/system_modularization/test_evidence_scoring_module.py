@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.fixtures import build_event, build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -97,8 +98,8 @@ def test_evidence_scoring_writes_explainable_scores_for_all_supported_subjects(t
     evidence_ids = {record["evidence_id"] for record in module.read_evidence()}
     assert evidence_ids
     assert all(ref in evidence_ids for score in scores for ref in score["evidence_refs"])
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("evidence_scoring_run_written" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(entry["action"] == "evidence_scoring_run_written" for entry in audit_entries)
 
 
 def test_evidence_scoring_v2_replaces_hash_scores_as_primary_signal(tmp_path):
@@ -491,8 +492,8 @@ def test_evidence_scoring_skips_unchanged_input_after_first_run(tmp_path):
         for line in module.runs_path.read_text(encoding="utf-8").splitlines()
     ]
     assert [report["skipped"] for report in run_reports] == [False, True]
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("evidence_scoring_run_skipped" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(entry["action"] == "evidence_scoring_run_skipped" for entry in audit_entries)
 
     store.append_event(
         EventEnvelope.from_dict(

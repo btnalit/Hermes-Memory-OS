@@ -4,6 +4,7 @@ import json
 import sqlite3
 import hashlib
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.crystallized import (
     CrystallizedCandidate,
@@ -3359,7 +3360,7 @@ def test_provider_owner_review_reply_tool_makes_sync_turn_idempotent(tmp_path):
     assert heartbeat["working_created_count"] == 0
     assert heartbeat["candidate_created_count"] == 0
     assert [item.candidate_id for item in read_candidate_queue(store)] == ["cand_owner_001"]
-    audit = _jsonl(store.roots.audit_path)
+    audit = read_audit_entries(store.roots.audit_path)
     ingress = [item for item in audit if item.get("action") == "owner_review_reply_ingress"]
     assert {item["details"]["phase"] for item in ingress} == {"tool_call"}
 
@@ -3427,7 +3428,7 @@ def test_provider_owner_review_reply_sync_turn_warns_and_skips_when_tool_was_not
     assert heartbeat["working_created_count"] == 0
     assert heartbeat["candidate_created_count"] == 0
     assert [item.candidate_id for item in read_candidate_queue(store)] == ["cand_owner_001"]
-    audit = _jsonl(store.roots.audit_path)
+    audit = read_audit_entries(store.roots.audit_path)
     warnings = [item for item in audit if item.get("action") == "owner_review_reply_tool_not_called"]
     assert len(warnings) == 1
 

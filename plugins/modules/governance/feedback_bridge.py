@@ -482,8 +482,6 @@ class GovernanceFeedbackBridgeModule:
         records: list[dict[str, Any]] = []
         roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
         audit_path = roots.audit_path
-        if not audit_path.exists():
-            return records
 
         RESOLVER_ACTIONS = {
             "crystallized_record_written",

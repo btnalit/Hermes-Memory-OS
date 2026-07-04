@@ -1,6 +1,7 @@
 import argparse
 import json
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.fixtures import build_event, build_working_item
 from plugins.memory.memory_os.config import save_config
@@ -631,7 +632,7 @@ def test_low_clue_recall_cli_dry_run_is_bounded_and_read_only(tmp_path, monkeypa
     store = _store(tmp_path)
     _write_working(store, ["互联网数据采集系统分层：任务定义、调度、抓取、解析、校验、存储。"])
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    before = store.roots.audit_path.read_text(encoding="utf-8")
+    before = read_audit_entries(store.roots.audit_path)
     parser = argparse.ArgumentParser()
     register_cli(parser)
 
@@ -639,7 +640,7 @@ def test_low_clue_recall_cli_dry_run_is_bounded_and_read_only(tmp_path, monkeypa
         parser.parse_args(["low-clue-recall", "dry-run", "--query", "继续那个互联网设计"])
     )
     output = json.loads(capsys.readouterr().out)
-    after = store.roots.audit_path.read_text(encoding="utf-8")
+    after = read_audit_entries(store.roots.audit_path)
 
     assert result == 0
     assert output["schema_version"] == "memory-os.low_clue_recall.v0"

@@ -1,6 +1,7 @@
 import json
 import time
 
+from plugins.memory.memory_os.audit import read_audit_entries
 import plugins.memory.memory_os as memory_os_module
 from plugins.memory import load_memory_provider
 from plugins.memory.memory_os.config import save_config
@@ -306,8 +307,8 @@ def test_sync_turn_drops_newest_when_queue_is_full_and_audits(tmp_path):
     events = _events(tmp_path)
     assert len(events) == 1
     assert "first user" in events[0].summary
-    audit_lines = (tmp_path / "memory-os" / "audit" / "write_audit.jsonl").read_text(encoding="utf-8").splitlines()
-    assert any("sync_turn_dropped" in line for line in audit_lines)
+    audit_entries = read_audit_entries(tmp_path / "memory-os" / "audit" / "write_audit.jsonl")
+    assert any(entry["action"] == "sync_turn_dropped" for entry in audit_entries)
 
 
 def test_worker_error_is_audited_and_later_items_continue(tmp_path):
@@ -331,8 +332,8 @@ def test_worker_error_is_audited_and_later_items_continue(tmp_path):
     events = _events(tmp_path)
     assert len(events) == 1
     assert "second user" in events[0].summary
-    audit_lines = (tmp_path / "memory-os" / "audit" / "write_audit.jsonl").read_text(encoding="utf-8").splitlines()
-    assert any("worker_error" in line and "boom" in line for line in audit_lines)
+    audit_entries = read_audit_entries(tmp_path / "memory-os" / "audit" / "write_audit.jsonl")
+    assert any(entry["action"] == "worker_error" and "boom" in json.dumps(entry) for entry in audit_entries)
 
 
 def test_v0_does_not_recover_unflushed_in_memory_queue_after_unclean_restart(tmp_path):

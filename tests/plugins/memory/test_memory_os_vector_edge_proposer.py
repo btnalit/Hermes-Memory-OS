@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.embedder import LocalEmbedder
 from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -440,11 +441,9 @@ def test_audit_path_written(tmp_path):
         embedder=embedder,
         audit_path=audit_path,
     )
-    assert Path(audit_path).exists()
-    lines = Path(audit_path).read_text().strip().split("\n")
-    assert len(lines) >= 1
-    entry = json.loads(lines[0])
-    assert entry["action"] == "vector_edge_proposer_run"
+    entries = read_audit_entries(Path(audit_path))
+    assert len(entries) >= 1
+    assert entries[0]["action"] == "vector_edge_proposer_run"
 
 
 # ── Cognitive loop integration ────────────────────────────────────────────────

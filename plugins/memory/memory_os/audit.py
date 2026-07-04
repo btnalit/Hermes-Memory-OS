@@ -39,63 +39,42 @@ def append_audit(
         "target": target,
         "details": details or {},
     }
-    append_jsonl_locked(audit_path, record, durable=True)
+    append_jsonl_locked(_audit_monthly_path(audit_path), record, durable=True)
 
 
 def read_audit_records(audit_path: Path) -> list[dict[str, Any]]:
-    """Read all audit records from the audit file.
+    """Read all audit records from legacy + monthly shards.
 
-    When monthly rotation is enabled, reads from legacy + monthly shards.
-    Currently the primary path is still the monolithic write_audit.jsonl.
+    Always globs for {stem}*.jsonl so that records written to monthly shards
+    (e.g. write_audit.202607.jsonl) are visible alongside the legacy
+    monolithic file (write_audit.jsonl).
     """
-    if not audit_path.exists():
-        # Try glob for future sharded layout
-        audit_dir = audit_path.parent
-        if audit_dir.exists():
-            stem = audit_path.stem
-            records: list[dict[str, Any]] = []
-            for path in sorted(audit_dir.glob(f"{stem}*.jsonl")):
-                if path.stat().st_size == 0:
-                    continue
-                for line in path.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        parsed = json.loads(line)
-                    except json.JSONDecodeError:
-                        records.append({
-                            "schema_version": "memory-os.audit.v0",
-                            "id": "",
-                            "ts": "",
-                            "action": "malformed_audit_entry",
-                            "status": "warning",
-                            "target": str(path),
-                            "details": {"line": line},
-                        })
-                        continue
-                    if isinstance(parsed, dict):
-                        records.append(parsed)
-            return records
+    audit_dir = audit_path.parent
+    if not audit_dir.exists():
         return []
+    stem = audit_path.stem
     records: list[dict[str, Any]] = []
-    for line in audit_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    for path in sorted(audit_dir.glob(f"{stem}*.jsonl")):
+        if path.stat().st_size == 0:
             continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            records.append({
-                "schema_version": "memory-os.audit.v0",
-                "id": "",
-                "ts": "",
-                "action": "malformed_audit_entry",
-                "status": "warning",
-                "target": str(audit_path),
-                "details": {"line": line},
-            })
-            continue
-        if isinstance(parsed, dict):
-            records.append(parsed)
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError:
+                records.append({
+                    "schema_version": "memory-os.audit.v0",
+                    "id": "",
+                    "ts": "",
+                    "action": "malformed_audit_entry",
+                    "status": "warning",
+                    "target": str(path),
+                    "details": {"line": line},
+                })
+                continue
+            if isinstance(parsed, dict):
+                records.append(parsed)
     return records
 
 

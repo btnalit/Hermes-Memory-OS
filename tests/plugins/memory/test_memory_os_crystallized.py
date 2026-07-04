@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.approval import (
     ApprovalDecision,
     ApprovalPurpose,
@@ -135,9 +136,9 @@ def test_approved_record_is_auditable_back_to_source_events(tmp_path):
 
     service.write_approved_record(candidate, decision, file_name="moments.md")
 
-    audit_lines = service.store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("crystallized_record_written" in line for line in audit_lines)
-    assert any(candidate.source_event_ids[0] in line for line in audit_lines)
+    audit_entries = read_audit_entries(service.store.roots.audit_path)
+    assert any(entry["action"] == "crystallized_record_written" for entry in audit_entries)
+    assert any(candidate.source_event_ids[0] in str(entry) for entry in audit_entries)
 
 
 def test_approval_purpose_enum_contains_required_v1_states():

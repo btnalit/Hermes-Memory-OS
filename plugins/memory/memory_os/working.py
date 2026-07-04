@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from math import pow
 from typing import Any
 
-from .audit import append_audit
+from .audit import append_audit, read_audit_records
 from .ids import new_working_id
 from .schema import WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0, WorkingItem
 from .store import MemoryOSStore
@@ -298,17 +298,8 @@ class WorkingMemoryService:
         )
 
     def _audit_actions_for(self, item_id: str) -> list[str]:
-        path = self.store.roots.audit_path
-        if not path.exists():
-            return []
         actions: list[str] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        for record in read_audit_records(self.store.roots.audit_path):
             if record.get("details", {}).get("item_id") == item_id:
                 actions.append(str(record.get("action", "")))
         return actions

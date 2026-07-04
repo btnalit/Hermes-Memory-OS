@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.fixtures import build_event, build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
@@ -53,8 +54,8 @@ def test_ops_gate_report_only_run_writes_decision_report_and_audit(tmp_path):
     reports = module.read_reports()
     assert len(reports) == 1
     assert reports[0]["report_id"] == result["report_id"]
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("ops_gate_report_written" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(entry["action"] == "ops_gate_report_written" for entry in audit_entries)
 
 
 def test_ops_gate_skips_without_report_when_no_proposed_actions(tmp_path):
@@ -78,8 +79,8 @@ def test_ops_gate_skips_without_report_when_no_proposed_actions(tmp_path):
     assert status["skipped_run_count"] == 1
     assert status["latest_cadence_skipped"] is True
     assert status["latest_skip_reason"] == "no_pending_proposed_actions"
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("ops_gate_run_skipped" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(entry["action"] == "ops_gate_run_skipped" for entry in audit_entries)
 
 
 def test_ops_gate_never_executes_even_would_allowed_actions(tmp_path):

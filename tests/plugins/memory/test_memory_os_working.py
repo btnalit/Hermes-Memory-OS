@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import WORKING_SCHEMA_VERSION
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -53,8 +54,11 @@ def test_decay_is_deterministic_and_marks_expired_items_with_audit(tmp_path):
     assert updated[0].status == "expired"
     document = service.read_document("lingering")
     assert document["items"][0]["status"] == "expired"
-    audit_lines = service.store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("working_item_expired" in line and item.id in line for line in audit_lines)
+    audit_entries = read_audit_entries(service.store.roots.audit_path)
+    assert any(
+        entry["action"] == "working_item_expired" and item.id in str(entry.get("details", {}))
+        for entry in audit_entries
+    )
 
 
 def test_status_summary_uses_salience_language_only(tmp_path):
@@ -212,8 +216,8 @@ def test_prune_audit_is_written(tmp_path):
     service.decay_items("attention", now=now + timedelta(hours=3), half_life_hours=1.0, expire_below=0.2)
 
     service.prune_expired_items("attention", now=now + timedelta(hours=30), min_age_hours=0)
-    audit_lines = service.store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("working_item_pruned" in line for line in audit_lines)
+    audit_entries = read_audit_entries(service.store.roots.audit_path)
+    assert any(entry["action"] == "working_item_pruned" for entry in audit_entries)
 
 
 def test_prune_rejects_negative_min_age_hours(tmp_path):
@@ -440,8 +444,8 @@ def test_cap_eviction_writes_audit(tmp_path):
         service.add_item("attention", f"Item {i}.", weight=0.5, now=now)
     service.add_item("attention", "Overflow.", weight=0.1, now=now)
 
-    audit_lines = service.store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("working_item_evicted" in line for line in audit_lines)
+    audit_entries = read_audit_entries(service.store.roots.audit_path)
+    assert any(entry["action"] == "working_item_evicted" for entry in audit_entries)
 
 
 # ── expired_at field verification ────────────────────────────────────────

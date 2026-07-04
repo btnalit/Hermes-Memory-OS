@@ -1,5 +1,6 @@
 import json
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.fixtures import build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -47,8 +48,8 @@ def test_proposal_queue_creates_profile_local_candidate_and_audit(tmp_path):
     queue = module.read_queue()
     assert queue["items"][0]["candidate_id"] == candidate["candidate_id"]
     assert queue["items"][0]["body"] == "Try a dry-run governance change."
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("proposal_queue_candidate_created" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(entry["action"] == "proposal_queue_candidate_created" for entry in audit_entries)
 
 
 def test_proposal_queue_transitions_defer_reject_and_approve_without_crystallized_approval(tmp_path):
@@ -109,9 +110,9 @@ def test_proposal_queue_legacy_import_is_idempotent(tmp_path):
     queue = module.read_queue()
     assert first == second
     assert len(queue["items"]) == 1
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert sum("proposal_queue_legacy_candidate_imported" in line for line in audit_lines) == 1
-    assert sum("proposal_queue_legacy_candidate_import_skipped" in line for line in audit_lines) == 1
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert sum(entry["action"] == "proposal_queue_legacy_candidate_imported" for entry in audit_entries) == 1
+    assert sum(entry["action"] == "proposal_queue_legacy_candidate_import_skipped" for entry in audit_entries) == 1
 
 
 def test_proposal_queue_status_and_doctor_report_queue_health(tmp_path):

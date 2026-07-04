@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.fixtures import build_event, build_sannai_multi_root_fixture
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
@@ -91,8 +92,8 @@ def test_self_evolution_dry_run_writes_digest_and_proposal_through_queue(tmp_pat
     assert "The test host needs a safer dry-run workflow." in digest
     assert "maturity_score=" in digest
     assert "hard-coded focus" not in digest
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("self_evolution_dry_run_written" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(entry["action"] == "self_evolution_dry_run_written" for entry in audit_entries)
     agenda_candidates = module.read_agenda_candidates()
     assert len(agenda_candidates) == 1
     assert agenda_candidates[0]["status"] == "promoted_to_proposal"

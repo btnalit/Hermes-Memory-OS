@@ -69,7 +69,7 @@ def build_event_stats(events: list[dict[str, object]]) -> EventStats:
 
 def event_stats_path(roots: object) -> Path:
     """Return the path to event_stats.json."""
-    return Path(str(roots.runtime_dir)) / "event_stats.json"
+    return Path(str(roots.memory_os_root)) / "runtime" / "event_stats.json"
 
 
 def write_event_stats(roots: object, stats: EventStats) -> None:

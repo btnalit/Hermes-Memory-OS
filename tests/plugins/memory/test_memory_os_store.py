@@ -10,6 +10,7 @@ from plugins.memory.memory_os.fixtures import (
 from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
@@ -118,8 +119,8 @@ def test_read_events_quarantines_malformed_jsonl_without_crashing(tmp_path):
     quarantine_lines = (tmp_path / "memory-os" / "quarantine" / "malformed_events.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(quarantine_lines) == 1
     assert "not json" in quarantine_lines[0]
-    audit_lines = (tmp_path / "memory-os" / "audit" / "write_audit.jsonl").read_text(encoding="utf-8").splitlines()
-    assert any("quarantine_malformed_event" in line for line in audit_lines)
+    audit_entries = read_audit_entries(tmp_path / "memory-os" / "audit" / "write_audit.jsonl")
+    assert any(entry["action"] == "quarantine_malformed_event" for entry in audit_entries)
 
 
 def test_index_rebuilds_from_filesystem_after_db_delete(tmp_path):
@@ -172,8 +173,11 @@ def test_index_unavailable_keeps_store_readable_and_emits_audit(tmp_path, monkey
 
     assert rebuilt is False
     assert [stored.id for stored in store.read_events()] == [event.id]
-    audit_lines = store.roots.audit_path.read_text(encoding="utf-8").splitlines()
-    assert any("index_rebuild_failed" in line and "database is locked" in line for line in audit_lines)
+    audit_entries = read_audit_entries(store.roots.audit_path)
+    assert any(
+        entry["action"] == "index_rebuild_failed" and "database is locked" in json.dumps(entry)
+        for entry in audit_entries
+    )
 
 
 def test_index_search_matches_chinese_event_summary_and_reports_tokenizer(tmp_path):

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -40,13 +41,8 @@ def test_unparseable_file_produces_error_record(tmp_path):
 
     # Audit should contain crystallized_file_unparseable
     audit_path = store.roots.audit_path
-    assert audit_path.exists()
-    audit_lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
-    unparseable_events = [
-        json.loads(line)
-        for line in audit_lines
-        if json.loads(line).get("action") == "crystallized_file_unparseable"
-    ]
+    audit_entries = read_audit_entries(audit_path)
+    unparseable_events = [e for e in audit_entries if e["action"] == "crystallized_file_unparseable"]
     assert len(unparseable_events) == 1
     assert unparseable_events[0]["details"]["file_name"] == "bad.md"
     assert unparseable_events[0]["status"] == "warning"

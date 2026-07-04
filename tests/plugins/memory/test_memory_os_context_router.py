@@ -1,6 +1,7 @@
 import argparse
 import json
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.context_router import (
     INCLUDE_THRESHOLD,
@@ -582,7 +583,7 @@ def test_context_router_cli_dry_run_outputs_json_and_does_not_write_store(tmp_pa
             "items": [{**item.__dict__, "text": "ComfyUI plugin install is active."}],
         },
     )
-    before_audit = roots.audit_path.read_text(encoding="utf-8")
+    before_audit = read_audit_entries(roots.audit_path)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     parser = argparse.ArgumentParser()
     register_cli(parser)
@@ -600,7 +601,7 @@ def test_context_router_cli_dry_run_outputs_json_and_does_not_write_store(tmp_pa
         )
     )
     output = json.loads(capsys.readouterr().out)
-    after_audit = roots.audit_path.read_text(encoding="utf-8")
+    after_audit = read_audit_entries(roots.audit_path)
 
     assert result == 0
     assert output["schema_version"] == "memory-os.context_router.v0"
