@@ -24,6 +24,10 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/cognitive_loop.py::CognitiveLoopRunner._append_report::path.open_a::self.reports_path": "cycle_report",
     "plugins/memory/memory_os/crystallized.py::append_candidate_queue::path.open_a::path": "candidate_queue_existing_surface",
     "plugins/memory/memory_os/jsonl_io.py::append_jsonl::path.open_a::target": "shared_jsonl_io_contract",
+    # Governed IO primitives — classification follows caller (structural_write_gate or owner action)
+    "plugins/memory/memory_os/jsonl_io.py::append_jsonl_locked::path.open_a::target": "governed_io_primitive",
+    "plugins/memory/memory_os/jsonl_io.py::append_jsonl_lines_locked::path.open_a::target": "governed_io_primitive",
+    "plugins/memory/memory_os/jsonl_io.py::locked_jsonl_file::path.open_a": "governed_io_primitive_lockfile",
     "plugins/memory/memory_os/execution_gate.py::start_execution_gate_envelope::append_jsonl_call::execution_gate_records_path(store.roots)": "execution_gate_permit_ledger",
     "plugins/memory/memory_os/execution_gate.py::complete_execution_gate_envelope::append_jsonl_call::execution_gate_records_path(store.roots)": "execution_gate_completion_ledger",
     "plugins/memory/memory_os/execution_gate.py::rotate_execution_gate_records::path.open_a::rotated_path": "execution_gate_retention_archive",
