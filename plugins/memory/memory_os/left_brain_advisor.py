@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_gate import complete_execution_gate_envelope, resolve_execution_gate_permit
+from .jsonl_io import append_jsonl_locked
 from .memory_projection import memory_projection_records_path
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
@@ -396,10 +397,7 @@ def _finding_dedup_key(source_key: str, projection: dict[str, Any], status: str)
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
+    append_jsonl_locked(path, record, durable=True)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

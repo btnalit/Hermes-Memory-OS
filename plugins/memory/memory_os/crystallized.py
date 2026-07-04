@@ -10,6 +10,7 @@ from typing import Any
 
 from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit
+from .jsonl_io import append_jsonl_locked
 from .ids import new_crystallized_id
 from .schema import CRYSTALLIZED_SCHEMA_VERSION
 from .store import MemoryOSStore, _format_frontmatter
@@ -753,9 +754,7 @@ def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidat
     data = asdict(candidate)
     data["tags"] = list(candidate.tags or [])
     data["created_at"] = str(data.get("created_at") or _timestamp(None))
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(data, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
+    append_jsonl_locked(path, data, durable=True)
     append_audit(
         store.roots.audit_path,
         action="crystallized_candidate_queued",

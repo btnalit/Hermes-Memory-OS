@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .jsonl_io import read_json_state_result, write_json_atomic
+from .jsonl_io import append_jsonl_locked, read_json_state_result, write_json_atomic
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
@@ -699,9 +699,7 @@ def _bounded_json(value: Any) -> Any:
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    append_jsonl_locked(path, record, durable=True)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

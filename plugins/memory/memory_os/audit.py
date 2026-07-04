@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .ids import new_audit_id
+from .jsonl_io import append_jsonl_locked
 
 
 def append_audit(
@@ -29,9 +30,7 @@ def append_audit(
         "target": target,
         "details": details or {},
     }
-    with audit_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
+    append_jsonl_locked(audit_path, record, durable=True)
 
 
 def read_audit_entries(audit_path: Path) -> list[dict[str, Any]]:

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_gate import any_boundary_true, resolve_execution_gate_permit
+from .jsonl_io import append_jsonl_locked
 from .store import MemoryOSStore, StoreError
 
 
@@ -76,9 +77,7 @@ def append_governed_jsonl(
         )
 
     payload["structural_write_governance"] = governance
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    append_jsonl_locked(destination, payload, durable=True)
     return destination
 
 

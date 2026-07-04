@@ -37,7 +37,7 @@ from .memory_sources import (
 )
 from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
-from .jsonl_io import build_error_record
+from .jsonl_io import append_jsonl_locked, build_error_record
 from .store import MemoryOSStore
 from .candidate_clusters import (
     candidate_cluster_action_target,
@@ -8097,10 +8097,7 @@ def _parse_dt(value: str) -> datetime | None:
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
+    append_jsonl_locked(path, record, durable=True)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

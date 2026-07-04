@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing import Any
 
 from .audit import append_audit
+from .jsonl_io import append_jsonl_locked
 from .roots import MemoryOSRoots
 from .schema import EventEnvelope
 
@@ -88,10 +89,7 @@ class MemoryOSStore:
 
     def append_event(self, event: EventEnvelope) -> Path:
         path = _event_path(self.roots.events_root, event.ts)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(path, event.to_dict(), durable=True)
         append_audit(
             self.roots.audit_path,
             action="append_event",
@@ -161,9 +159,7 @@ class MemoryOSStore:
             "line": line,
             "error": error,
         }
-        with quarantine_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(quarantine_path, record, durable=True)
         append_audit(
             self.roots.audit_path,
             action="quarantine_malformed_event",
