@@ -7,7 +7,22 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Generator, Iterable
+
+import logging
+import threading
+from contextlib import contextmanager
+from uuid import uuid4
+
+try:
+    import fcntl
+    _FLOCK_AVAILABLE = True
+except ImportError:
+    fcntl = None  # type: ignore
+    _FLOCK_AVAILABLE = False
+
+_flock_warned = False
+logger = logging.getLogger(__name__)
 
 
 ERROR_RECORD_SCHEMA_VERSION = "memory-os.error_record.v0"
@@ -332,3 +347,133 @@ def write_json_atomic(path: str | Path, data: Any, *, ensure_parent: bool = True
     tmp_path = target.with_name(f".{target.name}.tmp")
     tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp_path, target)
+
+
+# ── Locked JSONL IO primitives (data-plane safety) ─────────────────
+
+_held = threading.local()
+_fallback_locks: dict[str, threading.Lock] = {}
+_fallback_locks_lock = threading.Lock()
+
+
+def _get_fallback_lock(key: str) -> threading.Lock:
+    """Return (or create) a per-path threading.Lock for non-fcntl platforms."""
+    with _fallback_locks_lock:
+        if key not in _fallback_locks:
+            _fallback_locks[key] = threading.Lock()
+        return _fallback_locks[key]
+
+
+def _assert_not_reentrant(target: Path) -> None:
+    """Raise RuntimeError if *target* is already held by this process."""
+    s = getattr(_held, "paths", None) or set()
+    key = str(target.resolve())
+    if key in s:
+        raise RuntimeError(f"reentrant locked_jsonl_file on {key}")
+    s.add(key)
+    _held.paths = s
+
+
+def _release_reentrant(target: Path) -> None:
+    """Release the reentrant guard for *target*."""
+    s = getattr(_held, "paths", None) or set()
+    s.discard(str(target.resolve()))
+    _held.paths = s
+
+
+@contextmanager
+def locked_jsonl_file(path: Path) -> Generator[Path, None, None]:
+    """Acquire exclusive sidecar lock on *path*, yield the path.
+
+    Uses a .{name}.lock sidecar file with fcntl.flock (not the data file).
+    On platforms without fcntl, degrades to unlocked with a one-time warning.
+    Guards against same-process reentrant acquisition via thread-local held-set.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not _FLOCK_AVAILABLE:
+        global _flock_warned
+        if not _flock_warned:
+            logger.warning("fcntl unavailable; JSONL writes proceed without inter-process lock")
+            _flock_warned = True
+        # Fallback: threading.Lock for same-process safety + reentrant guard
+        _assert_not_reentrant(target)
+        fallback_lock = _get_fallback_lock(str(target.resolve()))
+        fallback_lock.acquire()
+        try:
+            yield target
+        finally:
+            fallback_lock.release()
+            _release_reentrant(target)
+        return
+    lock_path = target.with_name(f".{target.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lh:
+        fcntl.flock(lh.fileno(), fcntl.LOCK_EX)
+        _assert_not_reentrant(target)
+        try:
+            yield target
+        finally:
+            _release_reentrant(target)
+            fcntl.flock(lh.fileno(), fcntl.LOCK_UN)
+
+
+def append_jsonl_locked(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    ensure_parent: bool = True,
+    durable: bool = True,
+) -> None:
+    """Append one JSONL record under sidecar lock.
+
+    Contract: the serialized record is written in a single handle.write() call.
+    """
+    line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+    with locked_jsonl_file(path) as target:
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            if durable:
+                os.fsync(handle.fileno())
+
+
+def append_jsonl_lines_locked(
+    path: Path,
+    records: list[dict[str, Any]],
+    *,
+    ensure_parent: bool = True,
+    durable: bool = True,
+) -> None:
+    """Append multiple JSONL records under one lock acquisition.
+
+    All records are joined and written in a single handle.write() call.
+    """
+    if not records:
+        return
+    blob = "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in records) + "\n"
+    with locked_jsonl_file(path) as target:
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(blob)
+            handle.flush()
+            if durable:
+                os.fsync(handle.fileno())
+
+
+def write_jsonl_atomic_locked(
+    path: Path,
+    records: list[dict[str, Any]],
+    *,
+    ensure_parent: bool = True,
+) -> None:
+    """Atomically replace a JSONL file under sidecar lock.
+
+    Writes to a temp file in the same directory, then os.replace() under lock.
+    """
+    target = Path(path)
+    if ensure_parent:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    blob = "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in records) + "\n"
+    with locked_jsonl_file(target) as _lock_target:
+        tmp_path = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        tmp_path.write_text(blob, encoding="utf-8")
+        os.replace(tmp_path, target)
