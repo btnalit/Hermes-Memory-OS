@@ -365,7 +365,11 @@ def _get_fallback_lock(key: str) -> threading.Lock:
 
 
 def _assert_not_reentrant(target: Path) -> None:
-    """Raise RuntimeError if *target* is already held by this process."""
+    """Raise RuntimeError if *target* is already held by this process.
+
+    Deprecated inside locked_jsonl_file — use _held_path_guard instead.
+    Kept for backward compatibility with any external callers.
+    """
     s = getattr(_held, "paths", None) or set()
     key = str(target.resolve())
     if key in s:
@@ -375,10 +379,36 @@ def _assert_not_reentrant(target: Path) -> None:
 
 
 def _release_reentrant(target: Path) -> None:
-    """Release the reentrant guard for *target*."""
+    """Release the reentrant guard for *target*.
+
+    Deprecated inside locked_jsonl_file — use _held_path_guard instead.
+    Kept for backward compatibility with any external callers.
+    """
     s = getattr(_held, "paths", None) or set()
     s.discard(str(target.resolve()))
     _held.paths = s
+
+
+@contextmanager
+def _held_path_guard(target: Path):
+    """Reentrant guard — must be entered BEFORE any lock acquire.
+
+    Uses the same thread-local held-set as _assert_not_reentrant /
+    _release_reentrant, but as a single context manager so the guard
+    is released on exception and the mark/release pair can never drift.
+    """
+    key = str(target.resolve())
+    paths = getattr(_held, "paths", None)
+    if paths is None:
+        paths = set()
+        _held.paths = paths
+    if key in paths:
+        raise RuntimeError(f"reentrant locked_jsonl_file on {key}")
+    paths.add(key)
+    try:
+        yield
+    finally:
+        paths.discard(key)
 
 
 @contextmanager
@@ -391,30 +421,26 @@ def locked_jsonl_file(path: Path) -> Generator[Path, None, None]:
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    if not _FLOCK_AVAILABLE:
-        global _flock_warned
-        if not _flock_warned:
-            logger.warning("fcntl unavailable; JSONL writes proceed without inter-process lock")
-            _flock_warned = True
-        # Fallback: threading.Lock for same-process safety + reentrant guard
-        _assert_not_reentrant(target)
-        fallback_lock = _get_fallback_lock(str(target.resolve()))
-        fallback_lock.acquire()
-        try:
-            yield target
-        finally:
-            fallback_lock.release()
-            _release_reentrant(target)
-        return
-    lock_path = target.with_name(f".{target.name}.lock")
-    with lock_path.open("a+", encoding="utf-8") as lh:
-        fcntl.flock(lh.fileno(), fcntl.LOCK_EX)
-        _assert_not_reentrant(target)
-        try:
-            yield target
-        finally:
-            _release_reentrant(target)
-            fcntl.flock(lh.fileno(), fcntl.LOCK_UN)
+    with _held_path_guard(target):
+        if not _FLOCK_AVAILABLE:
+            global _flock_warned
+            if not _flock_warned:
+                logger.warning("fcntl unavailable; JSONL writes proceed without inter-process lock")
+                _flock_warned = True
+            fallback_lock = _get_fallback_lock(str(target.resolve()))
+            fallback_lock.acquire()
+            try:
+                yield target
+            finally:
+                fallback_lock.release()
+            return
+        lock_path = target.with_name(f".{target.name}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lh:
+            fcntl.flock(lh.fileno(), fcntl.LOCK_EX)
+            try:
+                yield target
+            finally:
+                fcntl.flock(lh.fileno(), fcntl.LOCK_UN)
 
 
 def append_jsonl_locked(
