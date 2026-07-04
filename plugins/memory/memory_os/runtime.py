@@ -71,11 +71,14 @@ class MemoryOSRuntime:
         current: datetime,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        # Windowed read: recent_processed_event_ids first, fall back to legacy processed_event_ids
-        recent_ids = state.get("recent_processed_event_ids")
-        if recent_ids is None:
-            recent_ids = state.get("processed_event_ids", [])
-        already_processed_ids = {str(event_id) for event_id in recent_ids}
+        # Full processed ledger is the primary dedup source (restored until EventCursor apply).
+        # recent_processed_event_ids is a shadow window for observability only.
+        full_ids = state.get("processed_event_ids")
+        if isinstance(full_ids, list) and full_ids:
+            already_processed_ids = {str(eid) for eid in full_ids}
+        else:
+            # Legacy state files: fall back to recent_processed_event_ids
+            already_processed_ids = {str(eid) for eid in state.get("recent_processed_event_ids", [])}
         processed_ids = set(already_processed_ids)
         runtime_gate = start_execution_gate_envelope(
             self.store,
@@ -185,9 +188,11 @@ class MemoryOSRuntime:
 
         latest_processed_event_id = processed_now[-1] if processed_now else str(state.get("last_processed_event_id") or "")
         current_ts = current.isoformat()
-        # Windowed ID tracking — preserve insertion order, never sorted() by id
-        prev_recent = list(state.get("recent_processed_event_ids") or state.get("processed_event_ids", []))
-        windowed_ids = _dedupe_preserve_order(prev_recent + processed_now)[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
+        # Maintain full processed ledger for dedup (primary) + recent window (shadow/observability).
+        # Full ledger is restored until EventCursor apply takes over dedup.
+        prev_full = list(state.get("processed_event_ids") or state.get("recent_processed_event_ids", []))
+        full_processed_ids = _dedupe_preserve_order(prev_full + processed_now)
+        recent_processed_ids = full_processed_ids[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
         self._write_state(
             {
                 "schema_version": "memory-os.runtime_state.v0",
@@ -197,9 +202,10 @@ class MemoryOSRuntime:
                 "processed_event_count_total": state.get("processed_event_count_total", 0) + newly_processed_count,
                 "last_processed_event_id": latest_processed_event_id,
                 "last_processed_event_ts": current_ts,
-                "recent_processed_event_ids": windowed_ids,
+                "processed_event_ids": full_processed_ids,
+                "recent_processed_event_ids": recent_processed_ids,
                 "recent_processed_event_ids_limit": RECENT_PROCESSED_EVENT_IDS_LIMIT,
-                "processed_event_ids_compacted": True,
+                "processed_event_ids_compacted": False,
             }
         )
         index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
@@ -272,6 +278,7 @@ class MemoryOSRuntime:
         if not self._state_path.exists():
             return {
                 "schema_version": "memory-os.runtime_state.v0",
+                "processed_event_ids": [],
                 "recent_processed_event_ids": [],
                 "processed_event_count_total": 0,
             }
@@ -283,9 +290,15 @@ class MemoryOSRuntime:
                 _dedupe_preserve_order(legacy_ids)[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
             )
             state["processed_event_count_total"] = state.get("processed_event_count", len(legacy_ids))
-            state["processed_event_ids_compacted"] = True
+        # Reverse migration: V4 state files have recent_processed_event_ids but NOT
+        # processed_event_ids (compacted=True).  Promote the recent window as the best
+        # available full ledger until it grows organically via heartbeat.
+        if "processed_event_ids" not in state:
+            state["processed_event_ids"] = list(state.get("recent_processed_event_ids", []))
+            state["processed_event_ids_compacted"] = False
         state.setdefault("recent_processed_event_ids_limit", RECENT_PROCESSED_EVENT_IDS_LIMIT)
         state.setdefault("processed_event_count_total", state.get("processed_event_count", 0))
+        state["processed_event_ids_compacted"] = False
         return state
 
     def _write_state(self, state: dict[str, Any]) -> None:
