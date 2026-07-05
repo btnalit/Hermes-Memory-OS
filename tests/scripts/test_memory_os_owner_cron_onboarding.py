@@ -155,6 +155,8 @@ def _home_with_helpers(
         "memory_os_cron_working_cleanup_gate.py",
         "memory_os_l3_probe_helper.py",
         "memory_os_cron_l3_probe_verification_gate.py",
+        "memory_os_event_stats_refresh.py",
+        "memory_os_cron_event_stats_refresh_gate.py",
     ):
         if helper in omitted:
             continue
@@ -207,7 +209,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 9
+    assert len(report["operational_cron_jobs"]) == 10
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
@@ -216,6 +218,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
         "memory-os-l3-probe-verification",
         "memory-os-candidate-aggregation",
         "memory-os-fact-judge",
+        "memory-os-event-stats-refresh",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
     }
@@ -312,7 +315,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 12
+    assert len(report["operational_cron_jobs"]) == 13
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -326,6 +329,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-candidate-aggregation",
         "memory-os-fact-judge",
         "memory-os-index-sync",
+        "memory-os-event-stats-refresh",
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
     }

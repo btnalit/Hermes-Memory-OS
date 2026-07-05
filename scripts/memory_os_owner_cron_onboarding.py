@@ -32,6 +32,7 @@ ACTIVE_CLOSURE_CRON_KEYS = frozenset({
     "l3_probe_verification",
     "candidate_aggregation",
     "fact_judge",
+    "event_stats_refresh",
     "expression_feedback_request",
     "memory_sources_feedback_request",
 })
@@ -87,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--index-sync-schedule", default="*/30 * * * *")
     parser.add_argument("--working-cleanup-schedule", default="0 3 * * 0")
     parser.add_argument("--l3-probe-schedule", default="0 */6 * * *")
+    parser.add_argument("--event-stats-refresh-schedule", default="7,22,37,52 * * * *")
     parser.add_argument(
         "--cron-profile",
         choices=("active-closure", "full"),
