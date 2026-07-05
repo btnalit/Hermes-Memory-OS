@@ -310,24 +310,37 @@ def run_fact_judge_lane(
     # ── Resolve knobs ──────────────────────────────────────────────────
     from plugins.memory.memory_os.knob_overrides import resolve_knob
 
-    judge_config: dict[str, Any] = dict(DEFAULT_JUDGE_CONFIG)
-    judge_config["max_tokens"] = int(resolve_knob(
-        "fact_judge_max_tokens", default=DEFAULT_JUDGE_CONFIG["max_tokens"],
-        roots=store.roots,
-    ))
-    judge_config["max_per_tick"] = int(resolve_knob(
-        "fact_judge_max_per_tick", default=DEFAULT_JUDGE_CONFIG["max_per_tick"],
-        roots=store.roots,
-    ))
-    judge_config["timeout_ms"] = int(resolve_knob(
-        "fact_judge_timeout_ms", default=DEFAULT_JUDGE_CONFIG["timeout_ms"],
-        roots=store.roots,
-    ))
-    heuristic_only = bool(resolve_knob(
-        "fact_judge_heuristic_only", default=False, roots=store.roots,
-    ))
+    def _safe_int_knob(name: str, default: int) -> int:
+        """Resolve *name* and coerce to int; fall back to *default* on any error.
 
-    max_per_tick = int(judge_config.get("max_per_tick") or 8)
+        Guards against non-numeric override values (e.g. a string ``"true"``
+        written to the knob-override store) that would cause ``int()`` to raise
+        ``ValueError`` and crash the lane.
+        """
+        raw = resolve_knob(name, default=default, roots=store.roots)
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return default
+
+    judge_config: dict[str, Any] = dict(DEFAULT_JUDGE_CONFIG)
+    judge_config["max_tokens"] = _safe_int_knob(
+        "fact_judge_max_tokens", DEFAULT_JUDGE_CONFIG["max_tokens"],
+    )
+    judge_config["max_per_tick"] = _safe_int_knob(
+        "fact_judge_max_per_tick", DEFAULT_JUDGE_CONFIG["max_per_tick"],
+    )
+    judge_config["timeout_ms"] = _safe_int_knob(
+        "fact_judge_timeout_ms", DEFAULT_JUDGE_CONFIG["timeout_ms"],
+    )
+    # Strict identity check: only the Python bool True enables the lane switch.
+    # ``bool("false")`` / ``bool("0")`` would be True — reject those.
+    heuristic_only = (
+        resolve_knob("fact_judge_heuristic_only", default=False, roots=store.roots)
+        is True
+    )
+
+    max_per_tick = _safe_int_knob("fact_judge_max_per_tick", 8)
     # ───────────────────────────────────────────────────────────────────
 
     active_count = _count_active_crystallized(store)
@@ -378,6 +391,7 @@ def run_fact_judge_lane(
             candidate_id=candidate.candidate_id,
             durable_fact=bool(verdict.get("durable_fact")),
             reason=str(verdict.get("reason") or ""),
+            failure_reason=failure_reason or None,
             now=_now,
         )
 
@@ -430,6 +444,7 @@ def _append_verdict(
     candidate_id: str,
     durable_fact: bool,
     reason: str,
+    failure_reason: str | None = None,
     now: datetime,
 ) -> None:
     path = _verdicts_path(store)
@@ -441,6 +456,8 @@ def _append_verdict(
         "reason": reason,
         "judged_at": now.isoformat(),
     }
+    if failure_reason:
+        record["failure_reason"] = failure_reason
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 

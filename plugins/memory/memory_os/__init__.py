@@ -321,6 +321,13 @@ class MemoryOSProvider(MemoryProvider):
             return  # Owner-action anchors (resumed, deferred, cancelled) carry specialized
             # response rules that _format_current_task_anchor would replace with the
             # generic compression rule — do not rebuild these formats.
+        if "[跨会话恢复" in self._current_task_anchor:
+            return  # Cross-session recovered anchors carry a specialized "verify with
+            # owner" compression rule that _format_current_task_anchor would replace
+            # with the generic "Continue this foreground task" — do not rebuild.
+            # Without this guard, the first turn that produces new operation context
+            # silently upgrades the recovered anchor into a standard current anchor,
+            # destroying P0's cross-session sanitisation.
         self._current_task_anchor = _format_current_task_anchor(
             task=current_task,
             operations=[],

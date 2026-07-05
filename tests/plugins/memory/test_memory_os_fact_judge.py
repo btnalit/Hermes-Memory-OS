@@ -1282,3 +1282,259 @@ class TestJudgeCandidateConfigOverride:
         assert call_config["max_tokens"] == 2048, (
             f"Expected max_tokens=2048 in call config; got {call_config}"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P1: Safe knob parsing — int() and bool() hardening
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRunFactJudgeLaneSafeKnobParsing:
+    """P1: Non-numeric knob values fall back to default; string bools don't enable lane switches."""
+
+    def test_non_numeric_max_tokens_falls_back_to_default(self, tmp_path):
+        """int('true') → ValueError → fall back to DEFAULT_JUDGE_CONFIG default."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import DEFAULT_JUDGE_CONFIG
+
+        # Write a poison knob override: max_tokens = "true" (string, not int)
+        _write_knob_override(store, "fact_judge_max_tokens", "true")
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        result = run_fact_judge_lane(store)
+        assert result["status"] == "ok", (
+            f"Lane should complete successfully despite poison knob; got {result}"
+        )
+
+    def test_non_numeric_max_per_tick_falls_back_to_default(self, tmp_path):
+        """int('false') → ValueError → fall back to default."""
+        store = _store(tmp_path)
+        _write_knob_override(store, "fact_judge_max_per_tick", "false")
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        result = run_fact_judge_lane(store)
+        assert result["status"] == "ok"
+
+    def test_non_numeric_timeout_ms_falls_back_to_default(self, tmp_path):
+        """int('hello') → ValueError → fall back to default."""
+        store = _store(tmp_path)
+        _write_knob_override(store, "fact_judge_timeout_ms", "hello")
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        result = run_fact_judge_lane(store)
+        assert result["status"] == "ok"
+
+    def test_string_true_does_not_enable_heuristic_only(self, tmp_path):
+        """bool('true') would be True, but strict `is True` rejects it."""
+        store = _store(tmp_path)
+        candidate = _candidate(
+            candidate_id="cand_heuristic_test",
+            body="I prefer dark mode",
+        )
+        _write_candidate(store, candidate)
+
+        # Write a poison knob: heuristic_only = "true" (string, not bool)
+        _write_knob_override(store, "fact_judge_heuristic_only", "true")
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+        ) as mock_llm:
+            mock_llm.return_value = '{"durable_fact": true, "reason": "preference"}'
+            result = run_fact_judge_lane(store)
+
+        # LLM was called — heuristic_only was NOT enabled by the string "true"
+        assert mock_llm.called, (
+            "P1 FAIL: string 'true' enabled heuristic_only — LLM was bypassed. "
+            "Strict `is True` check should reject string values."
+        )
+        assert result["status"] == "ok"
+
+    def test_string_false_does_not_enable_heuristic_only(self, tmp_path):
+        """bool('false') would be True (non-empty string), but strict check rejects it."""
+        store = _store(tmp_path)
+
+        candidate = _candidate(
+            candidate_id="cand_str_false",
+            body="I use vim",
+        )
+        _write_candidate(store, candidate)
+
+        _write_knob_override(store, "fact_judge_heuristic_only", "false")
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+        ) as mock_llm:
+            mock_llm.return_value = '{"durable_fact": true, "reason": "preference"}'
+            result = run_fact_judge_lane(store)
+
+        # "false" is a non-empty string → bool("false") == True, but
+        # strict `is True` check must reject it
+        assert mock_llm.called, (
+            "P1 FAIL: string 'false' enabled heuristic_only via bool('false')==True. "
+            "Strict `is True` check should reject string values."
+        )
+        assert result["status"] == "ok"
+
+    def test_int_zero_does_not_enable_heuristic_only(self, tmp_path):
+        """bool(0) is False, but int 0 is not True — strict check correctly rejects."""
+        store = _store(tmp_path)
+
+        candidate = _candidate(candidate_id="cand_zero", body="I use vscode")
+        _write_candidate(store, candidate)
+
+        _write_knob_override(store, "fact_judge_heuristic_only", 0)
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+        ) as mock_llm:
+            mock_llm.return_value = '{"durable_fact": true, "reason": "preference"}'
+            run_fact_judge_lane(store)
+
+        assert mock_llm.called, (
+            "P1 FAIL: int 0 should not enable heuristic_only (is True check)"
+        )
+
+    def test_bool_true_does_enable_heuristic_only(self, tmp_path):
+        """Only the Python bool True (is True) should enable the lane switch."""
+        store = _store(tmp_path)
+
+        candidate = _candidate(candidate_id="cand_bool_true", body="I prefer dark mode")
+        _write_candidate(store, candidate)
+
+        _write_knob_override(store, "fact_judge_heuristic_only", True)
+
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+        ) as mock_llm:
+            run_fact_judge_lane(store)
+
+        assert not mock_llm.called, (
+            "P1 FAIL: bool True should enable heuristic_only and bypass LLM"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P2a: failure_reason persisted to verdicts JSONL
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAppendVerdictFailureReasonPersistence:
+    """P2a: _append_verdict writes failure_reason to the verdicts JSONL."""
+
+    def test_failure_reason_written_for_heuristic_only(self, tmp_path):
+        """heuristic_only knob → failure_reason='heuristic_only_knob' in JSONL."""
+        from plugins.modules.governance.fact_judge import (
+            _read_verdicts,
+            run_fact_judge_lane,
+        )
+
+        store = _store(tmp_path)
+
+        candidate = _candidate(candidate_id="cand_fr_test", body="I prefer Python")
+        _write_candidate(store, candidate)
+
+        _write_knob_override(store, "fact_judge_heuristic_only", True)
+        run_fact_judge_lane(store)
+
+        verdicts = _read_verdicts(store)
+        assert "cand_fr_test" in verdicts, (
+            "P2a FAIL: verdict not written for candidate"
+        )
+        assert verdicts["cand_fr_test"].get("failure_reason") == "heuristic_only_knob", (
+            f"P2a FAIL: failure_reason not persisted; got {verdicts['cand_fr_test']}"
+        )
+
+    def test_failure_reason_written_for_llm_empty_content(self, tmp_path):
+        """LLM returns empty content → failure_reason='llm_empty_content' in JSONL."""
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+
+        store = _store(tmp_path)
+
+        candidate = _candidate(candidate_id="cand_empty", body="I prefer vim")
+        _write_candidate(store, candidate)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value="",
+        ):
+            run_fact_judge_lane(store)
+
+        verdicts = _read_verdicts(store)
+        assert "cand_empty" in verdicts
+        assert verdicts["cand_empty"].get("failure_reason") == "llm_empty_content", (
+            f"P2a FAIL: expected llm_empty_content; got {verdicts['cand_empty']}"
+        )
+
+    def test_failure_reason_written_for_llm_exception(self, tmp_path):
+        """LLM call raises → failure_reason='llm_exception' in JSONL."""
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+
+        store = _store(tmp_path)
+
+        candidate = _candidate(candidate_id="cand_exc", body="I use neovim")
+        _write_candidate(store, candidate)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            side_effect=RuntimeError("connection refused"),
+        ):
+            run_fact_judge_lane(store)
+
+        verdicts = _read_verdicts(store)
+        assert "cand_exc" in verdicts
+        assert verdicts["cand_exc"].get("failure_reason") == "llm_exception", (
+            f"P2a FAIL: expected llm_exception; got {verdicts['cand_exc']}"
+        )
+
+    def test_failure_reason_absent_on_success(self, tmp_path):
+        """Successful LLM judgment → no failure_reason key in JSONL."""
+        from plugins.modules.governance.fact_judge import _read_verdicts, run_fact_judge_lane
+
+        store = _store(tmp_path)
+
+        candidate = _candidate(candidate_id="cand_ok", body="I prefer Python")
+        _write_candidate(store, candidate)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "preference"}',
+        ):
+            run_fact_judge_lane(store)
+
+        verdicts = _read_verdicts(store)
+        assert "cand_ok" in verdicts
+        assert "failure_reason" not in verdicts["cand_ok"], (
+            f"P2a FAIL: failure_reason should be absent on success; got {verdicts['cand_ok']}"
+        )
+
+
+# ── Knob override helper ─────────────────────────────────────────────────
+
+
+def _write_knob_override(store, knob_name, value):
+    """Write a knob override directly to the knob-override store for testing."""
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+
+    path = store.roots.memory_os_root / "system" / "knob_overrides.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = _dt.now(_tz.utc)
+    record = {
+        "schema_version": "memory-os.knob_override.v0",
+        "id": f"ko_test_{knob_name}",
+        "knob": knob_name,
+        "override_value": value,
+        "prior_value": None,
+        "provisional": False,
+        "expires_at": "",
+        "proposed_by": "test",
+        "approved_via": "test",
+        "state": "active",
+        "ts": now.isoformat(),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(_json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")

@@ -849,8 +849,11 @@ def _current_task_anchor_lines(anchor: str | None) -> list[str]:
     if not anchor:
         return []
     text = _redact(_clip_multiline(str(anchor), 500))
-    lines: list[str] = []
+    info_lines: list[str] = []
+    completed_ops: list[str] = []
+    active_ops: list[str] = []
     response_rule_line = ""
+    section: str = "info"  # info | completed_ops | active_ops
     for line in text.splitlines():
         clean = line.strip()
         if not clean or clean.startswith("###"):
@@ -863,11 +866,30 @@ def _current_task_anchor_lines(anchor: str | None) -> list[str]:
         ):
             response_rule_line = formatted
             continue
-        lines.append(formatted)
-    # Take at most 4 non-rule lines, then append the rule so it is always
-    # visible regardless of how many fields (completed_operations, anchor_ops,
-    # session lines) the anchor carries.
-    return lines[:4] + ([response_rule_line] if response_rule_line else [])
+        # Section headers switch the parser state but are not emitted
+        # themselves — the ops they label are already self-describing
+        # (tool:/assistant: prefix) and the header text is recoverable
+        # boilerplate.
+        if formatted.startswith("- completed operations"):
+            section = "completed_ops"
+            continue
+        if formatted.startswith("- active tool/process state:"):
+            section = "active_ops"
+            continue
+        if section == "completed_ops":
+            completed_ops.append(formatted)
+        elif section == "active_ops":
+            active_ops.append(formatted)
+        else:
+            info_lines.append(formatted)
+    # Independent caps: task-info lines (max 4), completed ops (max 4).
+    # Active ops are already bounded by _format_current_task_anchor (max 4).
+    # The response/compression rule is always appended so it is never
+    # silently dropped regardless of how many fields the anchor carries.
+    result = info_lines[:4] + completed_ops[-4:] + active_ops
+    if response_rule_line:
+        result.append(response_rule_line)
+    return result
 
 
 def _identity_lines(store: MemoryOSStore) -> list[str]:
