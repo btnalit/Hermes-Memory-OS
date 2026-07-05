@@ -263,3 +263,118 @@ def test_legacy_event_stats_without_recent_summaries_returns_empty(tmp_path):
     assert stats.recent_event_summaries == [], (
         "Legacy stats without recent_event_summaries must default to empty list"
     )
+
+
+# ── Fix 5b: continuity_selector caching in event_stats ─────────────────
+
+def _make_event_dict_with_source_class(
+    evt_id: str,
+    ts: str,
+    *,
+    source: str = "foreground",
+    kind: str = "conversation_turn",
+    safe_ref: dict | None = None,
+) -> dict:
+    return {
+        "id": evt_id,
+        "ts": ts,
+        "source": source,
+        "kind": kind,
+        "summary": f"summary-{evt_id}",
+        "source_class": "general",
+        "protected": False,
+        "safe_ref": safe_ref or {"source_class": source},
+        "tags": [],
+    }
+
+
+def test_build_event_stats_includes_continuity_selector():
+    """build_event_stats produces continuity_selector with correct structure."""
+    events = _make_event_dicts(10)
+    stats = build_event_stats(events)
+
+    cs = stats.continuity_selector
+    assert isinstance(cs, dict), "continuity_selector must be a dict"
+    assert cs["schema_version"] == "memory-os.continuity_selector.v0"
+    assert "selected_total" in cs
+    assert "dropped_total" in cs
+    assert "selected_by_source_class" in cs
+    assert "dropped_by_source_class" in cs
+    assert "seed_slots" in cs
+    assert "max_records" in cs
+    # selected_total + dropped_total == total_event_count
+    assert cs["selected_total"] + cs["dropped_total"] == 10, (
+        f"selected({cs['selected_total']}) + dropped({cs['dropped_total']}) != 10"
+    )
+
+
+def test_continuity_selector_classifies_source_classes():
+    """Events with distinct source_classes are bucketed correctly."""
+    ts1 = "2026-07-01T00:00:00+00:00"
+    ts2 = "2026-07-01T00:01:00+00:00"
+    ts3 = "2026-07-01T00:02:00+00:00"
+    events = [
+        _make_event_dict_with_source_class("e1", ts1, kind="conversation_turn", safe_ref={"source_class": "foreground"}),
+        _make_event_dict_with_source_class("e2", ts2, source="cron", kind="cron_job", safe_ref={"source_module": "cron_mirror"}),
+        _make_event_dict_with_source_class("e3", ts3, source="mailbox", kind="mailbox_item", safe_ref={"platform": "mailbox"}),
+    ]
+    # sorted by ts (oldest first)
+    stats = build_event_stats(events)
+
+    cs = stats.continuity_selector
+    assert cs["selected_total"] + cs["dropped_total"] == 3
+    # All source classes should appear in at least one of the counters
+    all_sc = set(cs["selected_by_source_class"]) | set(cs["dropped_by_source_class"])
+    assert "foreground" in all_sc
+    assert "cron" in all_sc
+    assert "mailbox" in all_sc
+
+
+def test_continuity_selector_empty_events():
+    """Empty event list produces valid zeroed continuity_selector."""
+    stats = build_event_stats([])
+
+    cs = stats.continuity_selector
+    assert cs["selected_total"] == 0
+    assert cs["dropped_total"] == 0
+    assert cs["selected_by_source_class"] == {}
+    assert cs["dropped_by_source_class"] == {}
+
+
+def test_continuity_selector_roundtrip(tmp_path):
+    """continuity_selector survives write → read roundtrip."""
+    roots = _make_roots(tmp_path)
+    events = _make_event_dicts(8)
+    stats = build_event_stats(events)
+    stats.events_root = str(roots.events_root)
+    write_event_stats(roots, stats)
+
+    read_back, freshness = read_event_stats(roots)
+    assert read_back is not None
+    cs = read_back.continuity_selector
+    assert isinstance(cs, dict)
+    assert cs["schema_version"] == "memory-os.continuity_selector.v0"
+    assert cs["selected_total"] + cs["dropped_total"] == 8
+
+
+def test_legacy_event_stats_without_continuity_selector_returns_empty_dict(tmp_path):
+    """Event stats written before continuity_selector was added default to {}."""
+    roots = _make_roots(tmp_path)
+    path = event_stats_path(roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "schema_version": "memory-os.event_stats.v0",
+        "updated_at": "2026-07-01T00:00:00+00:00",
+        "total_event_count": 42,
+        "latest_event_id": "ev-old",
+        "latest_event_ts": "2026-07-01T00:00:00+00:00",
+        "by_source": {"test": 42},
+        "by_kind": {"note": 42},
+        "events_root": str(roots.events_root),
+    }), encoding="utf-8")
+
+    stats, freshness = read_event_stats(roots)
+    assert stats is not None
+    assert stats.continuity_selector == {}, (
+        "Legacy stats without continuity_selector must default to empty dict"
+    )

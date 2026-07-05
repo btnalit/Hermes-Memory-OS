@@ -150,14 +150,31 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
     if stats is not None and stats.total_event_count > 0 and _stats_usable:
         event_count = stats.total_event_count
         recent_summaries = stats.recent_event_summaries
+        continuity_selector = stats.continuity_selector if stats.continuity_selector else None
     else:
-        # Fallback: full scan only when cache is stale/missing/corrupt
+        # Fallback: one full scan (event reads are expensive — reuse)
         events = store.read_events()
         event_count = len(events)
+        sorted_events = sorted(events, key=lambda item: item.ts)
         recent_summaries = [
             {"id": event.id, "ts": event.ts, "kind": event.kind, "summary": event.summary}
-            for event in sorted(events, key=lambda item: item.ts)[-5:]
+            for event in sorted_events[-5:]
         ]
+        # Build continuity_selector from already-loaded (sorted) events
+        # to avoid a second full scan inside continuity_selector_report().
+        event_dicts: list[dict[str, object]] = [
+            {
+                "id": e.id, "ts": e.ts, "kind": e.kind, "summary": e.summary,
+                "source": getattr(e, "source", ""),
+                "safe_ref": getattr(e, "safe_ref", None),
+                "tags": getattr(e, "tags", None),
+            }
+            for e in sorted_events
+        ]
+        from .event_stats import _build_continuity_selector
+        continuity_selector = _build_continuity_selector(event_dicts)
+    if continuity_selector is None:
+        continuity_selector = continuity_selector_report(store)
     store_counts = _store_counts(store, event_count=event_count)
     index_counts = MemoryOSIndex(store.roots).counts()
     prefetch_mode = _prefetch_mode(store)
@@ -171,7 +188,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "index_health": _index_health_summary(store, store_counts, index_counts),
         "prefetch_mode": prefetch_mode,
         "vector_available": _check_vector_available(),  # import-only check (no model load); provider's tool_status reports full embedder readiness
-        "continuity_selector": continuity_selector_report(store),
+        "continuity_selector": continuity_selector,
         "queue_backlog": 0,
         "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),
         "recent_event_summaries": recent_summaries,

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -15,6 +16,21 @@ from uuid import uuid4
 from .jsonl_io import locked_jsonl_file
 
 EVENT_STATS_SCHEMA_VERSION = "memory-os.event_stats.v0"
+
+# Continuity selector constants — mirrors prefetch._BRIDGE_SEED_SLOTS / _MAX_CONTINUITY_RECORDS
+_CONTINUITY_SEED_SLOTS: dict[str, int] = {
+    "foreground": 2,
+    "cron": 1,
+    "mailbox": 1,
+    "room_family": 1,
+    "state_source": 1,
+    "governance": 1,
+}
+_MAX_CONTINUITY_RECORDS: int = 8
+_SOURCE_CLASS_PRIORITY: list[str] = [
+    "cron", "mailbox", "room_family", "foreground",
+    "state_source", "governance", "other",
+]
 
 
 class EventStats:
@@ -31,6 +47,7 @@ class EventStats:
         events_root: str | None = None,
         updated_at: str | None = None,
         recent_event_summaries: list[dict[str, str]] | None = None,
+        continuity_selector: dict[str, object] | None = None,
     ) -> None:
         self.total_event_count = total_event_count
         self.latest_event_id = latest_event_id
@@ -40,6 +57,7 @@ class EventStats:
         self.events_root = events_root
         self.updated_at = updated_at or datetime.now(timezone.utc).isoformat()
         self.recent_event_summaries: list[dict[str, str]] = recent_event_summaries or []
+        self.continuity_selector: dict[str, object] = continuity_selector or {}
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -52,14 +70,113 @@ class EventStats:
             "by_kind": self.by_kind,
             "events_root": self.events_root,
             "recent_event_summaries": self.recent_event_summaries,
+            "continuity_selector": self.continuity_selector,
         }
+
+
+def _dict_source_class(evt: dict[str, object]) -> str:
+    """Dict-based source class classifier — mirrors prefetch._event_source_class."""
+    safe_ref = evt.get("safe_ref") if isinstance(evt.get("safe_ref"), dict) else {}
+    source = str(evt.get("source", "")).lower()
+    kind = str(evt.get("kind", "")).lower()
+    tags = {str(t).lower() for t in (evt.get("tags") or [])}
+    source_module = str(safe_ref.get("source_module", "")).lower()
+    source_class = str(safe_ref.get("source_class", "")).lower()
+    platform = str(safe_ref.get("platform", "")).lower()
+    if source_module == "cron_mirror" or source == "cron" or "cron" in tags or platform == "cron":
+        return "cron"
+    if source_module == "state_source_mirror" or source_class.startswith("state:") or source == "state_source_mirror":
+        return "state_source"
+    if platform == "mailbox" or source == "mailbox" or "mailbox" in tags:
+        return "mailbox"
+    if platform in {"room", "family", "household"} or source in {"room", "family", "household"}:
+        return "room_family"
+    if source_module in {"ops_gate", "proposal_queue", "evidence_scoring", "self_evolution"}:
+        return "governance"
+    if any(marker in kind for marker in ("proposal", "governance", "evidence", "ops_gate", "self_evolution")):
+        return "governance"
+    if kind in {"conversation_turn", "memory_write", "conversation_turn_mirrored"}:
+        return "foreground"
+    return "other"
+
+
+def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, object]:
+    """Compute continuity selector summary from sorted event dicts.
+
+    Deterministic mirror of _select_continuity_events + continuity_selector_report
+    using dicts instead of EventEnvelope objects.  Runs in O(N) inside
+    build_event_stats so CLI status can read the result in O(1).
+    """
+    if not events:
+        return {
+            "schema_version": "memory-os.continuity_selector.v0",
+            "selected_total": 0,
+            "dropped_total": 0,
+            "selected_by_source_class": {},
+            "dropped_by_source_class": {},
+            "seed_slots": dict(_CONTINUITY_SEED_SLOTS),
+            "max_records": _MAX_CONTINUITY_RECORDS,
+        }
+
+    # newest-first for seed slot selection
+    events_rev: list[dict[str, object]] = list(reversed(events))
+    buckets: dict[str, list[dict[str, object]]] = {sc: [] for sc in _CONTINUITY_SEED_SLOTS}
+    for evt in events_rev:
+        sc = _dict_source_class(evt)
+        if sc in buckets:
+            buckets[sc].append(evt)
+
+    selected_ids: set[str] = set()
+
+    # Phase 1: fill seed slots (most recent per source_class, capped)
+    for source_class, limit in _CONTINUITY_SEED_SLOTS.items():
+        for evt in buckets[source_class][:limit]:
+            if len(selected_ids) >= _MAX_CONTINUITY_RECORDS:
+                break
+            eid = str(evt.get("id", ""))
+            if eid and eid not in selected_ids:
+                selected_ids.add(eid)
+
+    # Phase 2: fill remaining slots by priority + recency
+    remaining = [evt for evt in events_rev if str(evt.get("id", "")) not in selected_ids]
+
+    def _global_sort_key(evt: dict[str, object]) -> tuple[int, str, str]:
+        sc = _dict_source_class(evt)
+        priority = _SOURCE_CLASS_PRIORITY.index(sc) if sc in _SOURCE_CLASS_PRIORITY else 99
+        return (-priority, str(evt.get("ts", "")), str(evt.get("id", "")))
+
+    for evt in sorted(remaining, key=_global_sort_key, reverse=True):
+        if len(selected_ids) >= _MAX_CONTINUITY_RECORDS:
+            break
+        eid = str(evt.get("id", ""))
+        if eid and eid not in selected_ids:
+            selected_ids.add(eid)
+
+    selected_by_sc = Counter(
+        _dict_source_class(evt) for evt in events_rev
+        if str(evt.get("id", "")) in selected_ids
+    )
+    dropped_by_sc = Counter(
+        _dict_source_class(evt) for evt in events_rev
+        if str(evt.get("id", "")) not in selected_ids
+    )
+
+    return {
+        "schema_version": "memory-os.continuity_selector.v0",
+        "selected_total": len(selected_ids),
+        "dropped_total": len(events) - len(selected_ids),
+        "selected_by_source_class": dict(selected_by_sc),
+        "dropped_by_source_class": dict(dropped_by_sc),
+        "seed_slots": dict(_CONTINUITY_SEED_SLOTS),
+        "max_records": _MAX_CONTINUITY_RECORDS,
+    }
 
 
 def build_event_stats(events: list[dict[str, object]]) -> EventStats:
     """Build EventStats from a list of event records (assumed sorted by ts).
 
-    Captures bounded recent_event_summaries so status/monitor consumers
-    can read O(1) without a full event scan + sort.
+    Captures bounded recent_event_summaries and continuity_selector so
+    status/monitor consumers can read O(1) without a full event scan + sort.
     """
     stats = EventStats(total_event_count=len(events))
     if events:
@@ -80,6 +197,7 @@ def build_event_stats(events: list[dict[str, object]]) -> EventStats:
         }
         for evt in events[-5:]
     ]
+    stats.continuity_selector = _build_continuity_selector(events)
     return stats
 
 
@@ -141,6 +259,18 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
                     "kind": str(item.get("kind", "")),
                     "summary": str(item.get("summary", "")),
                 })
+    continuity_selector: dict[str, object] = {}
+    raw_cs = data.get("continuity_selector")
+    if isinstance(raw_cs, dict):
+        continuity_selector = {
+            "schema_version": str(raw_cs.get("schema_version", "")),
+            "selected_total": int(raw_cs.get("selected_total", 0)),
+            "dropped_total": int(raw_cs.get("dropped_total", 0)),
+            "selected_by_source_class": dict(raw_cs.get("selected_by_source_class") or {}),
+            "dropped_by_source_class": dict(raw_cs.get("dropped_by_source_class") or {}),
+            "seed_slots": dict(raw_cs.get("seed_slots") or {}),
+            "max_records": int(raw_cs.get("max_records", 0)),
+        }
     return EventStats(
         total_event_count=int(data.get("total_event_count", 0)),
         latest_event_id=str(data.get("latest_event_id") or ""),
@@ -150,4 +280,5 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
         events_root=str(data.get("events_root") or ""),
         updated_at=str(updated_at),
         recent_event_summaries=recent_summaries,
+        continuity_selector=continuity_selector,
     ), freshness
