@@ -152,18 +152,20 @@ Test.
             # (graceful degrade path). We verify the schema is intact.
             pass
 
-        # If embedder was available, verify the label matches
+        # If embedder was available, verify the label matches.  Query on the
+        # same connection: _index_embeddings() is a low-level helper and does
+        # not own transaction commit/rollback semantics.
         row = conn.execute(
             "select count(*) from memory_embeddings"
         ).fetchone()
-        conn.close()
-        # If vectors were written, model_name must not be hardcoded
+        model_row = None
         if row and row[0] > 0:
-            conn = sqlite3.connect(str(index_path))
             model_row = conn.execute(
                 "select distinct embedding_model from memory_embeddings"
             ).fetchone()
-            conn.close()
+        conn.close()
+        # If vectors were written, model_name must not be hardcoded
+        if row and row[0] > 0:
             assert model_row is not None
             assert "MiniLM" in model_row[0] or model_row[0] == embedder.model_name, (
                 f"Default embedder model_name should contain MiniLM, got {model_row[0]}"
