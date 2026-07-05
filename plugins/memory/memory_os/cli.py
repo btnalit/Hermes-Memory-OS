@@ -3619,14 +3619,60 @@ def _prefetch_mode(store: MemoryOSStore) -> str:
     return "indexed"
 
 
+def _index_health_counts_findings(
+    store_counts: dict[str, int],
+    index_counts: dict[str, int],
+) -> list[dict[str, Any]]:
+    """O(1) index health checks from pre-computed counts only (no event scan).
+
+    Used by the status fast path.  Deep per-event verification lives in
+    _index_health_findings() and is reserved for doctor / meta_audit.
+    """
+    findings: list[dict[str, Any]] = []
+    if index_counts.get("events", 0) > store_counts.get("events", 0):
+        findings.append(
+            _finding(
+                "index_count_mismatch",
+                "error",
+                "SQLite index has more events than the filesystem store.",
+                {"store_counts": store_counts, "index_counts": index_counts},
+            )
+        )
+    elif index_counts.get("events", 0) < store_counts.get("events", 0):
+        findings.append(
+            _finding(
+                "index_stale",
+                "warning",
+                "SQLite index is behind append-only filesystem events and should catch up on heartbeat.",
+                {"store_counts": store_counts, "index_counts": index_counts},
+            )
+        )
+    for key in ("working_items", "crystallized_records"):
+        if index_counts.get(key, 0) != store_counts.get(key, 0):
+            findings.append(
+                _finding(
+                    "index_count_mismatch",
+                    "error",
+                    "SQLite index counts do not match filesystem store counts.",
+                    {"store_counts": store_counts, "index_counts": index_counts, "count_key": key},
+                )
+            )
+    return findings
+
+
 def _index_health_summary(
     store: MemoryOSStore,
     store_counts: dict[str, int],
     index_counts: dict[str, int],
+    *,
+    deep: bool = False,
 ) -> dict[str, Any]:
     if not store.roots.index_path.exists():
         return {"state": "missing", "fts_tokenizer": ""}
-    findings = _index_health_findings(store, store_counts, index_counts)
+    if deep:
+        findings = _index_health_findings(store, store_counts, index_counts)
+    else:
+        findings = _index_health_counts_findings(store_counts, index_counts)
     if any(finding["severity"] == "error" for finding in findings):
         state = "mismatch"
     elif any(finding["id"] == "index_stale" for finding in findings):

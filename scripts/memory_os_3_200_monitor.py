@@ -4693,6 +4693,7 @@ def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str,
             input=script,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=True,
         )
     else:
@@ -4701,6 +4702,7 @@ def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str,
             input=script,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=True,
         )
     return json.loads(completed.stdout)
@@ -4724,7 +4726,7 @@ for _path in (
 
 def run(cmd, env=None):
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, env=env)
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, env=env, stdin=subprocess.DEVNULL)
         return {"ok": True, "out": out.strip(), "code": 0}
     except subprocess.CalledProcessError as exc:
         return {"ok": False, "out": (exc.output or "").strip(), "code": exc.returncode}

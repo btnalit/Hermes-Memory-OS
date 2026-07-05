@@ -11,7 +11,7 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.schema import EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
-from plugins.memory.memory_os.cli import build_status_report
+from plugins.memory.memory_os.cli import build_status_report, _index_health_counts_findings, _index_health_summary
 
 
 def _event(seed, *, profile="main", source="telegram", kind="conversation_turn", summary=None, safe_ref=None, tags=None):
@@ -339,3 +339,168 @@ def test_runtime_policy_source_caps_prevent_cron_batch_from_dominating(tmp_path)
     assert report["source_class_counts"]["cron"] == 2
     assert report["source_class_counts"]["foreground"] == 1
     assert report["candidate_count"] == 1
+
+
+# ── _index_health_counts_findings O(1) tests ──────────────────────────
+
+def test_counts_findings_healthy_when_all_match():
+    counts = _index_health_counts_findings(
+        {"events": 10, "working_items": 5, "crystallized_records": 3},
+        {"events": 10, "working_items": 5, "crystallized_records": 3},
+    )
+    assert counts == [], f"Expected no findings for matching counts, got {counts}"
+
+
+def test_counts_findings_error_when_index_has_more_events():
+    counts = _index_health_counts_findings(
+        {"events": 5, "working_items": 0, "crystallized_records": 0},
+        {"events": 10, "working_items": 0, "crystallized_records": 0},
+    )
+    assert any(f["id"] == "index_count_mismatch" and f["severity"] == "error" for f in counts), (
+        f"Expected index_count_mismatch error, got {counts}"
+    )
+
+
+def test_counts_findings_stale_when_store_ahead():
+    counts = _index_health_counts_findings(
+        {"events": 10, "working_items": 0, "crystallized_records": 0},
+        {"events": 5, "working_items": 0, "crystallized_records": 0},
+    )
+    assert any(f["id"] == "index_stale" and f["severity"] == "warning" for f in counts), (
+        f"Expected index_stale warning, got {counts}"
+    )
+
+
+def test_counts_findings_error_on_working_items_mismatch():
+    counts = _index_health_counts_findings(
+        {"events": 10, "working_items": 5, "crystallized_records": 3},
+        {"events": 10, "working_items": 3, "crystallized_records": 3},
+    )
+    mismatches = [f for f in counts if f["id"] == "index_count_mismatch"]
+    assert len(mismatches) == 1
+    assert mismatches[0]["details"]["count_key"] == "working_items"
+
+
+def test_counts_findings_error_on_crystallized_records_mismatch():
+    counts = _index_health_counts_findings(
+        {"events": 10, "working_items": 5, "crystallized_records": 3},
+        {"events": 10, "working_items": 5, "crystallized_records": 7},
+    )
+    mismatches = [f for f in counts if f["id"] == "index_count_mismatch"]
+    assert len(mismatches) == 1
+    assert mismatches[0]["details"]["count_key"] == "crystallized_records"
+
+
+# ── _index_health_summary O(1) fast path ──────────────────────────────
+
+def test_index_health_summary_fast_path_does_not_read_events(tmp_path, monkeypatch):
+    """deep=False must not call store.read_events() — O(1) guarantee."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # Build the index so it exists (empty)
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+
+    read_events_called = []
+
+    def _tracking_read_events(*args, **kwargs):
+        read_events_called.append(True)
+        return store._original_read_events(*args, **kwargs)
+
+    store._original_read_events = store.read_events
+    monkeypatch.setattr(store, "read_events", _tracking_read_events, raising=True)
+
+    store_counts = {"events": 0, "working_items": 0, "crystallized_records": 0}
+    index_counts = MemoryOSIndex(roots).counts()
+
+    result = _index_health_summary(store, store_counts, index_counts)
+    assert result["state"] == "healthy"
+    assert len(read_events_called) == 0, (
+        "deep=False path must not call store.read_events()"
+    )
+
+
+def test_index_health_summary_deep_path_reads_events(tmp_path, monkeypatch):
+    """deep=True must call store.read_events() for full verification."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+
+    read_events_called = []
+
+    def _tracking_read_events(*args, **kwargs):
+        read_events_called.append(True)
+        return store._original_read_events(*args, **kwargs)
+
+    store._original_read_events = store.read_events
+    monkeypatch.setattr(store, "read_events", _tracking_read_events, raising=True)
+
+    store_counts = {"events": 0, "working_items": 0, "crystallized_records": 0}
+    index_counts = MemoryOSIndex(roots).counts()
+
+    result = _index_health_summary(store, store_counts, index_counts, deep=True)
+    assert result["state"] == "healthy"
+    assert len(read_events_called) == 1, (
+        "deep=True path must call store.read_events()"
+    )
+
+
+def test_index_health_summary_missing_when_no_index(tmp_path):
+    """When index file doesn't exist, return missing state without loading."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path)
+    store = MemoryOSStore(roots)
+    store.initialize()
+    # Do NOT build the index
+
+    result = _index_health_summary(store, {"events": 0}, {"events": 0})
+    assert result["state"] == "missing"
+    assert result["fts_tokenizer"] == ""
+
+
+def test_build_status_report_uses_O1_index_health(tmp_path, monkeypatch):
+    """build_status_report index_health path must not trigger full event scan.
+
+    Counterfactual: before the deep=False fix, build_status_report would
+    call _index_health_findings → store.read_events() on every invocation.
+    """
+    from plugins.memory.memory_os.event_stats import build_event_stats, write_event_stats
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path)
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # Add a few events and build the index
+    for i in range(5):
+        store.append_event(_event(200 + i, summary=f"status event {i}"))
+    index = MemoryOSIndex(roots)
+    index.rebuild_from_store(store)
+
+    # Write fresh event stats so the O(1) path is taken
+    events = sorted(store.read_events(), key=lambda e: e.ts)
+    event_dicts = [e.to_dict() for e in events]
+    stats = build_event_stats(event_dicts)
+    stats.events_root = str(roots.events_root)
+    write_event_stats(roots, stats)
+
+    # Track read_events calls
+    read_events_called = []
+
+    def _tracking_read_events(*args, **kwargs):
+        read_events_called.append(True)
+        return store._original_read_events(*args, **kwargs)
+
+    store._original_read_events = store.read_events
+    monkeypatch.setattr(store, "read_events", _tracking_read_events, raising=True)
+
+    status = build_status_report(store)
+    assert status["counts"]["events"] == 5
+    assert status["index_health"]["state"] in ("healthy", "stale")
+    assert len(read_events_called) == 0, (
+        f"build_status_report must not call store.read_events() on the O(1) path, "
+        f"but it was called {len(read_events_called)} time(s)"
+    )
