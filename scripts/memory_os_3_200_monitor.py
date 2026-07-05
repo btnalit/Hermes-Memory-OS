@@ -4693,7 +4693,6 @@ def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str,
             input=script,
             text=True,
             capture_output=True,
-            stdin=subprocess.DEVNULL,
             check=True,
         )
     else:
@@ -4702,7 +4701,6 @@ def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str,
             input=script,
             text=True,
             capture_output=True,
-            stdin=subprocess.DEVNULL,
             check=True,
         )
     return json.loads(completed.stdout)
