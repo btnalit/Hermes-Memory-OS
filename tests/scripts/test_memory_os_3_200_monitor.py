@@ -48,6 +48,16 @@ def test_neutral_monitor_script_help_preserves_cli_contract():
     assert "No module named 'plugins'" not in result.stderr
 
 
+def test_run_probe_with_stdin_script_does_not_conflict_with_devnull():
+    result = monitor._run_probe(
+        "",
+        "import json\nprint(json.dumps({'ok': True, 'probe': 'stdin'}))\n",
+        python_bin=sys.executable,
+    )
+
+    assert result == {"ok": True, "probe": "stdin"}
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:
