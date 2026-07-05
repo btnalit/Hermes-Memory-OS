@@ -147,7 +147,7 @@ def _check_vector_available() -> bool:
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
     stats, freshness = read_event_stats(store.roots)
     _stats_usable = freshness in ("fresh", "acceptable", "warning")
-    if stats is not None and stats.total_event_count > 0 and _stats_usable:
+    if stats is not None and _stats_usable:
         event_count = stats.total_event_count
         recent_summaries = stats.recent_event_summaries
         continuity_selector = stats.continuity_selector if stats.continuity_selector else None

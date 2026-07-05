@@ -378,3 +378,90 @@ def test_legacy_event_stats_without_continuity_selector_returns_empty_dict(tmp_p
     assert stats.continuity_selector == {}, (
         "Legacy stats without continuity_selector must default to empty dict"
     )
+
+
+def test_continuity_selector_parity_with_live_selector(tmp_path):
+    """Cached continuity_selector must match live continuity_selector_report output.
+
+    Uses a real MemoryOSStore with events spanning different source classes
+    and importance levels to verify the dict-based selection logic is an exact
+    mirror of the EventEnvelope-based logic in prefetch.py.
+    """
+    from plugins.memory.memory_os.crystallized import append_candidate_queue
+    from plugins.memory.memory_os.prefetch import continuity_selector_report
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.schema import EventEnvelope
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    # Create events across different source classes with varying importance
+    now = datetime.now(timezone.utc)
+    events_data = [
+        # (age_minutes, source_class, kind, tags, importance)
+        (10, "foreground", "conversation_turn", [], 0.5),
+        (9, "foreground", "conversation_turn", [], 0.8),
+        (8, "cron", "cron_job", ["cron"], 0.0),
+        (7, "cron", "cron_job", ["cron"], 0.3),
+        (6, "mailbox", "mailbox_item", ["mailbox"], 0.0),
+        (5, "mailbox", "mailbox_item", ["mailbox"], 0.9),
+        (4, "governance", "proposal", [], 0.2),
+        (3, "governance", "ops_gate", [], 0.7),
+        (2, "state_source", "state_change", [], 0.0),
+        (1, "foreground", "conversation_turn_mirrored", [], 0.6),
+    ]
+
+    for i, (age_min, sc, kind, tags, importance) in enumerate(events_data):
+        ts = (now - timedelta(minutes=age_min)).isoformat()
+        safe_ref = {
+            "source_class": sc,
+            "source_module": "cron_mirror" if sc == "cron" else "",
+            "platform": "mailbox" if sc == "mailbox" else "",
+            "importance": importance,
+        }
+        event = EventEnvelope(
+            schema_version="memory-os.event.v0",
+            id=f"evt-parity-{i:04d}",
+            ts=ts,
+            profile="test",
+            source=sc,
+            kind=kind,
+            summary=f"summary-{i}",
+            tags=tags,
+            safe_ref=safe_ref,
+        )
+        store.append_event(event)
+
+    # Live selector (EventEnvelope path)
+    live = continuity_selector_report(store)
+
+    # Cached selector (dict path — same data)
+    sorted_events = sorted(store.read_events(), key=lambda e: e.ts)
+    event_dicts = [e.to_dict() for e in sorted_events]
+    cached = build_event_stats(event_dicts).continuity_selector
+
+    # Compare counts
+    assert cached["selected_total"] == live["selected_total"], (
+        f"selected_total: cached={cached['selected_total']} live={live['selected_total']}"
+    )
+    assert cached["dropped_total"] == live["dropped_total"], (
+        f"dropped_total: cached={cached['dropped_total']} live={live['dropped_total']}"
+    )
+
+    # Compare per-source-class breakdowns
+    for field in ("selected_by_source_class", "dropped_by_source_class"):
+        cached_val = cached[field]
+        live_val = live[field]
+        for sc in set(list(cached_val) + list(live_val)):
+            c = cached_val.get(sc, 0)
+            l = live_val.get(sc, 0)
+            assert c == l, (
+                f"{field}[{sc}]: cached={c} live={l}"
+            )
+
+    # Structural fields
+    assert cached["seed_slots"] == live["seed_slots"]
+    assert cached["max_records"] == live["max_records"]
+    assert cached["schema_version"] == live["schema_version"]

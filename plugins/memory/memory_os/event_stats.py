@@ -27,10 +27,6 @@ _CONTINUITY_SEED_SLOTS: dict[str, int] = {
     "governance": 1,
 }
 _MAX_CONTINUITY_RECORDS: int = 8
-_SOURCE_CLASS_PRIORITY: list[str] = [
-    "cron", "mailbox", "room_family", "foreground",
-    "state_source", "governance", "other",
-]
 
 
 class EventStats:
@@ -100,12 +96,37 @@ def _dict_source_class(evt: dict[str, object]) -> str:
     return "other"
 
 
+def _dict_event_importance(evt: dict[str, object]) -> float:
+    """Dict-based mirror of prefetch._event_importance."""
+    safe_ref = evt.get("safe_ref") if isinstance(evt.get("safe_ref"), dict) else {}
+    for key in ("importance", "score", "drive_weight"):
+        try:
+            return float(safe_ref.get(key, 0.0))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _dict_seed_sort_key(evt: dict[str, object]) -> tuple[str, float, str]:
+    """Dict-based mirror of prefetch._seed_sort_key — (ts, importance, id)."""
+    return (str(evt.get("ts", "")), _dict_event_importance(evt), str(evt.get("id", "")))
+
+
+def _dict_global_sort_key(evt: dict[str, object]) -> tuple[float, str, str]:
+    """Dict-based mirror of prefetch._global_sort_key — (importance, ts, id)."""
+    return (_dict_event_importance(evt), str(evt.get("ts", "")), str(evt.get("id", "")))
+
+
 def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, object]:
     """Compute continuity selector summary from sorted event dicts.
 
-    Deterministic mirror of _select_continuity_events + continuity_selector_report
+    Exact mirror of _select_continuity_events + continuity_selector_report
     using dicts instead of EventEnvelope objects.  Runs in O(N) inside
     build_event_stats so CLI status can read the result in O(1).
+
+    Sort keys (_dict_seed_sort_key / _dict_global_sort_key) are kept in
+    lockstep with prefetch._seed_sort_key / prefetch._global_sort_key so
+    the cached output matches the live selector.
     """
     if not events:
         return {
@@ -118,7 +139,7 @@ def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, obj
             "max_records": _MAX_CONTINUITY_RECORDS,
         }
 
-    # newest-first for seed slot selection
+    # newest-first for seed slot selection (mirrors reverse ts sort in original)
     events_rev: list[dict[str, object]] = list(reversed(events))
     buckets: dict[str, list[dict[str, object]]] = {sc: [] for sc in _CONTINUITY_SEED_SLOTS}
     for evt in events_rev:
@@ -128,24 +149,20 @@ def _build_continuity_selector(events: list[dict[str, object]]) -> dict[str, obj
 
     selected_ids: set[str] = set()
 
-    # Phase 1: fill seed slots (most recent per source_class, capped)
+    # Phase 1: fill seed slots — sort by (_seed_sort_key, reverse=True) then [:limit]
+    # (mirrors: sorted(buckets[sc], key=_seed_sort_key, reverse=True)[:limit])
     for source_class, limit in _CONTINUITY_SEED_SLOTS.items():
-        for evt in buckets[source_class][:limit]:
+        for evt in sorted(buckets[source_class], key=_dict_seed_sort_key, reverse=True)[:limit]:
             if len(selected_ids) >= _MAX_CONTINUITY_RECORDS:
                 break
             eid = str(evt.get("id", ""))
             if eid and eid not in selected_ids:
                 selected_ids.add(eid)
 
-    # Phase 2: fill remaining slots by priority + recency
+    # Phase 2: fill remaining slots by (_global_sort_key, reverse=True)
+    # (mirrors: sorted(remaining, key=_global_sort_key, reverse=True))
     remaining = [evt for evt in events_rev if str(evt.get("id", "")) not in selected_ids]
-
-    def _global_sort_key(evt: dict[str, object]) -> tuple[int, str, str]:
-        sc = _dict_source_class(evt)
-        priority = _SOURCE_CLASS_PRIORITY.index(sc) if sc in _SOURCE_CLASS_PRIORITY else 99
-        return (-priority, str(evt.get("ts", "")), str(evt.get("id", "")))
-
-    for evt in sorted(remaining, key=_global_sort_key, reverse=True):
+    for evt in sorted(remaining, key=_dict_global_sort_key, reverse=True):
         if len(selected_ids) >= _MAX_CONTINUITY_RECORDS:
             break
         eid = str(evt.get("id", ""))
