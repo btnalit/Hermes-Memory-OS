@@ -26,7 +26,8 @@ from plugins.memory.memory_os.store import MemoryOSStore
 DEFAULT_JUDGE_CONFIG: dict[str, Any] = {
     "provider": "hermes_default",
     "timeout_ms": 15000,
-    "max_tokens": 256,
+    "max_tokens": 1024,
+    "max_per_tick": 8,
 }
 
 # ── Retry + heuristic fallback ─────────────────────────────────────────────
@@ -195,21 +196,32 @@ def judge_candidate(
     config: dict[str, Any] | None = None,
     *,
     active_crystallized_count: int = 0,
+    heuristic_only: bool = False,
 ) -> dict[str, Any]:
     """Judge whether a candidate is a durable fact or a transient moment.
 
     Args:
         candidate: The inner_drive_candidate to judge.
         config: Optional judge config overrides (provider, timeout_ms, max_tokens).
+        heuristic_only: When True, skip LLM entirely and use keyword heuristic
+            (emergency knob: ``fact_judge_heuristic_only``).
 
     Returns:
-        {"durable_fact": bool, "reason": str}
-        On total failure after retries, falls back to heuristic (content-based, not fail-open).
+        {"durable_fact": bool, "reason": str, "failure_reason": str | None}
+        On total failure after retries, falls back to heuristic (content-based,
+        not fail-open).  The ``failure_reason`` field records *why* the LLM path
+        failed (empty_content / parse_failed / missing_key / exception / None
+        for success) so the cron lane can produce accurate error telemetry.
     """
+    if heuristic_only:
+        verdict = _heuristic_durable(candidate)
+        verdict["failure_reason"] = "heuristic_only_knob"
+        return verdict
+
     effective_config = dict(DEFAULT_JUDGE_CONFIG, **(config or {}))
     body = str(candidate.body or "").strip()
     if not body:
-        return {"durable_fact": False, "reason": "empty_body"}
+        return {"durable_fact": False, "reason": "empty_body", "failure_reason": None}
 
     # Truncate very long bodies to keep the prompt reasonable
     body_for_prompt = body[:2000]
@@ -225,16 +237,19 @@ def judge_candidate(
     prompt = f"{system_prompt}\n\n{user_prompt}"
 
     # Retry loop: empty / non-JSON / missing-key responses get retried
+    last_failure: str | None = None
     for attempt in range(1 + MAX_JUDGE_RETRIES):  # 1 initial + N retries
         try:
             response_text = _call_hermes_runtime_model(prompt, effective_config)
         except Exception:
+            last_failure = "llm_exception"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
             # All retries exhausted on exception → fall through to heuristic
             break
 
         if not response_text:
+            last_failure = "llm_empty_content"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
             break
@@ -242,27 +257,32 @@ def judge_candidate(
         try:
             parsed = _extract_json_object(response_text)
         except Exception:
+            last_failure = "llm_parse_failed"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
             break
 
         if not isinstance(parsed, dict):
+            last_failure = "llm_parse_failed"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
             break
 
         durable = parsed.get("durable_fact")
         if not isinstance(durable, bool):
+            last_failure = "llm_missing_key"
             if attempt < MAX_JUDGE_RETRIES:
                 continue
             break
 
         # Successful parse with valid durable_fact
         reason = str(parsed.get("reason") or "")[:200]
-        return {"durable_fact": durable, "reason": reason}
+        return {"durable_fact": durable, "reason": reason, "failure_reason": None}
 
     # All attempts exhausted — fall back to deterministic heuristic
-    return _heuristic_durable(candidate)
+    verdict = _heuristic_durable(candidate)
+    verdict["failure_reason"] = last_failure
+    return verdict
 
 
 def run_fact_judge_lane(
@@ -279,9 +299,37 @@ def run_fact_judge_lane(
     Does NOT mutate candidates — only writes verdicts for the aggregation
     lane to consume.
 
-    Returns a summary dict for monitor integration.
+    Config is resolved from knobs (``fact_judge_max_tokens``,
+    ``fact_judge_max_per_tick``, ``fact_judge_timeout_ms``,
+    ``fact_judge_heuristic_only``).  A bounded per-tick drain
+    (``max_per_tick``, default 8) prevents unbounded backlog blow-up
+    from dragging down the cron window.
     """
     _now = now or datetime.now(timezone.utc)
+
+    # ── Resolve knobs ──────────────────────────────────────────────────
+    from plugins.memory.memory_os.knob_overrides import resolve_knob
+
+    judge_config: dict[str, Any] = dict(DEFAULT_JUDGE_CONFIG)
+    judge_config["max_tokens"] = int(resolve_knob(
+        "fact_judge_max_tokens", default=DEFAULT_JUDGE_CONFIG["max_tokens"],
+        roots=store.roots,
+    ))
+    judge_config["max_per_tick"] = int(resolve_knob(
+        "fact_judge_max_per_tick", default=DEFAULT_JUDGE_CONFIG["max_per_tick"],
+        roots=store.roots,
+    ))
+    judge_config["timeout_ms"] = int(resolve_knob(
+        "fact_judge_timeout_ms", default=DEFAULT_JUDGE_CONFIG["timeout_ms"],
+        roots=store.roots,
+    ))
+    heuristic_only = bool(resolve_knob(
+        "fact_judge_heuristic_only", default=False, roots=store.roots,
+    ))
+
+    max_per_tick = int(judge_config.get("max_per_tick") or 8)
+    # ───────────────────────────────────────────────────────────────────
+
     active_count = _count_active_crystallized(store)
     candidates = read_candidate_queue(store)
 
@@ -303,22 +351,33 @@ def run_fact_judge_lane(
         if candidate.bridge_state not in ("", "inner_drive_candidate"):
             continue
 
-        verdict = judge_candidate(candidate, active_crystallized_count=active_count)
+        # Bounded drain: stop when we've judged enough this tick
+        if judged_count >= max_per_tick:
+            skipped_count += 1
+            continue
+
+        verdict = judge_candidate(
+            candidate,
+            config=judge_config,
+            active_crystallized_count=active_count,
+            heuristic_only=heuristic_only,
+        )
         judged_count += 1
 
         if verdict.get("durable_fact"):
             durable_count += 1
 
-        # Detect error reasons (non-empty reason that isn't a real judgment)
-        reason = str(verdict.get("reason") or "")
-        if reason.startswith("judge_"):
+        # ── Failure telemetry ──────────────────────────────────────────
+        failure_reason = str(verdict.get("failure_reason") or "")
+        if failure_reason:
             error_count += 1
+        # ─────────────────────────────────────────────────────────────────
 
         _append_verdict(
             store,
             candidate_id=candidate.candidate_id,
             durable_fact=bool(verdict.get("durable_fact")),
-            reason=reason,
+            reason=str(verdict.get("reason") or ""),
             now=_now,
         )
 

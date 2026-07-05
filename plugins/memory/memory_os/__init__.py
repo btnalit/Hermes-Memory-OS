@@ -308,12 +308,12 @@ class MemoryOSProvider(MemoryProvider):
             if role == "tool" and text[:1] in {"{", "["}:
                 continue
             if _looks_like_operation_context(text):
-                new_ops.append(f"{role}: {_clip(text, 180)}")
+                new_ops.append(f"{role}: {_clip(text, 140)}")
         if not new_ops:
             return
         # Merge: existing completed_operations + new turn operations
         previous_completed = _extract_anchor_operation_lines(self._current_task_anchor)
-        merged = list(dict.fromkeys(previous_completed + new_ops))[-6:]
+        merged = list(dict.fromkeys(previous_completed + new_ops))[-4:]
         current_task = _extract_anchor_current_task(self._current_task_anchor)
         if not current_task:
             return  # Non-standard anchor formats without current_task (cancelled, deferred, ambiguous)
@@ -1176,11 +1176,14 @@ class MemoryOSProvider(MemoryProvider):
             # ───────────────────────────────────────────────────────────
             anchor = str(record.get("anchor") or "")
             if anchor.strip():
-                # ── Cross-session marker: when the anchor was written by
-                # a different session, prepend a source label so the LLM
-                # knows this context was carried over, not created now. ──
                 anchor_session_id = str(record.get("session_id", ""))
                 if anchor_session_id and anchor_session_id != self.session_id:
+                    # ── Cross-session recovery: rebuild a sanitised anchor ──
+                    # Strip completed_operations and active tool/process state —
+                    # both belong to the old session's working state and must not
+                    # leak into the new session as "Current Foreground Task".
+                    # The old anchor's task line is preserved; the compression
+                    # rule is replaced with a "may be complete, verify" version.
                     if created_at is not None:
                         age_min = int(
                             (now - created_at).total_seconds() / 60
@@ -1191,11 +1194,18 @@ class MemoryOSProvider(MemoryProvider):
                             age_label = f"{age_min // 60}h前"
                     else:
                         age_label = "?"
-                    marker = (
-                        f"- [跨会话恢复, {age_label},"
-                        f" 原会话: {anchor_session_id}]\n"
-                    )
-                    anchor = marker + anchor
+                    task = _extract_anchor_current_task(anchor)
+                    if task:
+                        anchor = _format_recovered_cross_session_anchor(
+                            task=task,
+                            age_label=age_label,
+                            original_session=anchor_session_id,
+                            current_session=self.session_id,
+                        )
+                    # If the old anchor has no parseable task line, fall through
+                    # and return "" — don't inject an unreadable anchor.
+                    else:
+                        return ""
                 return anchor
             return ""
         return ""
@@ -1474,8 +1484,8 @@ def _owner_review_reply_not_processed(reason: str, *, status: str = "ignored") -
 
 
 def _turn_summary(user_content: str, assistant_content: str) -> str:
-    user_summary = _clip(_redact_secrets(user_content), 180)
-    assistant_summary = _clip(_redact_secrets(assistant_content), 180)
+    user_summary = _clip(_redact_secrets(user_content), 140)
+    assistant_summary = _clip(_redact_secrets(assistant_content), 140)
     return f"User: {user_summary} | Assistant: {assistant_summary}"
 
 
@@ -1534,7 +1544,7 @@ def _build_current_task_anchor(
         if role == "tool" and text[:1] in {"{", "["}:
             continue
         if _looks_like_operation_context(text):
-            operations.append(f"{role}: {_clip(text, 180)}")
+            operations.append(f"{role}: {_clip(text, 140)}")
     return _format_current_task_anchor(
         task=latest_user_text,
         operations=operations[-4:],
@@ -1558,12 +1568,12 @@ def _format_current_task_anchor(
         output.append(f"- session: {session_id}")
     if completed_operations:
         output.append("- completed operations (do not repeat):")
-        for op in completed_operations[-6:]:
-            output.append(f"  - {_redact_task_text(_clip(op, 220))}")
+        for op in completed_operations[-4:]:
+            output.append(f"  - {_redact_task_text(_clip(op, 160))}")
     if operations:
         output.append("- active tool/process state:")
         for operation in operations:
-            output.append(f"  - {_redact_task_text(_clip(operation, 220))}")
+            output.append(f"  - {_redact_task_text(_clip(operation, 160))}")
     rule = (
         "- compression rule: Continue this foreground task after compaction. "
         "Do not switch back to unrelated historical memory topics."
@@ -1571,7 +1581,7 @@ def _format_current_task_anchor(
     if completed_operations:
         rule += " Do not repeat completed operations."
     output.append(rule)
-    return _clip_multiline("\n".join(output), 1200)
+    return _clip_multiline("\n".join(output), 900)
 
 
 def _format_cancelled_task_anchor(
@@ -1584,19 +1594,19 @@ def _format_cancelled_task_anchor(
     ]
     previous_task = _extract_anchor_current_task(previous_anchor)
     if previous_task:
-        output.append(f"- cancelled task: {_redact_task_text(_clip(previous_task, 220))}")
+        output.append(f"- cancelled task: {_redact_task_text(_clip(previous_task, 160))}")
     if session_id:
         output.append(f"- session: {session_id}")
     if completed_operations:
         output.append("- completed operations (do not repeat):")
-        for op in completed_operations[-6:]:
-            output.append(f"  - {_redact_task_text(_clip(op, 220))}")
+        for op in completed_operations[-4:]:
+            output.append(f"  - {_redact_task_text(_clip(op, 160))}")
     output.append(
         "- response rule: Acknowledge the cancellation and stop the foreground task. "
         "Do not pivot to unrelated system-memory, provider-status, or historical architecture topics "
         "unless the owner explicitly asks."
     )
-    return _clip_multiline("\n".join(output), 1200)
+    return _clip_multiline("\n".join(output), 900)
 
 
 def _format_deferred_task_anchor(
@@ -1609,18 +1619,18 @@ def _format_deferred_task_anchor(
     ]
     previous_task = _extract_anchor_current_task(previous_anchor)
     if previous_task:
-        output.append(f"- deferred task: {_redact_task_text(_clip(previous_task, 220))}")
+        output.append(f"- deferred task: {_redact_task_text(_clip(previous_task, 160))}")
     if session_id:
         output.append(f"- session: {session_id}")
     if completed_operations:
         output.append("- completed operations (do not repeat):")
-        for op in completed_operations[-6:]:
-            output.append(f"  - {_redact_task_text(_clip(op, 220))}")
+        for op in completed_operations[-4:]:
+            output.append(f"  - {_redact_task_text(_clip(op, 160))}")
     output.append(
         "- response rule: Acknowledge the deferral and preserve this task for a later explicit resume. "
         "Do not pivot to unrelated historical memory topics."
     )
-    return _clip_multiline("\n".join(output), 1200)
+    return _clip_multiline("\n".join(output), 900)
 
 
 def _format_resumed_deferred_task_anchor(
@@ -1637,8 +1647,8 @@ def _format_resumed_deferred_task_anchor(
         lines.append(f"- current task: {_redact_task_text(_clip(task, 240))}")
     if completed_operations:
         lines.append("- completed operations (do not repeat):")
-        for op in completed_operations[-6:]:
-            lines.append(f"  - {_redact_task_text(_clip(op, 220))}")
+        for op in completed_operations[-4:]:
+            lines.append(f"  - {_redact_task_text(_clip(op, 160))}")
     if anchor_ops:
         lines.append(f"- latest task state: {_redact_task_text(_clip(anchor_ops[-1], 260))}")
     if session_id:
@@ -1647,7 +1657,7 @@ def _format_resumed_deferred_task_anchor(
         "- response rule: Continue this deferred foreground task. "
         "If details are insufficient, ask which file or artifact to inspect before guessing."
     )
-    return _clip_multiline("\n".join(line for line in lines if line), 1200)
+    return _clip_multiline("\n".join(line for line in lines if line), 900)
 
 
 def _format_ambiguous_deferred_resume_anchor(*, query: str, session_id: str = "") -> str:
@@ -1665,6 +1675,32 @@ def _format_ambiguous_deferred_resume_anchor(*, query: str, session_id: str = ""
     return _clip_multiline("\n".join(lines), 900)
 
 
+def _format_recovered_cross_session_anchor(
+    *, task: str, age_label: str, original_session: str, current_session: str = "",
+) -> str:
+    """Build a sanitised anchor for cross-session recovery.
+
+    Deliberately omits ``completed_operations`` and ``active tool/process
+    state`` — both belong to the old session's working state and must not
+    leak into the new session as "Current Foreground Task".
+    """
+    task = _redact_task_text(_clip(task, 240))
+    if not task:
+        return ""
+    lines = [
+        "### Memory-OS Current Task Anchor",
+        f"- [跨会话恢复, {age_label}, 原会话: {original_session}]",
+        f"- current task: {task}",
+    ]
+    if current_session:
+        lines.append(f"- session: {current_session}")
+    lines.append(
+        "- compression rule: This is a recovered task anchor from a prior session. "
+        "The task may be complete. Verify with the owner before continuing."
+    )
+    return _clip_multiline("\n".join(lines), 700)
+
+
 def _extract_anchor_current_task(anchor: str) -> str:
     for line in str(anchor or "").splitlines():
         clean = line.strip()
@@ -1679,7 +1715,7 @@ def _extract_anchor_operation_lines(anchor: str) -> list[str]:
         clean = line.strip()
         if clean.startswith("- assistant:") or clean.startswith("- tool:"):
             operations.append(clean[2:].strip())
-    return operations[-6:]
+    return operations[-4:]
 
 
 def _is_owner_action_anchor(anchor: str) -> bool:
@@ -1803,33 +1839,39 @@ def _owner_review_reply_system_instruction(result: dict[str, Any]) -> str:
 
 
 def _looks_like_operation_context(text: str) -> bool:
+    """Deterministic operation-context detector (INV-5: no LLM, no network).
+
+    Two-tier gating:
+    A. STRUCTURAL signals — hard markers from tool output shells.  Hit alone
+       is enough (terminal output, systemd journal lines, git/stack traces).
+    B. ACTION words — must co-occur with at least one extracted entity
+       (path, URL, UUID, or ID pattern).  An action word without a concrete
+       target (e.g. "开始全面检查" with no entity) is not an operation.
+    """
     lowered = str(text or "").lower()
     if not lowered:
         return False
-    markers = (
-        "terminal:",
-        "process",
-        "proc_",
-        "running",
-        "wait ",
-        "poll ",
-        "install",
-        "download",
-        "clone",
-        "git ",
-        "fatal:",
-        "error",
-        "failed",
-        "comfyui",
-        "正在",
-        "安装",
-        "下载",
-        "失败",
-        "报错",
-        "后台",
-        "进程",
+
+    # A. Structural signals: hit alone is sufficient
+    _STRUCTURAL = (
+        "terminal:", "execstart", "code=exited", "proc_",
+        "fatal:", "git ", "traceback", "main pid",
     )
-    return any(marker in lowered for marker in markers)
+    if any(s in lowered for s in _STRUCTURAL):
+        return True
+
+    # B. Action words: must co-occur with a concrete entity
+    _ACTION = (
+        "install", "download", "clone", "deploy", "merged", "restart",
+        "安装", "下载", "合入", "部署", "同步", "重启",
+    )
+    if any(a in lowered for a in _ACTION):
+        from .entity_extractor import extract_entities
+        entities = extract_entities(text)
+        if entities:
+            return True
+
+    return False
 
 
 def _extract_foreground_session_summary(messages: list[dict[str, Any]]) -> str:

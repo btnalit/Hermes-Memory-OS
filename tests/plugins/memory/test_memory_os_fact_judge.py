@@ -980,3 +980,305 @@ class TestAdaptiveBias:
         )
         svc.write_approved_record(candidate, decision, file_name="owner_approved.md")
         assert _count_active_crystallized(store) == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Fact Judge Config Hardening — max_tokens, bounded drain, failure telemetry
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestJudgeConfigDefaults:
+    """Default config: max_tokens=1024, max_per_tick=8, timeout_ms=15000."""
+
+    def test_max_tokens_is_1024(self):
+        """max_tokens default is 1024 (not 256) for reasoning-model headroom."""
+        from plugins.modules.governance.fact_judge import DEFAULT_JUDGE_CONFIG
+        assert DEFAULT_JUDGE_CONFIG["max_tokens"] == 1024, (
+            f"Expected max_tokens=1024, got {DEFAULT_JUDGE_CONFIG['max_tokens']}"
+        )
+
+    def test_max_per_tick_is_8(self):
+        """max_per_tick default is 8 to prevent unbounded backlog blow-up."""
+        from plugins.modules.governance.fact_judge import DEFAULT_JUDGE_CONFIG
+        assert DEFAULT_JUDGE_CONFIG["max_per_tick"] == 8, (
+            f"Expected max_per_tick=8, got {DEFAULT_JUDGE_CONFIG['max_per_tick']}"
+        )
+
+
+# ── Failure telemetry ────────────────────────────────────────────────────
+
+
+class TestJudgeCandidateFailureTelemetry:
+    """judge_candidate returns failure_reason on LLM-path failure."""
+
+    def test_success_path_has_no_failure_reason(self):
+        """Successful LLM judgment → failure_reason=None."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Remembered from event: I prefer Rust for backend services.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "preference for Rust"}',
+        ):
+            result = judge_candidate(candidate)
+            assert result["failure_reason"] is None, (
+                f"Success path should have failure_reason=None; got {result['failure_reason']}"
+            )
+
+    def test_empty_content_records_failure_reason(self):
+        """Empty LLM response → failure_reason='llm_empty_content' + heuristic fallback."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Session data: the project deadline is next month.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value="",
+        ):
+            result = judge_candidate(candidate)
+            assert result["failure_reason"] == "llm_empty_content", (
+                f"Expected llm_empty_content; got {result['failure_reason']}"
+            )
+            assert "heuristic_fallback" in result["reason"]
+
+    def test_parse_failed_records_failure_reason(self):
+        """Non-JSON response → failure_reason='llm_parse_failed' + heuristic fallback."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Session data: the project deadline is next month.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value="This is not JSON, just plain text output.",
+        ):
+            result = judge_candidate(candidate)
+            assert result["failure_reason"] == "llm_parse_failed", (
+                f"Expected llm_parse_failed; got {result['failure_reason']}"
+            )
+
+    def test_missing_key_records_failure_reason(self):
+        """JSON without durable_fact key → failure_reason='llm_missing_key'."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Session data: the project deadline is next month.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"something": "else"}',
+        ):
+            result = judge_candidate(candidate)
+            assert result["failure_reason"] == "llm_missing_key", (
+                f"Expected llm_missing_key; got {result['failure_reason']}"
+            )
+
+    def test_exception_records_failure_reason(self):
+        """Exception → failure_reason='llm_exception' + heuristic fallback."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Session data: the project deadline is next month.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            side_effect=RuntimeError("network timeout"),
+        ):
+            result = judge_candidate(candidate)
+            assert result["failure_reason"] == "llm_exception", (
+                f"Expected llm_exception; got {result['failure_reason']}"
+            )
+
+    def test_heuristic_only_knob_records_failure_reason(self):
+        """heuristic_only=True → failure_reason='heuristic_only_knob'."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Remembered from event: I prefer Rust.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+        ) as mock_call:
+            result = judge_candidate(candidate, heuristic_only=True)
+
+        mock_call.assert_not_called()
+        assert result["failure_reason"] == "heuristic_only_knob", (
+            f"Expected heuristic_only_knob; got {result['failure_reason']}"
+        )
+
+    def test_empty_body_has_no_failure_reason(self):
+        """Empty body is a valid fast-path, not an LLM failure."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="")
+        result = judge_candidate(candidate)
+        assert result["durable_fact"] is False
+        assert result["reason"] == "empty_body"
+        assert result["failure_reason"] is None, (
+            "Empty body is not an LLM failure — no failure_reason"
+        )
+
+
+# ── Bounded drain ────────────────────────────────────────────────────────
+
+
+class TestRunFactJudgeLaneBoundedDrain:
+    """run_fact_judge_lane respects max_per_tick bounded drain."""
+
+    def test_lane_stops_at_max_per_tick(self, tmp_path):
+        """When max_per_tick < unjudged candidates, only max_per_tick are judged."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        for i in range(12):
+            c = _candidate(
+                candidate_id=f"cand_drain_{i:03d}",
+                body=f"Remembered from event: preference item {i}.",
+            )
+            _write_candidate(store, c)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "preference"}',
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["judged_count"] == 8, (
+            f"Expected 8 judged (max_per_tick), got {result['judged_count']}"
+        )
+        assert result["skipped_count"] == 4, (
+            f"Expected 4 skipped (12 - 8), got {result['skipped_count']}"
+        )
+
+    def test_lane_includes_already_judged_in_skip_count(self, tmp_path):
+        """Already-judged + bounded-drain overflow both count as skipped."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        c1 = _candidate(
+            candidate_id="cand_skip_aj",
+            body="Remembered from event: already judged.",
+        )
+        c2 = _candidate(
+            candidate_id="cand_skip_new",
+            body="Remembered from event: new candidate.",
+        )
+        _write_candidate(store, c1)
+        _write_candidate(store, c2)
+        _write_durable_verdict(store, c1.candidate_id, durable_fact=True)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "preference"}',
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["judged_count"] == 1  # only c2 is new
+        assert result["skipped_count"] == 1  # c1 was already judged
+
+
+# ── Error telemetry in run_fact_judge_lane ────────────────────────────────
+
+
+class TestRunFactJudgeLaneErrorCount:
+    """run_fact_judge_lane error_count reads failure_reason from verdicts."""
+
+    def test_error_count_zero_when_all_llm_succeed(self, tmp_path):
+        """All LLM calls succeed → error_count=0."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        for i in range(3):
+            c = _candidate(
+                candidate_id=f"cand_ok_{i:03d}",
+                body=f"Remembered from event: I prefer option {i}.",
+            )
+            _write_candidate(store, c)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value='{"durable_fact": true, "reason": "preference"}',
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["error_count"] == 0, (
+            f"All LLM calls succeeded — error_count should be 0, got {result['error_count']}"
+        )
+
+    def test_error_count_nonzero_when_llm_fails(self, tmp_path):
+        """Empty LLM responses → error_count reflects failures."""
+        store = _store(tmp_path)
+        from plugins.modules.governance.fact_judge import run_fact_judge_lane
+
+        for i in range(5):
+            c = _candidate(
+                candidate_id=f"cand_fail_{i:03d}",
+                body=f"Session data: unjudgable content {i}.",
+            )
+            _write_candidate(store, c)
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+            return_value="",
+        ):
+            result = run_fact_judge_lane(store)
+
+        assert result["error_count"] == 5, (
+            f"All 5 LLM calls returned empty → error_count should be 5, got {result['error_count']}"
+        )
+
+
+# ── Knob registration ────────────────────────────────────────────────────
+
+
+class TestFactJudgeKnobsRegistered:
+    """fact_judge knobs are registered in OVERRIDABLE_KNOBS."""
+
+    def test_fact_judge_knobs_in_overridable_knobs(self):
+        """All 4 fact_judge knobs are registered."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        expected = {
+            "fact_judge_max_tokens",
+            "fact_judge_max_per_tick",
+            "fact_judge_timeout_ms",
+            "fact_judge_heuristic_only",
+        }
+        for knob in expected:
+            assert knob in OVERRIDABLE_KNOBS, (
+                f"Knob '{knob}' must be in OVERRIDABLE_KNOBS"
+            )
+
+    def test_fact_judge_heuristic_only_is_lane_switch(self):
+        """heuristic_only is a lane_switch (owner-gated — blast radius too large)."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        spec = OVERRIDABLE_KNOBS["fact_judge_heuristic_only"]
+        assert spec["kind"] == "lane_switch", (
+            f"heuristic_only must be lane_switch (owner-gated); got kind={spec.get('kind')}"
+        )
+
+    def test_fact_judge_max_tokens_bounds_allow_768_to_4096(self):
+        """Bounds: 256-4096 covers conservative (768) to generous (4096)."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        bounds = OVERRIDABLE_KNOBS["fact_judge_max_tokens"]["bounds"]
+        assert bounds[0] == 256
+        assert bounds[1] == 4096
+        assert 768 in range(bounds[0], bounds[1] + 1), "768 should be within bounds"
+
+    def test_knob_auto_approvable(self):
+        """fact_judge_max_tokens and max_per_tick are auto-approvable (not lane_switch)."""
+        from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
+        assert knob_override_auto_approvable("fact_judge_max_tokens", 2048) is True
+        assert knob_override_auto_approvable("fact_judge_max_per_tick", 4) is True
+
+
+# ── Config pipe-through ──────────────────────────────────────────────────
+
+
+class TestJudgeCandidateConfigOverride:
+    """judge_candidate's config parameter pipes through to _call_hermes_runtime_model."""
+
+    def test_config_max_tokens_overrides_default(self):
+        """Explicit config max_tokens overrides DEFAULT_JUDGE_CONFIG."""
+        from plugins.modules.governance.fact_judge import judge_candidate
+        candidate = _candidate(body="Remembered from event: I prefer Python.")
+
+        with patch(
+            "plugins.modules.governance.fact_judge._call_hermes_runtime_model",
+        ) as mock_call:
+            mock_call.return_value = '{"durable_fact": true, "reason": "preference"}'
+            judge_candidate(candidate, config={"max_tokens": 2048})
+
+        call_config = mock_call.call_args[0][1]
+        assert call_config["max_tokens"] == 2048, (
+            f"Expected max_tokens=2048 in call config; got {call_config}"
+        )

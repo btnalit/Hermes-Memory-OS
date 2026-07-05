@@ -253,7 +253,7 @@ def test_sync_turn_redacts_secrets_before_persisting_summary_and_index(tmp_path)
     user_secret = "sk-redaction-user-UNIQUE-20260601-aaaaaaaaaaaaaaaa"
     assistant_secret = "assistant-redaction-UNIQUE-20260601-bbbbbbbbbbbbbbbb"
     user_content = (
-        "u" * 150
+        "u" * 30
         + f" API_KEY={user_secret} password=RedactionPassword-UNIQUE-20260601 "
         + "tail text"
     )

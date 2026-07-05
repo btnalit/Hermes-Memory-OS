@@ -848,7 +848,7 @@ def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: li
 def _current_task_anchor_lines(anchor: str | None) -> list[str]:
     if not anchor:
         return []
-    text = _redact(_clip_multiline(str(anchor), 700))
+    text = _redact(_clip_multiline(str(anchor), 500))
     lines: list[str] = []
     response_rule_line = ""
     for line in text.splitlines():
@@ -864,10 +864,10 @@ def _current_task_anchor_lines(anchor: str | None) -> list[str]:
             response_rule_line = formatted
             continue
         lines.append(formatted)
-    # Take at most 6 non-rule lines, then append the rule so it is always
+    # Take at most 4 non-rule lines, then append the rule so it is always
     # visible regardless of how many fields (completed_operations, anchor_ops,
     # session lines) the anchor carries.
-    return lines[:6] + ([response_rule_line] if response_rule_line else [])
+    return lines[:4] + ([response_rule_line] if response_rule_line else [])
 
 
 def _identity_lines(store: MemoryOSStore) -> list[str]:

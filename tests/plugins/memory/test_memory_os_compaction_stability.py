@@ -22,6 +22,7 @@ from plugins.memory.memory_os.__init__ import (
     _format_cancelled_task_anchor,
     _format_current_task_anchor,
     _format_deferred_task_anchor,
+    _format_recovered_cross_session_anchor,
     _format_resumed_deferred_task_anchor,
     _is_owner_action_anchor,
     _looks_like_operation_context,
@@ -207,27 +208,33 @@ def test_a5_cancellation_writes_tombstone(tmp_path):
 
 
 def test_az_operation_extraction_is_deterministic(monkeypatch):
-    """Operation extraction must be pure string matching — no I/O, no network."""
-    # _looks_like_operation_context is the core — pure marker matching
+    """Operation extraction must be pure string matching — no I/O, no network.
+
+    P1 entity gate: structural signals hit alone; action words require
+    a co-occurring entity (path, URL, UUID, ID pattern).
+    """
+    # Structural signals — hit alone
     assert _looks_like_operation_context("terminal: apt-get install postgresql")
-    assert _looks_like_operation_context("error: connection refused")
-    assert _looks_like_operation_context("process running on port 5432")
-    assert _looks_like_operation_context("正在安装依赖...")
-    assert _looks_like_operation_context("下载完成")
-    assert _looks_like_operation_context("安装失败：依赖冲突")
+    assert _looks_like_operation_context("execstart /usr/bin/systemctl")
+    assert _looks_like_operation_context("main pid: 1234")
+
+    # Action word + entity — must have both
+    assert _looks_like_operation_context("合入 /opt/Hermes-Memory-OS")
+
+    # Action word without entity — filtered (not an operation)
+    assert not _looks_like_operation_context("开始全面检查")
+    assert not _looks_like_operation_context("正在安装依赖...")
+    assert not _looks_like_operation_context("下载完成")
+    assert not _looks_like_operation_context("安装失败：依赖冲突")
+
+    # Isolated generic words (removed from standalone markers) — filtered
+    assert not _looks_like_operation_context("error: connection refused")
+    assert not _looks_like_operation_context("process running on port 5432")
+
+    # Non-operation text — filtered
     assert not _looks_like_operation_context("hello world")
     assert not _looks_like_operation_context("PostgreSQL 是一个数据库")
     assert not _looks_like_operation_context("")
-
-    # Verify _format_current_task_anchor with completed_operations is pure formatting
-    anchor = _format_current_task_anchor(
-        task="test task",
-        operations=[],
-        completed_operations=["tool: apt-get install redis"],
-    )
-    assert "completed operations" in anchor
-    assert "install redis" in anchor
-    assert "Do not repeat completed operations" in anchor
 
 
 # ── A.X  反证：禁操作提取 → A.1 FAIL ─────────────────────────────────────────
@@ -361,18 +368,18 @@ def test_compression_rule_includes_do_not_repeat():
     assert "Do not repeat completed operations" in anchor
 
 
-def test_completed_operations_capped_at_6():
-    """Only the last 6 completed operations should be retained."""
+def test_completed_operations_capped_at_4():
+    """Only the last 4 completed operations should be retained (P2: 6→4)."""
     ops = [f"tool: operation-{i}" for i in range(10)]
     anchor = _format_current_task_anchor(
         task="cap test",
         operations=[],
         completed_operations=ops,
     )
-    # Should only contain the last 6
-    for i in range(4):  # operations 0-3 should NOT appear
+    # Should only contain the last 4
+    for i in range(6):  # operations 0-5 should NOT appear
         assert f"operation-{i}" not in anchor
-    for i in range(4, 10):  # operations 4-9 SHOULD appear
+    for i in range(6, 10):  # operations 6-9 SHOULD appear
         assert f"operation-{i}" in anchor
 
 
@@ -444,15 +451,15 @@ def test_a6_on_pre_compress_carries_forward_completed_operations(tmp_path):
 # ── A.7  extractor returns 6 (F2) ───────────────────────────────────────────
 
 
-def test_a7_extract_anchor_operation_lines_returns_up_to_6():
-    """F2: extractor should return up to 6 operations, matching formatter cap."""
+def test_a7_extract_anchor_operation_lines_returns_up_to_4():
+    """F2: extractor should return up to 4 operations (P2: 6→4)."""
     anchor = _format_current_task_anchor(
         task="test",
         operations=[],
         completed_operations=[f"tool: operation-{i}" for i in range(8)],
     )
     ops = _extract_anchor_operation_lines(anchor)
-    assert len(ops) == 6, f"F2: extractor should return 6 ops, got {len(ops)}: {ops}"
+    assert len(ops) == 4, f"F2: extractor should return 4 ops, got {len(ops)}: {ops}"
     assert "operation-7" in ops[-1]
 
 
@@ -888,3 +895,245 @@ def test_a17_capture_turn_operations_preserves_resumed_anchor_response_rule(tmp_
     assert "- owner resumed a deferred foreground task" in provider._current_task_anchor, (
         "A.17 FAIL: _capture_turn_operations stripped 'owner resumed' marker"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Anchor Pollution Fix — spec-mandated tests (T.1–T.5 + X.1–X.3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ── T.1  P0 core: cross-session recovery strips ops, uses recovered rule ─────
+
+
+def test_t1_cross_session_recovery_strips_operations():
+    """Cross-session recovery must strip completed_operations and active state."""
+    anchor = _format_recovered_cross_session_anchor(
+        task="deploy redis cluster",
+        age_label="12h前",
+        original_session="old-session-id",
+        current_session="new-session-id",
+    )
+    assert "completed operations" not in anchor, (
+        "T.1 FAIL: recovered anchor must NOT contain completed_operations section"
+    )
+    assert "active tool/process state" not in anchor, (
+        "T.1 FAIL: recovered anchor must NOT contain active tool/process state"
+    )
+    assert "deploy redis cluster" in anchor, (
+        "T.1 FAIL: recovered anchor must retain the task description"
+    )
+    assert "跨会话恢复" in anchor, (
+        "T.1 FAIL: recovered anchor must carry the cross-session marker"
+    )
+    assert "12h前" in anchor
+    assert "old-session-id" in anchor
+    assert "new-session-id" in anchor
+    assert "Continue this foreground task" not in anchor, (
+        "T.1 FAIL: recovered anchor must NOT command 'Continue this foreground task'"
+    )
+    assert "may be complete" in anchor, (
+        "T.1 FAIL: recovered anchor must use the 'may be complete, verify' rule"
+    )
+
+
+def test_t1_recovered_anchor_in_system_prompt_block(tmp_path):
+    """system_prompt_block must inject the recovered rule, not Continue."""
+    provider = _init_provider(tmp_path, session_id="new-session")
+    provider._current_task_anchor = _format_recovered_cross_session_anchor(
+        task="audit log review",
+        age_label="3h前",
+        original_session="prior-session",
+        current_session="new-session",
+    )
+    block = provider.system_prompt_block()
+    assert "may be complete" in block, (
+        "T.1 FAIL: system_prompt_block must use recovered rule"
+    )
+    assert "Continue this foreground task" not in block, (
+        "T.1 FAIL: system_prompt_block must NOT contain 'Continue' instruction "
+        "when anchor is a recovered cross-session anchor"
+    )
+
+
+# ── T.2  F3 regression: deferred resume preserves completed_operations ───────
+
+
+def test_t2_deferred_resume_preserves_completed_operations():
+    """explicit_deferred_resume path must retain completed_operations (P0 safety)."""
+    previous = _format_current_task_anchor(
+        task="migrate database",
+        operations=[],
+        completed_operations=["tool: backed up schema", "tool: dumped data"],
+    )
+    anchor = _format_resumed_deferred_task_anchor(
+        anchor=previous,
+        session_id="s1",
+        completed_operations=["tool: backed up schema", "tool: dumped data"],
+    )
+    assert "completed operations" in anchor, (
+        "T.2 FAIL: deferred resume anchor MUST retain completed_operations — "
+        "P0 boundary must not affect the deferred-resume path"
+    )
+    assert "backed up schema" in anchor
+    assert "dumped data" in anchor
+
+
+# ── T.3  P1 core: entity gate ────────────────────────────────────────────────
+
+
+def test_t3_entity_gate_filters_noise():
+    """Entity gate: noise text without entities is NOT captured."""
+    assert not _looks_like_operation_context("开始全面检查"), (
+        "T.3 FAIL: '开始全面检查' has action word removed and no entity → must be filtered"
+    )
+    assert not _looks_like_operation_context("正在安装依赖..."), (
+        "T.3 FAIL: '正在安装依赖' has no entity → must be filtered"
+    )
+
+
+def test_t3_entity_gate_captures_action_with_entity():
+    """Entity gate: action word + concrete entity IS captured."""
+    assert _looks_like_operation_context("合入 /opt/Hermes-Memory-OS"), (
+        "T.3 FAIL: '合入 /opt/Hermes-Memory-OS' has action + path entity → must be captured"
+    )
+    assert _looks_like_operation_context("deploy to /var/www/production"), (
+        "T.3 FAIL: 'deploy to /var/www/production' has action + path entity → must be captured"
+    )
+
+
+# ── T.4  isolated generic words filtered; structural still captured ──────────
+
+
+def test_t4_isolated_generic_words_filtered():
+    """Generic words (error/检查/正在) no longer trigger alone."""
+    assert not _looks_like_operation_context("error: connection refused"), (
+        "T.4 FAIL: 'error' alone without entity must NOT trigger"
+    )
+    assert not _looks_like_operation_context("检查配置文件"), (
+        "T.4 FAIL: '检查' alone without entity must NOT trigger"
+    )
+    assert not _looks_like_operation_context("正在运行"), (
+        "T.4 FAIL: '正在' alone without entity must NOT trigger"
+    )
+
+
+def test_t4_structural_signals_still_captured():
+    """Structural markers still capture regardless of entity presence."""
+    assert _looks_like_operation_context("terminal: systemctl status"), (
+        "T.4 FAIL: 'terminal:' is a structural signal → must be captured"
+    )
+    assert _looks_like_operation_context("main pid: 1234"), (
+        "T.4 FAIL: 'main pid' is a structural signal → must be captured"
+    )
+    assert _looks_like_operation_context("fatal: out of memory"), (
+        "T.4 FAIL: 'fatal:' is a structural signal → must be captured"
+    )
+
+
+# ── T.5  budget caps ─────────────────────────────────────────────────────────
+
+
+def test_t5_completed_operations_capped_at_4():
+    """P2: completed_operations window is 4, not 6."""
+    anchor = _format_current_task_anchor(
+        task="cap verification",
+        operations=[],
+        completed_operations=[f"tool: op-{i}" for i in range(10)],
+    )
+    assert "op-6" in anchor, "T.5 FAIL: operation 6 should be within 4-item window"
+    assert "op-9" in anchor, "T.5 FAIL: operation 9 should be within 4-item window"
+    assert "op-5" not in anchor, "T.5 FAIL: operation 5 should be outside 4-item window"
+
+
+def test_t5_per_operation_clip_within_budget():
+    """P2: each operation clipped to 140 (capture) / 160 (format)."""
+    anchor = _format_current_task_anchor(
+        task="clip test",
+        operations=[],
+        completed_operations=["tool: " + "x" * 200],
+    )
+    # After format clipping to 160: "tool: " (6 chars) + 154 chars of "x" + no overflow
+    assert len("x" * 200) > 160, "sanity: long op should be clipped"
+    # The rendered op line should be at most ~166 chars (6 prefix + 160 clipped text)
+    for line in anchor.splitlines():
+        if line.strip().startswith("- tool:"):
+            assert len(line) < 180, (
+                f"T.5 FAIL: operation line too long ({len(line)} chars): {line[:80]}..."
+            )
+
+
+def test_t5_same_session_mechanism_unchanged():
+    """Within-session anchor behavior is preserved (format + carry-forward)."""
+    anchor = _format_current_task_anchor(
+        task="intra-session task",
+        operations=["tool: active-op"],
+        completed_operations=["tool: completed-op"],
+    )
+    assert "current task: intra-session task" in anchor
+    assert "completed operations (do not repeat):" in anchor
+    assert "active tool/process state:" in anchor
+    assert "compression rule: Continue this foreground task" in anchor
+
+
+# ── X.1  counterfactual: P0 reverted → T.1 must fail ────────────────────────
+
+
+def test_x1_p0_reverted_would_fail_t1():
+    """If recovered anchor kept ops, T.1 assertions would fire."""
+    # Build what the OLD code path would produce (marker prepended to raw anchor)
+    raw_anchor = _format_current_task_anchor(
+        task="deploy redis cluster",
+        operations=[],
+        completed_operations=["tool: set up cluster", "tool: configured replicas"],
+    )
+    old_style = "- [跨会话恢复, 12h前, 原会话: old-session]\n" + raw_anchor
+
+    # The old code path would have LEAKED these into the new session
+    assert "completed operations" in old_style, (
+        "X.1 precondition FAIL: old code would have carried ops — this IS the bug"
+    )
+    assert "set up cluster" in old_style
+    assert "Continue this foreground task" in old_style
+
+    # The new code path (T.1) strips them — verify the positive case still holds
+    recovered = _format_recovered_cross_session_anchor(
+        task="deploy redis cluster",
+        age_label="12h前",
+        original_session="old-session",
+        current_session="new-session",
+    )
+    assert "completed operations" not in recovered
+    assert "Continue this foreground task" not in recovered
+
+
+# ── X.2  counterfactual: entity gate removed → T.3 must fail ─────────────────
+
+
+def test_x2_entity_gate_removed_would_fail_t3():
+    """Without entity gate, action words alone would capture noise."""
+    # The OLD _looks_like_operation_context treated any action word as a hit
+    old_markers = ("正在", "安装", "下载", "检查", "失败", "报错")
+    text = "开始全面检查"
+    old_result = any(m in text for m in old_markers)
+    assert old_result, (
+        "X.2 precondition FAIL: old matcher would have captured '开始全面检查' — "
+        "this IS the false positive the entity gate eliminates"
+    )
+    # New behaviour: no entity → not captured
+    assert not _looks_like_operation_context(text)
+
+
+# ── X.3  counterfactual: generic words back as standalone → T.4 must fail ────
+
+
+def test_x3_generic_words_back_would_fail_t4():
+    """If generic words were standalone again, they'd trigger false positives."""
+    old_generics = ("error", "failed", "running", "正在", "失败", "检查")
+    text = "error: connection refused"
+    old_result = any(g in text.lower() for g in old_generics)
+    assert old_result, (
+        "X.3 precondition FAIL: old matcher would have captured 'error: connection refused' "
+        "— this IS the false positive the new filter eliminates"
+    )
+    # New behaviour: no entity → not captured
+    assert not _looks_like_operation_context(text)

@@ -228,6 +228,39 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": "cross_session_max_items",
     },
+    "fact_judge_max_tokens": {
+        "module": "fact_judge",
+        "default": 1024,
+        "bounds": [256, 4096],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "llm_judge_success_rate",
+    },
+    "fact_judge_max_per_tick": {
+        "module": "fact_judge",
+        "default": 8,
+        "bounds": [1, 50],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "candidates_per_tick",
+    },
+    "fact_judge_timeout_ms": {
+        "module": "fact_judge",
+        "default": 15000,
+        "bounds": [5000, 60000],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "fact_judge_heuristic_only": {
+        "module": "fact_judge",
+        "default": False,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
 }
 
 # ── Auto-approvable check ──────────────────────────────────────────────
