@@ -102,7 +102,7 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
     },
     "vector_embedder_device": {
         "module": "embedder",
-        "default": "auto",
+        "default": "cpu",
         "kind": "threshold",
         "bounds": None,
         "meta": False,
@@ -111,7 +111,7 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
     },
     "vector_embedder_batch_device": {
         "module": "embedder",
-        "default": "auto",
+        "default": "cpu",
         "kind": "threshold",
         "bounds": None,
         "meta": False,

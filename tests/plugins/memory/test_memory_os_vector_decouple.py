@@ -359,17 +359,17 @@ class TestBatchEmbedderDeviceKnob:
         from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
         spec = OVERRIDABLE_KNOBS["vector_embedder_batch_device"]
         assert spec["module"] == "embedder"
-        assert spec["default"] == "auto"
+        assert spec["default"] == "cpu"
         assert spec["kind"] == "threshold"
         assert spec["meta"] is False
 
     def test_batch_device_resolves_default(self, tmp_path: Path):
-        """Resolving vector_embedder_batch_device returns default 'auto'."""
+        """Resolving vector_embedder_batch_device returns default 'cpu'."""
         from plugins.memory.memory_os.knob_overrides import resolve_knob
         # Use tmp_path to isolate from production /root/.hermes knob overrides
-        result = resolve_knob("vector_embedder_batch_device", default="auto",
+        result = resolve_knob("vector_embedder_batch_device", default="cpu",
                               _store_root=tmp_path)
-        assert result == "auto"
+        assert result == "cpu"
 
     def test_batch_device_override_via_jsonl(self, tmp_path: Path):
         """Overriding vector_embedder_batch_device via JSONL works."""
@@ -394,7 +394,7 @@ class TestBatchEmbedderDeviceKnob:
         }) + "\n", encoding="utf-8")
 
         from plugins.memory.memory_os.knob_overrides import resolve_knob
-        result = resolve_knob("vector_embedder_batch_device", default="auto",
+        result = resolve_knob("vector_embedder_batch_device", default="cpu",
                               _store_root=system_dir)
         assert result == "cuda:0", (
             f"D2: override should produce 'cuda:0', got {result}"
@@ -457,8 +457,8 @@ class TestBatchEmbedderDeviceKnob:
         from plugins.memory.memory_os.knob_overrides import resolve_knobs
         resolved = resolve_knobs(
             {
-                "vector_embedder_device": "auto",
-                "vector_embedder_batch_device": "auto",
+                "vector_embedder_device": "cpu",
+                "vector_embedder_batch_device": "cpu",
             },
             _store_root=system_dir,
         )
@@ -550,8 +550,9 @@ class TestBuildEmbedderBatchDevice:
                 f"got {emb._device}"
             )
 
-    def test_build_embedder_batch_falls_back_to_online_device_when_auto(self, tmp_path: Path):
-        """When batch_device='auto', batch uses same device as online path."""
+    def test_build_embedder_batch_uses_default_device_when_not_overridden(self, tmp_path: Path):
+        """When batch_device is not overridden (resolves to default 'cpu'),
+        batch uses the default device."""
         import json
         from plugins.memory.memory_os.embedder import build_embedder
         from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -572,7 +573,7 @@ class TestBuildEmbedderBatchDevice:
         emb = build_embedder(roots, batch=True)
         if emb is not None:
             assert emb._device == "cpu", (
-                f"Batch with auto fallback should use online device=cpu, "
+                f"Batch with default device should use device=cpu, "
                 f"got {emb._device}"
             )
 

@@ -29,11 +29,12 @@ class LocalEmbedder:
     """
 
     def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
-                 device: str = "auto") -> None:
+                 device: str = "cpu") -> None:
         self._model_name = model_name
         self._device = device
         self._model = None
         self._available: bool | None = None  # tri-state: None=unchecked
+        self._load_failed: bool = False  # guard against repeated failed loads
 
     @property
     def model_name(self) -> str:
@@ -41,17 +42,49 @@ class LocalEmbedder:
         return self._model_name
 
     def is_available(self) -> bool:
-        """Check whether the embedding model can be loaded.
+        """Lightweight check: is sentence-transformers importable?
 
         Cached: the check runs once and the result is memoized.
-        Returns False when sentence-transformers is not installed, the
-        model cannot be downloaded/loaded, or the platform is Windows
-        (sentence-transformers native deps are unstable on win32).
+        Returns False when sentence-transformers is not installed or
+        the platform is Windows (native deps are unstable on win32).
+
+        This does NOT load the model — model loading is deferred to
+        first ``embed()`` / ``embed_query()`` call, or can be triggered
+        explicitly via :meth:`warmup`.
         """
         if self._available is not None:
             return self._available
         if _WINDOWS:
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            _log.warning(
+                "Vector embedding unavailable on Windows: sentence-transformers "
+                "native dependencies (torch) are known-unstable on win32 "
+                "(segfault / MemoryError). Vector search degrades to FTS5 "
+                "full-text search. See docs for platform compatibility details."
+            )
             self._available = False
+            return False
+        try:
+            import sentence_transformers  # noqa: F401 — import check only
+            self._available = True
+        except ImportError:
+            self._available = False
+        return self._available
+
+    def _ensure_model(self) -> bool:
+        """Lazy-load the embedding model on first use.
+
+        Returns True if the model is ready for inference.  Caches the
+        loaded model; guards against repeated attempts after a failure
+        (call :meth:`warmup` to retry explicitly).
+        """
+        if self._model is not None:
+            return True
+        if self._load_failed:
+            return False
+        if not self.is_available():
+            self._load_failed = True
             return False
         try:
             from sentence_transformers import SentenceTransformer
@@ -59,18 +92,27 @@ class LocalEmbedder:
             self._model = SentenceTransformer(self._model_name, device=self._device)
             # Warm-up: run a tiny inference to catch runtime errors early
             self._model.encode(["warmup"], show_progress_bar=False)
-            self._available = True
+            return True
         except Exception:
-            self._available = False
-        return self._available
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            _log.warning(
+                "Failed to load embedding model '%s' on device '%s'. "
+                "Vector search will use FTS5 fallback. "
+                "Call embedder.warmup() to retry after fixing the issue.",
+                self._model_name, self._device, exc_info=True,
+            )
+            self._load_failed = True
+            return False
 
     def embed(self, text: str) -> bytes:
         """Embed text -> serialized numpy array blob.
 
         Returns empty bytes if unavailable. Deterministic: same input
-        produces the same output vector every time.
+        produces the same output vector every time.  Model is loaded
+        lazily on first call.
         """
-        if not self.is_available():
+        if not self._ensure_model():
             return b""
         vec = self._model.encode([text], show_progress_bar=False)[0]
         return vec.astype(np.float32).tobytes()
@@ -80,12 +122,24 @@ class LocalEmbedder:
 
         Returns None if unavailable. This is the hot-path call site --
         called during prefetch for every query. Must be local, fast,
-        and never touch the network.
+        and never touch the network.  Model is loaded lazily on first call.
         """
-        if not self.is_available():
+        if not self._ensure_model():
             return None
         vec = self._model.encode([text], show_progress_bar=False)[0]
         return vec.astype(np.float32)
+
+    def warmup(self) -> bool:
+        """Explicitly pre-load the embedding model.
+
+        Call during controlled initialization to move model loading
+        off the hot path.  Resets the failure guard so a previously
+        failed load can be retried.
+
+        Returns True if the model loaded successfully.
+        """
+        self._load_failed = False  # allow retry
+        return self._ensure_model()
 
 
 def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
@@ -96,9 +150,9 @@ def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
     when vector retrieval is disabled or the embedder is unavailable.
 
     When *batch* is True, reads vector_embedder_batch_device for device
-    selection (falling back to vector_embedder_device when the batch
-    knob is "auto").  This lets offline batch/index/reembed jobs use a
-    different device than the online gateway path.
+    selection.  Both knobs default to ``"cpu"``; set them independently
+    when online and batch jobs need different devices (e.g. online=cpu,
+    batch=cuda:0).
 
     This is the single entry point for all embedder instantiation —
     replaces ad-hoc ``LocalEmbedder()`` calls across the codebase.
@@ -140,16 +194,15 @@ def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
     )
     device = resolve_knob(
         "vector_embedder_device",
-        default="auto",
+        default="cpu",
         roots=roots,
     )
     if batch:
         batch_device = resolve_knob(
             "vector_embedder_batch_device",
-            default="auto",
+            default="cpu",
             roots=roots,
         )
-        if str(batch_device) != "auto":
-            device = batch_device
+        device = batch_device
     emb = LocalEmbedder(model_name=str(model), device=str(device))
     return emb if emb.is_available() else None
