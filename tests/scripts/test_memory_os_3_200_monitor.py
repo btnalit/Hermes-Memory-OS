@@ -3479,19 +3479,47 @@ def test_classify_snapshot_fails_memory_os_cron_helper_error_completion():
     assert any(item["code"] == "execution_gate_memory_os_cron_helper_completion_error" for item in classification["fail"])
 
 
-def test_memory_os_cron_specs_missing_snapshot_does_not_use_private_fallback(monkeypatch, tmp_path):
-    namespace: dict[str, object] = {}
-    _exec_remote_probe_prefix(namespace)
-    real_path = Path
+def test_memory_os_cron_specs_missing_snapshot_does_not_use_private_fallback(tmp_path):
+    """Missing cron registry snapshot → empty list (no private fallback).
 
-    def fake_path(value):
-        if str(value) == "/root/.hermes/memory-os/system/memory_os_cron_registry.json":
-            return tmp_path / "missing-memory-os-cron-registry.json"
-        return real_path(value)
+    Uses a custom hermes_home so the probe function looks for the registry
+    at a path we control, rather than monkeypatching Path which breaks when
+    internal path construction changes (e.g. from raw strings to
+    _hermes_home-based Path joins).
+    """
+    original_sys_path = list(sys.path)
+    try:
+        script_prefix = monitor._remote_probe_script(str(tmp_path)).split(
+            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            1,
+        )[0]
+        namespace: dict[str, object] = {}
+        exec(script_prefix, namespace)
+        # tmp_path/memory-os/system/memory_os_cron_registry.json does not exist
+        # → _memory_os_cron_specs_from_snapshot must return []
+        assert namespace["_memory_os_cron_specs_from_snapshot"]() == []
+    finally:
+        sys.path[:] = original_sys_path
 
-    monkeypatch.setitem(namespace, "Path", fake_path)
-
-    assert namespace["_memory_os_cron_specs_from_snapshot"]() == []
+    # Counterfactual: with an actual registry file, specs are returned
+    registry_dir = tmp_path / "memory-os" / "system"
+    registry_dir.mkdir(parents=True)
+    registry_dir.joinpath("memory_os_cron_registry.json").write_text(
+        json.dumps({"specs": [{"key": "test-job", "name": "Test Job"}]}),
+        encoding="utf-8",
+    )
+    try:
+        script_prefix2 = monitor._remote_probe_script(str(tmp_path)).split(
+            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            1,
+        )[0]
+        namespace2: dict[str, object] = {}
+        exec(script_prefix2, namespace2)
+        specs = namespace2["_memory_os_cron_specs_from_snapshot"]()
+        assert len(specs) == 1
+        assert specs[0]["key"] == "test-job"
+    finally:
+        sys.path[:] = original_sys_path
 
 
 def test_classify_snapshot_fails_session_mirror_owner_approved_without_owner_channel_binding():

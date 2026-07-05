@@ -324,3 +324,59 @@ def test_counterfactual_compact_without_dedup_would_duplicate(tmp_path):
     assert len(cf_entries) == 1, (
         f"Dedup should prevent duplicate archive rows; found {len(cf_entries)}"
     )
+
+
+# ── Fix 2: default archive_path safety ────────────────────────────────
+
+def test_compact_without_archive_path_uses_default_and_preserves_stale(tmp_path):
+    """Calling compact_candidate_queue without archive_path must not lose data."""
+    store = _setup_store(tmp_path)
+
+    stale = _make_candidate(candidate_id="stale-default-path", age_days=14, bridge_state="fleeting")
+    active = _make_candidate(candidate_id="active-default-path", age_days=1, bridge_state="owner_eligible")
+    append_candidate_queue(store, stale)
+    append_candidate_queue(store, active)
+
+    # Call WITHOUT archive_path — must use safe default, not drop stale
+    count = compact_candidate_queue(store, retention_days=1)
+    assert count == 1  # stale-default-path archived
+
+    # Main file should only have the active candidate
+    remaining = read_candidate_queue(store)
+    remaining_ids = {c.candidate_id for c in remaining}
+    assert "active-default-path" in remaining_ids
+    assert "stale-default-path" not in remaining_ids
+
+    # Default archive file should exist and contain the stale candidate
+    default_archive = store.roots.crystallized_root / "candidates.archive.jsonl"
+    assert default_archive.exists(), "Default archive must be created when not specified"
+    archive_lines = [
+        json.loads(line) for line in default_archive.read_text().strip().split("\n") if line.strip()
+    ]
+    archived_ids = {r.get("candidate_id") for r in archive_lines}
+    assert "stale-default-path" in archived_ids, "Stale candidate must be archived, not dropped"
+
+
+def test_counterfactual_archive_path_none_drops_data(tmp_path):
+    """Counterfactual: if archive_path=None were still a silent-drop trap, this
+    would lose the stale candidate. The test verifies the fix is effective."""
+    store = _setup_store(tmp_path)
+
+    stale = _make_candidate(candidate_id="cf-none-safety", age_days=14, bridge_state="fleeting")
+    append_candidate_queue(store, stale)
+
+    # Explicit None must still get a safe default (not drop data)
+    # Note: after Fix 2, None → derived default, so this is safe
+    count = compact_candidate_queue(store, archive_path=None, retention_days=1)
+    assert count == 1
+
+    # Verify stale was archived, not lost
+    default_archive = store.roots.crystallized_root / "candidates.archive.jsonl"
+    archive_ids = {
+        json.loads(line).get("candidate_id")
+        for line in default_archive.read_text().strip().split("\n")
+        if line.strip()
+    }
+    assert "cf-none-safety" in archive_ids, (
+        "archive_path=None must NOT drop data — stale candidates must be archived"
+    )

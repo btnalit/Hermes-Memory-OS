@@ -30,6 +30,7 @@ class EventStats:
         by_kind: dict[str, int] | None = None,
         events_root: str | None = None,
         updated_at: str | None = None,
+        recent_event_summaries: list[dict[str, str]] | None = None,
     ) -> None:
         self.total_event_count = total_event_count
         self.latest_event_id = latest_event_id
@@ -38,6 +39,7 @@ class EventStats:
         self.by_kind = by_kind or {}
         self.events_root = events_root
         self.updated_at = updated_at or datetime.now(timezone.utc).isoformat()
+        self.recent_event_summaries: list[dict[str, str]] = recent_event_summaries or []
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -49,11 +51,16 @@ class EventStats:
             "by_source": self.by_source,
             "by_kind": self.by_kind,
             "events_root": self.events_root,
+            "recent_event_summaries": self.recent_event_summaries,
         }
 
 
 def build_event_stats(events: list[dict[str, object]]) -> EventStats:
-    """Build EventStats from a list of event records."""
+    """Build EventStats from a list of event records (assumed sorted by ts).
+
+    Captures bounded recent_event_summaries so status/monitor consumers
+    can read O(1) without a full event scan + sort.
+    """
     stats = EventStats(total_event_count=len(events))
     if events:
         last = events[-1]
@@ -64,6 +71,15 @@ def build_event_stats(events: list[dict[str, object]]) -> EventStats:
         kind = str(evt.get("kind", "unknown"))
         stats.by_source[src] = stats.by_source.get(src, 0) + 1
         stats.by_kind[kind] = stats.by_kind.get(kind, 0) + 1
+    stats.recent_event_summaries = [
+        {
+            "id": str(evt.get("id", "")),
+            "ts": str(evt.get("ts", "")),
+            "kind": str(evt.get("kind", "")),
+            "summary": str(evt.get("summary", "")),
+        }
+        for evt in events[-5:]
+    ]
     return stats
 
 
@@ -114,6 +130,17 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
             freshness = "degraded"
     else:
         freshness = "unknown"
+    recent_summaries: list[dict[str, str]] = []
+    raw_recent = data.get("recent_event_summaries")
+    if isinstance(raw_recent, list):
+        for item in raw_recent:
+            if isinstance(item, dict):
+                recent_summaries.append({
+                    "id": str(item.get("id", "")),
+                    "ts": str(item.get("ts", "")),
+                    "kind": str(item.get("kind", "")),
+                    "summary": str(item.get("summary", "")),
+                })
     return EventStats(
         total_event_count=int(data.get("total_event_count", 0)),
         latest_event_id=str(data.get("latest_event_id") or ""),
@@ -122,4 +149,5 @@ def read_event_stats(roots: object) -> tuple[EventStats | None, str]:
         by_kind=dict(data.get("by_kind") or {}),
         events_root=str(data.get("events_root") or ""),
         updated_at=str(updated_at),
+        recent_event_summaries=recent_summaries,
     ), freshness

@@ -201,3 +201,65 @@ def test_status_fallback_corrupt_stats_rebuilds_cache(tmp_path):
     assert read_back is not None
     assert read_back.total_event_count == 7
     assert freshness in ("fresh", "acceptable")
+
+
+# ── Fix 5: recent_event_summaries in event_stats ──────────────────────
+
+def test_build_event_stats_captures_recent_summaries():
+    """build_event_stats stores the last 5 event summaries for O(1) status."""
+    events = _make_event_dicts(20)
+    stats = build_event_stats(events)
+
+    assert len(stats.recent_event_summaries) == 5
+    # Last event in the list should be the most recent (events are reversed by time)
+    assert stats.recent_event_summaries[-1]["id"] == "evt-0019"
+    assert stats.recent_event_summaries[-1]["kind"] == "test-kind"
+
+
+def test_build_event_stats_fewer_than_5_events():
+    """When there are fewer than 5 events, all summaries are captured."""
+    events = _make_event_dicts(3)
+    stats = build_event_stats(events)
+
+    assert len(stats.recent_event_summaries) == 3
+    assert stats.recent_event_summaries[0]["id"] == "evt-0000"
+
+
+def test_event_stats_roundtrip_recent_summaries(tmp_path):
+    """recent_event_summaries survive write → read roundtrip."""
+    roots = _make_roots(tmp_path)
+    events = _make_event_dicts(8)
+    stats = build_event_stats(events)
+    stats.events_root = str(roots.events_root)
+    write_event_stats(roots, stats)
+
+    read_back, freshness = read_event_stats(roots)
+    assert read_back is not None
+    assert len(read_back.recent_event_summaries) == 5
+    assert read_back.recent_event_summaries[-1]["id"] == "evt-0007"
+    assert all("id" in s and "ts" in s and "kind" in s and "summary" in s
+               for s in read_back.recent_event_summaries)
+
+
+def test_legacy_event_stats_without_recent_summaries_returns_empty(tmp_path):
+    """Event stats written before the schema addition default to empty list."""
+    roots = _make_roots(tmp_path)
+    path = event_stats_path(roots)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write legacy-format stats (no recent_event_summaries field)
+    path.write_text(json.dumps({
+        "schema_version": "memory-os.event_stats.v0",
+        "updated_at": "2026-07-01T00:00:00+00:00",
+        "total_event_count": 42,
+        "latest_event_id": "ev-old",
+        "latest_event_ts": "2026-07-01T00:00:00+00:00",
+        "by_source": {"test": 42},
+        "by_kind": {"note": 42},
+        "events_root": str(roots.events_root),
+    }), encoding="utf-8")
+
+    stats, freshness = read_event_stats(roots)
+    assert stats is not None
+    assert stats.recent_event_summaries == [], (
+        "Legacy stats without recent_event_summaries must default to empty list"
+    )

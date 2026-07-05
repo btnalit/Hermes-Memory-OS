@@ -145,13 +145,19 @@ def _check_vector_available() -> bool:
 
 
 def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
-    events = store.read_events()  # needed for recent_event_summaries below
     stats, freshness = read_event_stats(store.roots)
     _stats_usable = freshness in ("fresh", "acceptable", "warning")
     if stats is not None and stats.total_event_count > 0 and _stats_usable:
         event_count = stats.total_event_count
+        recent_summaries = stats.recent_event_summaries
     else:
+        # Fallback: full scan only when cache is stale/missing/corrupt
+        events = store.read_events()
         event_count = len(events)
+        recent_summaries = [
+            {"id": event.id, "ts": event.ts, "kind": event.kind, "summary": event.summary}
+            for event in sorted(events, key=lambda item: item.ts)[-5:]
+        ]
     store_counts = _store_counts(store, event_count=event_count)
     index_counts = MemoryOSIndex(store.roots).counts()
     prefetch_mode = _prefetch_mode(store)
@@ -168,10 +174,7 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         "continuity_selector": continuity_selector_report(store),
         "queue_backlog": 0,
         "last_write_age_seconds": last_audit_age_seconds(store.roots.audit_path),
-        "recent_event_summaries": [
-            {"id": event.id, "ts": event.ts, "kind": event.kind, "summary": event.summary}
-            for event in sorted(events, key=lambda item: item.ts)[-5:]
-        ],
+        "recent_event_summaries": recent_summaries,
         "hindsight_adapter_enabled": bool(config.get("hindsight_adapter_enabled")),
         "hindsight_substrate": hindsight_status_report(store),
         "low_clue_recall": {

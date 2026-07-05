@@ -13,9 +13,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _HERMES_HOME = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
-REPO_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+
+# Location-agnostic import resolution: repo checkout > runtime layout.
+_self = Path(__file__).absolute()
+_repo_root = _self.parents[1]  # scripts/ → repo root
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+else:
+    # Fallback: installed runtime layout (<home>/memory-os/runtime/python/)
+    _runtime_root = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
+    if _runtime_root.exists() and str(_runtime_root) not in sys.path:
+        sys.path.insert(0, str(_runtime_root))
 
 from plugins.memory.memory_os.audit import read_audit_records
 from plugins.memory.memory_os.index import MemoryOSIndex, _markdown_records

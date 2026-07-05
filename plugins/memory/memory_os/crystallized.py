@@ -998,10 +998,16 @@ def compact_candidate_queue(
     Returns count of archived candidates.
     Never deletes anything (append-only, INV-3).
 
+    When *archive_path* is None (the default), a default archive path is
+    derived from the crystallized root so stale candidates are always
+    preserved — the default must never be a silent data-loss path.
+
     Holds a shared sidecar lock with append_candidate_queue so concurrent
     appends cannot be lost during the read→replace window (§3.3).
     A conservation assertion catches silent write-loss (§3.4A fail-closed).
     """
+    if archive_path is None:
+        archive_path = store.roots.crystallized_root / "candidates.archive.jsonl"
     candidates_path = store.roots.crystallized_root / "candidates.jsonl"
     if not candidates_path.exists():
         return 0
@@ -1061,7 +1067,7 @@ def compact_candidate_queue(
 
         # Archive via locked append FIRST — fail before touching main file.
         # If archive append fails, candidates.jsonl is untouched (no data loss).
-        if archived and archive_path is not None:
+        if archived:
             try:
                 archived_records = [json.loads(line) for line in archived]
                 # Dedup: skip records whose candidate_id already exists in archive.

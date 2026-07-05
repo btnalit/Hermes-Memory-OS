@@ -48,6 +48,10 @@ def read_audit_records(audit_path: Path) -> list[dict[str, Any]]:
     Always globs for {stem}*.jsonl so that records written to monthly shards
     (e.g. write_audit.202607.jsonl) are visible alongside the legacy
     monolithic file (write_audit.jsonl).
+
+    Records are returned in chronological order (sorted by ``ts``).
+    Consumers that use positional access (``[-N:]``) therefore receive
+    the *N* most recent records rather than an arbitrary file-order tail.
     """
     audit_dir = audit_path.parent
     if not audit_dir.exists():
@@ -75,6 +79,7 @@ def read_audit_records(audit_path: Path) -> list[dict[str, Any]]:
                 continue
             if isinstance(parsed, dict):
                 records.append(parsed)
+    records.sort(key=lambda r: str(r.get("ts") or ""))
     return records
 
 

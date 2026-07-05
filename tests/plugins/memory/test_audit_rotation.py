@@ -113,20 +113,45 @@ def test_append_audit_writes_to_monthly_shard(tmp_path):
     assert len(records) == 1
 
 
-def test_read_audit_records_preserves_order(tmp_path):
-    """Records from multiple shards are returned in file-name order."""
+def test_read_audit_records_sorted_by_ts(tmp_path):
+    """Records from multiple shards are returned in chronological order by ts."""
     audit_dir = tmp_path / "audit"
     legacy_path = audit_dir / "write_audit.jsonl"
 
-    # Write legacy and multiple shards
-    _write_legacy_audit(audit_dir, [_make_audit_record("from_legacy")])
-    _write_monthly_shard(audit_dir, [_make_audit_record("from_202606")], "202606")
-    _write_monthly_shard(audit_dir, [_make_audit_record("from_202607")], "202607")
+    early = _make_audit_record("earliest", ts="2026-07-01T00:00:00+00:00")
+    mid = _make_audit_record("middle", ts="2026-07-02T00:00:00+00:00")
+    late = _make_audit_record("latest", ts="2026-07-03T00:00:00+00:00")
+
+    # Write in reverse-chronological order across shards
+    _write_monthly_shard(audit_dir, [late], "202607")
+    _write_legacy_audit(audit_dir, [early])
+    _write_monthly_shard(audit_dir, [mid], "202606")
 
     records = read_audit_records(legacy_path)
     actions = [r["action"] for r in records]
-    # Files are glob-sorted by path name
-    assert "from_legacy" in actions
-    assert "from_202606" in actions
-    assert "from_202607" in actions
     assert len(records) == 3
+    # Must be sorted by ts, not file-name order
+    assert actions == ["earliest", "middle", "latest"], (
+        f"Expected chronological order, got {actions}"
+    )
+
+
+def test_read_audit_records_recent_tail_is_chronological(tmp_path):
+    """[-N:] positional access returns most recent N by ts, not file-order tail."""
+    audit_dir = tmp_path / "audit"
+    legacy_path = audit_dir / "write_audit.jsonl"
+
+    # Write records across files — most recent ts in legacy, older in shard
+    recent = _make_audit_record("recent_action", ts="2026-07-03T12:00:00+00:00")
+    old = _make_audit_record("old_action", ts="2026-07-01T00:00:00+00:00")
+
+    _write_monthly_shard(audit_dir, [old], "202607")
+    _write_legacy_audit(audit_dir, [recent])
+
+    records = read_audit_records(legacy_path)
+    # Most recent 1 record must be recent_action (by ts), not file-order tail
+    tail = records[-1:]
+    assert len(tail) == 1
+    assert tail[0]["action"] == "recent_action", (
+        f"[-1:] must return most recent by ts, got {tail[0]['action']}"
+    )
