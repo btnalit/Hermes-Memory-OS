@@ -122,7 +122,7 @@ Broad `except Exception` must record bounded error records (`error_record` schem
 Fast probe PASS is not a substitute for full live monitor PASS.
 
 ### Cron Profile
-Default is `active-closure` (2 jobs: `memory-os-owner-review-digest` + `memory-os-proposal-followups-opsgate`). The `full` profile adds optional expression/cadence/feedback jobs. On upgraded hosts, active-closure onboarding pauses (does not delete) known optional jobs. The monitor classifies paused optional jobs as known optional rather than unregistered drift.
+Default is `active-closure` (10 jobs: `owner_review_digest`, `proposal_followups_opsgate`, `index_sync`, `working_cleanup`, `l3_probe_verification`, `candidate_aggregation`, `fact_judge`, `event_stats_refresh`, `expression_feedback_request`, `memory_sources_feedback_request`). The `full` profile adds optional expression/cadence/feedback jobs. On upgraded hosts, active-closure onboarding pauses (does not delete) known optional jobs. The monitor classifies paused optional jobs as known optional rather than unregistered drift.
 
 ### Owner Actions
 Display anchors (`A1`, `R1`, `F1`) in digests are UI labels only. The durable identity is the `oa_` action token. Owner approval moves a proposal into human-controlled follow-up — it does not execute work. Only proposal kinds with a bounded runtime target, rollback, monitor fields, and an explicit apply token can be applied.

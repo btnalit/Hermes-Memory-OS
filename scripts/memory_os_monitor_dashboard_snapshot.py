@@ -38,6 +38,7 @@ CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-working-cleanup",
     "memory-os-candidate-aggregation",
     "memory-os-fact-judge",
+    "memory-os-event-stats-refresh",
     "memory-os-expression-feedback-request",
     "memory-os-memory-sources-feedback-request",
 })

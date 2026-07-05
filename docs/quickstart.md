@@ -27,9 +27,12 @@ This installs and enables the Memory-OS provider, the Hermes Agent OS shell,
 the portable runtime, heartbeat, the current cognitive loop harness, and the
 active-closure Hermes cron operational set. Owner-facing cron jobs use Hermes
 `channel_directory.json` autodiscovery, so Telegram is selected only when it is
-the configured owner channel. The default active-closure cron set contains only
-the owner review digest and proposal follow-up OpsGate jobs. Runtime heartbeat
-and the cognitive-loop timer own the main sensing/projection/advisor loop.
+the configured owner channel. The default active-closure cron set contains
+the owner review digest, proposal follow-up OpsGate, index sync, working
+cleanup, L3 probe verification, candidate aggregation, fact judge, event
+stats refresh, expression feedback, and memory sources feedback jobs.
+Runtime heartbeat and the cognitive-loop timer own the main
+sensing/projection/advisor loop.
 
 Interactive install:
 
@@ -175,12 +178,20 @@ Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 
 ### Cron Profile
 
-The default cron profile is `active-closure`:
+The default cron profile is `active-closure` (10 jobs):
 
 | Job | Purpose |
 | --- | --- |
 | `memory-os-owner-review-digest` | sends approval items and real alerts through the owner channel |
 | `memory-os-proposal-followups-opsgate` | moves safe proposal follow-ups through OpsGate/report-only review |
+| `memory-os-index-sync` | keeps SQLite FTS5 index in sync with canonical files |
+| `memory-os-working-cleanup` | prunes expired working memory items |
+| `memory-os-l3-probe-verification` | verifies L3 boundary probe integrity |
+| `memory-os-candidate-aggregation` | aggregates candidate clusters |
+| `memory-os-fact-judge` | reversible fact-judge lane for crystallized records |
+| `memory-os-event-stats-refresh` | rebuilds O(1) event stats cache every 15 min |
+| `memory-os-expression-feedback-request` | requests owner feedback on right-brain expressions |
+| `memory-os-memory-sources-feedback-request` | requests owner feedback on memory source recall quality |
 
 The full registry also contains optional jobs for right-brain expression,
 module cadence reports, expression outcome capture, and owner feedback prompts.

@@ -81,10 +81,20 @@ Operational Hermes cron onboarding:
 ```
 
 The operational preset defaults to `--owner-cron-profile active-closure`, which
-creates only:
+creates the core maintenance and oversight jobs (10 total):
 
-- `memory-os-owner-review-digest`
-- `memory-os-proposal-followups-opsgate`
+- `memory-os-owner-review-digest` — owner-facing approval digest
+- `memory-os-proposal-followups-opsgate` — proposal follow-up OpsGate review
+- `memory-os-index-sync` — SQLite FTS5 index incremental sync
+- `memory-os-working-cleanup` — expired working memory cleanup
+- `memory-os-l3-probe-verification` — L3 boundary probe verification
+- `memory-os-candidate-aggregation` — candidate cluster aggregation
+- `memory-os-fact-judge` — fact-judge lane for reversible labels
+- `memory-os-event-stats-refresh` — O(1) event stats cache refresh
+- `memory-os-expression-feedback-request` — right-brain expression feedback
+- `memory-os-memory-sources-feedback-request` — MemorySources recall feedback
+
+See `cron_registry.py` for the authoritative list.
 
 That is the current automatic closure chain: owner-visible decisions remain in
 the normal Hermes owner channel, while safe proposal follow-up routing is
