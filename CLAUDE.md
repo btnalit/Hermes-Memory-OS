@@ -133,3 +133,45 @@ Display anchors (`A1`, `R1`, `F1`) in digests are UI labels only. The durable id
 - Do not add cross-import chains between governance modules (advisor → projection → collectors → owner_actions → session_mirror is forbidden).
 - Internal docs under `docs/internal-memory-os/` are gitignored and excluded from GitHub main. Do not use them as the sole source of truth for public-facing changes. The canonical public documentation is in `docs/` (non-internal).
 - The two known deployment hosts are `hermes-media` (10.20.3.200, production live closure) and `hermes-feiniu` (10.20.2.66, clean-host compatibility smoke). Do not describe clean-host results as equivalent to production.
+
+## Development Process (mandatory)
+
+### Stabilization Checklist — Required Before & After Every Task
+
+**Before starting work**, read `docs/resolver/hermes-memory-os-stabilization-checklist.md` once — at minimum the latest section and Section W (经验教训). This is not optional. The checklist records every repair cycle and the mistakes that made each one take multiple rounds. Skipping it guarantees repeating those mistakes.
+
+**After completing work** (all tests pass, ready to push), update the checklist:
+- Add a new section documenting: what was fixed, root cause, counterfactual coverage, test count delta, final test count
+- Append the commit range and a one-line summary to the "一句话" footer
+- This is not a nice-to-have — it is part of the definition of "done"
+
+### Repair Rules (from Section W — applied to EVERY change)
+
+These five rules were extracted from a cycle where three patches passed code review but introduced five regressions. They apply to every change, no exceptions:
+
+1. **Read the full function before modifying it.** Diff hunks are not enough — you must understand all branches, all default-parameter paths, and all return sites in the function you are touching.
+2. **Grep test files for the symbols you are changing.** String constants, function signatures, path patterns — if you change it, grep for it in tests. A test that monkeypatches the old string is a test you just broke.
+3. **Every fix gets a counterfactual test.** Ask: "If my fix were absent, what would go wrong?" — then write that as a test. The test must FAIL without your fix and PASS with it.
+4. **Default parameters must never be traps.** If `param=None` causes data loss, crash, or silent skip on any path, it is not an optional parameter — it is a landmine. Give it a safe default or remove the default.
+5. **Grep the whole project for the same bug pattern.** Found a defect in one file → grep all files for the same pattern → fix or document every occurrence.
+
+### Beyond the Pointed-Out Problem — Trace the Whole Call Chain
+
+When asked to fix "X is not Y", do not stop at making X become Y. Trace every consumer of X: what else on the same call path has the same class of defect? Use `codegraph_explore` to read the full call chain before declaring completion.
+
+Examples of what this catches:
+- "CLI status is not O(1)" → cache `continuity_selector` AND check `_index_health_findings` AND check `_index_health_summary` → all four data paths, not just the one flagged
+- "audit records are not visible" → fix read visibility AND check sort order → consumers using `[-N:]` depend on correct ordering
+
+### Definition of Done — Self-Verification Before Push
+
+Before claiming "X is fixed" or pushing, do these in order:
+
+1. **Enumerate sub-items.** "O(1) CLI status" = counts + summaries + continuity_selector + index_health. List them. Verify each one.
+2. **Run the counterfactual.** If your fix were absent, would existing tests catch the bug? If not, add the test.
+3. **Reverse review.** Read your diff as if you were the reviewer whose job is to find gaps. What did you not touch that looks related? Why?
+4. **Run full test suite.** Never push after running only the tests you added or modified.
+
+### Tests Verify "Did", Not "Didn't Miss"
+
+A passing test suite proves that the behaviors you implemented work correctly. It does NOT prove you implemented all necessary behaviors. The only defense against omissions is the self-verification checklist above — tests cannot verify the absence of missing work.
