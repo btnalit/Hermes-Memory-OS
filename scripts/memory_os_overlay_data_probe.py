@@ -1,9 +1,14 @@
 """Quick data probe for State Overlay design — read-only, no writes."""
-import json, sqlite3
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
 from pathlib import Path
 
+
 def probe(home_str="/root/.hermes"):
-    home = Path(home_str)
+    home = Path(home_str).expanduser().resolve()
     mos = home / "memory-os"
     results = {}
 
@@ -122,8 +127,22 @@ def probe(home_str="/root/.hermes"):
     return results
 
 
-if __name__ == "__main__":
-    import sys
-    home = sys.argv[1] if len(sys.argv) > 1 else "/root/.hermes"
-    data = probe(home)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Read-only Memory-OS data probe for state overlay design.",
+    )
+    parser.add_argument(
+        "--hermes-home",
+        default="/root/.hermes",
+        help="Path to HERMES_HOME (default: /root/.hermes)",
+    )
+    parser.add_argument("--output", choices=("json",), default="json")
+    args = parser.parse_args(argv)
+
+    data = probe(args.hermes_home)
     print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
