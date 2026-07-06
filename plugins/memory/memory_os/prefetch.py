@@ -914,7 +914,10 @@ def _state_overlay_lines(
         return []  # fail-open — must never block prefetch
     if not md.strip():
         return []
-    return md.splitlines()
+    lines = md.splitlines()
+    if lines and lines[0].strip() == "### Memory State Overlay":
+        lines = lines[1:]
+    return lines
 
 
 def _current_task_anchor_lines(anchor: str | None) -> list[str]:

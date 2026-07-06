@@ -297,3 +297,23 @@ class TestRenderStateOverlayMd:
         result = render_state_overlay_md(overlay)
         assert len(result) > 0
         assert result.startswith("### Memory State Overlay")
+
+
+class TestPrefetchStateOverlayIntegration:
+    def test_state_overlay_lines_do_not_duplicate_prefetch_section_header(self, tmp_path):
+        from plugins.memory.memory_os.prefetch import _state_overlay_lines
+
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        overlay = StateOverlay.create(profile="test")
+        overlay.active_projects.data.append(
+            OverlayEntry(text="Build state overlay", source="task_anchor:current",
+                         source_kind="task_anchor"))
+        overlay.active_projects.status = "ok"
+        write_state_overlay(roots, overlay.to_dict())
+
+        lines = _state_overlay_lines(store, roots=roots)
+
+        assert lines
+        assert lines[0] != "### Memory State Overlay"
+        assert all(line != "### Memory State Overlay" for line in lines)
