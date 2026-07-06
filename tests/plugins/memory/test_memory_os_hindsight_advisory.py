@@ -157,6 +157,31 @@ class TestHindsightRetriever:
         results = retriever.retrieve(store, "query")  # must not raise
         assert results == []
 
+    def test_hindsight_retriever_filters_local_artifact_fallback(self, tmp_path, monkeypatch):
+        """The hindsight lane should expose Hindsight facts, not local-artifact fallback."""
+        import plugins.memory.memory_os.retrievers.hindsight as module
+        from plugins.memory.memory_os.retrievers.hindsight import HindsightRetriever
+
+        roots = _make_roots(tmp_path)
+        cfg_path = roots.hermes_home / "memory-os" / "config.json"
+        cfg_path.write_text(json.dumps({
+            "substrate_providers": {
+                "hindsight": {"enabled": True, "recall_mode": "active", "api_url": "http://example", "bank_id": "b"}
+            }
+        }), encoding="utf-8")
+        store = _make_store(roots)
+
+        monkeypatch.setattr(module, "_substrate_recall", lambda store, query, config: {
+            "facts": [
+                {"provider": "local_artifact", "body_summary": "canonical fallback", "confidence": 0.9},
+                {"provider": "hindsight", "body_summary": "hindsight advisory", "confidence": 0.7},
+            ]
+        })
+
+        results = HindsightRetriever().retrieve(store, "query")
+        assert [r.metadata["provider"] for r in results] == ["hindsight"]
+        assert results[0].content == "hindsight advisory"
+
 
 # ── E3: Reflect digest → owner finding ───────────────────────────────
 
@@ -218,5 +243,49 @@ class TestHindsightCronIntegration:
         """Entity_graph and hindsight should both be in available retrievers."""
         from scripts.memory_os_recall_probe import AVAILABLE_RETRIEVERS
         assert "entity_graph" in AVAILABLE_RETRIEVERS
-        # Hindsight is L2 — may or may not be in probe by default
-        # (only L1 retrievers are guaranteed)
+        assert "hindsight" in AVAILABLE_RETRIEVERS
+
+    def test_recall_probe_accepts_hindsight_type(self, tmp_path):
+        import subprocess, sys
+        home = tmp_path / ".hermes"
+        (home / "memory-os" / "events").mkdir(parents=True)
+        (home / "memory-os" / "system").mkdir(parents=True)
+        script = Path(__file__).resolve().parents[3] / "scripts" / "memory_os_recall_probe.py"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--hermes-home", str(home),
+                "--type", "hindsight",
+                "--query", "test",
+                "--output", "json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        assert output["recall_types"] == ["hindsight"]
+        assert "hindsight" in output["results"]
+
+    def test_hindsight_http_client_uses_v061_memories_recall_path(self, monkeypatch):
+        from plugins.memory.memory_os.retrievers.hindsight import _hindsight_http_client
+
+        captured = {}
+
+        class FakeResponse:
+            def read(self):
+                return b'{"results": []}'
+
+        def fake_urlopen(req, timeout):
+            captured["full_url"] = req.full_url
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        import urllib.request as request_module
+        monkeypatch.setattr(request_module, "urlopen", fake_urlopen)
+
+        client = _hindsight_http_client({"api_url": "http://example.test/v1/default", "api_key": ""})
+        data = client.recall(bank_id="bank-a", query="q", budget="low", max_tokens=128)
+        assert data == {"results": []}
+        assert captured["full_url"] == "http://example.test/v1/default/banks/bank-a/memories/recall"

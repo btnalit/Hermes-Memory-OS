@@ -61,16 +61,22 @@ class HindsightRetriever:
         for fact in facts[:top_k]:
             if not isinstance(fact, dict):
                 continue
+            provider = str(fact.get("provider") or "hindsight")
+            if provider != "hindsight":
+                continue
             summary = str(fact.get("body_summary") or fact.get("summary") or "")
             if not summary.strip():
                 continue
-            provider = str(fact.get("provider") or "hindsight")
             authority = str(fact.get("authority_class") or "derived_projection")
+            try:
+                score = float(fact.get("relevance_score") or fact.get("confidence") or 0.5)
+            except (TypeError, ValueError):
+                score = 0.5
 
             objects.append(RecallObject(
                 recall_type=RecallType.HINDSIGHT.value,
                 content=summary[:300],
-                score=float(fact.get("relevance_score") or 0.5),
+                score=score,
                 source_ref=f"hindsight:{str(fact.get('substrate_snapshot_id', ''))}",
                 metadata={
                     "advisory_only": True,
@@ -197,7 +203,10 @@ def _hindsight_http_client(config: dict[str, Any]) -> Any:
                    max_tokens: int) -> dict[str, Any]:
             import json as _json
             import urllib.request as _req
-            url = f"{self.base_url.rstrip('/')}/banks/{bank_id}/recall"
+            base = self.base_url.rstrip('/')
+            if not base.endswith('/v1/default'):
+                base = f"{base}/v1/default"
+            url = f"{base}/banks/{bank_id}/memories/recall"
             body = _json.dumps({
                 "query": query, "budget": budget, "max_tokens": max_tokens,
             }).encode("utf-8")

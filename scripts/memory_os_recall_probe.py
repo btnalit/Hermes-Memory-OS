@@ -43,6 +43,7 @@ from plugins.memory.memory_os.retrievers.crystallized import CrystallizedRetriev
 from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
 from plugins.memory.memory_os.retrievers.temporal import TemporalRetriever
 from plugins.memory.memory_os.retrievers.entity_graph import EntityGraphRetriever
+from plugins.memory.memory_os.retrievers.hindsight import HindsightRetriever
 
 # L2 retrievers — imported only when requested
 _L2_RETRIEVERS: dict[str, type] = {}  # filled lazily
@@ -53,6 +54,7 @@ AVAILABLE_RETRIEVERS: dict[str, type] = {
     RecallType.INDEXED_FTS.value: IndexedFTSRetriever,
     RecallType.TEMPORAL.value: TemporalRetriever,
     RecallType.ENTITY_GRAPH.value: EntityGraphRetriever,
+    RecallType.HINDSIGHT.value: HindsightRetriever,
 }
 
 
