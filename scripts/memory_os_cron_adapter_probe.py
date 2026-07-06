@@ -26,10 +26,11 @@ from typing import Any
 # even when HERMES_HOME is set globally.
 _self = Path(__file__).absolute()
 _repo_root = _self.parents[1]
+_is_repo_checkout = (_repo_root / "plugins" / "memory" / "memory_os").exists()
 _path_candidates: list[Path] = []
 
 # 1) Repo self-root — must always be the highest-priority source
-if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+if _is_repo_checkout:
     _path_candidates.append(_repo_root)
 
 
@@ -47,31 +48,35 @@ def _preparse_hermes_home(argv: list[str]) -> str:
     return ""
 
 
-_cli_home = _preparse_hermes_home(sys.argv[1:])
-_env_home = os.environ.get("HERMES_HOME", "")
+# 2-3) CLI and env HERMES_HOME runtime paths.
+#      ONLY injected when NOT running from a repo checkout — when a repo
+#      checkout is active, importing from the repo is always correct and
+#      the installed runtime must never shadow it.  Without this guard,
+#      a globally-set HERMES_HOME (e.g. /root/.hermes in a Gateway agent
+#      process) pollutes the repo test environment with installed-runtime
+#      modules, causing import mismatches and spurious test failures.
+if not _is_repo_checkout:
+    _cli_home = _preparse_hermes_home(sys.argv[1:])
+    _env_home = os.environ.get("HERMES_HOME", "")
 
-# 2-3) CLI and env HERMES_HOME runtime paths (lower priority than repo root)
-for _home_str in (_cli_home, _env_home):
-    if not _home_str:
-        continue
-    _home = Path(_home_str)
-    _runtime = _home / "memory-os" / "runtime" / "python"
-    if _runtime.exists():
-        _path_candidates.append(_runtime)
-    _path_candidates.append(_home)
+    for _home_str in (_cli_home, _env_home):
+        if not _home_str:
+            continue
+        _home = Path(_home_str)
+        _runtime = _home / "memory-os" / "runtime" / "python"
+        if _runtime.exists():
+            _path_candidates.append(_runtime)
+        _path_candidates.append(_home)
 
-# 4) Self-location inference: when script is copied to <home>/scripts/…
-#    and neither --hermes-home nor HERMES_HOME env is set.
-#    No _inferred!=_repo_root guard — in the installed-copy case they are
-#    equal, but step 1 already skipped (no plugins/ under repo_root), so
-#    self-location is the only path that can find the runtime modules.
-_inferred = _self.parents[1]
-_runtime_inferred = _inferred / "memory-os" / "runtime" / "python"
-if _runtime_inferred.exists():
-    if _runtime_inferred not in _path_candidates:
-        _path_candidates.append(_runtime_inferred)
-    if _inferred not in _path_candidates:
-        _path_candidates.append(_inferred)
+    # 4) Self-location inference: when script is copied to <home>/scripts/…
+    #    and neither --hermes-home nor HERMES_HOME env is set.
+    _inferred = _self.parents[1]
+    _runtime_inferred = _inferred / "memory-os" / "runtime" / "python"
+    if _runtime_inferred.exists():
+        if _runtime_inferred not in _path_candidates:
+            _path_candidates.append(_runtime_inferred)
+        if _inferred not in _path_candidates:
+            _path_candidates.append(_inferred)
 
 # Apply: reversed + insert(0) so _path_candidates[0] ends up at sys.path[0].
 for _base in reversed(_path_candidates):
