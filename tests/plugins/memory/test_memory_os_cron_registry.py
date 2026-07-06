@@ -19,7 +19,11 @@ def test_cron_registry_snapshot_round_trips_all_specs(tmp_path):
     assert loaded["schema_version"] == "memory-os.cron_registry.v0"
     assert loaded["source_commit"] == "abc123"
     assert [spec.key for spec in restored] == [spec.key for spec in memory_os_cron_specs()]
-    assert all(spec.wrapper_script.startswith("memory_os_cron_") for spec in restored)
+    assert all(
+        spec.wrapper_script.startswith("memory_os_cron_")
+        or spec.wrapper_script == spec.raw_script  # self-wrapping no_agent scripts
+        for spec in restored
+    )
     assert all(spec.schedule_arg for spec in restored)
     assert all(spec.prompt_ref for spec in restored)
 

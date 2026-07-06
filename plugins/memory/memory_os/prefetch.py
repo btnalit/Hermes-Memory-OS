@@ -527,6 +527,9 @@ def _build_prefetch_sections(
     )
     _append_section(sections, "Current Foreground Task", _current_task_anchor_lines(current_task_anchor))
     _append_section(sections, "Identity Memory", _identity_lines(store))
+    _append_section(sections, "Memory State Overlay", _state_overlay_lines(
+        store, roots=store.roots, current_task_anchor=current_task_anchor,
+        session_id=session_id))
     # NOTE: _event_lines() and _continuity_bridge_lines() each trigger a full
     # store.read_events() JSONL scan internally. This is a pre-existing double-scan
     # (not introduced by session scoping). A future optimization could collect all
@@ -574,6 +577,7 @@ def _section_source_class(title: str) -> str:
         "Current Foreground Task": "foreground",
         "Recall Clarification Guard": "recall_guard",
         "Identity Memory": "identity",
+        "Memory State Overlay": "state_overlay",
         "Continuity Bridge": "bridge",
         "Last Session": "last_session",
         "Conversation Carryover": "carryover",
@@ -843,6 +847,56 @@ def set_fast_path_keywords(keywords: list[str] | None) -> None:
 def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: list[str]) -> None:
     if lines:
         sections.append((title, lines))
+
+
+def _overlay_has_data(overlay: dict[str, Any]) -> bool:
+    """Return True if at least one overlay section has actual data."""
+    for key in (
+        "identity_snapshot", "relationship_snapshot", "active_projects",
+        "open_threads", "recent_events", "owner_preferences",
+        "capability_map", "material_index",
+    ):
+        section = overlay.get(key)
+        if isinstance(section, dict) and section.get("status") == "ok":
+            return True
+    return False
+
+
+def _state_overlay_lines(
+    store: MemoryOSStore,
+    *,
+    roots: Any,
+    current_task_anchor: str | None = None,
+    session_id: str = "",
+) -> list[str]:
+    """Memory State Overlay section — derived projection for conversation context.
+
+    Built from last session anchors, task anchors, event stats, and
+    crystallized preferences.  Fail-open: any exception returns [] so
+    a broken overlay never blocks normal prefetch.
+    """
+    try:
+        from .state_overlay import build_state_overlay as _build
+        from .state_overlay_renderer import render_state_overlay_md as _render
+    except ImportError:
+        return []
+    try:
+        overlay = _build(
+            store, roots,
+            current_task_anchor=str(current_task_anchor or ""),
+            session_id=session_id,
+            max_recent_sessions=1,  # only the most recent — avoids duplicating other sections
+        )
+        # Suppress overlay when no section has any data — an empty overlay
+        # must not consume prefetch budget or pollute context.
+        if not _overlay_has_data(overlay):
+            return []
+        md = _render(overlay)
+    except Exception:
+        return []  # fail-open — must never block prefetch
+    if not md.strip():
+        return []
+    return md.splitlines()
 
 
 def _current_task_anchor_lines(anchor: str | None) -> list[str]:

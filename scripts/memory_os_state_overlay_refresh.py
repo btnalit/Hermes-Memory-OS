@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Memory-OS State Overlay refresh helper (no_agent).
+
+Reads last session anchors, task anchors, event stats, and crystallized
+preferences to build a state overlay projection.  Writes to
+``system/state_overlay/current.json`` and ``current.md``.
+
+Fail-open: any exception is recorded as an error run and the script
+exits 0 so cron scheduling is not disrupted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Location-agnostic import resolution (same pattern as index_sync.py).
+_self = Path(__file__).absolute()
+_repo_root = _self.parents[1]  # scripts/ → repo root
+_HERMES_HOME = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+
+if (_repo_root / "plugins" / "memory" / "memory_os").exists():
+    if str(_repo_root) not in sys.path:
+        sys.path.insert(0, str(_repo_root))
+else:
+    _runtime_root = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
+    if _runtime_root.exists() and str(_runtime_root) not in sys.path:
+        sys.path.insert(0, str(_runtime_root))
+
+from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.store import MemoryOSStore
+from plugins.memory.memory_os.state_overlay import (
+    build_state_overlay,
+    write_state_overlay,
+    append_overlay_run,
+)
+from plugins.memory.memory_os.state_overlay_renderer import render_state_overlay_md
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Refresh Memory State Overlay (no_agent, fail-open).",
+    )
+    parser.add_argument(
+        "--hermes-home",
+        default=_HERMES_HOME,
+        help="Path to HERMES_HOME (default: $HERMES_HOME or ~/.hermes)",
+    )
+    parser.add_argument(
+        "--profile",
+        default="default",
+        help="Memory-OS profile name",
+    )
+    parser.add_argument(
+        "--output",
+        choices=("json",),
+        default="json",
+    )
+    args = parser.parse_args(argv)
+
+    t0 = time.monotonic()
+    run_status = "ok"
+    error_msg = ""
+    section_count = 0
+
+    try:
+        roots = MemoryOSRoots.from_hermes_home(args.hermes_home, profile=args.profile)
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        # Read current task anchor (most recent active)
+        current_task_anchor = ""
+        anchor_path = roots.memory_os_root / "system" / "active_task_anchor.jsonl"
+        if anchor_path.exists():
+            try:
+                for line in anchor_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if isinstance(record, dict) and record.get("status") == "active":
+                        current_task_anchor = str(record.get("anchor", ""))
+            except (json.JSONDecodeError, OSError):
+                pass  # fail-open
+
+        overlay = build_state_overlay(
+            store,
+            roots,
+            current_task_anchor=current_task_anchor,
+        )
+
+        # Count populated sections
+        for key in (
+            "identity_snapshot", "relationship_snapshot", "active_projects",
+            "open_threads", "recent_events", "owner_preferences",
+            "capability_map", "material_index",
+        ):
+            section = overlay.get(key)
+            if isinstance(section, dict) and section.get("status") == "ok":
+                section_count += 1
+
+        # Write JSON
+        json_path = write_state_overlay(roots, overlay)
+
+        # Render and write markdown
+        md_text = render_state_overlay_md(overlay)
+        md_dir = roots.memory_os_root / "system" / "state_overlay"
+        md_dir.mkdir(parents=True, exist_ok=True)
+        md_path = md_dir / "current.md"
+        md_path.write_text(md_text + "\n", encoding="utf-8")
+
+    except Exception as exc:
+        run_status = "error"
+        error_msg = f"{type(exc).__name__}: {exc}"
+
+    duration_ms = int((time.monotonic() - t0) * 1000)
+
+    try:
+        # Re-resolve roots for error path (roots may not be bound if init failed)
+        _roots_error = MemoryOSRoots.from_hermes_home(args.hermes_home)
+        append_overlay_run(
+            _roots_error,
+            {
+                "status": run_status,
+                "error": error_msg,
+                "sections": section_count,
+                "duration_ms": duration_ms,
+            },
+        )
+    except Exception:
+        pass  # fail-open — even run record failure must not crash
+
+    if args.output == "json":
+        print(json.dumps({
+            "status": run_status,
+            "error": error_msg,
+            "sections": section_count,
+            "duration_ms": duration_ms,
+            "profile": args.profile,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }))
+
+    return 0  # Always exit 0 — fail-open
+
+
+if __name__ == "__main__":
+    sys.exit(main())

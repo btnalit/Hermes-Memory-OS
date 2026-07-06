@@ -201,6 +201,32 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         no_agent=True,
         requires_boundary_report=False,
     ),
+    MemoryOSCronSpec(
+        key="state_overlay_refresh",
+        name="memory-os-state-overlay-refresh",
+        raw_script="memory_os_state_overlay_refresh.py",
+        wrapper_script="memory_os_state_overlay_refresh.py",
+        lane_id="state_overlay_refresh",
+        helper_kind="local_helper",
+        schedule_arg="state_overlay_refresh_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
+    MemoryOSCronSpec(
+        key="entity_index_refresh",
+        name="memory-os-entity-index-refresh",
+        raw_script="memory_os_entity_index_refresh.py",
+        wrapper_script="memory_os_entity_index_refresh.py",
+        lane_id="entity_index_refresh",
+        helper_kind="local_helper",
+        schedule_arg="entity_index_refresh_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
 )
 
 

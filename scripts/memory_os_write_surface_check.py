@@ -58,6 +58,8 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/owner_actions.py::_rendered_digest_text::append_jsonl_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
     "plugins/memory/memory_os/prefetch.py::_record_substrate_shadow_recall::path.open_a::path": "report_only_shadow_recall",
     "plugins/memory/memory_os/prefetch.py::_record_graph_layer_shadow::path.open_a::path": "report_only_graph_layer_shadow",
+    "plugins/memory/memory_os/state_overlay.py::append_overlay_run::path.open_a::out_path": "state_overlay_run_ledger",
+    "scripts/memory_os_entity_index_refresh.py::main::path.open_a::run_path": "entity_index_refresh_run_ledger",
     "plugins/memory/memory_os/session_mirror.py::SessionMirror._append_apply_record::append_jsonl_call::session_mirror_apply_records_path(self.store.roots)": "session_mirror_governed_apply_ledger",
     "plugins/memory/memory_os/session_mirror.py::_append_jsonl::path.open_a::path": "session_mirror_private_writer",
     "plugins/memory/memory_os/shadow_journal.py::ShadowJournalIngestion._quarantine_malformed::path.open_a::quarantine_path": "quarantine_only",

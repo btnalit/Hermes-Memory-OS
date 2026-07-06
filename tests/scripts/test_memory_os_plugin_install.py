@@ -427,7 +427,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
     assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 10
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 12
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -439,6 +439,8 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
         "memory-os-candidate-aggregation",
         "memory-os-fact-judge",
         "memory-os-event-stats-refresh",
+        "memory-os-state-overlay-refresh",
+        "memory-os-entity-index-refresh",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
     }
@@ -471,7 +473,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 13
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 15
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert {job["name"] for job in jobs} == {
@@ -488,6 +490,8 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
         "memory-os-event-stats-refresh",
+        "memory-os-state-overlay-refresh",
+        "memory-os-entity-index-refresh",
     }
 
 
