@@ -90,8 +90,10 @@ def main(argv: list[str] | None = None) -> int:
         }
         with run_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-    except Exception:
-        pass
+    except Exception as _exc:
+        # fail-open — even run record failure must not crash the script.
+        import sys as _sys
+        _sys.stderr.write(f"entity_index_refresh: run record write failed: {_exc}\n")
 
     if args.output == "json":
         print(json.dumps({

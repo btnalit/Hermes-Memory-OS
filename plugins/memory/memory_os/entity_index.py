@@ -37,6 +37,17 @@ def refresh_entity_index(
 
     conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute("""
+            create table if not exists entity_index (
+                entity_id text not null,
+                entity_text text not null,
+                record_id text not null,
+                role text not null,
+                proposed_by text not null default 'structural',
+                created_at text not null,
+                primary key (entity_id, record_id, role)
+            );
+        """)
         conn.execute("delete from entity_index")
         now = datetime.now(timezone.utc).isoformat()
         count = 0

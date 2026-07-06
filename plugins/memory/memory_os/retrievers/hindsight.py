@@ -107,6 +107,9 @@ def _hindsight_available(store: Any) -> bool:
         config = _read_hindsight_config(store)
         return bool(config.get("enabled"))
     except Exception:
+        # fail-open: config read errors on this L2 optional path
+        # must never block normal recall.  No error_record needed —
+        # this is a read-only availability check, not a write path.
         return False
 
 
@@ -123,6 +126,8 @@ def _read_hindsight_config(store: Any) -> dict[str, Any]:
             if isinstance(substrates, dict):
                 return substrates.get("hindsight", {})
     except Exception:
+        # fail-open: config file parse errors on this L2 optional path
+        # must never block normal recall.
         pass
     return {}
 
@@ -165,6 +170,8 @@ def _substrate_recall(
         )
         return router.recall(query, consumer="hindsight_retriever")
     except Exception:
+        # fail-open: L2 optional substrate recall errors must never
+        # block normal recall.  This is a read-only advisory path.
         return None
 
 

@@ -184,6 +184,7 @@ def append_overlay_run(roots: "MemoryOSRoots", run: dict[str, Any]) -> Path:
 
 def _read_last_session_anchors(
     path: Path, *, limit: int = 3, exclude_session_id: str = "",
+    max_lines: int = 500,
 ) -> list[dict[str, Any]]:
     """Read the most recent session anchors from the JSONL file.
 
@@ -191,12 +192,20 @@ def _read_last_session_anchors(
     When *exclude_session_id* is non-empty, anchors belonging to that
     session are skipped to avoid duplicating foreground task context.
 
+    *max_lines* caps the number of lines read from the file to avoid
+    unbounded I/O on long-running deployments.  Since the file is
+    append-only, the most recent entries (which we care about) are at
+    the end; 500 lines covers months of normal session cadence.
+
     Fail-open: missing file, parse errors → empty list.
     """
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    all_lines = path.read_text(encoding="utf-8").splitlines()
+    # Only process the tail — the file is append-only so recent
+    # sessions (which we sort for) are at the end.
+    for line in all_lines[-max_lines:]:
         if not line.strip():
             continue
         try:
@@ -235,12 +244,22 @@ def _read_preference_crystallized(
             text = md_path.read_text(encoding="utf-8")
         except OSError:
             continue
-        # Simple frontmatter scan for kind: preference
-        if "kind: preference" not in text and 'kind: "preference"' not in text:
+        # Only check frontmatter for kind: preference — body substring
+        # match would produce false positives from citations or code blocks.
+        frontmatter_text = ""
+        body = ""
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                frontmatter_text = parts[1]
+                body = parts[2].strip()
+            else:
+                body = text.strip()
+        else:
+            body = text.strip()
+
+        if "kind: preference" not in frontmatter_text and 'kind: "preference"' not in frontmatter_text:
             continue
-        # Extract body (after frontmatter --- fence)
-        parts = text.split("---", 2)
-        body = parts[-1].strip() if len(parts) >= 3 else text.strip()
         if body:
             # Use first non-empty line as summary
             first_line = body.split("\n")[0].strip()

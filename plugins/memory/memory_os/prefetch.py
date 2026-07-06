@@ -871,26 +871,44 @@ def _state_overlay_lines(
 ) -> list[str]:
     """Memory State Overlay section — derived projection for conversation context.
 
-    Built from last session anchors, task anchors, event stats, and
-    crystallized preferences.  Fail-open: any exception returns [] so
-    a broken overlay never blocks normal prefetch.
+    Reads the cron-cached ``current.json`` (refreshed every ~30 min) when
+    available, falling back to a fresh build only when the cache is missing
+    or stale.  Fail-open: any exception returns [] so a broken overlay
+    never blocks normal prefetch.
     """
     try:
         from .state_overlay import build_state_overlay as _build
         from .state_overlay_renderer import render_state_overlay_md as _render
     except ImportError:
         return []
+
+    # ── Fast path: read cron-cached overlay ──────────────────────────
+    cached_path = roots.memory_os_root / "system" / "state_overlay" / "current.json"
+    overlay: dict[str, Any] | None = None
+    if cached_path.exists():
+        try:
+            import json as _json
+            overlay = _json.loads(cached_path.read_text(encoding="utf-8"))
+        except Exception:
+            overlay = None  # fall through to rebuild
+
+    # ── Slow path: rebuild overlay from canonical sources ────────────
+    if overlay is None:
+        try:
+            overlay = _build(
+                store, roots,
+                current_task_anchor=str(current_task_anchor or ""),
+                session_id=session_id,
+                max_recent_sessions=1,  # only the most recent — avoids duplicating other sections
+            )
+        except Exception:
+            return []  # fail-open — must never block prefetch
+
+    # Suppress overlay when no section has any data — an empty overlay
+    # must not consume prefetch budget or pollute context.
+    if not _overlay_has_data(overlay):
+        return []
     try:
-        overlay = _build(
-            store, roots,
-            current_task_anchor=str(current_task_anchor or ""),
-            session_id=session_id,
-            max_recent_sessions=1,  # only the most recent — avoids duplicating other sections
-        )
-        # Suppress overlay when no section has any data — an empty overlay
-        # must not consume prefetch budget or pollute context.
-        if not _overlay_has_data(overlay):
-            return []
         md = _render(overlay)
     except Exception:
         return []  # fail-open — must never block prefetch

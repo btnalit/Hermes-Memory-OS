@@ -158,7 +158,9 @@ def _home_with_helpers(
         "memory_os_event_stats_refresh.py",
         "memory_os_cron_event_stats_refresh_gate.py",
         "memory_os_state_overlay_refresh.py",
+        "memory_os_cron_state_overlay_refresh_gate.py",
         "memory_os_entity_index_refresh.py",
+        "memory_os_cron_entity_index_refresh_gate.py",
     ):
         if helper in omitted:
             continue

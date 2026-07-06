@@ -42,7 +42,6 @@ class EntityGraphRetriever:
         scope: dict[str, Any] | None = None,
     ) -> list[RecallObject]:
         from plugins.memory.memory_os.entity_index import query_related_records
-        from plugins.memory.memory_os.entity_extractor import _normalize_entity_id
 
         roots = store.roots
         db_path = roots.index_path

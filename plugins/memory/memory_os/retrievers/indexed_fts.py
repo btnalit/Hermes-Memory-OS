@@ -35,8 +35,8 @@ class IndexedFTSRetriever:
         if not index_path.exists():
             return []
 
+        conn = sqlite3.connect(str(index_path))
         try:
-            conn = sqlite3.connect(str(index_path))
             conn.row_factory = sqlite3.Row
             # Use FTS5 with BM25 scoring
             rows = conn.execute(
@@ -50,9 +50,10 @@ class IndexedFTSRetriever:
                 """,
                 {"query": _fts5_safe_query(query), "limit": top_k},
             ).fetchall()
-            conn.close()
         except (sqlite3.Error, sqlite3.OperationalError):
             return []
+        finally:
+            conn.close()
 
         objects: list[RecallObject] = []
         for row in rows:

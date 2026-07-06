@@ -106,12 +106,14 @@ def main(argv: list[str] | None = None) -> int:
         # Write JSON
         json_path = write_state_overlay(roots, overlay)
 
-        # Render and write markdown
+        # Render and write markdown (atomic: temp + rename)
         md_text = render_state_overlay_md(overlay)
         md_dir = roots.memory_os_root / "system" / "state_overlay"
         md_dir.mkdir(parents=True, exist_ok=True)
         md_path = md_dir / "current.md"
-        md_path.write_text(md_text + "\n", encoding="utf-8")
+        tmp_path = md_path.with_suffix(md_path.suffix + ".tmp")
+        tmp_path.write_text(md_text + "\n", encoding="utf-8")
+        tmp_path.replace(md_path)
 
     except Exception as exc:
         run_status = "error"
@@ -131,8 +133,11 @@ def main(argv: list[str] | None = None) -> int:
                 "duration_ms": duration_ms,
             },
         )
-    except Exception:
-        pass  # fail-open — even run record failure must not crash
+    except Exception as _exc:
+        # fail-open — even run record failure must not crash the script.
+        # Emit to stderr so the cron wrapper can capture the signal.
+        import sys as _sys
+        _sys.stderr.write(f"state_overlay_refresh: run record write failed: {_exc}\n")
 
     if args.output == "json":
         print(json.dumps({
