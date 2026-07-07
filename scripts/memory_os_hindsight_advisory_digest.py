@@ -48,8 +48,13 @@ from scripts.memory_os_hindsight_health_probe import _read_hindsight_config
 
 
 def _get_hindsight_client(config: GovernedHindsightConfig, *, timeout: float = 5.0) -> Any | None:
-    """Build a Hindsight HTTP client from config. Returns None if not configured."""
-    if not config.api_url or not config.api_key:
+    """Build a Hindsight HTTP client from config. Returns None if not configured.
+
+    Some Hindsight deployments run without API-key enforcement.  The HTTP
+    client supports an empty ``api_key``; requiring one here would make the
+    advisory digest report ``client_missing`` even when health/reflect work.
+    """
+    if not config.api_url or not config.bank_id:
         return None
     try:
         from plugins.memory.memory_os.adapters.hindsight import HindsightHttpClient

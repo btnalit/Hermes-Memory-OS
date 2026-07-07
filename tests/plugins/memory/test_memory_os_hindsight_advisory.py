@@ -388,6 +388,34 @@ class TestHindsightAdvisoryDigestScript:
         assert captured["api_key"] == "test-key"
         assert captured["timeout_seconds"] == 2.5
 
+    def test_get_hindsight_client_allows_empty_api_key(self, monkeypatch):
+        """API key is optional; some Hindsight deployments allow unauthenticated reflect."""
+        import scripts.memory_os_hindsight_advisory_digest as digest_module
+        from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightConfig
+        from plugins.memory.memory_os.adapters import hindsight as adapter_module
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(adapter_module, "HindsightHttpClient", FakeClient)
+        config = GovernedHindsightConfig.from_dict({
+            "enabled": True,
+            "api_url": "http://127.0.0.1:8888",
+            "bank_id": "test-bank",
+            "api_key": "",
+        })
+
+        client = digest_module._get_hindsight_client(config, timeout=2.5)
+
+        assert isinstance(client, FakeClient)
+        assert captured["api_url"] == "http://127.0.0.1:8888"
+        assert captured["bank_id"] == "test-bank"
+        assert captured["api_key"] == ""
+        assert captured["timeout_seconds"] == 2.5
+
     def test_advisory_digest_emits_advisory_only(self, tmp_path, monkeypatch):
         """When reflect succeeds, finding is advisory_only=True."""
         import scripts.memory_os_hindsight_advisory_digest as digest_module
