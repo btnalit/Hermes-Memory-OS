@@ -6,6 +6,7 @@ import json
 import sqlite3
 import hashlib
 import subprocess
+import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -5225,8 +5226,29 @@ def _rendered_digest_text(
                         details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as record_exc:
+                try:
+                    append_audit(
+                        store.roots.audit_path,
+                        action="owner_digest_error_record_failed",
+                        status="warning",
+                        target=str(store.roots.memory_os_root / "system" / "error_records.jsonl"),
+                        details={
+                            "component": "owner_actions._rendered_digest_text",
+                            "operation": "edge_digest_query",
+                            "original_error_type": type(exc).__name__,
+                            "original_error_message": str(exc)[:200],
+                            "error_record_write_error_type": type(record_exc).__name__,
+                            "error_record_write_error_message": str(record_exc)[:200],
+                        },
+                    )
+                except Exception as audit_exc:
+                    print(
+                        "Memory-OS owner digest edge error reporting failed: "
+                        f"record={type(record_exc).__name__}:{str(record_exc)[:120]} "
+                        f"audit={type(audit_exc).__name__}:{str(audit_exc)[:120]}",
+                        file=sys.stderr,
+                    )
 
     final_overview = _rendered_overview_lines(
         counts or {},

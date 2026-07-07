@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import read_candidate_queue
-from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
+from plugins.memory.memory_os.execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
 from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.signal_source_registry import signal_source_specs
@@ -770,10 +770,34 @@ class CognitiveLoopRunner:
             boundary=dict(BOUNDARIES),
         )
         owner_channel = gate._resolve_owner_channel()
-        delivery_decision = gate.evaluate_expression_draft(
-            draft,
-            channel=owner_channel,
-            delivery_tier="spontaneous_owner",
+        envelope_id = str(permit.get("execution_gate_envelope_id") or "")
+        try:
+            delivery_decision = gate.evaluate_expression_draft(
+                draft,
+                channel=owner_channel,
+                delivery_tier="spontaneous_owner",
+            )
+        except Exception as exc:
+            complete_execution_gate_envelope(
+                self.store,
+                envelope_id=envelope_id,
+                lane_id="spontaneous_expression_delivery",
+                execution_status="error",
+                postcheck=dict(BOUNDARIES),
+                result_summary={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+            )
+            raise
+        complete_execution_gate_envelope(
+            self.store,
+            envelope_id=envelope_id,
+            lane_id="spontaneous_expression_delivery",
+            execution_status="ok",
+            postcheck={**dict(BOUNDARIES), "actual_send": bool(delivery_decision.get("actual_send") is True)},
+            result_summary={
+                "decision": delivery_decision.get("decision", "unknown"),
+                "actual_send": bool(delivery_decision.get("actual_send") is True),
+                "delivery_id": delivery_decision.get("delivery_id", ""),
+            },
         )
         return {
             "status": "ok",
@@ -784,7 +808,7 @@ class CognitiveLoopRunner:
             "spontaneous_delivery_id": delivery_decision.get("delivery_id", ""),
             "spontaneous_delivery_tier": "spontaneous_owner",
             "spontaneous_channel": delivery_decision.get("channel", owner_channel),
-            "execution_gate_envelope_id": str(permit.get("execution_gate_envelope_id") or ""),
+            "execution_gate_envelope_id": envelope_id,
         }
 
     def _self_evolution(self, context: dict[str, Any]) -> dict[str, Any]:

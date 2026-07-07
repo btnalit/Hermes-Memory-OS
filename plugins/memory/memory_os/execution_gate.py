@@ -588,6 +588,7 @@ def rotate_execution_gate_records(
             "after_count": len(records),
             "rotated_count": 0,
         }
+    lock_cleanup_error = ""
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(current_now.isoformat())
@@ -605,15 +606,17 @@ def rotate_execution_gate_records(
     finally:
         try:
             lock_path.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            lock_cleanup_error = str(exc)[:200]
+    status = "warning" if lock_cleanup_error else "ok"
     return {
         "schema_version": "memory-os.execution_gate_rotation.v0",
-        "status": "ok",
+        "status": status,
         "before_count": len(records),
         "after_count": len(kept),
         "rotated_count": len(rotated),
         "active_size_bytes": path.stat().st_size if path.exists() else 0,
+        **({"lock_cleanup_error": lock_cleanup_error} if lock_cleanup_error else {}),
     }
 
 

@@ -71,6 +71,44 @@ def test_rotate_execution_gate_records_keeps_union_of_recent_and_latest(tmp_path
     assert len(rotated_files) == 1
 
 
+def test_rotate_execution_gate_records_reports_lock_cleanup_failure(tmp_path, monkeypatch):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    records_path = execution_gate_records_path(roots)
+    records_path.parent.mkdir(parents=True)
+    records_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.execution_gate_envelope.v0",
+                "stage": "permit",
+                "execution_gate_envelope_id": "recent-keep",
+                "created_at": "2026-05-25T00:00:00Z",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    original_unlink = type(records_path).unlink
+
+    def fail_rotation_lock_unlink(self, *args, **kwargs):
+        if self.name == "rotation.lock":
+            raise OSError("synthetic lock cleanup failure")
+        return original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(records_path), "unlink", fail_rotation_lock_unlink)
+
+    report = rotate_execution_gate_records(
+        roots,
+        max_records=10,
+        max_age_days=14,
+        now=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "warning"
+    assert report["lock_cleanup_error"] == "synthetic lock cleanup failure"
+
+
 def test_resolve_execution_gate_permit_validates_lane_risk_and_boundary(tmp_path):
     store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
     store.initialize()

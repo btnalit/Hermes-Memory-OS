@@ -284,3 +284,60 @@ def test_runner_requires_boundary_report_true_still_expects_report(tmp_path):
     # must still result in boundary_unobserved
     assert records[1]["postcheck"]["postcheck_boundary_observed"] is False
     assert records[1]["postcheck"].get("postcheck_boundary_not_required") is not True
+
+
+def test_execution_gate_runner_updates_sidecar_index_for_cron_permit(tmp_path):
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    runner = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_execution_gate_runner.py"
+    shutil.copy2(runner, scripts_dir / "memory_os_execution_gate_runner.py")
+    (scripts_dir / "indexed_helper.py").write_text("print('ok')\n", encoding="utf-8")
+    hermes_home = tmp_path / "home"
+    registry_path = hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.cron_registry.v0",
+                "specs": [
+                    {
+                        "key": "indexed_helper",
+                        "name": "memory-os-indexed-helper",
+                        "raw_script": "indexed_helper.py",
+                        "wrapper_script": "memory_os_cron_indexed_gate.py",
+                        "lane_id": "indexed_lane",
+                        "helper_kind": "local_helper",
+                        "no_agent": True,
+                        "requires_boundary_report": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(scripts_dir / "memory_os_execution_gate_runner.py"),
+            "--registry-key",
+            "indexed_helper",
+            "--hermes-home",
+            str(hermes_home),
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0
+    records_path = hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    index_path = hermes_home / "memory-os" / "system" / "execution_gate_index.json"
+    records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
+    permit = records[0]
+    completion = records[1]
+    assert completion["execution_gate_envelope_id"] == permit["execution_gate_envelope_id"]
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    entry = index[permit["execution_gate_envelope_id"]]
+    assert entry["lane_id"] == "indexed_lane"
+    assert entry["completion_count"] == 1

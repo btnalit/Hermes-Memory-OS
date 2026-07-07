@@ -221,6 +221,33 @@ def test_runtime_heartbeat_attempt_state_errors_are_audited(tmp_path, monkeypatc
     assert entries[0]["details"]["message"] == "synthetic attempt-state failure"
 
 
+def test_runtime_heartbeat_error_audit_failure_writes_fallback_diagnostic(tmp_path, monkeypatch):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+
+    def fail_read_events():
+        raise RuntimeError("synthetic event read failure")
+
+    def fail_append_audit(*args, **kwargs):
+        raise OSError("synthetic audit write failure")
+
+    monkeypatch.setattr(store, "read_events", fail_read_events)
+    monkeypatch.setattr("plugins.memory.memory_os.runtime.append_audit", fail_append_audit)
+
+    try:
+        MemoryOSRuntime(store).heartbeat(now=datetime(2026, 5, 23, 1, tzinfo=timezone.utc))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("heartbeat should re-raise the original failure")
+
+    fallback_path = tmp_path / "memory-os" / "runtime" / "heartbeat_error_fallback.json"
+    fallback = json.loads(fallback_path.read_text(encoding="utf-8"))
+    assert fallback["error_record"]["error_code"] == "runtime_heartbeat_error"
+    assert fallback["audit_error_type"] == "OSError"
+    assert fallback["audit_error_message"] == "synthetic audit write failure"
+
+
 def test_runtime_heartbeat_indexes_new_events_without_duplicates(tmp_path):
     provider = load_memory_provider("memory_os")
     provider.initialize("session-1", hermes_home=str(tmp_path), platform="cli", agent_identity="main")

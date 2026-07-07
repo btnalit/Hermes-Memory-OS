@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -356,8 +357,25 @@ class MemoryOSRuntime:
                 target=str(self.store.roots.memory_os_root),
                 details=details,
             )
-        except Exception:
-            pass
+        except Exception as audit_exc:
+            self._write_heartbeat_error_fallback(error_record, audit_exc)
+
+    def _write_heartbeat_error_fallback(self, error_record: dict[str, Any], audit_exc: Exception) -> None:
+        fallback = {
+            "schema_version": "memory-os.runtime_heartbeat_error_fallback.v0",
+            "error_record": error_record,
+            "audit_error_type": type(audit_exc).__name__,
+            "audit_error_message": str(audit_exc)[:200],
+        }
+        try:
+            write_json_atomic(self.store.roots.memory_os_root / "runtime" / "heartbeat_error_fallback.json", fallback)
+        except Exception as fallback_exc:
+            print(
+                "Memory-OS heartbeat error audit and fallback write failed: "
+                f"audit={type(audit_exc).__name__}:{str(audit_exc)[:120]} "
+                f"fallback={type(fallback_exc).__name__}:{str(fallback_exc)[:120]}",
+                file=sys.stderr,
+            )
 
 
 def _working_item_count(store: MemoryOSStore) -> int:

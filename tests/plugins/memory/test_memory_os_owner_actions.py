@@ -84,6 +84,32 @@ def _jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def test_rendered_digest_records_audit_when_edge_error_record_write_fails(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    store.roots.index_path.parent.mkdir(parents=True, exist_ok=True)
+    store.roots.index_path.write_text("not a sqlite database", encoding="utf-8")
+    audit_calls = []
+
+    def fail_append_jsonl(path, record):
+        raise OSError("synthetic error-record write failure")
+
+    def capture_append_audit(*args, **kwargs):
+        audit_calls.append(kwargs)
+
+    monkeypatch.setattr(owner_actions_module, "_append_jsonl", fail_append_jsonl)
+    monkeypatch.setattr(owner_actions_module, "append_audit", capture_append_audit)
+
+    owner_actions_module._rendered_digest_text(
+        {"action_required": [], "review_suggested": [], "fyi": []},
+        store=store,
+    )
+
+    assert audit_calls
+    assert audit_calls[-1]["action"] == "owner_digest_error_record_failed"
+    assert audit_calls[-1]["status"] == "warning"
+    assert audit_calls[-1]["details"]["error_record_write_error_type"] == "OSError"
+
+
 def _review_command(rendered, anchor: str, action_type: str) -> str:
     for items in (rendered.get("sections") or {}).values():
         for item in items:

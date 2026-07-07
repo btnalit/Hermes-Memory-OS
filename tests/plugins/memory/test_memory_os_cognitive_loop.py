@@ -2,6 +2,8 @@ import argparse
 import json
 from datetime import datetime, timezone
 
+import pytest
+
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -201,6 +203,97 @@ def test_cognitive_loop_skips_right_brain_downstream_when_signal_unchanged(tmp_p
     assert spontaneous["spontaneous_decision"] == "no_draft"
     assert spontaneous["spontaneous_sent"] is False
     assert second["boundaries"]["actual_send"] is False
+
+
+def test_spontaneous_expression_completes_execution_gate_envelope(tmp_path, monkeypatch):
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_rate_limit.under_speak_limit",
+        lambda _deliveries, *, max_per_hour: True,
+    )
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule.read_delivery_records",
+        lambda self: [],
+    )
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule._resolve_owner_channel",
+        lambda self: "telegram:owner",
+    )
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule.evaluate_expression_draft",
+        lambda self, draft, *, channel, delivery_tier: {
+            "decision": "blocked",
+            "actual_send": False,
+            "delivery_id": "",
+            "channel": channel,
+        },
+    )
+
+    result = runner._spontaneous_expression(
+        {
+            "wandering_mind": {"expression_draft": {"draft_id": "draft_1", "text": "hello"}},
+            "grounded_expression_judge_result": {"decision": "advisory_ok", "verdict_class": "grounded"},
+        }
+    )
+
+    envelope_id = result["execution_gate_envelope_id"]
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "memory-os" / "system" / "execution_gate_envelopes.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    stages = [record["stage"] for record in records if record["execution_gate_envelope_id"] == envelope_id]
+    assert stages == ["permit", "completion"]
+    assert records[-1]["execution_status"] == "ok"
+
+
+def test_spontaneous_expression_completes_execution_gate_envelope_on_delivery_error(tmp_path, monkeypatch):
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_rate_limit.under_speak_limit",
+        lambda _deliveries, *, max_per_hour: True,
+    )
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule.read_delivery_records",
+        lambda self: [],
+    )
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule._resolve_owner_channel",
+        lambda self: "telegram:owner",
+    )
+
+    def fail_delivery(self, draft, *, channel, delivery_tier):
+        raise RuntimeError("synthetic delivery failure")
+
+    monkeypatch.setattr(
+        "plugins.modules.expression.speak_gate.SpeakGateModule.evaluate_expression_draft",
+        fail_delivery,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic delivery failure"):
+        runner._spontaneous_expression(
+            {
+                "wandering_mind": {"expression_draft": {"draft_id": "draft_1", "text": "hello"}},
+                "grounded_expression_judge_result": {"decision": "advisory_ok", "verdict_class": "grounded"},
+            }
+        )
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "memory-os" / "system" / "execution_gate_envelopes.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert [record["stage"] for record in records] == ["permit", "completion"]
+    assert records[-1]["execution_status"] == "error"
+    assert records[-1]["result_summary"]["error_type"] == "RuntimeError"
 
 
 def test_cognitive_loop_continues_after_step_failure(tmp_path, monkeypatch):

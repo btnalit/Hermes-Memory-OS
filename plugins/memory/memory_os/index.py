@@ -1324,12 +1324,12 @@ def _write_edge_canonical(roots: MemoryOSRoots, edge: dict) -> bool:
 
     Returns True on success, False on error.
     """
-    from .jsonl_io import append_jsonl
+    from .jsonl_io import append_jsonl_locked
     from .audit import append_audit
     edges_path = roots.memory_os_root / "graph" / "edges.jsonl"
     try:
         edges_path.parent.mkdir(parents=True, exist_ok=True)
-        append_jsonl(edges_path, edge, ensure_parent=False)
+        append_jsonl_locked(edges_path, edge, ensure_parent=False, durable=True)
         append_audit(
             roots.audit_path,
             action="edge_canonical_written",

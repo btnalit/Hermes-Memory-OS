@@ -202,6 +202,7 @@ def _append_permit(
         "permit_reason": "boundary_true" if boundary_true else "boundary_false",
     }
     _append_jsonl(_records_path(hermes_home), record)
+    _update_sidecar_index(hermes_home, envelope_id, "permit", record)
     return record
 
 
@@ -228,35 +229,34 @@ def _append_completion(
     else:
         observed = helper_report.get("schema_version") == HELPER_REPORT_SCHEMA_VERSION
         boundary_not_required = False
-    _append_jsonl(
-        _records_path(hermes_home),
-        {
-            "schema_version": SCHEMA_VERSION,
-            "stage": "completion",
-            "execution_gate_envelope_id": envelope_id,
-            "created_at": now.isoformat().replace("+00:00", "Z"),
-            "profile": os.environ.get("HERMES_PROFILE") or "default",
-            "lane_id": lane_id,
-            "execution_status": execution_status,
-            "postcheck": {
-                "returncode": returncode,
-                "boundary": boundary,
-                "postcheck_boundary_observed": observed,
-                "postcheck_boundary_not_required": boundary_not_required,
-                "helper_report_schema_version": str(helper_report.get("schema_version") or ""),
-                "smoke_mode": smoke_mode,
-            },
-            "postcheck_boundary_true": _any_boundary_true(boundary),
-            "result_summary": {
-                "returncode": returncode,
-                **(
-                    helper_report.get("result_summary")
-                    if isinstance(helper_report.get("result_summary"), dict)
-                    else {}
-                ),
-            },
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "stage": "completion",
+        "execution_gate_envelope_id": envelope_id,
+        "created_at": now.isoformat().replace("+00:00", "Z"),
+        "profile": os.environ.get("HERMES_PROFILE") or "default",
+        "lane_id": lane_id,
+        "execution_status": execution_status,
+        "postcheck": {
+            "returncode": returncode,
+            "boundary": boundary,
+            "postcheck_boundary_observed": observed,
+            "postcheck_boundary_not_required": boundary_not_required,
+            "helper_report_schema_version": str(helper_report.get("schema_version") or ""),
+            "smoke_mode": smoke_mode,
         },
-    )
+        "postcheck_boundary_true": _any_boundary_true(boundary),
+        "result_summary": {
+            "returncode": returncode,
+            **(
+                helper_report.get("result_summary")
+                if isinstance(helper_report.get("result_summary"), dict)
+                else {}
+            ),
+        },
+    }
+    _append_jsonl(_records_path(hermes_home), record)
+    _update_sidecar_index(hermes_home, envelope_id, "completion", record)
 
 
 def _records_path(hermes_home: Path) -> Path:
@@ -290,6 +290,42 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _update_sidecar_index(hermes_home: Path, envelope_id: str, stage: str, record: dict[str, Any]) -> None:
+    """Keep the ExecutionGate O(1) sidecar index in sync for cron-wrapper permits."""
+    index_path = hermes_home / "memory-os" / "system" / "execution_gate_index.json"
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        loaded = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+    except json.JSONDecodeError:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        loaded = {}
+    entry = loaded.get(envelope_id, {})
+    if not isinstance(entry, dict):
+        entry = {}
+    entry["envelope_id"] = envelope_id
+    if stage == "permit":
+        entry.update(
+            {
+                "permit_decision": record.get("permit_decision"),
+                "lane_id": record.get("lane_id"),
+                "risk_class": record.get("risk_class"),
+                "scope_hash": record.get("scope_hash"),
+                "permit_created_at": record.get("created_at"),
+                "permit_expires_at": record.get("expires_at"),
+                "boundary_true": record.get("boundary_true", False),
+            }
+        )
+    elif stage == "completion":
+        entry["completion_count"] = int(entry.get("completion_count") or 0) + 1
+        entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
+        entry["completed_at"] = record.get("created_at")
+    loaded[envelope_id] = entry
+    tmp_path = index_path.with_name(f".{index_path.name}.tmp")
+    tmp_path.write_text(json.dumps(loaded, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp_path, index_path)
 
 
 def _any_boundary_true(value: Any) -> bool:
