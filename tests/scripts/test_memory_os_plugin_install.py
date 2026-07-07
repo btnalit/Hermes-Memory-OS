@@ -453,6 +453,9 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert by_name["memory-os-hindsight-advisory-digest"]["deliver"] == "local"
     assert by_name["memory-os-hindsight-advisory-digest"]["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
     assert by_name["memory-os-hindsight-advisory-digest"]["no_agent"] is True
+    assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
+    assert home.joinpath("scripts", "memory_os_cron_hindsight_advisory_digest_gate.py").is_file()
+    assert home.joinpath("scripts", "memory_os_hindsight_advisory_digest.py").is_file()
 
 
 def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
@@ -498,6 +501,9 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
     }
+    by_name = {job["name"]: job for job in jobs}
+    assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
+    assert home.joinpath("scripts", "memory_os_cron_hindsight_advisory_digest_gate.py").is_file()
 
 
 def test_installer_runs_owner_cron_onboarding_after_shell_enable(tmp_path, monkeypatch):
@@ -1091,6 +1097,18 @@ if args[:3] == ["memory-os-agent-os", "review", "render-digest"]:
 if args[:2] == ["cron", "create"]:
     def value(flag):
         return args[args.index(flag) + 1] if flag in args else ""
+    positionals = []
+    i = 2
+    while i < len(args):
+        if args[i] in {"--name", "--deliver", "--script"}:
+            i += 2
+        elif args[i] == "--no-agent":
+            i += 1
+        else:
+            positionals.append(args[i])
+            i += 1
+    schedule = positionals[0] if positionals else ""
+    prompt = positionals[1] if len(positionals) > 1 else ""
     jobs_path = home / "cron" / "jobs.json"
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
     loaded = json.loads(jobs_path.read_text(encoding="utf-8")) if jobs_path.exists() else {"jobs": []}
@@ -1104,7 +1122,9 @@ if args[:2] == ["cron", "create"]:
             "deliver": value("--deliver"),
             "script": value("--script"),
             "no_agent": "--no-agent" in args,
-            "prompt": args[-1],
+            "schedule_display": schedule,
+            "schedule": {"kind": "cron", "expr": schedule},
+            "prompt": prompt,
         }
     )
     jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")

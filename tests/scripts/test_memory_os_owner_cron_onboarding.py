@@ -39,6 +39,18 @@ if args[:3] == ["memory-os-agent-os", "review", "render-digest"]:
 if args[:2] == ["cron", "create"]:
     def value(flag):
         return args[args.index(flag) + 1] if flag in args else ""
+    positionals = []
+    i = 2
+    while i < len(args):
+        if args[i] in {"--name", "--deliver", "--script"}:
+            i += 2
+        elif args[i] == "--no-agent":
+            i += 1
+        else:
+            positionals.append(args[i])
+            i += 1
+    schedule = positionals[0] if positionals else ""
+    prompt = positionals[1] if len(positionals) > 1 else ""
     jobs_path = home / "cron" / "jobs.json"
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
     if jobs_path.exists():
@@ -54,7 +66,9 @@ if args[:2] == ["cron", "create"]:
         "deliver": value("--deliver"),
         "script": value("--script"),
         "no_agent": "--no-agent" in args,
-        "prompt": args[-1],
+        "schedule_display": schedule,
+        "schedule": {"kind": "cron", "expr": schedule},
+        "prompt": prompt,
     }
     jobs.append(job)
     jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
@@ -236,6 +250,10 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert index_sync["raw_script"] == "memory_os_index_sync.py"
     assert index_sync["deliver"] == "local"
     assert index_sync["no_agent"] is True
+    hindsight = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-hindsight-advisory-digest"][0]
+    assert hindsight["schedule"] == "20 2 * * 0"
+    assert hindsight["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
+    assert hindsight["raw_script"] == "memory_os_hindsight_advisory_digest.py"
     for job in report["operational_cron_jobs"]:
         assert home.joinpath("scripts", job["script"]).is_file(), job["script"]
     assert not home.joinpath("cron", "jobs.json").exists()
@@ -357,6 +375,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-hindsight-advisory-digest"]["deliver"] == "local"
     assert by_name["memory-os-hindsight-advisory-digest"]["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
     assert by_name["memory-os-hindsight-advisory-digest"]["no_agent"] is True
+    assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
     assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
     assert by_name["memory-os-right-brain-expression-outcome"]["script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
     assert by_name["memory-os-right-brain-expression-outcome"]["no_agent"] is True
