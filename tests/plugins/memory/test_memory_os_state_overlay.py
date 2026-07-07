@@ -192,6 +192,66 @@ class TestBuildStateOverlay:
         assert isinstance(overlay, dict)
         assert overlay["schema_version"] == STATE_OVERLAY_SCHEMA_VERSION
 
+    def test_build_overlay_filters_compaction_and_prior_context_noise(self, tmp_path):
+        roots = _make_roots(tmp_path)
+        _write_last_session_anchor(
+            roots,
+            session_id="sess-noise",
+            foreground=(
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted\n"
+                "Earli... compacted summary residue that should be removed\n"
+                "[PRIOR CONTEXT — for reference only; not a new message]\n"
+                "Real follow-up: verify BGE-M3 runs on CPU"
+            ),
+            ended_at="2026-07-06T10:00:00+00:00",
+        )
+        store = _make_store(roots)
+
+        overlay = build_state_overlay(
+            store,
+            roots,
+            current_task_anchor=(
+                "[System note: The following is recalled memory context, NOT new user input.]\n"
+                "### Current Foreground Task\n"
+                "Fix State Overlay cleaning"
+            ),
+        )
+        rendered = json.dumps(overlay, ensure_ascii=False)
+
+        assert "CONTEXT COMPACTION" not in rendered
+        assert "PRIOR CONTEXT" not in rendered
+        assert "System note:" not in rendered
+        assert "Earlier turns" not in rendered
+        assert "Earli..." not in rendered
+        assert "Real follow-up: verify BGE-M3 runs on CPU" in rendered
+        assert "Fix State Overlay cleaning" in rendered
+
+    def test_build_overlay_filters_document_upload_boilerplate(self, tmp_path):
+        roots = _make_roots(tmp_path)
+        stats_path = roots.memory_os_root / "system" / "event_stats.json"
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        stats_path.write_text(json.dumps({
+            "recent_event_summaries": [
+                {
+                    "kind": "conversation_turn",
+                    "summary": (
+                        "[The user sent a text document: 'memory-os-plan.md'. "
+                        "Its content has been included below. The file is also saved at: /tmp/doc.md]"
+                    ),
+                },
+                {"kind": "conversation_turn", "summary": "Useful event: overlay filter added"},
+            ],
+        }), encoding="utf-8")
+        store = _make_store(roots)
+
+        overlay = build_state_overlay(store, roots)
+        rendered = json.dumps(overlay, ensure_ascii=False)
+
+        assert "The user sent a text document" not in rendered
+        assert "Its content has been included below" not in rendered
+        assert "file is also saved" not in rendered
+        assert "Useful event: overlay filter added" in rendered
+
 
 # ── I/O tests ────────────────────────────────────────────────────────
 

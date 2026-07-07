@@ -215,6 +215,102 @@ class TestBuildEmbedder:
                               _store_root=tmp_path / "nonexistent")
         assert result is True
 
+    def test_build_embedder_forces_cpu_even_when_online_device_override_is_cuda(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Memory-OS vector/embedder paths must never load BGE-M3 on GPU.
+
+        Production can contain stale/custom ``vector_embedder_device=cuda``
+        overrides from earlier gateway/batch split experiments.  The online
+        Memory-OS embedding path must clamp that to CPU so prefetch cannot
+        trigger a second CUDA BGE-M3 load on a 4GB GPU.
+        """
+        import json
+
+        from plugins.memory.memory_os.embedder import LocalEmbedder, build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        home = tmp_path / ".hermes"
+        roots = MemoryOSRoots.from_hermes_home(str(home), profile="test")
+        system_root = roots.memory_os_root / "system"
+        system_root.mkdir(parents=True, exist_ok=True)
+        (system_root / "knob_overrides.jsonl").write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in [
+                    {
+                        "schema_version": "memory-os.knob_override.v0",
+                        "id": "ko_vector_enabled",
+                        "knob": "vector_retrieval_enabled",
+                        "override_value": True,
+                        "state": "confirmed",
+                        "ts": "2026-07-07T00:00:00Z",
+                    },
+                    {
+                        "schema_version": "memory-os.knob_override.v0",
+                        "id": "ko_online_cuda",
+                        "knob": "vector_embedder_device",
+                        "override_value": "cuda",
+                        "state": "confirmed",
+                        "ts": "2026-07-07T00:00:01Z",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(LocalEmbedder, "is_available", lambda self: True)
+
+        embedder = build_embedder(roots, batch=False)
+
+        assert embedder is not None
+        assert embedder._device == "cpu"
+
+    def test_build_embedder_forces_cpu_even_when_batch_device_override_is_cuda(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Batch/index-sync embedding also stays on CPU regardless of overrides."""
+        import json
+
+        from plugins.memory.memory_os.embedder import LocalEmbedder, build_embedder
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        home = tmp_path / ".hermes"
+        roots = MemoryOSRoots.from_hermes_home(str(home), profile="test")
+        system_root = roots.memory_os_root / "system"
+        system_root.mkdir(parents=True, exist_ok=True)
+        (system_root / "knob_overrides.jsonl").write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in [
+                    {
+                        "schema_version": "memory-os.knob_override.v0",
+                        "id": "ko_vector_enabled",
+                        "knob": "vector_retrieval_enabled",
+                        "override_value": True,
+                        "state": "confirmed",
+                        "ts": "2026-07-07T00:00:00Z",
+                    },
+                    {
+                        "schema_version": "memory-os.knob_override.v0",
+                        "id": "ko_batch_cuda",
+                        "knob": "vector_embedder_batch_device",
+                        "override_value": "cuda",
+                        "state": "confirmed",
+                        "ts": "2026-07-07T00:00:01Z",
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(LocalEmbedder, "is_available", lambda self: True)
+
+        embedder = build_embedder(roots, batch=True)
+
+        assert embedder is not None
+        assert embedder._device == "cpu"
+
 
 class TestVectorEdgeThresholdKnobs:
     """D4: vector_edge thresholds read from knobs, not hardcoded constants."""

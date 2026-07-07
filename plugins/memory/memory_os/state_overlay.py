@@ -8,6 +8,7 @@ derived projection, not a source of truth.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -21,6 +22,35 @@ from .store import MemoryOSStore
 
 if TYPE_CHECKING:
     from .roots import MemoryOSRoots
+
+
+_NOISE_LINE_MARKERS = (
+    "CONTEXT COMPACTION",
+    "CONTEXT COMPACT",
+    "COMPACTION SUMMARY BELOW",
+    "PRIOR CONTEXT",
+    "END OF PRIOR CONTEXT",
+    "System note:",
+    "recalled memory context, NOT new user input",
+    "Earlier turns were compacted",
+    "Earlier turns were compacted into",
+    "The user sent a text document:",
+    "Its content has been included below",
+    "The file is also saved at:",
+    "file is also saved at:",
+    "<memory-context>",
+    "</memory-context>",
+)
+
+_INLINE_NOISE_BLOCK_RE = re.compile(
+    r"\[(?:PRIOR CONTEXT|END OF PRIOR CONTEXT|CONTEXT COMPACTION|CONTEXT COMPACT)[^\]]*\]",
+    re.IGNORECASE,
+)
+
+_COMPACTION_RESIDUE_RE = re.compile(
+    r"(?:Earlier turns were compacted[^\n]*|Earli\.\.\.[^\n]*)",
+    re.IGNORECASE,
+)
 
 
 def build_state_overlay(
@@ -46,7 +76,7 @@ def build_state_overlay(
     overlay = StateOverlay.create(profile=roots.profile)
 
     # ── active_projects: from current task anchor ──────────────────
-    task_text = str(current_task_anchor).strip()
+    task_text = _clean_overlay_text(current_task_anchor)
     if task_text:
         # Extract the first meaningful line (skip markdown headers)
         lines = task_text.split("\n")
@@ -75,7 +105,7 @@ def build_state_overlay(
     )
 
     for i, session in enumerate(last_sessions):
-        foreground = str(session.get("foreground_summary", "")).strip()
+        foreground = _clean_overlay_text(session.get("foreground_summary", ""))
         session_id = str(session.get("session_id", ""))[:12]
         if foreground:
             if i == 0:
@@ -110,7 +140,7 @@ def build_state_overlay(
                 for s in summaries:
                     if not isinstance(s, dict):
                         continue
-                    summary = str(s.get("summary", "")).strip()
+                    summary = _clean_overlay_text(s.get("summary", ""))
                     if summary and added < max_recent_events:
                         overlay.recent_events.data.append(
                             OverlayEntry(
@@ -131,6 +161,9 @@ def build_state_overlay(
     # ── owner_preferences: from crystallized kind=preference ───────
     pref_entries = _read_preference_crystallized(roots.crystallized_root)
     for text, ref_id in pref_entries:
+        text = _clean_overlay_text(text)
+        if not text:
+            continue
         overlay.owner_preferences.data.append(
             OverlayEntry(
                 text=text[:200],
@@ -180,6 +213,35 @@ def append_overlay_run(roots: "MemoryOSRoots", run: dict[str, Any]) -> Path:
 
 
 # ── Internal helpers ─────────────────────────────────────────────────
+
+
+def _clean_overlay_text(value: Any, *, max_chars: int = 500) -> str:
+    """Return dialogue-facing overlay text with infrastructure boilerplate removed.
+
+    State Overlay is fed by session anchors, compaction summaries, uploaded
+    document notices, and event summaries.  Those sources often contain system
+    scaffolding that is useful for storage/debugging but harmful when mirrored
+    into model context.  This cleaner is intentionally deterministic and
+    conservative: it removes known Hermes boilerplate lines/blocks, preserves
+    ordinary user/task content, and returns an empty string when nothing useful
+    remains.
+    """
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = _INLINE_NOISE_BLOCK_RE.sub("", text)
+    text = _COMPACTION_RESIDUE_RE.sub("", text)
+    cleaned_lines: list[str] = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if any(marker in line for marker in _NOISE_LINE_MARKERS):
+            continue
+        if line.startswith("[") and line.endswith("]") and "document" in line.lower():
+            continue
+        cleaned_lines.append(line)
+    cleaned = " ".join(cleaned_lines)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_chars]
 
 
 def _read_last_session_anchors(

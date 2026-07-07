@@ -149,10 +149,10 @@ def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
     vector_embedder_device from the knob override store. Returns None
     when vector retrieval is disabled or the embedder is unavailable.
 
-    When *batch* is True, reads vector_embedder_batch_device for device
-    selection.  Both knobs default to ``"cpu"``; set them independently
-    when online and batch jobs need different devices (e.g. online=cpu,
-    batch=cuda:0).
+    When *batch* is True, the legacy vector_embedder_batch_device knob is
+    read for audit/compatibility but not honored.  Memory-OS embedding and
+    vector retrieval always instantiate on CPU; CUDA belongs to the gateway /
+    model-serving path, not Memory-OS vector jobs on 4GB GPUs.
 
     This is the single entry point for all embedder instantiation —
     replaces ad-hoc ``LocalEmbedder()`` calls across the codebase.
@@ -192,17 +192,22 @@ def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
         default="paraphrase-multilingual-MiniLM-L12-v2",
         roots=roots,
     )
-    device = resolve_knob(
+    # Memory-OS embedding/vector retrieval is forced to CPU on this code path.
+    # Earlier production overrides split online gateway CUDA from batch CPU, but
+    # online prefetch can still instantiate a second BGE-M3 model and OOM 4GB GPUs.
+    # Keep reading legacy knobs for audit/compatibility, but do not honor GPU
+    # devices here; gateway/model-serving CUDA belongs outside Memory-OS vectors.
+    resolve_knob(
         "vector_embedder_device",
         default="cpu",
         roots=roots,
     )
     if batch:
-        batch_device = resolve_knob(
+        resolve_knob(
             "vector_embedder_batch_device",
             default="cpu",
             roots=roots,
         )
-        device = batch_device
-    emb = LocalEmbedder(model_name=str(model), device=str(device))
+    device = "cpu"
+    emb = LocalEmbedder(model_name=str(model), device=device)
     return emb if emb.is_available() else None

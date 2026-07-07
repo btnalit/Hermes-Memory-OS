@@ -209,6 +209,7 @@ class MemoryOSRuntime:
             }
         )
         index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
+        approved_crystallized_record_count = int(index_counts.get("crystallized_records", 0) or 0)
         report = {
             "schema_version": "memory-os.heartbeat.v0",
             "processed_event_count": len(processed_now),
@@ -224,7 +225,9 @@ class MemoryOSRuntime:
             "total_event_count": len(events),
             "working_item_count": _working_item_count(self.store),
             "candidate_count": len(read_candidate_queue(self.store.roots)),
-            "crystallized_record_count": _crystallized_record_count(self.store),
+            "crystallized_record_count": approved_crystallized_record_count,
+            "approved_crystallized_record_count": approved_crystallized_record_count,
+            "legacy_markdown_record_block_count": _legacy_markdown_record_block_count(self.store),
             "index_counts": index_counts,
             "decayed_documents": decayed_documents,
             "pruned_working_items": pruned_total,
@@ -398,7 +401,14 @@ def _bounded_session_mirror_auto_apply(report: dict[str, Any]) -> dict[str, Any]
     }
 
 
-def _crystallized_record_count(store: MemoryOSStore) -> int:
+def _legacy_markdown_record_block_count(store: MemoryOSStore) -> int:
+    """Count raw markdown frontmatter blocks for legacy observability.
+
+    This is intentionally *not* the public crystallized record count: it can
+    include inactive/revoked legacy records and malformed historical probes. The
+    authoritative approved record count is the indexed ``crystallized_records``
+    count populated with the same active-frontmatter parser used by search.
+    """
     count = 0
     for path in sorted(store.roots.crystallized_root.glob("*.md")):
         count += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip() == "---") // 2

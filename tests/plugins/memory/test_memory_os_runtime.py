@@ -12,6 +12,7 @@ from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.schema import EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.cli import build_status_report, _index_health_counts_findings, _index_health_summary
+from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
 
 
 def _event(seed, *, profile="main", source="telegram", kind="conversation_turn", summary=None, safe_ref=None, tags=None):
@@ -234,6 +235,60 @@ def test_runtime_heartbeat_indexes_new_events_without_duplicates(tmp_path):
     assert first["index_counts"]["events"] == 2
     assert second["index_counts"]["events"] == 2
     assert MemoryOSIndex(store.roots).counts()["events"] == 2
+
+
+def test_runtime_heartbeat_uses_approved_crystallized_record_count_not_markdown_blocks(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    active_frontmatter = {
+        "schema_version": "memory-os.crystallized.v0",
+        "id": "cry_active_001",
+        "kind": "preference",
+        "created_at": "2026-07-07T00:00:00+00:00",
+        "approved_by": "owner",
+        "approved_at": "2026-07-07T00:00:01+00:00",
+        "source_event_ids": [],
+        "tags": [],
+        "sensitivity": "private",
+    }
+    revoked_frontmatter = {
+        **active_frontmatter,
+        "id": "cry_revoked_001",
+        "canonical_state": "owner_revoked",
+    }
+    store.append_crystallized_record("owner_approved.md", active_frontmatter, "Active approved memory.")
+    store.append_crystallized_record("owner_approved.md", revoked_frontmatter, "Revoked memory.")
+
+    report = MemoryOSRuntime(store).heartbeat()
+
+    assert report["crystallized_record_count"] == 1
+    assert report["approved_crystallized_record_count"] == 1
+    assert report["index_counts"]["crystallized_records"] == 1
+    assert report["legacy_markdown_record_block_count"] == 2
+
+
+def test_cognitive_loop_boundary_report_uses_approved_crystallized_count(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+    active_frontmatter = {
+        "schema_version": "memory-os.crystallized.v0",
+        "id": "cry_active_002",
+        "kind": "preference",
+        "created_at": "2026-07-07T00:00:00+00:00",
+        "approved_by": "owner",
+        "approved_at": "2026-07-07T00:00:01+00:00",
+        "source_event_ids": [],
+        "tags": [],
+        "sensitivity": "private",
+    }
+    store.append_crystallized_record("owner_approved.md", active_frontmatter, "Active approved memory.")
+    MemoryOSIndex(store.roots).rebuild_from_store(store)
+
+    report = CognitiveLoopRunner(store)._doctor_boundary_report({})
+
+    assert report["crystallized_record_count"] == 1
+    assert report["approved_crystallized_record_count"] == 1
+    assert report["legacy_crystallized_file_count"] == 1
 
 
 def test_runtime_heartbeat_indexes_candidates_separately_from_crystallized_records(tmp_path):

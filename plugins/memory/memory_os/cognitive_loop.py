@@ -11,6 +11,7 @@ from uuid import uuid4
 from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import read_candidate_queue
 from plugins.memory.memory_os.execution_gate import start_execution_gate_envelope
+from plugins.memory.memory_os.index import MemoryOSIndex
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.signal_source_registry import signal_source_specs
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -1203,12 +1204,16 @@ class CognitiveLoopRunner:
         )
 
     def _doctor_boundary_report(self, context: dict[str, Any]) -> dict[str, Any]:
+        index_counts = MemoryOSIndex(self.store.roots).counts()
+        approved_crystallized_record_count = int(index_counts.get("crystallized_records", 0) or 0)
         return {
             "schema_version": "memory-os.cognitive_loop.boundary_report.v0",
             "status": "ok",
             "event_count": len(self.store.read_events()),
             "candidate_count": len(read_candidate_queue(self.store)),
-            "crystallized_record_count": _crystallized_record_count(self.store),
+            "crystallized_record_count": approved_crystallized_record_count,
+            "approved_crystallized_record_count": approved_crystallized_record_count,
+            "legacy_crystallized_file_count": _legacy_crystallized_file_count(self.store),
             "boundaries": dict(BOUNDARIES),
         }
 
@@ -1321,7 +1326,13 @@ def _clip(value: str, limit: int) -> str:
     return value if len(value) <= limit else value[:limit] + "...[truncated]"
 
 
-def _crystallized_record_count(store: MemoryOSStore) -> int:
+def _legacy_crystallized_file_count(store: MemoryOSStore) -> int:
+    """Count raw crystallized markdown files for legacy observability only.
+
+    Multiple approved records may live in one file, and inactive/revoked records
+    can share the same directory. Public health fields should use the indexed
+    active approved-record count instead of this filesystem shape count.
+    """
     if not store.roots.crystallized_root.exists():
         return 0
     return len([path for path in store.roots.crystallized_root.glob("*.md") if path.is_file()])
