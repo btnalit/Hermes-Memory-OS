@@ -188,6 +188,7 @@ def build_prefetch(
     memory_sources_config: dict[str, Any] | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
+    recall_facade: object | None = None,  # Phase 3: RetrieverFacade (provider-cached)
 ) -> str:
     router_config = _normalize_context_router_config(context_router_config)
     source_config = normalize_memory_sources_config(memory_sources_config)
@@ -214,6 +215,7 @@ def build_prefetch(
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_config,
             substrate_recall_report=substrate_recall_report,
+            recall_facade=recall_facade,
         )
         report = route_context_sections(
             query,
@@ -394,6 +396,7 @@ def build_prefetch_section_candidates(
     current_task_anchor: str | None = None,
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
+    recall_facade: object | None = None,  # Phase 3: provider-cached RetrieverFacade
 ) -> list[ContextSection]:
     if _should_ground_diagnostic_query(
         query,
@@ -421,6 +424,7 @@ def build_prefetch_section_candidates(
             current_task_anchor=current_task_anchor,
             low_clue_recall_config=low_clue_recall_config,
             substrate_recall_report=substrate_recall_report,
+            recall_facade=recall_facade,
         )
     ]
 
@@ -511,6 +515,7 @@ def _build_prefetch_sections(
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
     error_records: list[dict[str, Any]] | None = None,
+    recall_facade: object | None = None,  # Phase 3: provider-cached RetrieverFacade
 ) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     # Shared dedup set: record_ids emitted by dedicated sections are skipped
@@ -567,6 +572,26 @@ def _build_prefetch_sections(
     # See docstring at _collect_anchor_ids for details.
     _first_anchors = _collect_anchor_ids(query, index)
     _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index, seen=seen))
+
+    # ── Phase 3: Retriever Facade supplementary recall lane ──────────────
+    # When the facade is available, add a composite recall section that
+    # aggregates State Overlay + Indexed FTS results through the unified
+    # facade interface. This is an ADDITION (not replacement) in Phase 3
+    # so the existing sections remain as the fallback baseline.
+    if recall_facade is not None:
+        try:
+            from .recall_types import RecallType
+            results = recall_facade.retrieve(
+                store, query,
+                recall_types=[RecallType.STATE_OVERLAY, RecallType.INDEXED_FTS],
+                top_k=10,
+            )
+            facade_text = recall_facade.format_context(results, budget=800)
+            if facade_text.strip():
+                sections.append(("Recall Facade (unified)", [facade_text]))
+        except Exception:
+            pass  # fail-open: facade failure must not block prefetch
+
     return sections
 
 

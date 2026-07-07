@@ -35,6 +35,8 @@ from .owner_actions import (
     parse_owner_review_reply,
 )
 from .prefetch import build_prefetch, set_fast_path_keywords
+from .recall_facade import RetrieverFacade
+from .recall_types import RecallType
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, IDENTITY_MANIFEST_SCHEMA_VERSION, EventEnvelope
 from .status_tool_contract import (
@@ -74,6 +76,9 @@ class MemoryOSProvider(MemoryProvider):
         self._last_owner_review_reply_result: dict[str, Any] | None = None
         self._last_owner_review_reply_query = ""
         self._embedder = None
+        # ── Phase 3: Retriever Facade (provider-level cache, constraint 1) ─
+        self._recall_facade: RetrieverFacade | None = None
+        self._recall_facade_initialized = False
 
     @property
     def name(self) -> str:
@@ -165,6 +170,39 @@ class MemoryOSProvider(MemoryProvider):
             encoding="utf-8",
         )
 
+    def _ensure_recall_facade(self) -> RetrieverFacade | None:
+        """Lazy-init the RetrieverFacade with registered retrievers.
+
+        Returns None when the facade knob is disabled.  Only initializes
+        once (provider-level cache, constraint 1).  Retriever __init__
+        must not trigger model loading or network calls (constraint 3).
+        """
+        if self._recall_facade_initialized:
+            return self._recall_facade
+
+        from .knob_overrides import resolve_knob as _resolve_knob
+
+        self._recall_facade_initialized = True
+        enabled = _resolve_knob(
+            "prefetch_facade_enabled", default=False, roots=self._roots,
+        )
+        if not enabled:
+            return None
+
+        from .retrievers.state_overlay import StateOverlayRetriever
+        from .retrievers.indexed_fts import IndexedFTSRetriever
+
+        self._recall_facade = RetrieverFacade()
+        try:
+            self._recall_facade.register(StateOverlayRetriever())
+        except Exception:
+            pass  # fail-open: retriever registration failure must not block startup
+        try:
+            self._recall_facade.register(IndexedFTSRetriever())
+        except Exception:
+            pass
+        return self._recall_facade
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._store is None:
             return ""
@@ -202,6 +240,8 @@ class MemoryOSProvider(MemoryProvider):
         else:
             set_fast_path_keywords(None)  # restore module default
         # ────────────────────────────────────────────────────────────────
+        # ── Phase 3: lazy-init facade once, reuse across prefetches ──
+        facade = self._ensure_recall_facade()
         return build_prefetch(
             query,
             budget_chars=int(self._config.get("prefetch_char_budget", 2200)),
@@ -219,6 +259,7 @@ class MemoryOSProvider(MemoryProvider):
             memory_sources_config=self._config.get("memory_sources"),
             low_clue_recall_config=low_clue_raw,
             substrate_recall_report=substrate_recall_report,
+            recall_facade=facade,
         )
 
     def _substrate_recall_report(self, query: str) -> dict[str, Any] | None:

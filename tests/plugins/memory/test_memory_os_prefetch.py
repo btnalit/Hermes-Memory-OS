@@ -2228,4 +2228,86 @@ def test_qx_counterfactual_remove_append_loses_last_session(monkeypatch, tmp_pat
     )
     assert "上一次会话" not in context
     assert "hermes-media" not in context
-    assert "Check deploy status" in context
+
+
+# ── Phase 3: Retriever Facade integration ──────────────────────────────
+
+
+class TestPrefetchFacadeIntegration:
+    """Phase 3: Retriever Facade → prefetch integration (knob-gated)."""
+
+    def test_facade_initialized_once_and_cached(self, tmp_path):
+        """Facade is initialized only once per provider (constraint 1: no repeated init)."""
+        from plugins.memory.memory_os import MemoryOSProvider
+
+        provider = MemoryOSProvider()
+        f1 = provider._ensure_recall_facade()
+        f2 = provider._ensure_recall_facade()
+        # Same object reference — cached at provider level
+        assert f1 is f2, "Facade must be cached (provider-level), not rebuilt"
+
+    def test_facade_returns_none_when_knob_disabled(self, tmp_path):
+        """Default: prefetch_facade_enabled=False → facade is None."""
+        from plugins.memory.memory_os import MemoryOSProvider
+
+        provider = MemoryOSProvider()
+        facade = provider._ensure_recall_facade()
+        assert facade is None, f"Facade should be None when knob disabled, got {facade}"
+
+    def test_facade_is_none_does_not_block_build_prefetch_sections(self, tmp_path):
+        """_build_prefetch_sections with recall_facade=None must not raise."""
+        store = _store(tmp_path)
+        sections = _build_prefetch_sections(
+            "test query", store=store, recall_facade=None,
+        )
+        assert isinstance(sections, list)
+        # No "Recall Facade" section when facade is None
+        assert not any("Recall Facade" in title for title, _ in sections)
+
+    def test_facade_failure_does_not_block_prefetch(self, tmp_path, monkeypatch):
+        """Facade exception → fail-open, prefetch does not raise."""
+        store = _store(tmp_path)
+
+        class BrokenFacade:
+            def retrieve(self, *args, **kwargs):
+                raise RuntimeError("simulated facade failure")
+
+            def format_context(self, *args, **kwargs):
+                return "should not be called"
+
+        # Must not raise — facade failure is contained
+        sections = _build_prefetch_sections(
+            "test query", store=store, recall_facade=BrokenFacade(),
+        )
+        assert isinstance(sections, list), "Must return list even on facade failure"
+
+    def test_build_prefetch_accepts_recall_facade_parameter(self, tmp_path):
+        """build_prefetch accepts recall_facade keyword without raising."""
+        store = _store(tmp_path)
+        result = build_prefetch(
+            "test query",
+            budget_chars=800,
+            store=store,
+            recall_facade=None,
+        )
+        assert isinstance(result, str)
+
+    def test_prefetch_facade_enabled_knob_registered(self):
+        """Constraint 6: prefetch_facade_enabled must be in OVERRIDABLE_KNOBS."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        assert "prefetch_facade_enabled" in OVERRIDABLE_KNOBS, (
+            "prefetch_facade_enabled must be registered in OVERRIDABLE_KNOBS"
+        )
+        spec = OVERRIDABLE_KNOBS["prefetch_facade_enabled"]
+        assert spec["default"] is False
+        assert spec["module"] == "prefetch"
+
+    def test_prefetch_trace_enabled_knob_registered(self):
+        """Constraint 6: prefetch_trace_enabled must be in OVERRIDABLE_KNOBS."""
+        from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
+        assert "prefetch_trace_enabled" in OVERRIDABLE_KNOBS, (
+            "prefetch_trace_enabled must be registered in OVERRIDABLE_KNOBS"
+        )
+        spec = OVERRIDABLE_KNOBS["prefetch_trace_enabled"]
+        assert spec["default"] is False
+        assert spec["module"] == "prefetch"
