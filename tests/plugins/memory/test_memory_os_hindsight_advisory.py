@@ -289,3 +289,151 @@ class TestHindsightCronIntegration:
         data = client.recall(bank_id="bank-a", query="q", budget="low", max_tokens=128)
         assert data == {"results": []}
         assert captured["full_url"] == "http://example.test/v1/default/banks/bank-a/memories/recall"
+
+
+# ── Phase 5: Hindsight Advisory Digest script tests ───────────────────
+
+
+class TestHindsightAdvisoryDigestScript:
+    """Phase 5: weekly advisory digest script (advisory_only=True, fail-open)."""
+
+    def test_advisory_digest_help_works(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[3] / "scripts" / "memory_os_hindsight_advisory_digest.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "advisory" in result.stdout.lower()
+
+    def test_advisory_digest_disabled_when_no_config(self, tmp_path):
+        from scripts.memory_os_hindsight_advisory_digest import run_advisory_digest
+
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True)
+        report = run_advisory_digest(str(home))
+        assert report["status"] == "disabled"
+        assert report["advisory_emitted"] is False
+
+    def test_advisory_digest_disabled_when_reflect_off(self, tmp_path):
+        from scripts.memory_os_hindsight_advisory_digest import run_advisory_digest
+
+        home = tmp_path / ".hermes"
+        (home / "memory-os").mkdir(parents=True)
+        (home / "memory-os" / "config.json").write_text(json.dumps({
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://127.0.0.1:1",
+                    "bank_id": "test-bank",
+                    "api_key": "test-key",
+                    "reflect_enabled": False,
+                }
+            }
+        }))
+        report = run_advisory_digest(str(home), timeout=0.5)
+        assert report["status"] in {"disabled", "unconfigured"}
+        assert report["advisory_emitted"] is False
+
+    def test_advisory_digest_timeout_fail_open(self, tmp_path):
+        """Timeout → fail-open, no crash, advisory_emitted=False."""
+        from scripts.memory_os_hindsight_advisory_digest import run_advisory_digest
+
+        home = tmp_path / ".hermes"
+        (home / "memory-os").mkdir(parents=True)
+        (home / "memory-os" / "config.json").write_text(json.dumps({
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://10.255.255.1:9999",  # non-routable
+                    "bank_id": "test-bank",
+                    "api_key": "test-key",
+                    "reflect_enabled": True,
+                }
+            }
+        }))
+        report = run_advisory_digest(str(home), timeout=0.5)
+        # Should not raise — fail-open
+        assert report["status"] in {"timeout", "error", "unreachable", "unavailable", "unhealthy"}
+
+    def test_advisory_digest_emits_advisory_only(self, tmp_path, monkeypatch):
+        """When reflect succeeds, finding is advisory_only=True."""
+        import scripts.memory_os_hindsight_advisory_digest as digest_module
+
+        home = tmp_path / ".hermes"
+        (home / "memory-os").mkdir(parents=True)
+        (home / "memory-os" / "config.json").write_text(json.dumps({
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://127.0.0.1:1",
+                    "bank_id": "test-bank",
+                    "api_key": "test-key",
+                    "reflect_enabled": True,
+                }
+            }
+        }))
+
+        # Mock _write_advisory_finding to capture what was written
+        written = {}
+
+        def fake_write(hermes_home, content, *, kind="", advisory_only=True):
+            written["content"] = content
+            written["kind"] = kind
+            written["advisory_only"] = advisory_only
+            return Path(hermes_home) / "fake.json"
+
+        monkeypatch.setattr(digest_module, "_write_advisory_finding", fake_write)
+        run_advisory_digest = digest_module.run_advisory_digest
+
+        # Mock GovernedHindsightSubstrate at the import site
+        from plugins.memory.memory_os.substrates import hindsight as hs_module
+
+        class FakeSubstrate:
+            def health(self):
+                from plugins.memory.memory_os.substrates.base import ProviderHealth
+                return ProviderHealth(provider="hindsight", status="ok", capabilities=["reflect"])
+
+            def reflect(self, query="", consumer=""):
+                return {
+                    "provider": "hindsight",
+                    "capability": "reflect",
+                    "status": "ok",
+                    "advisory_only": True,
+                    "response": {"summary": "Memory usage patterns show increased crystallized recall in recent sessions."},
+                }
+
+        original = getattr(hs_module, "GovernedHindsightSubstrate", None)
+        monkeypatch.setattr(hs_module, "GovernedHindsightSubstrate", lambda config, client=None: FakeSubstrate())
+        try:
+            report = run_advisory_digest(str(home), timeout=5.0)
+            assert report["advisory_emitted"] is True
+            assert report["advisory_only"] is True
+            assert written.get("advisory_only") is True
+            assert "Memory usage patterns" in written.get("content", "")
+        finally:
+            if original is not None:
+                monkeypatch.setattr(hs_module, "GovernedHindsightSubstrate", original)
+
+    def test_advisory_digest_script_default_query(self, tmp_path):
+        """Advisory digest script runs with default query without crash."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True)
+
+        script = Path(__file__).resolve().parents[3] / "scripts" / "memory_os_hindsight_advisory_digest.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--hermes-home", str(home), "--output", "json", "--timeout", "0.5"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert "status" in payload
+        assert "advisory_emitted" in payload
