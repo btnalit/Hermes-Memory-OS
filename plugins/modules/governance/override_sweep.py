@@ -175,9 +175,8 @@ class OverrideSweepModule:
         # Record run
         self.module_root.mkdir(parents=True, exist_ok=True)
         runs_record = {key: value for key, value in result.items()}
-        with self.runs_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(runs_record, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
+        append_jsonl_locked(self.runs_path, runs_record)
 
         # Audit
         audit_path = Path(self.hermes_home) / "memory-os" / "system" / "write_audit.jsonl"

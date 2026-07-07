@@ -1,9 +1,11 @@
 """Governance modules."""
 
-from .confidence_router import ConfidenceRouterModule, confidence_router_manifest
-from .crystallized_revalidator import CrystallizedRevalidatorModule, crystallized_revalidator_manifest
+from .candidate_aggregation import candidate_aggregation_manifest, run_candidate_aggregation_lane
 from .candidate_review import CandidateReviewModule, FeaturePreRouter, candidate_review_manifest
 from .cascade_routing_policy import CascadeRoutingPolicyModule, cascade_routing_policy_manifest
+from .confidence_router import ConfidenceRouterModule, confidence_router_manifest
+from .crystallized_revalidator import CrystallizedRevalidatorModule, crystallized_revalidator_manifest
+from .fact_judge import fact_judge_manifest, read_fact_judge_verdicts, run_fact_judge_lane
 from .feedback_bridge import GovernanceFeedbackBridgeModule, governance_feedback_manifest
 from .ground_truth_miner import GroundTruthMinerModule, ground_truth_miner_manifest
 from .judge_calibration import JudgeCalibrationMonitor, judge_calibration_manifest
@@ -47,4 +49,9 @@ __all__ = [
     "proposal_queue_manifest",
     "shadow_recall_manifest",
     "self_evolution_manifest",
+    "candidate_aggregation_manifest",
+    "fact_judge_manifest",
+    "read_fact_judge_verdicts",
+    "run_candidate_aggregation_lane",
+    "run_fact_judge_lane",
 ]

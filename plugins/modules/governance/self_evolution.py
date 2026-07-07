@@ -415,16 +415,14 @@ class SelfEvolutionGovernorModule:
         return self.digest_path
 
     def _write_report(self, result: dict[str, Any]) -> None:
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
         self.reports_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.reports_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(result, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(self.reports_path, result)
 
     def _write_agenda_candidate(self, candidate: dict[str, Any]) -> None:
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
         self.agenda_candidates_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.agenda_candidates_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(candidate, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(self.agenda_candidates_path, candidate)
 
     def _result(
         self,

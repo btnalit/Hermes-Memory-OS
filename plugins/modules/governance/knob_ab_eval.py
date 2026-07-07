@@ -217,9 +217,8 @@ class KnobABEvalModule:
 
         # Record run
         self.module_root.mkdir(parents=True, exist_ok=True)
-        with self.runs_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(result, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
+        append_jsonl_locked(self.runs_path, result)
 
         return result
 

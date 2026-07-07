@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .audit import append_audit
-from .index import write_governed_edge
 
 
 # Dice coefficient threshold for body-text similarity — above this is
@@ -291,7 +290,7 @@ def run_structural_proposer(
                 if dedup_key in dedup_keys or dedup_key in existing_edges:
                     continue
                 dedup_keys.add(dedup_key)
-                if index:
+                if index and hasattr(index, "write_governed_edge"):
                     result = index.write_governed_edge(**candidate)
                     if result:
                         proposed += 1

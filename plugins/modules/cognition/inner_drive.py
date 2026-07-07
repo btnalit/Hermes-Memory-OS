@@ -144,6 +144,14 @@ class InnerDriveRuntimeModule:
         lock_ttl_seconds: int = 300,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        """Run one tick of inner-drive processing. **[DEPRECATED]**
+
+        This method was designed for a module-based scheduler that was never
+        built. In production, MemoryOSRuntime.heartbeat() uses InnerDriveEngine
+        directly via runtime.py. This method is only used by test suites and is
+        retained for backward compatibility. New code should use
+        MemoryOSRuntime.heartbeat() instead.
+        """
         if max_events <= 0:
             raise ValueError("max_events must be positive")
         schedule = coordinator or ScheduleCoordinator(self.lock_root)

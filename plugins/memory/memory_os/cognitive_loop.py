@@ -228,6 +228,11 @@ class CognitiveLoopRunner:
             ("grounded_expression_judge", self._grounded_expression_judge),
             ("spontaneous_expression", self._spontaneous_expression),
             ("self_evolution", self._self_evolution),
+            # DESIGN NOTE: Each edge proposer step creates a fresh
+            # MemoryOSIndex(store.roots) instance. MemoryOSIndex.__init__ is O(1)
+            # — it only stores roots and does not open database connections.
+            # Per-step creation ensures each proposer gets a clean index reference
+            # without cross-step state leakage. This is intentional.
             ("structural_edge_proposer", self._structural_edge_proposer),
             ("crystallization_gate", self._crystallization_gate),
             ("llm_edge_proposer", self._llm_edge_proposer),
@@ -1050,7 +1055,14 @@ class CognitiveLoopRunner:
         try:
             from .knob_overrides import resolve_knob as _resolve_knob
             enabled = _resolve_knob("entity_index_enabled", default=False, roots=self.store.roots)
-        except Exception:
+        except Exception as exc:
+            append_audit(
+                self.store.roots.audit_path,
+                action="entity_index_knob_resolution_failed",
+                status="error",
+                target="entity_index",
+                details={"error": str(exc)},
+            )
             return {"status": "skipped", "reason": "knob_resolution_failed"}
 
         if not enabled:

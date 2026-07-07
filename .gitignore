@@ -40,3 +40,4 @@ docs/resolver/
 *.patch
 scripts/prod_check*.py
 scripts/p1a_step2_*.py
+*.diff

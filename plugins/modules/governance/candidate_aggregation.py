@@ -12,6 +12,11 @@ TASK ANCHOR compliance (see 56-lanes/candidate_aggregation/TASK_ANCHOR.md):
   A5 — Heuristics drive presentation (-> owner_eligible), never crystallization.
   A6 — All writes via StructuralWriteGate or direct append_governed-equivalent.
   A7 — Runs within existing cognitive_loop / ExecutionGate / monitor framework.
+
+DESIGN INTENT: This module runs as a cron lane (56-lanes/candidate_aggregation),
+NOT inside the cognitive loop's 40-step warm-path. The cognitive loop focuses on
+perception and judgment; candidate aggregation is a separate governance rhythm
+that operates on the accumulated queue. See TASK_ANCHOR.md for lane contracts.
 """
 
 from __future__ import annotations
@@ -33,6 +38,34 @@ from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.store import MemoryOSStore
 
 # V3a: knob override resolution (imported here; resolve_knob called at runtime)
+
+
+def candidate_aggregation_manifest() -> dict[str, Any]:
+    """Return the v0.1 Candidate Aggregation module manifest."""
+    return {
+        "name": "candidate_aggregation",
+        "kind": "governance",
+        "version": "0.1.0",
+        "layer": "L3",
+        "dependencies": {
+            "required": ["memory_os >=0.1.0", "execution_gate", "fact_judge"],
+        },
+        "provides": {
+            "commands": ["run_candidate_aggregation_lane"],
+            "schedules": ["candidate_aggregation"],
+            "reads": [
+                "memory_os.crystallized.candidates",
+                "memory_os.crystallized.triage",
+            ],
+            "writes": ["memory_os.crystallized.triage"],
+            "consumed_by": ["owner_actions", "monitor"],
+        },
+        "defaults": {
+            "enabled": True,
+            "profile_scope": "per-profile",
+        },
+    }
+
 
 # ── Keyword sets (heuristics, not crystallization rules) ────────────────
 
@@ -506,8 +539,20 @@ def _cluster_and_promote(
     try:
         from plugins.modules.governance.fact_judge import read_fact_judge_verdicts
         durable_verdicts = read_fact_judge_verdicts(store)
-    except Exception:
-        pass  # Fail-open: if verdicts can't be read, no bypass (safe default)
+    except Exception as exc:
+        # Fail-open: if verdicts can't be read, no bypass (safe default).
+        # Secondary try/except guards against audit write failure on the
+        # error-recovery path — the lane must not crash because of audit IO.
+        try:
+            append_audit(
+                store.roots.audit_path,
+                action="candidate_aggregation_fact_judge_read_failed",
+                status="warning",
+                target="fact_judge_verdicts",
+                details={"error": str(exc)},
+            )
+        except Exception:
+            pass
 
     if durable_verdicts:
         for c in candidates_for_promote:

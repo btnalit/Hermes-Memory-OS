@@ -321,16 +321,14 @@ class OpsGateModule:
         }
 
     def _append_report(self, report: dict[str, Any]) -> None:
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
         self.reports_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.reports_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(report, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(self.reports_path, report)
 
     def _append_run(self, run: dict[str, Any]) -> None:
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
         self.runs_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.runs_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(run, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(self.runs_path, run)
 
 
 def _looks_like_production_target(target: str) -> bool:

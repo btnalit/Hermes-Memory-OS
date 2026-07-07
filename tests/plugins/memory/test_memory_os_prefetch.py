@@ -2307,12 +2307,13 @@ class TestPrefetchFacadeIntegration:
         assert spec["default"] is False
         assert spec["module"] == "prefetch"
 
-    def test_prefetch_trace_enabled_knob_registered(self):
-        """Constraint 6: prefetch_trace_enabled must be in OVERRIDABLE_KNOBS."""
+    def test_prefetch_trace_knob_removed(self):
+        """Constraint 6 (revised): prefetch_trace_enabled was a dead knob —
+        never resolved in production code. It has been removed from
+        OVERRIDABLE_KNOBS. This test guards against accidental re-registration
+        of dead configuration surface."""
         from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS
-        assert "prefetch_trace_enabled" in OVERRIDABLE_KNOBS, (
-            "prefetch_trace_enabled must be registered in OVERRIDABLE_KNOBS"
+        assert "prefetch_trace_enabled" not in OVERRIDABLE_KNOBS, (
+            "prefetch_trace_enabled was removed as a dead knob; "
+            "do not re-register without a production resolve_knob() consumer"
         )
-        spec = OVERRIDABLE_KNOBS["prefetch_trace_enabled"]
-        assert spec["default"] is False
-        assert spec["module"] == "prefetch"

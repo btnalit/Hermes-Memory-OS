@@ -368,8 +368,8 @@ class TestRegisterOverrideDedup:
         # resolve_knob returns _SENTINEL (no active override), _SENTINEL !=
         # value → write proceeds normally.
         result = register_override(
-            "moment_provisional_ttl_days", 5,
-            prior=3, proposed_by="test", approved_via="test",
+            "max_provisional", 50,
+            prior=30, proposed_by="test", approved_via="test",
             expires_at=expires, _now=now, _store_root=tmp_path,
         )
         assert result["state"] == "active"

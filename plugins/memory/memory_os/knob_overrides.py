@@ -3,6 +3,12 @@
 Boundary is machine-enforced: knobs not in OVERRIDABLE_KNOBS cannot be
 overridden. The store is a single JSONL file under the memory-os system
 directory. resolve_knob() is deterministic — no LLM on the hot path (INV-5).
+
+DESIGN EXEMPTION: The knob overrides store is explicitly un-gated by
+StructuralWriteGate. Knob overrides are configuration artifacts, not runtime
+state. They are protected by their own validation (allowed values, bounds,
+AB metrics) and the owner approval workflow. Adding StructuralWriteGate
+overhead to configuration paths would introduce circular dependencies.
 """
 from __future__ import annotations
 
@@ -203,14 +209,6 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": "promotion_rate",
     },
-    "moment_provisional_ttl_days": {
-        "module": "crystallized",
-        "default": 3,
-        "bounds": [1, 14],
-        "meta": False,
-        "scope": "upper_layer",
-        "ab_metric": "moment_ttl_days",
-    },
     "recent_cross_session_enabled": {
         "module": "prefetch",
         "default": True,
@@ -271,15 +269,6 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
     },
     # ── Phase 3: Retriever Facade integration knobs ─────────────────────
     "prefetch_facade_enabled": {
-        "module": "prefetch",
-        "default": False,
-        "kind": "lane_switch",
-        "allowed": [True, False],
-        "meta": False,
-        "scope": "upper_layer",
-        "ab_metric": None,
-    },
-    "prefetch_trace_enabled": {
         "module": "prefetch",
         "default": False,
         "kind": "lane_switch",
