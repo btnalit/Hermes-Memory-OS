@@ -226,7 +226,126 @@ class TestBuildStateOverlay:
         assert "Real follow-up: verify BGE-M3 runs on CPU" in rendered
         assert "Fix State Overlay cleaning" in rendered
 
-    def test_build_overlay_filters_document_upload_boilerplate(self, tmp_path):
+    # ── Candidate open threads tests ──────────────────────────────────
+
+    def test_build_overlay_with_candidates_populates_open_threads(self, tmp_path):
+        """owner_eligible candidates within 7 days appear in open_threads."""
+        roots = _make_roots(tmp_path)
+        now_ts = "2026-07-07T10:00:00+00:00"
+        candidates_path = roots.crystallized_root / "candidates.jsonl"
+        candidates_path.write_text(
+            json.dumps({
+                "candidate_id": "cand-001",
+                "canonical_state": "owner_eligible",
+                "summary": "Implement vector decoupling for embedder",
+                "last_updated": now_ts,
+            }) + "\n" +
+            json.dumps({
+                "candidate_id": "cand-002",
+                "canonical_state": "owner_eligible",
+                "summary": "Fix heartbeat count alignment issue",
+                "last_updated": now_ts,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        store = _make_store(roots)
+        overlay = build_state_overlay(store, roots)
+        assert len(overlay["open_threads"]["data"]) >= 1
+        assert overlay["open_threads"]["status"] == "ok"
+        candidate_entries = [
+            e for e in overlay["open_threads"]["data"]
+            if e["source_kind"] == "candidate"
+        ]
+        assert len(candidate_entries) >= 1
+        texts = " ".join(e["text"] for e in candidate_entries)
+        assert "vector decoupling" in texts or "heartbeat" in texts
+
+    def test_candidates_outside_7_day_window_filtered_out(self, tmp_path):
+        """Candidates older than 7 days must be excluded (constraint 2: safe default)."""
+        roots = _make_roots(tmp_path)
+        old_ts = "2026-06-01T10:00:00+00:00"  # >7 days ago
+        candidates_path = roots.crystallized_root / "candidates.jsonl"
+        candidates_path.write_text(
+            json.dumps({
+                "candidate_id": "stale-001",
+                "canonical_state": "owner_eligible",
+                "summary": "Stale candidate from last month",
+                "last_updated": old_ts,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        store = _make_store(roots)
+        overlay = build_state_overlay(store, roots)
+        candidate_entries = [
+            e for e in overlay["open_threads"]["data"]
+            if e["source_kind"] == "candidate"
+        ]
+        assert len(candidate_entries) == 0, f"Stale candidate should be excluded, got: {candidate_entries}"
+
+    def test_candidates_non_owner_eligible_filtered_out(self, tmp_path):
+        """Only canonical_state=owner_eligible candidates enter open_threads."""
+        roots = _make_roots(tmp_path)
+        now_ts = "2026-07-07T10:00:00+00:00"
+        candidates_path = roots.crystallized_root / "candidates.jsonl"
+        candidates_path.write_text(
+            json.dumps({
+                "candidate_id": "cand-fleeting",
+                "canonical_state": "fleeting",
+                "summary": "Fleeting candidate should not appear",
+                "last_updated": now_ts,
+            }) + "\n" +
+            json.dumps({
+                "candidate_id": "cand-discard",
+                "canonical_state": "owner_discard",
+                "summary": "Discarded candidate should not appear",
+                "last_updated": now_ts,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        store = _make_store(roots)
+        overlay = build_state_overlay(store, roots)
+        candidate_entries = [
+            e for e in overlay["open_threads"]["data"]
+            if e["source_kind"] == "candidate"
+        ]
+        assert len(candidate_entries) == 0
+
+    def test_candidates_file_missing_no_crash(self, tmp_path):
+        """Missing candidates.jsonl must not crash build_state_overlay (fail-open)."""
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        # No candidates.jsonl written — must not raise
+        overlay = build_state_overlay(store, roots)
+        assert isinstance(overlay, dict)
+        assert overlay["schema_version"] == STATE_OVERLAY_SCHEMA_VERSION
+
+    def test_candidates_merge_with_session_threads(self, tmp_path):
+        """Candidates and last-session threads merge into open_threads."""
+        roots = _make_roots(tmp_path)
+        # Write last session anchor
+        _write_last_session_anchor(roots, session_id="sess-001",
+                                   foreground="Fixed anchor pollution bug",
+                                   ended_at="2026-07-06T10:00:00+00:00")
+        # Write candidate
+        now_ts = "2026-07-07T10:00:00+00:00"
+        candidates_path = roots.crystallized_root / "candidates.jsonl"
+        candidates_path.write_text(
+            json.dumps({
+                "candidate_id": "cand-001",
+                "canonical_state": "owner_eligible",
+                "summary": "Implement vector decoupling",
+                "last_updated": now_ts,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        store = _make_store(roots)
+        overlay = build_state_overlay(store, roots)
+        # Both sources contribute
+        source_kinds = {e["source_kind"] for e in overlay["open_threads"]["data"]}
+        assert "last_session" in source_kinds, "Session threads must be present"
+        assert "candidate" in source_kinds, "Candidate threads must be present"
+
+    def test_build_overlay_with_document_upload_boilerplate(self, tmp_path):
         roots = _make_roots(tmp_path)
         stats_path = roots.memory_os_root / "system" / "event_stats.json"
         stats_path.parent.mkdir(parents=True, exist_ok=True)
@@ -280,6 +399,93 @@ class TestWriteStateOverlay:
             record = json.loads(line)
             assert record["status"] == "ok"
             assert "ts" in record
+
+    # ── Quality JSON tests ────────────────────────────────────────────
+
+    def test_write_state_overlay_creates_quality_json(self, tmp_path):
+        """write_state_overlay must also write quality.json alongside current.json."""
+        roots = _make_roots(tmp_path)
+        overlay = StateOverlay.create(profile="test")
+        overlay.active_projects.data.append(
+            OverlayEntry(text="Active task", source="ta:1", source_kind="task_anchor"))
+        overlay.active_projects.status = "ok"
+        overlay.open_threads.data.append(
+            OverlayEntry(text="Open thread", source="cand:1", source_kind="candidate"))
+        overlay.open_threads.status = "ok"
+        out_path = write_state_overlay(roots, overlay.to_dict())
+        quality_path = out_path.parent / "quality.json"
+        assert quality_path.exists(), f"quality.json must exist at {quality_path}"
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        assert quality["schema_version"] == "memory-os.state_overlay_quality.v0"
+        assert "generated_at" in quality
+        assert "sections" in quality
+
+    def test_quality_json_section_statuses(self, tmp_path):
+        """quality.json sections dict reflects each overlay section status."""
+        roots = _make_roots(tmp_path)
+        overlay = StateOverlay.create(profile="test")
+        overlay.active_projects.status = "ok"
+        overlay.open_threads.status = "insufficient_data"
+        out_path = write_state_overlay(roots, overlay.to_dict())
+        quality_path = out_path.parent / "quality.json"
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        assert quality["sections"]["active_projects"] == "ok"
+        assert quality["sections"]["open_threads"] == "insufficient_data"
+
+    def test_quality_json_counts_open_threads_and_recent_events(self, tmp_path):
+        """quality.json records accurate entry counts."""
+        roots = _make_roots(tmp_path)
+        overlay = StateOverlay.create(profile="test")
+        overlay.open_threads.data = [
+            OverlayEntry(text="t1", source="s1", source_kind="candidate"),
+            OverlayEntry(text="t2", source="s2", source_kind="last_session"),
+        ]
+        overlay.open_threads.status = "ok"
+        overlay.recent_events.data = [
+            OverlayEntry(text="e1", source="s3", source_kind="event"),
+        ]
+        overlay.recent_events.status = "ok"
+        out_path = write_state_overlay(roots, overlay.to_dict())
+        quality_path = out_path.parent / "quality.json"
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        assert quality["open_threads_count"] == 2
+        assert quality["recent_events_count"] == 1
+
+    def test_quality_json_stale_sections(self, tmp_path):
+        """stale_sections lists sections with insufficient_data status."""
+        roots = _make_roots(tmp_path)
+        overlay = StateOverlay.create(profile="test")
+        # Most sections remain insufficient_data (default) — only one populated
+        overlay.active_projects.data.append(
+            OverlayEntry(text="Only active section", source="ta:1", source_kind="task_anchor"))
+        overlay.active_projects.status = "ok"
+        out_path = write_state_overlay(roots, overlay.to_dict())
+        quality_path = out_path.parent / "quality.json"
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        assert len(quality["stale_sections"]) >= 1
+        assert "identity_snapshot" in quality["stale_sections"]
+
+    def test_quality_json_private_body_always_false(self, tmp_path):
+        """private_body_printed must never be true — overlay never prints raw event bodies."""
+        roots = _make_roots(tmp_path)
+        overlay = StateOverlay.create(profile="test").to_dict()
+        out_path = write_state_overlay(roots, overlay)
+        quality_path = out_path.parent / "quality.json"
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        assert quality["private_body_printed"] is False
+
+    def test_quality_json_source_refs_count(self, tmp_path):
+        """source_refs_count tallies all entries with a source field."""
+        roots = _make_roots(tmp_path)
+        overlay = StateOverlay.create(profile="test")
+        overlay.active_projects.data.append(
+            OverlayEntry(text="t1", source="ta:1", source_kind="task_anchor"))
+        overlay.open_threads.data.append(
+            OverlayEntry(text="t2", source="cand:1", source_kind="candidate"))
+        out_path = write_state_overlay(roots, overlay.to_dict())
+        quality_path = out_path.parent / "quality.json"
+        quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        assert quality["source_refs_count"] == 2
 
 
 # ── Renderer tests ───────────────────────────────────────────────────

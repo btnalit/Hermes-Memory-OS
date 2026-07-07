@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -126,6 +126,22 @@ def build_state_overlay(
                 )
             )
 
+    # ── open_threads: also from candidates.jsonl (owner-eligible, recent) ─
+    candidate_threads = _read_open_threads_from_candidates(
+        roots.crystallized_root, limit=3,
+    )
+    for summary, candidate_id in candidate_threads:
+        cleaned = _clean_overlay_text(summary)
+        if not cleaned:
+            continue
+        overlay.open_threads.data.append(
+            OverlayEntry(
+                text=cleaned[:200],
+                source=f"candidate:{candidate_id}",
+                source_kind="candidate",
+            )
+        )
+
     if overlay.open_threads.data:
         overlay.open_threads.status = "ok"
 
@@ -182,11 +198,14 @@ def write_state_overlay(roots: "MemoryOSRoots", overlay: dict[str, Any]) -> Path
 
     Returns the written path.  The directory is created if missing.
     This is a projection write — it does NOT touch canonical paths.
+
+    Also writes ``quality.json`` with per-section health diagnostics.
     """
     out_dir = roots.memory_os_root / "system" / "state_overlay"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "current.json"
     _atomic_write_json(out_path, overlay)
+    _write_overlay_quality(out_dir, overlay)
     return out_path
 
 
@@ -213,6 +232,92 @@ def append_overlay_run(roots: "MemoryOSRoots", run: dict[str, Any]) -> Path:
 
 
 # ── Internal helpers ─────────────────────────────────────────────────
+
+
+def _read_open_threads_from_candidates(
+    crystallized_root: Path, *, limit: int = 3,
+) -> list[tuple[str, str]]:
+    """Read owner-eligible candidates from ``candidates.jsonl`` as open thread hints.
+
+    Filters to records with ``canonical_state=owner_eligible`` and
+    ``last_updated`` within the last 7 days.  Returns up to *limit*
+    ``(summary, candidate_id)`` tuples, sorted by recency.
+
+    Fail-open: missing file, parse errors, malformed records → empty list.
+    (Constraint 2: default parameters must never be data-loss traps.)
+    """
+    candidates_path = crystallized_root / "candidates.jsonl"
+    if not candidates_path.exists():
+        return []
+    threads: list[tuple[str, str, float]] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    try:
+        for line in candidates_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                c = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(c, dict):
+                continue
+            if c.get("canonical_state") != "owner_eligible":
+                continue
+            # Parse last_updated for recency filter
+            ts_str = str(c.get("last_updated", c.get("ts", "")))
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                continue
+            if ts < cutoff:
+                continue
+            summary = str(c.get("summary") or c.get("body", "")[:200]).strip()
+            if summary:
+                candidate_id = str(c.get("candidate_id", ""))
+                threads.append((summary, candidate_id, ts.timestamp()))
+    except OSError:
+        return []  # fail-open
+    # Sort by recency descending
+    threads.sort(key=lambda t: t[2], reverse=True)
+    return [(summary, cid) for summary, cid, _ts in threads[:limit]]
+
+
+def _write_overlay_quality(out_dir: Path, overlay: dict[str, Any]) -> None:
+    """Write ``quality.json`` with per-section health diagnostics.
+
+    Fail-open: OS errors are caught silently (quality is advisory, not critical).
+    (Constraint 4: quality written by cron, independent of heartbeat.)
+    """
+    sections: dict[str, str] = {}
+    source_refs_count = 0
+    for key, value in overlay.items():
+        if isinstance(value, dict) and "status" in value and "data" in value:
+            sections[key] = str(value.get("status", "unknown"))
+            data = value.get("data")
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, dict) and entry.get("source"):
+                        source_refs_count += 1
+
+    open_threads_data = overlay.get("open_threads", {}).get("data", [])
+    recent_events_data = overlay.get("recent_events", {}).get("data", [])
+
+    stale_sections = [k for k, v in sections.items() if v == "insufficient_data"]
+
+    quality = {
+        "schema_version": "memory-os.state_overlay_quality.v0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sections": sections,
+        "open_threads_count": len(open_threads_data) if isinstance(open_threads_data, list) else 0,
+        "recent_events_count": len(recent_events_data) if isinstance(recent_events_data, list) else 0,
+        "source_refs_count": source_refs_count,
+        "private_body_printed": False,
+        "stale_sections": stale_sections,
+    }
+    try:
+        _atomic_write_json(out_dir / "quality.json", quality)
+    except OSError:
+        pass  # fail-open — quality loss must not break the system
 
 
 def _clean_overlay_text(value: Any, *, max_chars: int = 500) -> str:
