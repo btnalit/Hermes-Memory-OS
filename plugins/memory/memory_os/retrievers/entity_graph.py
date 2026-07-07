@@ -8,6 +8,10 @@ persistent graph edges.
 
 Implements export A from the Graph V2 architecture:
   entity_index → query-time SQL join → related records with reason.
+
+Phase 2: entity_class soft-weighting applied at retrieval layer.
+Low-weight entities (path=0.4, url=0.5) are de-prioritized in scoring
+but never hard-excluded (constraint 2: safe defaults).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ import json
 from typing import Any, TYPE_CHECKING
 
 from plugins.memory.memory_os.recall_types import RecallObject, RecallType
+from plugins.memory.memory_os.entity_extractor import classify_entity
 
 if TYPE_CHECKING:
     from plugins.memory.memory_os.store import MemoryOSStore
@@ -27,6 +32,10 @@ class EntityGraphRetriever:
     Finds primary matching records via FTS5 (or crystallized markdown
     scan), then joins through the entity_index to surface related
     records with a ``related_reason`` annotation.
+
+    Phase 2: applies entity_class soft-weighting — path/url entities
+    receive lower weight (0.4-0.5) while proper_nouns receive higher
+    weight (0.9).  All entities remain recallable; only ranking changes.
     """
 
     @property
@@ -55,7 +64,10 @@ class EntityGraphRetriever:
             return []
 
         # 2) Query-time join: what records share entities with primary hits?
-        related = query_related_records(db_path, primary_ids, max_results=top_k)
+        #    min_weight=0.3 excludes only truly empty entities
+        related = query_related_records(
+            db_path, primary_ids, max_results=top_k, min_weight=0.3,
+        )
 
         # 3) Read related record bodies from crystallized
         objects: list[RecallObject] = []
@@ -64,16 +76,28 @@ class EntityGraphRetriever:
             body = _read_record_body(roots.crystallized_root, rid)
             if not body:
                 continue
+            entity_class = rel.get("entity_class", "unknown")
+            weight = rel.get("weight", 0.7)
+            # Score: overlap density × entity weight (Phase 2 soft-weighting)
+            base = min(1.0, rel["overlap_count"] / 5.0)
+            score = round(base * weight, 3)
+            shared_entity = rel["shared_entity"]
+            related_reason = (
+                f"shared_entity={shared_entity}"
+                + (f" ({entity_class}, w={weight})" if entity_class != "unknown" else "")
+            )
             objects.append(RecallObject(
                 recall_type=RecallType.ENTITY_GRAPH.value,
                 content=body[:300],
-                score=min(1.0, rel["overlap_count"] / 5.0),
+                score=score,
                 source_ref=f"entity_graph:{rid}",
                 metadata={
                     "related_record_id": rid,
-                    "shared_entity": rel["shared_entity"],
-                    "related_reason": rel["related_reason"],
+                    "shared_entity": shared_entity,
+                    "related_reason": related_reason,
                     "overlap_count": rel["overlap_count"],
+                    "entity_class": entity_class,
+                    "weight": weight,
                     "primary_ids": primary_ids[:3],
                 },
             ))
@@ -93,7 +117,14 @@ class EntityGraphRetriever:
         for obj in objects:
             reason = obj.metadata.get("related_reason", "")
             shared = obj.metadata.get("shared_entity", "")
-            tag = f" [{shared}]" if shared else ""
+            entity_class = obj.metadata.get("entity_class", "")
+            # Include entity_class for path-noise visibility
+            tag_parts = []
+            if shared:
+                tag_parts.append(shared)
+            if entity_class and entity_class != "unknown":
+                tag_parts.append(entity_class)
+            tag = f" [{' | '.join(tag_parts)}]" if tag_parts else ""
             lines.append(f"-{tag} {obj.content[:200]}")
         return "\n".join(lines)
 

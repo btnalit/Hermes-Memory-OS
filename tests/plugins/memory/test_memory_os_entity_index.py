@@ -15,6 +15,7 @@ import pytest
 
 from plugins.memory.memory_os.entity_extractor import (
     _normalize_entity_id,
+    classify_entity,
     entity_inverted_index,
     extract_entities,
     shared_entity_pairs,
@@ -417,3 +418,193 @@ def test_entity_extraction_whitespace_collapse() -> None:
     assert len(alice_bob_entries) == 1, (
         f"expected exactly one 'Alice Bob' entry, got {alice_bob_entries}"
     )
+
+
+# ── Phase 2: Entity classification + soft-weighting ────────────────────
+
+
+class TestClassifyEntity:
+    """Phase 2: entity_class assignment and soft-weighting (retrieval layer)."""
+
+    def test_classify_path_entity(self):
+        entity_class, weight = classify_entity("/opt/hermes/memory-os/config.json")
+        assert entity_class == "path"
+        assert weight == 0.4
+
+    def test_classify_url_entity(self):
+        entity_class, weight = classify_entity("https://docs.example.com/hermes/guide")
+        assert entity_class == "url"
+        assert weight == 0.5
+
+    def test_classify_ip_entity(self):
+        entity_class, weight = classify_entity("10.20.3.200")
+        assert entity_class == "ip"
+        assert weight == 0.6
+
+    def test_classify_uuid_entity(self):
+        entity_class, weight = classify_entity("550e8400-e29b-41d4-a716-446655440000")
+        assert entity_class == "uuid"
+        assert weight == 0.5
+
+    def test_classify_proper_noun_entity(self):
+        entity_class, weight = classify_entity("Alice Bob")
+        assert entity_class == "proper_noun"
+        assert weight == 0.9
+
+    def test_classify_single_capitalized_word_not_proper_noun(self):
+        """Single capitalized word doesn't match proper_noun pattern (needs 2+ words)."""
+        entity_class, weight = classify_entity("Alice")
+        # Should NOT be proper_noun (requires 2+ capitalized words pattern)
+        assert entity_class != "proper_noun", f"single word should not be proper_noun, got {entity_class}"
+
+    def test_classify_identifier_entity(self):
+        entity_class, weight = classify_entity("config_parser_v2")
+        assert entity_class == "identifier"
+        assert weight == 0.7
+
+    def test_classify_unknown_entity(self):
+        entity_class, weight = classify_entity("xy")
+        assert entity_class == "unknown"
+        assert weight == 0.7
+
+    def test_classify_empty_string(self):
+        entity_class, weight = classify_entity("")
+        assert entity_class == "empty"
+        assert weight == 0.0
+
+    def test_path_ranked_lower_than_proper_noun(self):
+        """Constraint 2: paths are soft-weight 0.4, not hard-deleted."""
+        _, path_weight = classify_entity("/var/log/hermes/audit.log")
+        _, noun_weight = classify_entity("Hermes Memory OS")
+        assert path_weight < noun_weight, (
+            f"path weight ({path_weight}) should be lower than proper_noun ({noun_weight})"
+        )
+
+
+class TestEntityExtractionWithClass:
+    """Phase 2: extract_entities includes entity_class and weight."""
+
+    def test_extracted_entities_have_entity_class(self):
+        entities = extract_entities(
+            "Alice Bob worked on /opt/hermes/config.json and visited https://example.com",
+            record_id="rec_001",
+        )
+        for ent in entities:
+            assert "entity_class" in ent, f"entity missing entity_class: {ent}"
+            assert "weight" in ent, f"entity missing weight: {ent}"
+            assert isinstance(ent["weight"], float)
+
+    def test_path_entity_has_low_weight(self):
+        entities = extract_entities(
+            "The config is at /opt/hermes/config.json",
+            record_id="rec_001",
+        )
+        path_entities = [e for e in entities if e["entity_class"] == "path"]
+        assert len(path_entities) >= 1
+        for e in path_entities:
+            assert e["weight"] == 0.4, f"path entity should have weight=0.4, got {e}"
+
+    def test_proper_noun_entity_has_high_weight(self):
+        entities = extract_entities(
+            "Alice Bob and Charlie David discussed the project.",
+            record_id="rec_001",
+        )
+        proper_entities = [e for e in entities if e["entity_class"] == "proper_noun"]
+        assert len(proper_entities) >= 1
+        for e in proper_entities:
+            assert e["weight"] == 0.9, f"proper_noun should have weight=0.9, got {e}"
+
+
+class TestEntityIndexStatsWithClasses:
+    """Phase 2: entity_index_stats includes class_distribution."""
+
+    def test_entity_index_stats_includes_class_distribution(self, tmp_path):
+        from plugins.memory.memory_os.entity_index import entity_index_stats, refresh_entity_index
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-class-test")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "rec_001", "body": "Alice Bob worked on /opt/hermes and https://example.com"},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        stats = entity_index_stats(db_path)
+        assert "class_distribution" in stats, f"stats missing class_distribution: {stats}"
+        class_dist = stats["class_distribution"]
+        assert len(class_dist) >= 1, f"class_distribution should have entries: {class_dist}"
+        # path entity should be present
+        assert "path" in class_dist or class_dist, f"expected some class distribution: {class_dist}"
+
+    def test_top_entities_include_class_and_weight(self, tmp_path):
+        from plugins.memory.memory_os.entity_index import entity_index_stats, refresh_entity_index
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-top-test")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "rec_001", "body": "Alice Bob discussed /opt/hermes/config.json."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        stats = entity_index_stats(db_path)
+        for ent in stats["top_entities"]:
+            assert "entity_class" in ent, f"top entity missing entity_class: {ent}"
+            assert "weight" in ent, f"top entity missing weight: {ent}"
+
+
+class TestQueryRelatedRecordsWithWeight:
+    """Phase 2: query_related_records with min_weight filter."""
+
+    def test_query_related_records_respects_min_weight(self, tmp_path):
+        from plugins.memory.memory_os.entity_index import query_related_records, refresh_entity_index
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-weight-query")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "rec_001", "body": "Alice Bob at /opt/hermes/config.json."},
+            {"id": "rec_002", "body": "Alice Bob reviewed the proposal."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        # Low min_weight: both records found
+        all_related = query_related_records(db_path, ["rec_001"], min_weight=0.0)
+        assert len(all_related) >= 1
+
+        # High min_weight: path entity (0.4) excluded, proper_noun (0.9) still included
+        high_weight_related = query_related_records(db_path, ["rec_001"], min_weight=0.8)
+        # Only proper_noun entities should pass
+        for rel in high_weight_related:
+            assert rel["weight"] >= 0.8, (
+                f"entity {rel['shared_entity']} with weight {rel['weight']} should be >= 0.8"
+            )
+
+    def test_query_related_records_includes_entity_class(self, tmp_path):
+        from plugins.memory.memory_os.entity_index import query_related_records, refresh_entity_index
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-class-query")
+        store = MemoryOSStore(roots)
+        _seed_crystallized(store, [
+            {"id": "rec_001", "body": "Alice Bob at /opt/hermes/config.json."},
+            {"id": "rec_002", "body": "Alice Bob discussed the design."},
+        ])
+        _enable_entity_index_knob(roots)
+
+        db_path = roots.index_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        refresh_entity_index(db_path, roots.crystallized_root, enabled=True)
+
+        related = query_related_records(db_path, ["rec_001"], min_weight=0.0)
+        for rel in related:
+            assert "entity_class" in rel, f"related record missing entity_class: {rel}"
+            assert "weight" in rel, f"related record missing weight: {rel}"

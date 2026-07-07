@@ -47,6 +47,37 @@ def _normalize_entity_id(entity_text: str) -> str:
     return f"ent_{digest}"
 
 
+# ── Entity classification (Phase 2: retrieval-layer soft weighting) ─────
+
+_ENTITY_CLASS_RULES: list[tuple[str, str, float]] = [
+    (r"^/[a-zA-Z0-9/._\-\[\]]+(?:/[a-zA-Z0-9/._\-\[\]]*)*$", "path", 0.4),
+    (r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "ip", 0.6),
+    (r"\bhttps?://[^\s<>\"{}|\\^`\[\]]+", "url", 0.5),
+    (r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b", "uuid", 0.5),
+    (r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", "proper_noun", 0.9),
+    (r"\b[A-Za-z_][A-Za-z0-9_]*[A-Z0-9]\b", "identifier", 0.7),
+]
+
+
+def classify_entity(entity_text: str) -> tuple[str, float]:
+    """Classify an entity string and return its (entity_class, weight).
+
+    Rules are checked in order — the first match wins.  Entities that
+    match no rule default to ``("unknown", 0.7)``.
+
+    This is a retrieval-layer function: it does NOT require DDL changes
+    to the entity_index table.  (Constraint 2: soft-weighting does not
+    hard-delete entities — all entities remain recallable, just ranked.)
+    """
+    text = entity_text.strip()
+    if not text:
+        return ("empty", 0.0)
+    for pattern, class_name, weight in _ENTITY_CLASS_RULES:
+        if re.search(pattern, text):
+            return (class_name, weight)
+    return ("unknown", 0.7)
+
+
 def extract_entities(body: str, *, record_id: str = "") -> list[dict[str, Any]]:
     """Extract entities from a crystallized record body.
 
@@ -71,12 +102,15 @@ def extract_entities(body: str, *, record_id: str = "") -> list[dict[str, Any]]:
         if eid in seen:
             return
         seen.add(eid)
+        entity_class, weight = classify_entity(text)
         entities.append({
             "entity_id": eid,
             "entity_text": text,
             "record_id": record_id,
             "role": role,
             "proposed_by": "structural",
+            "entity_class": entity_class,
+            "weight": weight,
         })
 
     # Paths
