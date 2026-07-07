@@ -40,7 +40,7 @@ from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightConfi
 from scripts.memory_os_hindsight_health_probe import _read_hindsight_config
 
 
-def _get_hindsight_client(config: GovernedHindsightConfig) -> Any | None:
+def _get_hindsight_client(config: GovernedHindsightConfig, *, timeout: float = 5.0) -> Any | None:
     """Build a Hindsight HTTP client from config. Returns None if not configured."""
     if not config.api_url or not config.api_key:
         return None
@@ -49,7 +49,7 @@ def _get_hindsight_client(config: GovernedHindsightConfig) -> Any | None:
         return HindsightHttpClient(
             api_url=config.api_url,
             api_key=config.api_key,
-            timeout=5.0,
+            timeout=timeout,
         )
     except Exception:
         return None

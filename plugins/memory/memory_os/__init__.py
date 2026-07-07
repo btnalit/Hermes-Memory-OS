@@ -182,11 +182,12 @@ class MemoryOSProvider(MemoryProvider):
 
         from .knob_overrides import resolve_knob as _resolve_knob
 
-        self._recall_facade_initialized = True
         enabled = _resolve_knob(
             "prefetch_facade_enabled", default=False, roots=self._roots,
         )
         if not enabled:
+            # Flag set so subsequent calls skip re-resolution (knob stays off)
+            self._recall_facade_initialized = True
             return None
 
         from .retrievers.state_overlay import StateOverlayRetriever
@@ -203,6 +204,7 @@ class MemoryOSProvider(MemoryProvider):
             self._recall_facade.register(IndexedFTSRetriever())
         except Exception:
             self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
+        self._recall_facade_initialized = True  # set after successful init
         return self._recall_facade
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
