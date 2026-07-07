@@ -235,13 +235,16 @@ def append_overlay_run(roots: "MemoryOSRoots", run: dict[str, Any]) -> Path:
 
 
 def _read_open_threads_from_candidates(
-    crystallized_root: Path, *, limit: int = 3,
+    crystallized_root: Path, *, limit: int = 3, max_lines: int = 500,
 ) -> list[tuple[str, str]]:
     """Read owner-eligible candidates from ``candidates.jsonl`` as open thread hints.
 
     Filters to records with ``canonical_state=owner_eligible`` and
     ``last_updated`` within the last 7 days.  Returns up to *limit*
     ``(summary, candidate_id)`` tuples, sorted by recency.
+
+    *max_lines* caps the number of lines read from the tail of the file
+    to avoid unbounded I/O (code-review fix: tail-cap, constraint 1).
 
     Fail-open: missing file, parse errors, malformed records → empty list.
     (Constraint 2: default parameters must never be data-loss traps.)
@@ -252,7 +255,10 @@ def _read_open_threads_from_candidates(
     threads: list[tuple[str, str, float]] = []
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     try:
-        for line in candidates_path.read_text(encoding="utf-8").splitlines():
+        all_lines = candidates_path.read_text(encoding="utf-8").splitlines()
+        # Only process the tail — candidates are append-only, recent
+        # entries (which we filter for) are at the end.
+        for line in all_lines[-max_lines:]:
             if not line.strip():
                 continue
             try:

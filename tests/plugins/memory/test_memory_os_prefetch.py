@@ -2228,6 +2228,11 @@ def test_qx_counterfactual_remove_append_loses_last_session(monkeypatch, tmp_pat
     )
     assert "上一次会话" not in context
     assert "hermes-media" not in context
+    # Counterfactual: current task anchor must survive foreground-only path
+    # even when Last Session is removed (code-review fix: restored assertion)
+    assert "Check deploy status" in context, (
+        "Current Foreground Task anchor must appear in foreground_task_only mode"
+    )
 
 
 # ── Phase 3: Retriever Facade integration ──────────────────────────────

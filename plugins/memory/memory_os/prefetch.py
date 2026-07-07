@@ -301,6 +301,7 @@ def build_prefetch(
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_config,
         substrate_recall_report=substrate_recall_report,
+        recall_facade=recall_facade,
     )
     if not sections:
         report = route_context_sections(
@@ -578,6 +579,9 @@ def _build_prefetch_sections(
     # aggregates State Overlay + Indexed FTS results through the unified
     # facade interface. This is an ADDITION (not replacement) in Phase 3
     # so the existing sections remain as the fallback baseline.
+    # TODO(Phase 3.1): when facade is enabled and healthy, conditionally
+    #   skip "Memory State Overlay" and "Indexed Recall" sections to avoid
+    #   duplicate content in prefetch context (code-review finding G-1).
     if recall_facade is not None:
         try:
             from .recall_types import RecallType
@@ -589,8 +593,18 @@ def _build_prefetch_sections(
             facade_text = recall_facade.format_context(results, budget=800)
             if facade_text.strip():
                 sections.append(("Recall Facade (unified)", [facade_text]))
-        except Exception:
-            pass  # fail-open: facade failure must not block prefetch
+        except Exception as exc:
+            # fail-open: facade failure must not block prefetch,
+            # but record bounded error for monitor visibility
+            if error_records is not None:
+                error_records.append(build_error_record(
+                    component="prefetch_facade",
+                    operation="retrieve_or_format",
+                    error_code="facade_exception",
+                    severity="warning",
+                    recoverable=True,
+                    details=str(exc)[:200],
+                ))
 
     return sections
 

@@ -36,19 +36,8 @@ else:
 
 from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightConfig
 
-
-def _read_hindsight_config(hermes_home: str) -> dict[str, Any] | None:
-    cfg_path = Path(hermes_home) / "memory-os" / "config.json"
-    if not cfg_path.exists():
-        return None
-    try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    substrates = cfg.get("substrate_providers", {})
-    if not isinstance(substrates, dict):
-        return None
-    return substrates.get("hindsight")
+# Reuse shared config reader from health probe (code-review fix: dedup)
+from scripts.memory_os_hindsight_health_probe import _read_hindsight_config
 
 
 def _get_hindsight_client(config: GovernedHindsightConfig) -> Any | None:

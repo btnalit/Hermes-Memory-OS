@@ -196,11 +196,13 @@ class MemoryOSProvider(MemoryProvider):
         try:
             self._recall_facade.register(StateOverlayRetriever())
         except Exception:
-            pass  # fail-open: retriever registration failure must not block startup
+            # fail-open: registration failure must not block startup;
+            # recorded as suppressed count for monitor visibility
+            self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
         try:
             self._recall_facade.register(IndexedFTSRetriever())
         except Exception:
-            pass
+            self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
         return self._recall_facade
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:

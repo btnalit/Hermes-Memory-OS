@@ -136,11 +136,11 @@ def query_related_records(
     conn.row_factory = sqlite3.Row
     try:
         placeholders = ",".join("?" for _ in record_ids)
-        from .entity_extractor import classify_entity
         rows = conn.execute(
             f"""
             select ei2.record_id,
                    min(ei2.entity_text) as shared_entity,
+                   max(ei2.weight) as max_weight,
                    count(*) as overlap_count
             from entity_index ei1
             join entity_index ei2
@@ -148,10 +148,11 @@ def query_related_records(
              and ei1.record_id != ei2.record_id
             where ei1.record_id in ({placeholders})
             group by ei2.record_id
+            having max(ei2.weight) >= ?
             order by overlap_count desc
             limit ?
             """,
-            (*record_ids, max_results * 2),  # over-fetch then filter by weight
+            (*record_ids, min_weight, max_results),
         ).fetchall()
     except sqlite3.Error:
         conn.close()
@@ -161,9 +162,20 @@ def query_related_records(
     results: list[dict[str, Any]] = []
     for row in rows:
         shared_entity = row["shared_entity"]
-        entity_class, weight = classify_entity(shared_entity)
-        if weight < min_weight:
-            continue
+        weight = float(row["max_weight"])
+        # Derive entity_class from weight for display (match _ENTITY_CLASS_RULES bands)
+        if weight >= 0.9:
+            entity_class = "proper_noun"
+        elif weight >= 0.7:
+            entity_class = "identifier"
+        elif weight == 0.6:
+            entity_class = "ip"
+        elif weight == 0.5:
+            entity_class = "url"
+        elif weight == 0.4:
+            entity_class = "path"
+        else:
+            entity_class = "unknown"
         results.append({
             "related_record_id": row["record_id"],
             "shared_entity": shared_entity,
@@ -172,8 +184,6 @@ def query_related_records(
             "entity_class": entity_class,
             "weight": weight,
         })
-        if len(results) >= max_results:
-            break
 
     return results
 
