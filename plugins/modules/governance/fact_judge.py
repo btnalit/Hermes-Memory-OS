@@ -22,6 +22,31 @@ from plugins.memory.memory_os.crystallized import CrystallizedCandidate, read_ca
 from plugins.memory.memory_os.low_clue_recall import _call_hermes_runtime_model, _extract_json_object
 from plugins.memory.memory_os.store import MemoryOSStore
 
+
+
+def fact_judge_manifest() -> dict[str, Any]:
+    return {
+        "name": "fact_judge",
+        "kind": "governance",
+        "version": "0.1.0",
+        "layer": "L3",
+        "dependencies": {
+            "required": ["memory_os >=0.1.0", "execution_gate", "candidate_aggregation"],
+        },
+        "provides": {
+            "commands": ["run_once", "read_fact_judge_verdicts"],
+            "schedules": ["fact_judge"],
+            "reads": ["memory_os.crystallized.candidates"],
+            "writes": ["local_artifact.fact_judge_verdicts"],
+            "consumed_by": ["candidate_aggregation"],
+        },
+        "defaults": {
+            "enabled": True,
+            "profile_scope": "per-profile",
+            "heuristic_only": False,
+        },
+    }
+
 # ── Judge config defaults ────────────────────────────────────────────────
 DEFAULT_JUDGE_CONFIG: dict[str, Any] = {
     "provider": "hermes_default",
@@ -448,7 +473,6 @@ def _append_verdict(
     now: datetime,
 ) -> None:
     path = _verdicts_path(store)
-    path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "schema_version": VERDICT_SCHEMA_VERSION,
         "candidate_id": candidate_id,
@@ -458,8 +482,9 @@ def _append_verdict(
     }
     if failure_reason:
         record["failure_reason"] = failure_reason
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    from plugins.memory.memory_os.jsonl_io import append_jsonl_locked
+
+    append_jsonl_locked(path, record)
 
 
 def read_fact_judge_verdicts(store: MemoryOSStore) -> dict[str, bool]:

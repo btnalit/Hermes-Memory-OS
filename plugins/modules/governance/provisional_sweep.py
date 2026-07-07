@@ -67,7 +67,7 @@ class ProvisionalSweepModule:
 
         # Resolve max_provisional at call time (C3 / sentinel pattern)
         from plugins.memory.memory_os.knob_overrides import resolve_knob
-        from plugins.memory.memory_os.jsonl_io import build_error_record
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked, build_error_record, write_json_atomic
         max_provisional = resolve_knob("max_provisional", default=30, _store_root=_store_root)
 
         error_records: list[dict[str, Any]] = []
@@ -75,11 +75,7 @@ class ProvisionalSweepModule:
         # 0. Expiry cliff guard: find near-expiry records for owner digest
         near_expiry = find_expiring_provisional(store, within_hours=48)
         p = _expiring_list_path(store)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            json.dumps(near_expiry, ensure_ascii=False, sort_keys=True),
-            encoding="utf-8",
-        )
+        write_json_atomic(p, near_expiry)
 
         # 1. TTL expiry
         expired = 0
@@ -173,9 +169,7 @@ class ProvisionalSweepModule:
             for key, value in result.items()
             if key not in ("escalated_ids",)
         }
-        with self.runs_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(runs_record, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
+        append_jsonl_locked(self.runs_path, runs_record)
 
         return result
 

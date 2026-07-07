@@ -46,6 +46,14 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "max_expiring_in_digest": {
+        "module": "owner_review_digest",
+        "default": 10,
+        "bounds": [1, 25],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     "lane_low_clue_recall_enabled": {
         "module": "low_clue_recall",
         "default": False,
