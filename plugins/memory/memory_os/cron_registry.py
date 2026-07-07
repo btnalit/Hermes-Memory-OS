@@ -227,6 +227,19 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         no_agent=True,
         requires_boundary_report=False,
     ),
+    MemoryOSCronSpec(
+        key="hindsight_advisory_digest",
+        name="memory-os-hindsight-advisory-digest",
+        raw_script="memory_os_hindsight_advisory_digest.py",
+        wrapper_script="memory_os_cron_hindsight_advisory_digest_gate.py",
+        lane_id="hindsight_advisory_digest",
+        helper_kind="local_helper",
+        schedule_arg="hindsight_advisory_digest_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
 )
 
 

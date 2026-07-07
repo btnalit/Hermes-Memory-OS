@@ -52,6 +52,7 @@ SOURCE_STATE_OVERLAY_REFRESH = REPO_ROOT / "scripts" / "memory_os_state_overlay_
 SOURCE_STATE_OVERLAY_REFRESH_GATE = REPO_ROOT / "scripts" / "memory_os_cron_state_overlay_refresh_gate.py"
 SOURCE_ENTITY_INDEX_REFRESH = REPO_ROOT / "scripts" / "memory_os_entity_index_refresh.py"
 SOURCE_ENTITY_INDEX_REFRESH_GATE = REPO_ROOT / "scripts" / "memory_os_cron_entity_index_refresh_gate.py"
+SOURCE_HINDSIGHT_ADVISORY_DIGEST = REPO_ROOT / "scripts" / "memory_os_hindsight_advisory_digest.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -1143,6 +1144,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "state_overlay_refresh_gate": SOURCE_STATE_OVERLAY_REFRESH_GATE,
         "entity_index_refresh": SOURCE_ENTITY_INDEX_REFRESH,
         "entity_index_refresh_gate": SOURCE_ENTITY_INDEX_REFRESH_GATE,
+        "hindsight_advisory_digest": SOURCE_HINDSIGHT_ADVISORY_DIGEST,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():

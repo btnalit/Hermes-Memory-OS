@@ -161,6 +161,8 @@ def _home_with_helpers(
         "memory_os_cron_state_overlay_refresh_gate.py",
         "memory_os_entity_index_refresh.py",
         "memory_os_cron_entity_index_refresh_gate.py",
+        "memory_os_hindsight_advisory_digest.py",
+        "memory_os_cron_hindsight_advisory_digest_gate.py",
     ):
         if helper in omitted:
             continue
@@ -213,7 +215,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 12
+    assert len(report["operational_cron_jobs"]) == 13
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
@@ -225,6 +227,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
         "memory-os-event-stats-refresh",
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
+        "memory-os-hindsight-advisory-digest",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
     }
@@ -321,7 +324,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 15
+    assert len(report["operational_cron_jobs"]) == 16
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -338,6 +341,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-event-stats-refresh",
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
+        "memory-os-hindsight-advisory-digest",
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
     }
@@ -350,6 +354,9 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-module-cadence-report"]["deliver"] == "local"
     assert by_name["memory-os-module-cadence-report"]["script"] == "memory_os_cron_module_cadence_report_gate.py"
     assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
+    assert by_name["memory-os-hindsight-advisory-digest"]["deliver"] == "local"
+    assert by_name["memory-os-hindsight-advisory-digest"]["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
+    assert by_name["memory-os-hindsight-advisory-digest"]["no_agent"] is True
     assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
     assert by_name["memory-os-right-brain-expression-outcome"]["script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
     assert by_name["memory-os-right-brain-expression-outcome"]["no_agent"] is True
