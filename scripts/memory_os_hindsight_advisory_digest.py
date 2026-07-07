@@ -138,7 +138,7 @@ def run_advisory_digest(
     try:
         from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightSubstrate
 
-        client = _get_hindsight_client(config)
+        client = _get_hindsight_client(config, timeout=timeout)
         substrate = GovernedHindsightSubstrate(config, client=client)
 
         health = substrate.health()
