@@ -437,7 +437,7 @@ class TestClassifyEntity:
         assert weight == 0.5
 
     def test_classify_ip_entity(self):
-        entity_class, weight = classify_entity("10.20.3.200")
+        entity_class, weight = classify_entity("192.0.2.10")
         assert entity_class == "ip"
         assert weight == 0.6
 

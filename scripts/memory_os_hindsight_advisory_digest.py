@@ -26,9 +26,16 @@ _self = Path(__file__).absolute()
 _repo_root = _self.parents[1]
 _HERMES_HOME = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
 
+# Always expose the parent that contains the ``scripts`` package.  In the
+# repository this is the repo root; in installed layout it is HERMES_HOME.
+# Without this, ``python ~/.hermes/scripts/<script>.py`` cannot resolve
+# ``from scripts...`` imports because sys.path[0] is the scripts directory
+# itself, not its parent.
+if str(_repo_root) not in sys.path:
+    sys.path.insert(0, str(_repo_root))
+
 if (_repo_root / "plugins" / "memory" / "memory_os").exists():
-    if str(_repo_root) not in sys.path:
-        sys.path.insert(0, str(_repo_root))
+    pass
 else:
     _runtime_root = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
     if _runtime_root.exists() and str(_runtime_root) not in sys.path:
@@ -48,8 +55,9 @@ def _get_hindsight_client(config: GovernedHindsightConfig, *, timeout: float = 5
         from plugins.memory.memory_os.adapters.hindsight import HindsightHttpClient
         return HindsightHttpClient(
             api_url=config.api_url,
+            bank_id=config.bank_id,
             api_key=config.api_key,
-            timeout=timeout,
+            timeout_seconds=timeout,
         )
     except Exception:
         return None
@@ -243,7 +251,10 @@ def main(argv: list[str] | None = None) -> int:
         budget=args.budget,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if report.get("status") == "ok" or report.get("status") == "disabled" else 2
+    # Advisory digest is optional/fail-open.  Non-ok statuses are reported in
+    # the JSON payload, but should not make a no-agent cron look like a broken
+    # Memory-OS core job when Hindsight is unavailable or unconfigured.
+    return 0
 
 
 if __name__ == "__main__":

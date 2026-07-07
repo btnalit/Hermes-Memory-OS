@@ -360,6 +360,34 @@ class TestHindsightAdvisoryDigestScript:
         # Should not raise — fail-open
         assert report["status"] in {"timeout", "error", "unreachable", "unavailable", "unhealthy"}
 
+    def test_get_hindsight_client_forwards_bank_id_and_timeout(self, monkeypatch):
+        """Digest client construction must pass bank_id and timeout_seconds to HindsightHttpClient."""
+        import scripts.memory_os_hindsight_advisory_digest as digest_module
+        from plugins.memory.memory_os.substrates.hindsight import GovernedHindsightConfig
+        from plugins.memory.memory_os.adapters import hindsight as adapter_module
+
+        captured = {}
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(adapter_module, "HindsightHttpClient", FakeClient)
+        config = GovernedHindsightConfig.from_dict({
+            "enabled": True,
+            "api_url": "http://127.0.0.1:8888",
+            "bank_id": "test-bank",
+            "api_key": "test-key",
+        })
+
+        client = digest_module._get_hindsight_client(config, timeout=2.5)
+
+        assert isinstance(client, FakeClient)
+        assert captured["api_url"] == "http://127.0.0.1:8888"
+        assert captured["bank_id"] == "test-bank"
+        assert captured["api_key"] == "test-key"
+        assert captured["timeout_seconds"] == 2.5
+
     def test_advisory_digest_emits_advisory_only(self, tmp_path, monkeypatch):
         """When reflect succeeds, finding is advisory_only=True."""
         import scripts.memory_os_hindsight_advisory_digest as digest_module
@@ -437,3 +465,33 @@ class TestHindsightAdvisoryDigestScript:
         payload = json.loads(result.stdout)
         assert "status" in payload
         assert "advisory_emitted" in payload
+
+    def test_advisory_digest_script_unavailable_is_exit_zero(self, tmp_path):
+        """Optional advisory CLI reports unavailable in JSON but exits 0 (fail-open)."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        home = tmp_path / ".hermes"
+        (home / "memory-os").mkdir(parents=True)
+        (home / "memory-os" / "config.json").write_text(json.dumps({
+            "substrate_providers": {
+                "hindsight": {
+                    "enabled": True,
+                    "api_url": "http://127.0.0.1:1",
+                    "bank_id": "test-bank",
+                    "api_key": "",
+                    "reflect_enabled": True,
+                }
+            }
+        }))
+
+        script = Path(__file__).resolve().parents[3] / "scripts" / "memory_os_hindsight_advisory_digest.py"
+        result = subprocess.run(
+            [sys.executable, str(script), "--hermes-home", str(home), "--output", "json", "--timeout", "0.1"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["status"] in {"unavailable", "unconfigured", "error", "timeout"}
+        assert payload["advisory_emitted"] is False
