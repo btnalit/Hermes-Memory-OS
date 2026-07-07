@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "memory_os_ragflow_readonly_probe.py"
@@ -28,7 +30,7 @@ def test_ragflow_readonly_probe_help_works():
         text=True,
     )
     assert result.returncode == 0
-    assert "read-only" in result.stdout.lower()
+    assert "external evidence" in result.stdout.lower() or "ragflow" in result.stdout.lower()
 
 
 def test_ragflow_readonly_probe_disabled_does_not_mutate_canonical(tmp_path):
@@ -128,3 +130,107 @@ def test_ragflow_readonly_probe_supports_ephemeral_cli_overrides(tmp_path):
     assert payload["config"]["api_key_file"] == "[REDACTED]"
     assert payload["status"] in {"ok", "no_results_or_unreachable"}
     assert not (home / "memory-os" / "system" / "seam_config.json").exists()
+
+
+# ── Phase 4: Tainted intake bridge tests ──────────────────────────────
+
+
+def test_ragflow_probe_intake_dry_run_without_execute(tmp_path):
+    """--intake without --execute reports dry_run, no canonical mutations."""
+    home = tmp_path / ".hermes"
+    before_hash = _seed_canonical(home)
+    (home / "memory-os" / "system").mkdir(parents=True)
+
+    result = subprocess.run(
+        [
+            sys.executable, str(SCRIPT),
+            "--hermes-home", str(home),
+            "--query", "test intake",
+            "--intake", "0",
+            "--output", "json",
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "intake" in payload, f"intake section missing: {list(payload.keys())}"
+    assert payload["intake"]["executed"] is False
+    assert not (home / "memory-os" / "events").exists(), "no events without --execute"
+
+
+def test_ragflow_probe_parse_intake_indices():
+    """_parse_intake_indices parses comma-separated indices correctly."""
+    from scripts.memory_os_ragflow_readonly_probe import _parse_intake_indices
+
+    assert _parse_intake_indices("0,2") == [0, 2]
+    assert _parse_intake_indices("0") == [0]
+    assert _parse_intake_indices("") == []
+    assert _parse_intake_indices("  1 , 3 ") == [1, 3]
+    assert _parse_intake_indices("invalid") == []
+
+
+def test_ragflow_probe_intake_with_empty_ref_rejected(tmp_path):
+    """Chunk with empty external_ref is rejected (constraint 2: safe default)."""
+    from scripts.memory_os_ragflow_readonly_probe import _intake_chunk
+
+    home = tmp_path / ".hermes"
+    (home / "memory-os" / "system").mkdir(parents=True)
+
+    result = _intake_chunk(home, {
+        "content_preview": "some content",
+        "document_id": "",
+        "chunk_id": "",
+    })
+    assert result["intake"] in {"skipped", "rejected"}
+    assert "error" in result
+
+
+def test_ragflow_probe_intake_with_valid_ref_succeeds(tmp_path):
+    """Valid chunk with external_ref lands as tainted event."""
+    from scripts.memory_os_ragflow_readonly_probe import _intake_chunk
+
+    home = tmp_path / ".hermes"
+    (home / "memory-os").mkdir(parents=True)
+
+    result = _intake_chunk(home, {
+        "content_preview": "RAGFlow evidence: configure index sync properly",
+        "document_id": "doc-001",
+        "chunk_id": "chunk-a",
+        "dataset_id": "dataset-123",
+    })
+    assert result["intake"] == "ok", f"Expected ok, got: {result}"
+    assert "event_id" in result
+    # Verify event was actually written
+    events_dir = home / "memory-os" / "events"
+    assert events_dir.exists(), f"events dir should exist at {events_dir}"
+
+
+def test_ragflow_probe_intake_creates_tainted_event(tmp_path):
+    """Intake produces events with source_class=external_evidence."""
+    from scripts.memory_os_ragflow_readonly_probe import _intake_chunk
+
+    home = tmp_path / ".hermes"
+    (home / "memory-os").mkdir(parents=True)
+
+    result = _intake_chunk(home, {
+        "content_preview": "External knowledge: vector retrieval tuning",
+        "document_id": "doc-002",
+        "chunk_id": "chunk-b",
+    })
+    assert result["intake"] == "ok"
+
+    # Read the event to verify tainting (events stored in MM/DD.jsonl)
+    events_dir = home / "memory-os" / "events"
+    found = False
+    for event_file in events_dir.rglob("*.jsonl"):
+        for line in event_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if event.get("id") == result["event_id"]:
+                assert event["kind"] == "external_evidence_intake"
+                safe_ref = event.get("safe_ref", {})
+                assert safe_ref.get("source_class") == "external_evidence"
+                assert "external-evidence" in event.get("tags", [])
+                found = True
+    assert found, f"Event {result['event_id']} not found in event store"

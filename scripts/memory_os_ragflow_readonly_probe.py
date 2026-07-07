@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Read-only RAGFlow external evidence observation probe.
 
-This script deliberately does not call Memory-OS ``external_intake`` and
-never writes canonical memory.  It is a boundary/health probe for using
-RAGFlow as external evidence, not as Memory-OS memory.
+This script is primarily a boundary/health probe for using RAGFlow as
+external evidence.  When invoked with ``--intake <indices> --execute``,
+it bridges specific chunks into the tainted intake pipeline via
+``external_intake()``.  Without ``--execute``, intake is a dry-run
+report-only path — no canonical writes occur.
+
+The ``--intake`` path is manual-only (never cron), requires
+``--execute`` to actually write, and each intake is audited through
+the ExecutionGate envelope.
 """
 
 from __future__ import annotations
@@ -180,9 +186,70 @@ def probe(
     }
 
 
+def _parse_intake_indices(raw: str) -> list[int]:
+    """Parse comma-separated intake indices (e.g. '0,2')."""
+    if not raw or not raw.strip():
+        return []
+    indices: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            indices.append(int(part))
+        except ValueError:
+            continue
+    return indices
+
+
+def _intake_chunk(
+    hermes_home: str | Path,
+    chunk: dict[str, Any],
+    *,
+    provider: str = "ragflow",
+) -> dict[str, Any]:
+    """Bridge one chunk into the tainted intake pipeline.
+
+    Returns an intake result dict with ``event_id`` on success or
+    ``error`` on failure.  Requires MemoryOSStore initialization.
+    """
+    from plugins.memory.memory_os.external_intake import external_intake
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    content = str(chunk.get("content_preview") or chunk.get("content") or "")
+    doc_id = str(chunk.get("document_id") or "")
+    chunk_id = str(chunk.get("chunk_id") or "")
+    external_ref = f"ragflow:{doc_id}:{chunk_id}" if doc_id else ""
+
+    if not content.strip() or not external_ref:
+        return {"index": chunk.get("_index", -1), "error": "empty_content_or_ref", "intake": "skipped"}
+
+    try:
+        roots = MemoryOSRoots.from_hermes_home(str(hermes_home))
+        store = MemoryOSStore(roots)
+        store.initialize()
+        event_id = external_intake(
+            store,
+            content=content,
+            external_ref=external_ref,
+            provider=provider,
+            metadata={
+                "dataset_id": str(chunk.get("dataset_id", "")),
+                "similarity": chunk.get("similarity"),
+                "intake_source": "ragflow_readonly_probe",
+            },
+        )
+        return {"index": chunk.get("_index", -1), "event_id": event_id, "intake": "ok"}
+    except ValueError as exc:
+        return {"index": chunk.get("_index", -1), "error": str(exc), "intake": "rejected"}
+    except Exception as exc:
+        return {"index": chunk.get("_index", -1), "error": str(exc), "intake": "failed"}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Read-only RAGFlow external evidence observation probe.",
+        description="RAGFlow external evidence observation probe with optional tainted intake.",
     )
     parser.add_argument("--hermes-home", default=_HERMES_HOME)
     parser.add_argument("--query", default="Memory-OS RAGFlow external evidence boundary")
@@ -197,6 +264,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset-id", default="", help="Ephemeral RAGFlow dataset ID override")
     parser.add_argument("--api-key-file", default="", help="Ephemeral API key file override (redacted in output)")
     parser.add_argument("--output", choices=("json",), default="json")
+    parser.add_argument(
+        "--intake",
+        default="",
+        help="Comma-separated chunk indices to intake as tainted evidence (e.g. '0,2'). Requires --execute.",
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually perform intake. Without this flag, --intake is dry-run only.",
+    )
     args = parser.parse_args(argv)
 
     override = None
@@ -214,6 +291,31 @@ def main(argv: list[str] | None = None) -> int:
         timeout=args.timeout,
         override_config=override,
     )
+
+    # ── Phase 4: Tainted intake bridging ────────────────────────────────
+    intake_indices = _parse_intake_indices(args.intake)
+    intake_results: list[dict[str, Any]] = []
+    if intake_indices:
+        results = report.get("results", [])
+        for idx in intake_indices:
+            if 0 <= idx < len(results):
+                chunk = dict(results[idx])
+                chunk["_index"] = idx
+                if args.execute:
+                    intake_results.append(_intake_chunk(args.hermes_home, chunk))
+                else:
+                    intake_results.append({
+                        "index": idx,
+                        "external_ref": f"ragflow:{chunk.get('document_id', '')}:{chunk.get('chunk_id', '')}",
+                        "intake": "dry_run",
+                        "note": "Use --execute to actually perform intake",
+                    })
+        report["intake"] = {
+            "requested_indices": intake_indices,
+            "executed": args.execute,
+            "results": intake_results,
+        }
+
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report.get("canonical_unchanged") is True else 2
 
