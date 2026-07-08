@@ -4,7 +4,7 @@ Spec: docs/resolver/hermes-crystallization-unblock-fact-judge-spec.md
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate
@@ -526,6 +526,96 @@ class TestFactJudgeSafety:
         assert candidate.candidate_id in content, (
             "Crystallized candidate should appear in owner_approved.md"
         )
+
+    def test_candidate_aggregation_moment_provisional_uses_short_ttl(self, tmp_path):
+        """Auto-created moment provisionals expire quickly to reduce context pollution."""
+        store = _store_with_gate(tmp_path)
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+        from plugins.modules.governance.candidate_aggregation import _cluster_and_promote
+
+        now = datetime(2026, 7, 8, 12, 0, 0, tzinfo=timezone.utc)
+        candidate = _candidate(
+            candidate_id="cand_moment_ttl_001",
+            kind="moment",
+            body="Remembered from event: 这轮会话里临时决定先验证候选聚合 TTL。",
+            sensitivity="private",
+        )
+        _write_candidate(store, candidate)
+        _write_durable_verdict(store, candidate.candidate_id, durable_fact=True)
+
+        processed: set[str] = set()
+        _cluster_and_promote(
+            [candidate], store, processed,
+            envelope_id=_VALID_ENVELOPE_ID,
+            now=now,
+        )
+
+        records = CrystallizedMemoryService(store).find_records_by_candidate_id(candidate.candidate_id)
+        assert len(records) == 1
+        expires_at = datetime.fromisoformat(str(records[0].frontmatter["expires_at"]))
+        assert expires_at == now + timedelta(days=3)
+
+    def test_candidate_aggregation_non_moment_provisional_keeps_default_ttl(self, tmp_path):
+        """Non-moment auto-created provisionals keep the default review window."""
+        store = _store_with_gate(tmp_path)
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+        from plugins.modules.governance.candidate_aggregation import _cluster_and_promote
+
+        now = datetime(2026, 7, 8, 12, 0, 0, tzinfo=timezone.utc)
+        candidate = _candidate(
+            candidate_id="cand_preference_ttl_001",
+            kind="preference",
+            body="Remembered from event: 用户偏好对 Memory-OS 变更保持证据优先。",
+            sensitivity="private",
+        )
+        _write_candidate(store, candidate)
+        _write_durable_verdict(store, candidate.candidate_id, durable_fact=True)
+
+        processed: set[str] = set()
+        _cluster_and_promote(
+            [candidate], store, processed,
+            envelope_id=_VALID_ENVELOPE_ID,
+            now=now,
+        )
+
+        records = CrystallizedMemoryService(store).find_records_by_candidate_id(candidate.candidate_id)
+        assert len(records) == 1
+        expires_at = datetime.fromisoformat(str(records[0].frontmatter["expires_at"]))
+        assert expires_at == now + timedelta(days=7)
+
+    def test_owner_explicit_provisional_expiry_is_preserved(self, tmp_path):
+        """Explicit owner/reviewer expires_at values are not capped by moment policy."""
+        store = _store_with_gate(tmp_path)
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+
+        candidate = _candidate(
+            candidate_id="cand_owner_explicit_ttl_001",
+            kind="moment",
+            body="Remembered from event: owner 明确设置较长观察窗口。",
+            sensitivity="private",
+        )
+        explicit_expires_at = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+        service = CrystallizedMemoryService(store)
+        service.write_approved_record(
+            candidate,
+            ApprovalDecision(
+                candidate_id=candidate.candidate_id,
+                purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                reviewer="owner",
+                reviewed_at=datetime(2026, 7, 8, 12, 0, 0, tzinfo=timezone.utc).isoformat(),
+                note="owner chose explicit review window",
+                source_state="owner_approved",
+                provisional=True,
+                expires_at=explicit_expires_at,
+                recurrence=0,
+            ),
+            file_name="owner_approved.md",
+        )
+
+        records = service.find_records_by_candidate_id(candidate.candidate_id)
+        assert len(records) == 1
+        assert records[0].frontmatter["expires_at"] == explicit_expires_at
 
     def test_judge_is_offline_not_hot_path(self):
         """F.10: Judge is offline (INV-5) — no fact_judge reference in hot-path code."""

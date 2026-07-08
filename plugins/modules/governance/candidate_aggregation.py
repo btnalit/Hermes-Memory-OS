@@ -21,7 +21,7 @@ that operates on the accumulated queue. See TASK_ANCHOR.md for lane contracts.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -113,9 +113,29 @@ _MIN_SUBSTANTIVE_CHARS = 15
 # Auto-demote candidates that have been rejected N+ times by owner
 _REJECTION_THRESHOLD = 3
 
+# Auto-created provisional crystallized records should not all share the same
+# lifetime: moment records are high-context/low-half-life and otherwise inflate
+# future recall/digest surfaces. Owner-specified expires_at is not touched here;
+# this helper only supplies defaults for resolver-created provisionals.
+_PROVISIONAL_TTL_DAYS_BY_KIND: dict[str, int] = {
+    "moment": 3,
+}
+_DEFAULT_PROVISIONAL_TTL_DAYS = 7
+
 # Terminal triage states — candidates in these states are permanently excluded
 # from the pending set and skipped by all pipeline stages.
 _TERMINAL_STATES = ("demoted", "fleeting", "absorbed")
+
+
+def _default_provisional_expires_at(candidate: CrystallizedCandidate, now: datetime) -> str:
+    """Return the default resolver-created provisional expiry for a candidate.
+
+    This is deliberately a creation-time policy, not a write_approved_record()
+    cap: explicit owner/reviewer expires_at values must remain authoritative.
+    """
+    kind = str(candidate.kind or "").strip().lower()
+    ttl_days = _PROVISIONAL_TTL_DAYS_BY_KIND.get(kind, _DEFAULT_PROVISIONAL_TTL_DAYS)
+    return (now + timedelta(days=ttl_days)).isoformat()
 
 
 # ── Public lane API ─────────────────────────────────────────────────────
@@ -477,7 +497,6 @@ def _cluster_and_promote(
                 )
                 from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
                 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
-                from datetime import timedelta
 
                 crystallized_service = CrystallizedMemoryService(store)
                 envelope = start_resolver_auto_approve_envelope(
@@ -495,7 +514,7 @@ def _cluster_and_promote(
                     note=verdict.get("reason", ""),
                     source_state="resolver_approved",
                     provisional=True,
-                    expires_at=(_now + timedelta(days=7)).isoformat(),
+                    expires_at=_default_provisional_expires_at(member, _now),
                     recurrence=0,
                 )
                 crystallized_service.write_approved_record(
@@ -647,7 +666,6 @@ def _cluster_and_promote(
                 )
                 from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
                 from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
-                from datetime import timedelta
 
                 crystallized_service = CrystallizedMemoryService(store)
                 envelope = start_resolver_auto_approve_envelope(
@@ -665,7 +683,7 @@ def _cluster_and_promote(
                     note=verdict.get("reason", ""),
                     source_state="resolver_approved",
                     provisional=True,
-                    expires_at=(_now + timedelta(days=7)).isoformat(),
+                    expires_at=_default_provisional_expires_at(c, _now),
                     recurrence=0,
                 )
                 crystallized_service.write_approved_record(
