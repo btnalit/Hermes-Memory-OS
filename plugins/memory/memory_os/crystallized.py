@@ -750,23 +750,82 @@ class CrystallizedMemoryService:
                 raise CrystallizedApprovalError("external_evidence_ack_ref_mismatch")
 
 
+def _candidate_id_present_locked(target: Path, candidate_id: str) -> bool:
+    """Return True if *candidate_id* already appears in the canonical queue.
+
+    *target* must already be held under the sidecar flock. Fail-open: any read
+    or parse error returns False so a transient IO failure never causes a
+    candidate to be dropped (dropped memory is worse than a rare duplicate
+    row — and the SQLite index already de-dupes on SELECT via PK REPLACE).
+    """
+    try:
+        for line in target.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("candidate_id") == candidate_id:
+                return True
+        return False
+    except OSError:
+        return False
+
+
 def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidate) -> Path:
+    """Append a candidate, de-duplicating by ``candidate_id`` at write time.
+
+    Idempotency guard (fix for duplicate-candidate rows): if a candidate with
+    the same ``candidate_id`` already exists in the canonical queue, the append
+    is skipped instead of producing a second physical row. The membership check
+    and the append happen inside a single sidecar-flock acquisition, so a
+    concurrent ``inner_drive`` re-processing of the same event cannot both pass
+    the check (no TOCTOU).
+
+    Design choices:
+    - Fail-open: if the existing queue cannot be read we still append rather
+      than risk dropping a candidate.
+    - Emits a ``crystallized_candidate_dedup_skipped`` audit when an append is
+      elided, so the skip is observable rather than silent.
+    """
     path = store.roots.crystallized_root / "candidates.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     data = asdict(candidate)
     data["tags"] = list(candidate.tags or [])
     data["created_at"] = str(data.get("created_at") or _timestamp(None))
-    append_jsonl_locked(path, data, durable=True)
-    append_audit(
-        store.roots.audit_path,
-        action="crystallized_candidate_queued",
-        status="ok",
-        target=str(path),
-        details={
-            "candidate_id": candidate.candidate_id,
-            "source_event_ids": list(candidate.source_event_ids),
-        },
-    )
+
+    candidate_id = candidate.candidate_id
+    already_present = False
+    with locked_jsonl_file(path) as target:
+        # Membership check + append under the same lock the writer uses → no TOCTOU.
+        if _candidate_id_present_locked(target, candidate_id):
+            already_present = True
+        else:
+            line = json.dumps(data, ensure_ascii=False, sort_keys=True) + "\n"
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+    if already_present:
+        append_audit(
+            store.roots.audit_path,
+            action="crystallized_candidate_dedup_skipped",
+            status="ok",
+            target=str(path),
+            details={"candidate_id": candidate_id},
+        )
+    else:
+        append_audit(
+            store.roots.audit_path,
+            action="crystallized_candidate_queued",
+            status="ok",
+            target=str(path),
+            details={
+                "candidate_id": candidate.candidate_id,
+                "source_event_ids": list(candidate.source_event_ids),
+            },
+        )
     return path
 
 

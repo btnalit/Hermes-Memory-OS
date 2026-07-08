@@ -789,3 +789,106 @@ class TestAutoPromoteAdversarial:
         result = service.auto_promote_provisional_records(now=now)
         assert result["promoted_count"] == 1
         assert len(service.list_provisional_records()) == 0
+
+
+# ── Write-time candidate_id idempotency guard ────────────────────────────────
+# Regression tests for duplicate-candidate rows: append_candidate_queue must
+# never append a second physical row for an id that already exists.
+
+
+def test_append_candidate_queue_dedups_same_id(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    cand = CrystallizedCandidate(
+        candidate_id="cand-dedup-001",
+        kind="moment",
+        body="first write",
+        source_event_ids=["evt-dedup-1"],
+        sensitivity="private",
+        bridge_state="owner_eligible",
+    )
+    append_candidate_queue(store, cand)
+    # Re-processing the same event (as inner_drive did during config boot) must not add a 2nd row.
+    append_candidate_queue(store, cand)
+
+    queued = read_candidate_queue(store)
+    assert len(queued) == 1, f"expected exactly 1 row, got {len(queued)}"
+    assert queued[0].candidate_id == "cand-dedup-001"
+
+
+def test_append_candidate_queue_allows_distinct_ids(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    for i in range(5):
+        append_candidate_queue(
+            store,
+            CrystallizedCandidate(
+                candidate_id=f"cand-distinct-{i}",
+                kind="moment",
+                body=f"body {i}",
+                source_event_ids=[f"evt-distinct-{i}"],
+                sensitivity="private",
+                bridge_state="owner_eligible",
+            ),
+        )
+    assert len(read_candidate_queue(store)) == 5
+
+
+def test_append_candidate_queue_emits_dedup_audit_on_skip(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    cand = CrystallizedCandidate(
+        candidate_id="cand-dedup-audit",
+        kind="moment",
+        body="dup body",
+        source_event_ids=["evt-dedup-audit"],
+        sensitivity="private",
+        bridge_state="owner_eligible",
+    )
+    append_candidate_queue(store, cand)
+    append_candidate_queue(store, cand)
+
+    actions = [
+        e.get("action")
+        for e in read_audit_entries(store.roots.audit_path)
+    ]
+    assert actions.count("crystallized_candidate_queued") == 1
+    assert "crystallized_candidate_dedup_skipped" in actions
+
+
+def test_index_and_queue_counts_converge_after_dedup_guard(tmp_path):
+    """Status over-count (139 vs 132) must not recur: index PK REPLACE and the
+    write-time guard both agree on distinct candidate_id count."""
+    import sqlite3
+
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+
+    cand = CrystallizedCandidate(
+        candidate_id="cand-converge-1",
+        kind="moment",
+        body="converge",
+        source_event_ids=["evt-converge-1"],
+        sensitivity="private",
+        bridge_state="owner_eligible",
+    )
+    append_candidate_queue(store, cand)
+    append_candidate_queue(store, cand)  # would have been the 2nd dup row pre-fix
+
+    queue_count = len(read_candidate_queue(store))
+    index_count = MemoryOSIndex(roots).counts().get("crystallized_candidates", 0)
+    # index table may be empty pre-build; build it to verify PK dedup matches.
+    MemoryOSIndex(roots).try_rebuild_from_store(store)
+    index_count = MemoryOSIndex(roots).counts().get("crystallized_candidates", 0)
+    assert queue_count == 1
+    assert index_count == 1
+
