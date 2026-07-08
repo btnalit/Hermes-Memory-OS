@@ -125,15 +125,18 @@ def test_processed_ids_accumulates_across_stages(tmp_path):
     assert "cand-chat" in processed
 
     # Stage 3: _cluster_and_promote should skip chat (in processed),
-    # only consider signal. Without a cluster partner (size < 2),
-    # signal gets 0 promoted count but should not error.
+    # only consider signal. With Fix 1 (min_cluster_size=1) the lone signal
+    # candidate routes through the resolver verdict (promoted_count == 1),
+    # but chat must NOT be reprocessed.
     r3 = _cluster_and_promote([chat, signal], store, processed,
                               envelope_id=_VALID_ENVELOPE_ID)
-    assert r3["promoted_count"] == 0
+    assert r3["promoted_count"] == 1
     # signal may or may not be added to processed — that's fine
     # The key contract: chat is NOT processed again
     assert "cand-chat" in processed
-    assert "cand-signal" in r3.get("clusters", []) or "cand-signal" not in processed
+    # With Fix 1, the lone signal candidate forms a singleton cluster (size 1)
+    # and is routed through the resolver; cand-signal is now in processed.
+    assert "cand-signal" in processed
 
 
 def test_auto_demote_rejected_at_threshold(tmp_path):

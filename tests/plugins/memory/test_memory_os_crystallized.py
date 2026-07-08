@@ -892,3 +892,48 @@ def test_index_and_queue_counts_converge_after_dedup_guard(tmp_path):
     assert queue_count == 1
     assert index_count == 1
 
+
+# ── Fix 3: candidate_aggregation status persistence ────────────────────────
+
+
+def test_write_then_read_candidate_aggregation_status(tmp_path):
+    store = _service(tmp_path).store
+    from plugins.memory.memory_os.crystallized import (
+        latest_candidate_aggregation_status,
+        read_candidate_aggregation_status,
+        write_candidate_aggregation_status,
+    )
+
+    summary = {
+        "candidates_read": 12,
+        "pending": 3,
+        "already_triaged": 9,
+        "promoted_count": 2,
+        "rejected_demoted_count": 1,
+        "demoted_count": 1,
+        "fleeting_count": 4,
+        "compacted_count": 5,
+    }
+    # No envelope → operator exemption path (mirrors append_candidate_triage)
+    write_candidate_aggregation_status(store, summary=summary)
+
+    latest = latest_candidate_aggregation_status(store)
+    assert latest is not None
+    assert latest["promoted_count"] == 2
+    assert latest["compacted_count"] == 5
+    assert latest["fleeting_count"] == 4
+    assert "structural_write_governance" in latest
+
+    all_records = read_candidate_aggregation_status(store)
+    assert len(all_records) == 1
+
+
+def test_candidate_aggregation_status_unavailable_returns_none(tmp_path):
+    store = _service(tmp_path).store
+    from plugins.memory.memory_os.crystallized import (
+        latest_candidate_aggregation_status,
+    )
+
+    assert latest_candidate_aggregation_status(store) is None
+
+

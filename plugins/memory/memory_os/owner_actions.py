@@ -326,6 +326,40 @@ def owner_review_status_report(store: MemoryOSStore) -> dict[str, Any]:
             "apply_ready_count": 0,
         },
         "approved_proposal_followups": _approved_proposal_followups_summary(store),
+        "candidate_aggregation": _candidate_aggregation_status_block(store),
+    }
+
+
+def _candidate_aggregation_status_block(store: MemoryOSStore) -> dict[str, Any]:
+    """Fix 3: expose the latest candidate_aggregation lane outcome to the owner
+    review digest. Returns an empty block when no lane has run yet."""
+    try:
+        from .crystallized import latest_candidate_aggregation_status
+
+        latest = latest_candidate_aggregation_status(store)
+    except Exception:
+        latest = None
+    if not latest:
+        return {
+            "available": False,
+            "last_tick": None,
+            "promoted_count": 0,
+            "rejected_demoted_count": 0,
+            "demoted_count": 0,
+            "fleeting_count": 0,
+            "compacted_count": 0,
+        }
+    return {
+        "available": True,
+        "last_tick": latest.get("created_at"),
+        "candidates_read": int(latest.get("candidates_read", 0)),
+        "pending": int(latest.get("pending", 0)),
+        "already_triaged": int(latest.get("already_triaged", 0)),
+        "promoted_count": int(latest.get("promoted_count", 0)),
+        "rejected_demoted_count": int(latest.get("rejected_demoted_count", 0)),
+        "demoted_count": int(latest.get("demoted_count", 0)),
+        "fleeting_count": int(latest.get("fleeting_count", 0)),
+        "compacted_count": int(latest.get("compacted_count", 0)),
     }
 
 
@@ -4712,6 +4746,26 @@ def _fyi_items(status: dict[str, Any], *, limit: int, start: int = 1) -> list[di
             "raw_body_included": False,
         },
     ]
+    raw_aggr = status.get("candidate_aggregation")
+    aggr: dict[str, Any] = raw_aggr if isinstance(raw_aggr, dict) else {}
+    if aggr.get("available"):
+        fyi.append(
+            {
+                "anchor": f"F{start + 2}",
+                "kind": "candidate_aggregation",
+                "target_type": "digest_status",
+                "target_id": "candidate_aggregation",
+                "source_module": "candidate_aggregation",
+                "summary": (
+                    f"聚合上次运行: promoted={aggr.get('promoted_count')}; "
+                    f"rejected_demoted={aggr.get('rejected_demoted_count')}; "
+                    f"demoted={aggr.get('demoted_count')}; "
+                    f"fleeting={aggr.get('fleeting_count')}; "
+                    f"compacted={aggr.get('compacted_count')}"
+                ),
+                "raw_body_included": False,
+            }
+        )
     return fyi[:limit]
 
 

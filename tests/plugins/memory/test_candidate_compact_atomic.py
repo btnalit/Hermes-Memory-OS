@@ -380,3 +380,58 @@ def test_counterfactual_archive_path_none_drops_data(tmp_path):
     assert "cf-none-safety" in archive_ids, (
         "archive_path=None must NOT drop data — stale candidates must be archived"
     )
+
+
+# ── Bonus: demoted/absorbed always archived, even when young ──────────
+
+def test_compact_archives_young_demoted_candidate(tmp_path):
+    """A demoted candidate newer than retention_days must be archived.
+
+    Before the Bonus fix, the active filter was
+    `effective == 'owner_eligible' or age < retention_days`; a young demoted
+    candidate (age < retention) kept cluttering the live queue. Resolved
+    outcomes (demoted/absorbed) are now always archived.
+    """
+    store = _setup_store(tmp_path)
+
+    young_demoted = _make_candidate(
+        candidate_id="young-demoted", age_days=1, bridge_state="demoted"
+    )
+    young_absorbed = _make_candidate(
+        candidate_id="young-absorbed", age_days=1, bridge_state="absorbed"
+    )
+    append_candidate_queue(store, young_demoted)
+    append_candidate_queue(store, young_absorbed)
+
+    archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
+    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7)
+
+    assert archived_count == 2
+    remaining = read_candidate_queue(store)
+    remaining_ids = {c.candidate_id for c in remaining}
+    assert "young-demoted" not in remaining_ids
+    assert "young-absorbed" not in remaining_ids
+
+
+def test_compact_keeps_young_non_terminal_and_owner_eligible(tmp_path):
+    """Regression guard: young owner_eligible and young fleeting stay active."""
+    store = _setup_store(tmp_path)
+
+    young_owner_eligible = _make_candidate(
+        candidate_id="young-oe", age_days=1, bridge_state="owner_eligible"
+    )
+    young_fleeting = _make_candidate(
+        candidate_id="young-fleeting", age_days=1, bridge_state="fleeting"
+    )
+    append_candidate_queue(store, young_owner_eligible)
+    append_candidate_queue(store, young_fleeting)
+
+    archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
+    archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7)
+
+    assert archived_count == 0
+    remaining = read_candidate_queue(store)
+    remaining_ids = {c.candidate_id for c in remaining}
+    assert "young-oe" in remaining_ids
+    assert "young-fleeting" in remaining_ids
+

@@ -52,6 +52,18 @@ def main() -> int:
     # Write execution helper report
     _write_execution_report(result)
 
+    # Persist lane outcome for the owner review digest (Fix 3).
+    try:
+        from plugins.memory.memory_os.crystallized import write_candidate_aggregation_status
+        write_candidate_aggregation_status(
+            store,
+            summary=result,
+            execution_gate_envelope_id=envelope_id,
+            now=now,
+        )
+    except Exception as exc:  # pragma: no cover - best-effort persistence
+        sys.stderr.write(f"[candidate_aggregation] status persistence skipped: {exc}\n")
+
     # Output JSON summary for cron delivery
     summary = {
         "tick": now.isoformat().replace("+00:00", "Z"),

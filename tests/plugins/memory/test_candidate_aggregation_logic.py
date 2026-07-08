@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from plugins.memory.memory_os.crystallized import (
     CrystallizedCandidate,
     CANDIDATE_DEMOTE_TTL_SECONDS,
+    read_candidate_triage,
 )
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -300,13 +301,37 @@ class TestCandidateAgeSeconds:
 class TestClusterAndPromote:
     """Cluster ≥2 candidates with same key → promote to owner_eligible."""
 
-    def test_single_candidate_no_promote(self, tmp_path):
-        """One candidate cannot form a cluster of size ≥2."""
+    def test_single_candidate_routes_via_resolver(self, tmp_path):
+        """Fix 1 (min_cluster_size=1): a lone candidate now routes through the
+        resolver verdict instead of being blocked by the cluster gate. A private
+        signal candidate is auto-approved provisionally (resolver_approved)."""
         store = _store_with_gate(tmp_path)
         c = _cand("cand-single", body="记住：必须备份日志")
         result = _cluster_and_promote([c], store, set(), envelope_id=_VALID_ENVELOPE_ID)
-        assert result["promoted_count"] == 0
-        assert result["clusters"] == []
+        assert result["promoted_count"] == 1
+        triage = read_candidate_triage(store)
+        assert triage[-1].get("target_state") == "resolver_approved"
+
+    def test_single_sensitive_candidate_not_auto_approved(self, tmp_path):
+        """Safety invariant under min_cluster_size=1: a sensitive single
+        candidate is routed to owner_eligible, never resolver_approved."""
+        store = _store_with_gate(tmp_path)
+        sensitive = CrystallizedCandidate(
+            candidate_id="cand-sensitive",
+            kind="note",
+            body="记住：我的银行卡密码是1234",
+            source_event_ids=["evt-test"],
+            sensitivity="sensitive",
+            tags=["test"],
+            bridge_state="inner_drive_candidate",
+            created_at="2026-07-08T00:00:00Z",
+            rejection_count=0,
+        )
+        result = _cluster_and_promote([sensitive], store, set(), envelope_id=_VALID_ENVELOPE_ID)
+        triage = read_candidate_triage(store)
+        target = triage[-1].get("target_state") if triage else None
+        assert target == "owner_eligible", f"sensitive must route to owner_eligible, got {target}"
+        assert result["promoted_count"] == 1
 
     def test_two_candidates_same_cluster_promote(self, tmp_path):
         """Two candidates with identical keywords → same cluster key → promote 2."""
@@ -320,14 +345,16 @@ class TestClusterAndPromote:
         assert "cand-a" in processed
         assert "cand-b" in processed
 
-    def test_two_candidates_different_kind_different_cluster(self, tmp_path):
-        """Different kinds produce different cluster keys → no promote."""
+    def test_different_kind_candidates_resolve_independently(self, tmp_path):
+        """Fix 1 (min_cluster_size=1): the cluster gate no longer blocks
+        promotion. Two private signal candidates of different kinds each route
+        through the resolver verdict independently (no shared cluster needed)."""
         store = _store_with_gate(tmp_path)
         c1 = _cand("cand-a", kind="moment", body="记住：备份日志")
         c2 = _cand("cand-b", kind="rule", body="永远不要 root 登录")
         processed: set[str] = set()
         result = _cluster_and_promote([c1, c2], store, processed, envelope_id=_VALID_ENVELOPE_ID)
-        assert result["promoted_count"] == 0
+        assert result["promoted_count"] == 2
 
     def test_already_processed_skipped(self, tmp_path):
         """Candidates already in processed_ids are skipped."""
@@ -355,12 +382,16 @@ class TestClusterAndPromote:
         # _cluster_and_promote's processing. Let's verify by checking
         # the triage file for overflow demote entries.
 
-    def test_signal_without_cluster_partner_not_promoted(self, tmp_path):
-        """Signal-bearing candidate alone → not promoted."""
+    def test_signal_single_routes_via_resolver(self, tmp_path):
+        """Fix 1 (min_cluster_size=1): a signal-bearing candidate alone now
+        routes through the resolver verdict (previously blocked by the cluster
+        gate). Private → resolver_approved."""
         store = _store_with_gate(tmp_path)
         c = _cand("cand-strong", body="這是一條鐵規則：永遠不要跳過確認步驟")
         result = _cluster_and_promote([c], store, set(), envelope_id=_VALID_ENVELOPE_ID)
-        assert result["promoted_count"] == 0
+        assert result["promoted_count"] == 1
+        triage = read_candidate_triage(store)
+        assert triage[-1].get("target_state") == "resolver_approved"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

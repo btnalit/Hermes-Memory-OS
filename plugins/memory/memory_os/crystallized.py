@@ -1020,6 +1020,100 @@ def read_candidate_triage(store: MemoryOSStore) -> list[dict[str, Any]]:
     return records
 
 
+# ── Candidate aggregation status (Fix 3: surface lane outcome to owner digest) ──
+
+# Language-agnostic constant used for both the file name and the surface key.
+AGGR_STATUS_FILE = "candidate_aggregation_status.jsonl"
+
+
+def write_candidate_aggregation_status(
+    store: MemoryOSStore,
+    *,
+    summary: dict[str, Any],
+    execution_gate_envelope_id: str = "",
+    now: datetime | None = None,
+) -> Path:
+    """Append one candidate_aggregation lane outcome record (append-only).
+
+    The lane returns promoted/demoted/fleeting/compacted counts that previously
+    went only to stdout. Persisting them here lets the owner review digest read
+    the latest outcome and surface it in the Hermes main-session review message.
+
+    Governance path: mirrors append_candidate_triage — lane ticks (envelope_id
+    non-empty) go through append_governed_jsonl; operator/backfill writes use
+    write_owner="owner_action" with allow_owner_action_without_envelope=True
+    (classified exemption in write_surface_check).
+    """
+    path = store.roots.crystallized_root / AGGR_STATUS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "candidates_read": int(summary.get("candidates_read", 0)),
+        "pending": int(summary.get("pending", 0)),
+        "already_triaged": int(summary.get("already_triaged", 0)),
+        "promoted_count": int(summary.get("promoted_count", 0)),
+        "rejected_demoted_count": int(summary.get("rejected_demoted_count", 0)),
+        "demoted_count": int(summary.get("demoted_count", 0)),
+        "fleeting_count": int(summary.get("fleeting_count", 0)),
+        "compacted_count": int(summary.get("compacted_count", 0)),
+        "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
+        "created_at": _timestamp(now),
+    }
+    from .structural_write_gate import append_governed_jsonl
+    from .execution_gate import execution_gate_scope_hash
+
+    has_envelope = bool(execution_gate_envelope_id and str(execution_gate_envelope_id).strip())
+    scope_hash = (
+        ""
+        if has_envelope
+        else execution_gate_scope_hash(
+            {
+                "lane": "candidate_aggregation",
+                "action": "write_aggregation_status",
+            }
+        )
+    )
+    append_governed_jsonl(
+        store,
+        path,
+        record,
+        write_owner="cognitive_loop" if has_envelope else "owner_action",
+        lane_id="candidate_aggregation",
+        risk_class="bounded_reversible_queue",
+        execution_gate_envelope_id=str(execution_gate_envelope_id or ""),
+        scope_hash=scope_hash,
+        allow_owner_action_without_envelope=not has_envelope,
+    )
+    append_audit(
+        store.roots.audit_path,
+        action="candidate_aggregation_status_appended",
+        status="ok",
+        target=str(path),
+        details={"promoted_count": record["promoted_count"]},
+    )
+    return path
+
+
+def read_candidate_aggregation_status(store: MemoryOSStore) -> list[dict[str, Any]]:
+    """Read all aggregation status records, newest first."""
+    path = store.roots.crystallized_root / AGGR_STATUS_FILE
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    records.reverse()  # newest first
+    return records
+
+
+def latest_candidate_aggregation_status(store: MemoryOSStore) -> dict[str, Any] | None:
+    """Return the most recent aggregation status record, or None if none yet."""
+    records = read_candidate_aggregation_status(store)
+    return records[0] if records else None
+
+
 def resolve_candidate_effective_state(
     candidate: CrystallizedCandidate,
     triage_records: list[dict[str, Any]],
@@ -1046,9 +1140,13 @@ def compact_candidate_queue(
     """Archive-and-compact: move stale candidates to archive file.
 
     A candidate is 'active' (stays in main file) if:
-      - bridge_state=owner_eligible (owner needs to see it)
-      - resolves to owner_eligible via triage
-      - created_age < retention_days
+      - effective state resolves to owner_eligible (owner needs to see it)
+      - effective state is NOT demoted/absorbed AND created_age < retention_days
+
+    Demoted/absorbed candidates are resolved outcomes and are ALWAYS archived
+    (even when newer than retention_days) so they stop cluttering the live
+    candidate queue. Other non-owner-eligible, non-terminal candidates within
+    the retention window stay active for observation.
 
     Others are appended to archive and excluded from the main file.
     Returns count of archived candidates.
@@ -1097,7 +1195,14 @@ def compact_candidate_queue(
             effective = resolve_candidate_effective_state(cand, triage)
             age = _candidate_age_seconds(cand.created_at, now)
 
-            if effective == "owner_eligible" or age < retention_days * 86400:
+            # Active (stays in main file) if the owner still needs to see it,
+            # OR it is within the retention window AND not a resolved outcome.
+            # Demoted/absorbed are resolved — always archive them so they stop
+            # cluttering the live queue (previously only archived once aged
+            # past retention_days, leaving young demoted/absorbed in active).
+            if effective == "owner_eligible" or (
+                effective not in ("demoted", "absorbed") and age < retention_days * 86400
+            ):
                 active.append(line_stripped)
             else:
                 archived.append(line_stripped)

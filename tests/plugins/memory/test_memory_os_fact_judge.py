@@ -363,8 +363,10 @@ class TestDurableFactBypassChannel:
         )
         assert result["promoted_count"] == 1
 
-    def test_non_durable_singleton_not_promoted(self, tmp_path):
-        """F.6: Non-durable singleton → NOT promoted through bypass."""
+    def test_non_durable_singleton_routes_via_resolver(self, tmp_path):
+        """F.6 (post Fix 1c): a non-durable singleton no longer hits the
+        cluster gate. With min_cluster_size=1 and no keyword/verdict, it routes
+        through the resolver verdict (private → resolver_approved)."""
         store = _store_with_gate(tmp_path)
         from plugins.modules.governance.candidate_aggregation import _cluster_and_promote
 
@@ -383,12 +385,16 @@ class TestDurableFactBypassChannel:
             now=datetime.now(timezone.utc),
         )
 
-        # Non-durable singleton should NOT be promoted (no cluster, no bypass)
-        assert candidate.candidate_id not in processed
-        assert result["promoted_count"] == 0
+        # Bypass + min_cluster_size=1 → singleton routes through resolver
+        assert candidate.candidate_id in processed
+        assert result["promoted_count"] == 1
 
-    def test_durable_without_verdict_not_promoted(self, tmp_path):
-        """F.6: Candidate without any verdict → NOT promoted as singleton."""
+    def test_durable_without_verdict_routes_via_resolver(self, tmp_path):
+        """F.6 (post Fix 1c): a candidate with no durable verdict still routes
+        through the resolver verdict under min_cluster_size=1 (private →
+        resolver_approved). No verdict → no durable bypass, but the no-keyword
+        singleton bypass now carries it through the gate.
+        """
         store = _store_with_gate(tmp_path)
         from plugins.modules.governance.candidate_aggregation import _cluster_and_promote
 
@@ -407,9 +413,9 @@ class TestDurableFactBypassChannel:
             now=datetime.now(timezone.utc),
         )
 
-        # No verdict → no bypass → not promoted
-        assert candidate.candidate_id not in processed
-        assert result["promoted_count"] == 0
+        # No verdict → no durable bypass, but singleton still enters resolver
+        assert candidate.candidate_id in processed
+        assert result["promoted_count"] == 1
 
 
 # ── F.7-F.8: Resolver routing (end-to-end) ───────────────────────────────

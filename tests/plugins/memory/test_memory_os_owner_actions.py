@@ -4527,3 +4527,66 @@ def test_proposal_body_with_transcript_marker_not_in_agenda_text(tmp_path):
     assert "Assistant:" not in text
     # Clean title should still appear
     assert "正常的 proposal 标题" in text
+
+
+# ── Fix 3: candidate_aggregation outcome surfaces in owner digest ───────────
+
+
+def test_status_report_exposes_candidate_aggregation_block(tmp_path):
+    store = _store(tmp_path)
+    from plugins.memory.memory_os.crystallized import write_candidate_aggregation_status
+
+    # No lane run yet → available=False
+    status = owner_review_status_report(store)
+    assert status["candidate_aggregation"]["available"] is False
+
+    write_candidate_aggregation_status(
+        store,
+        summary={
+            "candidates_read": 10,
+            "pending": 2,
+            "already_triaged": 8,
+            "promoted_count": 3,
+            "rejected_demoted_count": 1,
+            "demoted_count": 2,
+            "fleeting_count": 2,
+            "compacted_count": 4,
+        },
+    )
+
+    status = owner_review_status_report(store)
+    block = status["candidate_aggregation"]
+    assert block["available"] is True
+    assert block["promoted_count"] == 3
+    assert block["compacted_count"] == 4
+    assert block["last_tick"] is not None
+
+
+def test_digest_fyi_includes_candidate_aggregation_when_available(tmp_path):
+    store = _store(tmp_path)
+    from plugins.memory.memory_os.crystallized import write_candidate_aggregation_status
+
+    write_candidate_aggregation_status(
+        store,
+        summary={
+            "candidates_read": 10,
+            "pending": 2,
+            "already_triaged": 8,
+            "promoted_count": 3,
+            "rejected_demoted_count": 1,
+            "demoted_count": 2,
+            "fleeting_count": 2,
+            "compacted_count": 4,
+        },
+    )
+
+    preview = owner_review_digest_preview(store)
+    fyi_items = preview.get("sections", {}).get("fyi", [])
+    aggr_item = next(
+        (it for it in fyi_items if it.get("target_id") == "candidate_aggregation"),
+        None,
+    )
+    assert aggr_item is not None, "candidate_aggregation fyi item must appear when a lane has run"
+    assert "promoted=3" in aggr_item["summary"]
+    assert aggr_item["source_module"] == "candidate_aggregation"
+
