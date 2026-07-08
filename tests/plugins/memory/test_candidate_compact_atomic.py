@@ -413,8 +413,9 @@ def test_compact_archives_young_demoted_candidate(tmp_path):
     assert "young-absorbed" not in remaining_ids
 
 
-def test_compact_keeps_young_non_terminal_and_owner_eligible(tmp_path):
-    """Regression guard: young owner_eligible and young fleeting stay active."""
+def test_compact_keeps_young_owner_eligible_archives_young_fleeting(tmp_path):
+    """Regression guard: young owner_eligible stays active; young fleeting is
+    now terminal (like demoted/absorbed) and gets archived immediately."""
     store = _setup_store(tmp_path)
 
     young_owner_eligible = _make_candidate(
@@ -429,9 +430,10 @@ def test_compact_keeps_young_non_terminal_and_owner_eligible(tmp_path):
     archive_path = store.roots.crystallized_root / "candidates_archive.jsonl"
     archived_count = compact_candidate_queue(store, archive_path=archive_path, retention_days=7)
 
-    assert archived_count == 0
+    # fleeting is now terminal, so 1 gets archived
+    assert archived_count == 1
     remaining = read_candidate_queue(store)
     remaining_ids = {c.candidate_id for c in remaining}
     assert "young-oe" in remaining_ids
-    assert "young-fleeting" in remaining_ids
+    assert "young-fleeting" not in remaining_ids
 

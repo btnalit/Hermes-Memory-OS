@@ -337,7 +337,22 @@ def _candidate_aggregation_status_block(store: MemoryOSStore) -> dict[str, Any]:
         from .crystallized import latest_candidate_aggregation_status
 
         latest = latest_candidate_aggregation_status(store)
-    except Exception:
+    except Exception as exc:
+        # fail-open: candidate aggregation status read must not break digest
+        try:
+            _append_jsonl(
+                store.roots.memory_os_root / "system" / "error_records.jsonl",
+                build_error_record(
+                    component="owner_actions._candidate_aggregation_status_block",
+                    operation="candidate_aggregation_status_read",
+                    error_code="candidate_aggregation_status_read_failed",
+                    severity="warn",
+                    recoverable=True,
+                    details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+                ),
+            )
+        except Exception:
+            pass
         latest = None
     if not latest:
         return {
@@ -5124,7 +5139,7 @@ def _render_expiring_provisional_section(store: MemoryOSStore) -> str:
     if not isinstance(expiring, list) or not expiring:
         return ""
 
-    max_n = int(resolve_knob("max_expiring_in_digest", default=10))
+    max_n = int(resolve_knob("max_expiring_in_digest", default=10, roots=store.roots))
     # 按 recurrence 降序 + expires_at 升序
     expiring.sort(
         key=lambda r: (

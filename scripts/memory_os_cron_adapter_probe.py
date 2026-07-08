@@ -42,7 +42,10 @@ def _preparse_hermes_home(argv: list[str]) -> str:
     """
     for i, arg in enumerate(argv):
         if arg == "--hermes-home" and i + 1 < len(argv):
-            return argv[i + 1]
+            val = argv[i + 1]
+            if val.startswith("--"):
+                return ""
+            return val
         if arg.startswith("--hermes-home="):
             return arg.split("=", 1)[1]
     return ""

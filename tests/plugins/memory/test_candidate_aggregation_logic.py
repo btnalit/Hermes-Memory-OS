@@ -331,6 +331,7 @@ class TestClusterAndPromote:
         triage = read_candidate_triage(store)
         target = triage[-1].get("target_state") if triage else None
         assert target == "owner_eligible", f"sensitive must route to owner_eligible, got {target}"
+        assert target != "resolver_approved", "sensitive must never route to resolver_approved"
         assert result["promoted_count"] == 1
 
     def test_two_candidates_same_cluster_promote(self, tmp_path):
@@ -392,6 +393,46 @@ class TestClusterAndPromote:
         assert result["promoted_count"] == 1
         triage = read_candidate_triage(store)
         assert triage[-1].get("target_state") == "resolver_approved"
+
+    def test_no_keyword_identity_signal_routed_to_owner_eligible(self, tmp_path):
+        """Singleton with identity signal but NO signal keywords is routed
+        to owner_eligible (not resolver_approved). The identity signal
+        (e.g. 'password') triggers the resolver gate to reject auto-approval,
+        routing the candidate to owner_eligible for human review."""
+        store = _store_with_gate(tmp_path)
+        # "password" is an IDENTITY_SIGNAL but NOT a signal keyword
+        c = _cand("cand-identity", body="my password is secret123")
+        processed: set[str] = set()
+        result = _cluster_and_promote([c], store, processed, envelope_id=_VALID_ENVELOPE_ID)
+        # min_cluster_size=1 activates the no-keyword singleton bypass path
+        assert result["promoted_count"] == 1
+        assert c.candidate_id in processed
+        triage = read_candidate_triage(store)
+        assert triage is not None and len(triage) > 0
+        target = triage[-1].get("target_state")
+        assert target == "owner_eligible", \
+            f"identity-signal candidate must route to owner_eligible, got {target}"
+        assert target != "resolver_approved", \
+            "identity-signal candidate must never be resolver_approved"
+
+    def test_no_keyword_vacuous_body_routed_to_owner_eligible(self, tmp_path):
+        """Singleton with vacuous/chat body and NO signal keywords is
+        routed to owner_eligible via the fleeting pre-filter. Chat patterns
+        like '好的' lack signal keywords but hit the fleeting check in
+        the no-keyword singleton bypass path, routing to owner_eligible."""
+        store = _store_with_gate(tmp_path)
+        c = _cand("cand-vacuous", body="好的")
+        processed: set[str] = set()
+        result = _cluster_and_promote([c], store, processed, envelope_id=_VALID_ENVELOPE_ID)
+        # min_cluster_size=1 activates no-keyword bypass; fleeting check
+        # catches vacuous body and routes to owner_eligible
+        assert result["promoted_count"] == 1
+        assert c.candidate_id in processed
+        triage = read_candidate_triage(store)
+        assert triage is not None and len(triage) > 0
+        target = triage[-1].get("target_state")
+        assert target == "owner_eligible", \
+            f"vacuous candidate must route to owner_eligible, got {target}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

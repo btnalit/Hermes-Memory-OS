@@ -802,6 +802,19 @@ def _cluster_and_promote(
             processed_ids.add(c.candidate_id)
             continue
 
+        # Content-quality pre-filter for no-keyword singletons
+        if _is_fleeting_candidate(c):
+            append_candidate_triage(
+                store, candidate_id=c.candidate_id, action="promote",
+                target_state="owner_eligible",
+                reason="no-keyword singleton, low content quality — owner gate",
+                cluster_key="", cluster_size=1,
+                execution_gate_envelope_id=envelope_id, now=_now,
+            )
+            processed_ids.add(c.candidate_id)
+            promoted_count += 1
+            continue
+
         # ── Resolver routing (same path as cluster and durable-fact) ──
         reason = "no_keyword singleton bypass (min_cluster_size=1, resolver gate)"
         confidence_route = _lookup_confidence_route(c, store)

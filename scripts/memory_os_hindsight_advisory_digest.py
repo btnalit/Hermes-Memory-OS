@@ -30,7 +30,10 @@ def _preparse_cli_arg(argv: list[str], flag: str) -> str:
     """Extract a --flag value from raw argv before argparse runs."""
     for i, arg in enumerate(argv):
         if arg == flag and i + 1 < len(argv):
-            return argv[i + 1]
+            val = argv[i + 1]
+            if val.startswith("--"):
+                return ""  # next token is another flag, not a value
+            return val
         if arg.startswith(f"{flag}="):
             return arg.split("=", 1)[1]
     return ""

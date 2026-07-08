@@ -614,7 +614,15 @@ class CrystallizedMemoryService:
         _now = _datetime(now)
         from .knob_overrides import resolve_knob
 
-        enabled = resolve_knob("auto_promote_enabled", default=True, _store_root=_store_root)
+        # Resolve knobs from the store being operated on (not ambient ~/.hermes)
+        # so tests with a synthetic store are isolated from the user's real overrides.
+        _resolve_kwargs: dict[str, Any] = {}
+        if _store_root is not None:
+            _resolve_kwargs["_store_root"] = _store_root
+        else:
+            _resolve_kwargs["roots"] = self.store.roots
+
+        enabled = resolve_knob("auto_promote_enabled", default=True, **_resolve_kwargs)
         if not enabled:
             return {
                 "schema_version": "memory-os.auto_promote.v0",
@@ -626,7 +634,7 @@ class CrystallizedMemoryService:
                 "skipped_too_young_count": 0,
             }
 
-        min_age_days = resolve_knob("auto_promote_min_age_days", default=7, _store_root=_store_root)
+        min_age_days = resolve_knob("auto_promote_min_age_days", default=7, **_resolve_kwargs)
         cutoff_dt = _now - timedelta(days=min_age_days)
 
         eligible_count = 0
@@ -1197,11 +1205,12 @@ def compact_candidate_queue(
 
             # Active (stays in main file) if the owner still needs to see it,
             # OR it is within the retention window AND not a resolved outcome.
-            # Demoted/absorbed are resolved — always archive them so they stop
-            # cluttering the live queue (previously only archived once aged
-            # past retention_days, leaving young demoted/absorbed in active).
+            # Demoted/fleeting/absorbed are resolved — always archive them so
+            # they stop cluttering the live queue (previously only archived
+            # once aged past retention_days, leaving young demoted/fleeting/
+            # absorbed in active).
             if effective == "owner_eligible" or (
-                effective not in ("demoted", "absorbed") and age < retention_days * 86400
+                effective not in ("demoted", "fleeting", "absorbed") and age < retention_days * 86400
             ):
                 active.append(line_stripped)
             else:

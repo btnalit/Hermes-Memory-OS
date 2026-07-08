@@ -310,6 +310,9 @@ def knob_override_auto_approvable(knob: str, to: Any) -> bool:
 
 
 # ── Path resolution ────────────────────────────────────────────────────
+# Once-only guard against repeating the ambient-fallback warning.
+_ambient_fallback_warned: bool = False
+
 
 def _override_store_path(roots: MemoryOSRoots | None = None, *,
                          _store_root: Path | None = None) -> Path:
@@ -317,6 +320,17 @@ def _override_store_path(roots: MemoryOSRoots | None = None, *,
     if _store_root is not None:
         return _store_root / "knob_overrides.jsonl"
     if roots is None:
+        global _ambient_fallback_warned
+        if not _ambient_fallback_warned:
+            import warnings  # pylint: disable=import-outside-toplevel
+            warnings.warn(
+                "resolve_knob called without roots or _store_root; "
+                "falling back to ambient MemoryOSRoots.from_profile(). "
+                "Pass roots=store.roots for proper isolation.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _ambient_fallback_warned = True
         roots = MemoryOSRoots.from_profile()
     return roots.memory_os_root / "system" / "knob_overrides.jsonl"
 

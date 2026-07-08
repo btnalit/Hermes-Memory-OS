@@ -63,6 +63,22 @@ def main() -> int:
         )
     except Exception as exc:  # pragma: no cover - best-effort persistence
         sys.stderr.write(f"[candidate_aggregation] status persistence skipped: {exc}\n")
+        try:
+            from plugins.memory.memory_os.jsonl_io import build_error_record, append_jsonl_locked  # fmt: skip
+            append_jsonl_locked(
+                store.roots.memory_os_root / "system" / "error_records.jsonl",
+                build_error_record(
+                    component="candidate_aggregation_lane",
+                    operation="write_candidate_aggregation_status",
+                    error_code="candidate_aggregation_status_write_failed",
+                    severity="warning",
+                    recoverable=True,
+                    details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+                ),
+                durable=True,
+            )
+        except Exception:
+            pass
 
     # Output JSON summary for cron delivery
     summary = {
