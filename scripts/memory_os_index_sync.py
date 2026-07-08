@@ -3,6 +3,12 @@
 
 Calls sync_from_store to bring the SQLite FTS5 index up to date
 with canonical filesystem store. Non-authoritative cache — fail-open.
+
+Invocation:
+  - Cron (via execution_gate_runner): env HERMES_HOME is set by the runner.
+  - Direct/manual:  python scripts/memory_os_index_sync.py
+      --hermes-home /path/to/copy  --profile default
+    CLI args take priority over env vars.
 """
 from __future__ import annotations
 
@@ -12,7 +18,21 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-_HERMES_HOME = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+
+def _preparse_cli_arg(argv: list[str], flag: str) -> str:
+    """Extract a --flag value from raw argv before argparse runs."""
+    for i, arg in enumerate(argv):
+        if arg == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+# Resolve HERMES_HOME at module level — CLI > env > default.
+_CLI_HOME = _preparse_cli_arg(sys.argv, "--hermes-home")
+_ENV_HOME = os.environ.get("HERMES_HOME", "")
+_HERMES_HOME = _CLI_HOME or _ENV_HOME or str(Path.home() / ".hermes")
 
 # Location-agnostic import resolution: repo checkout > runtime layout.
 _self = Path(__file__).absolute()
@@ -108,11 +128,15 @@ def _drift_report(index: dict[str, int], canonical: dict[str, int]) -> dict[str,
 
 
 def main() -> int:
-    hermes_home = os.environ.get("HERMES_HOME", "")
-    profile = os.environ.get("HERMES_PROFILE", "default")
-
-    if not hermes_home:
-        hermes_home = str(Path.home() / ".hermes")
+    hermes_home = (
+        _preparse_cli_arg(sys.argv, "--hermes-home")
+        or os.environ.get("HERMES_HOME", "")
+        or str(Path.home() / ".hermes")
+    )
+    profile = (
+        _preparse_cli_arg(sys.argv, "--profile")
+        or os.environ.get("HERMES_PROFILE", "default")
+    )
 
     roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
     store = MemoryOSStore(roots)

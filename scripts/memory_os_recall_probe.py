@@ -22,7 +22,22 @@ from pathlib import Path
 # Location-agnostic import resolution.
 _self = Path(__file__).absolute()
 _repo_root = _self.parents[1]
-_HERMES_HOME = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
+
+
+def _preparse_cli_arg(argv: list[str], flag: str) -> str:
+    """Extract a --flag value from raw argv before argparse runs."""
+    for i, arg in enumerate(argv):
+        if arg == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+# Resolve HERMES_HOME at module level — CLI > env > default.
+_CLI_HOME = _preparse_cli_arg(sys.argv, "--hermes-home")
+_ENV_HOME = os.environ.get("HERMES_HOME", "")
+_HERMES_HOME = _CLI_HOME or _ENV_HOME or str(Path.home() / ".hermes")
 
 if (_repo_root / "plugins" / "memory" / "memory_os").exists():
     if str(_repo_root) not in sys.path:

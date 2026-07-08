@@ -360,10 +360,15 @@ def _cluster_and_promote(
     # Resolve min_cluster_size at call time (not import time)
     if min_cluster_size is None:
         from plugins.memory.memory_os.knob_overrides import resolve_knob
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if _override_store_root is not None:
             from pathlib import Path
             kwargs["_store_root"] = Path(_override_store_root)
+        else:
+            # Production path: resolve from the store being operated on
+            # (not ambient ~/.hermes) so tests that create a synthetic store
+            # are isolated from the user's real knob overrides.
+            kwargs["roots"] = store.roots
         min_cluster_size = resolve_knob("min_cluster_size", default=1, **kwargs)
     candidates_for_promote = [
         c for c in candidates
