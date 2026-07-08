@@ -17,9 +17,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+def _preparse_cli_arg(argv: list[str], flag: str) -> str:
+    """Extract a --flag value from raw argv before argparse runs.
+
+    Needed at module level because sys.path setup depends on --hermes-home.
+    """
+    for i, arg in enumerate(argv):
+        if arg == flag and i + 1 < len(argv):
+            val = argv[i + 1]
+            if val.startswith("--"):
+                return ""  # next token is another flag, not a value
+            return val
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+# Resolve HERMES_HOME at module level — CLI > env > default.
+_CLI_HOME = _preparse_cli_arg(sys.argv, "--hermes-home")
+_ENV_HOME = os.environ.get("HERMES_HOME", "")
+_HERMES_HOME = _CLI_HOME or _ENV_HOME or str(Path.home() / ".hermes")
+
 # Point to Memory-OS runtime root for plugin imports
 # Script lives in ~/.hermes/scripts/; runtime is at ~/.hermes/memory-os/runtime/python/
-_HERMES_HOME = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
 REPO_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -30,12 +50,19 @@ from plugins.modules.governance.candidate_aggregation import run_candidate_aggre
 
 
 def main() -> int:
-    hermes_home = os.environ.get("HERMES_HOME", "")
-    profile = os.environ.get("HERMES_PROFILE", "default")
-    envelope_id = os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "")
-
-    if not hermes_home:
-        hermes_home = str(Path.home() / ".hermes")
+    hermes_home = (
+        _preparse_cli_arg(sys.argv, "--hermes-home")
+        or os.environ.get("HERMES_HOME", "")
+        or str(Path.home() / ".hermes")
+    )
+    profile = (
+        _preparse_cli_arg(sys.argv, "--profile")
+        or os.environ.get("HERMES_PROFILE", "default")
+    )
+    envelope_id = (
+        _preparse_cli_arg(sys.argv, "--envelope-id")
+        or os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "")
+    )
 
     roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
     store = MemoryOSStore(roots)
