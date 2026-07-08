@@ -198,6 +198,7 @@ class SelfEvolutionGovernorModule:
                 proposal_class=str(proposal_shape.get("proposal_class") or ""),
                 dedupe_key=str(proposal_shape.get("dedupe_key") or ""),
                 proposal_quality=proposal_quality,
+                source_module="self_evolution",
             )
             proposal_id = str(proposal["candidate_id"])
             agenda_record = dict(agenda_record)

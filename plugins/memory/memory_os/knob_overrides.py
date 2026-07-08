@@ -30,8 +30,8 @@ _SENTINEL = object()
 OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
     "min_cluster_size": {
         "module": "candidate_aggregation",
-        "default": 2,
-        "bounds": [2, 5],
+        "default": 1,
+        "bounds": [1, 5],
         "meta": False,
         "scope": "upper_layer",
         "ab_metric": "confirm_rate",

@@ -82,6 +82,7 @@ class ProposalQueueModule:
         proposal_class: str = "",
         dedupe_key: str = "",
         proposal_quality: dict[str, Any] | None = None,
+        source_module: str = "",
     ) -> dict[str, Any]:
         now = _timestamp()
         candidate = {
@@ -110,6 +111,8 @@ class ProposalQueueModule:
             candidate["dedupe_key"] = _bounded_token(dedupe_key, 160)
         if proposal_quality:
             candidate["proposal_quality"] = _bounded_proposal_quality(proposal_quality)
+        if source_module:
+            candidate["source_module"] = _bounded_token(source_module, 64)
         queue = self.read_queue()
         queue["items"].append(candidate)
         self._write_queue(queue)

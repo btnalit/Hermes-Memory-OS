@@ -509,6 +509,7 @@ class DeepReflectionModule:
                         proposal_class=proposal_class,
                         dedupe_key=dedupe_key,
                         proposal_quality=_deep_reflection_proposal_quality(item, proposal_class=proposal_class),
+                        source_module="deep_reflection",
                     )
                     item["proposal_id"] = str(proposal["candidate_id"])
                     item["proposal_class"] = proposal_class

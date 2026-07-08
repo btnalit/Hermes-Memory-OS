@@ -1,22 +1,42 @@
-"""Candidate aggregation lane — triage logic for Memory-OS candidate queue.
+"""Candidate aggregation lane — triage + bounded auto-approve for Memory-OS candidate queue.
 
-This module implements queue-state-only operations for the candidate_aggregation
-56-lane. It never crystallizes, never auto-approves, never modifies candidates.jsonl.
-All triage actions are appended to candidate_triage.jsonl (append-only).
+This module runs as a cron lane (candidate_aggregation). It performs queue-state
+triage (promote/demote/absorb/fleeting) AND bounded resolver auto-approve for
+candidates that pass the deterministic dual-axis gate (resolver_gate.py).
 
-TASK ANCHOR compliance (see 56-lanes/candidate_aggregation/TASK_ANCHOR.md):
-  A1 — No auto-crystallize. Any -> crystallized only via owner_actions.
-  A2 — actual_crystallized_approval, actual_send, actual_execute, etc. = false.
-  A3 — Append-only, never delete.
-  A4 — Queue state only: candidate <-> owner_eligible <-> demoted <-> fleeting.
-  A5 — Heuristics drive presentation (-> owner_eligible), never crystallization.
-  A6 — All writes via StructuralWriteGate or direct append_governed-equivalent.
-  A7 — Runs within existing cognitive_loop / ExecutionGate / monitor framework.
+Auto-approve path (P4, _cluster_and_promote → _resolver_verdict):
+  Candidates that cluster (min_cluster_size knob, default 2), pass the resolver
+  gate (sensitivity in NON_SENSITIVE, no identity signals, no side effects), and
+  survive judgment-stack veto are auto-approved as provisional crystallized records
+  (reviewer="resolver", provisional=True) under an ExecutionGate envelope
+  (RESOLVER_AUTO_APPROVE_LANE). Permanent crystallization still requires either
+  auto_promote age gate (≥auto_promote_min_age_days, default 7d) or owner explicit
+  approval.
 
-DESIGN INTENT: This module runs as a cron lane (56-lanes/candidate_aggregation),
-NOT inside the cognitive loop's 40-step warm-path. The cognitive loop focuses on
-perception and judgment; candidate aggregation is a separate governance rhythm
-that operates on the accumulated queue. See TASK_ANCHOR.md for lane contracts.
+Triage-only path (owner_eligible):
+  Candidates that fail the resolver gate, carry tainted external evidence,
+  lack signal keywords (_cluster_key returns None), or belong to clusters below
+  min_cluster_size are routed to owner_eligible for manual review.
+
+Queue-state operations (append-only, never delete):
+  - Promote: candidate → owner_eligible or resolver_approved
+  - Demote: aged, rejected (≥threshold), or duplicate candidates
+  - Absorb: near-duplicate → merged into existing provisional
+  - Fleeting: no-decision-content candidates tagged, not deleted
+
+Governance anchors:
+  A1 — Provisional auto-approve is bounded (provisional=True, expires_at, recurrence cap).
+       Permanent crystallization still requires owner or auto_promote age gate.
+  A2 — actual_crystallized_approval, actual_send, actual_execute = false for
+       triage-only path; resolver-approved path writes provisional with
+       actual_crystallized_approval=true under gate envelope.
+  A3 — Append-only via StructuralWriteGate; never delete.
+  A4 — State machine: candidate → owner_eligible | resolver_approved | demoted |
+       absorbed | fleeting.
+  A5 — Resolver gate is deterministic (no LLM); judgment stack (confidence_band,
+       provisional_maturity, cascade_guardrails) tunes verdict within safety envelope.
+  A6 — All writes via StructuralWriteGate or append_governed-equivalent.
+  A7 — Runs as cron lane, NOT inside cognitive loop warm-path.
 """
 
 from __future__ import annotations
@@ -344,7 +364,7 @@ def _cluster_and_promote(
         if _override_store_root is not None:
             from pathlib import Path
             kwargs["_store_root"] = Path(_override_store_root)
-        min_cluster_size = resolve_knob("min_cluster_size", default=2, **kwargs)
+        min_cluster_size = resolve_knob("min_cluster_size", default=1, **kwargs)
     candidates_for_promote = [
         c for c in candidates
         if c.candidate_id not in processed_ids
@@ -712,6 +732,125 @@ def _cluster_and_promote(
             )
             processed_ids.add(c.candidate_id)
             promoted_count += 1
+
+    # ── No-keyword singleton bypass ──────────────────────────────────────
+    # Candidates without signal keywords (_cluster_key returns None) never
+    # enter the cluster map above.  With min_cluster_size=1 they still
+    # deserve a path through resolver verdict — the deterministic gate
+    # (sensitivity, identity signals, side effects) is the real safety
+    # boundary; the cluster gate was a presentation heuristic, not a safety
+    # mechanism.  Only applies to candidates not already processed by the
+    # cluster loop or durable-fact bypass above.  Only activates when
+    # min_cluster_size=1 — when the cluster gate is lifted entirely, every
+    # candidate deserves a resolver verdict path.
+    if min_cluster_size != 1:
+        return {"promoted_count": promoted_count, "clusters": cluster_summaries}
+    for c in candidates_for_promote:
+        if c.candidate_id in processed_ids:
+            continue
+        # Only handle candidates that got no cluster key — those WITH a
+        # cluster key were already handled by the cluster loop (they pass
+        # when min_cluster_size=1) or durable-fact bypass.
+        if _cluster_key(c) is not None:
+            continue
+        if _skip_tainted_external_evidence(
+            c, store, processed_ids,
+            cluster_key="", cluster_size=1,
+            envelope_id=envelope_id, now=_now,
+        ):
+            continue
+
+        # P2: Index-based near-duplicate dedup
+        existing_prov = _match_existing_provisional(store, c.body)
+        if existing_prov is not None:
+            from plugins.memory.memory_os.crystallized import CrystallizedMemoryService as _CS2
+            _cs2 = _CS2(store)
+            _bump = _cs2.bump_recurrence_and_renew(existing_prov, execution_gate_envelope_id=envelope_id)
+            if _bump.get("requires_owner_decision"):
+                append_candidate_triage(
+                    store, candidate_id=c.candidate_id, action="flag",
+                    target_state="owner_eligible",
+                    reason=f"max_renewals_reached: merged into existing provisional {existing_prov}",
+                    cluster_key="", cluster_size=1,
+                    execution_gate_envelope_id=envelope_id, now=_now,
+                )
+            else:
+                append_candidate_triage(
+                    store, candidate_id=c.candidate_id, action="dedup_absorb",
+                    target_state="absorbed",
+                    reason=f"recurrence bump + renew: merged into existing provisional {existing_prov}",
+                    cluster_key="", cluster_size=1,
+                    execution_gate_envelope_id=envelope_id, now=_now,
+                )
+            processed_ids.add(c.candidate_id)
+            continue
+
+        perm_match = _check_index_dedup(store, c)
+        if perm_match is not None:
+            append_candidate_triage(
+                store, candidate_id=c.candidate_id, action="demote",
+                target_state="demoted",
+                reason=f"dedup_skip: similar to permanent crystallized {perm_match}",
+                cluster_key="", cluster_size=1,
+                execution_gate_envelope_id=envelope_id, now=_now,
+            )
+            processed_ids.add(c.candidate_id)
+            continue
+
+        # ── Resolver routing (same path as cluster and durable-fact) ──
+        reason = "no_keyword singleton bypass (min_cluster_size=1, resolver gate)"
+        confidence_route = _lookup_confidence_route(c, store)
+        provisional_promotion = _lookup_provisional_promotion(c, store)
+        cascade_policy = _latest_cascade_policy(store)
+
+        verdict = _resolver_verdict(
+            c, store=store,
+            confidence_route=confidence_route,
+            provisional_promotion=provisional_promotion,
+            cascade_policy=cascade_policy,
+        )
+        if verdict.get("approve"):
+            target_state = "resolver_approved"
+            from plugins.memory.memory_os.execution_gate import (
+                start_resolver_auto_approve_envelope as _srae2,
+                complete_execution_gate_envelope as _cege2,
+                RESOLVER_AUTO_APPROVE_LANE as _RAL2,
+            )
+            from plugins.memory.memory_os.approval import ApprovalDecision as _AD2, ApprovalPurpose as _AP2
+            from plugins.memory.memory_os.crystallized import CrystallizedMemoryService as _CMS2
+
+            _crystallized_service2 = _CMS2(store)
+            _envelope2 = _srae2(
+                store, candidate_id=c.candidate_id,
+                sensitivity=c.sensitivity, has_identity_signal=False,
+                bridge_state=c.bridge_state,
+            )
+            _decision2 = _AD2(
+                candidate_id=c.candidate_id,
+                purpose=_AP2.APPROVE_FOR_CRYSTALLIZED,
+                reviewer="resolver", reviewed_at=_now.isoformat(),
+                note=verdict.get("reason", ""), source_state="resolver_approved",
+                provisional=True,
+                expires_at=_default_provisional_expires_at(c, _now),
+                recurrence=0,
+            )
+            _crystallized_service2.write_approved_record(c, _decision2, file_name="owner_approved.md")
+            _cege2(
+                store, envelope_id=_envelope2["execution_gate_envelope_id"],
+                lane_id=_RAL2, execution_status="completed",
+                postcheck={"crystallized_write": "success"},
+            )
+        else:
+            target_state = "owner_eligible"
+
+        append_candidate_triage(
+            store, candidate_id=c.candidate_id, action="promote",
+            target_state=target_state, reason=reason,
+            cluster_key="", cluster_size=1,
+            execution_gate_envelope_id=envelope_id, now=_now,
+        )
+        processed_ids.add(c.candidate_id)
+        promoted_count += 1
 
     return {"promoted_count": promoted_count, "clusters": cluster_summaries}
 

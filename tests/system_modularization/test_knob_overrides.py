@@ -113,7 +113,7 @@ class TestResolveKnob:
     def test_V3_6_knob_tune_rejected(self):
         """V3.6: out of bounds / unregistered / meta -> auto_approvable returns False."""
         from plugins.memory.memory_os.knob_overrides import knob_override_auto_approvable
-        assert knob_override_auto_approvable("min_cluster_size", 1) is False
+        assert knob_override_auto_approvable("min_cluster_size", 0) is False
         assert knob_override_auto_approvable("min_cluster_size", 6) is False
         assert knob_override_auto_approvable("nonexistent", 3) is False
 
@@ -244,6 +244,7 @@ class TestCandidateAggregationIntegration:
         result_default = _cluster_and_promote(
             candidates2, store, set(), envelope_id="test",
             now=now, _override_store_root=no_override_root,
+            min_cluster_size=2,
         )
         assert result_default["promoted_count"] >= 0  # depends on dedup
 

@@ -604,6 +604,7 @@ def _upsert_proposal_candidate(*, proposal_queue: Any, store: MemoryOSStore, can
         body=str(candidate["summary"]),
         source_refs=list(candidate["source_refs"]),
         kind="weekly_consolidation",
+        source_module="digest_consolidation",
     )
     queue = proposal_queue.read_queue()
     for item in queue.get("items", []):

@@ -420,7 +420,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
                 "followup_id": f"proposal_followup:{proposal_id}",
                 "proposal_id": proposal_id,
                 "title": _bounded_text(str(proposal.get("title") or "Approved proposal"), 140),
-                "source_module": "proposal_queue",
+                "source_module": str(proposal.get("source_module") or "proposal_queue"),
                 "proposal_kind": str(proposal.get("kind") or "proposal"),
                 "state": "approved_for_proposal",
                 "followup_state": followup_state,
@@ -480,6 +480,12 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
     legacy_cleanup_apply_count = sum(
         1 for item in items if item.get("followup_state") == "applied_legacy_template_cleanup"
     )
+    self_evolution_applied_count = sum(
+        1
+        for item in items
+        if item.get("source_module") == "self_evolution"
+        and item.get("followup_state") in {"applied_expression_policy", "applied_memory_sources_policy"}
+    )
     return {
         "schema_version": APPROVED_PROPOSAL_FOLLOWUPS_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
@@ -513,6 +519,7 @@ def approved_proposal_followups_report(store: MemoryOSStore, *, limit: int = 20)
         "policy_apply_count": policy_apply_count,
         "memory_sources_policy_apply_count": memory_sources_policy_apply_count,
         "legacy_template_cleanup_apply_count": legacy_cleanup_apply_count,
+        "self_evolution_applied_count": self_evolution_applied_count,
         "deep_reflection_policy_apply_count": bounded_policy_written_count,
         "execution_ticket_count": ticket_created_count,
         "actual_execute": False,
@@ -549,6 +556,7 @@ def _approved_proposal_followups_summary(store: MemoryOSStore) -> dict[str, Any]
         "policy_apply_count": report["policy_apply_count"],
         "memory_sources_policy_apply_count": report["memory_sources_policy_apply_count"],
         "legacy_template_cleanup_apply_count": report["legacy_template_cleanup_apply_count"],
+        "self_evolution_applied_count": report["self_evolution_applied_count"],
         "deep_reflection_policy_apply_count": report["deep_reflection_policy_apply_count"],
         "execution_ticket_count": report["execution_ticket_count"],
         "actual_execute": report["actual_execute"],
@@ -3896,7 +3904,7 @@ def _proposal_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[
                 "review_item_id": f"review:proposal:{proposal_id}",
                 "target_type": "proposal",
                 "target_id": proposal_id,
-                "source_module": "proposal_queue",
+                "source_module": str(proposal.get("source_module") or "proposal_queue"),
                 "priority": "review_suggested" if requires_maturation else "action_required",
                 "created_at": created_at,
                 "created_at_source": created_at_source,
@@ -7046,6 +7054,7 @@ def _write_memory_sources_policy(
         "created_at": policy["created_at"],
         "proposal_id": str(proposal.get("candidate_id") or ""),
         "proposal_title": _bounded_text(str(proposal.get("title") or ""), 180),
+        "source_module": str(proposal.get("source_module") or ""),
         "policy_id": policy["policy_id"],
         "policy_version": policy["policy_version"],
         "policy_path": str(policy_path),
@@ -7153,6 +7162,7 @@ def _write_right_brain_expression_policy(
         "created_at": policy["created_at"],
         "proposal_id": str(proposal.get("candidate_id") or ""),
         "proposal_title": _bounded_text(str(proposal.get("title") or ""), 180),
+        "source_module": str(proposal.get("source_module") or ""),
         "policy_id": policy["policy_id"],
         "policy_version": policy["policy_version"],
         "policy_path": str(policy_path),

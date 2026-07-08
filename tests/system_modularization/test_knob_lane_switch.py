@@ -240,7 +240,7 @@ def test_threshold_knob_record_stores_bounds_not_allowed(store_root):
         prior=2, proposed_by="test", approved_via="test",
         expires_at=_future_iso(), _store_root=store_root,
     )
-    assert record["bounds"] == [2, 5]
+    assert record["bounds"] == [1, 5]
     assert record["allowed"] is None
 
 
@@ -361,7 +361,7 @@ def test_threshold_knob_revert_still_propagates_bounds(store_root):
     reversion = revert_override(
         record["id"], reason="owner_reverted", _store_root=store_root,
     )
-    assert reversion["bounds"] == [2, 5]
+    assert reversion["bounds"] == [1, 5]
     assert reversion["allowed"] is None  # threshold knobs have no allowed
 
 
