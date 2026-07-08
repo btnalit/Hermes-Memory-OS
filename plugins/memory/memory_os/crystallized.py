@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit
-from .jsonl_io import append_jsonl_locked, append_jsonl_lines_locked, locked_jsonl_file
+from .jsonl_io import append_jsonl_locked, append_jsonl_lines_locked, locked_jsonl_file, _append_line_under_lock
 from .ids import new_crystallized_id
 from .schema import CRYSTALLIZED_SCHEMA_VERSION
 from .store import MemoryOSStore, _format_frontmatter
@@ -803,10 +803,7 @@ def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidat
             already_present = True
         else:
             line = json.dumps(data, ensure_ascii=False, sort_keys=True) + "\n"
-            with target.open("a", encoding="utf-8") as handle:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
+            _append_line_under_lock(target, line)
     if already_present:
         append_audit(
             store.roots.audit_path,

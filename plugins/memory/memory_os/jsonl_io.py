@@ -443,6 +443,28 @@ def locked_jsonl_file(path: Path) -> Generator[Path, None, None]:
                 fcntl.flock(lh.fileno(), fcntl.LOCK_UN)
 
 
+def _append_line_under_lock(
+    target: Path,
+    line: str,
+    *,
+    durable: bool = True,
+) -> None:
+    """Write one pre-serialized line to *target*, which MUST already be held
+    under the sidecar flock (e.g., inside a ``with locked_jsonl_file(path)``
+    block).
+
+    This is the single write-surface point for governed JSONL appends. Both
+    ``append_jsonl_locked`` and callers that need to interleave a check+write
+    under the same lock (e.g. ``append_candidate_queue``) funnel through here
+    so the write surface stays classified in one place.
+    """
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        if durable:
+            os.fsync(handle.fileno())
+
+
 def append_jsonl_locked(
     path: Path,
     record: dict[str, Any],
@@ -456,11 +478,7 @@ def append_jsonl_locked(
     """
     line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
     with locked_jsonl_file(path) as target:
-        with target.open("a", encoding="utf-8") as handle:
-            handle.write(line)
-            handle.flush()
-            if durable:
-                os.fsync(handle.fileno())
+        _append_line_under_lock(target, line, durable=durable)
 
 
 def append_jsonl_lines_locked(
