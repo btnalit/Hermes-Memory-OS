@@ -32,7 +32,11 @@ from plugins.memory.memory_os.ids import new_crystallized_id, new_event_id
 
 # ── configuration ──────────────────────────────────────────────────
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
-NONCE_FILE = HERMES_HOME / "memory-os" / "crystallized" / "probe_test.md"
+# System-internal probe file (not user memory).  The underscore prefix
+# signals "Memory-OS owned; do not edit by hand".  The file is
+# self-cleaning: after a successful revoke the probe compacts it,
+# removing all inactive records, and deletes it when empty.
+NONCE_FILE = HERMES_HOME / "memory-os" / "crystallized" / "_system_probe.md"
 LOG_FILE = Path(tempfile.gettempdir()) / f"l3_probe_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.log"
 
 def _resolve_probe_budget(hermes_home: Path) -> int:
@@ -66,6 +70,56 @@ def _generate_nonce() -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _compact_probe_file(service: CrystallizedMemoryService) -> str:
+    """Rewrite the probe file containing only active records; delete if empty.
+
+    After each L3 probe run, one new nonce is written and one prior nonce
+    is revoked.  Over time the file would accumulate inactive records
+    indefinitely.  This compaction step keeps the probe artifact lean by
+    removing every record whose canonical_state is inactive, and unlinking
+    the file entirely when no active records remain.
+    """
+    probe_name = "_system_probe.md"
+    probe_path = service.store.roots.crystallized_root / probe_name
+    try:
+        records = service.read_records(probe_name)
+    except Exception:
+        return "compact: file not found (nothing to compact)"
+
+    active = [r for r in records if is_active_crystallized_frontmatter(r.frontmatter)]
+    if not active:
+        # All records are inactive — remove the file entirely
+        try:
+            probe_path.unlink(missing_ok=True)
+            return "compact: deleted (no active records)"
+        except OSError as exc:
+            return f"compact: delete failed ({exc})"
+
+    inactive_count = len(records) - len(active)
+    if inactive_count == 0:
+        return "compact: no inactive records (already clean)"
+
+    # Render only active records to a temp file, then atomically replace
+    tmp_path = probe_path.with_suffix(".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            for record in active:
+                from plugins.memory.memory_os.store import _format_frontmatter
+                handle.write(_format_frontmatter(record.frontmatter))
+                handle.write("\n\n")
+                handle.write(record.body.rstrip())
+                handle.write("\n\n")
+        tmp_path.replace(probe_path)
+        return f"compact: removed {inactive_count} inactive record(s)"
+    except Exception as exc:
+        # Best-effort — failure to compact must not fail the probe
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return f"compact: failed ({exc})"
 
 
 # ── harness core ───────────────────────────────────────────────────
@@ -103,8 +157,8 @@ def run(cleanup: bool = True) -> dict[str, str]:
         reviewed_at=_now(),
         note=f"L3 probe nonce (positive case); cleanup=revoke",
     )
-    path = service.write_approved_record(cand_pos, dec_pos, file_name="probe_test.md")
-    record_id = service.read_records("probe_test.md")[-1].frontmatter["id"]
+    path = service.write_approved_record(cand_pos, dec_pos, file_name="_system_probe.md")
+    record_id = service.read_records("_system_probe.md")[-1].frontmatter["id"]
     log["positive_record_id"] = record_id
     log["write_path"] = str(path)
     log_path.write_text(json.dumps(log, indent=2), encoding="utf-8")
@@ -149,7 +203,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
             if in_section:
                 results["l2_recall_debug"] = results.get("l2_recall_debug", "") + line + "\n"
         # Also dump nonce_file
-        results["l2_recall_file_check"] = f"nonce in probe_test.md"
+        results["l2_recall_file_check"] = f"nonce in _system_probe.md"
 
     # ── step 3: L2 recall verification — negative nonce ────────
     l2_negative = False
@@ -166,7 +220,7 @@ def run(cleanup: bool = True) -> dict[str, str]:
     if not l2_negative:
         results["l2_recall_negative"] = "✅ negative nonce NOT recalled (expected)"
 
-    # ── step 4: cleanup — revoke via governance path ──────────
+    # ── step 4: cleanup — revoke + compact via governance path ─
     if cleanup:
         revoke_result = service.revoke_record(
             record_id,
@@ -178,6 +232,12 @@ def run(cleanup: bool = True) -> dict[str, str]:
             results["cleanup"] = f"revoked: canonical_state changed"
         else:
             results["cleanup"] = f"revoke status: {revoke_result}"
+
+        # Compact the probe file: rewrite with only active records,
+        # delete if empty.  This prevents unbounded accumulation of
+        # inactive probe nonces in the production crystallized directory.
+        compacted = _compact_probe_file(service)
+        results["cleanup_compact"] = compacted
 
         # Verify revocation: post-revoke prefetch should NOT contain nonce
         context_post = build_prefetch(

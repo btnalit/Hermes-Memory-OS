@@ -1166,6 +1166,11 @@ def _floor_match_score(path: Path, tokens: list[str], *, body_cache: dict[Path, 
     If *body_cache* is provided, body lookups use the pre-read cache
     to avoid duplicate disk I/O when the caller also needs the raw body
     for line-building.
+
+    Deprecated for record-level scoring: use :func:`_record_body_score`
+    instead when individual records (not whole files) should be ranked.
+    This function is retained for backward compatibility and for the
+    :func:`_tokenize_for_floor_match` test suite.
     """
     if not tokens:
         return 0
@@ -1187,6 +1192,27 @@ def _floor_match_score(path: Path, tokens: list[str], *, body_cache: dict[Path, 
     score = 0
     for token in tokens:
         if token in body:
+            score += 1
+    return score
+
+
+def _record_body_score(body_text: str, tokens: list[str]) -> int:
+    """Score a single crystallized record body against floor-match tokens.
+
+    Unlike :func:`_floor_match_score` which scores an entire file (giving
+    large files an unfair advantage), this scores a single record's body
+    text in isolation.  Each distinct token that appears as a substring
+    in *body_text* contributes 1 point.
+
+    Pure deterministic computation — no LLM, no network, no external
+    dependency.  Returns an integer ≥ 0.
+    """
+    if not tokens or not body_text:
+        return 0
+    cf = body_text.casefold()
+    score = 0
+    for token in tokens:
+        if token in cf:
             score += 1
     return score
 
@@ -1331,14 +1357,17 @@ def _crystallized_lines(
     # ── File traversal ──────────────────────────────────────────────
     # When FTS5 provides relevance, sort by filename (stable, predictable).
     # When relevance is absent:
-    #   - level 2 (deterministic floor recall): sort by floor match score
-    #     descending — query-aware brute-force matching puts relevant
-    #     records first so the cap truncates non-matches from the bottom
+    #   - level 2 (deterministic floor recall): record-level scoring is
+    #     applied *after* collecting all entries — each record body is
+    #     scored individually against floor_tokens so small files with
+    #     highly relevant records aren't pushed out of the cap by large
+    #     files with dilute incidental matches.
     #   - level 1 (empty query / pure recency): sort by mtime descending
     paths = list(store.roots.crystallized_root.glob("*.md"))
     # Pre-read cache for degradation floor path — avoids double file I/O
-    # (the same bodies serve both floor-match sorting and line-building).
+    # (the same bodies serve both record-level scoring and line-building).
     body_cache: dict[Path, str] = {}
+    floor_tokens: list[str] = []
     if degradation_level == 2:
         floor_tokens = _tokenize_for_floor_match(search_query)
         if floor_tokens:
@@ -1355,7 +1384,8 @@ def _crystallized_lines(
                             severity="warning",
                             recoverable=True,
                         ))
-            paths.sort(key=lambda p: _floor_match_score(p, floor_tokens, body_cache=body_cache, error_records=error_records), reverse=True)
+            # Do NOT sort by file-level floor_match_score — record-level
+            # scoring is applied later (see _record_body_score usage below).
         else:
             paths.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     elif relevant_ids is None:
@@ -1372,6 +1402,11 @@ def _crystallized_lines(
                 content = path.read_text(encoding="utf-8")
             except Exception:
                 continue
+        # Determine whether to apply record-level floor-match scoring.
+        # Only active at degradation_level=2 (deterministic floor recall)
+        # with non-empty tokens — otherwise behaviour is unchanged.
+        record_scoring = degradation_level == 2 and bool(floor_tokens)
+
         for frontmatter, body in _parse_markdown_records(content):
             if not is_active_crystallized_frontmatter(frontmatter):
                 continue
@@ -1386,6 +1421,11 @@ def _crystallized_lines(
             text = _redact(_clip(body, 220))
             if not text or _is_diagnostic_style_seed(text):
                 continue
+
+            # Record-level score at degradation level 2 — each record body
+            # is scored individually so small files with relevant records
+            # are not pushed out of the cap by large files (bugfix).
+            rec_score = _record_body_score(body, floor_tokens) if record_scoring else 0
 
             is_provisional = frontmatter.get("provisional") is True
             if is_provisional:
@@ -1412,35 +1452,38 @@ def _crystallized_lines(
                     f"- {path.name}/{kind}: "
                     f"(provisional·剩{days_remaining}d){recurrence_marker} {text}"
                 )
-                provisional_entries.append((expires_dt, rid, line, recurrence))
+                provisional_entries.append((expires_dt, rid, line, recurrence, rec_score))
             else:
                 recurrence = 0
                 try:
                     recurrence = int(frontmatter.get("recurrence", "0"))
                 except (ValueError, TypeError):
                     pass
-                permanent_entries.append((rid, f"- {path.name}/{kind}: {text}", recurrence))
+                permanent_entries.append((rid, f"- {path.name}/{kind}: {text}", recurrence, rec_score))
 
-    # Sort provisional entries: closest expiry first
-    provisional_entries.sort(key=lambda e: e[0])
-
-    # ── Permanent recurrence baseline (mtime fallback only) ───────────
-    # At degradation_level=1 (empty query, pure recency), sort permanent
-    # entries by recurrence descending so the most-recurrent records
-    # survive the per-class cap (MAX_PERMANENT=15).  This prevents high-
-    # recurrence core memories from being dropped when query-aware ranking
-    # is unavailable.
-    # At degradation_level=2 (deterministic floor recall), the floor match
-    # file ordering is preserved — recurrence sort would override the
-    # query-aware substring-match ordering and defeat floor recall.
-    # Reorder-only — does not expand the cap.
-    if degradation_level == 1 and permanent_entries:
-        permanent_entries.sort(key=lambda e: (-e[2], e[0]))
+    # ── Sort entries ─────────────────────────────────────────────
+    # At degradation_level=2 (deterministic floor recall), sort entries
+    # by record-level score descending so query-relevant records survive
+    # the cap regardless of which file they live in.  Score 0 (no token
+    # match) sinks to the bottom and is truncated by the cap — this is
+    # the intended behaviour: the floor is a query-aware fallback, not a
+    # universal recall of every on-disk record.
+    if degradation_level == 2 and floor_tokens:
+        permanent_entries.sort(key=lambda e: (-e[3], e[0]))
+        provisional_entries.sort(key=lambda e: (-e[4], e[0]))
+    else:
+        # Sort provisional entries: closest expiry first
+        provisional_entries.sort(key=lambda e: e[0])
+        # At degradation_level=1 (empty query, pure recency), sort permanent
+        # entries by recurrence descending so the most-recurrent records
+        # survive the per-class cap (MAX_PERMANENT=15).
+        if degradation_level == 1 and permanent_entries:
+            permanent_entries.sort(key=lambda e: (-e[2], e[0]))
 
     # ── Apply caps and track seen only for surviving records ──────
     result: list[str] = []
     # Cap permanent records at MAX_PERMANENT (15) — reserve floor for provisional
-    for rid, line, _recurrence in permanent_entries[:MAX_PERMANENT]:
+    for rid, line, _recurrence, _score in permanent_entries[:MAX_PERMANENT]:
         result.append(line)
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))
@@ -1448,7 +1491,7 @@ def _crystallized_lines(
     # Cap provisional records: at least MAX_PROVISIONAL (5), more if
     # permanent didn't fill its MAX_PERMANENT allocation.
     remaining_slots = MAX_TOTAL - len(result)
-    for _, rid, line, _ in provisional_entries[:max(MAX_PROVISIONAL, remaining_slots)]:
+    for _, rid, line, _, _score in provisional_entries[:max(MAX_PROVISIONAL, remaining_slots)]:
         result.append(line)
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))

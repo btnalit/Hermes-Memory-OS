@@ -40,7 +40,7 @@ def test_host_runtime_profile_resolves_ip_literal_aliases():
     assert media.hermes_home == "/root/.hermes"
     assert media.monitor_profile == "live"
     assert media.profile_source == "known_host"
-    assert feiniu.remote_repo_root == "/opt/Hermes-Memory-OS"
+    assert feiniu.remote_repo_root == "/root/Hermes-Memory-OS"
     assert feiniu.hermes_home == "/root/.hermes"
     assert feiniu.monitor_profile == "clean-host"
     assert feiniu.profile_source == "known_host"

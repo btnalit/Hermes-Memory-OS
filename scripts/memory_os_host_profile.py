@@ -44,13 +44,13 @@ KNOWN_HOST_RUNTIME_PROFILES: dict[str, dict[str, str]] = {
         "monitor_profile": "live",
     },
     "hermes-feiniu": {
-        "remote_repo_root": DEFAULT_REMOTE_REPO_ROOT,
+        "remote_repo_root": "/root/Hermes-Memory-OS",
         "hermes_home": DEFAULT_HERMES_HOME,
         "python_bin": "python3",
         "monitor_profile": "clean-host",
     },
     "10.20.2.66": {
-        "remote_repo_root": DEFAULT_REMOTE_REPO_ROOT,
+        "remote_repo_root": "/root/Hermes-Memory-OS",
         "hermes_home": DEFAULT_HERMES_HOME,
         "python_bin": "python3",
         "monitor_profile": "clean-host",
