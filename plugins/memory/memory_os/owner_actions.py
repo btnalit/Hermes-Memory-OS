@@ -172,6 +172,17 @@ ACTION_TYPES = {
     "reject_provisional_knob_override",
 }
 
+# V2-0 registry: scope the permanent-promotion delivery contract narrowly so
+# unrelated owner-review systems never contribute to its hard-zero invariants.
+LIVING_MEMORY_TARGET_TYPES = frozenset(
+    {
+        "candidate_cluster",
+        "crystallized_record",
+        "provisional_crystallized_record",
+        "permanent_memory_promotion",
+    }
+)
+
 TERMINAL_ACTIONS_BY_TARGET_TYPE = {
     "candidate": {"approve_candidate", "reject_candidate", "approve_external_evidence"},
     "candidate_cluster": {"approve_candidate_cluster", "reject_candidate_cluster", "defer_candidate_cluster"},
@@ -1697,6 +1708,7 @@ def owner_review_digest_preview(
     status = owner_review_status_report(store)
     channel = resolve_owner_review_channel(store, owner_id=resolved_owner)
     queue_items = list(queue.get("items") or [])
+    queue_items, delivery_diagnostics = _assemble_living_memory_delivery_items(queue_items)
     review_aging = queue.get("review_aging") if isinstance(queue.get("review_aging"), dict) else {}
     visible_queue_items, stale_informational_suppressed = _suppress_stale_informational_digest_items(
         queue_items,
@@ -1757,6 +1769,7 @@ def owner_review_digest_preview(
             "visible_fyi_total": visible_fyi_total,
         },
         "review_aging": review_aging,
+        "delivery_diagnostics": delivery_diagnostics,
         "aging_behavior": {
             "stale_informational_action": "suppress_from_digest",
             "stale_informational_suppressed_count": stale_informational_suppressed,
@@ -1874,118 +1887,26 @@ def parse_owner_review_reply(
     parsed = _parse_owner_reply_text(reply_text)
     anchor = str(parsed.get("anchor") or "").upper() if parsed.get("status") == "ok" else ""
     action_token = str(parsed.get("action_token") or "").lower() if parsed.get("status") == "ok" else ""
-
-    # --- P1: expiry cliff guard tokens (oa_confirm_ / oa_let_expire_) ---
-    if action_token and action_token.startswith("oa_confirm_"):
-        record_id = action_token[len("oa_confirm_"):]
-        if not record_id.strip():
-            return _reply_result(
-                status="error",
-                reply_text=reply_text,
-                owner_id=owner_id,
-                channel=channel,
-                apply=apply,
-                reason="missing record_id in oa_confirm_ token",
-                rendered={"profile": store.roots.profile or "default"},
-                binding="raw_token",
-            )
-        # P1 fix: require recorded digest when caller demands it (was bypassed)
-        rendered, binding = _resolve_reply_digest(
-            store,
-            owner_id=owner_id,
-            channel=channel,
-            digest_id=digest_id,
-            require_recorded_digest=require_recorded_digest,
-            anchor=anchor,
-            action_token=action_token,
-            max_action_required=max_action_required,
-            max_review_suggested=max_review_suggested,
-            max_fyi=max_fyi,
-        )
-        if binding == "digest_not_found":
-            return _reply_result(
-                status="needs_clarification",
-                reply_text=reply_text,
-                owner_id=owner_id,
-                channel=channel,
-                apply=apply,
-                reason="digest_not_found_or_expired",
-                rendered=rendered,
-                binding=binding,
-            )
-        service = CrystallizedMemoryService(store)
-        try:
-            result = service.confirm_provisional_record(
-                record_id.strip(),
-                confirmed_by="owner",
-            )
-        except KeyError:
-            return _reply_result(
-                status="error",
-                reply_text=reply_text,
-                owner_id=owner_id,
-                channel=channel,
-                apply=apply,
-                reason=f"record_not_found: {record_id.strip()}",
-                rendered=rendered,
-                binding=binding,
-            )
+    # V2-0 retires expiry-cliff raw token actions. Permanent promotion is
+    # available only via the ledger-backed permanent CLI/service route.
+    if action_token and action_token.startswith(("oa_confirm_", "oa_let_expire_")):
         return _reply_result(
-            status="ok",
+            status="unsupported",
             reply_text=reply_text,
             owner_id=owner_id,
             channel=channel,
             apply=apply,
-            reason="",
-            rendered=rendered,
-            binding=binding,
-            action_result={
-                "status": "ok",
-                "action": "provisional_confirmed",
-                "record_id": record_id.strip(),
-                "canonical_state_changed": result.get("canonical_state_changed", False),
-            },
-        )
-
-    if action_token and action_token.startswith("oa_let_expire_"):
-        record_id = action_token[len("oa_let_expire_"):]
-        if not record_id.strip():
-            return _reply_result(
-                status="error",
-                reply_text=reply_text,
-                owner_id=owner_id,
-                channel=channel,
-                apply=apply,
-                reason="missing record_id in oa_let_expire_ token",
-                rendered={"profile": store.roots.profile or "default"},
-                binding="raw_token",
-            )
-        if apply:
-            append_audit(
-                store.roots.audit_path,
-                action="provisional_let_expire",
-                status="ok",
-                target=str(store.roots.crystallized_root),
-                details={
-                    "record_id": record_id.strip(),
-                    "note": "owner explicitly chose to let this provisional record expire",
-                },
-            )
-        return _reply_result(
-            status="ok",
-            reply_text=reply_text,
-            owner_id=owner_id,
-            channel=channel,
-            apply=apply,
-            reason="",
+            reason="legacy_expiry_token_retired",
             rendered={"profile": store.roots.profile or "default"},
             binding="raw_token",
-            action_result={
-                "status": "ok",
-                "action": "provisional_let_expire_acknowledged",
-                "record_id": record_id.strip(),
-            },
         )
+
+    # V2-0: the legacy oa_confirm_/oa_let_expire_ expiry-cliff handlers were
+    # removed. They are unreachable — the retirement guard above returns for
+    # every oa_confirm_/oa_let_expire_ token — and the old oa_confirm_ path
+    # called confirm_provisional_record() without a proposal authorization,
+    # which the guarded write primitive now rejects. Permanent promotion is
+    # available only through the ledger-backed permanent CLI/service route.
 
     rendered, binding = _resolve_reply_digest(
         store,
@@ -2339,6 +2260,12 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
     items.extend(_provisional_crystallized_review_items(store, closed))
+    # Query surfaces retain provisional visibility, but disclose the delivery
+    # policy instead of silently presenting a delivery-only queue.
+    for item in items:
+        target_type = str(item.get("target_type") or "")
+        if target_type in LIVING_MEMORY_TARGET_TYPES:
+            item["delivery_eligible"] = target_type == "permanent_memory_promotion"
     aged_items, aging = _apply_review_aging(store, items)
     sorted_items = sorted(
         aged_items,
@@ -2358,6 +2285,28 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
         "raw_body_included": False,
         "review_aging": _review_aging_summary(sorted_items, aging),
         "items": anchored,
+    }
+
+
+def _assemble_living_memory_delivery_items(
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Filter only the delivery view; leave shared query/aging reports intact."""
+    delivery_items: list[dict[str, Any]] = []
+    nonpromotion_count = 0
+    promotion_count = 0
+    for item in items:
+        target_type = str(item.get("target_type") or "")
+        if target_type not in LIVING_MEMORY_TARGET_TYPES:
+            delivery_items.append(item)
+        elif target_type == "permanent_memory_promotion":
+            promotion_count += 1
+            delivery_items.append(item)
+        else:
+            nonpromotion_count += 1
+    return delivery_items, {
+        "living_memory_nonpromotion_filtered_count": nonpromotion_count,
+        "permanent_promotion_review_item_count": promotion_count,
     }
 
 
@@ -3035,11 +2984,8 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             "outcome_feedback_linked": bool(feedback.get("outcome_feedback_linked")),
         }
     if action_type == "confirm_provisional_crystallized_record":
-        result = CrystallizedMemoryService(store).confirm_provisional_record(
-            target_id, confirmed_by=str(record["owner_id"]),
-        )
-        record["owner_effect"]["owner_confirmed_provisional"] = True
-        return {"record_id": target_id, "canonical_state_changed": result.get("canonical_state_changed", False)}
+        # Deterministic legacy owner actions have no permanent authority in V2-0.
+        return {"status": "rejected", "reason": "legacy_permanent_action_rejected"}
     if action_type == "reject_provisional_crystallized_record":
         result = CrystallizedMemoryService(store).invalidate_provisional_record(
             target_id, reason="owner_rejected", invalidated_by=str(record["owner_id"]),
@@ -5118,63 +5064,6 @@ def _action_token(*, action_type: str, target_type: str, target_id: str) -> str:
     return "oa_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:14]
 
 
-def _render_expiring_provisional_section(store: MemoryOSStore) -> str:
-    """渲染临近过期 provisional 区段，带 confirm/let_expire action token。
-
-    从 system/expiring_provisional.json 读取 sweep 输出的列表，
-    按 recurrence 降序 + expires_at 升序取 top-N，生成 digest 区段。
-    """
-    from plugins.modules.governance.provisional_sweep import _expiring_list_path as _sweep_list_path
-    from plugins.memory.memory_os.knob_overrides import resolve_knob
-
-    list_path = _sweep_list_path(store)
-    if not list_path.exists():
-        return ""
-
-    try:
-        expiring = json.loads(list_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return ""
-
-    if not isinstance(expiring, list) or not expiring:
-        return ""
-
-    max_n = int(resolve_knob("max_expiring_in_digest", default=10, roots=store.roots))
-    # 按 recurrence 降序 + expires_at 升序
-    expiring.sort(
-        key=lambda r: (
-            -int(r.get("recurrence", 0)),
-            str(r.get("expires_at", "")),
-        )
-    )
-    expiring = expiring[:max_n]
-
-    lines = [
-        "## ⚠ 即将过期的 Provisional 事实（48h 内）",
-        "",
-    ]
-    for r in expiring:
-        record_id = str(r.get("id") or "")
-        raw_body = str(r.get("body") or "").strip()
-        if _contains_transcript_marker(raw_body):
-            body = "(摘要隐藏：内容包含原始对话片段)"
-        else:
-            body = raw_body
-            if len(body) > 120:
-                body = body[:117] + "..."
-        hours = int(r.get("hours_remaining", 0))
-        external_ref = str(r.get("external_ref") or "")
-        ref_line = f"\n    外部参考: {external_ref}" if external_ref else ""
-
-        lines.append(
-            f"- [⏳即将过期] {body} (剩{hours}h){ref_line}\n"
-            f"    → confirm: 确认为 permanent    let_expire: 让其过期\n"
-            f"    action_tokens: oa_confirm_{record_id} | oa_let_expire_{record_id}"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
 def _digest_text_preview(
     action_items: list[dict[str, Any]],
     suggested_items: list[dict[str, Any]],
@@ -5249,14 +5138,6 @@ def _rendered_digest_text(
                 section_lines.append(summary_line)
         lines.extend(section_lines)
         lines.append("")
-
-    # 临近过期 provisional 提醒（expiry cliff guard）
-    if store is not None:
-        _expiring = _render_expiring_provisional_section(store)
-        if _expiring:
-            candidate = lines + [_expiring]
-            if len("\n".join(candidate).rstrip()) <= max_chars:
-                lines.append(_expiring)
 
     # 待审批 edges 区段（owner review for governed edges）
     if store is not None:

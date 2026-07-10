@@ -4255,11 +4255,11 @@ def test_confirm_provisional_through_owner_action(tmp_path):
         apply=True,
     )
     assert result["status"] in {"applied", "ok"}
+    assert result.get("result_ref", {}).get("reason") == "legacy_permanent_action_rejected"
 
     records_after = service.read_records("owner_approved.md")
     fm = records_after[0].frontmatter
-    assert fm.get("provisional") is False
-    assert fm.get("confirmed_by") == "owner"
+    assert fm.get("provisional") is True
 
 
 def test_reject_provisional_through_owner_action(tmp_path):
@@ -4419,64 +4419,6 @@ def test_provisional_crystallized_clean_body_passed_through(tmp_path):
     # Clean body should pass through normally
     assert "摘要隐藏" not in item["summary"]
     assert "简洁的中文回答" in item["summary"]
-
-
-def test_expiring_provisional_body_with_transcript_marker_is_suppressed(tmp_path):
-    """Counterfactual: _render_expiring_provisional_section suppresses transcript-like bodies."""
-    import json as _json
-
-    store = _store(tmp_path)
-    list_dir = store.roots.memory_os_root / "system"
-    list_dir.mkdir(parents=True, exist_ok=True)
-    list_path = list_dir / "expiring_provisional.json"
-    list_path.write_text(
-        _json.dumps(
-            [
-                {
-                    "id": "prov_transcript_001",
-                    "body": "User: 我需要帮助 | Assistant: 好的，我来帮你。",
-                    "recurrence": 1,
-                    "expires_at": "2026-07-04T00:00:00Z",
-                    "hours_remaining": 24,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    section = owner_actions_module._render_expiring_provisional_section(store)
-    # Counterfactual: without the fix, "User:" and "Assistant:" would leak into the section
-    assert "User:" not in section
-    assert "Assistant:" not in section
-    assert "摘要隐藏" in section
-
-
-def test_expiring_provisional_clean_body_passed_through(tmp_path):
-    """Clean expiring provisional body renders normally."""
-    import json as _json
-
-    store = _store(tmp_path)
-    list_dir = store.roots.memory_os_root / "system"
-    list_dir.mkdir(parents=True, exist_ok=True)
-    list_path = list_dir / "expiring_provisional.json"
-    list_path.write_text(
-        _json.dumps(
-            [
-                {
-                    "id": "prov_clean",
-                    "body": "用户偏好使用深色模式界面。",
-                    "recurrence": 1,
-                    "expires_at": "2026-07-04T00:00:00Z",
-                    "hours_remaining": 24,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    section = owner_actions_module._render_expiring_provisional_section(store)
-    assert "摘要隐藏" not in section
-    assert "深色模式" in section
 
 
 def test_contains_transcript_marker_includes_all_consolidation_markers():

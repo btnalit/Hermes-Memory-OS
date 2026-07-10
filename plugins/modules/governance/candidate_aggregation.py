@@ -9,9 +9,10 @@ Auto-approve path (P4, _cluster_and_promote → _resolver_verdict):
   gate (sensitivity in NON_SENSITIVE, no identity signals, no side effects), and
   survive judgment-stack veto are auto-approved as provisional crystallized records
   (reviewer="resolver", provisional=True) under an ExecutionGate envelope
-  (RESOLVER_AUTO_APPROVE_LANE). Permanent crystallization still requires either
-  auto_promote age gate (≥auto_promote_min_age_days, default 7d) or owner explicit
-  approval.
+  (RESOLVER_AUTO_APPROVE_LANE). Permanent crystallization is owner-gated (V2-0):
+  the age signal (≥permanent_proposal_min_age_days, default 7d) only marks a
+  record eligible for an owner-initiated `memory-os permanent propose`; it never
+  writes permanent state on its own.
 
 Triage-only path (owner_eligible):
   Candidates that fail the resolver gate, carry tainted external evidence,

@@ -192,7 +192,9 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "ab_metric": None,
     },
     # ── Source gate quality knobs (F.8) ────────────────────────────────
-    "auto_promote_enabled": {
+    # V2-0 successors. `permanent_proposal_enabled` gates the non-mutating
+    # permanent-promotion eligibility collection (never an automatic write).
+    "permanent_proposal_enabled": {
         "module": "crystallized",
         "default": True,
         "kind": "lane_switch",
@@ -201,6 +203,28 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "permanent_proposal_min_age_days": {
+        "module": "crystallized",
+        "default": 7,
+        "bounds": [3, 30],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": "promotion_rate",
+    },
+    # Deprecated aliases (V2-0 migration). Kept registered so existing owner
+    # overrides still resolve, but they emit a DeprecationWarning and are
+    # migrated to the successor key (see DEPRECATED_KNOB_ALIASES). They can
+    # never re-enable the removed silent auto-promote write path.
+    "auto_promote_enabled": {
+        "module": "crystallized",
+        "default": True,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+        "deprecated_alias_of": "permanent_proposal_enabled",
+    },
     "auto_promote_min_age_days": {
         "module": "crystallized",
         "default": 7,
@@ -208,6 +232,7 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "meta": False,
         "scope": "upper_layer",
         "ab_metric": "promotion_rate",
+        "deprecated_alias_of": "permanent_proposal_min_age_days",
     },
     "recent_cross_session_enabled": {
         "module": "prefetch",
@@ -394,6 +419,55 @@ def resolve_knobs(
         if len(definitively_seen) == _all_queries:
             break
     return results
+
+
+# ── Deprecated knob migration (V2-0) ─────────────────────────────────────
+# Legacy alias → V2-0 successor. Kept so pre-existing owner overrides on the
+# old keys still resolve, but they warn and are migrated to the successor.
+DEPRECATED_KNOB_ALIASES: dict[str, str] = {
+    "auto_promote_enabled": "permanent_proposal_enabled",
+    "auto_promote_min_age_days": "permanent_proposal_min_age_days",
+}
+_SUCCESSOR_TO_DEPRECATED: dict[str, str] = {
+    successor: alias for alias, successor in DEPRECATED_KNOB_ALIASES.items()
+}
+
+
+def resolve_migrated_knob(
+    name: str,
+    default: Any,
+    *,
+    roots: MemoryOSRoots | None = None,
+    _now: datetime | None = None,
+    _store_root: Path | None = None,
+) -> Any:
+    """Resolve a V2-0 successor knob, honoring a deprecated alias override.
+
+    Precedence: an active override on the *successor* key wins outright. If the
+    successor has no override but the deprecated alias does, emit a
+    DeprecationWarning and migrate the alias value. Otherwise return *default*.
+
+    Deterministic and free of side effects apart from the warning — INV-5 safe.
+    """
+    deprecated = _SUCCESSOR_TO_DEPRECATED.get(name)
+    queries: dict[str, Any] = {name: _SENTINEL}
+    if deprecated is not None:
+        queries[deprecated] = _SENTINEL
+    resolved = resolve_knobs(queries, roots=roots, _now=_now, _store_root=_store_root)
+
+    successor_value = resolved[name]
+    if successor_value is not _SENTINEL:
+        return successor_value
+    if deprecated is not None and resolved[deprecated] is not _SENTINEL:
+        import warnings  # pylint: disable=import-outside-toplevel
+        warnings.warn(
+            f"Knob '{deprecated}' is deprecated; use '{name}'. "
+            f"The legacy override value is being migrated for this resolution.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return resolved[deprecated]
+    return default
 
 
 # ── Write ───────────────────────────────────────────────────────────────

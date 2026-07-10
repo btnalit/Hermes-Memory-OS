@@ -1223,6 +1223,12 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
         help="Count records that would be reembedded, do not write",
     )
     subs.add_parser("status")
+    permanent = subs.add_parser("permanent")
+    permanent_subs = permanent.add_subparsers(dest="permanent_command", required=True)
+    propose = permanent_subs.add_parser("propose"); propose.add_argument("target")
+    approve = permanent_subs.add_parser("approve"); approve.add_argument("token")
+    reject = permanent_subs.add_parser("reject"); reject.add_argument("token")
+    defer = permanent_subs.add_parser("defer"); defer.add_argument("token"); defer.add_argument("--until", required=True)
     subs.add_parser("doctor")
     hindsight_parser = subs.add_parser("hindsight")
     hindsight_subs = hindsight_parser.add_subparsers(dest="hindsight_command", required=True)
@@ -1622,6 +1628,19 @@ def memory_os_command(args: argparse.Namespace) -> int:
         )
     )
     command = args.memory_os_command
+    if command == "permanent":
+        from .permanent_promotion import PermanentPromotionError, PermanentPromotionService
+        service = PermanentPromotionService(store)
+        try:
+            if args.permanent_command == "propose": result = service.propose(args.target)
+            elif args.permanent_command == "approve": result = service.approve(args.token)
+            elif args.permanent_command == "reject": result = service.reject(args.token)
+            elif args.permanent_command == "defer": result = service.defer(args.token, until=args.until)
+            else: result = {"status": "error", "reason_code": "unknown_permanent_command"}
+        except PermanentPromotionError as exc:
+            result = {"status": "error", "reason_code": str(exc)}
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0 if result.get("status") in {"open", "approved", "ineligible", "rejected", "deferred"} else 2
     if command == "cron-mirror":
         return _cron_mirror_command(args, store)
     if command == "session-mirror":

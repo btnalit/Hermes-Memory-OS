@@ -79,7 +79,7 @@ def test_find_expiring_provisional_filters_48h(tmp_path):
             candidate_id=c.candidate_id,
             purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
             reviewer="resolver",
-            reviewed_at=now.isoformat(),
+            reviewed_at=(now - timedelta(days=8)).isoformat(),
             note="test",
             source_state="resolver_approved",
             provisional=True,
@@ -101,52 +101,33 @@ def test_find_expiring_provisional_filters_48h(tmp_path):
     assert "cand_exp_3" not in ids
 
 
-def test_expiring_section_in_digest(tmp_path):
-    """D.2: 临近过期 → digest 区段出现，带 confirm/let_expire token."""
+def test_expiring_provisional_is_not_proactively_delivered(tmp_path):
+    """V2-0 keeps expiry data queryable but removes it from owner delivery."""
     store = _store(tmp_path)
     service = CrystallizedMemoryService(store)
     now = datetime.now(timezone.utc)
-
-    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
     from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
 
     c = CrystallizedCandidate(
-        candidate_id="cand_d2",
-        kind="preference",
-        body="用户偏好:使用暗色主题编辑代码",
-        bridge_state="resolver_approved",
-        sensitivity="private",
-        source_event_ids=["ev_sweep_test"],
+        candidate_id="cand_d2", kind="preference", body="用户偏好:使用暗色主题编辑代码",
+        bridge_state="resolver_approved", sensitivity="private", source_event_ids=["ev_sweep_test"],
         created_at=(now - timedelta(days=6)).isoformat(),
     )
     d = ApprovalDecision(
-        candidate_id=c.candidate_id,
-        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
-        reviewer="resolver",
-        reviewed_at=now.isoformat(),
-        note="test",
-        source_state="resolver_approved",
-        provisional=True,
-        expires_at=(now + timedelta(hours=24)).isoformat(),
+        candidate_id=c.candidate_id, purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver", reviewed_at=(now - timedelta(days=8)).isoformat(), note="test",
+        source_state="resolver_approved", provisional=True, expires_at=(now + timedelta(hours=24)).isoformat(),
         recurrence=0,
     )
     service.write_approved_record(c, d, file_name="owner_approved.md", now=now)
 
-    # 写临时文件供 digest 读取
-    from plugins.modules.governance.provisional_sweep import _expiring_list_path as _sweep_expiring_path
-    near = find_expiring_provisional(store, within_hours=48)
-    p = _sweep_expiring_path(store)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(near, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-
-    # 调 digest 区段渲染
-    from plugins.memory.memory_os.owner_actions import _render_expiring_provisional_section
-    section_text = _render_expiring_provisional_section(store)
-
-    assert "即将过期" in section_text
-    assert "oa_confirm_" in section_text
-    assert "oa_let_expire_" in section_text
-    assert "24h" in section_text or "剩" in section_text
+    assert find_expiring_provisional(store, within_hours=48)
+    from plugins.memory.memory_os.owner_actions import render_owner_review_digest
+    rendered = render_owner_review_digest(store)
+    assert "即将过期的 Provisional" not in rendered["text"]
+    assert "oa_confirm_" not in rendered["text"]
+    assert "oa_let_expire_" not in rendered["text"]
 
 
 def test_owner_confirm_makes_permanent(tmp_path):
@@ -171,7 +152,7 @@ def test_owner_confirm_makes_permanent(tmp_path):
         candidate_id=c.candidate_id,
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
         reviewer="resolver",
-        reviewed_at=now.isoformat(),
+        reviewed_at=(now - timedelta(days=8)).isoformat(),
         note="test",
         source_state="resolver_approved",
         provisional=True,
@@ -185,16 +166,15 @@ def test_owner_confirm_makes_permanent(tmp_path):
     assert len(prov_records) == 1
     record_id = prov_records[0]["id"]
 
-    # 执行 confirm
-    result = service.confirm_provisional_record(
-        record_id,
-        confirmed_by="owner",
-        now=now,
-    )
+    # Owner-initiated permanent promotion uses proposal → random token → approve.
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+    promotion = PermanentPromotionService(store)
+    issued = promotion.propose(record_id, channel="cli")
+    result = promotion.approve(issued["token"])
     assert result["canonical_state_changed"] is True
 
     # 读回确认已是 permanent
-    all_records = service.read_records(result["file_name"])
+    all_records = service.read_records("owner_approved.md")
     confirmed = [
         r for r in all_records
         if r.frontmatter.get("id") == record_id
@@ -277,7 +257,7 @@ def test_thundering_herd_top_n(tmp_path):
             candidate_id=c.candidate_id,
             purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
             reviewer="resolver",
-            reviewed_at=now.isoformat(),
+            reviewed_at=(now - timedelta(days=8)).isoformat(),
             note="test",
             source_state="resolver_approved",
             provisional=True,
@@ -328,7 +308,7 @@ def test_bump_recurrence_on_match(tmp_path):
         candidate_id=c.candidate_id,
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
         reviewer="resolver",
-        reviewed_at=now.isoformat(),
+        reviewed_at=(now - timedelta(days=8)).isoformat(),
         note="test",
         source_state="resolver_approved",
         provisional=True,
@@ -400,7 +380,7 @@ def test_repeated_observation_accumulates_recurrence(tmp_path):
         candidate_id=c.candidate_id,
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
         reviewer="resolver",
-        reviewed_at=now.isoformat(),
+        reviewed_at=(now - timedelta(days=8)).isoformat(),
         note="test",
         source_state="resolver_approved",
         provisional=True,
@@ -451,7 +431,7 @@ def test_max_renewals_requires_owner_decision(tmp_path):
         candidate_id=c.candidate_id,
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
         reviewer="resolver",
-        reviewed_at=now.isoformat(),
+        reviewed_at=(now - timedelta(days=8)).isoformat(),
         note="test",
         source_state="resolver_approved",
         provisional=True,

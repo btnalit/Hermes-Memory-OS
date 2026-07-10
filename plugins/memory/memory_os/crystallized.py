@@ -412,15 +412,16 @@ class CrystallizedMemoryService:
         self,
         record_id: str,
         *,
-        confirmed_by: str,
+        authorization: Any | None = None,
+        confirmed_by: str = "",
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Confirm a provisional record, making it permanent.
-
-        Sets provisional=False, clears expires_at, adds confirmed_at/confirmed_by.
-        The record transitions from temporary to permanent.
-        """
+        """Confirm only after a ledger service has validated proposal binding."""
         normalized = str(record_id or "").strip()
+        if authorization is None:
+            raise CrystallizedApprovalError("permanent confirmation requires proposal authorization")
+        if str(getattr(authorization, "target_id", "")) != normalized:
+            raise CrystallizedApprovalError("proposal authorization target mismatch")
         if not normalized:
             raise KeyError("crystallized record id is required")
         if not self.store.roots.crystallized_root.exists():
@@ -441,12 +442,13 @@ class CrystallizedMemoryService:
                     if frontmatter.get("provisional") is True:
                         frontmatter["provisional"] = False
                         frontmatter["expires_at"] = ""
-                        frontmatter["confirmed_by"] = confirmed_by
+                        frontmatter["confirmed_by"] = "owner"
                         frontmatter["confirmed_at"] = _timestamp(now)
+                        frontmatter["permanent_promotion_proposal_id"] = str(getattr(authorization, "proposal_id", ""))
                         if frontmatter.get("canonical_state") in (
                             "provisional_expired", "provisional_cap_evicted", "provisional_rejected",
                         ):
-                            frontmatter["canonical_state"] = "active"
+                            raise CrystallizedApprovalError("evidence_increment_unavailable")
                         changed = True
                 rendered.append(_format_frontmatter(frontmatter))
                 rendered.append("")
@@ -595,24 +597,28 @@ class CrystallizedMemoryService:
                     })
         return results
 
-    def auto_promote_provisional_records(
+    def collect_permanent_promotion_eligibility(
         self,
         *,
         now: datetime | None = None,
         dry_run: bool = False,
         _store_root: Path | None = None,
     ) -> dict[str, Any]:
-        """Auto-promote provisional records that have lived long enough.
+        """Non-mutating V2-0 permanent-promotion eligibility report.
 
-        Passive trust model (S1 from source-gate spec): a provisional record
-        that has not been rejected by the owner and has been alive for
-        ≥ auto_promote_min_age_days is auto-confirmed to permanent.
+        Replaces the removed silent age-based auto-promote write. Reports which
+        provisional records the legacy age rule *would* have promoted — a
+        derived ``legacy_auto_promoted`` projection — but never writes permanent
+        state, never rewrites frontmatter, and never mints an owner action.
+        Owner-initiated ``memory-os permanent propose`` is the only permanent
+        entrance in V2-0.
 
-        Governance: reversible (invalidate), audited, owner can block via
-        auto_promote_enabled=False knob.
+        Governance: read-only; owner can disable via the
+        ``permanent_proposal_enabled`` knob (legacy ``auto_promote_enabled``
+        is migrated with a deprecation warning).
         """
         _now = _datetime(now)
-        from .knob_overrides import resolve_knob
+        from .knob_overrides import resolve_migrated_knob
 
         # Resolve knobs from the store being operated on (not ambient ~/.hermes)
         # so tests with a synthetic store are isolated from the user's real overrides.
@@ -622,25 +628,32 @@ class CrystallizedMemoryService:
         else:
             _resolve_kwargs["roots"] = self.store.roots
 
-        enabled = resolve_knob("auto_promote_enabled", default=True, **_resolve_kwargs)
+        enabled = resolve_migrated_knob(
+            "permanent_proposal_enabled", True, **_resolve_kwargs
+        )
         if not enabled:
             return {
-                "schema_version": "memory-os.auto_promote.v0",
+                "schema_version": "memory-os.permanent_promotion_eligibility.v1",
                 "status": "disabled",
-                "reason": "knob auto_promote_enabled=False",
+                "reason": "knob permanent_proposal_enabled=False",
                 "eligible_count": 0,
                 "promoted_count": 0,
                 "skipped_rejected_count": 0,
                 "skipped_too_young_count": 0,
+                "dry_run": dry_run,
+                "eligible_records": [],
+                "error_records": [],
             }
 
-        min_age_days = resolve_knob("auto_promote_min_age_days", default=7, **_resolve_kwargs)
+        min_age_days = resolve_migrated_knob(
+            "permanent_proposal_min_age_days", 7, **_resolve_kwargs
+        )
         cutoff_dt = _now - timedelta(days=min_age_days)
 
         eligible_count = 0
-        promoted_count = 0
         skipped_rejected_count = 0
         skipped_too_young_count = 0
+        eligible_records: list[dict[str, Any]] = []
         error_records: list[dict[str, Any]] = []
 
         for record in self.list_provisional_records():
@@ -648,7 +661,7 @@ class CrystallizedMemoryService:
             if not record_id:
                 continue
 
-            # Never auto-promote owner-rejected records
+            # Never surface owner-rejected records as eligible
             canonical_state = str(record.get("canonical_state") or "")
             if canonical_state == "provisional_rejected":
                 skipped_rejected_count += 1
@@ -670,40 +683,45 @@ class CrystallizedMemoryService:
                 continue
 
             eligible_count += 1
-
-            if dry_run:
-                continue
-
-            try:
-                self.confirm_provisional_record(
-                    record_id,
-                    confirmed_by="auto_promote",
-                    now=_now,
-                )
-                promoted_count += 1
-            except Exception:
-                from .jsonl_io import build_error_record
-
-                error_records.append(
-                    build_error_record(
-                        component="crystallized.auto_promote",
-                        operation="confirm_provisional_record",
-                        error_code="CONFIRM_FAILED",
-                        severity="warn",
-                        recoverable=True,
-                    )
-                )
+            eligible_records.append({
+                "record_id": record_id,
+                "candidate_id": str(record.get("candidate_id") or ""),
+                "projection": "legacy_auto_promoted",
+                "approved_at": approved_at_str,
+                "age_days": (_now - approved_dt).days,
+            })
+            # V2-0: report-only. No permanent write, no owner action minted.
 
         return {
-            "schema_version": "memory-os.auto_promote.v0",
+            "schema_version": "memory-os.permanent_promotion_eligibility.v1",
             "status": "ok" if not error_records else "partial",
             "eligible_count": eligible_count,
-            "promoted_count": promoted_count if not dry_run else 0,
+            "promoted_count": 0,
             "skipped_rejected_count": skipped_rejected_count,
             "skipped_too_young_count": skipped_too_young_count,
             "dry_run": dry_run,
+            "eligible_records": eligible_records,
             "error_records": error_records,
         }
+
+    def auto_promote_provisional_records(
+        self,
+        *,
+        now: datetime | None = None,
+        dry_run: bool = False,
+        _store_root: Path | None = None,
+    ) -> dict[str, Any]:
+        """Deprecated V2-0 compatibility wrapper — non-mutating.
+
+        The silent age-based permanent write was removed in V2-0. This name is
+        retained only so existing callers keep resolving; it delegates to
+        :meth:`collect_permanent_promotion_eligibility` and never writes
+        permanent state or mints an owner action. New code must call that
+        method directly.
+        """
+        return self.collect_permanent_promotion_eligibility(
+            now=now, dry_run=dry_run, _store_root=_store_root,
+        )
 
     def _ensure_crystallized_approval(
         self,

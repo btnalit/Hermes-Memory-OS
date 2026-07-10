@@ -1131,6 +1131,101 @@ def summarize_l4_guard(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, Any]:
+    """Bounded permanent-promotion proposal/token ledger state counts.
+
+    Diagnostics only — the ledgers are the source of truth; these are a
+    read-only projection for monitor visibility. Last-status-wins per id.
+    """
+    root = Path(memory_os_root)
+
+    def _final_states(path: Path, id_key: str) -> dict[str, str]:
+        states: dict[str, str] = {}
+        if not path.exists():
+            return states
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            key = str(event.get(id_key) or "")
+            status = str(event.get("status") or "")
+            if key and status:
+                states[key] = status
+        return states
+
+    def _tally(states: dict[str, str], keys: tuple[str, ...]) -> dict[str, int]:
+        tally = {key: 0 for key in keys}
+        for status in states.values():
+            tally[status] = tally.get(status, 0) + 1
+        return tally
+
+    proposals = _final_states(root / "system" / "permanent_promotion_proposals.jsonl", "proposal_id")
+    tokens = _final_states(root / "system" / "owner_action_tokens.jsonl", "token_hash")
+    return {
+        "proposal_ledger_counts": _tally(
+            proposals, ("open", "approved", "rejected", "deferred", "revoked", "expired")
+        ),
+        "token_ledger_counts": _tally(tokens, ("open", "consumed", "revoked", "expired")),
+    }
+
+
+def summarize_living_memory_promotion(
+    *,
+    delivery_items: list[dict[str, Any]] | None = None,
+    review_items: list[dict[str, Any]] | None = None,
+    automatic_permanent_promotion_count: int = 0,
+    memory_os_root: Path | None = None,
+) -> dict[str, Any]:
+    """Derive the Living Memory V2-0 permanent-promotion monitor section.
+
+    Counts only registered ``LIVING_MEMORY_TARGET_TYPES`` so unrelated owner
+    systems (speak, knob, route/score) never enter the hard-zero counters.
+    ``delivery_items`` are what would be proactively delivered to the owner
+    (post Task-7 choke point, promotion-only); ``review_items`` are the
+    owner-initiated query surface (queue/aging), which may include provisional
+    non-promotion items by design.
+    """
+    try:
+        from plugins.memory.memory_os.owner_actions import LIVING_MEMORY_TARGET_TYPES
+    except Exception:
+        LIVING_MEMORY_TARGET_TYPES = frozenset({
+            "candidate_cluster", "crystallized_record",
+            "provisional_crystallized_record", "permanent_memory_promotion",
+        })
+    promo = "permanent_memory_promotion"
+    delivery = delivery_items or []
+    review = review_items or []
+
+    def _lm(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [i for i in items if str(i.get("target_type") or "") in LIVING_MEMORY_TARGET_TYPES]
+
+    lm_delivery = _lm(delivery)
+    lm_review = _lm(review)
+    section: dict[str, Any] = {
+        "schema_version": "memory-os.living_memory_promotion.v0",
+        "permanent_promotion_review_item_count": sum(
+            1 for i in lm_review if str(i.get("target_type")) == promo
+        ),
+        "living_memory_nonpromotion_review_item_count": sum(
+            1 for i in lm_review if str(i.get("target_type")) != promo
+        ),
+        "living_memory_owner_delivery_nonpromotion_count": sum(
+            1 for i in lm_delivery if str(i.get("target_type")) != promo
+        ),
+        "automatic_permanent_promotion_count": int(automatic_permanent_promotion_count or 0),
+        "proposal_ledger_counts": {
+            "open": 0, "approved": 0, "rejected": 0, "deferred": 0, "revoked": 0, "expired": 0,
+        },
+        "token_ledger_counts": {"open": 0, "consumed": 0, "revoked": 0, "expired": 0},
+    }
+    if memory_os_root is not None:
+        section.update(read_permanent_promotion_ledger_counts(memory_os_root))
+    return section
+
+
 def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
@@ -3107,6 +3202,38 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     failure["finding"] = item["finding"]
                 fail.append(failure)
 
+    # ── Living Memory V2-0 permanent-promotion invariants (Task 8) ──────────
+    living_memory_promotion = snapshot.get("living_memory_promotion", {})
+    if isinstance(living_memory_promotion, dict) and living_memory_promotion:
+        if living_memory_promotion.get("schema_version") == "memory-os.living_memory_promotion.v0":
+            auto_count = int(living_memory_promotion.get("automatic_permanent_promotion_count") or 0)
+            delivery_nonpromo = int(
+                living_memory_promotion.get("living_memory_owner_delivery_nonpromotion_count") or 0
+            )
+            # Hard-zero: no silent auto-promotion and no non-promotion Living
+            # Memory item in proactive owner delivery. Query-surface provisional
+            # visibility (nonpromotion_review_item_count) is intentionally NOT a
+            # failure — mother-spec §2.2 preserves it.
+            if auto_count > 0:
+                fail.append({"code": "living_memory_automatic_permanent_promotion", "value": auto_count})
+            if delivery_nonpromo > 0:
+                fail.append({"code": "living_memory_owner_delivery_nonpromotion", "value": delivery_nonpromo})
+            if auto_count == 0 and delivery_nonpromo == 0:
+                passed.append({"code": "living_memory_promotion_hard_zero_ok"})
+            passed.append({
+                "code": "living_memory_promotion_ledger_state_visible",
+                "value": {
+                    "proposal_ledger_counts": living_memory_promotion.get("proposal_ledger_counts"),
+                    "token_ledger_counts": living_memory_promotion.get("token_ledger_counts"),
+                    "permanent_promotion_review_item_count":
+                        living_memory_promotion.get("permanent_promotion_review_item_count"),
+                    "living_memory_nonpromotion_review_item_count":
+                        living_memory_promotion.get("living_memory_nonpromotion_review_item_count"),
+                },
+            })
+        else:
+            warn.append({"code": "living_memory_promotion_unavailable", "value": living_memory_promotion})
+
     status = "FAIL" if fail else "WARN" if warn else "PASS"
     evidence_labels = _monitor_evidence_labels(monitor_profile=monitor_profile, status=status)
     return {
@@ -4030,6 +4157,17 @@ def collect_snapshot(
     raw["v7_governance"] = summarize_v7_governance(raw)
     raw["index_catchup_contract"] = index_catchup_contract(raw)
     raw["error_observability"] = monitor_error_observability(raw)
+    # Living Memory V2-0 permanent-promotion invariants. The automatic-promotion
+    # hard-zero is derived from the provisional module artifact (which must never
+    # live-apply an auto-promote). Ledger state counts are read directly only for
+    # a local run, where the canonical store is on this filesystem.
+    _provisional_artifact = (raw.get("module_artifacts") or {}).get("provisional") or {}
+    _lm_kwargs: dict[str, Any] = {
+        "automatic_permanent_promotion_count": 1 if _provisional_artifact.get("auto_promote_live_applied") else 0,
+    }
+    if not host:
+        _lm_kwargs["memory_os_root"] = Path(hermes_home) / "memory-os"
+    raw["living_memory_promotion"] = summarize_living_memory_promotion(**_lm_kwargs)
     raw["classification"] = classify_snapshot(raw)
     return raw
 

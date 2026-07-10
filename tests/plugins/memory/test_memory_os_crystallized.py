@@ -365,7 +365,9 @@ def test_confirm_provisional_record_removes_provisional_and_expires_at(tmp_path)
     records = service.read_records("owner_approved.md")
     record_id = records[0].frontmatter["id"]
 
-    result = service.confirm_provisional_record(record_id, confirmed_by="owner")
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+    issued = PermanentPromotionService(store).propose(record_id, channel="cli")
+    result = PermanentPromotionService(store).approve(issued["token"])
     assert result["record_id"] == record_id
     assert result["canonical_state_changed"] is True
 
@@ -480,10 +482,10 @@ class TestAutoPromoteProvisionalRecords:
         result = service.auto_promote_provisional_records(now=now)
         assert result["status"] == "ok"
         assert result["eligible_count"] == 1
-        assert result["promoted_count"] == 1
+        assert result["promoted_count"] == 0
 
-        # Verify it's now permanent (no longer provisional)
-        assert len(service.list_provisional_records()) == 0
+        # V2-0 leaves it provisional until an owner-issued proposal/token action.
+        assert len(service.list_provisional_records()) == 1
 
     def test_s1_too_young_not_promoted(self, tmp_path):
         """S.1: provisional younger than min_age → not promoted."""
@@ -731,11 +733,11 @@ class TestAutoPromoteProvisionalRecords:
 
         result = service.auto_promote_provisional_records(now=now)
         assert result["eligible_count"] == 1
-        assert result["promoted_count"] == 1
+        assert result["promoted_count"] == 0
         assert result["skipped_too_young_count"] == 1
 
-        # Only young remains
-        assert len(service.list_provisional_records()) == 1
+        # Both remain until an owner action approves a proposal.
+        assert len(service.list_provisional_records()) == 2
 
 
 # ── S.X: Adversarial verification ────────────────────────────────────────
@@ -785,10 +787,10 @@ class TestAutoPromoteAdversarial:
         # Without calling auto_promote, record stays provisional
         assert len(service.list_provisional_records()) == 1
 
-        # Auto-promote exists and works — calling it proves the difference
+        # Compatibility wrapper is non-mutating in V2-0.
         result = service.auto_promote_provisional_records(now=now)
-        assert result["promoted_count"] == 1
-        assert len(service.list_provisional_records()) == 0
+        assert result["promoted_count"] == 0
+        assert len(service.list_provisional_records()) == 1
 
 
 # ── Write-time candidate_id idempotency guard ────────────────────────────────
@@ -935,5 +937,141 @@ def test_candidate_aggregation_status_unavailable_returns_none(tmp_path):
     )
 
     assert latest_candidate_aggregation_status(store) is None
+
+
+# ── Task 5: permanent-promotion eligibility (V2-0 migration) ──────────────
+# collect_permanent_promotion_eligibility() replaces the silent age-based
+# auto-promote write path with a non-mutating, owner-facing eligibility
+# report. It must never write permanent state and must expose a derived
+# `legacy_auto_promoted` projection without rewriting canonical frontmatter.
+
+
+def _build_aged_provisional(service, *, candidate_id, days_old, now,
+                            file_name="owner_approved.md"):
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+
+    candidate = CrystallizedCandidate(
+        candidate_id=candidate_id,
+        kind="fact",
+        body=f"Aged provisional record {candidate_id}.",
+        source_event_ids=[f"evt_{candidate_id}"],
+        sensitivity="private",
+        bridge_state="inner_drive_candidate",
+    )
+    decision = ApprovalDecision(
+        candidate_id=candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at=(now - timedelta(days=days_old)).isoformat(),
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at=(now + timedelta(days=30)).isoformat(),
+    )
+    service.write_approved_record(candidate, decision, file_name=file_name)
+
+
+def _eligibility_service(tmp_path):
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    return CrystallizedMemoryService(store)
+
+
+def test_legacy_auto_promote_never_writes_permanent_even_when_old(tmp_path):
+    service = _eligibility_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    _build_aged_provisional(service, candidate_id="cand_old30", days_old=30, now=now)
+
+    report = service.collect_permanent_promotion_eligibility(now=now)
+
+    assert report["promoted_count"] == 0
+    assert report["eligible_count"] == 1
+    # Record must be untouched: still provisional, no permanent rewrite.
+    assert len(service.list_provisional_records()) == 1
+    records = service.read_records("owner_approved.md")
+    assert records[0].frontmatter["provisional"] is True
+
+
+def test_migration_snapshot_lists_all_previously_age_eligible_records(tmp_path):
+    service = _eligibility_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    _build_aged_provisional(service, candidate_id="cand_a", days_old=20, now=now)
+    _build_aged_provisional(service, candidate_id="cand_b", days_old=10, now=now)
+    _build_aged_provisional(service, candidate_id="cand_young", days_old=1, now=now)
+
+    report = service.collect_permanent_promotion_eligibility(now=now)
+
+    eligible_ids = {e["candidate_id"] for e in report["eligible_records"]}
+    assert eligible_ids == {"cand_a", "cand_b"}
+    assert report["eligible_count"] == 2
+    assert all(e["projection"] == "legacy_auto_promoted" for e in report["eligible_records"])
+
+
+def test_migration_marks_legacy_auto_promoted_projection_without_rewriting_frontmatter(tmp_path):
+    service = _eligibility_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    _build_aged_provisional(service, candidate_id="cand_proj", days_old=15, now=now)
+
+    report = service.collect_permanent_promotion_eligibility(now=now)
+
+    assert report["eligible_records"][0]["projection"] == "legacy_auto_promoted"
+    # Projection is derived-only: canonical frontmatter must NOT carry it.
+    records = service.read_records("owner_approved.md")
+    fm = records[0].frontmatter
+    assert "legacy_auto_promoted" not in fm
+    assert fm.get("canonical_state", "") != "legacy_auto_promoted"
+    assert fm["provisional"] is True
+
+
+def test_old_override_keys_warn_and_are_migrated_to_new_keys(tmp_path):
+    from plugins.memory.memory_os.knob_overrides import register_override
+
+    service = _eligibility_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    _build_aged_provisional(service, candidate_id="cand_knob", days_old=15, now=now)
+
+    # Legacy key must still be honored (migrated to the new key) but warn.
+    register_override(
+        "auto_promote_enabled", False, prior=True,
+        proposed_by="test", approved_via="resolver",
+        expires_at=(now + timedelta(days=7)).isoformat(),
+        _now=now, _store_root=tmp_path,
+    )
+    with pytest.warns(DeprecationWarning):
+        report = service.collect_permanent_promotion_eligibility(
+            now=now, _store_root=tmp_path,
+        )
+    assert report["status"] == "disabled"
+    assert report["promoted_count"] == 0
+
+
+def test_new_permanent_proposal_key_wins_over_legacy_alias(tmp_path):
+    from plugins.memory.memory_os.knob_overrides import register_override
+
+    service = _eligibility_service(tmp_path)
+    now = datetime.now(timezone.utc)
+    _build_aged_provisional(service, candidate_id="cand_new_wins", days_old=15, now=now)
+
+    # Legacy alias says disabled, new key says enabled → new key wins, no warn needed.
+    register_override(
+        "auto_promote_enabled", False, prior=True,
+        proposed_by="test", approved_via="resolver",
+        expires_at=(now + timedelta(days=7)).isoformat(),
+        _now=now, _store_root=tmp_path,
+    )
+    register_override(
+        "permanent_proposal_enabled", True, prior=False,
+        proposed_by="test", approved_via="resolver",
+        expires_at=(now + timedelta(days=7)).isoformat(),
+        _now=now, _store_root=tmp_path,
+    )
+    report = service.collect_permanent_promotion_eligibility(now=now, _store_root=tmp_path)
+    assert report["status"] == "ok"
+    assert report["eligible_count"] == 1
 
 

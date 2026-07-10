@@ -657,3 +657,18 @@ def _write_deep_reflection_test_host_config(tmp_path) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+def test_cognitive_loop_reports_zero_automatic_permanent_promotions(tmp_path):
+    """V2-0: the provisional step is report-only — it never auto-promotes."""
+    store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
+    _append_event(store, "evt_promote", "Owner discussed a durable memory fact.")
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+
+    steps = {step["step"]: step for step in result["steps"]}
+    provisional = steps["provisional"]["result"]
+    assert provisional["auto_promote_live_applied"] is False
+    assert provisional["auto_promote_promoted"] == 0
+    assert provisional["canonical_state_changed"] is False

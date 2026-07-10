@@ -62,6 +62,10 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/prefetch.py::_record_graph_layer_shadow::path.open_a::path": "report_only_graph_layer_shadow",
     "plugins/memory/memory_os/state_overlay.py::append_overlay_run::path.open_a::out_path": "state_overlay_run_ledger",
     "scripts/memory_os_entity_index_refresh.py::main::path.open_a::run_path": "entity_index_refresh_run_ledger",
+    "plugins/memory/memory_os/permanent_promotion.py::ProposalLedger.create_or_get::append_under_lock_call::target": "permanent_promotion_proposal_ledger",
+    "plugins/memory/memory_os/permanent_promotion.py::ProposalLedger.append_terminal::append_under_lock_call::target": "permanent_promotion_proposal_ledger",
+    "plugins/memory/memory_os/permanent_promotion.py::TokenLedger.issue::append_under_lock_call::target": "permanent_promotion_token_ledger",
+    "plugins/memory/memory_os/permanent_promotion.py::TokenLedger.consume::append_under_lock_call::target": "permanent_promotion_token_ledger",
     "plugins/memory/memory_os/session_mirror.py::SessionMirror._append_apply_record::append_jsonl_call::session_mirror_apply_records_path(self.store.roots)": "session_mirror_governed_apply_ledger",
     "plugins/memory/memory_os/session_mirror.py::_append_jsonl::path.open_a::path": "session_mirror_private_writer",
     "plugins/memory/memory_os/shadow_journal.py::ShadowJournalIngestion._quarantine_malformed::path.open_a::quarantine_path": "quarantine_only",
@@ -234,6 +238,13 @@ class _WriteSurfaceVisitor(ast.NodeVisitor):
                 target = ast.unparse(node.args[0])
         elif isinstance(node.func, ast.Name) and node.func.id in {"_append_jsonl", "append_jsonl"}:
             kind = "append_jsonl_call"
+            target = ast.unparse(node.args[0]) if node.args else ""
+        elif (
+            self.rel_path == "plugins/memory/memory_os/permanent_promotion.py"
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_append_line_under_lock"
+        ):
+            kind = "append_under_lock_call"
             target = ast.unparse(node.args[0]) if node.args else ""
         if kind:
             qualname = ".".join(self.stack) or "<module>"

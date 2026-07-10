@@ -5689,3 +5689,120 @@ def test_counterfactual_hook_marker_counts_uses_hermes_home():
     assert '"/root/.hermes/memory-os/audit"' not in script, (
         "hook_marker_counts must not hardcode /root/.hermes/memory-os/audit"
     )
+
+
+# ── Task 8: Living Memory V2-0 permanent-promotion monitor invariants ──────
+
+
+def _living_memory_promotion_section(**overrides):
+    section = {
+        "schema_version": "memory-os.living_memory_promotion.v0",
+        "permanent_promotion_review_item_count": 0,
+        "living_memory_nonpromotion_review_item_count": 0,
+        "living_memory_owner_delivery_nonpromotion_count": 0,
+        "automatic_permanent_promotion_count": 0,
+        "proposal_ledger_counts": {"open": 0, "approved": 0, "rejected": 0, "deferred": 0},
+        "token_ledger_counts": {"open": 0, "consumed": 0, "revoked": 0, "expired": 0},
+    }
+    section.update(overrides)
+    return section
+
+
+def test_monitor_hard_fails_for_automatic_permanent_promotion():
+    snapshot = {"living_memory_promotion": _living_memory_promotion_section(
+        automatic_permanent_promotion_count=1,
+    )}
+    classification = classify_snapshot(snapshot)
+    codes = {item["code"] for item in classification["fail"]}
+    assert "living_memory_automatic_permanent_promotion" in codes
+
+
+def test_monitor_hard_fails_for_living_memory_nonpromotion_delivery():
+    snapshot = {"living_memory_promotion": _living_memory_promotion_section(
+        living_memory_owner_delivery_nonpromotion_count=2,
+    )}
+    classification = classify_snapshot(snapshot)
+    codes = {item["code"] for item in classification["fail"]}
+    assert "living_memory_owner_delivery_nonpromotion" in codes
+
+
+def test_monitor_passes_living_memory_hard_zero_and_reports_ledger_state():
+    snapshot = {"living_memory_promotion": _living_memory_promotion_section(
+        permanent_promotion_review_item_count=3,
+        # Query-surface provisional visibility is preserved — NOT a failure.
+        living_memory_nonpromotion_review_item_count=5,
+        proposal_ledger_counts={"open": 2, "approved": 1, "rejected": 0, "deferred": 0},
+        token_ledger_counts={"open": 2, "consumed": 1, "revoked": 0, "expired": 0},
+    )}
+    classification = classify_snapshot(snapshot)
+    fail_codes = {item["code"] for item in classification["fail"]}
+    pass_codes = {item["code"] for item in classification["pass"]}
+    assert not any(code.startswith("living_memory_") for code in fail_codes)
+    assert "living_memory_promotion_hard_zero_ok" in pass_codes
+    assert "living_memory_promotion_ledger_state_visible" in pass_codes
+
+
+def test_monitor_ignores_speak_and_knob_for_living_memory_hard_zero():
+    snapshot = {
+        "living_memory_promotion": _living_memory_promotion_section(),
+        "module_artifacts": {
+            "spontaneous_expression": {"status": "ok", "spontaneous_sent": False},
+            "knob_ab_eval": {"status": "ok"},
+        },
+    }
+    classification = classify_snapshot(snapshot)
+    fail_codes = {item["code"] for item in classification["fail"]}
+    assert not any(code.startswith("living_memory_") for code in fail_codes)
+
+
+def test_summarize_living_memory_promotion_counts_only_registered_target_types():
+    delivery = [
+        {"target_type": "permanent_memory_promotion"},
+        {"target_type": "speak_proposal"},   # not a Living Memory target type
+        {"target_type": "knob_tune"},         # not a Living Memory target type
+    ]
+    review = [
+        {"target_type": "provisional_crystallized_record"},  # LM non-promotion
+        {"target_type": "permanent_memory_promotion"},        # LM promotion
+        {"target_type": "route_score_proposal"},              # not LM
+    ]
+    section = monitor.summarize_living_memory_promotion(
+        delivery_items=delivery, review_items=review,
+    )
+    # speak/knob/route ignored; only registered LM target types counted.
+    assert section["living_memory_owner_delivery_nonpromotion_count"] == 0
+    assert section["living_memory_nonpromotion_review_item_count"] == 1
+    assert section["permanent_promotion_review_item_count"] == 1
+
+
+def test_summarize_flags_nonpromotion_living_memory_delivery():
+    delivery = [
+        {"target_type": "permanent_memory_promotion"},
+        {"target_type": "provisional_crystallized_record"},  # must never be delivered
+    ]
+    section = monitor.summarize_living_memory_promotion(delivery_items=delivery)
+    assert section["living_memory_owner_delivery_nonpromotion_count"] == 1
+
+
+def test_read_permanent_promotion_ledger_counts(tmp_path):
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    proposals = system / "permanent_promotion_proposals.jsonl"
+    proposals.write_text(
+        json.dumps({"proposal_id": "ppm_a", "status": "open"}) + "\n"
+        + json.dumps({"proposal_id": "ppm_a", "status": "approved"}) + "\n"
+        + json.dumps({"proposal_id": "ppm_b", "status": "open"}) + "\n",
+        encoding="utf-8",
+    )
+    tokens = system / "owner_action_tokens.jsonl"
+    tokens.write_text(
+        json.dumps({"token_hash": "h1", "status": "open"}) + "\n"
+        + json.dumps({"token_hash": "h1", "status": "consumed"}) + "\n",
+        encoding="utf-8",
+    )
+    counts = monitor.read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+    # ppm_a resolved to approved (terminal), ppm_b stays open.
+    assert counts["proposal_ledger_counts"]["approved"] == 1
+    assert counts["proposal_ledger_counts"]["open"] == 1
+    assert counts["token_ledger_counts"]["consumed"] == 1
+    assert counts["token_ledger_counts"]["open"] == 0

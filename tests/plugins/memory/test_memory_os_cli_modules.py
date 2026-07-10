@@ -335,3 +335,82 @@ def _init_store(tmp_path):
     store = MemoryOSStore(roots)
     store.initialize()
     return store
+
+
+def _seed_provisional(store, *, candidate_id, file_name):
+    from datetime import datetime, timezone, timedelta
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate, CrystallizedMemoryService
+
+    now = datetime.now(timezone.utc)
+    svc = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(candidate_id, "fact", f"Durable fact {candidate_id}.", [f"evt_{candidate_id}"])
+    decision = ApprovalDecision(
+        candidate_id, ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+        (now - timedelta(days=10)).isoformat(), provisional=True,
+        expires_at=(now + timedelta(days=30)).isoformat(),
+    )
+    svc.write_approved_record(candidate, decision, file_name=file_name)
+    return svc.read_records(file_name)[0].frontmatter["id"]
+
+
+def test_permanent_cli_propose_approve_end_to_end(tmp_path, monkeypatch, capsys):
+    store = _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    record_id = _seed_provisional(store, candidate_id="cand_cli_ok", file_name="cli_ok.md")
+
+    rc = memory_os_command(_parse_memory_os_args(["permanent", "propose", record_id]))
+    assert rc == 0
+    proposed = json.loads(capsys.readouterr().out)
+    assert proposed["status"] == "open"
+    token = proposed["token"]
+    assert token.startswith("ppmt_")
+
+    rc = memory_os_command(_parse_memory_os_args(["permanent", "approve", token]))
+    assert rc == 0
+    approved = json.loads(capsys.readouterr().out)
+    assert approved["status"] == "approved"
+
+    # Canonical record is now permanent; raw token never persisted.
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    fm = CrystallizedMemoryService(store).read_records("cli_ok.md")[0].frontmatter
+    assert fm["provisional"] is False
+    system = store.roots.memory_os_root / "system"
+    proposals_text = (system / "permanent_promotion_proposals.jsonl").read_text(encoding="utf-8")
+    tokens_text = (system / "owner_action_tokens.jsonl").read_text(encoding="utf-8")
+    assert proposed["proposal_id"] in proposals_text
+    assert token not in tokens_text  # only the token hash is stored
+
+
+def test_permanent_cli_reject_returns_success_exit_code(tmp_path, monkeypatch, capsys):
+    store = _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    record_id = _seed_provisional(store, candidate_id="cand_cli_reject", file_name="cli_reject.md")
+
+    memory_os_command(_parse_memory_os_args(["permanent", "propose", record_id]))
+    token = json.loads(capsys.readouterr().out)["token"]
+
+    rc = memory_os_command(_parse_memory_os_args(["permanent", "reject", token]))
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["status"] == "rejected"
+    assert rc == 0  # a successful reject is not a failure exit code
+    # Record stays provisional — reject performs no permanent write.
+    from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+    assert CrystallizedMemoryService(store).read_records("cli_reject.md")[0].frontmatter["provisional"] is True
+
+
+def test_permanent_cli_defer_returns_success_exit_code(tmp_path, monkeypatch, capsys):
+    store = _init_store(tmp_path)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    record_id = _seed_provisional(store, candidate_id="cand_cli_defer", file_name="cli_defer.md")
+
+    memory_os_command(_parse_memory_os_args(["permanent", "propose", record_id]))
+    token = json.loads(capsys.readouterr().out)["token"]
+
+    rc = memory_os_command(_parse_memory_os_args(
+        ["permanent", "defer", token, "--until", "2026-08-01T00:00:00Z"]
+    ))
+    deferred = json.loads(capsys.readouterr().out)
+    assert deferred["status"] == "deferred"
+    assert deferred["deferred_until"] == "2026-08-01T00:00:00Z"
+    assert rc == 0
