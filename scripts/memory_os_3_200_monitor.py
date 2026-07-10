@@ -5189,6 +5189,7 @@ def session_activity_stats(recent_window=250):
     }
 
 def audit_action_stats(recent_window=250, hermes_home=None):
+    from plugins.memory.memory_os.audit import read_audit_records
     if hermes_home is None:
         hermes_home = _hermes_home
     audit_path = Path(hermes_home) / "memory-os" / "audit" / "write_audit.jsonl"

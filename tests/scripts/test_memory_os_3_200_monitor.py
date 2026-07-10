@@ -5876,3 +5876,29 @@ def test_monitor_hard_fails_recovery_failure_and_stale_open():
 
     assert "living_memory_decision_recovery_failure" in codes
     assert "living_memory_stale_open_proposal" in codes
+
+
+def test_remote_probe_audit_action_stats_imports_read_audit_records():
+    """Regression: audit_action_stats must resolve read_audit_records in the
+    probe's own scope. The only module import lived inside the nested rh26_probe
+    sub-string, so the live monitor raised NameError at snapshot time."""
+    import ast
+
+    from scripts.memory_os_3_200_monitor import _remote_probe_script
+
+    tree = ast.parse(_remote_probe_script("/root/.hermes"))
+    func = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "audit_action_stats"
+        ),
+        None,
+    )
+    assert func is not None, "audit_action_stats missing from probe"
+    imports_read_audit = any(
+        isinstance(node, ast.ImportFrom)
+        and any(alias.name == "read_audit_records" for alias in node.names)
+        for node in ast.walk(func)
+    )
+    assert imports_read_audit, "audit_action_stats must import read_audit_records in-scope"
