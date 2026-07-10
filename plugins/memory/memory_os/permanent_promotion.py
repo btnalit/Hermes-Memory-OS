@@ -101,6 +101,17 @@ class AutomaticWriteContext:
         )
 
 
+@dataclass(frozen=True)
+class _VerifiedHostDeliveryReceipt:
+    """Bound receipt created only after the owner-review claim is resolved."""
+
+    delivery_ref: str
+    digest_id: str
+    receipt_id: str
+    receipt_status: str
+    proposal_ids: tuple[str, ...]
+
+
 def build_proposal_record(
     *,
     proposal_id: str,
@@ -499,7 +510,7 @@ class TokenLedger:
 class PermanentPromotionDeliveryLedger:
     """Acknowledged owner-digest exposure and bounded reminder schedule."""
 
-    _ACK_SOURCES = frozenset({"hermes_send_receipt", "hermes_cron_emission"})
+    _ACK_SOURCES = frozenset({"hermes_send_receipt"})
     _REMINDER_DELAYS = (3, 7, 14, 30)
 
     def __init__(self, memory_os_root: Path, *, clock: Callable[[], datetime] | None = None) -> None:
@@ -553,8 +564,40 @@ class PermanentPromotionDeliveryLedger:
     ) -> dict[str, Any]:
         selected_at = (now or self.clock()).astimezone(timezone.utc)
         bounded_cap = max(0, int(cap))
-        bounded_new = max(0, min(int(new_reserve), bounded_cap))
-        bounded_reminder = max(0, min(int(reminder_reserve), bounded_cap))
+        requested_new = max(0, int(new_reserve))
+        requested_reminder = max(0, int(reminder_reserve))
+        requested_total = requested_new + requested_reminder
+        if requested_total <= bounded_cap:
+            bounded_new = requested_new
+            bounded_reminder = requested_reminder
+        elif bounded_cap == 0:
+            bounded_new = 0
+            bounded_reminder = 0
+        elif not requested_new:
+            bounded_new = 0
+            bounded_reminder = min(requested_reminder, bounded_cap)
+        elif not requested_reminder:
+            bounded_new = min(requested_new, bounded_cap)
+            bounded_reminder = 0
+        elif bounded_cap == 1:
+            bounded_new = int(requested_new >= requested_reminder)
+            bounded_reminder = 1 - bounded_new
+        else:
+            proportional_new = (
+                bounded_cap * requested_new + requested_total // 2
+            ) // requested_total
+            bounded_new = max(1, min(requested_new, bounded_cap - 1, proportional_new))
+            bounded_reminder = min(requested_reminder, bounded_cap - bounded_new)
+            remaining_reserve = bounded_cap - bounded_new - bounded_reminder
+            if remaining_reserve > 0:
+                extra_new = min(requested_new - bounded_new, remaining_reserve)
+                bounded_new += extra_new
+                remaining_reserve -= extra_new
+            if remaining_reserve > 0:
+                bounded_reminder += min(
+                    requested_reminder - bounded_reminder,
+                    remaining_reserve,
+                )
         states = self.states()
         actionable = [
             proposal for proposal in proposals
@@ -610,6 +653,8 @@ class PermanentPromotionDeliveryLedger:
         *,
         owner_digest_delivery_id: str,
         ack_source: str,
+        delivery_receipt_id: str,
+        digest_id: str,
         now: datetime | None = None,
         write_context: AutomaticWriteContext | None = None,
     ) -> dict[str, Any]:
@@ -620,6 +665,12 @@ class PermanentPromotionDeliveryLedger:
         delivery_id = str(owner_digest_delivery_id or "").strip()
         if not delivery_id:
             raise PermanentPromotionError("delivery_id_required")
+        receipt_id = str(delivery_receipt_id or "").strip()
+        if not receipt_id:
+            raise PermanentPromotionError("delivery_receipt_required")
+        bounded_digest_id = str(digest_id or "").strip()
+        if not bounded_digest_id:
+            raise PermanentPromotionError("delivery_digest_id_required")
         delivered_at = (now or self.clock()).astimezone(timezone.utc)
         acknowledged_count = 0
         duplicate_count = 0
@@ -645,6 +696,8 @@ class PermanentPromotionDeliveryLedger:
                     "event_id": event_id,
                     "proposal_id": proposal_id,
                     "owner_digest_delivery_id": delivery_id,
+                    "digest_id": bounded_digest_id,
+                    "delivery_receipt_id": receipt_id[:160],
                     "ack_source": ack_source,
                     "status": "acknowledged",
                     "delivered_at": utc_timestamp(delivered_at),
@@ -662,13 +715,6 @@ class PermanentPromotionDeliveryLedger:
             "acknowledged_count": acknowledged_count,
             "duplicate_delivery_suppressed_count": duplicate_count,
         }
-
-
-@dataclass(frozen=True)
-class PermanentPromotionAuthorization:
-    proposal_id: str
-    target_id: str
-    token_hash: str
 
 
 class PermanentPromotionService:
@@ -907,7 +953,11 @@ class PermanentPromotionService:
             )
             return self._result_from_state(terminal)
 
-        from .crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
+        from .crystallized import (
+            CrystallizedMemoryService,
+            _PERMANENT_PROMOTION_WRITE_CAPABILITY,
+            is_active_crystallized_frontmatter,
+        )
 
         crystallized = CrystallizedMemoryService(self.store)
         record = crystallized.find_record(str(proposal.get("target_id") or ""))
@@ -949,14 +999,15 @@ class PermanentPromotionService:
             )
             return self._result_from_state(terminal)
 
-        authorization = PermanentPromotionAuthorization(
-            str(proposal["proposal_id"]),
-            str(proposal["target_id"]),
-            token_hash,
+        self._validate_approve_intent(
+            proposal,
+            token_hash=token_hash,
+            current_body=record.body,
         )
-        result = crystallized.confirm_provisional_record(
+        result = crystallized._confirm_provisional_record_from_permanent_service(
             str(proposal["target_id"]),
-            authorization=authorization,
+            proposal_id=str(proposal["proposal_id"]),
+            capability=_PERMANENT_PROMOTION_WRITE_CAPABILITY,
             confirmed_by="owner",
             now=self.clock(),
         )
@@ -969,6 +1020,43 @@ class PermanentPromotionService:
             write_context=write_context,
         )
         return self._result_from_state(terminal)
+
+    def _validate_approve_intent(
+        self,
+        proposal: dict[str, Any],
+        *,
+        token_hash: str,
+        current_body: str,
+    ) -> None:
+        """Validate durable proposal/token state before the canonical write."""
+        proposal_id = str(proposal.get("proposal_id") or "")
+        target_id = str(proposal.get("target_id") or "")
+        projected = self.proposals._states().get(proposal_id, {})
+        token_state = self.tokens._states().get(str(token_hash or ""), {})
+        operation_id = str(projected.get("operation_id") or "")
+        expected_content_hash = content_hash(current_body)
+        if (
+            not proposal_id
+            or not target_id
+            or not token_hash
+            or str(projected.get("status") or "") not in {"deciding", "approved"}
+            or str(projected.get("decision_action") or "") != "approve"
+            or not operation_id
+            or str(projected.get("target_id") or "") != target_id
+            or str(projected.get("content_hash") or "") != expected_content_hash
+            or str(projected.get("decision_token_hash") or "") != token_hash
+        ):
+            raise PermanentPromotionError("authorization_proposal_binding_mismatch")
+        if (
+            str(token_state.get("status") or "") != "consumed"
+            or str(token_state.get("proposal_id") or "") != proposal_id
+            or str(token_state.get("target_id") or "") != target_id
+            or str(token_state.get("content_hash") or "") != expected_content_hash
+            or str(token_state.get("dossier_snapshot_hash") or "")
+            != str(projected.get("dossier_snapshot_hash") or "")
+            or str(token_state.get("operation_id") or "") != operation_id
+        ):
+            raise PermanentPromotionError("authorization_token_binding_mismatch")
 
     def _act(self, token: str, action: str, *, deferred_until: str = "") -> dict[str, Any]:
         proposal = self.begin_decision_and_consume(
@@ -1168,6 +1256,105 @@ def _bounded_result_ref(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def preview_permanent_promotion_delivery(
+    store: Any,
+    *,
+    now: datetime | None = None,
+    cap: int = 5,
+    new_reserve: int = 3,
+    reminder_reserve: int = 2,
+) -> dict[str, Any]:
+    """Project the delivery queue without creating proposals or tokens."""
+    from .crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    crystallized = CrystallizedMemoryService(store)
+    eligibility = crystallized.collect_permanent_promotion_eligibility(
+        now=current,
+        dry_run=True,
+    )
+    eligible_by_record = {
+        str(item.get("record_id") or ""): item
+        for item in eligibility.get("eligible_records", [])
+        if str(item.get("record_id") or "")
+    }
+    service = PermanentPromotionService(store, clock=lambda: current)
+    open_proposals: list[dict[str, Any]] = []
+    for state in service.proposals._states().values():
+        if state.get("status") != "open":
+            continue
+        target = crystallized.find_record(str(state.get("target_id") or ""))
+        if (
+            target is not None
+            and target.frontmatter.get("provisional") is True
+            and is_active_crystallized_frontmatter(target.frontmatter)
+        ):
+            open_proposals.append(state)
+    existing_targets = {str(item.get("target_id") or "") for item in open_proposals}
+    synthetic = [
+        {
+            "proposal_id": "preview_" + content_hash(record_id)[:24],
+            "target_id": record_id,
+            "status": "open",
+            "created_at": utc_timestamp(current),
+            "eligibility": item,
+            "preview_only": True,
+        }
+        for record_id, item in eligible_by_record.items()
+        if record_id not in existing_targets
+    ]
+    queue = PermanentPromotionDeliveryLedger(
+        store.roots.memory_os_root,
+        clock=lambda: current,
+    ).select_due(
+        open_proposals + synthetic,
+        now=current,
+        cap=cap,
+        new_reserve=new_reserve,
+        reminder_reserve=reminder_reserve,
+    )
+    items: list[dict[str, Any]] = []
+    for proposal in queue["selected"]:
+        record_id = str(proposal.get("target_id") or "")
+        record = crystallized.find_record(record_id)
+        if record is None:
+            continue
+        eligibility_data = (
+            proposal.get("eligibility")
+            if isinstance(proposal.get("eligibility"), dict)
+            else eligible_by_record.get(record_id, {})
+        )
+        body = str(record.body or "")
+        items.append({
+            "review_item_id": str(proposal.get("proposal_id") or ""),
+            "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
+            "target_id": str(proposal.get("proposal_id") or ""),
+            "proposal_id": str(proposal.get("proposal_id") or ""),
+            "record_id": record_id,
+            "source_module": "permanent_promotion",
+            "priority": "action_required",
+            "created_at": str(proposal.get("created_at") or utc_timestamp(current)),
+            "created_at_source": "permanent_promotion_preview",
+            "summary": body[:1000],
+            "proposed_memory": body[:4000],
+            "age_days": int(eligibility_data.get("age_days") or 0),
+            "eligibility_reason_codes": list(eligibility_data.get("reason_codes") or []),
+            "action_token": "",
+            "action_token_available": False,
+            "preview_only": True,
+            "delivery_eligible": True,
+            "raw_body_included": False,
+        })
+    return {
+        "status": "preview",
+        "items": items,
+        "proposal_would_create_count": len(synthetic),
+        "proposal_reused_count": len(open_proposals),
+        "automatic_permanent_promotion_count": 0,
+        **{key: value for key, value in queue.items() if key != "selected"},
+    }
+
+
 def prepare_permanent_promotion_delivery(
     store: Any,
     *,
@@ -1344,20 +1531,24 @@ def prepare_permanent_promotion_delivery(
 
 def acknowledge_permanent_promotion_delivery(
     store: Any,
-    proposal_ids: list[str],
     *,
-    owner_digest_delivery_id: str,
-    ack_source: str,
+    verified_receipt: _VerifiedHostDeliveryReceipt,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Record only a real host emission or an explicit Hermes send receipt."""
+    """Record exposure only for a claim-bound receipt verified by owner_actions."""
     from .execution_gate import (
         complete_execution_gate_envelope,
         execution_gate_scope_hash,
         start_execution_gate_envelope,
     )
 
-    clean_ids = sorted({str(value or "") for value in proposal_ids if str(value or "")})
+    if not isinstance(verified_receipt, _VerifiedHostDeliveryReceipt):
+        raise PermanentPromotionError("verified_delivery_receipt_required")
+    clean_ids = sorted({
+        str(value or "")
+        for value in verified_receipt.proposal_ids
+        if str(value or "")
+    })
     if not clean_ids:
         return {
             "status": "ok",
@@ -1366,8 +1557,11 @@ def acknowledge_permanent_promotion_delivery(
         }
     scope = {
         "operation": "acknowledge_permanent_promotion_delivery",
-        "owner_digest_delivery_id": str(owner_digest_delivery_id or "")[:160],
-        "ack_source": str(ack_source or ""),
+        "owner_digest_delivery_id": verified_receipt.delivery_ref[:160],
+        "digest_id": verified_receipt.digest_id[:160],
+        "ack_source": "hermes_send_receipt",
+        "delivery_receipt_id": verified_receipt.receipt_id[:160],
+        "delivery_receipt_status": verified_receipt.receipt_status[:40],
         "proposal_ids": clean_ids[:500],
         "writes": ["permanent_promotion_delivery_ack"],
     }
@@ -1398,8 +1592,10 @@ def acknowledge_permanent_promotion_delivery(
             clock=(lambda: now.astimezone(timezone.utc)) if now is not None else None,
         ).acknowledge(
             clean_ids,
-            owner_digest_delivery_id=owner_digest_delivery_id,
-            ack_source=ack_source,
+            owner_digest_delivery_id=verified_receipt.delivery_ref,
+            ack_source="hermes_send_receipt",
+            delivery_receipt_id=verified_receipt.receipt_id,
+            digest_id=verified_receipt.digest_id,
             now=now,
             write_context=context,
         )

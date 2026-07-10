@@ -1227,9 +1227,9 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     permanent = subs.add_parser("permanent")
     permanent_subs = permanent.add_subparsers(dest="permanent_command", required=True)
     propose = permanent_subs.add_parser("propose"); propose.add_argument("target")
-    approve = permanent_subs.add_parser("approve"); approve.add_argument("token")
-    reject = permanent_subs.add_parser("reject"); reject.add_argument("token")
-    defer = permanent_subs.add_parser("defer"); defer.add_argument("token"); defer.add_argument("--until", required=True)
+    approve = permanent_subs.add_parser("approve"); approve.add_argument("token"); approve.add_argument("--owner", default="owner")
+    reject = permanent_subs.add_parser("reject"); reject.add_argument("token"); reject.add_argument("--owner", default="owner")
+    defer = permanent_subs.add_parser("defer"); defer.add_argument("token"); defer.add_argument("--until", required=True); defer.add_argument("--owner", default="owner")
     subs.add_parser("doctor")
     hindsight_parser = subs.add_parser("hindsight")
     hindsight_subs = hindsight_parser.add_subparsers(dest="hindsight_command", required=True)
@@ -1445,13 +1445,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_delivery_render.add_argument("--max-fyi", type=int)
     review_delivery_render.add_argument("--mode", choices=["review", "agenda", "debug"], default="agenda")
     review_delivery_render.add_argument("--format", choices=["json", "text"], default="json")
-    review_delivery_ack = review_subs.add_parser("ack-delivery-digest")
+    review_delivery_ack = review_subs.add_parser("ack-delivery-receipt")
     review_delivery_ack.add_argument("--delivery-ref", required=True)
-    review_delivery_ack.add_argument("--proposal-id", action="append", default=[])
+    review_delivery_ack.add_argument("--digest-id", required=True)
+    review_delivery_ack.add_argument("--receipt-id", required=True)
     review_delivery_ack.add_argument(
-        "--ack-source",
-        choices=["hermes_cron_emission", "hermes_send_receipt"],
-        default="hermes_cron_emission",
+        "--receipt-status",
+        choices=["ok", "sent", "delivered", "success"],
+        required=True,
     )
     review_reply = review_subs.add_parser("reply")
     review_reply.add_argument("reply", nargs="+")
@@ -1651,14 +1652,28 @@ def memory_os_command(args: argparse.Namespace) -> int:
         service = PermanentPromotionService(store)
         try:
             if args.permanent_command == "propose": result = service.propose(args.target)
-            elif args.permanent_command == "approve": result = service.approve(args.token)
-            elif args.permanent_command == "reject": result = service.reject(args.token)
-            elif args.permanent_command == "defer": result = service.defer(args.token, until=args.until)
+            elif args.permanent_command in {"approve", "reject", "defer"}:
+                from .owner_actions import apply_owner_action
+
+                processed = apply_owner_action(
+                    store,
+                    action_type=f"{args.permanent_command}_permanent_promotion",
+                    target=str(args.token),
+                    owner_id=str(getattr(args, "owner", "owner") or "owner"),
+                    channel="cli",
+                    apply=True,
+                    deferred_until=str(getattr(args, "until", "") or ""),
+                )
+                result = (
+                    processed.get("result_ref")
+                    if isinstance(processed.get("result_ref"), dict)
+                    else processed
+                )
             else: result = {"status": "error", "reason_code": "unknown_permanent_command"}
         except PermanentPromotionError as exc:
             result = {"status": "error", "reason_code": str(exc)}
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result.get("status") in {"open", "approved", "ineligible", "rejected", "deferred"} else 2
+        return 0 if result.get("status") in {"open", "approved", "ineligible", "rejected", "deferred", "ok", "duplicate_ignored"} else 2
     if command == "cron-mirror":
         return _cron_mirror_command(args, store)
     if command == "session-mirror":
@@ -2556,15 +2571,20 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
         else:
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
-    if command == "ack-delivery-digest":
-        from .permanent_promotion import acknowledge_permanent_promotion_delivery
+    if command == "ack-delivery-receipt":
+        from .owner_actions import acknowledge_owner_review_delivery_receipt
 
-        report = acknowledge_permanent_promotion_delivery(
-            store,
-            list(args.proposal_id or []),
-            owner_digest_delivery_id=str(args.delivery_ref),
-            ack_source=str(args.ack_source),
-        )
+        try:
+            report = acknowledge_owner_review_delivery_receipt(
+                store,
+                delivery_ref=str(args.delivery_ref),
+                digest_id=str(args.digest_id),
+                receipt_id=str(args.receipt_id),
+                receipt_status=str(args.receipt_status),
+            )
+        except ValueError as exc:
+            print(json.dumps({"status": "error", "reason_code": str(exc)}, ensure_ascii=False, sort_keys=True))
+            return 2
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if command == "reply":

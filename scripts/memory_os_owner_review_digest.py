@@ -57,26 +57,6 @@ def main() -> int:
     if text:
         print(text)
         sys.stdout.flush()
-        delivery = render.get("permanent_promotion_delivery")
-        proposal_ids = (
-            delivery.get("shown_proposal_ids")
-            if isinstance(delivery, dict) and isinstance(delivery.get("shown_proposal_ids"), list)
-            else []
-        )
-        if proposal_ids:
-            ack_command = [
-                "hermes",
-                "memory-os-agent-os",
-                "review",
-                "ack-delivery-digest",
-                "--delivery-ref",
-                delivery_ref,
-                "--ack-source",
-                "hermes_cron_emission",
-            ]
-            for proposal_id in proposal_ids:
-                ack_command.extend(["--proposal-id", str(proposal_id)])
-            _run_json(ack_command)
     return 0
 
 

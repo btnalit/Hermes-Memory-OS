@@ -152,7 +152,7 @@ def test_confirm_requires_verified_permanent_promotion_binding(tmp_path):
     service = CrystallizedMemoryService(store)
     service.write_approved_record(candidate, decision, file_name="owner_approved.md")
     record_id = service.read_records("owner_approved.md")[0].frontmatter["id"]
-    with pytest.raises(Exception, match="proposal authorization"):
+    with pytest.raises(Exception, match="PermanentPromotionService"):
         service.confirm_provisional_record(record_id, confirmed_by="owner")
 
 
@@ -274,20 +274,23 @@ def test_confirm_rejects_free_text_confirmed_by_without_binding(tmp_path):
     from plugins.memory.memory_os.crystallized import CrystallizedApprovalError
 
     service, record_id = _provisional_service(tmp_path)
-    with pytest.raises(CrystallizedApprovalError, match="proposal authorization"):
+    with pytest.raises(CrystallizedApprovalError, match="PermanentPromotionService"):
         service.confirm_provisional_record(record_id, confirmed_by="auto_promote")
 
 
-def test_confirm_authorization_target_mismatch_is_rejected(tmp_path):
+def test_direct_canonical_confirmation_rejects_arbitrary_authorization(tmp_path):
     from plugins.memory.memory_os.crystallized import CrystallizedApprovalError
-    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionAuthorization
+    from types import SimpleNamespace
 
     service, record_id = _provisional_service(tmp_path)
-    wrong = PermanentPromotionAuthorization(
-        proposal_id="ppm_" + "0" * 32, target_id="cry_wrong_target", token_hash="deadbeef",
+    forged = SimpleNamespace(
+        proposal_id="ppm_" + "0" * 32,
+        target_id=record_id,
+        token_hash="deadbeef",
     )
-    with pytest.raises(CrystallizedApprovalError, match="target mismatch"):
-        service.confirm_provisional_record(record_id, authorization=wrong)
+    with pytest.raises(CrystallizedApprovalError, match="PermanentPromotionService"):
+        service.confirm_provisional_record(record_id, authorization=forged)
+    assert service.find_record(record_id).frontmatter["provisional"] is True
 
 
 def test_service_promotes_once_and_consumes_bound_token(tmp_path):
@@ -317,27 +320,24 @@ def test_service_promotes_once_and_consumes_bound_token(tmp_path):
     assert duplicate["canonical_state_changed"] is True
 
 
-def test_confirm_inactive_record_fails_closed_evidence_increment(tmp_path):
-    from plugins.memory.memory_os.crystallized import CrystallizedApprovalError
-    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionAuthorization
+def test_service_approval_closes_inactive_target_without_confirming(tmp_path):
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
 
     service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+    proposed = promotions.propose(record_id)
     # Owner-reject → canonical_state=provisional_rejected (provisional flag kept).
     service.invalidate_provisional_record(record_id, reason="owner_rejected", invalidated_by="owner")
-    auth = PermanentPromotionAuthorization(
-        proposal_id="ppm_" + "0" * 32, target_id=record_id, token_hash="deadbeef",
-    )
-    with pytest.raises(CrystallizedApprovalError, match="evidence_increment_unavailable"):
-        service.confirm_provisional_record(record_id, authorization=auth)
+    result = promotions.approve(proposed["token"])
+    assert result["status"] == "expired"
     # Record body/id are preserved — no deletion on the failed confirm.
     records = service.read_records("owner_approved.md")
     assert records[0].frontmatter["id"] == record_id
     assert records[0].body.strip() == "A stable fact."
 
 
-def test_all_confirm_provisional_record_callers_pass_authorization():
-    """Every production caller of confirm_provisional_record must bind an
-    authorization object. This is the AST guard for D-3 (Task 4)."""
+def test_public_canonical_confirmation_has_no_production_callers():
+    """PermanentPromotionService is the sole production confirmation owner."""
     import ast
     import pathlib
 
@@ -356,10 +356,9 @@ def test_all_confirm_provisional_record_callers_pass_authorization():
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "confirm_provisional_record"
             ):
-                if "authorization" not in {kw.arg for kw in node.keywords}:
-                    offenders.append(f"{src.name}:{node.lineno}")
+                offenders.append(f"{src.name}:{node.lineno}")
     assert offenders == [], (
-        f"confirm_provisional_record called without authorization= at {offenders}"
+        f"public confirm_provisional_record called in production at {offenders}"
     )
 
 
@@ -503,45 +502,29 @@ def test_reconcile_closes_genuinely_retired_target_as_expired(tmp_path):
     assert state["reason"] == "target_retired"
 
 
-def test_confirm_is_idempotent_only_for_same_permanent_proposal(tmp_path):
+def test_private_canonical_confirmation_requires_service_capability(tmp_path):
     from plugins.memory.memory_os.crystallized import CrystallizedApprovalError
-    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionAuthorization
 
     service, record_id = _provisional_service(tmp_path)
-    first = PermanentPromotionAuthorization(
-        proposal_id="ppm_" + "1" * 32,
-        target_id=record_id,
-        token_hash="first",
-    )
-    second = PermanentPromotionAuthorization(
-        proposal_id="ppm_" + "2" * 32,
-        target_id=record_id,
-        token_hash="second",
-    )
-
-    applied = service.confirm_provisional_record(record_id, authorization=first)
-    duplicate = service.confirm_provisional_record(record_id, authorization=first)
-    assert applied["canonical_state_changed"] is True
-    assert duplicate["canonical_state_changed"] is False
-    with pytest.raises(CrystallizedApprovalError, match="different permanent proposal"):
-        service.confirm_provisional_record(record_id, authorization=second)
+    with pytest.raises(CrystallizedApprovalError, match="write capability"):
+        service._confirm_provisional_record_from_permanent_service(
+            record_id,
+            proposal_id="ppm_" + "2" * 32,
+            capability=object(),
+        )
 
 
 def test_confirm_and_retirement_share_one_canonical_transition(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
-
-    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionAuthorization
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
 
     service, record_id = _provisional_service(tmp_path)
-    authorization = PermanentPromotionAuthorization(
-        proposal_id="ppm_" + "3" * 32,
-        target_id=record_id,
-        token_hash="token",
-    )
+    promotions = PermanentPromotionService(service.store)
+    proposed = promotions.propose(record_id)
 
     def confirm():
         try:
-            result = service.confirm_provisional_record(record_id, authorization=authorization)
+            result = promotions.approve(proposed["token"])
             return ("confirm", bool(result["canonical_state_changed"]))
         except Exception as exc:  # one canonical contender may lose fail-closed
             return ("confirm_error", str(exc))

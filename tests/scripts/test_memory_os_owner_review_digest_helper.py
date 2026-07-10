@@ -70,8 +70,6 @@ def test_digest_helper_uses_single_delivery_render_command(monkeypatch, capsys):
 
     def fake_run_json(command):
         commands.append(command)
-        if command[3] == "ack-delivery-digest":
-            return {"status": "ok", "acknowledged_count": 1}
         return {
             "counts": {
                 "action_required_shown": 1,
@@ -86,8 +84,6 @@ def test_digest_helper_uses_single_delivery_render_command(monkeypatch, capsys):
     monkeypatch.setattr(module, "_run_json", fake_run_json)
 
     assert module.main() == 0
-    assert len(commands) == 2
+    assert len(commands) == 1
     assert commands[0][2:4] == ["review", "render-delivery-digest"]
-    assert commands[1][2:4] == ["review", "ack-delivery-digest"]
-    assert commands[0][commands[0].index("--delivery-ref") + 1] == commands[1][commands[1].index("--delivery-ref") + 1]
     assert "memory approve ppmt_" in capsys.readouterr().out

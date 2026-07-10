@@ -8,6 +8,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import pytest
+
 from plugins.memory.memory_os.audit import read_audit_entries
 
 
@@ -117,6 +119,66 @@ def test_shell_pre_tool_call_blocks_ppmt_token_ending_with_urlsafe_punctuation()
     result = module._on_pre_tool_call(
         tool_name="terminal",
         args={"command": "hermes memory approve ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-"},
+    )
+
+    assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
+def test_shell_pre_tool_call_blocks_permanent_cli_token_bypass():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": "hermes memory-os permanent approve ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-"},
+    )
+
+    assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'hermes memory-os permanent "approve" ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-',
+        'hermes memory-os permanent approve "ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-"',
+        "python -m plugins.memory.memory_os.cli permanent approve ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-",
+    ],
+)
+def test_shell_pre_tool_call_blocks_quoted_or_indirect_permanent_token_bypass(command):
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(tool_name="terminal", args={"command": command})
+
+    assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
+def test_shell_pre_tool_call_blocks_delivery_receipt_cli_bypass_without_action_token():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="terminal",
+        args={
+            "command": (
+                "hermes memory-os-agent-os review ack-delivery-receipt "
+                "--delivery-ref cron-1 --digest-id digest-1 --receipt-id fake --receipt-status sent"
+            )
+        },
+    )
+
+    assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
+def test_shell_pre_tool_call_blocks_direct_permanent_service_bypass():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="execute_code",
+        args={
+            "code": (
+                "from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService\n"
+                "PermanentPromotionService(store).approve("
+                "'ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-')"
+            )
+        },
     )
 
     assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
@@ -359,15 +421,19 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     delivery_ack_args = parser.parse_args(
         [
             "review",
-            "ack-delivery-digest",
+            "ack-delivery-receipt",
             "--delivery-ref",
             "cron_test",
-            "--proposal-id",
-            "ppm_test",
+            "--digest-id",
+            "digest_test",
+            "--receipt-id",
+            "message_test",
+            "--receipt-status",
+            "delivered",
         ]
     )
-    assert delivery_ack_args.review_command == "ack-delivery-digest"
-    assert delivery_ack_args.proposal_id == ["ppm_test"]
+    assert delivery_ack_args.review_command == "ack-delivery-receipt"
+    assert delivery_ack_args.receipt_id == "message_test"
     review_surface_args = parser.parse_args(
         [
             "review",

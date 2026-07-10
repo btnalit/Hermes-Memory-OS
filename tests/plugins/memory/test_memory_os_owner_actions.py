@@ -4012,6 +4012,11 @@ def test_deliver_once_dry_run_returns_ready_without_sending(tmp_path, monkeypatc
         raise AssertionError("dry-run must not call Hermes send")
 
     monkeypatch.setattr(owner_actions_module, "_send_owner_review_digest_via_hermes", fail_send)
+    files_before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
 
     result = deliver_owner_review_digest_once(
         store,
@@ -4025,6 +4030,12 @@ def test_deliver_once_dry_run_returns_ready_without_sending(tmp_path, monkeypatc
     assert result["dry_run"] is True
     assert result["record"]["boundary"]["actual_send"] is False
     assert not owner_review_deliveries_path(store.roots).exists()
+    files_after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert files_after == files_before
 
 
 def test_delivery_gate_blocks_unsupported_delivery_adapter(tmp_path):
@@ -4531,4 +4542,3 @@ def test_digest_fyi_includes_candidate_aggregation_when_available(tmp_path):
     assert aggr_item is not None, "candidate_aggregation fyi item must appear when a lane has run"
     assert "promoted=3" in aggr_item["summary"]
     assert aggr_item["source_module"] == "candidate_aggregation"
-

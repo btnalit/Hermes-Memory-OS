@@ -380,6 +380,9 @@ def test_permanent_cli_propose_approve_end_to_end(tmp_path, monkeypatch, capsys)
     tokens_text = (system / "owner_action_tokens.jsonl").read_text(encoding="utf-8")
     assert proposed["proposal_id"] in proposals_text
     assert token not in tokens_text  # only the token hash is stored
+    from plugins.memory.memory_os.owner_actions import read_owner_action_records
+    owner_actions = read_owner_action_records(store.roots)
+    assert owner_actions[-1]["action_type"] == "approve_permanent_promotion"
 
 
 def test_permanent_cli_reject_returns_success_exit_code(tmp_path, monkeypatch, capsys):

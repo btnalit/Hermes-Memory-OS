@@ -39,6 +39,9 @@ class CrystallizedApprovalError(ValueError):
     """Raised when a candidate lacks crystallized-memory approval."""
 
 
+_PERMANENT_PROMOTION_WRITE_CAPABILITY = object()
+
+
 def _canonical_transition_locked(method):
     """Serialize every in-place canonical Markdown state transition.
 
@@ -437,7 +440,6 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
-    @_canonical_transition_locked
     def confirm_provisional_record(
         self,
         record_id: str,
@@ -446,12 +448,28 @@ class CrystallizedMemoryService:
         confirmed_by: str = "",
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Confirm only after a ledger service has validated proposal binding."""
+        """Reject direct canonical confirmation; the promotion service owns it."""
+        raise CrystallizedApprovalError(
+            "permanent confirmation must use PermanentPromotionService"
+        )
+
+    @_canonical_transition_locked
+    def _confirm_provisional_record_from_permanent_service(
+        self,
+        record_id: str,
+        *,
+        proposal_id: str,
+        capability: object,
+        confirmed_by: str = "",
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Apply a service-validated permanent-promotion transition."""
+        if capability is not _PERMANENT_PROMOTION_WRITE_CAPABILITY:
+            raise CrystallizedApprovalError("invalid permanent promotion write capability")
         normalized = str(record_id or "").strip()
-        if authorization is None:
-            raise CrystallizedApprovalError("permanent confirmation requires proposal authorization")
-        if str(getattr(authorization, "target_id", "")) != normalized:
-            raise CrystallizedApprovalError("proposal authorization target mismatch")
+        normalized_proposal_id = str(proposal_id or "").strip()
+        if not normalized_proposal_id:
+            raise CrystallizedApprovalError("permanent promotion proposal id is required")
         if not normalized:
             raise KeyError("crystallized record id is required")
         if not self.store.roots.crystallized_root.exists():
@@ -478,13 +496,13 @@ class CrystallizedMemoryService:
                         frontmatter["expires_at"] = ""
                         frontmatter["confirmed_by"] = "owner"
                         frontmatter["confirmed_at"] = _timestamp(now)
-                        frontmatter["permanent_promotion_proposal_id"] = str(getattr(authorization, "proposal_id", ""))
+                        frontmatter["permanent_promotion_proposal_id"] = normalized_proposal_id
                         changed = True
                     else:
                         confirmed_proposal_id = str(
                             frontmatter.get("permanent_promotion_proposal_id") or ""
                         )
-                        requested_proposal_id = str(getattr(authorization, "proposal_id", ""))
+                        requested_proposal_id = normalized_proposal_id
                         if confirmed_proposal_id != requested_proposal_id:
                             raise CrystallizedApprovalError(
                                 "record already confirmed by different permanent proposal"

@@ -69,7 +69,8 @@ _OWNER_ACTION_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _OWNER_REVIEW_COMMAND_RE = re.compile(
-    r"\b(?:memory|mos)\s+(?:approve|reject|defer|revoke|allow|feedback|apply)\s+"
+    r"\b(?:(?:memory|mos)\s+(?:approve|reject|defer|revoke|allow|feedback|apply)"
+    r"|(?:memory-os|memory_os)\s+permanent\s+(?:approve|reject|defer))\s+"
     r"(?:oa_[0-9a-f]{8,32}|ppmt_[A-Za-z0-9_-]{20,128})(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
@@ -77,13 +78,7 @@ _DIRECT_OWNER_ACTION_BYPASS_MARKERS = (
     "apply_approved_proposal_execution_decision",
     "apply_owner_action",
     "parse_owner_review_reply",
-)
-_TOKEN_OWNER_ACTION_BYPASS_MARKERS = (
-    "memory-os-agent-os review apply",
-    "memory_os_review_reply_tool_input",
-    "plugins.memory.memory_os.owner_actions",
-    "memory_os/owner_actions.py",
-    "memory_os\\owner_actions.py",
+    "ack-delivery-receipt",
 )
 _OWNER_ACTION_BYPASS_TOOLS = {"terminal", "execute_code"}
 _OWNER_ACTION_BYPASS_BLOCK_MESSAGE = (
@@ -130,6 +125,10 @@ def _looks_like_owner_action_bypass(args_text: str) -> bool:
     if not args_text:
         return False
     lowered = args_text.lower()
+    # Owner-action tokens are control-plane capabilities. They never belong in
+    # terminal or execute_code, even when shell quoting changes command text.
+    if _OWNER_ACTION_TOKEN_RE.search(args_text):
+        return True
     if _OWNER_REVIEW_COMMAND_RE.search(args_text):
         return True
     if any(marker in lowered for marker in _DIRECT_OWNER_ACTION_BYPASS_MARKERS):
@@ -137,8 +136,6 @@ def _looks_like_owner_action_bypass(args_text: str) -> bool:
     if "memory-os-agent-os review apply" in lowered:
         return True
     if "review apply" in lowered and "--action" in lowered:
-        return True
-    if _OWNER_ACTION_TOKEN_RE.search(args_text) and any(marker in lowered for marker in _TOKEN_OWNER_ACTION_BYPASS_MARKERS):
         return True
     if "apply_proposal" in lowered and any(marker in lowered for marker in ("python3 -c", "python -c")):
         return True
@@ -325,13 +322,14 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_delivery_render.add_argument("--max-fyi", type=int)
     review_delivery_render.add_argument("--mode", choices=["review", "agenda", "debug"], default="agenda")
     review_delivery_render.add_argument("--format", choices=["json", "text"], default="json")
-    review_delivery_ack = review_subs.add_parser("ack-delivery-digest")
+    review_delivery_ack = review_subs.add_parser("ack-delivery-receipt")
     review_delivery_ack.add_argument("--delivery-ref", required=True)
-    review_delivery_ack.add_argument("--proposal-id", action="append", default=[])
+    review_delivery_ack.add_argument("--digest-id", required=True)
+    review_delivery_ack.add_argument("--receipt-id", required=True)
     review_delivery_ack.add_argument(
-        "--ack-source",
-        choices=["hermes_cron_emission", "hermes_send_receipt"],
-        default="hermes_cron_emission",
+        "--receipt-status",
+        choices=["ok", "sent", "delivered", "success"],
+        required=True,
     )
     review_reply = review_subs.add_parser("reply")
     review_reply.add_argument("reply", nargs="+")
