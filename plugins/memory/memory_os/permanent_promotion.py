@@ -506,6 +506,40 @@ class TokenLedger:
                 write_context=write_context,
             )
 
+    def sweep_expired(
+        self,
+        *,
+        now: datetime | None = None,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        """Revoke open tokens whose expiry has already passed.
+
+        This is the token ledger's `revoked` producer: without it, superseded or
+        expired tokens stay `status="open"` forever (nominally open, actually
+        dead), so the ledger grows unboundedly. Only already-expired tokens are
+        swept, so a still-valid older token — which the owner may reply to across
+        digest cycles — is deliberately left untouched.
+        """
+        current = (now or self.clock()).astimezone(timezone.utc)
+        swept = 0
+        with locked_jsonl_file(self.path) as target:
+            for token_hash, state in self._states().items():
+                if state.get("status") != "open":
+                    continue
+                expiry = parse_timestamp(state.get("expires_at"))
+                if expiry is not None and expiry > current:
+                    continue
+                event = {
+                    "schema_version": TOKEN_SCHEMA_VERSION,
+                    "token_hash": token_hash,
+                    "status": "revoked",
+                    "reason": "token_expired_sweep",
+                    "updated_at": utc_timestamp(current),
+                }
+                self._append_locked(target, event, write_context=write_context)
+                swept += 1
+        return {"expired_token_swept_count": swept}
+
 
 class PermanentPromotionDeliveryLedger:
     """Acknowledged owner-digest exposure and bounded reminder schedule."""
@@ -1115,7 +1149,7 @@ class PermanentPromotionService:
             "operation": "permanent_promotion_reconcile",
             "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
             "proposal_ids": sorted(str(item.get("proposal_id") or "") for item in pending)[:100],
-            "writes": ["proposal_terminal", "token_consume_repair"],
+            "writes": ["proposal_terminal", "token_consume_repair", "token_expired_sweep"],
         }
         owns_context = write_context is None
         if owns_context:
@@ -1150,6 +1184,7 @@ class PermanentPromotionService:
             "decision_recovery_failure_count": 0,
             "approved_reconcile_count": 0,
             "target_retired_close_count": 0,
+            "expired_token_swept_count": 0,
             "error_records": [],
             "execution_gate_envelope_id": context.envelope_id,
         }
@@ -1208,7 +1243,23 @@ class PermanentPromotionService:
                     target=proposal_id,
                     details={"error_code": type(exc).__name__, "message": str(exc)[:200]},
                 )
-        if report["decision_recovery_failure_count"]:
+        try:
+            sweep = self.tokens.sweep_expired(now=self.clock(), write_context=context)
+            report["expired_token_swept_count"] = int(sweep.get("expired_token_swept_count") or 0)
+        except Exception as exc:
+            report["error_records"].append({
+                "proposal_id": "",
+                "error_code": type(exc).__name__,
+                "message": str(exc)[:200],
+            })
+            append_audit(
+                self.store.roots.audit_path,
+                action="permanent_promotion_token_sweep_failed",
+                status="error",
+                target="",
+                details={"error_code": type(exc).__name__, "message": str(exc)[:200]},
+            )
+        if report["decision_recovery_failure_count"] or report["error_records"]:
             report["status"] = "partial"
         if owns_context:
             complete_execution_gate_envelope(
@@ -1336,7 +1387,7 @@ def preview_permanent_promotion_delivery(
             "created_at": str(proposal.get("created_at") or utc_timestamp(current)),
             "created_at_source": "permanent_promotion_preview",
             "summary": body[:1000],
-            "proposed_memory": body[:4000],
+            "proposed_memory": body[:1000],  # render (_render_review_item) re-bounds to 1000; the gate
             "age_days": int(eligibility_data.get("age_days") or 0),
             "eligibility_reason_codes": list(eligibility_data.get("reason_codes") or []),
             "action_token": "",
@@ -1490,7 +1541,7 @@ def prepare_permanent_promotion_delivery(
                 "created_at": str(proposal.get("created_at") or utc_timestamp(current)),
                 "created_at_source": "permanent_promotion_proposal",
                 "summary": body[:1000],
-                "proposed_memory": body[:4000],
+                "proposed_memory": body[:1000],  # render (_render_review_item) re-bounds to 1000; the gate
                 "age_days": int(eligibility_data.get("age_days") or 0),
                 "eligibility_reason_codes": list(eligibility_data.get("reason_codes") or []),
                 "action_token": token,

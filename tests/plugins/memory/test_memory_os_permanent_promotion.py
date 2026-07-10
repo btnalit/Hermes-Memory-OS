@@ -680,3 +680,94 @@ def test_single_eligibility_gate_blocks_duplicate_existing_permanent_body(tmp_pa
     assert report["eligible_count"] == 0
     assert report["skipped_permanent_duplicate_count"] == 1
     assert proposed == {"status": "ineligible", "reason_codes": ["permanent_duplicate"]}
+
+
+# ── N1: expired-token sweep gives the token ledger a `revoked` producer and
+# stops "nominally open, actually expired" tokens accumulating forever. Only
+# already-expired open tokens are swept, so a still-valid older token that the
+# owner may reply to remains usable. ───────────────────────────────────────────
+
+
+def test_sweep_expired_revokes_only_expired_open_tokens(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from plugins.memory.memory_os.permanent_promotion import (
+        ProposalLedger,
+        TokenLedger,
+        content_hash,
+    )
+
+    root = tmp_path / "memory-os"
+    now = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    proposal, _ = ProposalLedger(root, clock=lambda: now).create_or_get(
+        target_id="cry_1", candidate_id="cand_1", body="one", channel="cli"
+    )
+    tokens = TokenLedger(root, clock=lambda: now)
+    expired = tokens.issue(proposal, channel="cli", expires_at=now - timedelta(seconds=1))
+    valid = tokens.issue(proposal, channel="cli", expires_at=now + timedelta(hours=48))
+
+    report = tokens.sweep_expired(now=now)
+
+    assert report["expired_token_swept_count"] == 1
+    states = tokens._states()
+    assert states[content_hash(expired)]["status"] == "revoked"
+    assert states[content_hash(expired)]["reason"] == "token_expired_sweep"
+    # The still-valid token is left untouched (async reply UX preserved).
+    assert states[content_hash(valid)]["status"] == "open"
+
+
+def test_reconcile_sweeps_expired_open_tokens(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from plugins.memory.memory_os.permanent_promotion import (
+        PermanentPromotionError,
+        PermanentPromotionService,
+        content_hash,
+    )
+
+    service, record_id = _provisional_service(tmp_path)
+    base = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    promotions = PermanentPromotionService(service.store, clock=lambda: base)
+    proposed = promotions.propose(record_id)
+
+    later = base + timedelta(hours=49)
+    report = PermanentPromotionService(service.store, clock=lambda: later).reconcile()
+
+    assert report["expired_token_swept_count"] == 1
+    token_state = promotions.tokens._states()[content_hash(proposed["token"])]
+    assert token_state["status"] == "revoked"
+    assert token_state["reason"] == "token_expired_sweep"
+    # Proposal itself stays open (owner never acted; target still provisional).
+    assert promotions.proposals._states()[proposed["proposal_id"]]["status"] == "open"
+    # The swept token now fails closed as revoked, not merely expired.
+    proposal_state = promotions.proposals._states()[proposed["proposal_id"]]
+    record = service.read_records("owner_approved.md")[0]
+    with pytest.raises(PermanentPromotionError, match="token_revoked"):
+        PermanentPromotionService(service.store, clock=lambda: later).tokens.validate(
+            proposed["token"], proposal=proposal_state, current_body=record.body
+        )
+
+
+# ── N3: producer must not over-capture body beyond the digest render gate.
+# render (_render_review_item) re-bounds proposed_memory to 1000 chars, so a
+# 4000-char slice in the producer is dead weight that also lands in the local
+# delivery ledger under raw_body_included=False. Align the producer to the gate.
+
+
+def test_delivery_items_bound_proposed_memory_to_render_gate(tmp_path):
+    from plugins.memory.memory_os.permanent_promotion import (
+        prepare_permanent_promotion_delivery,
+        preview_permanent_promotion_delivery,
+    )
+
+    long_body = "sensitive canonical detail. " * 400  # > 4000 chars
+    service, _record_id = _provisional_service(tmp_path, body=long_body)
+
+    preview = preview_permanent_promotion_delivery(service.store)
+    prepared = prepare_permanent_promotion_delivery(service.store, delivery_ref="d1")
+
+    items = list(preview.get("items") or []) + list(prepared.get("items") or [])
+    assert items, "expected at least one permanent-promotion delivery item"
+    for item in items:
+        assert len(item["proposed_memory"]) <= 1000
+        assert len(item["summary"]) <= 1000

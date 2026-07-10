@@ -22,6 +22,7 @@ def test_static_hygiene_reports_repo_native_pass_without_ruff(tmp_path):
         "public_checkout_probe",
         "write_surface_check",
         "memory_os_provider_agnostic",
+        "memory_os_host_boundary",
     }
     assert all(item["status"] == "pass" for item in report["checks"].values())
     assert len(calls) == 5
@@ -37,3 +38,81 @@ def test_static_hygiene_fails_when_any_repo_native_check_fails(tmp_path):
 
     assert report["status"] == "fail"
     assert report["checks"]["diff_check"]["status"] == "fail"
+
+
+# ── N2: host-boundary static guard (memory_os must not import transport /
+# channel-resolution / scheduling from the Hermes host or onboarding seam) ──
+
+
+def test_boundary_scan_flags_owner_cron_onboarding_import():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    src = "from scripts.memory_os_owner_cron_onboarding import discover_owner_channels\n"
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+    kinds = {v["kind"] for v in violations}
+    assert violations, "must flag host-boundary import"
+    assert {"forbidden_import_module", "forbidden_import_name"} & kinds
+
+
+def test_boundary_scan_flags_plain_import_of_onboarding():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    src = "import scripts.memory_os_owner_cron_onboarding as onboarding\n"
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+    assert any(v["kind"] == "forbidden_import_module" for v in violations)
+
+
+def test_boundary_scan_flags_channel_directory_literal():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    src = "path = home / 'channel_directory.json'\n"
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+    assert any(v["kind"] == "forbidden_path_literal" for v in violations)
+
+
+def test_boundary_scan_allows_internal_delivery_helpers():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    # Internal "delivery" seam functions and relative imports are NOT violations.
+    src = (
+        "from .permanent_promotion import prepare_permanent_promotion_delivery\n"
+        "def build(): return owner_review_deliveries_path()\n"
+    )
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+    assert violations == []
+
+
+def test_real_memory_os_tree_has_no_host_boundary_violations():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    repo_root = Path(__file__).resolve().parents[2]
+    root = repo_root / "plugins" / "memory" / "memory_os"
+    violations = []
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        violations.extend(
+            scan_source_boundary_violations(
+                path.relative_to(repo_root).as_posix(),
+                path.read_text(encoding="utf-8"),
+            )
+        )
+    assert violations == [], f"host-boundary violations: {violations}"
+
+
+def test_run_static_hygiene_flags_host_boundary_violation(tmp_path):
+    mo = tmp_path / "plugins" / "memory" / "memory_os"
+    mo.mkdir(parents=True)
+    (mo / "offender.py").write_text(
+        "from scripts.memory_os_owner_cron_onboarding import discover_owner_channels\n",
+        encoding="utf-8",
+    )
+
+    def fake_runner(argv, cwd):
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    report = run_static_hygiene(tmp_path, runner=fake_runner)
+
+    assert report["checks"]["memory_os_host_boundary"]["status"] == "fail"
+    assert report["checks"]["memory_os_host_boundary"]["violations"]
+    assert report["status"] == "fail"
