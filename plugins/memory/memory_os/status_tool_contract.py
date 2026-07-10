@@ -18,8 +18,9 @@ MEMORY_OS_STATUS_TOOL_DESCRIPTION = (
 MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION = (
     "Apply a Memory-OS owner review action after the Hermes agent has "
     "understood the owner's interactive approval intent. Use structured "
-    "arguments only: action=`approve|reject|revoke|allow|feedback|apply` plus action_token="
-    "`oa_<token>` and, for feedback, rating. Do not send a free-form command "
+    "arguments only: action=`approve|reject|defer|revoke|allow|feedback|apply` plus action_token="
+    "`oa_<token>` or case-sensitive `ppmt_<token>` for permanent promotion; use rating for feedback "
+    "and until for ppmt defer. Do not send a free-form command "
     "string. Use only when the latest owner message clearly asks to apply a "
     "specific owner review token, or after the agent has clarified the target. "
     "Call the tool for every new explicit owner token message, including repeated "
@@ -28,7 +29,7 @@ MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION = (
     "Do not use for ordinary chat, questions about Memory-OS, messages that "
     "merely mention a token, display anchors such as A1/R1 without resolving "
     "the matching token, or broad approval language without a confirmed oa_ "
-    "action token. The tool routes through OwnerActionProcessor and never "
+    "action token. The tool routes through the single owner-review ingress and never "
     "sends, executes work, writes identity, or approves crystallized memory "
     "without the matching owner action token."
 )

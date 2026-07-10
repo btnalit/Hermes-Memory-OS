@@ -8,6 +8,7 @@ or selected context text.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -1139,10 +1140,10 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
     """
     root = Path(memory_os_root)
 
-    def _final_states(path: Path, id_key: str) -> dict[str, str]:
-        states: dict[str, str] = {}
+    def _events(path: Path) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
         if not path.exists():
-            return states
+            return records
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 event = json.loads(line)
@@ -1150,25 +1151,152 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
                 continue
             if not isinstance(event, dict):
                 continue
+            records.append(event)
+        return records
+
+    def _final_states(events: list[dict[str, Any]], id_key: str) -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for event in events:
             key = str(event.get(id_key) or "")
-            status = str(event.get("status") or "")
-            if key and status:
-                states[key] = status
+            if key:
+                states[key] = {**states.get(key, {}), **event}
         return states
 
-    def _tally(states: dict[str, str], keys: tuple[str, ...]) -> dict[str, int]:
+    def _tally(states: dict[str, dict[str, Any]], keys: tuple[str, ...]) -> dict[str, int]:
         tally = {key: 0 for key in keys}
-        for status in states.values():
+        for state in states.values():
+            status = str(state.get("status") or "")
             tally[status] = tally.get(status, 0) + 1
         return tally
 
-    proposals = _final_states(root / "system" / "permanent_promotion_proposals.jsonl", "proposal_id")
-    tokens = _final_states(root / "system" / "owner_action_tokens.jsonl", "token_hash")
+    def _parse_ts(value: Any) -> datetime | None:
+        try:
+            parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    proposal_events = _events(root / "system" / "permanent_promotion_proposals.jsonl")
+    token_events = _events(root / "system" / "owner_action_tokens.jsonl")
+    delivery_events = _events(root / "system" / "permanent_promotion_deliveries.jsonl")
+    proposals = _final_states(proposal_events, "proposal_id")
+    tokens = _final_states(token_events, "token_hash")
+    deliveries = _final_states(delivery_events, "proposal_id")
+    open_states = {
+        proposal_id: state for proposal_id, state in proposals.items()
+        if state.get("status") == "open"
+    }
+    deciding_states = {
+        proposal_id: state for proposal_id, state in proposals.items()
+        if state.get("status") == "deciding"
+    }
+    never_delivered = {
+        proposal_id: state for proposal_id, state in open_states.items()
+        if proposal_id not in deliveries
+    }
+    due_reminder_count = sum(
+        1 for proposal_id in open_states
+        if proposal_id in deliveries
+        and (_parse_ts(deliveries[proposal_id].get("next_reminder_at")) or datetime.max.replace(tzinfo=timezone.utc))
+        <= now
+    )
+    open_bindings = {
+        (str(state.get("target_id") or ""), str(state.get("content_hash") or ""))
+        for state in open_states.values()
+    }
+    deferred_past_due_count = sum(
+        1 for state in proposals.values()
+        if state.get("status") == "deferred"
+        and (_parse_ts(state.get("deferred_until")) or datetime.max.replace(tzinfo=timezone.utc)) <= now
+        and (str(state.get("target_id") or ""), str(state.get("content_hash") or "")) not in open_bindings
+    )
+
+    stale_open_count = 0
+    stale_open_evaluation_status = "ok"
+    try:
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedMemoryService,
+            is_active_crystallized_frontmatter,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(root.parent, profile="monitor"))
+        crystallized = CrystallizedMemoryService(store)
+        for state in open_states.values():
+            record = crystallized.find_record(str(state.get("target_id") or ""))
+            if (
+                record is None
+                or record.frontmatter.get("provisional") is not True
+                or not is_active_crystallized_frontmatter(record.frontmatter)
+                or hashlib.sha256(record.body.encode("utf-8")).hexdigest()
+                != str(state.get("content_hash") or "")
+            ):
+                stale_open_count += 1
+    except Exception:
+        stale_open_evaluation_status = "unavailable"
+
+    latest_recovery: dict[str, Any] = {}
+    for event in _events(root / "system" / "execution_gate_envelopes.jsonl"):
+        summary = event.get("result_summary") if isinstance(event.get("result_summary"), dict) else {}
+        if (
+            event.get("stage") == "completion"
+            and event.get("lane_id") == "permanent_promotion_producer"
+            and "decision_recovery_attempt_count" in summary
+        ):
+            latest_recovery = summary
+    recovered_events = [event for event in proposal_events if event.get("recovered") is True]
+    recovery_success_count = int(
+        latest_recovery.get("decision_recovery_success_count")
+        if latest_recovery
+        else len(recovered_events)
+    )
+    recovery_failure_count = int(latest_recovery.get("decision_recovery_failure_count") or 0)
+    recovery_attempt_count = int(
+        latest_recovery.get("decision_recovery_attempt_count")
+        if latest_recovery
+        else recovery_success_count + recovery_failure_count
+    )
+
+    def _oldest_age_days(states: dict[str, dict[str, Any]], key: str) -> int | None:
+        values = [_parse_ts(state.get(key)) for state in states.values()]
+        parsed = [value for value in values if value is not None]
+        if not parsed:
+            return None
+        return max(int((now - min(parsed)).total_seconds() // 86400), 0)
+
+    delivery_event_ids = [str(event.get("event_id") or "") for event in delivery_events if event.get("event_id")]
     return {
         "proposal_ledger_counts": _tally(
-            proposals, ("open", "approved", "rejected", "deferred", "revoked", "expired")
+            proposals, ("open", "deciding", "approved", "rejected", "deferred", "revoked", "expired")
         ),
         "token_ledger_counts": _tally(tokens, ("open", "consumed", "revoked", "expired")),
+        "open_proposal_backlog_count": len(open_states),
+        "never_delivered_open_count": len(never_delivered),
+        "due_reminder_count": due_reminder_count,
+        "deferred_past_due_count": deferred_past_due_count,
+        "deciding_proposal_count": len(deciding_states),
+        "decision_recovery_attempt_count": recovery_attempt_count,
+        "decision_recovery_success_count": recovery_success_count,
+        "decision_recovery_failure_count": recovery_failure_count,
+        "stale_open_proposal_count": stale_open_count,
+        "stale_open_evaluation_status": stale_open_evaluation_status,
+        "target_retired_close_count": sum(
+            1 for event in proposal_events
+            if event.get("status") == "expired" and event.get("reason") == "target_retired"
+        ),
+        "approved_reconcile_count": sum(
+            1 for event in proposal_events
+            if event.get("status") == "approved"
+            and (event.get("recovered") is True or event.get("reason") == "confirmed_target_recovered")
+        ),
+        "duplicate_delivery_suppressed_count": len(delivery_event_ids) - len(set(delivery_event_ids)),
+        "oldest_open_proposal_age_days": _oldest_age_days(open_states, "created_at"),
+        "oldest_never_delivered_age_days": _oldest_age_days(never_delivered, "created_at"),
+        "oldest_delivery_age_days": _oldest_age_days(deliveries, "delivered_at"),
     }
 
 
@@ -1217,9 +1345,21 @@ def summarize_living_memory_promotion(
         ),
         "automatic_permanent_promotion_count": int(automatic_permanent_promotion_count or 0),
         "proposal_ledger_counts": {
-            "open": 0, "approved": 0, "rejected": 0, "deferred": 0, "revoked": 0, "expired": 0,
+            "open": 0, "deciding": 0, "approved": 0, "rejected": 0, "deferred": 0, "revoked": 0, "expired": 0,
         },
         "token_ledger_counts": {"open": 0, "consumed": 0, "revoked": 0, "expired": 0},
+        "open_proposal_backlog_count": 0,
+        "never_delivered_open_count": 0,
+        "due_reminder_count": 0,
+        "deferred_past_due_count": 0,
+        "deciding_proposal_count": 0,
+        "decision_recovery_attempt_count": 0,
+        "decision_recovery_success_count": 0,
+        "decision_recovery_failure_count": 0,
+        "stale_open_proposal_count": 0,
+        "target_retired_close_count": 0,
+        "approved_reconcile_count": 0,
+        "duplicate_delivery_suppressed_count": 0,
     }
     if memory_os_root is not None:
         section.update(read_permanent_promotion_ledger_counts(memory_os_root))
@@ -3218,6 +3358,17 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 fail.append({"code": "living_memory_automatic_permanent_promotion", "value": auto_count})
             if delivery_nonpromo > 0:
                 fail.append({"code": "living_memory_owner_delivery_nonpromotion", "value": delivery_nonpromo})
+            recovery_failures = int(
+                living_memory_promotion.get("decision_recovery_failure_count") or 0
+            )
+            stale_open = int(living_memory_promotion.get("stale_open_proposal_count") or 0)
+            if recovery_failures > 0:
+                fail.append({
+                    "code": "living_memory_decision_recovery_failure",
+                    "value": recovery_failures,
+                })
+            if stale_open > 0:
+                fail.append({"code": "living_memory_stale_open_proposal", "value": stale_open})
             if auto_count == 0 and delivery_nonpromo == 0:
                 passed.append({"code": "living_memory_promotion_hard_zero_ok"})
             passed.append({
@@ -3229,6 +3380,22 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         living_memory_promotion.get("permanent_promotion_review_item_count"),
                     "living_memory_nonpromotion_review_item_count":
                         living_memory_promotion.get("living_memory_nonpromotion_review_item_count"),
+                    "open_proposal_backlog_count": living_memory_promotion.get("open_proposal_backlog_count"),
+                    "never_delivered_open_count": living_memory_promotion.get("never_delivered_open_count"),
+                    "due_reminder_count": living_memory_promotion.get("due_reminder_count"),
+                    "deferred_past_due_count": living_memory_promotion.get("deferred_past_due_count"),
+                    "deciding_proposal_count": living_memory_promotion.get("deciding_proposal_count"),
+                    "decision_recovery_attempt_count":
+                        living_memory_promotion.get("decision_recovery_attempt_count"),
+                    "decision_recovery_success_count":
+                        living_memory_promotion.get("decision_recovery_success_count"),
+                    "decision_recovery_failure_count": recovery_failures,
+                    "stale_open_proposal_count": stale_open,
+                    "target_retired_close_count":
+                        living_memory_promotion.get("target_retired_close_count"),
+                    "approved_reconcile_count": living_memory_promotion.get("approved_reconcile_count"),
+                    "duplicate_delivery_suppressed_count":
+                        living_memory_promotion.get("duplicate_delivery_suppressed_count"),
                 },
             })
         else:

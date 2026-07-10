@@ -34,6 +34,43 @@ def append_governed_jsonl(
     path, but this helper does not silently treat missing envelopes as valid.
     """
 
+    destination = Path(path)
+    payload = prepare_governed_jsonl_record(
+        store,
+        destination,
+        record,
+        write_owner=write_owner,
+        lane_id=lane_id,
+        risk_class=risk_class,
+        execution_gate_envelope_id=execution_gate_envelope_id,
+        scope_hash=scope_hash,
+        allow_owner_action_without_envelope=allow_owner_action_without_envelope,
+    )
+    append_jsonl_locked(destination, payload, durable=True)
+    return destination
+
+
+def prepare_governed_jsonl_record(
+    store: MemoryOSStore,
+    path: Path,
+    record: dict[str, Any],
+    *,
+    write_owner: str,
+    lane_id: str,
+    risk_class: str,
+    execution_gate_envelope_id: str,
+    scope_hash: str,
+    allow_owner_action_without_envelope: bool = False,
+) -> dict[str, Any]:
+    """Validate governance and return a payload for an already-locked append.
+
+    Multi-ledger state machines sometimes need check-and-append while holding
+    their own deterministic lock order.  They must still use the exact same
+    StructuralWriteGate validation and metadata as ``append_governed_jsonl``;
+    this helper separates validation from the final IO primitive without
+    weakening the write boundary.
+    """
+
     owner = str(write_owner or "").strip()
     destination = Path(path)
     _assert_memory_os_path(store, destination)
@@ -77,8 +114,7 @@ def append_governed_jsonl(
         )
 
     payload["structural_write_governance"] = governance
-    append_jsonl_locked(destination, payload, durable=True)
-    return destination
+    return payload
 
 
 def structural_write_gate_status() -> dict[str, Any]:
@@ -86,6 +122,7 @@ def structural_write_gate_status() -> dict[str, Any]:
         "schema_version": STRUCTURAL_WRITE_GATE_SCHEMA_VERSION,
         "status": "available",
         "append_governed_jsonl_available": True,
+        "prepare_governed_jsonl_record_available": True,
         "contract": "automatic JSONL writes require a valid ExecutionGate permit at write surface",
         "raw_body_included": False,
     }

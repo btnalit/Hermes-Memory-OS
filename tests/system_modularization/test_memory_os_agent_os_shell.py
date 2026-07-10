@@ -111,6 +111,17 @@ def test_shell_pre_tool_call_blocks_direct_python_owner_action_bypass():
     assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
 
 
+def test_shell_pre_tool_call_blocks_ppmt_token_ending_with_urlsafe_punctuation():
+    module = load_shell_module()
+
+    result = module._on_pre_tool_call(
+        tool_name="terminal",
+        args={"command": "hermes memory approve ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-"},
+    )
+
+    assert result == {"action": "block", "message": module._OWNER_ACTION_BYPASS_BLOCK_MESSAGE}
+
+
 def test_shell_pre_tool_call_allows_read_only_shell_without_owner_token():
     module = load_shell_module()
 
@@ -328,6 +339,35 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert review_render_args.bounded is True
     assert review_render_args.record_active is True
     assert review_render_args.mode == "agenda"
+    delivery_render_args = parser.parse_args(
+        [
+            "review",
+            "render-delivery-digest",
+            "--owner",
+            "owner",
+            "--channel",
+            "telegram",
+            "--delivery-ref",
+            "cron_test",
+            "--format",
+            "json",
+        ]
+    )
+    assert delivery_render_args.review_command == "render-delivery-digest"
+    assert delivery_render_args.delivery_ref == "cron_test"
+    assert delivery_render_args.mode == "agenda"
+    delivery_ack_args = parser.parse_args(
+        [
+            "review",
+            "ack-delivery-digest",
+            "--delivery-ref",
+            "cron_test",
+            "--proposal-id",
+            "ppm_test",
+        ]
+    )
+    assert delivery_ack_args.review_command == "ack-delivery-digest"
+    assert delivery_ack_args.proposal_id == ["ppm_test"]
     review_surface_args = parser.parse_args(
         [
             "review",

@@ -14,7 +14,7 @@ from plugins.memory.memory_os.status_tool_contract import (
     validate_memory_os_status_tool_description,
 )
 from plugins.memory.memory_os.store import MemoryOSStore
-from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply
+from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply, _owner_review_reply_tool_input
 
 
 def _events(hermes_home):
@@ -98,9 +98,12 @@ def test_memory_os_review_reply_tool_prefers_structured_action_token():
 
     assert schema["description"] == MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION
     assert "Use structured arguments only" in schema["description"]
-    assert "action=`approve|reject|revoke|allow|feedback|apply`" in schema["description"]
+    assert "action=`approve|reject|defer|revoke|allow|feedback|apply`" in schema["description"]
     assert "apply" in schema["parameters"]["properties"]["action"]["enum"]
     assert "revoke" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "defer" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "ppmt_<token>" in schema["parameters"]["properties"]["action_token"]["description"]
+    assert "until" in schema["parameters"]["properties"]
     assert "Do not send a free-form command string" in schema["description"]
     assert "display anchors such as A1/R1 without resolving" in schema["description"]
     assert "reply" not in schema["parameters"]["properties"]
@@ -116,6 +119,24 @@ def test_owner_review_reply_guard_accepts_expression_feedback_rating():
     assert _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanical")
     assert _looks_like_owner_review_reply("反馈 oa_12345678 off_voice")
     assert _looks_like_owner_review_reply("memory revoke oa_12345678")
+    assert _looks_like_owner_review_reply("memory approve ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz012345")
+    assert _looks_like_owner_review_reply(
+        "memory defer ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz012345 2026-07-20T00:00:00Z"
+    )
+
+
+def test_structured_ppmt_input_preserves_command_case_but_redacts_tool_result():
+    token = "ppmt_AbCdEfGhIjKlMnOpQrStUvWxYz01234-"
+
+    command, tool_input = _owner_review_reply_tool_input({
+        "action": "approve",
+        "action_token": token,
+        "owner_utterance": f"批准 {token}",
+    })
+
+    assert command == f"memory approve {token}"
+    assert tool_input["action_token"] == "ppmt_[redacted]"
+    assert token not in tool_input["owner_utterance"]
 
 
 def test_memory_os_review_surface_tool_is_read_only_agent_surface():

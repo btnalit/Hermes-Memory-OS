@@ -62,3 +62,32 @@ def test_digest_helper_review_mode_can_render_pull_review_content():
         )
         is True
     )
+
+
+def test_digest_helper_uses_single_delivery_render_command(monkeypatch, capsys):
+    module = _load_helper_module()
+    commands = []
+
+    def fake_run_json(command):
+        commands.append(command)
+        if command[3] == "ack-delivery-digest":
+            return {"status": "ok", "acknowledged_count": 1}
+        return {
+            "counts": {
+                "action_required_shown": 1,
+                "review_suggested_shown": 0,
+                "fyi_shown": 0,
+            },
+            "text": "Memory-OS 审批摘要\nmemory approve ppmt_EphemeralToken1234567890",
+            "permanent_promotion_delivery": {"shown_proposal_ids": ["ppm_test"]},
+        }
+
+    monkeypatch.setenv("MEMORY_OS_OWNER_REVIEW_CHANNEL", "telegram")
+    monkeypatch.setattr(module, "_run_json", fake_run_json)
+
+    assert module.main() == 0
+    assert len(commands) == 2
+    assert commands[0][2:4] == ["review", "render-delivery-digest"]
+    assert commands[1][2:4] == ["review", "ack-delivery-digest"]
+    assert commands[0][commands[0].index("--delivery-ref") + 1] == commands[1][commands[1].index("--delivery-ref") + 1]
+    assert "memory approve ppmt_" in capsys.readouterr().out

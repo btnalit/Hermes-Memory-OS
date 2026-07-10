@@ -107,6 +107,7 @@ from .owner_actions import (
     parse_owner_review_reply,
     read_owner_action_records,
     render_owner_review_digest,
+    render_owner_review_delivery_digest,
     resolve_owner_review_channel,
     route_approved_proposal_followup_to_ops_gate,
     route_pending_approved_proposal_followups_to_ops_gate,
@@ -1435,6 +1436,23 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_render.add_argument("--format", choices=["json", "text"], default="json")
     review_render.add_argument("--bounded", action="store_true")
     review_render.add_argument("--record-active", action="store_true")
+    review_delivery_render = review_subs.add_parser("render-delivery-digest")
+    review_delivery_render.add_argument("--owner", default="")
+    review_delivery_render.add_argument("--channel", default="cli")
+    review_delivery_render.add_argument("--delivery-ref", default="")
+    review_delivery_render.add_argument("--max-action-required", type=int)
+    review_delivery_render.add_argument("--max-review-suggested", type=int)
+    review_delivery_render.add_argument("--max-fyi", type=int)
+    review_delivery_render.add_argument("--mode", choices=["review", "agenda", "debug"], default="agenda")
+    review_delivery_render.add_argument("--format", choices=["json", "text"], default="json")
+    review_delivery_ack = review_subs.add_parser("ack-delivery-digest")
+    review_delivery_ack.add_argument("--delivery-ref", required=True)
+    review_delivery_ack.add_argument("--proposal-id", action="append", default=[])
+    review_delivery_ack.add_argument(
+        "--ack-source",
+        choices=["hermes_cron_emission", "hermes_send_receipt"],
+        default="hermes_cron_emission",
+    )
     review_reply = review_subs.add_parser("reply")
     review_reply.add_argument("reply", nargs="+")
     review_reply.add_argument("--owner", default="owner")
@@ -2518,6 +2536,36 @@ def _review_command(args: argparse.Namespace, store: MemoryOSStore) -> int:
             print(report["text"])
         else:
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "render-delivery-digest":
+        delivery_ref = str(args.delivery_ref or "").strip()
+        if not delivery_ref:
+            delivery_ref = "cron_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        report = render_owner_review_delivery_digest(
+            store,
+            owner_id=args.owner,
+            channel=args.channel,
+            delivery_ref=delivery_ref,
+            max_action_required=args.max_action_required,
+            max_review_suggested=args.max_review_suggested,
+            max_fyi=args.max_fyi,
+            digest_mode=args.mode,
+        )
+        if args.format == "text":
+            print(report["text"])
+        else:
+            print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if command == "ack-delivery-digest":
+        from .permanent_promotion import acknowledge_permanent_promotion_delivery
+
+        report = acknowledge_permanent_promotion_delivery(
+            store,
+            list(args.proposal_id or []),
+            owner_digest_delivery_id=str(args.delivery_ref),
+            ack_source=str(args.ack_source),
+        )
+        print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if command == "reply":
         report = parse_owner_review_reply(

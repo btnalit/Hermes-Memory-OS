@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import scripts.memory_os_3_200_monitor as monitor
@@ -5806,3 +5807,72 @@ def test_read_permanent_promotion_ledger_counts(tmp_path):
     assert counts["proposal_ledger_counts"]["open"] == 1
     assert counts["token_ledger_counts"]["consumed"] == 1
     assert counts["token_ledger_counts"]["open"] == 0
+
+
+def test_permanent_promotion_monitor_projects_delivery_and_recovery_fields(tmp_path):
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    proposals = [
+        {"proposal_id": "ppm_new", "target_id": "cry_new", "content_hash": "h1", "status": "open", "created_at": (now - timedelta(days=4)).isoformat()},
+        {"proposal_id": "ppm_due", "target_id": "cry_due", "content_hash": "h2", "status": "open", "created_at": (now - timedelta(days=8)).isoformat()},
+        {"proposal_id": "ppm_deciding", "target_id": "cry_deciding", "content_hash": "h3", "status": "deciding", "created_at": now.isoformat()},
+        {"proposal_id": "ppm_deferred", "target_id": "cry_deferred", "content_hash": "h4", "status": "deferred", "deferred_until": (now - timedelta(days=1)).isoformat()},
+        {"proposal_id": "ppm_retired", "status": "expired", "reason": "target_retired", "recovered": True},
+        {"proposal_id": "ppm_recovered", "status": "approved", "recovered": True},
+    ]
+    (system / "permanent_promotion_proposals.jsonl").write_text(
+        "".join(json.dumps(value) + "\n" for value in proposals),
+        encoding="utf-8",
+    )
+    delivery = {
+        "event_id": "proposal_delivery:odig:ppm_due",
+        "proposal_id": "ppm_due",
+        "status": "acknowledged",
+        "delivered_at": (now - timedelta(days=5)).isoformat(),
+        "next_reminder_at": (now - timedelta(days=1)).isoformat(),
+        "delivery_count": 1,
+    }
+    (system / "permanent_promotion_deliveries.jsonl").write_text(
+        json.dumps(delivery) + "\n" + json.dumps(delivery) + "\n",
+        encoding="utf-8",
+    )
+    (system / "execution_gate_envelopes.jsonl").write_text(
+        json.dumps({
+            "stage": "completion",
+            "lane_id": "permanent_promotion_producer",
+            "result_summary": {
+                "decision_recovery_attempt_count": 3,
+                "decision_recovery_success_count": 2,
+                "decision_recovery_failure_count": 1,
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = monitor.read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+
+    assert counts["open_proposal_backlog_count"] == 2
+    assert counts["never_delivered_open_count"] == 1
+    assert counts["due_reminder_count"] == 1
+    assert counts["deferred_past_due_count"] == 1
+    assert counts["deciding_proposal_count"] == 1
+    assert counts["decision_recovery_attempt_count"] == 3
+    assert counts["decision_recovery_success_count"] == 2
+    assert counts["decision_recovery_failure_count"] == 1
+    assert counts["target_retired_close_count"] == 1
+    assert counts["approved_reconcile_count"] == 1
+    assert counts["duplicate_delivery_suppressed_count"] == 1
+
+
+def test_monitor_hard_fails_recovery_failure_and_stale_open():
+    snapshot = {"living_memory_promotion": _living_memory_promotion_section(
+        decision_recovery_failure_count=1,
+        stale_open_proposal_count=2,
+    )}
+
+    classification = classify_snapshot(snapshot)
+    codes = {item["code"] for item in classification["fail"]}
+
+    assert "living_memory_decision_recovery_failure" in codes
+    assert "living_memory_stale_open_proposal" in codes

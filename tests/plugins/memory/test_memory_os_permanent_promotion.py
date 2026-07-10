@@ -310,9 +310,11 @@ def test_service_promotes_once_and_consumes_bound_token(tmp_path):
     assert fm["provisional"] is False
     assert fm["permanent_promotion_proposal_id"] == proposed["proposal_id"]
 
-    # Promote-once: the burned token cannot drive a second permanent write.
-    with pytest.raises(PermanentPromotionError, match="token_consumed|proposal_closed"):
-        pps.approve(token)
+    # Promote-once: retry returns the stable terminal result and never writes
+    # canonical state twice.
+    duplicate = pps.approve(token)
+    assert duplicate["status"] == "approved"
+    assert duplicate["canonical_state_changed"] is True
 
 
 def test_confirm_inactive_record_fails_closed_evidence_increment(tmp_path):
@@ -359,3 +361,339 @@ def test_all_confirm_provisional_record_callers_pass_authorization():
     assert offenders == [], (
         f"confirm_provisional_record called without authorization= at {offenders}"
     )
+
+
+# ── V2-0.5 reviewed-defect counterfactuals ──────────────────────────────
+
+
+def test_idempotent_reproposal_returns_new_raw_token_without_revoking_previous(tmp_path):
+    """Raw tokens are hash-only on disk, so a reminder issues an overlapping
+    token; proposal CAS, not routine revocation, prevents double decisions."""
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+
+    first = promotions.propose(record_id)
+    second = promotions.propose(record_id)
+
+    assert first["proposal_id"] == second["proposal_id"]
+    assert first["token"].startswith("ppmt_")
+    assert second["token"].startswith("ppmt_")
+    assert second["token"] != first["token"]
+    proposal = promotions.proposals._states()[first["proposal_id"]]
+    assert promotions.tokens.validate(first["token"], proposal=proposal, current_body="A stable fact.")["status"] == "open"
+    assert promotions.tokens.validate(second["token"], proposal=proposal, current_body="A stable fact.")["status"] == "open"
+
+
+def test_token_consume_is_compare_and_set_under_concurrency(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from plugins.memory.memory_os.permanent_promotion import (
+        PermanentPromotionError,
+        ProposalLedger,
+        TokenLedger,
+    )
+
+    root = tmp_path / "memory-os"
+    proposal, _ = ProposalLedger(root).create_or_get(
+        target_id="cry_1", candidate_id="cand_1", body="stable", channel="cli"
+    )
+    tokens = TokenLedger(root)
+    token = tokens.issue(proposal, channel="cli")
+
+    def consume_once():
+        try:
+            tokens.consume(token)
+            return "consumed"
+        except PermanentPromotionError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _index: consume_once(), range(2)))
+
+    assert results.count("consumed") == 1
+    assert results.count("token_consumed") == 1
+
+
+def test_automatic_owner_digest_origin_is_audited_and_channel_allowed(tmp_path):
+    from plugins.memory.memory_os.execution_gate import execution_gate_scope_hash, start_execution_gate_envelope
+    from plugins.memory.memory_os.permanent_promotion import AutomaticWriteContext, ProposalLedger
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+    scope = {"operation": "test_owner_digest_proposal", "writes": ["proposal"]}
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="permanent_promotion_producer",
+        trigger_surface="test",
+        risk_class="bounded_reversible_queue",
+        human_approval_required=False,
+        why_no_human_approval="test automatic proposal creation only",
+        scope=scope,
+        boundary={"actual_unapproved_crystallized_approval": False},
+    )
+    context = AutomaticWriteContext(
+        store=store,
+        envelope_id=permit["execution_gate_envelope_id"],
+        scope_hash=execution_gate_scope_hash(scope),
+    )
+
+    proposal, created = ProposalLedger(store.roots.memory_os_root).create_or_get(
+        target_id="cry_1",
+        candidate_id="cand_1",
+        body="stable",
+        channel="owner_digest",
+        origin="automatic",
+        write_context=context,
+    )
+
+    assert created is True
+    assert proposal["channel"] == "owner_digest"
+    assert proposal["origin"] == "automatic"
+    assert proposal["clearance"]["status"] == "unavailable"
+    assert proposal["structural_write_governance"]["permit_status"] == "valid"
+
+
+def test_reconcile_recovers_confirmed_target_as_approved_after_terminal_append_crash(tmp_path, monkeypatch):
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+    proposed = promotions.propose(record_id)
+
+    original_append = promotions.proposals.append_terminal
+
+    def crash_before_terminal(*_args, **_kwargs):
+        raise OSError("synthetic terminal append crash")
+
+    monkeypatch.setattr(promotions.proposals, "append_terminal", crash_before_terminal)
+    with pytest.raises(OSError, match="synthetic terminal append crash"):
+        promotions.approve(proposed["token"])
+
+    monkeypatch.setattr(promotions.proposals, "append_terminal", original_append)
+    report = PermanentPromotionService(service.store).reconcile()
+    state = promotions.proposals._states()[proposed["proposal_id"]]
+    frontmatter = service.read_records("owner_approved.md")[0].frontmatter
+
+    assert report["approved_reconcile_count"] == 1
+    assert state["status"] == "approved"
+    assert frontmatter["permanent_promotion_proposal_id"] == proposed["proposal_id"]
+
+
+def test_reconcile_closes_genuinely_retired_target_as_expired(tmp_path):
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+    proposed = promotions.propose(record_id)
+    service.invalidate_provisional_record(
+        record_id,
+        reason="resolver_ttl_expired",
+        invalidated_by="test",
+    )
+
+    report = promotions.reconcile()
+    state = promotions.proposals._states()[proposed["proposal_id"]]
+
+    assert report["target_retired_close_count"] == 1
+    assert state["status"] == "expired"
+    assert state["reason"] == "target_retired"
+
+
+def test_confirm_is_idempotent_only_for_same_permanent_proposal(tmp_path):
+    from plugins.memory.memory_os.crystallized import CrystallizedApprovalError
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionAuthorization
+
+    service, record_id = _provisional_service(tmp_path)
+    first = PermanentPromotionAuthorization(
+        proposal_id="ppm_" + "1" * 32,
+        target_id=record_id,
+        token_hash="first",
+    )
+    second = PermanentPromotionAuthorization(
+        proposal_id="ppm_" + "2" * 32,
+        target_id=record_id,
+        token_hash="second",
+    )
+
+    applied = service.confirm_provisional_record(record_id, authorization=first)
+    duplicate = service.confirm_provisional_record(record_id, authorization=first)
+    assert applied["canonical_state_changed"] is True
+    assert duplicate["canonical_state_changed"] is False
+    with pytest.raises(CrystallizedApprovalError, match="different permanent proposal"):
+        service.confirm_provisional_record(record_id, authorization=second)
+
+
+def test_confirm_and_retirement_share_one_canonical_transition(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionAuthorization
+
+    service, record_id = _provisional_service(tmp_path)
+    authorization = PermanentPromotionAuthorization(
+        proposal_id="ppm_" + "3" * 32,
+        target_id=record_id,
+        token_hash="token",
+    )
+
+    def confirm():
+        try:
+            result = service.confirm_provisional_record(record_id, authorization=authorization)
+            return ("confirm", bool(result["canonical_state_changed"]))
+        except Exception as exc:  # one canonical contender may lose fail-closed
+            return ("confirm_error", str(exc))
+
+    def retire():
+        try:
+            result = service.invalidate_provisional_record(
+                record_id,
+                reason="resolver_ttl_expired",
+                invalidated_by="test",
+            )
+            return ("retire", bool(result["canonical_state_changed"]))
+        except Exception as exc:
+            return ("retire_error", str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(confirm), pool.submit(retire)]
+        outcomes = [future.result() for future in results]
+
+    changed = [value for _kind, value in outcomes if value is True]
+    assert len(changed) == 1
+    frontmatter = service.read_records("owner_approved.md")[0].frontmatter
+    assert not (
+        frontmatter.get("provisional") is False
+        and frontmatter.get("canonical_state") == "provisional_expired"
+    )
+
+
+def test_decision_intent_recovers_when_process_crashes_before_token_consume(tmp_path, monkeypatch):
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService, content_hash
+
+    service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+    proposed = promotions.propose(record_id)
+    original = promotions.tokens._consume_hash_locked
+
+    def crash_after_intent(*_args, **_kwargs):
+        raise OSError("synthetic consume crash")
+
+    monkeypatch.setattr(promotions.tokens, "_consume_hash_locked", crash_after_intent)
+    with pytest.raises(OSError, match="synthetic consume crash"):
+        promotions.approve(proposed["token"])
+
+    monkeypatch.setattr(promotions.tokens, "_consume_hash_locked", original)
+    report = PermanentPromotionService(service.store).reconcile()
+    proposal = promotions.proposals._states()[proposed["proposal_id"]]
+    token_state = promotions.tokens._states()[content_hash(proposed["token"])]
+
+    assert report["decision_recovery_success_count"] == 1
+    assert proposal["status"] == "approved"
+    assert token_state["status"] == "consumed"
+
+
+@pytest.mark.parametrize(
+    ("action", "kwargs", "expected_status"),
+    [
+        ("reject", {}, "rejected"),
+        ("defer", {"until": "2026-08-01T00:00:00Z"}, "deferred"),
+    ],
+)
+def test_nonwrite_owner_decisions_recover_after_terminal_append_crash(
+    tmp_path, monkeypatch, action, kwargs, expected_status
+):
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+    proposed = promotions.propose(record_id)
+    original = promotions.proposals.append_terminal
+
+    def crash_before_terminal(*_args, **_kwargs):
+        raise OSError("synthetic terminal crash")
+
+    monkeypatch.setattr(promotions.proposals, "append_terminal", crash_before_terminal)
+    with pytest.raises(OSError, match="synthetic terminal crash"):
+        getattr(promotions, action)(proposed["token"], **kwargs)
+
+    monkeypatch.setattr(promotions.proposals, "append_terminal", original)
+    report = PermanentPromotionService(service.store).reconcile()
+    proposal = promotions.proposals._states()[proposed["proposal_id"]]
+
+    assert report["decision_recovery_success_count"] == 1
+    assert proposal["status"] == expected_status
+    assert service.read_records("owner_approved.md")[0].frontmatter["provisional"] is True
+
+
+def test_multiple_overlapping_tokens_still_confirm_canonical_state_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from plugins.memory.memory_os.audit import read_audit_records
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path)
+    promotions = PermanentPromotionService(service.store)
+    first = promotions.propose(record_id)
+    second = promotions.propose(record_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(promotions.approve, [first["token"], second["token"]]))
+
+    assert {result["status"] for result in results} == {"approved"}
+    records = service.read_records("owner_approved.md")
+    assert records[0].frontmatter["permanent_promotion_proposal_id"] == first["proposal_id"]
+    audit = [
+        record for record in read_audit_records(service.store.roots.audit_path)
+        if record.get("action") == "provisional_record_confirmed"
+    ]
+    assert len(audit) == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ("User: remember the raw transcript", "forbidden_raw_transcript"),
+        ("Deployment credential password=DO_NOT_STORE", "forbidden_secret_material"),
+    ],
+)
+def test_single_eligibility_gate_blocks_forbidden_permanent_content(tmp_path, body, reason):
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path, body=body)
+    report = service.collect_permanent_promotion_eligibility()
+    proposed = PermanentPromotionService(service.store).propose(record_id)
+
+    assert report["eligible_count"] == 0
+    assert report["skipped_forbidden_content_count"] == 1
+    assert proposed == {"status": "ineligible", "reason_codes": [reason]}
+
+
+def test_single_eligibility_gate_blocks_duplicate_existing_permanent_body(tmp_path):
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+    from plugins.memory.memory_os.crystallized import CrystallizedCandidate
+    from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+    service, record_id = _provisional_service(tmp_path, body="Duplicated durable fact.")
+    candidate = CrystallizedCandidate(
+        "cand_permanent",
+        "fact",
+        "Duplicated durable fact.",
+        ["evt_permanent"],
+    )
+    decision = ApprovalDecision(
+        "cand_permanent",
+        ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        "owner",
+        "2026-06-02T00:00:00Z",
+    )
+    service.write_approved_record(candidate, decision, file_name="existing_permanent.md")
+
+    report = service.collect_permanent_promotion_eligibility()
+    proposed = PermanentPromotionService(service.store).propose(record_id)
+
+    assert report["eligible_count"] == 0
+    assert report["skipped_permanent_duplicate_count"] == 1
+    assert proposed == {"status": "ineligible", "reason_codes": ["permanent_duplicate"]}

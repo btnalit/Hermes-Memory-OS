@@ -1,4 +1,4 @@
-"""Ledger-backed permanent-promotion domain contract (Living Memory V2-0)."""
+"""Ledger-backed permanent-promotion domain contract (Living Memory V2-0.5)."""
 from __future__ import annotations
 
 import hashlib
@@ -6,17 +6,25 @@ import json
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .audit import append_audit
 from .jsonl_io import _append_line_under_lock, locked_jsonl_file, write_jsonl_atomic_locked
 
 PROPOSAL_SCHEMA_VERSION = "memory-os.permanent-promotion-proposal.v1"
 TOKEN_SCHEMA_VERSION = "memory-os.permanent-promotion-token.v1"
+DELIVERY_SCHEMA_VERSION = "memory-os.permanent-promotion-delivery.v1"
 PERMANENT_PROMOTION_TARGET_TYPE = "permanent_memory_promotion"
 PERMANENT_ACTIONS = frozenset({"propose", "approve", "reject", "defer"})
+PERMANENT_DECISION_ACTIONS = frozenset({"approve", "reject", "defer"})
+PERMANENT_PROMOTION_CHANNELS = frozenset({"cli", "owner_digest"})
+PERMANENT_PROMOTION_ORIGINS = frozenset({"owner_initiated", "automatic"})
+PROPOSAL_TERMINAL_STATUSES = frozenset({"approved", "rejected", "deferred", "revoked", "expired"})
+PERMANENT_PROMOTION_LANE_ID = "permanent_promotion_producer"
+PERMANENT_PROMOTION_RISK_CLASS = "bounded_reversible_queue"
 
 
 class PermanentPromotionError(ValueError):
@@ -28,6 +36,16 @@ def utc_timestamp(now: datetime | None = None) -> str:
     if value.tzinfo is None:
         raise PermanentPromotionError("timestamp_must_be_timezone_aware")
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def content_hash(body: str) -> str:
@@ -58,6 +76,31 @@ def validate_action_target(action: str, target_type: str) -> None:
         raise PermanentPromotionError("invalid_permanent_target_type")
 
 
+@dataclass(frozen=True)
+class AutomaticWriteContext:
+    """ExecutionGate proof reused by locked permanent-promotion appends."""
+
+    store: Any
+    envelope_id: str
+    scope_hash: str
+    lane_id: str = PERMANENT_PROMOTION_LANE_ID
+    risk_class: str = PERMANENT_PROMOTION_RISK_CLASS
+
+    def prepare(self, path: Path, record: dict[str, Any]) -> dict[str, Any]:
+        from .structural_write_gate import prepare_governed_jsonl_record
+
+        return prepare_governed_jsonl_record(
+            self.store,
+            path,
+            record,
+            write_owner="automatic",
+            lane_id=self.lane_id,
+            risk_class=self.risk_class,
+            execution_gate_envelope_id=self.envelope_id,
+            scope_hash=self.scope_hash,
+        )
+
+
 def build_proposal_record(
     *,
     proposal_id: str,
@@ -66,6 +109,7 @@ def build_proposal_record(
     body: str,
     created_at: str,
     channel: str,
+    origin: str = "owner_initiated",
     evidence_profile_version: str = "v2-0-existing-eligibility",
     eligibility: dict[str, Any] | None = None,
     clearance: dict[str, Any] | None = None,
@@ -73,6 +117,10 @@ def build_proposal_record(
     validate_action_target("propose", PERMANENT_PROMOTION_TARGET_TYPE)
     if not proposal_id.startswith("ppm_") or not target_id or not candidate_id:
         raise PermanentPromotionError("invalid_proposal_binding")
+    if channel not in PERMANENT_PROMOTION_CHANNELS:
+        raise PermanentPromotionError("proposal_channel_not_allowed")
+    if origin not in PERMANENT_PROMOTION_ORIGINS:
+        raise PermanentPromotionError("proposal_origin_not_allowed")
     record: dict[str, Any] = {
         "schema_version": PROPOSAL_SCHEMA_VERSION,
         "proposal_id": proposal_id,
@@ -84,9 +132,8 @@ def build_proposal_record(
         "status": "open",
         "created_at": created_at,
         "channel": channel,
+        "origin": origin,
         "eligibility": eligibility or {"status": "eligible", "reason_codes": []},
-        # V2-E does not exist yet. Owner-initiated CLI records this explicit
-        # carve-out; automatic callers will be refused by the service layer.
         "clearance": clearance or {"status": "unavailable", "reason_code": "v2e_not_enabled"},
     }
     snapshot_input = {key: value for key, value in record.items() if key != "dossier_snapshot_hash"}
@@ -95,7 +142,7 @@ def build_proposal_record(
 
 
 class ProposalLedger:
-    """Append-only proposal events plus atomically-derived open snapshot."""
+    """Append-only proposal events plus atomically-derived pending snapshot."""
 
     def __init__(self, memory_os_root: Path, *, clock: Callable[[], datetime] | None = None) -> None:
         self.memory_os_root = Path(memory_os_root)
@@ -131,46 +178,158 @@ class ProposalLedger:
         return states
 
     def _write_open_snapshot(self) -> None:
-        opens = [state for state in self._states().values() if state.get("status") == "open"]
-        write_jsonl_atomic_locked(self.open_snapshot_path, sorted(opens, key=lambda item: str(item["created_at"])))
+        pending = [
+            state for state in self._states().values()
+            if state.get("status") in {"open", "deciding"}
+        ]
+        write_jsonl_atomic_locked(
+            self.open_snapshot_path,
+            sorted(pending, key=lambda item: (str(item.get("created_at") or ""), str(item.get("proposal_id") or ""))),
+        )
 
-    def create_or_get(self, *, target_id: str, candidate_id: str, body: str, channel: str) -> tuple[dict[str, Any], bool]:
-        if channel != "cli":
-            raise PermanentPromotionError("automatic_proposal_generation_blocked_pre_v2e")
+    def _append_locked(
+        self,
+        target: Path,
+        event: dict[str, Any],
+        *,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        payload = write_context.prepare(self.proposals_path, event) if write_context else dict(event)
+        _append_line_under_lock(target, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        return payload
+
+    def create_or_get(
+        self,
+        *,
+        target_id: str,
+        candidate_id: str,
+        body: str,
+        channel: str,
+        origin: str = "owner_initiated",
+        eligibility: dict[str, Any] | None = None,
+        clearance: dict[str, Any] | None = None,
+        v2e_enabled: bool = False,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        if channel not in PERMANENT_PROMOTION_CHANNELS:
+            raise PermanentPromotionError("proposal_channel_not_allowed")
+        if origin not in PERMANENT_PROMOTION_ORIGINS:
+            raise PermanentPromotionError("proposal_origin_not_allowed")
+        if origin == "automatic" and write_context is None:
+            raise PermanentPromotionError("automatic_write_requires_execution_gate")
+        resolved_clearance = clearance or {"status": "unavailable", "reason_code": "v2e_not_enabled"}
+        if origin == "automatic" and v2e_enabled and resolved_clearance.get("status") != "clear":
+            raise PermanentPromotionError("automatic_clearance_required")
+
         body_hash = content_hash(body)
         evidence_version = "v2-0-existing-eligibility"
-        # Interleave read/idempotency/append under one lock to prevent duplicate opens.
         with locked_jsonl_file(self.proposals_path) as target:
             states = self._states()
+
+            # Same target with a changed body must never leave two actionable
+            # proposals. Close the stale binding before opening the replacement.
+            for proposal_id, existing in list(states.items()):
+                if (
+                    existing.get("status") in {"open", "deciding"}
+                    and existing.get("target_id") == target_id
+                    and existing.get("content_hash") != body_hash
+                ):
+                    stale_event = {
+                        "schema_version": PROPOSAL_SCHEMA_VERSION,
+                        "proposal_id": proposal_id,
+                        "status": "revoked",
+                        "reason": "content_drift",
+                        "updated_at": utc_timestamp(self.clock()),
+                    }
+                    self._append_locked(target, stale_event, write_context=write_context)
+                    states[proposal_id] = {**existing, **stale_event}
+
             existing_open: dict[str, Any] | None = None
             for existing in states.values():
-                if existing.get("status") == "open" and existing.get("content_hash") == body_hash and existing.get("evidence_profile_version") == evidence_version:
+                if (
+                    existing.get("status") in {"open", "deciding"}
+                    and existing.get("content_hash") == body_hash
+                    and existing.get("evidence_profile_version") == evidence_version
+                ):
                     existing_open = existing
                     break
             if existing_open is not None:
                 proposal, created = existing_open, False
             else:
+                for existing in states.values():
+                    if existing.get("target_id") != target_id or existing.get("content_hash") != body_hash:
+                        continue
+                    status = str(existing.get("status") or "")
+                    if status == "rejected" and origin == "automatic":
+                        raise PermanentPromotionError("automatic_reproposal_rejected")
+                    if status == "approved":
+                        raise PermanentPromotionError("content_already_permanent")
+                    if status == "deferred":
+                        due = parse_timestamp(existing.get("deferred_until"))
+                        if due is not None and due > self.clock().astimezone(timezone.utc):
+                            return existing, False
                 proposal = build_proposal_record(
-                    proposal_id=make_proposal_id(), target_id=target_id, candidate_id=candidate_id,
-                    body=body, created_at=utc_timestamp(self.clock()), channel=channel,
+                    proposal_id=make_proposal_id(),
+                    target_id=target_id,
+                    candidate_id=candidate_id,
+                    body=body,
+                    created_at=utc_timestamp(self.clock()),
+                    channel=channel,
+                    origin=origin,
+                    eligibility=eligibility,
+                    clearance=resolved_clearance,
+                    evidence_profile_version=evidence_version,
                 )
-                _append_line_under_lock(target, json.dumps(proposal, ensure_ascii=False, sort_keys=True) + "\n")
+                proposal = self._append_locked(target, proposal, write_context=write_context)
                 created = True
-        # Always (re)derive the open snapshot from the ledger so a prior failed
-        # snapshot write self-heals on the next call — the snapshot is a derived
-        # projection, never the source of truth.
         self._write_open_snapshot()
         return proposal, created
 
-    def append_terminal(self, proposal_id: str, status: str, *, deferred_until: str = "") -> None:
-        if status not in {"approved", "rejected", "deferred", "revoked", "expired"}:
+    def append_terminal(
+        self,
+        proposal_id: str,
+        status: str,
+        *,
+        deferred_until: str = "",
+        reason: str = "",
+        operation_id: str = "",
+        result_ref: dict[str, Any] | None = None,
+        recovered: bool = False,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        if status not in PROPOSAL_TERMINAL_STATUSES:
             raise PermanentPromotionError("invalid_terminal_proposal_status")
-        event = {"schema_version": PROPOSAL_SCHEMA_VERSION, "proposal_id": proposal_id, "status": status, "updated_at": utc_timestamp(self.clock())}
-        if deferred_until:
-            event["deferred_until"] = deferred_until
         with locked_jsonl_file(self.proposals_path) as target:
-            _append_line_under_lock(target, json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+            current = self._states().get(str(proposal_id or ""))
+            if current is None:
+                raise PermanentPromotionError("proposal_not_found")
+            current_status = str(current.get("status") or "")
+            if current_status in PROPOSAL_TERMINAL_STATUSES:
+                if current_status == status:
+                    return current
+                raise PermanentPromotionError("proposal_closed")
+            if current_status not in {"open", "deciding"}:
+                raise PermanentPromotionError("proposal_not_actionable")
+            event: dict[str, Any] = {
+                "schema_version": PROPOSAL_SCHEMA_VERSION,
+                "proposal_id": proposal_id,
+                "status": status,
+                "updated_at": utc_timestamp(self.clock()),
+            }
+            if deferred_until:
+                event["deferred_until"] = deferred_until
+            if reason:
+                event["reason"] = reason
+            if operation_id:
+                event["operation_id"] = operation_id
+            if result_ref:
+                event["result_ref"] = _bounded_result_ref(result_ref)
+            if recovered:
+                event["recovered"] = True
+            payload = self._append_locked(target, event, write_context=write_context)
+            result = {**current, **payload}
         self._write_open_snapshot()
+        return result
 
 
 class TokenLedger:
@@ -198,28 +357,60 @@ class TokenLedger:
                 states[token_hash] = {**states.get(token_hash, {}), **event}
         return states
 
-    def issue(self, proposal: dict[str, Any], *, channel: str, expires_at: datetime | None = None) -> str:
-        if channel != "cli" or proposal.get("status") != "open":
+    def _append_locked(
+        self,
+        target: Path,
+        event: dict[str, Any],
+        *,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        payload = write_context.prepare(self.path, event) if write_context else dict(event)
+        _append_line_under_lock(target, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        return payload
+
+    def issue(
+        self,
+        proposal: dict[str, Any],
+        *,
+        channel: str,
+        expires_at: datetime | None = None,
+        delivery_ref: str = "",
+        write_context: AutomaticWriteContext | None = None,
+    ) -> str:
+        if channel not in PERMANENT_PROMOTION_CHANNELS or proposal.get("status") != "open":
             raise PermanentPromotionError("token_issuance_not_allowed")
+        if channel == "owner_digest" and write_context is None:
+            raise PermanentPromotionError("automatic_write_requires_execution_gate")
         token = issue_token()
         now = self.clock()
-        from datetime import timedelta
-        expiry = expires_at or (now + timedelta(hours=24))
-        record = {
-            "schema_version": TOKEN_SCHEMA_VERSION, "token_hash": content_hash(token),
-            "proposal_id": proposal["proposal_id"], "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
-            "target_id": proposal["target_id"], "content_hash": proposal["content_hash"],
-            "dossier_snapshot_hash": proposal["dossier_snapshot_hash"], "issued_at": utc_timestamp(now),
-            "expires_at": utc_timestamp(expiry), "channel": channel, "status": "open",
+        expiry = expires_at or (now + timedelta(hours=48))
+        record: dict[str, Any] = {
+            "schema_version": TOKEN_SCHEMA_VERSION,
+            "token_hash": content_hash(token),
+            "proposal_id": proposal["proposal_id"],
+            "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
+            "target_id": proposal["target_id"],
+            "content_hash": proposal["content_hash"],
+            "dossier_snapshot_hash": proposal["dossier_snapshot_hash"],
+            "issued_at": utc_timestamp(now),
+            "expires_at": utc_timestamp(expiry),
+            "channel": channel,
+            "status": "open",
         }
+        if delivery_ref:
+            record["delivery_ref"] = str(delivery_ref)[:160]
         with locked_jsonl_file(self.path) as target:
-            _append_line_under_lock(target, json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+            self._append_locked(target, record, write_context=write_context)
         return token
 
-    def validate(self, token: str, *, proposal: dict[str, Any], current_body: str) -> dict[str, Any]:
-        if str(token).startswith("oa_"):
-            raise PermanentPromotionError("legacy_token")
-        state = self._states().get(content_hash(token))
+    def _validate_state(
+        self,
+        state: dict[str, Any] | None,
+        *,
+        proposal: dict[str, Any],
+        current_body: str,
+        allow_expired_after_validated_at: str = "",
+    ) -> dict[str, Any]:
         if not state:
             raise PermanentPromotionError("token_not_found")
         if state.get("status") != "open":
@@ -230,25 +421,247 @@ class TokenLedger:
             raise PermanentPromotionError("content_hash_mismatch")
         if state.get("dossier_snapshot_hash") != proposal.get("dossier_snapshot_hash"):
             raise PermanentPromotionError("dossier_snapshot_mismatch")
-        try:
-            expiry = datetime.fromisoformat(str(state["expires_at"]).replace("Z", "+00:00"))
-        except (KeyError, ValueError):
+        expiry = parse_timestamp(state.get("expires_at"))
+        if expiry is None:
             raise PermanentPromotionError("token_expired")
-        if expiry <= self.clock().astimezone(timezone.utc):
+        validated_at = parse_timestamp(allow_expired_after_validated_at)
+        comparison = validated_at or self.clock().astimezone(timezone.utc)
+        if expiry <= comparison:
             raise PermanentPromotionError("token_expired")
         return state
 
-    def consume(self, token: str) -> dict[str, Any]:
-        token_hash = content_hash(token)
+    def validate(self, token: str, *, proposal: dict[str, Any], current_body: str) -> dict[str, Any]:
+        if str(token).startswith("oa_"):
+            raise PermanentPromotionError("legacy_token")
+        return self._validate_state(
+            self._states().get(content_hash(token)),
+            proposal=proposal,
+            current_body=current_body,
+        )
+
+    def _consume_hash_locked(
+        self,
+        target: Path,
+        token_hash: str,
+        *,
+        operation_id: str = "",
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
         state = self._states().get(token_hash)
         if not state:
             raise PermanentPromotionError("token_not_found")
+        if state.get("status") == "consumed" and operation_id and state.get("operation_id") == operation_id:
+            return state
         if state.get("status") != "open":
             raise PermanentPromotionError(f"token_{state.get('status')}")
-        event = {"schema_version": TOKEN_SCHEMA_VERSION, "token_hash": token_hash, "status": "consumed", "updated_at": utc_timestamp(self.clock())}
+        event: dict[str, Any] = {
+            "schema_version": TOKEN_SCHEMA_VERSION,
+            "token_hash": token_hash,
+            "status": "consumed",
+            "updated_at": utc_timestamp(self.clock()),
+        }
+        if operation_id:
+            event["operation_id"] = operation_id
+        return self._append_locked(target, event, write_context=write_context)
+
+    def consume(
+        self,
+        token: str,
+        *,
+        operation_id: str = "",
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        token_hash = content_hash(token)
         with locked_jsonl_file(self.path) as target:
-            _append_line_under_lock(target, json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
-        return event
+            return self._consume_hash_locked(
+                target,
+                token_hash,
+                operation_id=operation_id,
+                write_context=write_context,
+            )
+
+    def complete_consume_by_hash(
+        self,
+        token_hash: str,
+        *,
+        operation_id: str,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        with locked_jsonl_file(self.path) as target:
+            return self._consume_hash_locked(
+                target,
+                token_hash,
+                operation_id=operation_id,
+                write_context=write_context,
+            )
+
+
+class PermanentPromotionDeliveryLedger:
+    """Acknowledged owner-digest exposure and bounded reminder schedule."""
+
+    _ACK_SOURCES = frozenset({"hermes_send_receipt", "hermes_cron_emission"})
+    _REMINDER_DELAYS = (3, 7, 14, 30)
+
+    def __init__(self, memory_os_root: Path, *, clock: Callable[[], datetime] | None = None) -> None:
+        self.memory_os_root = Path(memory_os_root)
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @property
+    def path(self) -> Path:
+        return self.memory_os_root / "system" / "permanent_promotion_deliveries.jsonl"
+
+    def _events(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        records: list[dict[str, Any]] = []
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+
+    def states(self) -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for event in self._events():
+            proposal_id = str(event.get("proposal_id") or "")
+            if proposal_id:
+                states[proposal_id] = {**states.get(proposal_id, {}), **event}
+        return states
+
+    def _append_locked(
+        self,
+        target: Any,
+        event: dict[str, Any],
+        *,
+        write_context: AutomaticWriteContext,
+    ) -> dict[str, Any]:
+        payload = write_context.prepare(self.path, event)
+        _append_line_under_lock(target, json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        return payload
+
+    def select_due(
+        self,
+        proposals: list[dict[str, Any]],
+        *,
+        now: datetime | None = None,
+        cap: int = 5,
+        new_reserve: int = 3,
+        reminder_reserve: int = 2,
+    ) -> dict[str, Any]:
+        selected_at = (now or self.clock()).astimezone(timezone.utc)
+        bounded_cap = max(0, int(cap))
+        bounded_new = max(0, min(int(new_reserve), bounded_cap))
+        bounded_reminder = max(0, min(int(reminder_reserve), bounded_cap))
+        states = self.states()
+        actionable = [
+            proposal for proposal in proposals
+            if str(proposal.get("status") or "") == "open"
+        ]
+        never_delivered = sorted(
+            [item for item in actionable if str(item.get("proposal_id") or "") not in states],
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("target_id") or ""),
+                str(item.get("proposal_id") or ""),
+            ),
+        )
+        due_reminders = sorted(
+            [
+                item for item in actionable
+                if str(item.get("proposal_id") or "") in states
+                and (
+                    parse_timestamp(states[str(item.get("proposal_id") or "")].get("next_reminder_at"))
+                    or datetime.max.replace(tzinfo=timezone.utc)
+                ) <= selected_at
+            ],
+            key=lambda item: (
+                str(states[str(item.get("proposal_id") or "")].get("next_reminder_at") or ""),
+                str(item.get("target_id") or ""),
+                str(item.get("proposal_id") or ""),
+            ),
+        )
+
+        selected_new = never_delivered[:bounded_new]
+        selected_reminders = due_reminders[:bounded_reminder]
+        remaining = bounded_cap - len(selected_new) - len(selected_reminders)
+        if remaining > 0:
+            extra_new = never_delivered[len(selected_new):len(selected_new) + remaining]
+            selected_new.extend(extra_new)
+            remaining -= len(extra_new)
+        if remaining > 0:
+            selected_reminders.extend(
+                due_reminders[len(selected_reminders):len(selected_reminders) + remaining]
+            )
+        return {
+            "selected": selected_new + selected_reminders,
+            "selected_new_count": len(selected_new),
+            "selected_reminder_count": len(selected_reminders),
+            "never_delivered_open_count": len(never_delivered),
+            "due_reminder_count": len(due_reminders),
+            "open_proposal_backlog_count": len(actionable),
+        }
+
+    def acknowledge(
+        self,
+        proposal_ids: list[str],
+        *,
+        owner_digest_delivery_id: str,
+        ack_source: str,
+        now: datetime | None = None,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        if write_context is None:
+            raise PermanentPromotionError("automatic_write_requires_execution_gate")
+        if ack_source not in self._ACK_SOURCES:
+            raise PermanentPromotionError("delivery_ack_source_not_allowed")
+        delivery_id = str(owner_digest_delivery_id or "").strip()
+        if not delivery_id:
+            raise PermanentPromotionError("delivery_id_required")
+        delivered_at = (now or self.clock()).astimezone(timezone.utc)
+        acknowledged_count = 0
+        duplicate_count = 0
+        with locked_jsonl_file(self.path) as target:
+            events = self._events()
+            event_ids = {str(item.get("event_id") or "") for item in events}
+            states: dict[str, dict[str, Any]] = {}
+            for event in events:
+                proposal_id = str(event.get("proposal_id") or "")
+                if proposal_id:
+                    states[proposal_id] = {**states.get(proposal_id, {}), **event}
+            for proposal_id in dict.fromkeys(str(item or "") for item in proposal_ids):
+                if not proposal_id:
+                    continue
+                event_id = f"proposal_delivery:{delivery_id}:{proposal_id}"
+                if event_id in event_ids:
+                    duplicate_count += 1
+                    continue
+                delivery_count = int(states.get(proposal_id, {}).get("delivery_count") or 0) + 1
+                delay_index = min(delivery_count - 1, len(self._REMINDER_DELAYS) - 1)
+                event = {
+                    "schema_version": DELIVERY_SCHEMA_VERSION,
+                    "event_id": event_id,
+                    "proposal_id": proposal_id,
+                    "owner_digest_delivery_id": delivery_id,
+                    "ack_source": ack_source,
+                    "status": "acknowledged",
+                    "delivered_at": utc_timestamp(delivered_at),
+                    "delivery_count": delivery_count,
+                    "next_reminder_at": utc_timestamp(
+                        delivered_at + timedelta(days=self._REMINDER_DELAYS[delay_index])
+                    ),
+                }
+                payload = self._append_locked(target, event, write_context=write_context)
+                states[proposal_id] = {**states.get(proposal_id, {}), **payload}
+                event_ids.add(event_id)
+                acknowledged_count += 1
+        return {
+            "status": "ok",
+            "acknowledged_count": acknowledged_count,
+            "duplicate_delivery_suppressed_count": duplicate_count,
+        }
 
 
 @dataclass(frozen=True)
@@ -259,16 +672,34 @@ class PermanentPromotionAuthorization:
 
 
 class PermanentPromotionService:
-    """Single owner-initiated proposal/token/permanent-write route."""
+    """Single proposal/token/permanent-write state machine for CLI and digest."""
 
-    def __init__(self, store: Any, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        v2e_enabled: bool = False,
+    ) -> None:
         self.store = store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.v2e_enabled = bool(v2e_enabled)
         self.proposals = ProposalLedger(store.roots.memory_os_root, clock=self.clock)
         self.tokens = TokenLedger(store.roots.memory_os_root, clock=self.clock)
 
-    def propose(self, record_id: str, *, channel: str = "cli") -> dict[str, Any]:
+    def create_proposal(
+        self,
+        record_id: str,
+        *,
+        channel: str = "cli",
+        origin: str | None = None,
+        clearance: dict[str, Any] | None = None,
+        write_context: AutomaticWriteContext | None = None,
+        eligibility_item: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         from .crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
+
+        resolved_origin = str(origin or ("automatic" if channel == "owner_digest" else "owner_initiated"))
         record = CrystallizedMemoryService(self.store).find_record(record_id)
         if record is None:
             return {"status": "ineligible", "reason_codes": ["target_not_found"]}
@@ -278,49 +709,723 @@ class PermanentPromotionService:
         body = str(record.body or "")
         if not body.strip():
             return {"status": "ineligible", "reason_codes": ["empty_content"]}
+
+        eligible = eligibility_item
+        eligibility_report: dict[str, Any] = {}
+        if eligible is None:
+            eligibility_report = CrystallizedMemoryService(self.store).collect_permanent_promotion_eligibility(
+                now=self.clock()
+            )
+            eligible = next(
+                (
+                    item for item in eligibility_report.get("eligible_records", [])
+                    if str(item.get("record_id") or "") == str(record_id)
+                ),
+                None,
+            )
+        if eligible is None:
+            rejected = next(
+                (
+                    item for item in eligibility_report.get("ineligible_records", [])
+                    if str(item.get("record_id") or "") == str(record_id)
+                ),
+                None,
+            )
+            return {
+                "status": "ineligible",
+                "reason_codes": list((rejected or {}).get("reason_codes") or ["eligibility_gate_rejected"]),
+            }
+
         proposal, created = self.proposals.create_or_get(
-            target_id=record_id, candidate_id=str(frontmatter.get("candidate_id") or record_id), body=body, channel=channel
+            target_id=record_id,
+            candidate_id=str(frontmatter.get("candidate_id") or record_id),
+            body=body,
+            channel=channel,
+            origin=resolved_origin,
+            eligibility={
+                "status": "eligible",
+                "reason_codes": list(eligible.get("reason_codes") or ["min_age_satisfied"]),
+                "age_days": int(eligible.get("age_days") or 0),
+            },
+            clearance=clearance,
+            v2e_enabled=self.v2e_enabled,
+            write_context=write_context,
         )
-        token = self.tokens.issue(proposal, channel=channel) if created else ""
-        return {"status": "open", "proposal_id": proposal["proposal_id"], "token": token, "idempotent": not created}
+        return {
+            "status": str(proposal.get("status") or "open"),
+            "proposal": proposal,
+            "proposal_id": proposal["proposal_id"],
+            "idempotent": not created,
+        }
+
+    def issue_proposal_token(
+        self,
+        proposal: dict[str, Any],
+        *,
+        channel: str,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> str:
+        if str(proposal.get("status") or "") != "open":
+            raise PermanentPromotionError("proposal_not_actionable")
+        return self.tokens.issue(proposal, channel=channel, write_context=write_context)
+
+    def propose(
+        self,
+        record_id: str,
+        *,
+        channel: str = "cli",
+        origin: str | None = None,
+        clearance: dict[str, Any] | None = None,
+        write_context: AutomaticWriteContext | None = None,
+    ) -> dict[str, Any]:
+        created = self.create_proposal(
+            record_id,
+            channel=channel,
+            origin=origin,
+            clearance=clearance,
+            write_context=write_context,
+        )
+        if created.get("status") == "ineligible":
+            return created
+        proposal = dict(created.get("proposal") or {})
+        if proposal.get("status") == "deciding":
+            return {
+                "status": "deciding",
+                "proposal_id": proposal["proposal_id"],
+                "token": "",
+                "idempotent": True,
+            }
+        token = self.issue_proposal_token(proposal, channel=channel, write_context=write_context)
+        return {
+            "status": "open",
+            "proposal_id": proposal["proposal_id"],
+            "token": token,
+            "idempotent": bool(created.get("idempotent")),
+        }
+
+    def begin_decision_and_consume(
+        self,
+        token: str,
+        action: str,
+        *,
+        deferred_until: str = "",
+    ) -> dict[str, Any]:
+        if action not in PERMANENT_DECISION_ACTIONS:
+            raise PermanentPromotionError("invalid_permanent_action")
+        if action == "defer":
+            due = parse_timestamp(deferred_until)
+            if due is None:
+                raise PermanentPromotionError("invalid_deferred_until")
+
+        token_hash = content_hash(token)
+        hint = self.tokens._states().get(token_hash)
+        if not hint:
+            raise PermanentPromotionError("token_not_found")
+        proposal_id = str(hint.get("proposal_id") or "")
+        operation_id = f"ppop_{uuid4().hex}"
+
+        # Fixed lock order: proposal then token. The pre-read above is only an
+        # id hint; every security decision is revalidated while both are held.
+        with locked_jsonl_file(self.proposals.proposals_path) as proposal_target:
+            with locked_jsonl_file(self.tokens.path) as token_target:
+                proposal = self.proposals._states().get(proposal_id)
+                token_state = self.tokens._states().get(token_hash)
+                if not proposal:
+                    raise PermanentPromotionError("proposal_not_found")
+                status = str(proposal.get("status") or "")
+                if status in PROPOSAL_TERMINAL_STATUSES:
+                    return proposal
+                if status == "deciding":
+                    if str(proposal.get("decision_action") or "") != action:
+                        raise PermanentPromotionError("proposal_deciding")
+                    return proposal
+                if status != "open":
+                    raise PermanentPromotionError("proposal_not_actionable")
+
+                from .crystallized import CrystallizedMemoryService
+
+                record = CrystallizedMemoryService(self.store).find_record(str(proposal.get("target_id") or ""))
+                if record is None:
+                    raise PermanentPromotionError("target_not_found")
+                validated = self.tokens._validate_state(
+                    token_state,
+                    proposal=proposal,
+                    current_body=record.body,
+                )
+                intent = {
+                    "schema_version": PROPOSAL_SCHEMA_VERSION,
+                    "proposal_id": proposal_id,
+                    "status": "deciding",
+                    "decision_action": action,
+                    "operation_id": operation_id,
+                    "decision_token_hash": token_hash,
+                    "token_validated_at": utc_timestamp(self.clock()),
+                    "token_expires_at": str(validated.get("expires_at") or ""),
+                    "updated_at": utc_timestamp(self.clock()),
+                }
+                if deferred_until:
+                    intent["deferred_until"] = deferred_until
+                intent_payload = self.proposals._append_locked(proposal_target, intent)
+                self.tokens._consume_hash_locked(
+                    token_target,
+                    token_hash,
+                    operation_id=operation_id,
+                )
+                claimed = {**proposal, **intent_payload}
+        self.proposals._write_open_snapshot()
+        return claimed
+
+    def _resume_decision(
+        self,
+        proposal: dict[str, Any],
+        *,
+        write_context: AutomaticWriteContext | None = None,
+        recovered: bool = False,
+    ) -> dict[str, Any]:
+        action = str(proposal.get("decision_action") or "")
+        operation_id = str(proposal.get("operation_id") or "")
+        token_hash = str(proposal.get("decision_token_hash") or "")
+        if not action or not operation_id:
+            raise PermanentPromotionError("decision_intent_incomplete")
+        if token_hash:
+            self.tokens.complete_consume_by_hash(
+                token_hash,
+                operation_id=operation_id,
+                write_context=write_context,
+            )
+
+        if action in {"reject", "defer"}:
+            status = "rejected" if action == "reject" else "deferred"
+            terminal = self.proposals.append_terminal(
+                str(proposal["proposal_id"]),
+                status,
+                deferred_until=str(proposal.get("deferred_until") or ""),
+                operation_id=operation_id,
+                result_ref={"canonical_state_changed": False},
+                recovered=recovered,
+                write_context=write_context,
+            )
+            return self._result_from_state(terminal)
+
+        from .crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
+
+        crystallized = CrystallizedMemoryService(self.store)
+        record = crystallized.find_record(str(proposal.get("target_id") or ""))
+        if record is None:
+            terminal = self.proposals.append_terminal(
+                str(proposal["proposal_id"]),
+                "expired",
+                reason="target_retired",
+                operation_id=operation_id,
+                recovered=recovered,
+                write_context=write_context,
+            )
+            return self._result_from_state(terminal)
+        frontmatter = record.frontmatter
+        if frontmatter.get("provisional") is not True:
+            if (
+                str(frontmatter.get("permanent_promotion_proposal_id") or "")
+                == str(proposal.get("proposal_id") or "")
+                and content_hash(record.body) == str(proposal.get("content_hash") or "")
+            ):
+                terminal = self.proposals.append_terminal(
+                    str(proposal["proposal_id"]),
+                    "approved",
+                    operation_id=operation_id,
+                    result_ref={"canonical_state_changed": False},
+                    recovered=recovered,
+                    write_context=write_context,
+                )
+                return self._result_from_state(terminal)
+            raise PermanentPromotionError("target_confirmed_by_different_proposal")
+        if not is_active_crystallized_frontmatter(frontmatter):
+            terminal = self.proposals.append_terminal(
+                str(proposal["proposal_id"]),
+                "expired",
+                reason="target_retired",
+                operation_id=operation_id,
+                recovered=recovered,
+                write_context=write_context,
+            )
+            return self._result_from_state(terminal)
+
+        authorization = PermanentPromotionAuthorization(
+            str(proposal["proposal_id"]),
+            str(proposal["target_id"]),
+            token_hash,
+        )
+        result = crystallized.confirm_provisional_record(
+            str(proposal["target_id"]),
+            authorization=authorization,
+            confirmed_by="owner",
+            now=self.clock(),
+        )
+        terminal = self.proposals.append_terminal(
+            str(proposal["proposal_id"]),
+            "approved",
+            operation_id=operation_id,
+            result_ref={"canonical_state_changed": bool(result.get("canonical_state_changed"))},
+            recovered=recovered,
+            write_context=write_context,
+        )
+        return self._result_from_state(terminal)
+
+    def _act(self, token: str, action: str, *, deferred_until: str = "") -> dict[str, Any]:
+        proposal = self.begin_decision_and_consume(
+            token,
+            action,
+            deferred_until=deferred_until,
+        )
+        if str(proposal.get("status") or "") in PROPOSAL_TERMINAL_STATUSES:
+            return self._result_from_state(proposal)
+        return self._resume_decision(proposal)
 
     def approve(self, token: str) -> dict[str, Any]:
-        # Validate first, burn token before markdown write (safe crash direction).
-        token_hash = content_hash(token)
-        state = self.tokens._states().get(token_hash)
-        if not state:
+        return self._act(token, "approve")
+
+    def reject(self, token: str) -> dict[str, Any]:
+        return self._act(token, "reject")
+
+    def defer(self, token: str, *, until: str) -> dict[str, Any]:
+        return self._act(token, "defer", deferred_until=until)
+
+    def inspect_action_token(self, token: str) -> dict[str, Any]:
+        token_state = self.tokens._states().get(content_hash(token))
+        if not token_state:
             raise PermanentPromotionError("token_not_found")
-        proposal = self.proposals._states().get(str(state.get("proposal_id") or ""))
-        if not proposal or proposal.get("status") != "open":
-            raise PermanentPromotionError("proposal_closed")
+        proposal = self.proposals._states().get(str(token_state.get("proposal_id") or ""))
+        if not proposal:
+            raise PermanentPromotionError("proposal_not_found")
+        if str(proposal.get("status") or "") in PROPOSAL_TERMINAL_STATUSES:
+            return self._result_from_state(proposal)
         from .crystallized import CrystallizedMemoryService
-        record = CrystallizedMemoryService(self.store).find_record(str(proposal["target_id"]))
+
+        record = CrystallizedMemoryService(self.store).find_record(str(proposal.get("target_id") or ""))
         if record is None:
             raise PermanentPromotionError("target_not_found")
         self.tokens.validate(token, proposal=proposal, current_body=record.body)
-        self.tokens.consume(token)
-        authorization = PermanentPromotionAuthorization(proposal["proposal_id"], proposal["target_id"], token_hash)
-        result = CrystallizedMemoryService(self.store).confirm_provisional_record(proposal["target_id"], authorization=authorization)
-        self.proposals.append_terminal(proposal["proposal_id"], "approved")
-        return {"status": "approved", "proposal_id": proposal["proposal_id"], "record_id": proposal["target_id"], "canonical_state_changed": bool(result.get("canonical_state_changed"))}
+        return {
+            "status": str(proposal.get("status") or "open"),
+            "proposal_id": str(proposal.get("proposal_id") or ""),
+            "record_id": str(proposal.get("target_id") or ""),
+            "canonical_state_changed": False,
+        }
 
-    def _close_without_write(self, token: str, status: str, *, until: str = "") -> dict[str, Any]:
-        token_hash = content_hash(token)
-        state = self.tokens._states().get(token_hash)
-        if not state:
-            raise PermanentPromotionError("token_not_found")
-        proposal = self.proposals._states().get(str(state.get("proposal_id") or ""))
-        if not proposal or proposal.get("status") != "open":
-            raise PermanentPromotionError("proposal_closed")
-        if until:
-            try: datetime.fromisoformat(until.replace("Z", "+00:00"))
-            except ValueError: raise PermanentPromotionError("invalid_deferred_until")
-        self.tokens.consume(token)
-        self.proposals.append_terminal(proposal["proposal_id"], status, deferred_until=until)
-        return {"status": status, "proposal_id": proposal["proposal_id"], "record_id": proposal["target_id"], "canonical_state_changed": False, "deferred_until": until}
+    def reconcile(self, *, write_context: AutomaticWriteContext | None = None) -> dict[str, Any]:
+        """Autonomously converge incomplete decisions and retired targets."""
+        from .execution_gate import (
+            complete_execution_gate_envelope,
+            execution_gate_scope_hash,
+            start_execution_gate_envelope,
+        )
 
-    def reject(self, token: str) -> dict[str, Any]:
-        return self._close_without_write(token, "rejected")
+        pending = [
+            state for state in self.proposals._states().values()
+            if state.get("status") in {"open", "deciding"}
+        ]
+        scope = {
+            "operation": "permanent_promotion_reconcile",
+            "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
+            "proposal_ids": sorted(str(item.get("proposal_id") or "") for item in pending)[:100],
+            "writes": ["proposal_terminal", "token_consume_repair"],
+        }
+        owns_context = write_context is None
+        if owns_context:
+            permit = start_execution_gate_envelope(
+                self.store,
+                lane_id=PERMANENT_PROMOTION_LANE_ID,
+                trigger_surface="owner_review_digest_preassembly",
+                risk_class=PERMANENT_PROMOTION_RISK_CLASS,
+                human_approval_required=False,
+                why_no_human_approval="reconcile only completes recorded owner decisions or target-retirement bookkeeping",
+                scope=scope,
+                boundary={
+                    "actual_send": False,
+                    "actual_execute": False,
+                    "actual_identity_write": False,
+                    "actual_unapproved_crystallized_approval": False,
+                    "automatic_permanent_promotion": False,
+                },
+            )
+            context = AutomaticWriteContext(
+                store=self.store,
+                envelope_id=str(permit["execution_gate_envelope_id"]),
+                scope_hash=execution_gate_scope_hash(scope),
+            )
+        else:
+            context = write_context
+        report: dict[str, Any] = {
+            "status": "ok",
+            "open_proposal_count": len(pending),
+            "decision_recovery_attempt_count": 0,
+            "decision_recovery_success_count": 0,
+            "decision_recovery_failure_count": 0,
+            "approved_reconcile_count": 0,
+            "target_retired_close_count": 0,
+            "error_records": [],
+            "execution_gate_envelope_id": context.envelope_id,
+        }
+        from .crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
 
-    def defer(self, token: str, *, until: str) -> dict[str, Any]:
-        return self._close_without_write(token, "deferred", until=until)
+        crystallized = CrystallizedMemoryService(self.store)
+        for state in pending:
+            proposal_id = str(state.get("proposal_id") or "")
+            try:
+                if state.get("status") == "deciding":
+                    report["decision_recovery_attempt_count"] += 1
+                    result = self._resume_decision(state, write_context=context, recovered=True)
+                    report["decision_recovery_success_count"] += 1
+                    if result.get("status") == "approved":
+                        report["approved_reconcile_count"] += 1
+                    elif result.get("status") == "expired":
+                        report["target_retired_close_count"] += 1
+                    continue
+
+                record = crystallized.find_record(str(state.get("target_id") or ""))
+                if record is not None and record.frontmatter.get("provisional") is not True:
+                    if (
+                        str(record.frontmatter.get("permanent_promotion_proposal_id") or "") == proposal_id
+                        and content_hash(record.body) == str(state.get("content_hash") or "")
+                    ):
+                        self.proposals.append_terminal(
+                            proposal_id,
+                            "approved",
+                            reason="confirmed_target_recovered",
+                            result_ref={"canonical_state_changed": False},
+                            recovered=True,
+                            write_context=context,
+                        )
+                        report["approved_reconcile_count"] += 1
+                        continue
+                if record is None or not is_active_crystallized_frontmatter(record.frontmatter):
+                    self.proposals.append_terminal(
+                        proposal_id,
+                        "expired",
+                        reason="target_retired",
+                        recovered=True,
+                        write_context=context,
+                    )
+                    report["target_retired_close_count"] += 1
+            except Exception as exc:
+                report["decision_recovery_failure_count"] += 1
+                report["error_records"].append({
+                    "proposal_id": proposal_id,
+                    "error_code": type(exc).__name__,
+                    "message": str(exc)[:200],
+                })
+                append_audit(
+                    self.store.roots.audit_path,
+                    action="permanent_promotion_reconcile_failed",
+                    status="error",
+                    target=proposal_id,
+                    details={"error_code": type(exc).__name__, "message": str(exc)[:200]},
+                )
+        if report["decision_recovery_failure_count"]:
+            report["status"] = "partial"
+        if owns_context:
+            complete_execution_gate_envelope(
+                self.store,
+                envelope_id=context.envelope_id,
+                lane_id=PERMANENT_PROMOTION_LANE_ID,
+                execution_status="completed" if report["status"] == "ok" else "partial",
+                postcheck={
+                    "actual_send": False,
+                    "actual_execute": False,
+                    "actual_identity_write": False,
+                    "actual_unapproved_crystallized_approval": False,
+                    "automatic_permanent_promotion": False,
+                },
+                result_summary={
+                    key: value for key, value in report.items()
+                    if key.endswith("_count") or key == "status"
+                },
+            )
+        return report
+
+    @staticmethod
+    def _result_from_state(state: dict[str, Any]) -> dict[str, Any]:
+        result_ref = state.get("result_ref") if isinstance(state.get("result_ref"), dict) else {}
+        result = {
+            "status": str(state.get("status") or "unknown"),
+            "proposal_id": str(state.get("proposal_id") or ""),
+            "record_id": str(state.get("target_id") or ""),
+            "canonical_state_changed": bool(result_ref.get("canonical_state_changed")),
+        }
+        if state.get("deferred_until"):
+            result["deferred_until"] = str(state.get("deferred_until") or "")
+        if state.get("reason"):
+            result["reason"] = str(state.get("reason") or "")
+        if state.get("operation_id"):
+            result["operation_id"] = str(state.get("operation_id") or "")
+        return result
+
+
+def _bounded_result_ref(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        str(key)[:80]: item
+        for key, item in value.items()
+        if isinstance(item, (str, int, float, bool)) or item is None
+    }
+
+
+def prepare_permanent_promotion_delivery(
+    store: Any,
+    *,
+    delivery_ref: str,
+    now: datetime | None = None,
+    cap: int = 5,
+    new_reserve: int = 3,
+    reminder_reserve: int = 2,
+    v2e_enabled: bool = False,
+) -> dict[str, Any]:
+    """Prepare permanent-only review items without acknowledging delivery."""
+    from .crystallized import CrystallizedMemoryService
+    from .execution_gate import (
+        complete_execution_gate_envelope,
+        execution_gate_scope_hash,
+        start_execution_gate_envelope,
+    )
+
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    crystallized = CrystallizedMemoryService(store)
+    eligibility = crystallized.collect_permanent_promotion_eligibility(now=current)
+    candidate_ids = sorted(
+        str(item.get("record_id") or "")
+        for item in eligibility.get("eligible_records", [])
+        if str(item.get("record_id") or "")
+    )
+    service = PermanentPromotionService(store, clock=lambda: current, v2e_enabled=v2e_enabled)
+    pending_ids = sorted(
+        str(item.get("proposal_id") or "")
+        for item in service.proposals._states().values()
+        if item.get("status") in {"open", "deciding"}
+    )
+    scope = {
+        "operation": "prepare_permanent_promotion_delivery",
+        "delivery_ref": str(delivery_ref or "")[:160],
+        "eligible_record_ids": candidate_ids[:500],
+        "pending_proposal_ids": pending_ids[:500],
+        "writes": ["proposal_create", "proposal_reconcile", "token_issue"],
+    }
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id=PERMANENT_PROMOTION_LANE_ID,
+        trigger_surface="owner_review_digest_preassembly",
+        risk_class=PERMANENT_PROMOTION_RISK_CLASS,
+        human_approval_required=False,
+        why_no_human_approval="only prepares bounded owner-review proposals; permanent confirmation remains owner-token gated",
+        scope=scope,
+        boundary={
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "automatic_permanent_promotion": False,
+        },
+    )
+    context = AutomaticWriteContext(
+        store=store,
+        envelope_id=str(permit["execution_gate_envelope_id"]),
+        scope_hash=execution_gate_scope_hash(scope),
+    )
+    report: dict[str, Any] = {
+        "status": "ok",
+        "items": [],
+        "automatic_permanent_promotion_count": 0,
+        "proposal_created_count": 0,
+        "proposal_reused_count": 0,
+        "proposal_skipped_count": 0,
+        "error_records": [],
+        "execution_gate_envelope_id": context.envelope_id,
+    }
+    try:
+        reconcile = service.reconcile(write_context=context)
+        report["reconcile"] = reconcile
+        for key, value in reconcile.items():
+            if key.endswith("_count"):
+                report[key] = int(value or 0)
+        for item in eligibility.get("eligible_records", []):
+            record_id = str(item.get("record_id") or "")
+            try:
+                created = service.create_proposal(
+                    record_id,
+                    channel="owner_digest",
+                    origin="automatic",
+                    write_context=context,
+                    eligibility_item=item,
+                )
+                if created.get("status") == "ineligible":
+                    report["proposal_skipped_count"] += 1
+                elif created.get("idempotent"):
+                    report["proposal_reused_count"] += 1
+                else:
+                    report["proposal_created_count"] += 1
+            except PermanentPromotionError as exc:
+                report["proposal_skipped_count"] += 1
+                if str(exc) not in {"automatic_reproposal_rejected", "content_already_permanent"}:
+                    report["error_records"].append({"record_id": record_id, "reason_code": str(exc)})
+
+        open_proposals = [
+            state for state in service.proposals._states().values()
+            if state.get("status") == "open"
+        ]
+        delivery_ledger = PermanentPromotionDeliveryLedger(
+            store.roots.memory_os_root,
+            clock=lambda: current,
+        )
+        queue = delivery_ledger.select_due(
+            open_proposals,
+            now=current,
+            cap=cap,
+            new_reserve=new_reserve,
+            reminder_reserve=reminder_reserve,
+        )
+        report.update({key: value for key, value in queue.items() if key != "selected"})
+        for proposal in queue["selected"]:
+            record = crystallized.find_record(str(proposal.get("target_id") or ""))
+            if record is None:
+                continue
+            token = service.issue_proposal_token(
+                proposal,
+                channel="owner_digest",
+                write_context=context,
+            )
+            eligibility_data = proposal.get("eligibility") if isinstance(proposal.get("eligibility"), dict) else {}
+            body = str(record.body or "")
+            report["items"].append({
+                "review_item_id": str(proposal.get("proposal_id") or ""),
+                "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
+                "target_id": str(proposal.get("proposal_id") or ""),
+                "proposal_id": str(proposal.get("proposal_id") or ""),
+                "record_id": str(proposal.get("target_id") or ""),
+                "source_module": "permanent_promotion",
+                "priority": "action_required",
+                "created_at": str(proposal.get("created_at") or utc_timestamp(current)),
+                "created_at_source": "permanent_promotion_proposal",
+                "summary": body[:1000],
+                "proposed_memory": body[:4000],
+                "age_days": int(eligibility_data.get("age_days") or 0),
+                "eligibility_reason_codes": list(eligibility_data.get("reason_codes") or []),
+                "action_token": token,
+                "delivery_eligible": True,
+                "raw_body_included": False,
+            })
+    except Exception:
+        complete_execution_gate_envelope(
+            store,
+            envelope_id=context.envelope_id,
+            lane_id=PERMANENT_PROMOTION_LANE_ID,
+            execution_status="failed",
+            postcheck={"automatic_permanent_promotion": False, "actual_send": False},
+            result_summary={"status": "failed", "automatic_permanent_promotion_count": 0},
+        )
+        raise
+    if report["error_records"] or report.get("reconcile", {}).get("status") != "ok":
+        report["status"] = "partial"
+    complete_execution_gate_envelope(
+        store,
+        envelope_id=context.envelope_id,
+        lane_id=PERMANENT_PROMOTION_LANE_ID,
+        execution_status="completed" if report["status"] == "ok" else "partial",
+        postcheck={
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "automatic_permanent_promotion": False,
+        },
+        result_summary={
+            key: value for key, value in report.items()
+            if key.endswith("_count") or key == "status"
+        },
+    )
+    return report
+
+
+def acknowledge_permanent_promotion_delivery(
+    store: Any,
+    proposal_ids: list[str],
+    *,
+    owner_digest_delivery_id: str,
+    ack_source: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Record only a real host emission or an explicit Hermes send receipt."""
+    from .execution_gate import (
+        complete_execution_gate_envelope,
+        execution_gate_scope_hash,
+        start_execution_gate_envelope,
+    )
+
+    clean_ids = sorted({str(value or "") for value in proposal_ids if str(value or "")})
+    if not clean_ids:
+        return {
+            "status": "ok",
+            "acknowledged_count": 0,
+            "duplicate_delivery_suppressed_count": 0,
+        }
+    scope = {
+        "operation": "acknowledge_permanent_promotion_delivery",
+        "owner_digest_delivery_id": str(owner_digest_delivery_id or "")[:160],
+        "ack_source": str(ack_source or ""),
+        "proposal_ids": clean_ids[:500],
+        "writes": ["permanent_promotion_delivery_ack"],
+    }
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id=PERMANENT_PROMOTION_LANE_ID,
+        trigger_surface="owner_review_digest_delivery_ack",
+        risk_class=PERMANENT_PROMOTION_RISK_CLASS,
+        human_approval_required=False,
+        why_no_human_approval="acknowledges exposure only; it cannot decide or promote memory",
+        scope=scope,
+        boundary={
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "automatic_permanent_promotion": False,
+        },
+    )
+    context = AutomaticWriteContext(
+        store=store,
+        envelope_id=str(permit["execution_gate_envelope_id"]),
+        scope_hash=execution_gate_scope_hash(scope),
+    )
+    try:
+        result = PermanentPromotionDeliveryLedger(
+            store.roots.memory_os_root,
+            clock=(lambda: now.astimezone(timezone.utc)) if now is not None else None,
+        ).acknowledge(
+            clean_ids,
+            owner_digest_delivery_id=owner_digest_delivery_id,
+            ack_source=ack_source,
+            now=now,
+            write_context=context,
+        )
+    except Exception:
+        complete_execution_gate_envelope(
+            store,
+            envelope_id=context.envelope_id,
+            lane_id=PERMANENT_PROMOTION_LANE_ID,
+            execution_status="failed",
+            postcheck={"automatic_permanent_promotion": False, "actual_send": False},
+            result_summary={"status": "failed", "acknowledged_count": 0},
+        )
+        raise
+    complete_execution_gate_envelope(
+        store,
+        envelope_id=context.envelope_id,
+        lane_id=PERMANENT_PROMOTION_LANE_ID,
+        execution_status="completed",
+        postcheck={
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "automatic_permanent_promotion": False,
+        },
+        result_summary=result,
+    )
+    result["execution_gate_envelope_id"] = context.envelope_id
+    return result

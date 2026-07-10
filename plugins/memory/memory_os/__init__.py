@@ -398,7 +398,8 @@ class MemoryOSProvider(MemoryProvider):
                 "## Owner Review Command Rule",
                 (
                     "If the latest owner message is a Memory-OS review task, resolve it to a definite action "
-                    "and stable `oa_<token>` from the visible digest context, then call `memory_os_review_reply` "
+                    "and stable `oa_<token>` from the visible digest context, or the case-sensitive `ppmt_<token>` "
+                    "for a permanent-memory promotion, then call `memory_os_review_reply` "
                     "with structured `action`, `action_token`, and `owner_utterance`. If the target is ambiguous, "
                     "ask a short clarification before calling the tool. Do not pass A1/R1 display anchors as "
                     "state identity, do not treat review actions as ordinary chat, and do not claim approval "
@@ -475,17 +476,21 @@ class MemoryOSProvider(MemoryProvider):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["approve", "reject", "revoke", "allow", "feedback", "apply"],
+                            "enum": ["approve", "reject", "defer", "revoke", "allow", "feedback", "apply"],
                             "description": "The owner review action resolved by Hermes agent.",
                         },
                         "action_token": {
                             "type": "string",
-                            "description": "Stable Memory-OS owner action token printed in the digest, e.g. oa_12345678.",
+                            "description": "Stable owner action token printed in the digest: oa_<token>, or case-sensitive ppmt_<token> for permanent promotion.",
                         },
                         "rating": {
                             "type": "string",
                             "enum": sorted(ALLOWED_FEEDBACK_RATINGS | EXPRESSION_FEEDBACK_ACTION_TYPES),
                             "description": "Required only when action is feedback. Supports MemorySources and expression feedback ratings.",
+                        },
+                        "until": {
+                            "type": "string",
+                            "description": "Required only for defer on a ppmt_<token>; timezone-aware ISO-8601 timestamp.",
                         },
                         "owner_utterance": {
                             "type": "string",
@@ -1461,60 +1466,90 @@ def _extend_loaded_package_path(package_name: str, package_path: Path) -> None:
 def _owner_review_reply_tool_input(args: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     reply = str(args.get("reply") or "").strip()
     owner_utterance = str(args.get("owner_utterance") or "").strip()
+    safe_owner_utterance = re.sub(
+        r"(?<![A-Za-z0-9_-])ppmt_[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-])",
+        "ppmt_[redacted]",
+        owner_utterance,
+    )
     if reply:
         return reply, {
             "mode": "reply_fallback",
-            "owner_utterance": owner_utterance,
+            "owner_utterance": safe_owner_utterance,
             "reason": "",
         }
 
     action = str(args.get("action") or "").strip().lower()
-    action_token = str(args.get("action_token") or "").strip().lower()
+    action_token = str(args.get("action_token") or "").strip()
+    if action_token.lower().startswith("oa_"):
+        action_token = action_token.lower()
+    safe_action_token = "ppmt_[redacted]" if action_token.startswith("ppmt_") else action_token
     rating = str(args.get("rating") or "").strip()
-    if action not in {"approve", "reject", "revoke", "allow", "feedback", "apply"}:
+    deferred_until = str(args.get("until") or "").strip()
+    if action not in {"approve", "reject", "defer", "revoke", "allow", "feedback", "apply"}:
         return "", {
             "mode": "structured",
             "action": action,
-            "action_token": action_token,
-            "owner_utterance": owner_utterance,
+            "action_token": safe_action_token,
+            "owner_utterance": safe_owner_utterance,
             "reason": "missing_or_invalid_action",
         }
-    if not re.fullmatch(r"oa_[0-9a-f]{8,32}", action_token):
+    oa_token = bool(re.fullmatch(r"oa_[0-9a-f]{8,32}", action_token))
+    permanent_token = bool(re.fullmatch(r"ppmt_[A-Za-z0-9_-]{20,128}", action_token))
+    if not oa_token and not permanent_token:
         return "", {
             "mode": "structured",
             "action": action,
-            "action_token": action_token,
-            "owner_utterance": owner_utterance,
+            "action_token": safe_action_token,
+            "owner_utterance": safe_owner_utterance,
             "reason": "missing_or_invalid_action_token",
+        }
+    if permanent_token and action not in {"approve", "reject", "defer"}:
+        return "", {
+            "mode": "structured",
+            "action": action,
+            "action_token": "ppmt_[redacted]",
+            "owner_utterance": safe_owner_utterance,
+            "reason": "invalid_permanent_promotion_action",
         }
     if action == "feedback":
         if rating not in ALLOWED_FEEDBACK_RATINGS and rating not in EXPRESSION_FEEDBACK_ACTION_TYPES:
             return "", {
                 "mode": "structured",
                 "action": action,
-                "action_token": action_token,
+                "action_token": safe_action_token,
                 "rating": rating,
-                "owner_utterance": owner_utterance,
+                "owner_utterance": safe_owner_utterance,
                 "reason": "missing_or_invalid_feedback_rating",
             }
         command = f"memory feedback {action_token} {rating}"
+    elif action == "defer":
+        if not permanent_token or not deferred_until:
+            return "", {
+                "mode": "structured",
+                "action": action,
+                "action_token": safe_action_token,
+                "owner_utterance": safe_owner_utterance,
+                "reason": "missing_or_invalid_deferred_until",
+            }
+        command = f"memory defer {action_token} {deferred_until}"
     else:
         if rating:
             return "", {
                 "mode": "structured",
                 "action": action,
-                "action_token": action_token,
+                "action_token": safe_action_token,
                 "rating": rating,
-                "owner_utterance": owner_utterance,
+                "owner_utterance": safe_owner_utterance,
                 "reason": "rating_only_allowed_for_feedback",
             }
         command = f"memory {action} {action_token}"
     return command, {
         "mode": "structured",
         "action": action,
-        "action_token": action_token,
+        "action_token": safe_action_token,
         "rating": rating,
-        "owner_utterance": owner_utterance,
+        "until": deferred_until,
+        "owner_utterance": safe_owner_utterance,
         "reason": "",
     }
 
@@ -1825,6 +1860,16 @@ def _looks_like_owner_review_reply(text: str) -> bool:
             + r"(useful|irrelevant|too_mechanistic|missing_context|overconfident|needs_specific_recall|"
             + r"like_expression|too_mechanical|too_frequent|boundary_private|off_voice|mute_period)"
             + r"[：:,.，。!！?？]?",
+            normalized,
+        )
+        or re.fullmatch(
+            prefix
+            + r"(?i:approve|reject|批准|通过|拒绝)\s+ppmt_[A-Za-z0-9_-]{20,128}[：:,.，。!！?？]?",
+            normalized,
+        )
+        or re.fullmatch(
+            prefix
+            + r"(?i:defer|延后|稍后)\s+ppmt_[A-Za-z0-9_-]{20,128}\s+\S+",
             normalized,
         )
     )

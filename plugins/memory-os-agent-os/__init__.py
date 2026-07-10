@@ -64,9 +64,13 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
 
 
-_OWNER_ACTION_TOKEN_RE = re.compile(r"\boa_[0-9a-f]{8,32}\b", re.IGNORECASE)
+_OWNER_ACTION_TOKEN_RE = re.compile(
+    r"(?:\boa_[0-9a-f]{8,32}\b|(?<![A-Za-z0-9_-])ppmt_[A-Za-z0-9_-]{20,128}(?![A-Za-z0-9_-]))",
+    re.IGNORECASE,
+)
 _OWNER_REVIEW_COMMAND_RE = re.compile(
-    r"\b(?:memory|mos)\s+(?:approve|reject|revoke|allow|feedback|apply)\s+oa_[0-9a-f]{8,32}\b",
+    r"\b(?:memory|mos)\s+(?:approve|reject|defer|revoke|allow|feedback|apply)\s+"
+    r"(?:oa_[0-9a-f]{8,32}|ppmt_[A-Za-z0-9_-]{20,128})(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 _DIRECT_OWNER_ACTION_BYPASS_MARKERS = (
@@ -84,7 +88,7 @@ _TOKEN_OWNER_ACTION_BYPASS_MARKERS = (
 _OWNER_ACTION_BYPASS_TOOLS = {"terminal", "execute_code"}
 _OWNER_ACTION_BYPASS_BLOCK_MESSAGE = (
     "Memory-OS owner-action bypass blocked. Use the structured "
-    "memory_os_review_reply tool with action=approve|reject|revoke|allow|feedback|apply "
+    "memory_os_review_reply tool with action=approve|reject|defer|revoke|allow|feedback|apply "
     "and the stable action_token, or use memory_os_review_surface for read-only "
     "context. Do not process Memory-OS owner-review tokens through terminal, "
     "execute_code, CLI fallback, or direct Python calls."
@@ -312,6 +316,23 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     review_render.add_argument("--format", choices=["json", "text"], default="json")
     review_render.add_argument("--bounded", action="store_true")
     review_render.add_argument("--record-active", action="store_true")
+    review_delivery_render = review_subs.add_parser("render-delivery-digest")
+    review_delivery_render.add_argument("--owner", default="")
+    review_delivery_render.add_argument("--channel", default="cli")
+    review_delivery_render.add_argument("--delivery-ref", default="")
+    review_delivery_render.add_argument("--max-action-required", type=int)
+    review_delivery_render.add_argument("--max-review-suggested", type=int)
+    review_delivery_render.add_argument("--max-fyi", type=int)
+    review_delivery_render.add_argument("--mode", choices=["review", "agenda", "debug"], default="agenda")
+    review_delivery_render.add_argument("--format", choices=["json", "text"], default="json")
+    review_delivery_ack = review_subs.add_parser("ack-delivery-digest")
+    review_delivery_ack.add_argument("--delivery-ref", required=True)
+    review_delivery_ack.add_argument("--proposal-id", action="append", default=[])
+    review_delivery_ack.add_argument(
+        "--ack-source",
+        choices=["hermes_cron_emission", "hermes_send_receipt"],
+        default="hermes_cron_emission",
+    )
     review_reply = review_subs.add_parser("reply")
     review_reply.add_argument("reply", nargs="+")
     review_reply.add_argument("--owner", default="owner")

@@ -1,0 +1,22 @@
+{
+  "captured_at": "2026-07-10T01:51:11.485022Z",
+  "desensitised": true,
+  "desensitised_fields": [
+    "runtime_module"
+  ],
+  "manifest_entries": 2600,
+  "production_store_unchanged": true,
+  "result": {
+    "dry_run": true,
+    "eligible_count": 0,
+    "error_records": [],
+    "promoted_count": 0,
+    "schema_version": "memory-os.auto_promote.v0",
+    "skipped_rejected_count": 0,
+    "skipped_too_young_count": 12,
+    "status": "ok"
+  },
+  "runtime_module": "<HERMES_HOME>/memory-os/runtime/python/plugins/memory/memory_os/crystallized.py",
+  "schema_version": "memory-os.v2-0.migration-dry-run.v1",
+  "source_kind": "real_production_dry_run"
+}

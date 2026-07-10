@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import hashlib
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -40,6 +41,10 @@ from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
 from .jsonl_io import append_jsonl_locked, build_error_record
 from .store import MemoryOSStore
+from .review_content_safety import (
+    contains_transcript_marker as _shared_contains_transcript_marker,
+    looks_like_raw_review_content as _shared_looks_like_raw_review_content,
+)
 from .candidate_clusters import (
     candidate_cluster_action_target,
     candidate_cluster_scope,
@@ -1690,6 +1695,7 @@ def owner_review_digest_preview(
     max_review_suggested: int | None = None,
     max_fyi: int | None = None,
     digest_mode: str = "review",
+    permanent_promotion_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     digest_mode = _digest_mode(digest_mode)
     config = load_config(store.roots.hermes_home).get("owner_review", {})
@@ -1704,7 +1710,11 @@ def owner_review_digest_preview(
     else:
         suggested_limit = _positive_limit(max_review_suggested, config.get("max_review_suggested"), 2)
         fyi_limit = _positive_limit(max_fyi, config.get("max_fyi"), 2)
-    queue = owner_review_queue_report(store, limit=1000)
+    queue = owner_review_queue_report(
+        store,
+        limit=1000,
+        permanent_promotion_items=permanent_promotion_items,
+    )
     status = owner_review_status_report(store)
     channel = resolve_owner_review_channel(store, owner_id=resolved_owner)
     queue_items = list(queue.get("items") or [])
@@ -1807,6 +1817,7 @@ def render_owner_review_digest(
     max_fyi: int | None = None,
     digest_mode: str = "review",
     record_active: bool = False,
+    permanent_promotion_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     digest_mode = _digest_mode(digest_mode)
     preview = owner_review_digest_preview(
@@ -1816,6 +1827,7 @@ def render_owner_review_digest(
         max_review_suggested=max_review_suggested,
         max_fyi=max_fyi,
         digest_mode=digest_mode,
+        permanent_promotion_items=permanent_promotion_items,
     )
     rendered_sections = {
         "action_required": [
@@ -1871,6 +1883,92 @@ def render_owner_review_digest(
     return rendered
 
 
+def render_owner_review_delivery_digest(
+    store: MemoryOSStore,
+    *,
+    owner_id: str = "",
+    channel: str = "cli",
+    delivery_ref: str,
+    max_action_required: int | None = None,
+    max_review_suggested: int | None = None,
+    max_fyi: int | None = None,
+    digest_mode: str = "agenda",
+    ack_source: str = "",
+) -> dict[str, Any]:
+    """Produce, render, persist safely, then acknowledge the host emission."""
+    from .permanent_promotion import (
+        acknowledge_permanent_promotion_delivery,
+        prepare_permanent_promotion_delivery,
+    )
+
+    try:
+        prepared = prepare_permanent_promotion_delivery(
+            store,
+            delivery_ref=delivery_ref,
+            cap=5,
+        )
+    except Exception as exc:
+        prepared = {
+            "status": "error",
+            "items": [],
+            "error_code": type(exc).__name__,
+            "automatic_permanent_promotion_count": 0,
+        }
+        append_audit(
+            store.roots.audit_path,
+            action="permanent_promotion_digest_preassembly_failed",
+            status="error",
+            target=str(delivery_ref or ""),
+            details={"error_code": type(exc).__name__},
+        )
+    rendered = render_owner_review_digest(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        max_action_required=max_action_required,
+        max_review_suggested=max_review_suggested,
+        max_fyi=max_fyi,
+        digest_mode=digest_mode,
+        record_active=True,
+        permanent_promotion_items=list(prepared.get("items") or []),
+    )
+    sections = rendered.get("sections") if isinstance(rendered.get("sections"), dict) else {}
+    shown_ids = [
+        str(item.get("target_id") or "")
+        for values in sections.values()
+        for item in (values if isinstance(values, list) else [])
+        if isinstance(item, dict)
+        and item.get("target_type") == "permanent_memory_promotion"
+        and str(item.get("target_id") or "")
+    ]
+    ack = (
+        acknowledge_permanent_promotion_delivery(
+            store,
+            shown_ids,
+            owner_digest_delivery_id=delivery_ref,
+            ack_source=ack_source,
+        )
+        if ack_source
+        else {
+            "status": "pending_host_emission",
+            "acknowledged_count": 0,
+            "duplicate_delivery_suppressed_count": 0,
+        }
+    )
+    rendered["permanent_promotion_delivery"] = {
+        "status": prepared.get("status"),
+        "proposal_created_count": prepared.get("proposal_created_count", 0),
+        "proposal_reused_count": prepared.get("proposal_reused_count", 0),
+        "open_proposal_backlog_count": prepared.get("open_proposal_backlog_count", 0),
+        "never_delivered_open_count": prepared.get("never_delivered_open_count", 0),
+        "due_reminder_count": prepared.get("due_reminder_count", 0),
+        "shown_proposal_ids": shown_ids,
+        "ack": ack,
+        "automatic_permanent_promotion_count": 0,
+    }
+    return rendered
+
+
 def parse_owner_review_reply(
     store: MemoryOSStore,
     reply_text: str,
@@ -1886,9 +1984,11 @@ def parse_owner_review_reply(
 ) -> dict[str, Any]:
     parsed = _parse_owner_reply_text(reply_text)
     anchor = str(parsed.get("anchor") or "").upper() if parsed.get("status") == "ok" else ""
-    action_token = str(parsed.get("action_token") or "").lower() if parsed.get("status") == "ok" else ""
-    # V2-0 retires expiry-cliff raw token actions. Permanent promotion is
-    # available only via the ledger-backed permanent CLI/service route.
+    action_token = str(parsed.get("action_token") or "") if parsed.get("status") == "ok" else ""
+    if action_token.lower().startswith("oa_"):
+        action_token = action_token.lower()
+    # V2-0 retires expiry-cliff raw token actions. Permanent promotion now
+    # routes through the ledger-backed service from this same host ingress.
     if action_token and action_token.startswith(("oa_confirm_", "oa_let_expire_")):
         return _reply_result(
             status="unsupported",
@@ -1901,12 +2001,22 @@ def parse_owner_review_reply(
             binding="raw_token",
         )
 
+    if action_token.startswith("ppmt_"):
+        return _parse_permanent_promotion_reply(
+            store,
+            parsed=parsed,
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+        )
+
     # V2-0: the legacy oa_confirm_/oa_let_expire_ expiry-cliff handlers were
     # removed. They are unreachable — the retirement guard above returns for
     # every oa_confirm_/oa_let_expire_ token — and the old oa_confirm_ path
     # called confirm_provisional_record() without a proposal authorization,
     # which the guarded write primitive now rejects. Permanent promotion is
-    # available only through the ledger-backed permanent CLI/service route.
+    # available only through the ledger-backed permanent service route.
 
     rendered, binding = _resolve_reply_digest(
         store,
@@ -2061,6 +2171,95 @@ def parse_owner_review_reply(
     )
 
 
+def _parse_permanent_promotion_reply(
+    store: MemoryOSStore,
+    *,
+    parsed: dict[str, Any],
+    reply_text: str,
+    owner_id: str,
+    channel: str,
+    apply: bool,
+) -> dict[str, Any]:
+    """Use the same host reply tool while binding authority to the ppmt ledger."""
+    from .permanent_promotion import PermanentPromotionError, PermanentPromotionService
+
+    verb = str(parsed.get("verb") or "")
+    token = str(parsed.get("action_token") or "")
+    rendered = _empty_rendered_digest(store, owner_id=owner_id)
+    if verb not in {"approve", "reject", "defer"}:
+        return _reply_result(
+            status="unsupported",
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            reason="permanent_promotion_action_not_supported",
+            rendered=rendered,
+            parsed=parsed,
+            binding="permanent_promotion_token_ledger",
+        )
+    service = PermanentPromotionService(store)
+    try:
+        if not apply:
+            action_result = service.inspect_action_token(token)
+        elif verb == "approve":
+            action_result = service.approve(token)
+        elif verb == "reject":
+            action_result = service.reject(token)
+        else:
+            action_result = service.defer(token, until=str(parsed.get("deferred_until") or ""))
+    except PermanentPromotionError as exc:
+        return _reply_result(
+            status="error",
+            reply_text=reply_text,
+            owner_id=owner_id,
+            channel=channel,
+            apply=apply,
+            reason=str(exc),
+            rendered=rendered,
+            parsed=parsed,
+            binding="permanent_promotion_token_ledger",
+        )
+    proposal_id = str(action_result.get("proposal_id") or "")
+    record_id = str(action_result.get("record_id") or "")
+    if apply:
+        append_audit(
+            store.roots.audit_path,
+            action="permanent_promotion_owner_reply_applied",
+            status="ok",
+            target=proposal_id,
+            details={
+                "proposal_id": proposal_id,
+                "record_id": record_id,
+                "decision_action": verb,
+                "result_status": action_result.get("status"),
+                "canonical_state_changed": bool(action_result.get("canonical_state_changed")),
+            },
+        )
+    return _reply_result(
+        status="ok",
+        reply_text=reply_text,
+        owner_id=owner_id,
+        channel=channel,
+        apply=apply,
+        reason="",
+        rendered=rendered,
+        parsed={
+            **parsed,
+            "action_type": f"{verb}_permanent_promotion",
+            "target_type": "permanent_memory_promotion",
+            "target_id": proposal_id,
+        },
+        item={
+            "target_type": "permanent_memory_promotion",
+            "target_id": proposal_id,
+            "source_module": "permanent_promotion",
+        },
+        action_result=action_result,
+        binding="permanent_promotion_token_ledger",
+    )
+
+
 def owner_review_delivery_gate_report(store: MemoryOSStore, *, owner_id: str = "") -> dict[str, Any]:
     config = load_config(store.roots.hermes_home).get("owner_review", {})
     if not isinstance(config, dict):
@@ -2153,7 +2352,7 @@ def deliver_owner_review_digest_once(
     if not key:
         key = f"{resolved_owner}|one_shot|{created_at.strftime('%Y%m%dT%H%M%S%fZ')}"
     existing = _find_delivery_by_key(store.roots, key)
-    if existing:
+    if existing and str(existing.get("result") or "") not in {"error", "skipped", "dry_run", "ready"}:
         duplicate = _base_delivery_record(
             store,
             owner_id=resolved_owner,
@@ -2164,6 +2363,24 @@ def deliver_owner_review_digest_once(
             created_at=created_at,
         )
         duplicate["result_ref"] = {"existing_delivery_id": existing.get("delivery_id", "")}
+        proposal_ids = [str(value) for value in existing.get("permanent_promotion_proposal_ids") or []]
+        ack_delivery_id = str(
+            existing.get("permanent_promotion_ack_delivery_id")
+            or existing.get("delivery_id")
+            or duplicate["delivery_id"]
+        )
+        duplicate["permanent_promotion_proposal_ids"] = proposal_ids
+        duplicate["permanent_promotion_ack_delivery_id"] = ack_delivery_id
+        ack_report: dict[str, Any] = {}
+        if apply and proposal_ids:
+            from .permanent_promotion import acknowledge_permanent_promotion_delivery
+
+            ack_report = acknowledge_permanent_promotion_delivery(
+                store,
+                proposal_ids,
+                owner_digest_delivery_id=ack_delivery_id,
+                ack_source="hermes_send_receipt",
+            )
         if apply:
             _append_owner_review_delivery(store, duplicate)
         return {
@@ -2173,6 +2390,7 @@ def deliver_owner_review_digest_once(
             "dry_run": not apply,
             "record": duplicate,
             "gate": gate,
+            "permanent_promotion_delivery_ack": ack_report,
         }
 
     record = _base_delivery_record(
@@ -2184,6 +2402,8 @@ def deliver_owner_review_digest_once(
         result="dry_run" if not apply else "skipped",
         created_at=created_at,
     )
+    if existing:
+        record["retry_of_delivery_id"] = str(existing.get("delivery_id") or "")
     record["digest"] = _bounded_delivery_digest(preview)
 
     blocked_reasons = list(gate.get("blocked_reasons") or [])
@@ -2209,7 +2429,50 @@ def deliver_owner_review_digest_once(
             _append_owner_review_delivery(store, record)
         return result
 
-    message = _delivery_message_from_preview(preview)
+    from .permanent_promotion import prepare_permanent_promotion_delivery
+
+    try:
+        prepared = prepare_permanent_promotion_delivery(
+            store,
+            delivery_ref=str(record.get("delivery_id") or key),
+            cap=5,
+        )
+    except Exception as exc:
+        prepared = {
+            "status": "error",
+            "items": [],
+            "error_code": type(exc).__name__,
+            "automatic_permanent_promotion_count": 0,
+        }
+        append_audit(
+            store.roots.audit_path,
+            action="permanent_promotion_digest_preassembly_failed",
+            status="error",
+            target=str(record.get("delivery_id") or key),
+            details={"error_code": type(exc).__name__},
+        )
+    record["permanent_promotion_preassembly_status"] = str(prepared.get("status") or "unknown")
+    rendered = render_owner_review_digest(
+        store,
+        owner_id=resolved_owner,
+        channel=str(channel.get("channel") or "cli"),
+        digest_mode="review",
+        record_active=True,
+        permanent_promotion_items=list(prepared.get("items") or []),
+    )
+    message = _bounded_text(str(rendered.get("text") or ""), 3500)
+    sections = rendered.get("sections") if isinstance(rendered.get("sections"), dict) else {}
+    proposal_ids = [
+        str(item.get("target_id") or "")
+        for values in sections.values()
+        for item in (values if isinstance(values, list) else [])
+        if isinstance(item, dict)
+        and item.get("target_type") == "permanent_memory_promotion"
+        and str(item.get("target_id") or "")
+    ]
+    record["permanent_promotion_proposal_ids"] = proposal_ids
+    record["permanent_promotion_ack_delivery_id"] = str(record.get("delivery_id") or key)
+    record["digest"] = _bounded_delivery_digest(rendered)
     record["text_char_count"] = len(message)
     if not apply:
         record["result"] = "ready"
@@ -2240,6 +2503,16 @@ def deliver_owner_review_digest_once(
         status = "error"
     if apply:
         _append_owner_review_delivery(store, record)
+    ack_report: dict[str, Any] = {}
+    if status == "sent" and proposal_ids:
+        from .permanent_promotion import acknowledge_permanent_promotion_delivery
+
+        ack_report = acknowledge_permanent_promotion_delivery(
+            store,
+            proposal_ids,
+            owner_digest_delivery_id=str(record.get("permanent_promotion_ack_delivery_id") or ""),
+            ack_source="hermes_send_receipt",
+        )
     return {
         "schema_version": OWNER_REVIEW_DELIVERY_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
@@ -2247,10 +2520,16 @@ def deliver_owner_review_digest_once(
         "dry_run": False,
         "record": record,
         "gate": gate,
+        "permanent_promotion_delivery_ack": ack_report,
     }
 
 
-def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[str, Any]:
+def owner_review_queue_report(
+    store: MemoryOSStore,
+    *,
+    limit: int = 20,
+    permanent_promotion_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     closed = _closed_targets(read_owner_action_records(store.roots))
     items = _candidate_cluster_review_items(store, closed)
     items.extend(_candidate_review_items(store, closed))
@@ -2260,6 +2539,11 @@ def owner_review_queue_report(store: MemoryOSStore, *, limit: int = 20) -> dict[
     items.extend(_speak_review_items(store, closed))
     items.extend(_left_brain_advisor_review_items(store, closed))
     items.extend(_provisional_crystallized_review_items(store, closed))
+    items.extend(
+        dict(item)
+        for item in (permanent_promotion_items or [])
+        if str(item.get("target_type") or "") == "permanent_memory_promotion"
+    )
     # Query surfaces retain provisional visibility, but disclose the delivery
     # policy instead of silently presenting a delivery-only queue.
     for item in items:
@@ -2626,7 +2910,7 @@ def _bounded_rendered_digest(rendered: dict[str, Any]) -> dict[str, Any]:
             "review_suggested": [_bounded_rendered_item(item) for item in sections.get("review_suggested", [])],
             "fyi": [_bounded_rendered_item(item) for item in sections.get("fyi", [])],
         },
-        "text": _bounded_text(str(rendered.get("text") or ""), 3500),
+        "text": _bounded_text(_redact_permanent_action_tokens(str(rendered.get("text") or "")), 3500),
         "boundary": {
             "actual_send": False,
             "actual_execute": False,
@@ -2634,6 +2918,22 @@ def _bounded_rendered_digest(rendered: dict[str, Any]) -> dict[str, Any]:
             "actual_unapproved_crystallized_approval": False,
         },
     }
+
+
+def _redact_permanent_action_tokens(value: str) -> str:
+    return re.sub(
+        r"(?<![A-Za-z0-9_-])ppmt_[A-Za-z0-9_-]+(?![A-Za-z0-9_-])",
+        "ppmt_[redacted]",
+        str(value or ""),
+    )
+
+
+def _redacted_reply_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
+    bounded = dict(parsed)
+    token = str(bounded.get("action_token") or "")
+    if token.startswith("ppmt_"):
+        bounded["action_token"] = "ppmt_[redacted]"
+    return bounded
 
 
 def _owner_review_delivery_binding(store: MemoryOSStore, channel: str) -> dict[str, Any]:
@@ -2660,6 +2960,7 @@ def _owner_review_delivery_binding(store: MemoryOSStore, channel: str) -> dict[s
 def _bounded_rendered_item(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         return {}
+    permanent_item = str(item.get("target_type") or "") == "permanent_memory_promotion"
     return {
         "anchor": str(item.get("anchor") or ""),
         "review_item_id": str(item.get("review_item_id") or ""),
@@ -2668,7 +2969,10 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "source_module": str(item.get("source_module") or ""),
         "section": str(item.get("section") or ""),
         "question": _bounded_text(str(item.get("question") or ""), 220),
-        "suggested_action": _bounded_text(str(item.get("suggested_action") or ""), 220),
+        "suggested_action": _bounded_text(
+            _redact_permanent_action_tokens(str(item.get("suggested_action") or "")),
+            220,
+        ),
         "reason": _bounded_text(str(item.get("reason") or ""), 240),
         "consequence": _bounded_text(str(item.get("consequence") or ""), 240),
         "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360),
@@ -2681,7 +2985,7 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         "session_mirror_approval": _bounded_session_mirror_approval(
             item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
         ),
-        "action_tokens": {
+        "action_tokens": {} if permanent_item else {
             str(key): str(value)
             for key, value in (item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}).items()
         },
@@ -2697,10 +3001,10 @@ def _bounded_rendered_item(item: Any) -> dict[str, Any]:
         },
         "owner_utterance_scope": str(item.get("owner_utterance_scope") or "owner_chat_utterance"),
         "owner_utterance_examples": [
-            str(value)
+            _redact_permanent_action_tokens(str(value))
             for value in (item.get("owner_utterance_examples") or item.get("action_commands") or [])
         ][:8],
-        "agent_tool_calls": [
+        "agent_tool_calls": [] if permanent_item else [
             value
             for value in (item.get("agent_tool_calls") if isinstance(item.get("agent_tool_calls"), list) else [])
             if isinstance(value, dict)
@@ -3655,6 +3959,16 @@ def _bounded_delivery_record(record: dict[str, Any]) -> dict[str, Any]:
         "delivery_ref": record.get("delivery_ref") if isinstance(record.get("delivery_ref"), dict) else {},
         "boundary": record.get("boundary") if isinstance(record.get("boundary"), dict) else {},
         "owner_effect": record.get("owner_effect") if isinstance(record.get("owner_effect"), dict) else {},
+        "permanent_promotion_proposal_ids": [
+            str(value) for value in record.get("permanent_promotion_proposal_ids") or []
+        ][:5],
+        "permanent_promotion_ack_delivery_id": str(
+            record.get("permanent_promotion_ack_delivery_id") or ""
+        ),
+        "permanent_promotion_preassembly_status": str(
+            record.get("permanent_promotion_preassembly_status") or ""
+        ),
+        "retry_of_delivery_id": str(record.get("retry_of_delivery_id") or ""),
     }
 
 
@@ -4452,33 +4766,11 @@ def _proposal_detail(proposal: dict[str, Any], *, requires_maturation: bool) -> 
 
 
 def _looks_like_raw_proposal_body(body: str) -> bool:
-    lowered = body.lower()
-    raw_markers = (
-        "raw ",
-        "raw_",
-        "private raw",
-        "transcript:",
-    )
-    return any(marker in lowered for marker in raw_markers) or _contains_transcript_marker(body)
+    return _shared_looks_like_raw_review_content(body)
 
 
 def _contains_transcript_marker(value: str) -> bool:
-    lowered = str(value or "").lower()
-    transcript_markers = (
-        "user:",
-        "assistant:",
-        "用户:",
-        "用户：",
-        "助手:",
-        "助手：",
-        "菸草:",
-        "菸草：",
-        "agentcoco:",
-        "agentcoco：",
-        "| assistant:",
-        "| user:",
-    )
-    return any(marker in lowered for marker in transcript_markers)
+    return _shared_contains_transcript_marker(value)
 
 
 def _channel_report(
@@ -4623,7 +4915,7 @@ def _suppress_stale_informational_digest_items(
 
 
 def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "anchor": item.get("anchor"),
         "review_item_id": item.get("review_item_id"),
         "target_type": item.get("target_type"),
@@ -4649,6 +4941,18 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         "safe_source_ids": item.get("safe_source_ids") or [],
         "raw_body_included": False,
     }
+    if str(item.get("target_type") or "") == "permanent_memory_promotion":
+        result.update({
+            "proposal_id": str(item.get("proposal_id") or item.get("target_id") or ""),
+            "record_id": str(item.get("record_id") or ""),
+            "proposed_memory": _bounded_text(str(item.get("proposed_memory") or item.get("summary") or ""), 1000),
+            "eligibility_reason_codes": [
+                str(value) for value in item.get("eligibility_reason_codes") or []
+            ][:12],
+            "action_token": str(item.get("action_token") or ""),
+            "delivery_eligible": bool(item.get("delivery_eligible")),
+        })
+    return result
 
 
 def _bounded_session_mirror_approval(value: dict[str, Any]) -> dict[str, Any]:
@@ -4735,7 +5039,27 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
     source_module = str(item.get("source_module") or "owner_review")
     anchor = str(item.get("anchor") or "")
     target_id = str(item.get("target_id") or item.get("kind") or "")
-    actions = [] if _review_item_suppresses_actions(item) else _review_actions(target_type, target_id)
+    if target_type == "permanent_memory_promotion":
+        token = str(item.get("action_token") or "")
+        actions = [
+            {
+                "verb": verb,
+                "action_type": f"{verb}_permanent_promotion",
+                "target_type": target_type,
+                "target_id": target_id,
+                "token": token,
+                "owner_utterance_example": (
+                    f"memory defer {token} <ISO-8601>" if verb == "defer" else f"memory {verb} {token}"
+                ),
+                "agent_tool_call": (
+                    {} if verb == "defer" else _owner_review_reply_tool_call(action=verb, action_token=token)
+                ),
+            }
+            for verb in ("approve", "reject", "defer")
+            if token.startswith("ppmt_")
+        ]
+    else:
+        actions = [] if _review_item_suppresses_actions(item) else _review_actions(target_type, target_id)
     if target_type == "speak" and bool(item.get("expression_preview_suppressed")):
         actions = [action for action in actions if action.get("action_type") != "allow_speak_once"]
     question = _review_question(target_type, item)
@@ -4754,8 +5078,11 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
         "suggested_action": suggested_action,
         "reason": _review_reason(target_type, item),
         "consequence": consequence,
-        "proposed_memory_text": _bounded_text(str(item.get("proposed_memory_text") or ""), 360)
-        if target_type == "candidate"
+        "proposed_memory_text": _bounded_text(
+            str(item.get("proposed_memory") or item.get("proposed_memory_text") or item.get("summary") or ""),
+            1000 if target_type == "permanent_memory_promotion" else 360,
+        )
+        if target_type in {"candidate", "permanent_memory_promotion"}
         else "",
         "proposal_detail": _bounded_text(str(item.get("proposal_detail") or ""), 620)
         if target_type in {"proposal", "proposal_apply"}
@@ -4793,6 +5120,9 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
 
 
 def _review_question(target_type: str, item: dict[str, Any]) -> str:
+    if target_type == "permanent_memory_promotion":
+        proposed = _bounded_text(str(item.get("proposed_memory") or item.get("summary") or ""), 220)
+        return f"这条已成熟的临时记忆要晋升为永久记忆吗？{proposed}"
     if target_type == "candidate":
         proposed = _bounded_text(str(item.get("proposed_memory_text") or item.get("summary") or ""), 160)
         if proposed:
@@ -4852,11 +5182,20 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
         return " or ".join(examples[:3])
     if target_type == "candidate_cleanup":
         return "这次摘要里不需要操作；等待后续整理或 review queue 清理"
+    if target_type == "permanent_memory_promotion" and examples:
+        return " or ".join(examples[:3])
     return "不需要操作"
 
 
 def _review_reason(target_type: str, item: dict[str, Any]) -> str:
     source_module = str(item.get("source_module") or "owner_review")
+    if target_type == "permanent_memory_promotion":
+        age_days = int(item.get("age_days") or 0)
+        reasons = ",".join(str(value) for value in item.get("eligibility_reason_codes") or [])
+        return _bounded_text(
+            f"{source_module} 判定该临时记忆已成熟 {age_days} 天并通过内容/重复检查；依据={reasons or 'eligible'}。",
+            240,
+        )
     if target_type == "candidate":
         source_count = len(item.get("safe_source_ids") or [])
         aging = str(item.get("aging_reason") or "pending_owner_review")
@@ -4942,6 +5281,8 @@ def _safe_review_summary(value: Any, *, fallback: str) -> str:
 
 
 def _review_consequence(target_type: str) -> str:
+    if target_type == "permanent_memory_promotion":
+        return "只有 approve 会把绑定的临时记忆确认成永久记忆；reject/defer 只关闭或延后提案，不改变 canonical 记忆。"
     if target_type == "candidate":
         return "批准会写入一条 owner-approved crystallized memory；拒绝会保留审计证据并关闭该项。"
     if target_type == "candidate_cluster":
@@ -5101,6 +5442,7 @@ def _rendered_digest_text(
         "回复方式：",
         "- 直接在 Hermes 会话里回复示例，例如：memory approve oa_...",
         "- 也可以只回复 oa_...，Hermes 会继续问你要 approve/reject/allow/feedback。",
+        "- 永久记忆晋升使用摘要中大小写敏感的 ppmt_...，支持 approve/reject/defer。",
         "- A1/R1/F1 只是列表编号，不是审批 ID。",
         "",
     ]
@@ -5705,6 +6047,8 @@ def _parse_owner_reply_text(reply_text: str) -> dict[str, Any]:
     anchor = ""
     if target.lower().startswith("oa_"):
         action_token = target.lower()
+    elif target.startswith("ppmt_"):
+        action_token = target
     elif prefixed:
         return {"status": "needs_clarification", "reason": "expected_action_token"}
     else:
@@ -5712,6 +6056,7 @@ def _parse_owner_reply_text(reply_text: str) -> dict[str, Any]:
     if not anchor and not action_token:
         return {"status": "needs_clarification", "reason": "missing_anchor_or_token"}
     rating = ""
+    deferred_until = ""
     if verb == "feedback":
         if len(parts) < 3:
             return {
@@ -5729,7 +6074,23 @@ def _parse_owner_reply_text(reply_text: str) -> dict[str, Any]:
                 "action_token": action_token,
                 "rating": rating,
             }
-    return {"status": "ok", "verb": verb, "anchor": anchor, "action_token": action_token, "rating": rating}
+    if verb == "defer":
+        if len(parts) < 3:
+            return {
+                "status": "needs_clarification",
+                "reason": "missing_deferred_until",
+                "anchor": anchor,
+                "action_token": action_token,
+            }
+        deferred_until = parts[2].strip("：:,.，。")
+    return {
+        "status": "ok",
+        "verb": verb,
+        "anchor": anchor,
+        "action_token": action_token,
+        "rating": rating,
+        "deferred_until": deferred_until,
+    }
 
 
 def _normalize_reply_verb(value: str) -> str:
@@ -5740,6 +6101,9 @@ def _normalize_reply_verb(value: str) -> str:
         "通过": "approve",
         "reject": "reject",
         "拒绝": "reject",
+        "defer": "defer",
+        "延后": "defer",
+        "稍后": "defer",
         "feedback": "feedback",
         "mark": "feedback",
         "反馈": "feedback",
@@ -5888,9 +6252,9 @@ def _reply_result(
         "dry_run": not apply,
         "owner_id": owner_id,
         "channel": channel,
-        "reply_preview": _bounded_text(reply_text, 120),
+        "reply_preview": _bounded_text(_redact_permanent_action_tokens(reply_text), 120),
         "reason": reason,
-        "parsed": parsed or {},
+        "parsed": _redacted_reply_parsed(parsed or {}),
         "matched_item": _bounded_matched_item(item or {}),
         "owner_action_result": action_result or {},
         "active_digest": {

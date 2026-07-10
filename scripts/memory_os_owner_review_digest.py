@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -27,37 +28,55 @@ def main() -> int:
     digest_mode = os.environ.get("MEMORY_OS_OWNER_REVIEW_DIGEST_MODE", "agenda").strip() or "agenda"
     limits = _limit_args()
 
-    preview = _run_json(
-        ["hermes", "memory-os-agent-os", "review", "preview-digest", "--owner", owner, "--mode", digest_mode, *limits]
-    )
-    if not _has_meaningful_content(preview, digest_mode=digest_mode):
-        return 0
-
     if not channel:
         channel = _resolve_channel()
 
-    render = _run_text(
+    delivery_ref = "cron_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    render = _run_json(
         [
             "hermes",
             "memory-os-agent-os",
             "review",
-            "render-digest",
+            "render-delivery-digest",
             "--owner",
             owner,
             "--channel",
             channel,
+            "--delivery-ref",
+            delivery_ref,
             "--format",
-            "text",
-            "--bounded",
-            "--record-active",
+            "json",
             "--mode",
             digest_mode,
             *limits,
         ]
     )
-    text = render.strip()
+    if not _has_meaningful_content(render, digest_mode=digest_mode):
+        return 0
+    text = str(render.get("text") or "").strip()
     if text:
         print(text)
+        sys.stdout.flush()
+        delivery = render.get("permanent_promotion_delivery")
+        proposal_ids = (
+            delivery.get("shown_proposal_ids")
+            if isinstance(delivery, dict) and isinstance(delivery.get("shown_proposal_ids"), list)
+            else []
+        )
+        if proposal_ids:
+            ack_command = [
+                "hermes",
+                "memory-os-agent-os",
+                "review",
+                "ack-delivery-digest",
+                "--delivery-ref",
+                delivery_ref,
+                "--ack-source",
+                "hermes_cron_emission",
+            ]
+            for proposal_id in proposal_ids:
+                ack_command.extend(["--proposal-id", str(proposal_id)])
+            _run_json(ack_command)
     return 0
 
 

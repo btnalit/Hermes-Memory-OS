@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,6 +18,7 @@ from .jsonl_io import append_jsonl_locked, append_jsonl_lines_locked, locked_jso
 from .ids import new_crystallized_id
 from .schema import CRYSTALLIZED_SCHEMA_VERSION
 from .store import MemoryOSStore, _format_frontmatter
+from .review_content_safety import permanent_promotion_forbidden_reason_codes
 
 
 INACTIVE_CANONICAL_STATES = {
@@ -34,6 +37,23 @@ CANDIDATE_DEMOTE_TTL_SECONDS = 259200
 
 class CrystallizedApprovalError(ValueError):
     """Raised when a candidate lacks crystallized-memory approval."""
+
+
+def _canonical_transition_locked(method):
+    """Serialize every in-place canonical Markdown state transition.
+
+    Confirmation, TTL/cap retirement, revoke, demote, and provisional renewal
+    all rewrite the same canonical files.  A shared sidecar lock makes each
+    method re-read and compare state after the previous contender commits.
+    """
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        lock_target = self.store.roots.crystallized_root / ".canonical_transition"
+        with locked_jsonl_file(lock_target):
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -180,6 +200,7 @@ class CrystallizedMemoryService:
                     results.append(record)
         return results
 
+    @_canonical_transition_locked
     def revoke_record(
         self,
         record_id: str,
@@ -264,6 +285,7 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    @_canonical_transition_locked
     def demote_record(
         self,
         record_id: str,
@@ -325,6 +347,7 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    @_canonical_transition_locked
     def invalidate_provisional_record(
         self,
         record_id: str,
@@ -371,9 +394,15 @@ class CrystallizedMemoryService:
                     matched = {
                         "record_id": normalized,
                         "file_name": current.file_name,
-                        "already_invalidated": not is_active_crystallized_frontmatter(frontmatter),
+                        "already_invalidated": (
+                            frontmatter.get("provisional") is not True
+                            or not is_active_crystallized_frontmatter(frontmatter)
+                        ),
                     }
-                    if is_active_crystallized_frontmatter(frontmatter):
+                    if (
+                        frontmatter.get("provisional") is True
+                        and is_active_crystallized_frontmatter(frontmatter)
+                    ):
                         frontmatter["canonical_state"] = target_state
                         frontmatter["invalidated_at"] = _timestamp(now)
                         frontmatter["invalidated_by"] = invalidated_by
@@ -408,6 +437,7 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    @_canonical_transition_locked
     def confirm_provisional_record(
         self,
         record_id: str,
@@ -440,16 +470,25 @@ class CrystallizedMemoryService:
                         "file_name": current.file_name,
                     }
                     if frontmatter.get("provisional") is True:
+                        if frontmatter.get("canonical_state") in (
+                            "provisional_expired", "provisional_cap_evicted", "provisional_rejected",
+                        ):
+                            raise CrystallizedApprovalError("evidence_increment_unavailable")
                         frontmatter["provisional"] = False
                         frontmatter["expires_at"] = ""
                         frontmatter["confirmed_by"] = "owner"
                         frontmatter["confirmed_at"] = _timestamp(now)
                         frontmatter["permanent_promotion_proposal_id"] = str(getattr(authorization, "proposal_id", ""))
-                        if frontmatter.get("canonical_state") in (
-                            "provisional_expired", "provisional_cap_evicted", "provisional_rejected",
-                        ):
-                            raise CrystallizedApprovalError("evidence_increment_unavailable")
                         changed = True
+                    else:
+                        confirmed_proposal_id = str(
+                            frontmatter.get("permanent_promotion_proposal_id") or ""
+                        )
+                        requested_proposal_id = str(getattr(authorization, "proposal_id", ""))
+                        if confirmed_proposal_id != requested_proposal_id:
+                            raise CrystallizedApprovalError(
+                                "record already confirmed by different permanent proposal"
+                            )
                 rendered.append(_format_frontmatter(frontmatter))
                 rendered.append("")
                 rendered.append(current.body.rstrip())
@@ -478,6 +517,7 @@ class CrystallizedMemoryService:
             return matched
         raise KeyError(normalized)
 
+    @_canonical_transition_locked
     def bump_recurrence_and_renew(
         self,
         record_id: str,
@@ -610,8 +650,8 @@ class CrystallizedMemoryService:
         provisional records the legacy age rule *would* have promoted — a
         derived ``legacy_auto_promoted`` projection — but never writes permanent
         state, never rewrites frontmatter, and never mints an owner action.
-        Owner-initiated ``memory-os permanent propose`` is the only permanent
-        entrance in V2-0.
+        In V2-0.5 the digest producer may automatically open a bounded proposal,
+        but only an owner-bound action token may perform the permanent write.
 
         Governance: read-only; owner can disable via the
         ``permanent_proposal_enabled`` knob (legacy ``auto_promote_enabled``
@@ -640,8 +680,11 @@ class CrystallizedMemoryService:
                 "promoted_count": 0,
                 "skipped_rejected_count": 0,
                 "skipped_too_young_count": 0,
+                "skipped_forbidden_content_count": 0,
+                "skipped_permanent_duplicate_count": 0,
                 "dry_run": dry_run,
                 "eligible_records": [],
+                "ineligible_records": [],
                 "error_records": [],
             }
 
@@ -653,33 +696,94 @@ class CrystallizedMemoryService:
         eligible_count = 0
         skipped_rejected_count = 0
         skipped_too_young_count = 0
+        skipped_forbidden_content_count = 0
+        skipped_permanent_duplicate_count = 0
         eligible_records: list[dict[str, Any]] = []
+        ineligible_records: list[dict[str, Any]] = []
         error_records: list[dict[str, Any]] = []
+
+        permanent_body_hashes: set[str] = set()
+        if self.store.roots.crystallized_root.exists():
+            for path in sorted(self.store.roots.crystallized_root.glob("*.md")):
+                for existing in self.read_records(path.name):
+                    if (
+                        existing.frontmatter.get("provisional") is not True
+                        and is_active_crystallized_frontmatter(existing.frontmatter)
+                    ):
+                        permanent_body_hashes.add(
+                            hashlib.sha256(existing.body.encode("utf-8")).hexdigest()
+                        )
 
         for record in self.list_provisional_records():
             record_id = str(record.get("id") or "")
             if not record_id:
                 continue
 
+            body = str(record.get("body") or "")
+            forbidden_reasons = permanent_promotion_forbidden_reason_codes(body)
+            if forbidden_reasons:
+                skipped_forbidden_content_count += 1
+                ineligible_records.append({
+                    "record_id": record_id,
+                    "candidate_id": str(record.get("candidate_id") or ""),
+                    "reason_codes": forbidden_reasons,
+                })
+                continue
+
+            body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            if body_hash in permanent_body_hashes:
+                skipped_permanent_duplicate_count += 1
+                ineligible_records.append({
+                    "record_id": record_id,
+                    "candidate_id": str(record.get("candidate_id") or ""),
+                    "reason_codes": ["permanent_duplicate"],
+                })
+                continue
+
             # Never surface owner-rejected records as eligible
             canonical_state = str(record.get("canonical_state") or "")
             if canonical_state == "provisional_rejected":
                 skipped_rejected_count += 1
+                ineligible_records.append({
+                    "record_id": record_id,
+                    "candidate_id": str(record.get("candidate_id") or ""),
+                    "reason_codes": ["target_rejected"],
+                })
                 continue
 
             # Check age threshold
             approved_at_str = str(record.get("approved_at") or "").strip()
             if not approved_at_str:
                 skipped_too_young_count += 1
+                ineligible_records.append({
+                    "record_id": record_id,
+                    "candidate_id": str(record.get("candidate_id") or ""),
+                    "reason_codes": ["approved_at_missing"],
+                })
                 continue
             try:
                 approved_dt = datetime.fromisoformat(approved_at_str)
             except (ValueError, TypeError):
                 skipped_too_young_count += 1
+                ineligible_records.append({
+                    "record_id": record_id,
+                    "candidate_id": str(record.get("candidate_id") or ""),
+                    "reason_codes": ["approved_at_invalid"],
+                })
                 continue
+
+            if approved_dt.tzinfo is None:
+                approved_dt = approved_dt.replace(tzinfo=timezone.utc)
+            else:
+                approved_dt = approved_dt.astimezone(timezone.utc)
 
             if approved_dt > cutoff_dt:
                 skipped_too_young_count += 1
+                ineligible_records.append({
+                    "record_id": record_id,
+                    "candidate_id": str(record.get("candidate_id") or ""),
+                    "reason_codes": ["minimum_age_not_met"],
+                })
                 continue
 
             eligible_count += 1
@@ -689,8 +793,15 @@ class CrystallizedMemoryService:
                 "projection": "legacy_auto_promoted",
                 "approved_at": approved_at_str,
                 "age_days": (_now - approved_dt).days,
+                "reason_codes": [
+                    "active_provisional",
+                    "minimum_age_met",
+                    "content_allowed",
+                    "no_permanent_duplicate",
+                ],
             })
-            # V2-0: report-only. No permanent write, no owner action minted.
+            # Eligibility remains report-only. The V2-0.5 delivery producer may
+            # consume this projection to open a proposal, never to write permanent state.
 
         return {
             "schema_version": "memory-os.permanent_promotion_eligibility.v1",
@@ -699,8 +810,11 @@ class CrystallizedMemoryService:
             "promoted_count": 0,
             "skipped_rejected_count": skipped_rejected_count,
             "skipped_too_young_count": skipped_too_young_count,
+            "skipped_forbidden_content_count": skipped_forbidden_content_count,
+            "skipped_permanent_duplicate_count": skipped_permanent_duplicate_count,
             "dry_run": dry_run,
             "eligible_records": eligible_records,
+            "ineligible_records": ineligible_records,
             "error_records": error_records,
         }
 
@@ -1385,4 +1499,3 @@ def find_crystallized_by_body(
                     "canonical_state": record.frontmatter.get("canonical_state", "active"),
                 })
     return results
-
