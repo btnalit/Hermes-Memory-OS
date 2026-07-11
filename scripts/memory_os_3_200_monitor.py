@@ -5143,6 +5143,15 @@ def memory_os_cli(args):
     env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python:" + _hermes_home + "/plugins:" + env.get("PYTHONPATH", "")
     return load_json_cmd(["python3", "-m", "plugins.memory.memory_os"] + list(args), env=env)
 
+def seam_host_probe():
+    try:
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.seam.hermes_memory_os.host_capability_adapter import probe_host_capabilities as _seam_probe
+        _roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
+        return _seam_probe(_roots)
+    except ImportError:
+        return memory_os_cli(["host-probe", "--json"])
+
 def compaction_stats():
     r = run(["journalctl", "--user", "-u", "hermes-gateway.service", "--since", "6 hours ago", "--no-pager", "-o", "cat"])
     text = r["out"] if r["ok"] else ""
@@ -7692,7 +7701,7 @@ owner_review_delivery_status = memory_os_cli(["review", "delivery-status"])
 owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups", "--limit", "10"])
 owner_review_proposal_auto_route = memory_os_cli(["review", "proposal-followups", "--auto-route", "--limit", "10"])
-host_capability_probe = memory_os_cli(["host-probe", "--json"])
+host_capability_probe = seam_host_probe()
 signal_source_requirements = memory_os_cli(["signal-sources", "--json"])
 memory_projection = memory_os_cli(["projection", "status"])
 memory_projection_retention = memory_os_cli(["projection", "retention-status"])

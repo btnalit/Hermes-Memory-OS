@@ -1717,13 +1717,7 @@ def memory_os_command(args: argparse.Namespace) -> int:
             return 0
         return 2
     if command == "host-probe":
-        try:
-            from plugins.seam.hermes_memory_os.host_capability_adapter import (
-                probe_host_capabilities as seam_probe_host_capabilities,
-            )
-            report = seam_probe_host_capabilities(store.roots)
-        except Exception:
-            report = probe_host_capabilities(store.roots)
+        report = probe_host_capabilities(store.roots)
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
         return 0
     if command == "signal-sources":
