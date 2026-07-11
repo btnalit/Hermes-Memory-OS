@@ -1190,3 +1190,233 @@ class TestV2EClearanceWiringIntegration:
         # With v2e disabled, clearance is default "unavailable"
         proposal_state = service.proposals._states()[result["proposal_id"]]
         assert proposal_state["clearance"]["status"] == "unavailable"
+
+
+# ── X.4: branch-by-branch poison tests ───────────────────────────────────────
+
+
+def _minimal_write_context(tmp_path: Path) -> Any:
+    """Build a valid AutomaticWriteContext with a real execution gate envelope."""
+    from plugins.memory.memory_os.execution_gate import (
+        execution_gate_scope_hash,
+        start_execution_gate_envelope,
+    )
+    from plugins.memory.memory_os.permanent_promotion import (
+        PERMANENT_PROMOTION_LANE_ID,
+        PERMANENT_PROMOTION_RISK_CLASS,
+        AutomaticWriteContext,
+    )
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+    store.initialize()
+    scope = {"operation": "test_gate_232", "test": True}
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id=PERMANENT_PROMOTION_LANE_ID,
+        trigger_surface="test",
+        risk_class=PERMANENT_PROMOTION_RISK_CLASS,
+        human_approval_required=False,
+        why_no_human_approval="test only — no human review needed",
+        scope=scope,
+        boundary={"actual_send": False, "actual_execute": False},
+    )
+    return AutomaticWriteContext(
+        store=store,
+        envelope_id=str(permit["execution_gate_envelope_id"]),
+        scope_hash=execution_gate_scope_hash(scope),
+    )
+
+
+class TestV2EX4Poison:
+    """X.4 — each constitution-matrix branch exercised with edge cases."""
+
+    def test_gate_232_raises_on_automatic_with_non_clear_verdict(self, tmp_path: Path) -> None:
+        """:232 gate: automatic + v2e_enabled + non-clear → raises automatic_clearance_required."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            PermanentPromotionError,
+            ProposalLedger,
+        )
+
+        ledger = ProposalLedger(tmp_path / "memory-os")
+        wctx = _minimal_write_context(tmp_path)
+        with pytest.raises(PermanentPromotionError, match="automatic_clearance_required"):
+            ledger.create_or_get(
+                target_id="cry_gate_1", candidate_id="cand_gate_1",
+                body="gate test body", channel="cli", origin="automatic",
+                clearance={"status": "conflict", "receipt_id": "clr_X"},
+                v2e_enabled=True,
+                write_context=wctx,
+            )
+
+    def test_gate_232_allows_automatic_with_clear(self, tmp_path: Path) -> None:
+        """:232 gate: automatic + v2e_enabled + clear → proposal created."""
+        from plugins.memory.memory_os.permanent_promotion import ProposalLedger
+
+        ledger = ProposalLedger(tmp_path / "memory-os")
+        wctx = _minimal_write_context(tmp_path)
+        proposal, created = ledger.create_or_get(
+            target_id="cry_gate_2", candidate_id="cand_gate_2",
+            body="clear gate body", channel="cli", origin="automatic",
+            clearance={"status": "clear", "receipt_id": "clr_clear_1"},
+            v2e_enabled=True,
+            write_context=wctx,
+        )
+        assert created is True
+        assert proposal["clearance"]["status"] == "clear"
+        assert proposal["clearance"]["receipt_id"] == "clr_clear_1"
+
+    def test_gate_232_blocks_automatic_with_unknown(self, tmp_path: Path) -> None:
+        """:232 gate: automatic + v2e_enabled + unknown → blocked."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            PermanentPromotionError, ProposalLedger,
+        )
+
+        ledger = ProposalLedger(tmp_path / "memory-os")
+        wctx = _minimal_write_context(tmp_path)
+        with pytest.raises(PermanentPromotionError, match="automatic_clearance_required"):
+            ledger.create_or_get(
+                target_id="cry_gate_3", candidate_id="cand_gate_3",
+                body="unknown gate body", channel="cli", origin="automatic",
+                clearance={"status": "unknown", "receipt_id": "clr_U"},
+                v2e_enabled=True,
+                write_context=wctx,
+            )
+
+    def test_gate_232_bypassed_when_v2e_disabled(self, tmp_path: Path) -> None:
+        """:232 gate: skipped when v2e_enabled=False regardless of verdict."""
+        from plugins.memory.memory_os.permanent_promotion import ProposalLedger
+
+        ledger = ProposalLedger(tmp_path / "memory-os")
+        wctx = _minimal_write_context(tmp_path)
+        # Even conflict passes when v2e is off
+        proposal, created = ledger.create_or_get(
+            target_id="cry_gate_4", candidate_id="cand_gate_4",
+            body="v2e off body", channel="cli", origin="automatic",
+            clearance={"status": "conflict", "receipt_id": "clr_off_1"},
+            v2e_enabled=False,
+            write_context=wctx,
+        )
+        assert created is True
+        # Clearance stored as-is, gate not applied
+        assert proposal["clearance"]["status"] == "conflict"
+
+    def test_gate_232_bypassed_for_owner_origin(self, tmp_path: Path) -> None:
+        """:232 gate: only applies to automatic origin, not owner_initiated."""
+        from plugins.memory.memory_os.permanent_promotion import ProposalLedger
+
+        ledger = ProposalLedger(tmp_path / "memory-os")
+        # Owner-initiated with conflict + v2e → still allowed (gate only for automatic)
+        proposal, created = ledger.create_or_get(
+            target_id="cry_gate_5", candidate_id="cand_gate_5",
+            body="owner conflict body", channel="cli", origin="owner_initiated",
+            clearance={"status": "conflict", "receipt_id": "clr_owner", "owner_override": True},
+            v2e_enabled=True,
+        )
+        assert created is True
+        assert proposal["clearance"]["owner_override"] is True
+
+    def test_resolve_unexpected_verdict_blocked(self, tmp_path: Path) -> None:
+        """Defensive branch: a receipt with an unrecognized verdict blocks."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_bogus", "bogus_verdict")
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_bogus", "automatic", v2e_enabled=True,
+        )
+        assert block == "unexpected_verdict"
+        assert clearance["status"] == "unavailable"
+        assert clearance["raw_verdict"] == "bogus_verdict"
+
+    def test_resolve_unexpected_verdict_blocks_owner_too(self, tmp_path: Path) -> None:
+        """Defensive branch: unexpected verdict blocks owner path as well."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_bogus2", "bogus_verdict")
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_bogus2", "owner_initiated", v2e_enabled=True,
+        )
+        assert block == "unexpected_verdict"
+
+    def test_clearance_receipt_id_flows_into_proposal_record(self, tmp_path: Path) -> None:
+        """Receipt ID survives the full chain: resolve → create_or_get → proposal record."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            PermanentPromotionService,
+        )
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from datetime import datetime, timezone
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_flow_1", "fact", "Flow-through test.", ["evt_f1"])
+        decision = ApprovalDecision(
+            "cand_flow_1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="flow_test.md")
+        record_id = svc.read_records("flow_test.md")[0].frontmatter["id"]
+
+        # Write a clear receipt with a known receipt_id
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "clear", receipt_id="clr_flow_known_42")
+
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=True,
+        )
+        result = service.propose(record_id, origin="owner_initiated")
+        assert result["status"] == "open"
+        proposal_state = service.proposals._states()[result["proposal_id"]]
+        assert proposal_state["clearance"]["status"] == "clear"
+        assert proposal_state["clearance"]["receipt_id"] == "clr_flow_known_42"
+
+    def test_conflict_receipt_refs_flow_into_proposal(self, tmp_path: Path) -> None:
+        """Conflict refs survive the full chain into the proposal record."""
+        from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        from datetime import datetime, timezone
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_cfref_1", "fact", "Conflict refs test.", ["evt_cf1"])
+        decision = ApprovalDecision(
+            "cand_cfref_1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="cfref_test.md")
+        record_id = svc.read_records("cfref_test.md")[0].frontmatter["id"]
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "conflict",
+                         conflict_refs=["perm_AAA", "perm_BBB"],
+                         receipt_id="clr_conflict_refs_99")
+
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=True,
+        )
+        result = service.propose(record_id, origin="owner_initiated")
+        assert result["status"] == "open"
+        proposal_state = service.proposals._states()[result["proposal_id"]]
+        assert proposal_state["clearance"]["status"] == "conflict"
+        assert proposal_state["clearance"]["owner_override"] is True
+        assert set(proposal_state["clearance"]["conflict_refs"]) == {"perm_AAA", "perm_BBB"}
