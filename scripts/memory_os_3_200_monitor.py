@@ -22,7 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from plugins.modules.governance.live_guard import live_guard_registration_report
-from plugins.memory.memory_os.host_capability_probe import (
+from plugins.seam.hermes_memory_os.host_capability_adapter import (
     HOST_CAPABILITY_ALLOWED_STATUSES,
     HOST_CAPABILITY_REQUIRED_FIELDS,
     HOST_CAPABILITY_REQUIRED_KEYS,
@@ -2305,6 +2305,16 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                         "wrapped": wrapped,
                     }
                 )
+            if execution_gate_cron.get("classification_source") == "hermes_cron_adapter_probe":
+                if execution_gate_cron.get("adapter_owner") == "hermes_memory_os_seam":
+                    passed.append({"code": "execution_gate_cron_adapter_host_owned"})
+                else:
+                    fail.append(
+                        {
+                            "code": "execution_gate_cron_adapter_not_host_owned",
+                            "owner": execution_gate_cron.get("adapter_owner"),
+                        }
+                    )
             enabled_optional_count = int(
                 execution_gate_cron.get("enabled_known_optional_outside_active_registry_count") or 0
             )
@@ -2591,65 +2601,80 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     ingress_guard = snapshot.get("owner_review_ingress_guard", {})
     if ingress_guard:
         if ingress_guard.get("schema_version") == "memory-os.owner_review_ingress_guard.v0":
-            if ingress_guard.get("legacy_anchor_accepted") is True:
-                fail.append({"code": "owner_review_legacy_anchor_accepted", "value": "approve A2"})
-            if ingress_guard.get("legacy_reject_anchor_accepted") is True:
-                fail.append({"code": "owner_review_legacy_reject_anchor_accepted", "value": "reject R1"})
-            if ingress_guard.get("ordinary_anchor_text_accepted") is True:
-                fail.append({"code": "owner_review_ordinary_anchor_text_accepted"})
-            if ingress_guard.get("token_command_accepted") is not True:
-                fail.append({"code": "owner_review_token_command_not_accepted"})
-            if ingress_guard.get("bare_token_command_accepted") is not True:
-                fail.append({"code": "owner_review_bare_token_command_not_accepted"})
-            if ingress_guard.get("slash_token_command_accepted") is not True:
-                fail.append({"code": "owner_review_slash_token_command_not_accepted"})
-            if ingress_guard.get("feedback_token_command_accepted") is not True:
-                fail.append({"code": "owner_review_feedback_token_command_not_accepted"})
-            if ingress_guard.get("bare_feedback_token_command_accepted") is not True:
-                fail.append({"code": "owner_review_bare_feedback_token_command_not_accepted"})
-            if ingress_guard.get("gateway_hook_registered") is True:
-                fail.append({"code": "owner_review_gateway_hook_still_registered"})
-            if ingress_guard.get("review_reply_tool_available") is not True:
-                fail.append({"code": "owner_review_agent_tool_unavailable"})
-            if ingress_guard.get("review_reply_tool_status") != "ok":
-                fail.append({"code": "owner_review_agent_tool_not_ok", "value": ingress_guard})
-            if ingress_guard.get("review_reply_tool_input_mode") != "structured":
-                fail.append({"code": "owner_review_agent_tool_not_structured", "value": ingress_guard})
-            if int(ingress_guard.get("structured_review_reply_count") or 0) < 1:
-                fail.append({"code": "owner_review_structured_reply_probe_missing"})
-            if int(ingress_guard.get("reply_fallback_used_count") or 0) > 0:
-                warn.append({"code": "owner_review_reply_fallback_used", "value": ingress_guard.get("reply_fallback_used_count")})
-            if int(ingress_guard.get("owner_command_event_count") or 0) > 0:
-                fail.append({"code": "owner_review_command_captured_as_event"})
-            if int(ingress_guard.get("owner_command_working_count") or 0) > 0:
-                fail.append({"code": "owner_review_command_promoted_to_working"})
-            if int(ingress_guard.get("owner_command_candidate_count") or 0) > 0:
-                fail.append({"code": "owner_review_command_promoted_to_candidate"})
-            if ingress_guard.get("owner_command_promoted_to_candidate") is True:
-                fail.append({"code": "owner_review_command_candidate_pollution"})
-            if int(ingress_guard.get("owner_review_command_pollution_count") or 0) > 0:
-                fail.append({"code": "owner_review_command_pollution_count_nonzero"})
-            if (
-                ingress_guard.get("legacy_anchor_accepted") is not True
-                and ingress_guard.get("legacy_reject_anchor_accepted") is not True
-                and ingress_guard.get("ordinary_anchor_text_accepted") is not True
-                and ingress_guard.get("token_command_accepted") is True
-                and ingress_guard.get("bare_token_command_accepted") is True
-                and ingress_guard.get("slash_token_command_accepted") is True
-                and ingress_guard.get("feedback_token_command_accepted") is True
-                and ingress_guard.get("bare_feedback_token_command_accepted") is True
-                and ingress_guard.get("gateway_hook_registered") is not True
-                and ingress_guard.get("review_reply_tool_available") is True
-                and ingress_guard.get("review_reply_tool_status") == "ok"
-                and ingress_guard.get("review_reply_tool_input_mode") == "structured"
-                and int(ingress_guard.get("structured_review_reply_count") or 0) >= 1
-                and int(ingress_guard.get("reply_fallback_used_count") or 0) == 0
-                and int(ingress_guard.get("owner_command_event_count") or 0) == 0
-                and int(ingress_guard.get("owner_command_working_count") or 0) == 0
-                and int(ingress_guard.get("owner_command_candidate_count") or 0) == 0
-                and int(ingress_guard.get("owner_review_command_pollution_count") or 0) == 0
-            ):
-                passed.append({"code": "owner_review_ingress_guard_token_only"})
+            probe_status = str(ingress_guard.get("probe_status") or "legacy")
+            if probe_status in {"bootstrap_error", "probe_error"}:
+                code = (
+                    "owner_review_ingress_probe_bootstrap_error"
+                    if probe_status == "bootstrap_error"
+                    else "owner_review_ingress_probe_error"
+                )
+                fail.append(
+                    {
+                        "code": code,
+                        "stage": str(ingress_guard.get("bootstrap_stage") or "unknown"),
+                        "reason": str(ingress_guard.get("bootstrap_reason_code") or "unknown"),
+                    }
+                )
+            else:
+                if ingress_guard.get("legacy_anchor_accepted") is True:
+                    fail.append({"code": "owner_review_legacy_anchor_accepted", "value": "approve A2"})
+                if ingress_guard.get("legacy_reject_anchor_accepted") is True:
+                    fail.append({"code": "owner_review_legacy_reject_anchor_accepted", "value": "reject R1"})
+                if ingress_guard.get("ordinary_anchor_text_accepted") is True:
+                    fail.append({"code": "owner_review_ordinary_anchor_text_accepted"})
+                if ingress_guard.get("token_command_accepted") is not True:
+                    fail.append({"code": "owner_review_token_command_not_accepted"})
+                if ingress_guard.get("bare_token_command_accepted") is not True:
+                    fail.append({"code": "owner_review_bare_token_command_not_accepted"})
+                if ingress_guard.get("slash_token_command_accepted") is not True:
+                    fail.append({"code": "owner_review_slash_token_command_not_accepted"})
+                if ingress_guard.get("feedback_token_command_accepted") is not True:
+                    fail.append({"code": "owner_review_feedback_token_command_not_accepted"})
+                if ingress_guard.get("bare_feedback_token_command_accepted") is not True:
+                    fail.append({"code": "owner_review_bare_feedback_token_command_not_accepted"})
+                if ingress_guard.get("gateway_hook_registered") is True:
+                    fail.append({"code": "owner_review_gateway_hook_still_registered"})
+                if ingress_guard.get("review_reply_tool_available") is not True:
+                    fail.append({"code": "owner_review_agent_tool_unavailable"})
+                if ingress_guard.get("review_reply_tool_status") != "ok":
+                    fail.append({"code": "owner_review_agent_tool_not_ok", "value": ingress_guard})
+                if ingress_guard.get("review_reply_tool_input_mode") != "structured":
+                    fail.append({"code": "owner_review_agent_tool_not_structured", "value": ingress_guard})
+                if int(ingress_guard.get("structured_review_reply_count") or 0) < 1:
+                    fail.append({"code": "owner_review_structured_reply_probe_missing"})
+                if int(ingress_guard.get("reply_fallback_used_count") or 0) > 0:
+                    warn.append({"code": "owner_review_reply_fallback_used", "value": ingress_guard.get("reply_fallback_used_count")})
+                if int(ingress_guard.get("owner_command_event_count") or 0) > 0:
+                    fail.append({"code": "owner_review_command_captured_as_event"})
+                if int(ingress_guard.get("owner_command_working_count") or 0) > 0:
+                    fail.append({"code": "owner_review_command_promoted_to_working"})
+                if int(ingress_guard.get("owner_command_candidate_count") or 0) > 0:
+                    fail.append({"code": "owner_review_command_promoted_to_candidate"})
+                if ingress_guard.get("owner_command_promoted_to_candidate") is True:
+                    fail.append({"code": "owner_review_command_candidate_pollution"})
+                if int(ingress_guard.get("owner_review_command_pollution_count") or 0) > 0:
+                    fail.append({"code": "owner_review_command_pollution_count_nonzero"})
+                if (
+                    ingress_guard.get("legacy_anchor_accepted") is not True
+                    and ingress_guard.get("legacy_reject_anchor_accepted") is not True
+                    and ingress_guard.get("ordinary_anchor_text_accepted") is not True
+                    and ingress_guard.get("token_command_accepted") is True
+                    and ingress_guard.get("bare_token_command_accepted") is True
+                    and ingress_guard.get("slash_token_command_accepted") is True
+                    and ingress_guard.get("feedback_token_command_accepted") is True
+                    and ingress_guard.get("bare_feedback_token_command_accepted") is True
+                    and ingress_guard.get("gateway_hook_registered") is not True
+                    and ingress_guard.get("review_reply_tool_available") is True
+                    and ingress_guard.get("review_reply_tool_status") == "ok"
+                    and ingress_guard.get("review_reply_tool_input_mode") == "structured"
+                    and int(ingress_guard.get("structured_review_reply_count") or 0) >= 1
+                    and int(ingress_guard.get("reply_fallback_used_count") or 0) == 0
+                    and int(ingress_guard.get("owner_command_event_count") or 0) == 0
+                    and int(ingress_guard.get("owner_command_working_count") or 0) == 0
+                    and int(ingress_guard.get("owner_command_candidate_count") or 0) == 0
+                    and int(ingress_guard.get("owner_review_command_pollution_count") or 0) == 0
+                ):
+                    passed.append({"code": "owner_review_ingress_guard_token_only"})
         else:
             warn.append({"code": "owner_review_ingress_guard_unavailable", "value": ingress_guard})
 
@@ -3483,6 +3508,16 @@ def _classify_left_brain_signal_weaving(
                 fail.append(contract_gap)
             else:
                 passed.append({"code": "host_capability_probe_contract_ok"})
+                if host_probe.get("schema_version") == "memory-os.host_capability_probe.v2":
+                    if host_probe.get("host_observation_owner") == "hermes_memory_os_seam":
+                        passed.append({"code": "host_capability_probe_host_owned"})
+                    else:
+                        fail.append(
+                            {
+                                "code": "host_capability_probe_not_host_owned",
+                                "owner": host_probe.get("host_observation_owner"),
+                            }
+                        )
                 capabilities = host_probe.get("capabilities") if isinstance(host_probe.get("capabilities"), dict) else {}
                 structural = capabilities.get("structural_write_gate") if isinstance(capabilities.get("structural_write_gate"), dict) else {}
                 if host_probe.get("schema_version") == "memory-os.host_capability_probe.v2":
@@ -6810,6 +6845,7 @@ def execution_gate_cron_summary():
         "registry_snapshot_status": "ok" if specs else "missing_or_invalid",
         "classification_source": "registry_snapshot",
         "adapter_probe_status": str(adapter_probe.get("status") or ""),
+        "adapter_owner": str(adapter_probe.get("adapter_owner") or ""),
         "active_registry_job_count": len(specs_by_name),
         "memory_os_owned_expected_count": len(specs_by_name),
         "memory_os_owned_wrapped_count": len(wrapped),
@@ -6831,6 +6867,7 @@ def execution_gate_cron_summary():
             job for job in known_optional if job.get("enabled") is True
         ],
         "unregistered_like_jobs": unregistered_like,
+        "external_unmanaged_jobs": external_unmanaged,
     }
     adapter_classification = (
         adapter_probe.get("classification") if isinstance(adapter_probe.get("classification"), dict) else {}
@@ -6853,6 +6890,7 @@ def execution_gate_cron_summary():
             "known_optional_jobs",
             "enabled_known_optional_outside_active_registry_jobs",
             "unregistered_like_jobs",
+            "external_unmanaged_jobs",
         ):
             if key in adapter_classification:
                 summary[key] = adapter_classification.get(key)
@@ -7419,102 +7457,159 @@ def _latest_recorded_owner_utterance():
     return ""
 
 def owner_review_ingress_guard_summary():
-    env = dict(os.environ)
+    env = {
+        key: value
+        for key in ("PATH", "HOME", "LANG", "LC_ALL", "SYSTEMROOT", "WINDIR", "PATHEXT", "TMP", "TEMP", "TMPDIR")
+        if (value := os.environ.get(key))
+    }
+    python_roots = [
+        os.path.join(_hermes_home, "memory-os", "runtime", "python"),
+        _hermes_home,
+    ]
     env["HERMES_HOME"] = _hermes_home
-    env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python:" + _hermes_home + "/plugins:" + env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_roots))
+    env["PYTHONIOENCODING"] = "utf-8"
     code = """
 import json
 import importlib.util
+import os
+import sys
 import tempfile
 from pathlib import Path
-from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply
-from plugins.memory.memory_os import MemoryOSProvider
-from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
-from plugins.memory.memory_os.owner_actions import owner_actions_path, render_owner_review_digest
-from plugins.memory.memory_os.roots import MemoryOSRoots
-from plugins.memory.memory_os.runtime import MemoryOSRuntime
-from plugins.memory.memory_os.store import MemoryOSStore
-cases = {
-    "legacy_anchor_accepted": _looks_like_owner_review_reply("approve A2"),
-    "legacy_reject_anchor_accepted": _looks_like_owner_review_reply("reject R1"),
-    "ordinary_anchor_text_accepted": _looks_like_owner_review_reply("普通聊天里提到 approve A2"),
-    "token_command_accepted": _looks_like_owner_review_reply("memory approve oa_12345678"),
-    "bare_token_command_accepted": _looks_like_owner_review_reply("approve oa_12345678"),
-    "slash_token_command_accepted": _looks_like_owner_review_reply("/memory reject oa_12345678"),
-    "feedback_token_command_accepted": _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanistic"),
-    "bare_feedback_token_command_accepted": _looks_like_owner_review_reply("feedback oa_12345678 too_mechanistic"),
-}
-control_plane = {
-    "owner_command_event_count": 0,
-    "owner_command_working_count": 0,
-    "owner_command_candidate_count": 0,
-    "owner_command_promoted_to_candidate": False,
-    "owner_review_command_pollution_count": 0,
-    "gateway_hook_plugin_present": False,
-    "gateway_hook_registered": False,
-    "gateway_safety_skip_count": 0,
-    "review_reply_tool_available": False,
-    "review_reply_tool_status": "",
-    "structured_review_reply_count": 0,
-    "reply_fallback_used_count": 0,
-}
-try:
-    plugin_path = Path(_hermes_home) / "plugins" / "memory-os-agent-os" / "__init__.py"
-    if plugin_path.exists():
-        control_plane["gateway_hook_plugin_present"] = True
-        spec = importlib.util.spec_from_file_location("memory_os_agent_os_monitor_probe", plugin_path)
-        if spec is not None and spec.loader is not None:
-            shell = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(shell)
-            hooks = []
-            class Ctx:
-                def register_cli_command(self, **kwargs):
-                    return None
-                def register_hook(self, name, callback):
-                    hooks.append(name)
-                def register_command(self, *args, **kwargs):
-                    return None
-            shell.register(Ctx())
-            control_plane["gateway_hook_registered"] = "pre_gateway_dispatch" in hooks
-    with tempfile.TemporaryDirectory() as tmp:
-        roots = MemoryOSRoots.from_hermes_home(tmp, profile="default")
-        store = MemoryOSStore(roots)
-        store.initialize()
-        append_candidate_queue(
-            store,
-            CrystallizedCandidate(
-                candidate_id="cand_monitor_owner_ingress",
-                kind="preference",
-                body="Bounded monitor candidate for owner ingress guard.",
-                source_event_ids=["evt_monitor_owner_ingress"],
-                sensitivity="private",
-            ),
-        )
-        rendered = render_owner_review_digest(
-            store,
-            channel="telegram",
-            max_action_required=1,
-            max_review_suggested=0,
-            max_fyi=0,
-            record_active=True,
-        )
-        command = ""
-        for item in (rendered.get("sections") or {}).get("action_required", []):
-            if item.get("anchor") == "A1":
-                command = "memory reject " + str((item.get("action_tokens") or {}).get("reject_candidate") or "")
-                break
-        provider = MemoryOSProvider()
-        provider.initialize(
-            "session-monitor-owner-ingress",
-            hermes_home=tmp,
-            platform="telegram",
-            agent_identity="default",
-            worker_autostart=False,
-        )
-        control_plane["review_reply_tool_available"] = any(
-            schema.get("name") == "memory_os_review_reply" for schema in provider.get_tool_schemas()
-        )
-        if command.strip():
+
+SCHEMA_VERSION = "memory-os.owner_review_ingress_guard.v0"
+
+
+def module_origin_class(module_file, hermes_home):
+    try:
+        module_path = Path(module_file).resolve()
+        runtime_root = (hermes_home / "memory-os" / "runtime" / "python").resolve()
+        home_root = hermes_home.resolve()
+        if module_path.is_relative_to(runtime_root):
+            return "installed_runtime"
+        if module_path.is_relative_to(home_root):
+            return "hermes_home"
+    except Exception:
+        return "unknown"
+    return "external"
+
+
+def probe():
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "probe_status": "bootstrap_error",
+        "bootstrap_stage": "environment",
+        "bootstrap_reason_code": "hermes_home_missing",
+        "capability_observation_status": "unobserved",
+        "module_origin_class": "unknown",
+    }
+    hermes_home_value = str(os.environ.get("HERMES_HOME") or "").strip()
+    if not hermes_home_value:
+        return base
+    hermes_home = Path(hermes_home_value)
+    base["bootstrap_stage"] = "import"
+    base["bootstrap_reason_code"] = "module_import_failed"
+    try:
+        from plugins.memory.memory_os.__init__ import _looks_like_owner_review_reply
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
+        from plugins.memory.memory_os.owner_actions import owner_actions_path, render_owner_review_digest
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.runtime import MemoryOSRuntime
+        from plugins.memory.memory_os.store import MemoryOSStore
+    except Exception as exc:
+        base["bootstrap_error_type"] = type(exc).__name__
+        return base
+
+    provider_module = sys.modules.get(MemoryOSProvider.__module__)
+    base["module_origin_class"] = module_origin_class(getattr(provider_module, "__file__", ""), hermes_home)
+    cases = {
+        "legacy_anchor_accepted": _looks_like_owner_review_reply("approve A2"),
+        "legacy_reject_anchor_accepted": _looks_like_owner_review_reply("reject R1"),
+        "ordinary_anchor_text_accepted": _looks_like_owner_review_reply("普通聊天里提到 approve A2"),
+        "token_command_accepted": _looks_like_owner_review_reply("memory approve oa_12345678"),
+        "bare_token_command_accepted": _looks_like_owner_review_reply("approve oa_12345678"),
+        "slash_token_command_accepted": _looks_like_owner_review_reply("/memory reject oa_12345678"),
+        "feedback_token_command_accepted": _looks_like_owner_review_reply("memory feedback oa_12345678 too_mechanistic"),
+        "bare_feedback_token_command_accepted": _looks_like_owner_review_reply("feedback oa_12345678 too_mechanistic"),
+    }
+    control_plane = {
+        "owner_command_event_count": 0,
+        "owner_command_working_count": 0,
+        "owner_command_candidate_count": 0,
+        "owner_command_promoted_to_candidate": False,
+        "owner_review_command_pollution_count": 0,
+        "gateway_hook_plugin_present": False,
+        "gateway_hook_registered": False,
+        "gateway_safety_skip_count": 0,
+        "review_reply_tool_available": False,
+        "review_reply_tool_status": "",
+        "review_reply_tool_input_mode": "",
+        "structured_review_reply_count": 0,
+        "reply_fallback_used_count": 0,
+    }
+    try:
+        plugin_path = hermes_home / "plugins" / "memory-os-agent-os" / "__init__.py"
+        if plugin_path.exists():
+            control_plane["gateway_hook_plugin_present"] = True
+            spec = importlib.util.spec_from_file_location("memory_os_agent_os_monitor_probe", plugin_path)
+            if spec is not None and spec.loader is not None:
+                shell = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(shell)
+                hooks = []
+
+                class Ctx:
+                    def register_cli_command(self, **kwargs):
+                        return None
+
+                    def register_hook(self, name, callback):
+                        hooks.append(name)
+
+                    def register_command(self, *args, **kwargs):
+                        return None
+
+                shell.register(Ctx())
+                control_plane["gateway_hook_registered"] = "pre_gateway_dispatch" in hooks
+        with tempfile.TemporaryDirectory() as tmp:
+            roots = MemoryOSRoots.from_hermes_home(tmp, profile="default")
+            store = MemoryOSStore(roots)
+            store.initialize()
+            append_candidate_queue(
+                store,
+                CrystallizedCandidate(
+                    candidate_id="cand_monitor_owner_ingress",
+                    kind="preference",
+                    body="Bounded monitor candidate for owner ingress guard.",
+                    source_event_ids=["evt_monitor_owner_ingress"],
+                    sensitivity="private",
+                ),
+            )
+            rendered = render_owner_review_digest(
+                store,
+                channel="telegram",
+                max_action_required=1,
+                max_review_suggested=0,
+                max_fyi=0,
+                record_active=True,
+            )
+            command = ""
+            for item in (rendered.get("sections") or {}).get("action_required", []):
+                if item.get("anchor") == "A1":
+                    command = "memory reject " + str((item.get("action_tokens") or {}).get("reject_candidate") or "")
+                    break
+            provider = MemoryOSProvider()
+            provider.initialize(
+                "session-monitor-owner-ingress",
+                hermes_home=tmp,
+                platform="telegram",
+                agent_identity="default",
+                worker_autostart=False,
+            )
+            control_plane["review_reply_tool_available"] = any(
+                schema.get("name") == "memory_os_review_reply" for schema in provider.get_tool_schemas()
+            )
+            if not command.strip():
+                raise RuntimeError("missing_review_token")
             parts = command.split()
             token = parts[2] if len(parts) >= 3 else ""
             tool_result = json.loads(
@@ -7548,15 +7643,39 @@ try:
             control_plane["owner_command_action_count"] = len(
                 [line for line in owner_actions_path(roots).read_text(encoding="utf-8").splitlines() if line.strip()]
             ) if owner_actions_path(roots).exists() else 0
-        else:
-            control_plane["owner_command_probe_error"] = "missing_review_token"
-except Exception as exc:
-    control_plane["owner_command_probe_error"] = str(exc)
-print(json.dumps({"schema_version": "memory-os.owner_review_ingress_guard.v0", **cases, **control_plane}, ensure_ascii=False, sort_keys=True))
+    except Exception as exc:
+        return {
+            **base,
+            **cases,
+            **control_plane,
+            "probe_status": "probe_error",
+            "bootstrap_stage": "execute",
+            "bootstrap_reason_code": "probe_execution_failed",
+            "probe_error_type": type(exc).__name__,
+        }
+    return {
+        **base,
+        **cases,
+        **control_plane,
+        "probe_status": "ok",
+        "bootstrap_stage": "complete",
+        "bootstrap_reason_code": "",
+        "capability_observation_status": "observed",
+    }
+
+
+print(json.dumps(probe(), ensure_ascii=False, sort_keys=True))
 """
-    report = load_json_cmd(["python3", "-c", code], env=env)
+    report = load_json_cmd([sys.executable, "-c", code], env=env)
     if isinstance(report, dict) and report.get("_error"):
-        report.setdefault("schema_version", "memory-os.owner_review_ingress_guard.v0")
+        return {
+            "schema_version": "memory-os.owner_review_ingress_guard.v0",
+            "probe_status": "bootstrap_error",
+            "bootstrap_stage": "process",
+            "bootstrap_reason_code": "child_process_failed",
+            "capability_observation_status": "unobserved",
+            "child_exit_code": report.get("_code"),
+        }
     return report
 
 status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])

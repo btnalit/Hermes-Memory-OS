@@ -93,6 +93,7 @@ def probe_host_capabilities(
     *,
     hermes_bin: str = "hermes",
     include_hermes_version: bool = True,
+    host_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Return safe capability metadata without raw bodies or secret values."""
 
@@ -100,8 +101,16 @@ def probe_host_capabilities(
     observed_at = now.isoformat().replace("+00:00", "Z")
     config = _safe_config_shape(load_config(roots.hermes_home))
     deployment_manifest = read_deployment_runtime_manifest(roots)
-    hermes_version = _gateway_capability(hermes_bin) if include_hermes_version else {"status": "disabled"}
-    cron_capability = _hermes_cron_capability(roots, hermes_bin=hermes_bin)
+    host_observations = dict(host_observations or {})
+    hermes_version = host_observations.get("hermes_version")
+    if not isinstance(hermes_version, dict):
+        hermes_version = _gateway_capability(hermes_bin) if include_hermes_version else {"status": "disabled"}
+    cron_capability = host_observations.get("cron")
+    if not isinstance(cron_capability, dict):
+        cron_capability = _hermes_cron_capability(roots, hermes_bin=hermes_bin)
+    owner_channel_capability = host_observations.get("owner_channel")
+    if not isinstance(owner_channel_capability, dict):
+        owner_channel_capability = _owner_channel_capability(roots)
     raw_capabilities = {
         "deployment_runtime_manifest": _deployment_manifest_capability(deployment_manifest),
         "hermes_version": hermes_version,
@@ -110,7 +119,7 @@ def probe_host_capabilities(
         "active_runtime": _active_runtime_capability(deployment_manifest),
         "memory_os_plugin": _path_capability(roots.memory_os_root),
         "cron": cron_capability,
-        "owner_channel": _owner_channel_capability(roots),
+        "owner_channel": owner_channel_capability,
         "memory_provider": _memory_provider_capability(config),
         "hindsight": _hindsight_capability(roots, config),
         "hindsight_write_origin": _hindsight_write_origin_capability(roots),

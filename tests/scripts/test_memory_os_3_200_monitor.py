@@ -559,6 +559,15 @@ def test_classify_snapshot_fails_when_host_capability_contract_is_incomplete():
     assert any(item["code"] == "host_capability_probe_contract_incomplete" for item in classification["fail"])
 
 
+def test_classify_snapshot_fails_when_host_capability_probe_is_still_core_owned():
+    snapshot = _healthy_snapshot()
+    snapshot["host_capability_probe"].pop("host_observation_owner")
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "host_capability_probe_not_host_owned" for item in classification["fail"])
+
+
 def test_classify_snapshot_fails_when_structural_write_gate_is_not_available():
     snapshot = _healthy_snapshot()
     snapshot["host_capability_probe"]["capabilities"]["structural_write_gate"]["status"] = "migration_needed"
@@ -3209,6 +3218,8 @@ def test_classify_snapshot_passes_memory_os_cron_execution_gate_coverage():
     snapshot = _healthy_snapshot()
     snapshot["execution_gate_cron"] = {
         "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "classification_source": "hermes_cron_adapter_probe",
+        "adapter_owner": "hermes_memory_os_seam",
         "memory_os_owned_expected_count": 7,
         "memory_os_owned_wrapped_count": 7,
         "memory_os_owned_naked_count": 0,
@@ -3220,7 +3231,26 @@ def test_classify_snapshot_passes_memory_os_cron_execution_gate_coverage():
     classification = classify_snapshot(snapshot)
 
     assert any(item["code"] == "execution_gate_memory_os_cron_wrapped_ok" for item in classification["pass"])
+    assert any(item["code"] == "execution_gate_cron_adapter_host_owned" for item in classification["pass"])
     assert not any(item["code"].startswith("execution_gate_memory_os_cron") for item in classification["fail"])
+
+
+def test_classify_snapshot_fails_when_cron_probe_is_not_host_owned():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "classification_source": "hermes_cron_adapter_probe",
+        "adapter_owner": "",
+        "memory_os_owned_expected_count": 1,
+        "memory_os_owned_wrapped_count": 1,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "execution_gate_cron_adapter_not_host_owned" for item in classification["fail"])
 
 
 def test_classify_snapshot_fails_production_when_known_optional_cron_enabled_outside_active_registry():
@@ -4717,6 +4747,7 @@ def _healthy_host_capability_probe() -> dict:
     capabilities["deployment_runtime_manifest"].update({"deployed_head": "abc123"})
     return {
         "schema_version": "memory-os.host_capability_probe.v2",
+        "host_observation_owner": "hermes_memory_os_seam",
         "capabilities": capabilities,
         "capability_contract": {
             "schema_version": "memory-os.host_capability_contract.v0",
@@ -5282,6 +5313,8 @@ def _healthy_owner_review_surface() -> dict:
 def _healthy_owner_ingress_guard() -> dict:
     return {
         "schema_version": "memory-os.owner_review_ingress_guard.v0",
+        "probe_status": "ok",
+        "capability_observation_status": "observed",
         "legacy_anchor_accepted": False,
         "legacy_reject_anchor_accepted": False,
         "ordinary_anchor_text_accepted": False,
@@ -5304,6 +5337,52 @@ def _healthy_owner_ingress_guard() -> dict:
         "owner_command_promoted_to_candidate": False,
         "owner_review_command_pollution_count": 0,
     }
+
+
+def test_classify_snapshot_collapses_owner_ingress_bootstrap_failure_to_one_finding():
+    snapshot = _healthy_snapshot()
+    snapshot["owner_review_ingress_guard"] = {
+        "schema_version": "memory-os.owner_review_ingress_guard.v0",
+        "probe_status": "bootstrap_error",
+        "bootstrap_stage": "import",
+        "bootstrap_reason_code": "module_import_failed",
+        "capability_observation_status": "unobserved",
+    }
+
+    classification = classify_snapshot(snapshot)
+    owner_ingress_fail_codes = {
+        item["code"]
+        for item in classification["fail"]
+        if item["code"].startswith("owner_review_")
+    }
+
+    assert owner_ingress_fail_codes == {"owner_review_ingress_probe_bootstrap_error"}
+
+
+def test_remote_owner_review_ingress_guard_runs_in_clean_child_process():
+    repo_root = Path(__file__).resolve().parents[2]
+    script = monitor._remote_probe_script(str(repo_root))
+    namespace: dict[str, object] = {}
+    original_sys_path = list(sys.path)
+    try:
+        exec(
+            script.split(
+                '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+                1,
+            )[0],
+            namespace,
+        )
+        report = namespace["owner_review_ingress_guard_summary"]()
+    finally:
+        sys.path[:] = original_sys_path
+
+    assert report["probe_status"] == "ok"
+    assert report["capability_observation_status"] == "observed"
+    assert report["review_reply_tool_available"] is True
+    assert report["review_reply_tool_status"] == "ok"
+    assert report["review_reply_tool_input_mode"] == "structured"
+    assert report["structured_review_reply_count"] == 1
+    assert report["owner_review_command_pollution_count"] == 0
 
 
 def _healthy_owner_proposal_followups() -> dict:

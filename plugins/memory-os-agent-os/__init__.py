@@ -464,9 +464,98 @@ def _memory_os_agent_os_exit_code(args: argparse.Namespace) -> int:
     command = str(getattr(args, "agent_os_command", "") or "")
     if command not in _ALLOWED_ALIASES:
         return 2
+    if command == "review" and str(getattr(args, "review_command", "") or "") == "channel":
+        return _host_owner_review_channel_command(args)
+    if command == "host-probe":
+        return _host_capability_probe_command()
     delegated_args = argparse.Namespace(**vars(args))
     delegated_args.memory_os_command = command
     return _delegate_to_memory_os_cli(delegated_args)
+
+
+def _host_owner_review_channel_command(args: argparse.Namespace) -> int:
+    """Resolve host channel metadata without delegating ownership to core."""
+
+    hermes_home = _resolve_hermes_home()
+    if hermes_home is None:
+        print(
+            json.dumps(
+                {
+                    "schema_version": "memory-os.owner_review_channel.v0",
+                    "status": "error",
+                    "reason": "hermes_home_unavailable",
+                    "raw_body_included": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+    _ensure_memory_os_runtime_path()
+    try:
+        from plugins.seam.hermes_memory_os.owner_channel_adapter import resolve_owner_review_channel
+    except ModuleNotFoundError as exc:
+        print(
+            json.dumps(
+                {
+                    "schema_version": "memory-os.owner_review_channel.v0",
+                    "status": "error",
+                    "reason": "hermes_owner_channel_adapter_unavailable",
+                    "error_class": type(exc).__name__,
+                    "raw_body_included": False,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 1
+    report = resolve_owner_review_channel(
+        hermes_home=hermes_home,
+        profile=str(os.environ.get("MEMORY_OS_PROFILE") or "default"),
+        owner_id=str(getattr(args, "owner", "") or ""),
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _host_capability_probe_command() -> int:
+    hermes_home = _resolve_hermes_home()
+    if hermes_home is None:
+        return _print_host_adapter_error(
+            schema_version="memory-os.host_capability_probe.v2",
+            reason="hermes_home_unavailable",
+        )
+    _ensure_memory_os_runtime_path()
+    try:
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.seam.hermes_memory_os.host_capability_adapter import probe_host_capabilities
+    except ModuleNotFoundError as exc:
+        return _print_host_adapter_error(
+            schema_version="memory-os.host_capability_probe.v2",
+            reason="hermes_host_capability_adapter_unavailable",
+            error_class=type(exc).__name__,
+        )
+    roots = MemoryOSRoots.from_hermes_home(
+        hermes_home,
+        profile=str(os.environ.get("MEMORY_OS_PROFILE") or "default"),
+    )
+    print(json.dumps(probe_host_capabilities(roots), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _print_host_adapter_error(*, schema_version: str, reason: str, error_class: str = "") -> int:
+    report = {
+        "schema_version": schema_version,
+        "status": "error",
+        "reason": reason,
+        "raw_body_included": False,
+    }
+    if error_class:
+        report["error_class"] = error_class
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    return 1
 
 
 def _delegate_to_memory_os_cli(args: argparse.Namespace) -> int:

@@ -70,6 +70,15 @@ def test_boundary_scan_flags_channel_directory_literal():
     assert any(v["kind"] == "forbidden_path_literal" for v in violations)
 
 
+def test_boundary_scan_flags_core_import_of_hermes_host_adapter():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    src = "from plugins.seam.hermes_memory_os.owner_channel_adapter import resolve_owner_review_channel\n"
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+
+    assert any(v["kind"] == "forbidden_import_module" for v in violations)
+
+
 def test_boundary_scan_allows_internal_delivery_helpers():
     from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
 
@@ -82,8 +91,48 @@ def test_boundary_scan_allows_internal_delivery_helpers():
     assert violations == []
 
 
-def test_real_memory_os_tree_has_no_host_boundary_violations():
+def test_boundary_scan_flags_hermes_send_subprocess_semantics():
     from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    src = "import subprocess\nsubprocess.run(['hermes', 'send', '--to', target, message])\n"
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+
+    assert any(v["kind"] == "forbidden_host_invocation" and v["detail"] == "hermes send" for v in violations)
+
+
+def test_boundary_scan_flags_hermes_cron_and_version_semantics_without_banning_subprocess_import():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    safe = scan_source_boundary_violations(
+        "plugins/memory/memory_os/x.py",
+        "import subprocess\nsubprocess.run(['git', 'status'])\n",
+    )
+    cron = scan_source_boundary_violations(
+        "plugins/memory/memory_os/x.py",
+        "import subprocess\nsubprocess.run([hermes_bin, 'cron', 'create', '--help'])\n",
+    )
+    version = scan_source_boundary_violations(
+        "plugins/memory/memory_os/x.py",
+        "import subprocess\nsubprocess.run([hermes_bin, '--version'])\n",
+    )
+
+    assert safe == []
+    assert any(v["detail"] == "hermes cron" for v in cron)
+    assert any(v["detail"] == "hermes --version" for v in version)
+
+
+def test_boundary_scan_flags_channel_resolution_ownership_symbols():
+    from scripts.memory_os_static_hygiene_check import scan_source_boundary_violations
+
+    src = "CHANNEL_PRIORITY = ('telegram',)\ndef resolve_owner_review_channel(store): return {}\n"
+    violations = scan_source_boundary_violations("plugins/memory/memory_os/x.py", src)
+
+    details = {v["detail"] for v in violations if v["kind"] == "forbidden_host_symbol"}
+    assert details == {"CHANNEL_PRIORITY", "resolve_owner_review_channel"}
+
+
+def test_real_memory_os_tree_has_only_declared_frozen_host_boundary_debt():
+    from scripts.memory_os_static_hygiene_check import partition_boundary_violations, scan_source_boundary_violations
 
     repo_root = Path(__file__).resolve().parents[2]
     root = repo_root / "plugins" / "memory" / "memory_os"
@@ -97,7 +146,16 @@ def test_real_memory_os_tree_has_no_host_boundary_violations():
                 path.read_text(encoding="utf-8"),
             )
         )
-    assert violations == [], f"host-boundary violations: {violations}"
+    unapproved, declared = partition_boundary_violations(violations)
+
+    assert unapproved == [], f"unapproved host-boundary violations: {unapproved}"
+    assert declared, "current legacy debt must remain visible until S0.4 migration completes"
+    assert {item["path"] for item in declared} == {
+        "plugins/memory/memory_os/cli.py",
+        "plugins/memory/memory_os/hermes_cron_adapter.py",
+        "plugins/memory/memory_os/host_capability_probe.py",
+        "plugins/memory/memory_os/owner_actions.py",
+    }
 
 
 def test_run_static_hygiene_flags_host_boundary_violation(tmp_path):

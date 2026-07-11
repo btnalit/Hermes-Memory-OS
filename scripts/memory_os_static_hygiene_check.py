@@ -8,6 +8,7 @@ import ast
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -25,6 +26,7 @@ Runner = Callable[[list[str], Path], dict[str, Any]]
 _BOUNDARY_FORBIDDEN_IMPORT_FRAGMENTS = (
     "owner_cron_onboarding",
     "channel_directory",
+    "plugins.seam.hermes_memory_os",
 )
 _BOUNDARY_FORBIDDEN_IMPORT_NAMES = frozenset(
     {
@@ -34,6 +36,35 @@ _BOUNDARY_FORBIDDEN_IMPORT_NAMES = frozenset(
     }
 )
 _BOUNDARY_FORBIDDEN_LITERALS = ("channel_directory.json",)
+_BOUNDARY_FORBIDDEN_HOST_SYMBOLS = frozenset(
+    {
+        "CHANNEL_PRIORITY",
+        "OWNER_REVIEW_DELIVERY_ADAPTERS",
+        "resolve_owner_review_channel",
+        "_configured_channel_candidate",
+        "_channel_candidate_is_safe",
+        "_session_channel_candidates",
+    }
+)
+_BOUNDARY_HOST_SUBPROCESS_METHODS = frozenset({"run", "Popen", "check_call", "check_output"})
+
+# Exact, count-bounded debt present at eab6ed7.  New violations, including
+# additional copies in these files, remain CI failures.  Entries disappear as
+# S0.4 moves each capability to the Hermes host adapter.
+_DECLARED_LEGACY_BOUNDARY_DEBT: Counter[tuple[str, str, str]] = Counter(
+    {
+        ("plugins/memory/memory_os/cli.py", "forbidden_host_symbol", "resolve_owner_review_channel"): 1,
+        ("plugins/memory/memory_os/hermes_cron_adapter.py", "forbidden_host_invocation", "hermes cron"): 2,
+        ("plugins/memory/memory_os/host_capability_probe.py", "forbidden_host_symbol", "resolve_owner_review_channel"): 1,
+        ("plugins/memory/memory_os/host_capability_probe.py", "forbidden_host_invocation", "hermes --version"): 1,
+        ("plugins/memory/memory_os/owner_actions.py", "forbidden_host_symbol", "OWNER_REVIEW_DELIVERY_ADAPTERS"): 1,
+        ("plugins/memory/memory_os/owner_actions.py", "forbidden_host_symbol", "resolve_owner_review_channel"): 4,
+        ("plugins/memory/memory_os/owner_actions.py", "forbidden_host_symbol", "_configured_channel_candidate"): 2,
+        ("plugins/memory/memory_os/owner_actions.py", "forbidden_host_symbol", "_channel_candidate_is_safe"): 2,
+        ("plugins/memory/memory_os/owner_actions.py", "forbidden_host_symbol", "_session_channel_candidates"): 2,
+        ("plugins/memory/memory_os/owner_actions.py", "forbidden_host_invocation", "hermes send"): 1,
+    }
+)
 
 
 def scan_source_boundary_violations(rel_path: str, source: str) -> list[dict[str, str]]:
@@ -43,12 +74,26 @@ def scan_source_boundary_violations(rel_path: str, source: str) -> list[dict[str
     fragment or imported name, and (b) the channel_directory path literal.
     Relative imports and internal delivery-ledger helpers are not violations.
     """
+    rel_path = str(rel_path).replace("\\", "/")
     violations: list[dict[str, str]] = []
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return violations  # compileall covers syntax separately
+    command_bindings: dict[str, str] = {}
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            signature = _host_command_signature(value)
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    if signature:
+                        command_bindings[target.id] = signature
+                    if target.id in _BOUNDARY_FORBIDDEN_HOST_SYMBOLS:
+                        violations.append({"path": rel_path, "kind": "forbidden_host_symbol", "detail": target.id})
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in _BOUNDARY_FORBIDDEN_HOST_SYMBOLS:
+            violations.append({"path": rel_path, "kind": "forbidden_host_symbol", "detail": node.name})
         if isinstance(node, ast.ImportFrom):
             module = node.module or ""
             if node.level == 0 and any(frag in module for frag in _BOUNDARY_FORBIDDEN_IMPORT_FRAGMENTS):
@@ -60,10 +105,91 @@ def scan_source_boundary_violations(rel_path: str, source: str) -> list[dict[str
             for alias in node.names:
                 if any(frag in alias.name for frag in _BOUNDARY_FORBIDDEN_IMPORT_FRAGMENTS):
                     violations.append({"path": rel_path, "kind": "forbidden_import_module", "detail": alias.name})
+        elif isinstance(node, ast.Call):
+            called_name = _called_name(node.func)
+            if called_name in _BOUNDARY_FORBIDDEN_HOST_SYMBOLS:
+                violations.append({"path": rel_path, "kind": "forbidden_host_symbol", "detail": called_name})
+            if _is_subprocess_call(node.func) and node.args:
+                signature = (
+                    command_bindings.get(node.args[0].id, "")
+                    if isinstance(node.args[0], ast.Name)
+                    else _host_command_signature(node.args[0])
+                )
+                if signature:
+                    violations.append({"path": rel_path, "kind": "forbidden_host_invocation", "detail": signature})
+            elif called_name in {"system", "popen"} and node.args:
+                signature = _host_command_signature(node.args[0])
+                if signature:
+                    violations.append({"path": rel_path, "kind": "forbidden_host_invocation", "detail": signature})
     for literal in _BOUNDARY_FORBIDDEN_LITERALS:
         if literal in source:
             violations.append({"path": rel_path, "kind": "forbidden_path_literal", "detail": literal})
     return violations
+
+
+def partition_boundary_violations(
+    violations: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    remaining = _DECLARED_LEGACY_BOUNDARY_DEBT.copy()
+    unapproved: list[dict[str, str]] = []
+    declared: list[dict[str, str]] = []
+    for violation in violations:
+        fingerprint = (
+            str(violation.get("path") or ""),
+            str(violation.get("kind") or ""),
+            str(violation.get("detail") or ""),
+        )
+        if remaining[fingerprint] > 0:
+            remaining[fingerprint] -= 1
+            declared.append(violation)
+        else:
+            unapproved.append(violation)
+    return unapproved, declared
+
+
+def _called_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return ""
+
+
+def _is_subprocess_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "subprocess"
+        and node.attr in _BOUNDARY_HOST_SUBPROCESS_METHODS
+    )
+
+
+def _host_command_signature(node: ast.AST) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        text = node.value.strip().lower()
+        if "hermes" not in text:
+            return ""
+        if " send" in f" {text}":
+            return "hermes send"
+        if " cron" in f" {text}":
+            return "hermes cron"
+        if "--version" in text:
+            return "hermes --version"
+        return ""
+    if not isinstance(node, (ast.List, ast.Tuple)) or len(node.elts) < 2:
+        return ""
+    first = ast.unparse(node.elts[0]).lower()
+    if "hermes" not in first:
+        return ""
+    second = node.elts[1]
+    second_value = second.value.lower() if isinstance(second, ast.Constant) and isinstance(second.value, str) else ""
+    if second_value == "send":
+        return "hermes send"
+    if second_value == "cron":
+        return "hermes cron"
+    if second_value == "--version":
+        return "hermes --version"
+    return ""
 
 
 def default_runner(argv: list[str], cwd: Path) -> dict[str, Any]:
@@ -126,10 +252,12 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
         "exit_code": 1 if provider_literal_hits else 0,
         "hits": provider_literal_hits,
     }
+    unapproved_boundary_violations, declared_legacy_boundary_debt = partition_boundary_violations(boundary_violations)
     results["memory_os_host_boundary"] = {
-        "status": "fail" if boundary_violations else "pass",
-        "exit_code": 1 if boundary_violations else 0,
-        "violations": boundary_violations,
+        "status": "fail" if unapproved_boundary_violations else "pass",
+        "exit_code": 1 if unapproved_boundary_violations else 0,
+        "violations": unapproved_boundary_violations,
+        "declared_legacy_debt": declared_legacy_boundary_debt,
     }
     for name, argv in checks.items():
         raw = runner(argv, root)

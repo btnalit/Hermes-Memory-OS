@@ -603,6 +603,43 @@ def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, cap
     assert json.loads(capsys.readouterr().out) == {"delegated": "status"}
 
 
+def test_shell_review_channel_is_owned_by_host_adapter_not_core_delegate(tmp_path, monkeypatch, capsys):
+    module = load_shell_module()
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        module,
+        "_delegate_to_memory_os_cli",
+        lambda _args: (_ for _ in ()).throw(AssertionError("channel resolution must stay in host plugin")),
+    )
+
+    result = module._memory_os_agent_os_exit_code(
+        argparse.Namespace(agent_os_command="review", review_command="channel")
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert result == 0
+    assert report["schema_version"] == "memory-os.owner_review_channel.v0"
+    assert report["status"] == "dry_run_only"
+    assert report["reason"] == "cli_preview_fallback"
+    assert report["raw_body_included"] is False
+
+
+def test_shell_host_probe_is_owned_by_host_adapter_not_core_delegate(monkeypatch):
+    module = load_shell_module()
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "_delegate_to_memory_os_cli",
+        lambda _args: (_ for _ in ()).throw(AssertionError("host probe must stay in host plugin")),
+    )
+    monkeypatch.setattr(module, "_host_capability_probe_command", lambda: calls.append("host") or 0)
+
+    result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="host-probe"))
+
+    assert result == 0
+    assert calls == ["host"]
+
+
 def test_hindsight_status_reports_optional_off(tmp_path):
     from plugins.memory.memory_os.cli import hindsight_status_report
     from plugins.memory.memory_os.roots import MemoryOSRoots
