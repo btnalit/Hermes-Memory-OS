@@ -19,6 +19,7 @@ docs/system-modularization/
 docs/internal-memory-os/
 docs/public-materials-drafts/
 docs/superpowers/
+docs/plans/
 eval/reports/
 *.tmp
 monitor_dashboard/snapshot.generated.js
