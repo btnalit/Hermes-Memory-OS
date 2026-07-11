@@ -1514,10 +1514,10 @@ def prepare_permanent_promotion_delivery(
         start_execution_gate_envelope,
     )
 
+    from .knob_overrides import resolve_knob as _resolve_knob
+
     # Resolve v2e_enabled from knob when not explicitly passed
     if v2e_enabled is None:
-        from .knob_overrides import resolve_knob as _resolve_knob
-
         v2e_enabled = bool(_resolve_knob(
             "v2e_enabled", default=False, roots=store.roots,
         ))
@@ -1643,7 +1643,7 @@ def prepare_permanent_promotion_delivery(
             )
             eligibility_data = proposal.get("eligibility") if isinstance(proposal.get("eligibility"), dict) else {}
             body = str(record.body or "")
-            report["items"].append({
+            item: dict[str, Any] = {
                 "review_item_id": str(proposal.get("proposal_id") or ""),
                 "target_type": PERMANENT_PROMOTION_TARGET_TYPE,
                 "target_id": str(proposal.get("proposal_id") or ""),
@@ -1654,13 +1654,44 @@ def prepare_permanent_promotion_delivery(
                 "created_at": str(proposal.get("created_at") or utc_timestamp(current)),
                 "created_at_source": "permanent_promotion_proposal",
                 "summary": body[:1000],
-                "proposed_memory": body[:1000],  # render (_render_review_item) re-bounds to 1000; the gate
+                "proposed_memory": body[:1000],
                 "age_days": int(eligibility_data.get("age_days") or 0),
                 "eligibility_reason_codes": list(eligibility_data.get("reason_codes") or []),
                 "action_token": token,
                 "delivery_eligible": True,
                 "raw_body_included": False,
-            })
+            }
+
+            # ── B1: Dossier enrichment (gated by dossier_enrichment_enabled) ─
+            if _resolve_knob("dossier_enrichment_enabled", default=False, roots=store.roots):
+                from .evidence_profile import build_evidence_profile
+
+                fm = dict(record.frontmatter or {})
+                clearance = (
+                    proposal.get("clearance")
+                    if isinstance(proposal.get("clearance"), dict)
+                    else {}
+                )
+                item["evidence_profile"] = build_evidence_profile(
+                    subject_ref=str(proposal.get("target_id") or ""),
+                    subject_kind=str(fm.get("kind") or "item"),
+                    source_ref=str(fm.get("approved_by") or ""),
+                    evidence_summary=body[:200],
+                    tags=list(fm.get("tags") or []),
+                    provenance=str(fm.get("provenance", {}).get("source_class", "observed") if isinstance(fm.get("provenance"), dict) else "observed"),
+                )
+                item["stability_basis"] = str(
+                    eligibility_data.get("stability_basis") or "provisional_age"
+                )
+                item["stability_value_days"] = int(eligibility_data.get("age_days") or 0)
+                item["clearance_summary"] = {
+                    "verdict": str(clearance.get("verdict") or clearance.get("status") or "unavailable"),
+                    "receipt_id": str(clearance.get("receipt_id") or ""),
+                    "conflict_refs": list(clearance.get("conflict_refs") or []),
+                }
+                item["exposure"] = "unavailable"
+
+            report["items"].append(item)
     except Exception:
         complete_execution_gate_envelope(
             store,

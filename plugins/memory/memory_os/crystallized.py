@@ -25,6 +25,7 @@ INACTIVE_CANONICAL_STATES = {
     "owner_revoked", "revoked", "demoted",
     "provisional_expired", "provisional_cap_evicted",
     "provisional_rejected",
+    "superseded",  # V2-B: demoted by supersession (owner_assertion conflict resolution)
 }
 
 # Triage action types for candidate_aggregation lane
@@ -749,6 +750,12 @@ class CrystallizedMemoryService:
         )
         cutoff_dt = _now - timedelta(days=min_age_days)
 
+        # ── B2 fast track knob ───────────────────────────────────────────
+        from .knob_overrides import resolve_knob as _resolve_knob_simple
+        fast_path_enabled = bool(_resolve_knob_simple(
+            "fast_path_enabled", default=False, **_resolve_kwargs
+        ))
+
         eligible_count = 0
         skipped_rejected_count = 0
         skipped_too_young_count = 0
@@ -807,55 +814,105 @@ class CrystallizedMemoryService:
                 })
                 continue
 
-            # Check age threshold
-            approved_at_str = str(record.get("approved_at") or "").strip()
-            if not approved_at_str:
-                skipped_too_young_count += 1
-                ineligible_records.append({
-                    "record_id": record_id,
-                    "candidate_id": str(record.get("candidate_id") or ""),
-                    "reason_codes": ["approved_at_missing"],
-                })
-                continue
-            try:
-                approved_dt = datetime.fromisoformat(approved_at_str)
-            except (ValueError, TypeError):
-                skipped_too_young_count += 1
-                ineligible_records.append({
-                    "record_id": record_id,
-                    "candidate_id": str(record.get("candidate_id") or ""),
-                    "reason_codes": ["approved_at_invalid"],
-                })
-                continue
+            # ── B2: owner_assertion fast track (before age check) ──────
+            approved_by = str(record.get("approved_by") or "").strip()
+            provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+            is_owner_assertion = (
+                approved_by == "owner"
+                or provenance.get("source_class") == "owner_assertion"
+                or str(provenance.get("derivation") or "") == "owner_assertion"
+            )
+            fast_path_applied = False
+            stability_basis = "provisional_age"
 
-            if approved_dt.tzinfo is None:
-                approved_dt = approved_dt.replace(tzinfo=timezone.utc)
+            if fast_path_enabled and is_owner_assertion:
+                # V2-E clearance gate: must have clear verdict (fail-closed)
+                from .clearance_receipts import ClearanceReceipt, read_clearance_receipts
+                clearance_receipts = read_clearance_receipts(self.store.roots)
+                active_clearance = None
+                for cr_dict in clearance_receipts:
+                    cr = ClearanceReceipt.from_dict(cr_dict)
+                    if cr.record_id == record_id and cr.is_active:
+                        active_clearance = cr
+                        break
+                if active_clearance is not None and active_clearance.verdict == "clear":
+                    fast_path_applied = True
+                    stability_basis = "owner_assertion_fast_path"
+
+            # Check age threshold (skipped for fast-path eligible records)
+            age_days = 0
+            if fast_path_applied:
+                # Fast path: skip age gate, compute age for dossier display only
+                approved_at_str = str(record.get("approved_at") or "").strip()
+                if approved_at_str:
+                    try:
+                        approved_dt = datetime.fromisoformat(approved_at_str)
+                        if approved_dt.tzinfo is None:
+                            approved_dt = approved_dt.replace(tzinfo=timezone.utc)
+                        else:
+                            approved_dt = approved_dt.astimezone(timezone.utc)
+                        age_days = (_now - approved_dt).days
+                    except (ValueError, TypeError):
+                        age_days = 0
             else:
-                approved_dt = approved_dt.astimezone(timezone.utc)
+                approved_at_str = str(record.get("approved_at") or "").strip()
+                if not approved_at_str:
+                    skipped_too_young_count += 1
+                    ineligible_records.append({
+                        "record_id": record_id,
+                        "candidate_id": str(record.get("candidate_id") or ""),
+                        "reason_codes": ["approved_at_missing"],
+                    })
+                    continue
+                try:
+                    approved_dt = datetime.fromisoformat(approved_at_str)
+                except (ValueError, TypeError):
+                    skipped_too_young_count += 1
+                    ineligible_records.append({
+                        "record_id": record_id,
+                        "candidate_id": str(record.get("candidate_id") or ""),
+                        "reason_codes": ["approved_at_invalid"],
+                    })
+                    continue
 
-            if approved_dt > cutoff_dt:
-                skipped_too_young_count += 1
-                ineligible_records.append({
-                    "record_id": record_id,
-                    "candidate_id": str(record.get("candidate_id") or ""),
-                    "reason_codes": ["minimum_age_not_met"],
-                })
-                continue
+                if approved_dt.tzinfo is None:
+                    approved_dt = approved_dt.replace(tzinfo=timezone.utc)
+                else:
+                    approved_dt = approved_dt.astimezone(timezone.utc)
+
+                if approved_dt > cutoff_dt:
+                    skipped_too_young_count += 1
+                    ineligible_records.append({
+                        "record_id": record_id,
+                        "candidate_id": str(record.get("candidate_id") or ""),
+                        "reason_codes": ["minimum_age_not_met"],
+                    })
+                    continue
+                age_days = (_now - approved_dt).days
 
             eligible_count += 1
-            eligible_records.append({
+            reason_codes = [
+                "active_provisional",
+                "content_allowed",
+                "no_permanent_duplicate",
+            ]
+            if fast_path_applied:
+                reason_codes.append("fast_path_owner_assertion")
+                reason_codes.append("minimum_age_waived")
+            else:
+                reason_codes.append("minimum_age_met")
+
+            eligible_entry: dict[str, Any] = {
                 "record_id": record_id,
                 "candidate_id": str(record.get("candidate_id") or ""),
                 "projection": "legacy_auto_promoted",
                 "approved_at": approved_at_str,
-                "age_days": (_now - approved_dt).days,
-                "reason_codes": [
-                    "active_provisional",
-                    "minimum_age_met",
-                    "content_allowed",
-                    "no_permanent_duplicate",
-                ],
-            })
+                "age_days": age_days,
+                "stability_basis": stability_basis,
+                "fast_path": fast_path_applied,
+                "reason_codes": reason_codes,
+            }
+            eligible_records.append(eligible_entry)
             # Eligibility remains report-only. The V2-0.5 delivery producer may
             # consume this projection to open a proposal, never to write permanent state.
 
