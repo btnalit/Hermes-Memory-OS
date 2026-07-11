@@ -1,8 +1,11 @@
 import json
+import importlib.util
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 
 def test_execution_gate_runner_preserves_stdout_and_writes_envelopes(tmp_path):
@@ -341,3 +344,89 @@ def test_execution_gate_runner_updates_sidecar_index_for_cron_permit(tmp_path):
     entry = index[permit["execution_gate_envelope_id"]]
     assert entry["lane_id"] == "indexed_lane"
     assert entry["completion_count"] == 1
+
+
+def test_execution_gate_runner_serializes_parallel_sidecar_updates(tmp_path):
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    runner = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_execution_gate_runner.py"
+    shutil.copy2(runner, scripts_dir / "memory_os_execution_gate_runner.py")
+    (scripts_dir / "parallel_helper.py").write_text("print('ok')\n", encoding="utf-8")
+    hermes_home = tmp_path / "home"
+    registry_path = hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json"
+    registry_path.parent.mkdir(parents=True)
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.cron_registry.v0",
+                "specs": [
+                    {
+                        "key": "parallel_helper",
+                        "name": "memory-os-parallel-helper",
+                        "raw_script": "parallel_helper.py",
+                        "wrapper_script": "memory_os_cron_parallel_helper_gate.py",
+                        "lane_id": "parallel_helper_lane",
+                        "helper_kind": "local_helper",
+                        "no_agent": True,
+                        "requires_boundary_report": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    command = [
+        sys.executable,
+        str(scripts_dir / "memory_os_execution_gate_runner.py"),
+        "--registry-key",
+        "parallel_helper",
+        "--hermes-home",
+        str(hermes_home),
+    ]
+    processes = [
+        subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(8)
+    ]
+    results = [process.communicate(timeout=30) + (process.returncode,) for process in processes]
+
+    assert [returncode for _stdout, _stderr, returncode in results] == [0] * 8, results
+    records_path = hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 16
+    index_path = hermes_home / "memory-os" / "system" / "execution_gate_index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    assert len(index) == 8
+    assert {entry["completion_count"] for entry in index.values()} == {1}
+
+
+def test_execution_gate_sidecar_replace_failure_preserves_previous_index(tmp_path, monkeypatch):
+    runner_path = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_execution_gate_runner.py"
+    spec = importlib.util.spec_from_file_location("memory_os_execution_gate_runner_crash_test", runner_path)
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    hermes_home = tmp_path / "home"
+    index_path = hermes_home / "memory-os" / "system" / "execution_gate_index.json"
+    index_path.parent.mkdir(parents=True)
+    index_path.write_text(json.dumps({"existing": {"completion_count": 1}}), encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(runner.os, "replace", fail_replace)
+    with pytest.raises(runner.ExecutionGateInfrastructureError, match="sidecar_update_failed"):
+        runner._update_sidecar_index(
+            hermes_home,
+            "xgate_new",
+            "permit",
+            {
+                "permit_decision": "allowed",
+                "lane_id": "test",
+                "created_at": "2026-07-11T00:00:00Z",
+                "expires_at": "2026-07-11T01:00:00Z",
+            },
+        )
+
+    assert json.loads(index_path.read_text(encoding="utf-8")) == {"existing": {"completion_count": 1}}
+    assert list(index_path.parent.glob(f".{index_path.name}.*.tmp")) == []

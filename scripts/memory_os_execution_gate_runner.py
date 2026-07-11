@@ -15,11 +15,14 @@ Each permit carries:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,13 @@ from typing import Any
 
 SCHEMA_VERSION = "memory-os.execution_gate_envelope.v0"
 HELPER_REPORT_SCHEMA_VERSION = "memory-os.helper_execution_report.v0"
+SIDECAR_LOCK_TIMEOUT_SECONDS = 15.0
+
+
+class ExecutionGateInfrastructureError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -59,30 +69,38 @@ def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = 
         "actual_identity_write": False,
         "actual_unapproved_crystallized_approval": False,
     }
-    permit = _append_permit(
-        hermes_home=hermes_home,
-        registry_key=registry_key,
-        lane_id=spec["lane_id"],
-        risk_class=spec["risk_class"],
-        raw_script=spec["raw_script"],
-        helper_present=helper.is_file(),
-        smoke_mode=smoke_mode,
-        boundary=boundary,
-    )
+    try:
+        permit = _append_permit(
+            hermes_home=hermes_home,
+            registry_key=registry_key,
+            lane_id=spec["lane_id"],
+            risk_class=spec["risk_class"],
+            raw_script=spec["raw_script"],
+            helper_present=helper.is_file(),
+            smoke_mode=smoke_mode,
+            boundary=boundary,
+        )
+    except ExecutionGateInfrastructureError as exc:
+        sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
+        return 3
     if permit["permit_decision"] != "allowed":
         return 2
     if not helper.is_file():
-        _append_completion(
-            hermes_home=hermes_home,
-            envelope_id=permit["execution_gate_envelope_id"],
-            lane_id=spec["lane_id"],
-            execution_status="helper_missing",
-            returncode=2,
-            smoke_mode=smoke_mode,
-            boundary=boundary,
-            helper_report={},
-            requires_boundary_report=spec.get("requires_boundary_report", True),
-        )
+        try:
+            _append_completion(
+                hermes_home=hermes_home,
+                envelope_id=permit["execution_gate_envelope_id"],
+                lane_id=spec["lane_id"],
+                execution_status="helper_missing",
+                returncode=2,
+                smoke_mode=smoke_mode,
+                boundary=boundary,
+                helper_report={},
+                requires_boundary_report=spec.get("requires_boundary_report", True),
+            )
+        except ExecutionGateInfrastructureError as exc:
+            sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
+            return 3
         sys.stderr.write(f"Memory-OS cron helper missing: {helper.name}\n")
         return 2
     report_path = _helper_report_path(hermes_home, str(permit["execution_gate_envelope_id"]))
@@ -102,17 +120,25 @@ def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = 
     )
     helper_report = _read_helper_report(report_path, completed.stdout)
     observed_boundary = helper_report.get("boundary") if isinstance(helper_report.get("boundary"), dict) else boundary
-    _append_completion(
-        hermes_home=hermes_home,
-        envelope_id=permit["execution_gate_envelope_id"],
-        lane_id=spec["lane_id"],
-        execution_status="ok" if completed.returncode == 0 else "error",
-        returncode=completed.returncode,
-        smoke_mode=smoke_mode,
-        boundary=observed_boundary,
-        helper_report=helper_report,
-        requires_boundary_report=spec.get("requires_boundary_report", True),
-    )
+    try:
+        _append_completion(
+            hermes_home=hermes_home,
+            envelope_id=permit["execution_gate_envelope_id"],
+            lane_id=spec["lane_id"],
+            execution_status="ok" if completed.returncode == 0 else "error",
+            returncode=completed.returncode,
+            smoke_mode=smoke_mode,
+            boundary=observed_boundary,
+            helper_report=helper_report,
+            requires_boundary_report=spec.get("requires_boundary_report", True),
+        )
+    except ExecutionGateInfrastructureError as exc:
+        if completed.stdout:
+            sys.stdout.write(completed.stdout)
+        if completed.stderr:
+            sys.stderr.write(completed.stderr)
+        sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
+        return 3
     if completed.stdout:
         sys.stdout.write(completed.stdout)
     if completed.stderr:
@@ -288,44 +314,128 @@ def _read_helper_report(path: Path, stdout: str) -> dict[str, Any]:
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    lock_path = path.with_name(f".{path.name}.lock")
+    try:
+        with _exclusive_file_lock(lock_path, timeout_seconds=SIDECAR_LOCK_TIMEOUT_SECONDS):
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+    except ExecutionGateInfrastructureError:
+        raise
+    except OSError as exc:
+        raise ExecutionGateInfrastructureError("journal_append_failed") from exc
 
 
 def _update_sidecar_index(hermes_home: Path, envelope_id: str, stage: str, record: dict[str, Any]) -> None:
     """Keep the ExecutionGate O(1) sidecar index in sync for cron-wrapper permits."""
     index_path = hermes_home / "memory-os" / "system" / "execution_gate_index.json"
     index_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = index_path.with_name(f".{index_path.name}.lock")
     try:
-        loaded = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
-    except json.JSONDecodeError:
-        loaded = {}
-    if not isinstance(loaded, dict):
-        loaded = {}
-    entry = loaded.get(envelope_id, {})
-    if not isinstance(entry, dict):
-        entry = {}
-    entry["envelope_id"] = envelope_id
-    if stage == "permit":
-        entry.update(
-            {
-                "permit_decision": record.get("permit_decision"),
-                "lane_id": record.get("lane_id"),
-                "risk_class": record.get("risk_class"),
-                "scope_hash": record.get("scope_hash"),
-                "permit_created_at": record.get("created_at"),
-                "permit_expires_at": record.get("expires_at"),
-                "boundary_true": record.get("boundary_true", False),
-            }
-        )
-    elif stage == "completion":
-        entry["completion_count"] = int(entry.get("completion_count") or 0) + 1
-        entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
-        entry["completed_at"] = record.get("created_at")
-    loaded[envelope_id] = entry
-    tmp_path = index_path.with_name(f".{index_path.name}.tmp")
-    tmp_path.write_text(json.dumps(loaded, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp_path, index_path)
+        with _exclusive_file_lock(lock_path, timeout_seconds=SIDECAR_LOCK_TIMEOUT_SECONDS):
+            try:
+                loaded = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+            except json.JSONDecodeError:
+                loaded = {}
+            if not isinstance(loaded, dict):
+                loaded = {}
+            entry = loaded.get(envelope_id, {})
+            if not isinstance(entry, dict):
+                entry = {}
+            entry["envelope_id"] = envelope_id
+            if stage == "permit":
+                entry.update(
+                    {
+                        "permit_decision": record.get("permit_decision"),
+                        "lane_id": record.get("lane_id"),
+                        "risk_class": record.get("risk_class"),
+                        "scope_hash": record.get("scope_hash"),
+                        "permit_created_at": record.get("created_at"),
+                        "permit_expires_at": record.get("expires_at"),
+                        "boundary_true": record.get("boundary_true", False),
+                    }
+                )
+            elif stage == "completion":
+                entry["completion_count"] = int(entry.get("completion_count") or 0) + 1
+                entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
+                entry["completed_at"] = record.get("created_at")
+            loaded[envelope_id] = entry
+            _atomic_write_json(index_path, loaded)
+    except ExecutionGateInfrastructureError:
+        raise
+    except OSError as exc:
+        raise ExecutionGateInfrastructureError("sidecar_update_failed") from exc
+
+
+@contextlib.contextmanager
+def _exclusive_file_lock(path: Path, *, timeout_seconds: float):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"\0")
+        handle.flush()
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    locked = False
+    try:
+        while not locked:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise ExecutionGateInfrastructureError("sidecar_lock_timeout")
+                time.sleep(0.01)
+        yield
+    finally:
+        if locked:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        _fsync_directory(path.parent)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(directory_fd)
 
 
 def _any_boundary_true(value: Any) -> bool:
