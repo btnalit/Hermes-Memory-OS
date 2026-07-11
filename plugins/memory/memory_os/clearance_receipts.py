@@ -149,20 +149,27 @@ class CorpusChangeEvent:
 
 
 def read_clearance_receipts(roots: Any) -> list[dict[str, Any]]:
-    """Read all clearance receipts from the journal."""
+    """Read all clearance receipts from the journal.
+
+    Deduplicates by receipt_id — later entries supersede earlier ones
+    (journal is append-only; invalidation appends updated copies).
+    """
     path = clearance_receipts_path(roots)
     if not path.exists():
         return []
-    records: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
             continue
         try:
-            records.append(json.loads(line))
+            record = json.loads(line)
+            rid = str(record.get("receipt_id") or "")
+            if rid:
+                by_id[rid] = record  # later entry wins
         except json.JSONDecodeError:
             continue
-    return records
+    return list(by_id.values())
 
 
 def write_clearance_receipt(
@@ -312,3 +319,91 @@ def latest_corpus_watermark(roots: Any) -> int:
     """Return the current corpus watermark (latest event_id, 0 if empty)."""
     events = read_corpus_change_events(roots)
     return max((int(e.get("event_id") or 0) for e in events), default=0)
+
+
+# ── E3: Invalidation engine ────────────────────────────────────────────────
+
+
+def invalidate_receipts_since(
+    roots: Any,
+    *,
+    watermark: int = 0,
+) -> dict[str, Any]:
+    """Invalidate receipts affected by corpus changes since *watermark*.
+
+    For each active receipt:
+    - If the receipt is ``conservative_full`` → always invalidated (any change).
+    - If any event entity_set is empty → conservative_full for entity_scoped receipts.
+    - If event entity_set ∩ receipt checked_entity_set is non-empty → invalidated.
+    - Otherwise preserved.
+
+    Returns a structured report. Invalidation appends updated receipt records
+    (marked with ``invalidated_at`` / ``invalidated_by``) to the journal.
+    The original record is not deleted.
+    """
+    from .jsonl_io import append_jsonl_locked
+
+    events = read_corpus_change_events(roots)
+    new_events = [e for e in events if int(e.get("event_id") or 0) > watermark]
+    if not new_events:
+        return {"status": "ok", "invalidated_count": 0, "events_since_watermark": 0}
+
+    # Collect affected entity sets from new events
+    all_event_entities: set[str] = set()
+    has_unattributable_event = False
+    affected_record_ids: set[str] = set()
+    for event in new_events:
+        entity_set = list(event.get("entity_set") or [])
+        if entity_set:
+            all_event_entities.update(entity_set)
+        else:
+            has_unattributable_event = True
+        rid = str(event.get("record_id") or "")
+        if rid:
+            affected_record_ids.add(rid)
+
+    invalidated_count = 0
+    records = read_clearance_receipts(roots)
+
+    for rec_dict in records:
+        receipt = ClearanceReceipt.from_dict(rec_dict)
+        if not receipt.is_active:
+            continue
+
+        should_invalidate = False
+        invalidation_mode = "entity_scoped"
+
+        if receipt.invalidation_mode == "conservative_full":
+            should_invalidate = True
+            invalidation_mode = "conservative_full"
+        elif has_unattributable_event:
+            should_invalidate = True
+            invalidation_mode = "conservative_full"
+        elif all_event_entities:
+            receipt_entities = set(receipt.checked_entity_set)
+            if receipt_entities & all_event_entities:
+                should_invalidate = True
+                invalidation_mode = "entity_scoped"
+            elif affected_record_ids:
+                # Check if receipt's conflict_refs overlap with affected records
+                receipt_conflict_refs = set(receipt.conflict_refs)
+                if receipt_conflict_refs & affected_record_ids:
+                    should_invalidate = True
+                    invalidation_mode = "entity_scoped"
+
+        if should_invalidate:
+            invalidated = receipt.to_dict()
+            from datetime import timezone as _tz
+
+            invalidated["invalidated_at"] = datetime.now(_tz.utc).isoformat().replace("+00:00", "Z")
+            invalidated["invalidated_by"] = invalidation_mode
+            append_jsonl_locked(clearance_receipts_path(roots), invalidated)
+            invalidated_count += 1
+
+    return {
+        "status": "ok",
+        "invalidated_count": invalidated_count,
+        "events_since_watermark": len(new_events),
+        "affected_entity_count": len(all_event_entities),
+        "has_unattributable_event": has_unattributable_event,
+    }
