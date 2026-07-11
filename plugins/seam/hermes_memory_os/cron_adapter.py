@@ -1,4 +1,8 @@
-"""Hermes cron adapter for Memory-OS-owned scheduled jobs."""
+"""Hermes host adapter for Memory-OS-owned cron specifications.
+
+Memory-OS owns the declarative job specs.  This seam owns Hermes filesystem
+inspection, capability subprocesses, and create/edit command planning.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .cron_registry import MemoryOSCronSpec, memory_os_cron_specs
+from plugins.memory.memory_os.cron_registry import MemoryOSCronSpec, memory_os_cron_specs
 
 
 @dataclass(frozen=True)
@@ -80,7 +84,10 @@ def read_jobs_from_hermes_home(hermes_home: Path) -> list[dict[str, Any]]:
     return [dict(item) for item in jobs if isinstance(item, dict)] if isinstance(jobs, list) else []
 
 
-def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[MemoryOSCronSpec]) -> dict[str, Any]:
+def classify_hermes_cron_jobs(
+    jobs: Iterable[dict[str, Any]],
+    specs: Iterable[MemoryOSCronSpec],
+) -> dict[str, Any]:
     specs_by_name = {spec.name: spec for spec in specs}
     known_specs_by_name = {spec.name: spec for spec in memory_os_cron_specs()}
     known_specs_by_wrapper = {spec.wrapper_script: spec for spec in memory_os_cron_specs()}
@@ -104,10 +111,7 @@ def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[Me
         }
         spec = specs_by_name.get(name)
         if spec:
-            if script == spec.wrapper_script:
-                wrapped.append(safe)
-            else:
-                naked.append(safe)
+            (wrapped if script == spec.wrapper_script else naked).append(safe)
             continue
         known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
         if known_spec:

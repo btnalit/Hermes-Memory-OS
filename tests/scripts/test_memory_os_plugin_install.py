@@ -427,7 +427,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
     assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 13
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 14
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -442,6 +442,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
+        "memory-os-hindsight-health-probe",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
     }
@@ -456,6 +457,17 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
     assert home.joinpath("scripts", "memory_os_cron_hindsight_advisory_digest_gate.py").is_file()
     assert home.joinpath("scripts", "memory_os_hindsight_advisory_digest.py").is_file()
+    hindsight_health_probe = home.joinpath("scripts", "memory_os_hindsight_health_probe.py")
+    source_hindsight_health_probe = Path(__file__).resolve().parents[2].joinpath(
+        "scripts", "memory_os_hindsight_health_probe.py"
+    )
+    assert hindsight_health_probe.read_text(encoding="utf-8") == source_hindsight_health_probe.read_text(
+        encoding="utf-8"
+    )
+    ragflow_wrapper = home.joinpath("scripts", "external_evidence_ragflow_readonly_probe.sh")
+    assert ragflow_wrapper.is_file()
+    assert "memory_os_ragflow_readonly_probe.py" in ragflow_wrapper.read_text(encoding="utf-8")
+    assert home.joinpath("scripts", "memory_os_ragflow_readonly_probe.py").is_file()
 
 
 def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
@@ -480,7 +492,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 16
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 17
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert {job["name"] for job in jobs} == {
@@ -500,6 +512,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
+        "memory-os-hindsight-health-probe",
     }
     by_name = {job["name"]: job for job in jobs}
     assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"

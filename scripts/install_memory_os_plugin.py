@@ -53,6 +53,9 @@ SOURCE_STATE_OVERLAY_REFRESH_GATE = REPO_ROOT / "scripts" / "memory_os_cron_stat
 SOURCE_ENTITY_INDEX_REFRESH = REPO_ROOT / "scripts" / "memory_os_entity_index_refresh.py"
 SOURCE_ENTITY_INDEX_REFRESH_GATE = REPO_ROOT / "scripts" / "memory_os_cron_entity_index_refresh_gate.py"
 SOURCE_HINDSIGHT_ADVISORY_DIGEST = REPO_ROOT / "scripts" / "memory_os_hindsight_advisory_digest.py"
+SOURCE_HINDSIGHT_HEALTH_PROBE = REPO_ROOT / "scripts" / "memory_os_hindsight_health_probe.py"
+SOURCE_RAGFLOW_READONLY_PROBE = REPO_ROOT / "scripts" / "memory_os_ragflow_readonly_probe.py"
+SOURCE_EXTERNAL_EVIDENCE_RAGFLOW_WRAPPER = REPO_ROOT / "scripts" / "external_evidence_ragflow_readonly_probe.sh"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -1145,6 +1148,9 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "entity_index_refresh": SOURCE_ENTITY_INDEX_REFRESH,
         "entity_index_refresh_gate": SOURCE_ENTITY_INDEX_REFRESH_GATE,
         "hindsight_advisory_digest": SOURCE_HINDSIGHT_ADVISORY_DIGEST,
+        "hindsight_health_probe": SOURCE_HINDSIGHT_HEALTH_PROBE,
+        "ragflow_readonly_probe": SOURCE_RAGFLOW_READONLY_PROBE,
+        "external_evidence_ragflow_wrapper": SOURCE_EXTERNAL_EVIDENCE_RAGFLOW_WRAPPER,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():
@@ -1228,6 +1234,8 @@ def _write_registry_cron_wrappers(hermes_home: Path) -> None:
     scripts_dir.mkdir(parents=True, exist_ok=True)
     specs = memory_os_cron_specs()
     for spec in specs:
+        if spec.wrapper_script == spec.raw_script:
+            continue
         wrapper = scripts_dir / spec.wrapper_script
         wrapper.write_text(
             (

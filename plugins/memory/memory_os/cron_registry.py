@@ -240,6 +240,19 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         no_agent=True,
         requires_boundary_report=False,
     ),
+    MemoryOSCronSpec(
+        key="hindsight_health_probe",
+        name="memory-os-hindsight-health-probe",
+        raw_script="memory_os_hindsight_health_probe.py",
+        wrapper_script="memory_os_hindsight_health_probe.py",
+        lane_id="hindsight_health_probe",
+        helper_kind="read_only_probe",
+        schedule_arg="hindsight_health_probe_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
 )
 
 

@@ -177,6 +177,7 @@ def _home_with_helpers(
         "memory_os_cron_entity_index_refresh_gate.py",
         "memory_os_hindsight_advisory_digest.py",
         "memory_os_cron_hindsight_advisory_digest_gate.py",
+        "memory_os_hindsight_health_probe.py",
     ):
         if helper in omitted:
             continue
@@ -229,7 +230,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 13
+    assert len(report["operational_cron_jobs"]) == 14
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
@@ -242,6 +243,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
+        "memory-os-hindsight-health-probe",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
     }
@@ -254,6 +256,10 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert hindsight["schedule"] == "20 2 * * 0"
     assert hindsight["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
     assert hindsight["raw_script"] == "memory_os_hindsight_advisory_digest.py"
+    hindsight_health = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-hindsight-health-probe"][0]
+    assert hindsight_health["schedule"] == "33 * * * *"
+    assert hindsight_health["script"] == "memory_os_hindsight_health_probe.py"
+    assert hindsight_health["raw_script"] == "memory_os_hindsight_health_probe.py"
     for job in report["operational_cron_jobs"]:
         assert home.joinpath("scripts", job["script"]).is_file(), job["script"]
     assert not home.joinpath("cron", "jobs.json").exists()
@@ -342,7 +348,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 16
+    assert len(report["operational_cron_jobs"]) == 17
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -360,6 +366,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
+        "memory-os-hindsight-health-probe",
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
     }
@@ -376,6 +383,11 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-hindsight-advisory-digest"]["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
     assert by_name["memory-os-hindsight-advisory-digest"]["no_agent"] is True
     assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
+    assert by_name["memory-os-hindsight-health-probe"]["deliver"] == "local"
+    assert by_name["memory-os-hindsight-health-probe"]["script"] == "memory_os_hindsight_health_probe.py"
+    assert by_name["memory-os-hindsight-health-probe"]["no_agent"] is True
+    assert by_name["memory-os-hindsight-health-probe"]["schedule_display"] == "33 * * * *"
+    assert home.joinpath("scripts", "memory_os_hindsight_health_probe.py").read_text(encoding="utf-8") == "#!/usr/bin/env python3\n"
     assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
     assert by_name["memory-os-right-brain-expression-outcome"]["script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
     assert by_name["memory-os-right-brain-expression-outcome"]["no_agent"] is True

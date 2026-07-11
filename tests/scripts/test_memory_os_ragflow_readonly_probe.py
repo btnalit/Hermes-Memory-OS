@@ -13,6 +13,17 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "memory_os_ragflow_readonly_probe.py"
+HOST_WRAPPER = REPO_ROOT / "scripts" / "external_evidence_ragflow_readonly_probe.sh"
+
+
+def test_external_evidence_cron_wrapper_is_host_owned_and_secret_free():
+    text = HOST_WRAPPER.read_text(encoding="utf-8")
+
+    assert HOST_WRAPPER.name == "external_evidence_ragflow_readonly_probe.sh"
+    assert "memory_os_ragflow_readonly_probe.py" in text
+    assert "--api-key-file" not in text
+    assert "--dataset-id" not in text
+    assert "--base-url" not in text
 
 
 def _seed_canonical(home: Path) -> str:

@@ -2,10 +2,25 @@ import json
 
 from plugins.memory.memory_os.cron_registry import (
     cron_registry_snapshot,
+    memory_os_cron_spec_by_key,
     memory_os_cron_specs,
     specs_from_snapshot,
     write_cron_registry_snapshot,
 )
+
+
+def test_hindsight_health_probe_is_registered_as_read_only_self_wrapper():
+    spec = memory_os_cron_spec_by_key("hindsight_health_probe")
+
+    assert spec is not None
+    assert spec.name == "memory-os-hindsight-health-probe"
+    assert spec.raw_script == "memory_os_hindsight_health_probe.py"
+    assert spec.wrapper_script == spec.raw_script
+    assert spec.lane_id == "hindsight_health_probe"
+    assert spec.schedule_arg == "hindsight_health_probe_schedule"
+    assert spec.deliver_role == "local"
+    assert spec.no_agent is True
+    assert spec.requires_boundary_report is False
 
 
 def test_cron_registry_snapshot_round_trips_all_specs(tmp_path):

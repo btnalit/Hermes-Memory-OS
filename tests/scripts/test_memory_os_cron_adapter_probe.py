@@ -1,10 +1,23 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import scripts.memory_os_cron_adapter_probe as cron_probe
+
+
+def _copy_installed_cron_seam(home: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins"
+    seam_target = runtime_plugins / "seam"
+    seam_target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(repo_root / "plugins" / "seam" / "__init__.py", seam_target / "__init__.py")
+    adapter_target = seam_target / "hermes_memory_os"
+    adapter_target.mkdir(parents=True, exist_ok=True)
+    for name in ("__init__.py", "cron_adapter.py"):
+        shutil.copy2(repo_root / "plugins" / "seam" / "hermes_memory_os" / name, adapter_target / name)
 
 
 def _fake_hermes(tmp_path: Path) -> Path:
@@ -87,6 +100,7 @@ def test_cron_adapter_probe_uses_installed_snapshot_and_adapter_classification(t
 
     assert result.returncode == 0
     assert report["schema_version"] == "memory-os.hermes_cron_adapter_probe.v0"
+    assert report["adapter_owner"] == "hermes_memory_os_seam"
     assert report["spec_source"] == "installed_snapshot"
     assert report["capabilities"]["supports_script"] is True
     assert report["classification"]["memory_os_owned_expected_count"] == 1
@@ -189,6 +203,7 @@ def test_import_comes_from_repo_not_runtime_when_both_exist(tmp_path, monkeypatc
         runtime_home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
     )
     runtime_plugins.mkdir(parents=True)
+    _copy_installed_cron_seam(runtime_home)
     # Write a sentinel __init__.py so we can detect which copy was imported
     (runtime_plugins / "__init__.py").write_text(
         '__version__ = "RUNTIME_COPY"\n'
@@ -248,6 +263,7 @@ def test_installed_copy_without_env_bootstraps_via_self_location(tmp_path):
     # Create the installed runtime layout
     runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
     runtime_plugins.mkdir(parents=True)
+    _copy_installed_cron_seam(home)
     (runtime_plugins / "__init__.py").write_text(
         '"""Installed Memory-OS provider."""\n__version__ = "installed"\n',
         encoding="utf-8",
@@ -301,6 +317,7 @@ def test_installed_copy_with_hermes_home_flag_no_env(tmp_path):
     # Create the installed runtime layout with a full enough import chain
     runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
     runtime_plugins.mkdir(parents=True)
+    _copy_installed_cron_seam(home)
     (runtime_plugins / "__init__.py").write_text(
         '"""Installed Memory-OS provider."""\n__version__ = "installed"\n',
         encoding="utf-8",
@@ -356,6 +373,7 @@ def test_cli_hermes_home_beats_env_hermes_home_for_imports(tmp_path, monkeypatch
         scripts_dir.mkdir(parents=True)
         runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
         runtime_plugins.mkdir(parents=True)
+        _copy_installed_cron_seam(home)
         (runtime_plugins / "__init__.py").write_text(
             f'"""Home: {home.name}."""\n__version__ = "{home.name}"\n',
             encoding="utf-8",

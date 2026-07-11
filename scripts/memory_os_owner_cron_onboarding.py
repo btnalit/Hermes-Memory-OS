@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, write_cron_registry_snapshot
-from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
+from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 
 
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
@@ -36,6 +36,7 @@ ACTIVE_CLOSURE_CRON_KEYS = frozenset({
     "state_overlay_refresh",
     "entity_index_refresh",
     "hindsight_advisory_digest",
+    "hindsight_health_probe",
     "expression_feedback_request",
     "memory_sources_feedback_request",
 })
@@ -95,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-overlay-refresh-schedule", default="17,47 * * * *")
     parser.add_argument("--entity-index-refresh-schedule", default="25,55 * * * *")
     parser.add_argument("--hindsight-advisory-digest-schedule", default="20 2 * * 0")
+    parser.add_argument("--hindsight-health-probe-schedule", default="33 * * * *")
     parser.add_argument(
         "--cron-profile",
         choices=("active-closure", "full"),
@@ -335,6 +337,8 @@ def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any
     else:
         raise RuntimeError(f"execution gate runner source missing: {SOURCE_EXECUTION_GATE_RUNNER}")
     for spec in specs:
+        if str(spec["script"]) == str(spec["raw_script"]):
+            continue
         wrapper = scripts_dir / str(spec["script"])
         wrapper.write_text(
             (

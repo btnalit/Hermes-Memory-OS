@@ -43,7 +43,7 @@ except ImportError:
     # Fallback for deploy from non-standard paths
     _MEMORY_OS_IDENTITY_MARKERS = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
 
-from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
+from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, write_cron_registry_snapshot
 
 SCHEMA_VERSION = "memory-os.l3_probe_deploy.v0"

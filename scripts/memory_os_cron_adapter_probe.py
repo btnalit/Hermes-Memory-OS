@@ -88,7 +88,7 @@ for _base in reversed(_path_candidates):
         sys.path.insert(0, _base_str)
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, specs_from_snapshot
-from plugins.memory.memory_os.hermes_cron_adapter import HermesCronAdapter
+from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 from scripts.memory_os_host_profile import resolve_host_runtime_profile
 
 
@@ -179,6 +179,7 @@ def probe_hermes_cron_adapter(*, hermes_home: Path, hermes_bin: str = "hermes") 
         status = "warning"
     return {
         "schema_version": SCHEMA_VERSION,
+        "adapter_owner": "hermes_memory_os_seam",
         "status": status,
         "hermes_home": str(hermes_home),
         "spec_source": "installed_snapshot" if _snapshot_path(hermes_home).exists() else "package_registry",

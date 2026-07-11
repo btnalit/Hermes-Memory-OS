@@ -1,9 +1,10 @@
 import subprocess
 
 from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, memory_os_cron_specs
-from plugins.memory.memory_os.hermes_cron_adapter import classify_hermes_cron_jobs, plan_hermes_cron_job_upsert
-from plugins.memory.memory_os.hermes_cron_adapter import HermesCronDesiredJob
-from plugins.memory.memory_os.hermes_cron_adapter import probe_hermes_cron_capabilities
+from plugins.memory.memory_os import hermes_cron_adapter as legacy_cron_adapter
+from plugins.seam.hermes_memory_os.cron_adapter import classify_hermes_cron_jobs, plan_hermes_cron_job_upsert
+from plugins.seam.hermes_memory_os.cron_adapter import HermesCronDesiredJob
+from plugins.seam.hermes_memory_os.cron_adapter import probe_hermes_cron_capabilities
 
 
 def test_hermes_cron_adapter_classifies_wrapped_naked_and_unregistered_jobs():
@@ -61,6 +62,60 @@ def test_hermes_cron_adapter_counts_enabled_known_optional_jobs_outside_active_r
             "known_optional_reason": "not_in_active_installed_snapshot",
         }
     ]
+
+
+def test_hermes_cron_adapter_classifies_renamed_ragflow_probe_as_external_seam_job():
+    summary = classify_hermes_cron_jobs(
+        [
+            {
+                "name": "external-evidence-ragflow-readonly-probe",
+                "script": "external_evidence_ragflow_readonly_probe.sh",
+                "enabled": True,
+                "deliver": "local",
+                "no_agent": True,
+            }
+        ],
+        (),
+    )
+
+    assert summary["memory_os_like_unregistered_count"] == 0
+    assert summary["memory_os_owned_expected_count"] == 0
+    assert summary["external_unmanaged_count"] == 1
+    assert summary["external_unmanaged_jobs"] == [
+        {
+            "name": "external-evidence-ragflow-readonly-probe",
+            "script": "external_evidence_ragflow_readonly_probe.sh",
+            "enabled": True,
+            "deliver": "local",
+            "no_agent": True,
+        }
+    ]
+
+
+def test_hermes_cron_host_seam_shadow_matches_legacy_adapter():
+    specs = memory_os_cron_specs()
+    jobs = [
+        {
+            "id": "job-1",
+            "name": specs[0].name,
+            "script": specs[0].wrapper_script,
+            "enabled": True,
+            "deliver": "local",
+            "no_agent": True,
+        },
+        {
+            "id": "job-2",
+            "name": "external-evidence-ragflow-readonly-probe",
+            "script": "external_evidence_ragflow_readonly_probe.sh",
+            "enabled": True,
+            "deliver": "local",
+            "no_agent": True,
+        },
+    ]
+
+    assert classify_hermes_cron_jobs(jobs, specs) == legacy_cron_adapter.classify_hermes_cron_jobs(
+        jobs, specs
+    )
 
 
 def test_hermes_cron_adapter_upsert_plan_owns_schedule_prompt_wrapper_and_no_agent():
