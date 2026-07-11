@@ -771,3 +771,422 @@ def test_delivery_items_bound_proposed_memory_to_render_gate(tmp_path):
     for item in items:
         assert len(item["proposed_memory"]) <= 1000
         assert len(item["summary"]) <= 1000
+
+
+# ── V2-E E5: clearance receipt wiring ────────────────────────────────────────
+
+
+class _FakeRootsForClearance:
+    """Minimal roots that exposes the system directory for receipt writes."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.memory_os_root = tmp_path / "memory-os"
+        (self.memory_os_root / "system").mkdir(parents=True, exist_ok=True)
+        self.hermes_home = tmp_path
+        self.profile = "default"
+
+
+def _write_clearance(roots: Any, record_id: str, verdict: str,
+                     *, conflict_refs: list[str] | None = None,
+                     receipt_id: str | None = None,
+                     corpus_watermark: int = 0,
+                     content_hash: str = "") -> str:
+    """Helper: write a single active clearance receipt and return its receipt_id."""
+    from plugins.memory.memory_os.clearance_receipts import (
+        ClearanceReceipt, write_clearance_receipt,
+    )
+
+    rid = receipt_id or f"clr_test_{record_id}"
+    ch = content_hash or f"test_hash_{record_id}"  # unique per record to avoid idempotency collision
+    receipt = ClearanceReceipt(
+        receipt_id=rid,
+        record_id=record_id,
+        content_hash=ch,
+        verdict=verdict,
+        conflict_refs=list(conflict_refs or []),
+        corpus_watermark=corpus_watermark,
+        judge_version="test_v1",
+        judged_at="2026-07-11T00:00:00Z",
+    )
+    write_clearance_receipt(roots, receipt)
+    return rid
+
+
+class TestV2EClearanceWiringUnit:
+    """E.1/E.2/E.3 — _resolve_clearance_for_proposal constitution matrix."""
+
+    def test_clear_verdict_allows_automatic(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_1", "clear")
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_1", "automatic", v2e_enabled=True,
+        )
+        assert block is None
+        assert clearance is not None
+        assert clearance["status"] == "clear"
+        assert clearance["receipt_id"] == "clr_test_prov_1"
+
+    def test_clear_verdict_allows_owner(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_2", "clear")
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_2", "owner_initiated", v2e_enabled=True,
+        )
+        assert block is None
+        assert clearance["status"] == "clear"
+
+    def test_conflict_verdict_blocks_automatic_with_contested(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_3", "conflict", conflict_refs=["perm_A", "perm_B"])
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_3", "automatic", v2e_enabled=True,
+        )
+        assert block == "clearance_conflict"
+        assert clearance is not None
+        assert clearance["status"] == "conflict"
+        assert clearance["contested"] is True
+        assert set(clearance["conflict_refs"]) == {"perm_A", "perm_B"}
+
+    def test_conflict_verdict_allows_owner_with_override(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_4", "conflict", conflict_refs=["perm_C"])
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_4", "owner_initiated", v2e_enabled=True,
+        )
+        assert block is None
+        assert clearance["status"] == "conflict"
+        assert clearance["owner_override"] is True
+        assert "contested" not in clearance
+
+    def test_unknown_verdict_blocks_automatic(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_5", "unknown")
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_5", "automatic", v2e_enabled=True,
+        )
+        assert block == "clearance_unknown"
+        assert clearance["status"] == "unknown"
+
+    def test_unknown_verdict_blocks_owner(self, tmp_path: Path) -> None:
+        """Constitution matrix: unknown blocks both automatic AND owner."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_6", "unknown")
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_6", "owner_initiated", v2e_enabled=True,
+        )
+        assert block == "clearance_unknown"
+
+    def test_no_receipt_blocks_both_paths(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "no_such_record", "automatic", v2e_enabled=True,
+        )
+        assert block == "no_clearance_receipt"
+        assert clearance["status"] == "unavailable"
+
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "no_such_record", "owner_initiated", v2e_enabled=True,
+        )
+        assert block == "no_clearance_receipt"
+
+    def test_v2e_disabled_bypasses_all_gating(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        # Even with a conflict receipt, v2e_enabled=False returns no gating
+        _write_clearance(roots, "prov_7", "conflict", conflict_refs=["perm_D"])
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_7", "automatic", v2e_enabled=False,
+        )
+        assert block is None
+        assert clearance is None  # None → caller uses default
+
+    def test_invalidated_receipt_treated_as_no_receipt(self, tmp_path: Path) -> None:
+        """An invalidated receipt is not active — treated as missing."""
+        from plugins.memory.memory_os.clearance_receipts import (
+            ClearanceReceipt, write_clearance_receipt,
+        )
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        receipt = ClearanceReceipt(
+            receipt_id="clr_invalidated",
+            record_id="prov_8",
+            content_hash="test",
+            verdict="clear",
+            judge_version="v1",
+            judged_at="2026-07-11T00:00:00Z",
+            invalidated_at="2026-07-11T01:00:00Z",
+            invalidated_by="entity_scoped",
+        )
+        write_clearance_receipt(roots, receipt)
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_8", "automatic", v2e_enabled=True,
+        )
+        assert block == "no_clearance_receipt"
+
+    def test_only_active_receipt_for_specific_record_id_matches(self, tmp_path: Path) -> None:
+        """Receipts for other records must not interfere."""
+        from plugins.memory.memory_os.permanent_promotion import (
+            _resolve_clearance_for_proposal,
+        )
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, "prov_A", "conflict")
+        _write_clearance(roots, "prov_B", "clear")
+        # prov_C has no receipt
+        clearance, block = _resolve_clearance_for_proposal(
+            roots, "prov_B", "automatic", v2e_enabled=True,
+        )
+        assert block is None
+        assert clearance["status"] == "clear"
+
+
+class TestV2EClearanceWiringIntegration:
+    """E5 producer integration — prepare_permanent_promotion_delivery + propose."""
+
+    def test_automatic_delivery_skips_conflict_record(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            prepare_permanent_promotion_delivery,
+        )
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_int_1", "fact", "Integration test fact.", ["evt_1"])
+        decision = ApprovalDecision(
+            "cand_int_1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="integration.md")
+        record_id = svc.read_records("integration.md")[0].frontmatter["id"]
+
+        # Write a conflict receipt for this record
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "conflict", conflict_refs=["perm_X"])
+
+        # v2e_enabled=False (default): should still work (no gating)
+        report_off = prepare_permanent_promotion_delivery(
+            store, delivery_ref="d_off",
+        )
+        assert report_off["status"] in ("ok", "partial")
+        # With v2e off, clearance is not checked
+        assert report_off.get("clearance_blocked_count", 0) == 0
+
+    def test_owner_propose_blocks_on_unknown(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import (
+            PermanentPromotionError,
+            PermanentPromotionService,
+        )
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_own_1", "fact", "Owner test fact.", ["evt_1"])
+        decision = ApprovalDecision(
+            "cand_own_1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="owner_test.md")
+        record_id = svc.read_records("owner_test.md")[0].frontmatter["id"]
+
+        # Write an unknown receipt
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "unknown")
+
+        # Owner propose with v2e enabled → blocked
+        from datetime import datetime, timezone
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=True,
+        )
+        with pytest.raises(PermanentPromotionError, match="clearance_unknown"):
+            service.propose(record_id, origin="owner_initiated")
+
+    def test_owner_propose_allows_clear(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_own_2", "fact", "Owner clear fact.", ["evt_1"])
+        decision = ApprovalDecision(
+            "cand_own_2", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="owner_clear.md")
+        record_id = svc.read_records("owner_clear.md")[0].frontmatter["id"]
+
+        # Write a clear receipt
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "clear")
+
+        from datetime import datetime, timezone
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=True,
+        )
+        result = service.propose(record_id, origin="owner_initiated")
+        assert result["status"] == "open"
+        assert result["proposal_id"].startswith("ppm_")
+
+    def test_owner_propose_allows_conflict_with_override(self, tmp_path: Path) -> None:
+        """Owner can override a conflict verdict (owner_override flag set)."""
+        from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_own_3", "fact", "Owner conflict fact.", ["evt_2"])
+        decision = ApprovalDecision(
+            "cand_own_3", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="owner_conflict.md")
+        record_id = svc.read_records("owner_conflict.md")[0].frontmatter["id"]
+
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "conflict", conflict_refs=["perm_Y"])
+
+        from datetime import datetime, timezone
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=True,
+        )
+        result = service.propose(record_id, origin="owner_initiated")
+        assert result["status"] == "open"
+        # Verify the clearance in the proposal has owner_override
+        proposal_state = service.proposals._states()[result["proposal_id"]]
+        assert proposal_state["clearance"]["status"] == "conflict"
+        assert proposal_state["clearance"]["owner_override"] is True
+
+    def test_explicit_clearance_passed_by_caller_is_not_overridden(self, tmp_path: Path) -> None:
+        """When caller explicitly passes clearance, don't query receipts."""
+        from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_exp_1", "fact", "Explicit clearance fact.", ["evt_3"])
+        decision = ApprovalDecision(
+            "cand_exp_1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="explicit.md")
+        record_id = svc.read_records("explicit.md")[0].frontmatter["id"]
+
+        # Write a conflict receipt (should be ignored because caller passes explicit clearance)
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "conflict", conflict_refs=["perm_Z"])
+
+        from datetime import datetime, timezone
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=True,
+        )
+        result = service.propose(
+            record_id, origin="owner_initiated",
+            clearance={"status": "clear", "receipt_id": "explicit_override"},
+        )
+        assert result["status"] == "open"
+        proposal_state = service.proposals._states()[result["proposal_id"]]
+        assert proposal_state["clearance"]["status"] == "clear"
+        assert proposal_state["clearance"]["receipt_id"] == "explicit_override"
+
+    def test_v2e_disabled_owner_propose_no_gating(self, tmp_path: Path) -> None:
+        """With v2e_enabled=False, no clearance resolution occurs."""
+        from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate, CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        candidate = CrystallizedCandidate("cand_off_1", "fact", "V2E off fact.", ["evt_9"])
+        decision = ApprovalDecision(
+            "cand_off_1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "resolver",
+            "2026-06-01T00:00:00Z", provisional=True, expires_at="2026-09-01T00:00:00Z",
+        )
+        svc = CrystallizedMemoryService(store)
+        svc.write_approved_record(candidate, decision, file_name="v2e_off.md")
+        record_id = svc.read_records("v2e_off.md")[0].frontmatter["id"]
+
+        # Write a conflict receipt — should be ignored when v2e_enabled=False
+        roots = _FakeRootsForClearance(tmp_path)
+        _write_clearance(roots, record_id, "conflict")
+
+        from datetime import datetime, timezone
+        service = PermanentPromotionService(
+            store, clock=lambda: datetime(2026, 7, 11, tzinfo=timezone.utc),
+            v2e_enabled=False,
+        )
+        result = service.propose(record_id, origin="owner_initiated")
+        assert result["status"] == "open"
+        # With v2e disabled, clearance is default "unavailable"
+        proposal_state = service.proposals._states()[result["proposal_id"]]
+        assert proposal_state["clearance"]["status"] == "unavailable"

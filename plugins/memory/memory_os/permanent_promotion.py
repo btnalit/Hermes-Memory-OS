@@ -152,6 +152,81 @@ def build_proposal_record(
     return record
 
 
+def _resolve_clearance_for_proposal(
+    roots: Any,
+    record_id: str,
+    origin: str,
+    v2e_enabled: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Query clearance receipts and map verdict → clearance dict per constitution matrix.
+
+    Constitution matrix (V2-E §5):
+    ─────────────┬─────────────────┬──────────────────
+      Verdict     │ Automatic       │ Owner-initiated
+    ─────────────┼─────────────────┼──────────────────
+      clear       │ ✅ allow        │ ✅ allow
+      conflict    │ ❌ contested     │ ⚠️ warn, allow
+      unknown     │ ❌ blocked       │ ❌ blocked
+      (no receipt)│ ❌ blocked       │ ❌ blocked
+    ─────────────┴─────────────────┴──────────────────
+
+    Returns ``(clearance_dict, block_reason_or_None)``.
+    When *block_reason* is not ``None`` the proposal **must not** be created.
+    """
+    if not v2e_enabled:
+        return (None, None)
+
+    from .clearance_receipts import ClearanceReceipt as _CR, read_clearance_receipts as _read
+
+    receipts = _read(roots)
+    active_receipt = None
+    for rec in receipts:
+        cr = _CR.from_dict(rec)
+        if cr.record_id == record_id and cr.is_active:
+            active_receipt = cr
+            break
+
+    if active_receipt is None:
+        return (
+            {"status": "unavailable", "reason_code": "no_clearance_receipt"},
+            "no_clearance_receipt",
+        )
+
+    verdict = active_receipt.verdict
+
+    if verdict == "clear":
+        return (
+            {"status": "clear", "receipt_id": active_receipt.receipt_id},
+            None,
+        )
+
+    if verdict == "conflict":
+        clearance = {
+            "status": "conflict",
+            "receipt_id": active_receipt.receipt_id,
+            "conflict_refs": list(active_receipt.conflict_refs),
+        }
+        if origin == "automatic":
+            clearance["contested"] = True
+            return (clearance, "clearance_conflict")
+        else:
+            clearance["owner_override"] = True
+            return (clearance, None)
+
+    if verdict == "unknown":
+        return (
+            {"status": "unknown", "receipt_id": active_receipt.receipt_id},
+            "clearance_unknown",
+        )
+
+    # Defensive: unexpected verdict → block
+    return (
+        {"status": "unavailable", "reason_code": "unexpected_verdict",
+         "raw_verdict": verdict},
+        "unexpected_verdict",
+    )
+
+
 class ProposalLedger:
     """Append-only proposal events plus atomically-derived pending snapshot."""
 
@@ -858,6 +933,15 @@ class PermanentPromotionService:
         clearance: dict[str, Any] | None = None,
         write_context: AutomaticWriteContext | None = None,
     ) -> dict[str, Any]:
+        resolved_origin = str(origin or "owner_initiated")
+        # V2-E: resolve clearance receipt before proposing (owner path)
+        if self.v2e_enabled and clearance is None:
+            clearance_dict, block_reason = _resolve_clearance_for_proposal(
+                self.store.roots, record_id, resolved_origin, self.v2e_enabled,
+            )
+            if block_reason:
+                raise PermanentPromotionError(block_reason)
+            clearance = clearance_dict
         created = self.create_proposal(
             record_id,
             channel=channel,
@@ -1482,15 +1566,30 @@ def prepare_permanent_promotion_delivery(
         for key, value in reconcile.items():
             if key.endswith("_count"):
                 report[key] = int(value or 0)
+        report.setdefault("clearance_blocked_count", 0)
+        report.setdefault("clearance_blocked", [])
         for item in eligibility.get("eligible_records", []):
             record_id = str(item.get("record_id") or "")
             try:
+                # V2-E: resolve clearance receipt before proposing
+                clearance_dict, block_reason = _resolve_clearance_for_proposal(
+                    store.roots, record_id, "automatic", v2e_enabled,
+                )
+                if block_reason:
+                    report["proposal_skipped_count"] += 1
+                    report["clearance_blocked_count"] += 1
+                    report["clearance_blocked"].append({
+                        "record_id": record_id,
+                        "reason": block_reason,
+                    })
+                    continue
                 created = service.create_proposal(
                     record_id,
                     channel="owner_digest",
                     origin="automatic",
                     write_context=context,
                     eligibility_item=item,
+                    clearance=clearance_dict,
                 )
                 if created.get("status") == "ineligible":
                     report["proposal_skipped_count"] += 1
