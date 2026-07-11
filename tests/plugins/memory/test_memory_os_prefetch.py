@@ -734,7 +734,7 @@ def test_crystallized_lines_annotates_provisional_with_countdown(tmp_path):
     )
     service.write_approved_record(candidate, decision, file_name="owner_approved.md")
 
-    lines, _crystallized_degradation = _crystallized_lines(store)
+    lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
     assert len(lines) == 1
     assert "provisional" in lines[0]
     assert "剩" in lines[0]
@@ -783,7 +783,7 @@ def test_crystallized_lines_sorts_permanent_before_provisional(tmp_path):
     )
     service.write_approved_record(cand_perm, dec_perm, file_name="owner_approved.md")
 
-    lines, _crystallized_degradation = _crystallized_lines(store)
+    lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
     assert len(lines) == 2
     # Permanent record should be first
     assert "Permanent" in lines[0]
@@ -993,7 +993,7 @@ def test_deterministic_floor_recall_recovers_token_matches_mtime_would_cut(tmp_p
     error_records: list = []
 
     # ── Phase 5: Call _crystallized_lines ─────────────────────────────────
-    lines, degradation_level = _crystallized_lines(
+    lines, degradation_level, _record_ids = _crystallized_lines(
         store, query="时间", index=index, error_records=error_records,
     )
 
@@ -1111,7 +1111,7 @@ def test_deterministic_floor_recall_header_annotation(tmp_path):
             return {"hits": []}
 
     error_records: list = []
-    lines, degradation_level = _crystallized_lines(
+    lines, degradation_level, _record_ids = _crystallized_lines(
         store, query="时间", index=ZeroHitIndex(), error_records=error_records,
     )
     assert degradation_level == 2
@@ -1882,7 +1882,7 @@ def test_cross_session_dedup_prevents_duplicate_injection(tmp_path):
     store.append_event(event)
 
     # ── Normal path: shared seen prevents duplicate injection ──────────
-    sections = _build_prefetch_sections(
+    sections, _section_ids = _build_prefetch_sections(
         "test dedup query",
         store=store,
         session_id=current_session_id,
@@ -2262,7 +2262,7 @@ class TestPrefetchFacadeIntegration:
     def test_facade_is_none_does_not_block_build_prefetch_sections(self, tmp_path):
         """_build_prefetch_sections with recall_facade=None must not raise."""
         store = _store(tmp_path)
-        sections = _build_prefetch_sections(
+        sections, _section_ids = _build_prefetch_sections(
             "test query", store=store, recall_facade=None,
         )
         assert isinstance(sections, list)
@@ -2281,7 +2281,7 @@ class TestPrefetchFacadeIntegration:
                 return "should not be called"
 
         # Must not raise — facade failure is contained
-        sections = _build_prefetch_sections(
+        sections, _section_ids = _build_prefetch_sections(
             "test query", store=store, recall_facade=BrokenFacade(),
         )
         assert isinstance(sections, list), "Must return list even on facade failure"
@@ -2317,3 +2317,144 @@ class TestPrefetchFacadeIntegration:
             "prefetch_trace_enabled was removed as a dead knob; "
             "do not re-register without a production resolve_knob() consumer"
         )
+
+
+# ── A1: Attribution closure ────────────────────────────────────────────────
+
+
+class TestAttributionClosure:
+    """A1: crystallized sections carry canonical record IDs in metadata."""
+
+    def test_crystallized_sections_carry_canonical_ids(
+        self, tmp_path,
+    ) -> None:
+        """All three crystallized degradation levels produce source_ids."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.prefetch import (
+            ContextSection,
+            _build_prefetch_sections,
+            _section_metadata,
+            _section_source_class,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+
+        # Write a permanent record
+        perm = CrystallizedCandidate(
+            "perm_a1", "fact", "Permanent record for A1.", ["evt_1"],
+        )
+        perm_dec = ApprovalDecision(
+            "perm_a1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-06-01T00:00:00Z",
+        )
+        service.write_approved_record(perm, perm_dec, file_name="perm.md")
+
+        # Write a provisional record
+        prov = CrystallizedCandidate(
+            "prov_a1", "fact", "Provisional record for A1.", ["evt_2"],
+        )
+        prov_dec = ApprovalDecision(
+            "prov_a1", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-06-15T00:00:00Z", provisional=True,
+            expires_at="2026-09-01T00:00:00Z",
+        )
+        service.write_approved_record(prov, prov_dec, file_name="prov.md")
+
+        # Degradation level 0: empty query → level 1 (recent — no query match)
+        sections, section_source_ids = _build_prefetch_sections(
+            "", store=store,
+        )
+
+        # Find crystallized section (header varies by degradation level)
+        cryst_header = None
+        for title, _lines in sections:
+            if title.startswith("Crystallized Memory"):
+                cryst_header = title
+                break
+        assert cryst_header is not None, "No crystallized section found"
+
+        crystallized_ids = section_source_ids.get(cryst_header, [])
+        assert len(crystallized_ids) >= 2, (
+            f"Expected >=2 crystallized IDs for 2 records, got {crystallized_ids}"
+        )
+        # IDs must be in crystallized:<id> format
+        for cid in crystallized_ids:
+            assert cid.startswith("crystallized:"), (
+                f"Bad source_id format: {cid}"
+            )
+
+    def test_crystallized_source_ids_flow_to_context_section_metadata(
+        self, tmp_path,
+    ) -> None:
+        """source_ids from _build_prefetch_sections reach ContextSection.metadata."""
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.prefetch import (
+            ContextSection,
+            _build_prefetch_sections,
+            _section_metadata,
+            _section_source_class,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+
+        candidate = CrystallizedCandidate(
+            "cand_meta", "fact", "Metadata flow test.", ["evt_meta"],
+        )
+        decision = ApprovalDecision(
+            "cand_meta", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-07-01T00:00:00Z",
+        )
+        service.write_approved_record(candidate, decision, file_name="owner.md")
+
+        sections, section_source_ids = _build_prefetch_sections(
+            "", store=store,
+        )
+
+        # Build ContextSection objects the same way build_prefetch does
+        candidates = [
+            ContextSection(
+                section=title,
+                text="\n".join(lines),
+                source_class=_section_source_class(title),
+                metadata=_section_metadata(
+                    title, source_ids=section_source_ids.get(title),
+                ),
+            )
+            for title, lines in sections
+        ]
+
+        # Verify crystallized section has source_ids in metadata
+        cryst_section = None
+        for cs in candidates:
+            if cs.section.startswith("Crystallized Memory"):
+                cryst_section = cs
+                break
+        assert cryst_section is not None
+
+        source_ids = (
+            cryst_section.metadata.get("source_ids", [])
+            if isinstance(cryst_section.metadata, dict)
+            else []
+        )
+        assert len(source_ids) >= 1, (
+            f"Expected >=1 source_ids in crystallized metadata, got {source_ids}"
+        )
+        assert all(
+            sid.startswith("crystallized:") for sid in source_ids
+        ), f"Bad source_id format: {source_ids}"

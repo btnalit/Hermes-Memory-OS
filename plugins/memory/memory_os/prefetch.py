@@ -293,7 +293,7 @@ def build_prefetch(
                 prefetch_mode=_prefetch_mode(index),
             )
             return str(routed["context"])
-    sections = _build_prefetch_sections(
+    sections, section_source_ids = _build_prefetch_sections(
         query,
         store=store,
         index=index,
@@ -327,7 +327,7 @@ def build_prefetch(
             section=title,
             text="\n".join(lines),
             source_class=_section_source_class(title),
-            metadata=_section_metadata(title),
+            metadata=_section_metadata(title, source_ids=section_source_ids.get(title)),
         )
         for title, lines in sections
     ]
@@ -362,7 +362,7 @@ def build_prefetch_with_observability(
     substrate_recall_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     error_records: list[dict[str, Any]] = []
-    sections = _build_prefetch_sections(
+    sections, _section_ids = _build_prefetch_sections(
         query,
         store=store,
         index=index,
@@ -410,23 +410,24 @@ def build_prefetch_section_candidates(
                 source_class="diagnostic",
             )
         ]
+    raw_sections, section_source_ids = _build_prefetch_sections(
+        query,
+        store=store,
+        index=index,
+        session_id=session_id,
+        current_task_anchor=current_task_anchor,
+        low_clue_recall_config=low_clue_recall_config,
+        substrate_recall_report=substrate_recall_report,
+        recall_facade=recall_facade,
+    )
     return [
         ContextSection(
             section=title,
             text="\n".join(lines),
             source_class=_section_source_class(title),
-            metadata=_section_metadata(title),
+            metadata=_section_metadata(title, source_ids=section_source_ids.get(title)),
         )
-        for title, lines in _build_prefetch_sections(
-            query,
-            store=store,
-            index=index,
-            session_id=session_id,
-            current_task_anchor=current_task_anchor,
-            low_clue_recall_config=low_clue_recall_config,
-            substrate_recall_report=substrate_recall_report,
-            recall_facade=recall_facade,
-        )
+        for title, lines in raw_sections
     ]
 
 
@@ -517,8 +518,9 @@ def _build_prefetch_sections(
     substrate_recall_report: dict[str, Any] | None = None,
     error_records: list[dict[str, Any]] | None = None,
     recall_facade: object | None = None,  # Phase 3: provider-cached RetrieverFacade
-) -> list[tuple[str, list[str]]]:
+) -> tuple[list[tuple[str, list[str]]], dict[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
+    section_source_ids: dict[str, list[str]] = {}
     # Shared dedup set: record_ids emitted by dedicated sections are skipped
     # by Indexed Recall to avoid duplicate injection across sections.
     seen: set[tuple[str, str]] = set()
@@ -557,7 +559,7 @@ def _build_prefetch_sections(
     _append_section(sections, "Working Memory", _working_lines(store, query=query))
     _append_section(sections, "Relationship Memory", _relationship_lines(store))
     _append_section(sections, "Crystallized Review Candidates", _candidate_lines(store, query=query, seen=seen))
-    cryst_lines, cryst_degradation = _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records)
+    cryst_lines, cryst_degradation, cryst_ids = _crystallized_lines(store, query=query, index=index, seen=seen, error_records=error_records)
     if cryst_degradation >= 2:
         cryst_header = "Crystallized Memory (deterministic floor recall)"
     elif cryst_degradation == 1:
@@ -565,6 +567,8 @@ def _build_prefetch_sections(
     else:
         cryst_header = "Crystallized Memory"
     _append_section(sections, cryst_header, cryst_lines)
+    if cryst_ids:
+        section_source_ids[cryst_header] = cryst_ids
     _append_section(sections, "Substrate Recall", _substrate_recall_lines(substrate_recall_report))
     _append_section(sections, "Indexed Recall", _indexed_lines(query, index, error_records=error_records, seen=seen))
     _append_section(sections, "Recent Event Summaries", _event_lines(store, session_id=session_id, seen=seen))
@@ -606,7 +610,7 @@ def _build_prefetch_sections(
                     details=str(exc)[:200],
                 ))
 
-    return sections
+    return sections, section_source_ids
 
 
 def _section_source_class(title: str) -> str:
@@ -633,9 +637,11 @@ def _section_source_class(title: str) -> str:
     return mapping.get(base_title, "other")
 
 
-def _section_metadata(title: str) -> dict[str, Any]:
+def _section_metadata(title: str, source_ids: list[str] | None = None) -> dict[str, Any]:
     if title == "Recall Clarification Guard":
         return {"source_ids": [GUARD_RECALL_CLARIFICATION]}
+    if source_ids:
+        return {"source_ids": source_ids}
     return {}
 
 
@@ -1250,7 +1256,7 @@ def _crystallized_lines(
     index: object | None = None,
     seen: set[tuple[str, str]] | None = None,
     error_records: list[dict[str, Any]] | None = None,
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, list[str]]:
     """Record-level crystallized memory lines with relevance filtering and caps.
 
     Uses FTS5 index (like Indexed Recall) to find records relevant to the
@@ -1268,11 +1274,13 @@ def _crystallized_lines(
     and sorted after permanent records. High-recurrence provisional records
     receive a high-recurrence marker.
 
-    Returns (lines, degradation_level) where:
+    Returns (lines, degradation_level, record_ids) where:
       0 = normal (FTS5 or vector hits, relevance gate active)
       1 = mtime fallback (no search intent — empty query)
       2 = deterministic floor recall (non-empty query, FTS5+vector both
           returned zero hits; floor match scoring applied)
+    record_ids = canonical IDs of records surviving the caps, formatted as
+    ``crystallized:<id>`` entries for attribution closure (A1).
     """
     MAX_TOTAL = 20
     MAX_PROVISIONAL = 5
@@ -1482,9 +1490,11 @@ def _crystallized_lines(
 
     # ── Apply caps and track seen only for surviving records ──────
     result: list[str] = []
+    record_ids: list[str] = []
     # Cap permanent records at MAX_PERMANENT (15) — reserve floor for provisional
     for rid, line, _recurrence, _score in permanent_entries[:MAX_PERMANENT]:
         result.append(line)
+        record_ids.append(f"crystallized:{rid}")
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))
 
@@ -1493,10 +1503,11 @@ def _crystallized_lines(
     remaining_slots = MAX_TOTAL - len(result)
     for _, rid, line, _, _score in provisional_entries[:max(MAX_PROVISIONAL, remaining_slots)]:
         result.append(line)
+        record_ids.append(f"crystallized:{rid}")
         if seen is not None and rid:
             seen.add(("crystallized_record", rid))
 
-    return result, degradation_level
+    return result, degradation_level, record_ids
 
 
 def _candidate_lines(store: MemoryOSStore, *, query: str, seen: set[tuple[str, str]] | None = None) -> list[str]:

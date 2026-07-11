@@ -103,7 +103,7 @@ def test_accumulation_decay_fixed():
         service.write_approved_record(cand3, dec3, file_name="owner_approved.md", now=now)
 
         # NOW: call _crystallized_lines — the new record-level version
-        lines, _crystallized_degradation = _crystallized_lines(store)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
         combined = "\n".join(lines)
 
         # Assert: all three records are visible — not clipped away
@@ -175,7 +175,7 @@ def test_revocation_leak_fixed():
         )
 
         # Call _crystallized_lines
-        lines, _crystallized_degradation = _crystallized_lines(store)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
         combined = "\n".join(lines)
 
         # Assert: record 1 IS present, record 2 is NOT
@@ -245,7 +245,7 @@ def test_empty_file_no_crash():
         store = MemoryOSStore(roots)
         store.initialize()
 
-        lines, _crystallized_degradation = _crystallized_lines(store)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
         assert lines == [], f"FAIL: Empty dir should return [], got {lines}"
         print("  ✅ Empty directory: returns [] without crash")
 
@@ -277,7 +277,7 @@ def test_no_active_records_returns_empty():
             encoding="utf-8",
         )
 
-        lines, _crystallized_degradation = _crystallized_lines(store)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
         assert lines == [], f"FAIL: All-revoked file should return [], got {lines}"
         print("  ✅ All-revoked file: returns []")
 
@@ -313,7 +313,7 @@ def test_multiple_files():
         d2 = ApprovalDecision(candidate_id=c2.candidate_id, purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, reviewer="owner", reviewed_at=ts)
         service.write_approved_record(c2, d2, file_name="file2.md")
 
-        lines, _crystallized_degradation = _crystallized_lines(store)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
         combined = "\n".join(lines)
         assert len(lines) == 2, f"FAIL: Expected 2 lines, got {len(lines)}: {lines}"
         assert "file1.md" in combined
@@ -341,7 +341,7 @@ def test_kind_in_output():
         d = ApprovalDecision(candidate_id=c.candidate_id, purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, reviewer="owner", reviewed_at=_ts())
         service.write_approved_record(c, d, file_name="kinds.md")
 
-        lines, _crystallized_degradation = _crystallized_lines(store)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store)
         assert len(lines) == 1
         assert "kinds.md/test_kind_value" in lines[0], \
             f"FAIL: Expected '/test_kind_value' in output, got: {lines[0]}"

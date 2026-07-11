@@ -504,7 +504,7 @@ class TestCrystallizedLinesVectorLane:
         index._embedder = None
         index.rebuild_from_store(store)
 
-        lines, _crystallized_degradation = _crystallized_lines(store, query="网络搜索", index=index)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store, query="网络搜索", index=index)
         assert len(lines) >= 1  # FTS5 still works
 
     def test_vector_lane_uses_rrf_when_embedder_available(self, tmp_path):
@@ -562,7 +562,7 @@ class TestCrystallizedLinesVectorLane:
             f.write(json.dumps(override_record, ensure_ascii=False, sort_keys=True) + "\n")
 
         try:
-            lines, _crystallized_degradation = _crystallized_lines(store, query="网络搜索", index=index)
+            lines, _crystallized_degradation, _record_ids = _crystallized_lines(store, query="网络搜索", index=index)
             assert len(lines) >= 1  # RRF union produces results
         finally:
             if override_path.exists():
@@ -610,7 +610,7 @@ class TestVectorRetrievalIntegration:
         assert resolve_knob("vector_retrieval_enabled", default=False, roots=roots) is False
 
         # FTS5 search for a keyword-matching term should work
-        lines, _crystallized_degradation = _crystallized_lines(store, query="语义", index=index)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store, query="语义", index=index)
         assert len(lines) >= 1  # FTS5 trigram should match "语义"
 
     def test_full_flow_vector_union_when_knob_enabled(self, tmp_path):
@@ -662,7 +662,7 @@ class TestVectorRetrievalIntegration:
         )
 
         # Query should now include both FTS5 and vector results
-        lines, _crystallized_degradation = _crystallized_lines(store, query="Python", index=index)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store, query="Python", index=index)
         assert len(lines) >= 1  # Should get at least FTS5 matches
 
     def test_vector_lane_degraded_when_embedder_unavailable(self, tmp_path):
@@ -708,7 +708,7 @@ class TestVectorRetrievalIntegration:
         )
 
         # Should NOT crash — degrades to pure FTS5
-        lines, _crystallized_degradation = _crystallized_lines(store, query="Python", index=index)
+        lines, _crystallized_degradation, _record_ids = _crystallized_lines(store, query="Python", index=index)
         assert len(lines) >= 1  # FTS5 still works
 
     def test_no_llm_no_network_in_vector_path(self, tmp_path):
