@@ -181,7 +181,8 @@ def write_clearance_receipt(
     """Append a clearance receipt to the journal (idempotent).
 
     Checks the idempotency key before writing — an existing active receipt
-    with the same key suppresses the write.
+    with the same key suppresses the write, UNLESS that receipt's record_id
+    has been invalidated by a newer journal entry (rejudge path).
     """
     from .jsonl_io import append_jsonl_locked, read_jsonl
 
@@ -189,11 +190,23 @@ def write_clearance_receipt(
     receipt_dict = receipt.to_dict()
     idemp_key = receipt.idempotency_key
 
-    # Check for existing active receipt with same idempotency key
+    # Build the set of record_ids that have been invalidated —
+    # these supersede any older "active" receipt for the same record_id.
     existing = read_jsonl(str(path))
+    invalidated_record_ids: set[str] = set()
+    for existing_rec in existing:
+        er = ClearanceReceipt.from_dict(existing_rec)
+        if er.invalidated_at is not None:
+            invalidated_record_ids.add(er.record_id)
+
+    # Check for existing active receipt with same idempotency key
     for existing_rec in existing:
         existing_receipt = ClearanceReceipt.from_dict(existing_rec)
         if existing_receipt.idempotency_key == idemp_key and existing_receipt.is_active:
+            # If this record_id has been invalidated since, the original
+            # active receipt is superseded — allow the new receipt.
+            if existing_receipt.record_id in invalidated_record_ids:
+                continue
             return {"status": "idempotent", "receipt_id": existing_receipt.receipt_id, "written": False}
 
     append_jsonl_locked(path, receipt_dict)
