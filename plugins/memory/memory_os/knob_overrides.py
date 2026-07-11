@@ -191,6 +191,20 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    # ── V2-E clearance gating ───────────────────────────────────────────
+    # Gates the automatic permanent-promotion producer through the clearance
+    # receipt journal. Default False (shadow mode): clearance receipts are
+    # produced and invalidated but do not gate proposals. Flip to True once
+    # the owner confirms the clearance pipeline is producing valid verdicts.
+    "v2e_enabled": {
+        "module": "clearance",
+        "default": False,
+        "kind": "lane_switch",
+        "allowed": [True, False],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── Source gate quality knobs (F.8) ────────────────────────────────
     # V2-0 successors. `permanent_proposal_enabled` gates the non-mutating
     # permanent-promotion eligibility collection (never an automatic write).

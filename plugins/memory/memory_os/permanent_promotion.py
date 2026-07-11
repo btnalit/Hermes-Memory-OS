@@ -834,10 +834,16 @@ class PermanentPromotionService:
         store: Any,
         *,
         clock: Callable[[], datetime] | None = None,
-        v2e_enabled: bool = False,
+        v2e_enabled: bool | None = None,
     ) -> None:
         self.store = store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        if v2e_enabled is None:
+            from .knob_overrides import resolve_knob as _resolve_knob
+
+            v2e_enabled = bool(_resolve_knob(
+                "v2e_enabled", default=False, roots=store.roots,
+            ))
         self.v2e_enabled = bool(v2e_enabled)
         self.proposals = ProposalLedger(store.roots.memory_os_root, clock=self.clock)
         self.tokens = TokenLedger(store.roots.memory_os_root, clock=self.clock)
@@ -1498,7 +1504,7 @@ def prepare_permanent_promotion_delivery(
     cap: int = 5,
     new_reserve: int = 3,
     reminder_reserve: int = 2,
-    v2e_enabled: bool = False,
+    v2e_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Prepare permanent-only review items without acknowledging delivery."""
     from .crystallized import CrystallizedMemoryService
@@ -1507,6 +1513,14 @@ def prepare_permanent_promotion_delivery(
         execution_gate_scope_hash,
         start_execution_gate_envelope,
     )
+
+    # Resolve v2e_enabled from knob when not explicitly passed
+    if v2e_enabled is None:
+        from .knob_overrides import resolve_knob as _resolve_knob
+
+        v2e_enabled = bool(_resolve_knob(
+            "v2e_enabled", default=False, roots=store.roots,
+        ))
 
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     crystallized = CrystallizedMemoryService(store)
