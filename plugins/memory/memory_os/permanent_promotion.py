@@ -227,6 +227,82 @@ def _resolve_clearance_for_proposal(
     )
 
 
+def _evidence_increment_detected(
+    rejection_evidence: dict[str, Any],
+    current_evidence: dict[str, Any],
+) -> bool:
+    """B5: detect meaningful evidence improvement since rejection.
+
+    Returns True when at least one of:
+    - coverage counts rose (source_diversity or recurrence up)
+    - derivation level upgraded (L2→L1, L1→L0)
+    """
+    if not rejection_evidence or not current_evidence:
+        # No prior evidence snapshot or no current evidence — allow
+        return True
+
+    # Check coverage increment
+    old_cov = (
+        rejection_evidence.get("coverage")
+        if isinstance(rejection_evidence.get("coverage"), dict)
+        else {}
+    )
+    new_cov = (
+        current_evidence.get("coverage")
+        if isinstance(current_evidence.get("coverage"), dict)
+        else {}
+    )
+    old_diversity = int(old_cov.get("source_diversity") or 0)
+    new_diversity = int(new_cov.get("source_diversity") or 0)
+    old_recurrence = int(old_cov.get("recurrence") or 0)
+    new_recurrence = int(new_cov.get("recurrence") or 0)
+
+    if new_diversity > old_diversity or new_recurrence > old_recurrence:
+        return True
+
+    # Check derivation upgrade
+    derivation_order = {"L3": 0, "L2": 1, "L1": 2, "L0": 3}
+    old_derivation = str(rejection_evidence.get("derivation") or "")
+    new_derivation = str(current_evidence.get("derivation") or "")
+    old_level = str(rejection_evidence.get("abstraction_level") or "")
+    new_level = str(current_evidence.get("abstraction_level") or "")
+
+    if derivation_order.get(new_level, -1) > derivation_order.get(old_level, -1):
+        return True
+    if derivation_order.get(new_derivation, -1) > derivation_order.get(old_derivation, -1):
+        return True
+
+    return False
+
+
+def _write_absorption_audit(
+    roots: Any,
+    *,
+    absorbed_content_hash: str,
+    target_permanent_id: str,
+    similarity_basis: str = "",
+) -> None:
+    """B6: Write absorption audit record — no silent drops."""
+    import json as _json
+    from datetime import timezone as _tz
+
+    from .jsonl_io import append_jsonl_locked
+
+    path = roots.memory_os_root / "system" / "absorption_audit.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "schema_version": "memory-os.absorption_audit.v0",
+        "absorbed_content_hash": str(absorbed_content_hash),
+        "target_permanent_id": str(target_permanent_id),
+        "similarity_basis": str(similarity_basis or "exact_match"),
+        "absorbed_at": datetime.now(_tz.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        append_jsonl_locked(path, record)
+    except Exception:
+        pass  # fail-open: audit loss must not block proposal flow
+
+
 class ProposalLedger:
     """Append-only proposal events plus atomically-derived pending snapshot."""
 
@@ -347,8 +423,38 @@ class ProposalLedger:
                         continue
                     status = str(existing.get("status") or "")
                     if status == "rejected" and origin == "automatic":
-                        raise PermanentPromotionError("automatic_reproposal_rejected")
+                        # ── B5: evidence increment predicate ──────────
+                        from .knob_overrides import resolve_knob as _resolve_knob_inc
+                        if _resolve_knob_inc(
+                            "evidence_increment_enabled", default=False,
+                            _store_root=self.memory_os_root,
+                        ):
+                            # Check if evidence has improved since rejection
+                            rejection_evidence = (
+                                existing.get("evidence_profile_snapshot")
+                                if isinstance(existing.get("evidence_profile_snapshot"), dict)
+                                else {}
+                            )
+                            current_evidence = (
+                                eligibility.get("evidence_profile")
+                                if isinstance(eligibility, dict) and isinstance(eligibility.get("evidence_profile"), dict)
+                                else {}
+                            )
+                            if not _evidence_increment_detected(
+                                rejection_evidence, current_evidence,
+                            ):
+                                raise PermanentPromotionError("automatic_reproposal_rejected_no_evidence_increment")
+                            # Evidence improved — fall through to allow re-proposal
+                        else:
+                            raise PermanentPromotionError("automatic_reproposal_rejected")
                     if status == "approved":
+                        # ── B6: absorption audit — don't silently drop ──
+                        _write_absorption_audit(
+                            self.store.roots,
+                            absorbed_content_hash=body_hash,
+                            target_permanent_id=str(existing.get("target_id") or ""),
+                            similarity_basis="exact_content_hash_match",
+                        )
                         raise PermanentPromotionError("content_already_permanent")
                     if status == "deferred":
                         due = parse_timestamp(existing.get("deferred_until"))
@@ -1128,11 +1234,20 @@ class PermanentPromotionService:
             token_hash=token_hash,
             current_body=record.body,
         )
+        # ── A0: when owner approved over conflict, pass contested_refs ──
+        clearance = proposal.get("clearance") if isinstance(proposal.get("clearance"), dict) else {}
+        contested_refs = (
+            list(clearance.get("conflict_refs") or [])
+            if clearance.get("contested") or clearance.get("owner_override")
+            else None
+        )
+
         result = crystallized._confirm_provisional_record_from_permanent_service(
             str(proposal["target_id"]),
             proposal_id=str(proposal["proposal_id"]),
             capability=_PERMANENT_PROMOTION_WRITE_CAPABILITY,
             confirmed_by="owner",
+            contested_refs=contested_refs,
             now=self.clock(),
         )
         terminal = self.proposals.append_terminal(

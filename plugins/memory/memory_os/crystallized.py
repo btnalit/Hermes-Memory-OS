@@ -498,9 +498,15 @@ class CrystallizedMemoryService:
         proposal_id: str,
         capability: object,
         confirmed_by: str = "",
+        contested_refs: list[str] | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """Apply a service-validated permanent-promotion transition."""
+        """Apply a service-validated permanent-promotion transition.
+
+        When *contested_refs* is provided (owner approved over conflict),
+        the frontmatter records the conflict pair for the A0 contested
+        projection index.
+        """
         if capability is not _PERMANENT_PROMOTION_WRITE_CAPABILITY:
             raise CrystallizedApprovalError("invalid permanent promotion write capability")
         normalized = str(record_id or "").strip()
@@ -534,6 +540,8 @@ class CrystallizedMemoryService:
                         frontmatter["confirmed_by"] = "owner"
                         frontmatter["confirmed_at"] = _timestamp(now)
                         frontmatter["permanent_promotion_proposal_id"] = normalized_proposal_id
+                        if contested_refs:
+                            frontmatter["contested_refs"] = list(contested_refs)
                         changed = True
                     else:
                         confirmed_proposal_id = str(

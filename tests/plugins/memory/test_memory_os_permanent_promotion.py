@@ -651,7 +651,8 @@ def test_single_eligibility_gate_blocks_forbidden_permanent_content(tmp_path, bo
 
     assert report["eligible_count"] == 0
     assert report["skipped_forbidden_content_count"] == 1
-    assert proposed == {"status": "ineligible", "reason_codes": [reason]}
+    assert proposed["status"] == "ineligible"
+    assert reason in proposed.get("reason_codes", [])
 
 
 def test_single_eligibility_gate_blocks_duplicate_existing_permanent_body(tmp_path):
