@@ -98,15 +98,57 @@ def run_clearance_cycle(
         "clearance_rejudge_budget_per_cycle", default=10, roots=roots,
     ))
 
+    # ── Crystallized service (created early — needed by Step 2.5 + Step 3) ──
+    crystallized = CrystallizedMemoryService(store)
+
     # Step 1: invalidation
     invalidation = invalidate_receipts_since(roots, watermark=0)
     report["invalidated"] = invalidation["invalidated_count"]
 
     # Step 2: select rejudge batch
     queue = get_rejudge_queue(roots)
+
+    # ── Step 2.5 (E9): collect never-judged provisional records ───────────
+    # These are records with no clearance receipt at all — they would be
+    # permanently blocked by the :232 gate at proposal time
+    # (no_clearance_receipt).  Add them to the same queue, oldest-first,
+    # sharing the same per-cycle budget with the rejudge queue.
+    existing_queue_ids = {item["record_id"] for item in queue}
+    all_active_receipt_ids: set[str] = {
+        ClearanceReceipt.from_dict(r).record_id
+        for r in read_clearance_receipts(roots)
+        if ClearanceReceipt.from_dict(r).is_active
+    }
+    for record in crystallized.list_provisional_records():
+        rid = str(record.get("id") or "")
+        if not rid or rid in existing_queue_ids or rid in all_active_receipt_ids:
+            continue
+        queue.append({
+            "record_id": rid,
+            "receipt_id": None,
+            "old_verdict": None,
+            "invalidated_at": None,
+            "priority": "initial",
+            "entered_at": record.get("approved_at") or record.get("created_at") or "",
+        })
+
+    # Re-sort after merge: initial + rejudge, oldest-first (E9)
+    queue.sort(key=lambda x: str(x.get("entered_at") or ""))
+    # Re-dedup after merge
+    seen_rids: set[str] = set()
+    deduped_queue: list[dict[str, Any]] = []
+    for item in queue:
+        if item["record_id"] not in seen_rids:
+            seen_rids.add(item["record_id"])
+            deduped_queue.append(item)
+    queue = deduped_queue
+
+    batch = queue[:budget]  # shared budget, oldest-first
     report["queue_depth"] = len(queue)
-    batch = queue[:budget]
     report["budget_used"] = len(batch)
+    report["initial_never_judged_queued"] = sum(
+        1 for item in batch if item.get("priority") == "initial"
+    )
 
     # Compute oldest unknown age
     unknowns = [
@@ -130,7 +172,6 @@ def run_clearance_cycle(
             pass
 
     # Step 3: judge each candidate (flag-off: heuristic judge)
-    crystallized = CrystallizedMemoryService(store)
     for item in batch:
         record_id = item["record_id"]
         try:

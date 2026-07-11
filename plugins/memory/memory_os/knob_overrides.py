@@ -306,6 +306,22 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "scope": "upper_layer",
         "ab_metric": None,
     },
+    "clearance_rejudge_budget_per_cycle": {
+        "module": "clearance",
+        "default": 10,
+        "bounds": [1, 20],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
+    "prefetch_telemetry_latency_budget_pct": {
+        "module": "prefetch",
+        "default": 15,
+        "bounds": [5, 50],
+        "meta": False,
+        "scope": "upper_layer",
+        "ab_metric": None,
+    },
     # ── Phase 3: Retriever Facade integration knobs ─────────────────────
     "prefetch_facade_enabled": {
         "module": "prefetch",

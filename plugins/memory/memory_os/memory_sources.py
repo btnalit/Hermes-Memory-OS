@@ -158,11 +158,11 @@ def memory_sources_enabled(config: dict[str, Any] | None) -> bool:
 
 
 def append_memory_source_record(roots: MemoryOSRoots, record: dict[str, Any]) -> Path:
+    from .jsonl_io import append_jsonl_locked
+
     path = memory_sources_path(roots)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
-        handle.write("\n")
+    append_jsonl_locked(path, record)
     return path
 
 

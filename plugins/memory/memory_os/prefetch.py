@@ -689,8 +689,8 @@ def _record_substrate_shadow_recall(
         "fallback_triggered": bool(report.get("fallback_triggered")),
     }
     try:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        from .jsonl_io import append_jsonl_locked
+        append_jsonl_locked(path, record)
     except Exception:
         pass  # fail-open: shadow loss must not break prefetch
 
@@ -1760,8 +1760,8 @@ def _record_graph_layer_shadow(
         ],
     }
     try:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        from .jsonl_io import append_jsonl_locked
+        append_jsonl_locked(path, record)
     except Exception:
         pass  # fail-open: shadow loss must not break prefetch
 
