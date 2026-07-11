@@ -9,8 +9,9 @@
 </p>
 
 <p align="center">
-  A file-first memory and cognition runtime for long-running
-  <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> profiles.
+  A complete, file-first memory and cognition runtime for long-running
+  <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> profiles —
+  with a governed right-brain module.
 </p>
 
 <p align="center">
@@ -41,11 +42,33 @@ Memory-OS also asks:
 - Can the system forget without turning forgetting into a failure?
 - Can an agent have thoughts that are not tasks, reports, or alerts?
 
-That last question defines the V3 right brain: a governed space that can
+That last question defines the right-brain module: a governed space that can
 associate freely, remain silent, share a thought, or let it disappear — without
 quietly rewriting what the system believes.
 
-## Core Capabilities
+## A Complete Agent Memory & Cognition Stack
+
+Memory-OS is not a single retrieval plugin. It is a layered Agent OS with a
+memory kernel, multiple retrieval lanes, cognition modules, evidence and truth
+checks, owner governance, safe self-evolution, expression control, and an
+operational control plane.
+
+| System layer | What it includes |
+| --- | --- |
+| **Memory kernel** | Canonical file store, working memory, provisional memory, crystallized memory, permanent promotion, retention, cleanup, audit, migration, and append-only lifecycle receipts. |
+| **Recall engine** | FTS5, vector recall, entity graph, temporal recall, state-overlay recall, optional Hindsight recall, low-clue routing, unified recall facade, and source attribution. |
+| **Evidence & truth** | Source gating, provenance and taint checks, evidence scoring, fact judge, confabulation detection, contradiction lanes, contested-pair projections, clearance receipts, and crystallized-memory revalidation. |
+| **Context intelligence** | Bounded prefetch, context routing, memory projection, state overlay, session/cron/state mirrors, abstraction distillation, digest consolidation, household digest, and symbolic offloading. |
+| **Cognition system** | Inner Drive, Deep Reflection, Imagination Loop, Wandering Mind, cognitive-loop orchestration, cadence control, and bounded module coordination. |
+| **Governance & evolution** | Candidate aggregation and review, confidence routing, provisional lifecycle, proposal queue, OpsGate, live guards, reversible knob overrides, A/B evaluation, migration control, feedback bridge, and Self-Evolution Governor. |
+| **Expression system** | Expression drafts, grounded-expression judge, Speak Gate, rolling rate limits, right-brain sharing, outcome capture, deduplication, and owner feedback. |
+| **Operations & safety** | ExecutionGate, StructuralWriteGate, cron registry and adapters, owner action tokens, no-send mailbox boundary, installer, phased deploy wrapper, health probes, audit monitors, and read-only dashboard. |
+
+These layers are composable and profile-local. Modules can remain disabled,
+shadowed, report-only, or no-send until their evidence and owner gates permit a
+stronger mode.
+
+## Core Capabilities in Depth
 
 ### Living memory, not a transcript archive
 
@@ -106,14 +129,14 @@ remain authoritative. Raw conversation turns are not exported by default.
 Retain, retract, advisory recall, and reflection each have separate controls,
 and the projection ledger remains auditable.
 
-## How the V3 Right Brain Works
+## The Right-Brain Module
 
-The V3 contract is deliberately different from an autonomous task loop. Its
+The right brain is deliberately different from an autonomous task loop. Its
 purpose is not to optimize output volume. Its purpose is to give the agent a
 bounded place for non-instrumental thought while keeping durable belief changes
 fully governed.
 
-| Principle | Final behavior |
+| Principle | Behavior |
 | --- | --- |
 | Direction stays open | The wandering prompt gives boundaries and seeds, but no required direction or success criterion. Producing nothing is a normal result. |
 | Three depths of thought | `association` holds fragments and free associations; `interpretation` explores meaning; `claim` is a belief-like statement that must enter the governed synthesis path. |
@@ -332,23 +355,25 @@ controls.
 ```mermaid
 flowchart TD
     H["Hermes Agent<br/>conversation · tools · cron · delivery"]
-    P["Memory-OS Provider<br/>canonical files · working memory · sync"]
-    R["Retrieval<br/>FTS5 · vector · graph · RRF"]
-    G["Governance<br/>candidates · clearance · stability · owner actions"]
-    C["Bounded Cognition<br/>reflection · evidence · expression artifacts"]
-    M["Monitor & Audit<br/>receipts · ledgers · read-only dashboard"]
-    V3["V3 Right Brain<br/>wandering journal · synthesis bridge · optional sharing"]
+    I["Ingress & Source Gate<br/>events · mirrors · external evidence"]
+    K["Memory Kernel<br/>working · provisional · crystallized · permanent"]
+    R["Recall Engine<br/>FTS5 · vector · entity graph · temporal · overlays"]
+    X["Context Intelligence<br/>routing · projection · distillation · digests"]
+    C["Cognition System<br/>Inner Drive · Deep Reflection · Imagination"]
+    RB["Right-Brain Module<br/>Wandering Mind · journal · synthesis · sharing"]
+    E["Evidence & Truth<br/>scoring · provenance · fact judge · contradiction"]
+    G["Governance & Evolution<br/>clearance · proposals · OpsGate · owner actions"]
+    O["Expression System<br/>draft · grounded judge · Speak Gate · rate limit"]
+    M["Operations & Safety<br/>execution gates · cron · monitor · audit"]
 
-    H --> P
-    P --> R
-    P --> G
-    R --> H
-    G --> P
-    P --> C
-    C --> M
-    P --> V3
-    V3 --> G
-    V3 -->|"Hermes-owned delivery"| H
+    H --> I --> K
+    K --> R --> H
+    K --> X --> C --> RB
+    RB --> E --> G --> K
+    RB --> O -->|"Hermes-owned delivery"| H
+    M -. "permits · receipts · health" .-> I
+    M -. "permits · receipts · health" .-> G
+    M -. "permits · receipts · health" .-> O
 ```
 
 ### Boundary summary
@@ -382,7 +407,15 @@ memory_os_agent/               Minimal Hermes compatibility surface
 plugins/memory/memory_os/      Provider, lifecycle, retrieval, governance
 plugins/memory-os-agent-os/    Hermes shell plugin and owner-review tools
 plugins/system/                Runtime contracts and coordination primitives
-plugins/modules/               Portable cognition/governance/expression modules
+plugins/modules/
+  cognition/                   Inner Drive, Deep Reflection, Imagination,
+                               Wandering Mind
+  context/                     Distillation, consolidation, digests, offloading
+  evidence/                    Evidence scoring and confabulation detection
+  expression/                  Drafts, grounded judge, Speak Gate, rate limits
+  governance/                  Candidate, truth, proposal, migration,
+                               self-evolution, live-guard modules
+  messaging/                   No-send mailbox boundary
 scripts/                       Install, deploy, cron, monitor, and validation tools
 monitor_dashboard/             Read-only operational dashboard
 tests/                         Provider, module, installer, and monitor tests
