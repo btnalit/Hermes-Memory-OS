@@ -29,11 +29,14 @@ from plugins.memory.memory_os.llm_contradiction_lane import (
 
 
 class FakeRoots:
-    """Minimal roots-like object exposing index_path + memory_os_root."""
+    """Minimal roots-like object exposing index_path + memory_os_root + crystallized_root."""
 
     def __init__(self, tmp_path: Path) -> None:
         self.index_path = tmp_path / "index.db"
         self.memory_os_root = tmp_path / "memory-os"
+        self.crystallized_root = self.memory_os_root / "crystallized"
+        self.hermes_home = tmp_path
+        self.profile = "default"
 
 
 class FakeStore:
@@ -589,3 +592,359 @@ class TestCandidateSourceDispatch:
         )
         # threshold 0.99 excludes cos≈0.88 pair
         assert len(candidate_pairs) == 0
+
+
+# ── E1: Clearance pair source ──────────────────────────────────────────────
+
+
+def _insert_provisional_record(
+    conn: sqlite3.Connection,
+    rec_id: str,
+    body: str,
+    *,
+    kind: str = "note",
+    provisional: int = 1,
+    embedding_bytes: bytes | None = None,
+) -> None:
+    """Insert a provisional crystallized record + optional embedding."""
+    conn.execute(
+        "insert into crystallized_records "
+        "(id, kind, created_at, approved_by, approved_at, source_event_ids_json, "
+        "tags_json, sensitivity, hindsight_indexed, file_name, body) "
+        "values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            rec_id,
+            kind,
+            "2026-06-01T00:00:00Z",  # created_at
+            "owner",
+            "2026-06-01T00:00:00Z",  # approved_at — 40+ days ago (>> min_age)
+            '["evt_001"]',
+            "[]",
+            "private",
+            int(provisional),
+            f"{rec_id}.md",
+            body,
+        ),
+    )
+    if embedding_bytes is not None:
+        conn.execute(
+            "insert into memory_embeddings "
+            "(record_type, record_id, embedding_model, embedding, created_at) "
+            "values (?, ?, ?, ?, ?)",
+            ("crystallized_record", rec_id, "test-model", embedding_bytes, "2026-07-01T00:00:00Z"),
+        )
+
+
+def _write_crystallized_md(
+    roots: FakeRoots,
+    rec_id: str,
+    body: str,
+    *,
+    kind: str = "note",
+    provisional: bool = True,
+) -> None:
+    """Write a crystallized markdown file so CrystallizedMemoryService can read it."""
+    md_dir = roots.crystallized_root
+    md_dir.mkdir(parents=True, exist_ok=True)
+    prov_line = "true" if provisional else "false"
+    expires_line = "expires_at: 2026-08-01T00:00:00Z\n" if provisional else ""
+    content = (
+        "---\n"
+        f"schema_version: memory-os.crystallized.v0\n"
+        f"id: {rec_id}\n"
+        f"candidate_id: cand_{rec_id}\n"
+        f"kind: {kind}\n"
+        "created_at: 2026-06-01T00:00:00Z\n"
+        "approved_by: owner\n"
+        "approved_at: 2026-06-01T00:00:00Z\n"
+        'approval_purpose: approve_for_crystallized\n'
+        'approval_note: ""\n'
+        'source_event_ids: ["evt_001"]\n'
+        "tags: []\n"
+        "sensitivity: private\n"
+        "hindsight_indexed: false\n"
+        "bridge_state: active\n"
+        f"provisional: {prov_line}\n"
+        f"{expires_line}"
+        "---\n"
+        f"{body}\n"
+    )
+    (md_dir / f"{rec_id}.md").write_text(content, encoding="utf-8")
+
+
+def _insert_entity_link(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    entity_text: str,
+    record_id: str,
+) -> None:
+    """Insert an entity_index row for a record."""
+    conn.execute(
+        "insert into entity_index (entity_id, entity_text, record_id, role, proposed_by) "
+        "values (?, ?, ?, ?, ?)",
+        (entity_id, entity_text, record_id, "mention", "structural"),
+    )
+
+
+def _ensure_entity_index_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "create table if not exists entity_index ("
+        "entity_id text, entity_text text, record_id text, "
+        "role text, proposed_by text, created_at text, "
+        "primary key (entity_id, record_id, role))"
+    )
+
+
+class TestClearancePairSource:
+    """E1 RED: candidate/provisional × active permanent pair source."""
+
+    # ── helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _setup_clearance_knob(roots: FakeRoots) -> None:
+        """Enable the lane + set source=clearance."""
+        _enable_lane_knob(roots)
+        _set_source_knob(roots, "clearance")
+
+    # ── RED tests ────────────────────────────────────────────────────────
+
+    def test_empty_permanents_yields_no_pairs(self, tmp_path: Path) -> None:
+        """No active permanent records → 0 pairs, 0 pairs_evaluated."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+        # One provisional, zero permanents
+        _insert_provisional_record(
+            conn, "prov_001", "candidate body about project X",
+            embedding_bytes=np.array([1.0, 0.0], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "prov_001", "candidate body about project X", provisional=True)
+        conn.commit()
+        conn.close()
+
+        pairs, evaluated = _find_contradiction_candidates(
+            store, max_pairs=100, roots=roots,
+        )
+        assert len(pairs) == 0, f"expected 0 pairs with no permanents, got {len(pairs)}"
+        assert evaluated == 0
+
+    def test_entity_intersection_priority(self, tmp_path: Path) -> None:
+        """Candidate + permanent share entity → pair via entity priority."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+        _ensure_entity_index_table(conn)
+
+        # One provisional, one permanent — share entity "ent_X"
+        _insert_provisional_record(
+            conn, "prov_ent", "we use PostgreSQL for the main database",
+            embedding_bytes=np.array([1.0, 0.1], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "prov_ent", "we use PostgreSQL for the main database", provisional=True)
+        _insert_record(
+            conn,
+            {"id": "perm_ent", "body": "the primary database is PostgreSQL 15", "kind": "note"},
+            np.array([0.98, 0.05], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "perm_ent", "the primary database is PostgreSQL 15", provisional=False)
+        _insert_entity_link(conn, "ent_X", "PostgreSQL", "prov_ent")
+        _insert_entity_link(conn, "ent_X", "PostgreSQL", "perm_ent")
+        conn.commit()
+        conn.close()
+
+        pairs, evaluated = _find_contradiction_candidates(
+            store, max_pairs=100, roots=roots,
+        )
+        assert len(pairs) == 1
+        assert pairs[0]["a"]["id"] == "prov_ent"
+        assert pairs[0]["b"]["id"] == "perm_ent"
+        assert evaluated > 0
+
+    def test_cosine_fallback_when_no_entity_overlap(self, tmp_path: Path) -> None:
+        """No shared entities, high cosine sim → pair via fallback."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+        _ensure_entity_index_table(conn)
+        # Entities exist but don't overlap between prov and perm
+        _insert_entity_link(conn, "ent_A", "entity_A", "prov_cos")
+        _insert_entity_link(conn, "ent_B", "entity_B", "perm_cos")
+
+        # High cosine similarity vectors
+        _insert_provisional_record(
+            conn, "prov_cos", "candidate body about system architecture",
+            embedding_bytes=np.array([1.0, 0.1], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "prov_cos", "candidate body about system architecture", provisional=True)
+        _insert_record(
+            conn,
+            {"id": "perm_cos", "body": "permanent record about system architecture v2", "kind": "note"},
+            np.array([0.98, 0.05], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "perm_cos", "permanent record about system architecture v2", provisional=False)
+        conn.commit()
+        conn.close()
+
+        pairs, evaluated = _find_contradiction_candidates(
+            store, max_pairs=100, roots=roots,
+        )
+        # Cosine fallback finds the pair even without shared entities
+        assert len(pairs) == 1
+        assert pairs[0]["a"]["id"] == "prov_cos"
+        assert pairs[0]["b"]["id"] == "perm_cos"
+        assert pairs[0]["similarity"] > 0.75
+
+    def test_respects_clearance_pair_top_k_knob(self, tmp_path: Path) -> None:
+        """clearance_pair_top_k bounds per-candidate permanent pairs."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        # Override top_k to 2
+        topk_path = roots.memory_os_root / "system" / "knob_overrides.jsonl"
+        topk_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = topk_path.read_text(encoding="utf-8") if topk_path.exists() else ""
+        topk_path.write_text(
+            existing
+            + json.dumps({
+                "schema_version": "memory-os.knob_override.v0",
+                "id": "test_topk_001",
+                "knob": "clearance_pair_top_k",
+                "override_value": 2,
+                "prior_value": 5,
+                "provisional": False,
+                "expires_at": "",
+                "state": "confirmed",
+                "ts": "2026-07-01T00:00:00Z",
+            }, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+
+        # One provisional
+        _insert_provisional_record(
+            conn, "prov_topk", "candidate body",
+            embedding_bytes=np.array([1.0, 0.0], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "prov_topk", "candidate body", provisional=True)
+        # Four permanents — all high cosine sim to the provisional
+        for i in range(4):
+            _insert_record(
+                conn,
+                {"id": f"perm_topk_{i}", "body": f"permanent record variant {i}", "kind": "note"},
+                np.array([0.95 + i * 0.01, 0.05], dtype=np.float32).tobytes(),
+            )
+            _write_crystallized_md(roots, f"perm_topk_{i}", f"permanent record variant {i}", provisional=False)
+        conn.commit()
+        conn.close()
+
+        pairs, _ = _find_contradiction_candidates(
+            store, max_pairs=100, roots=roots,
+        )
+        # With top_k=2, at most 2 pairs per candidate
+        prov_pairs = [p for p in pairs if p["a"]["id"] == "prov_topk"]
+        assert len(prov_pairs) <= 2, f"top_k=2 but got {len(prov_pairs)} pairs for prov_topk"
+
+    def test_bounded_total_pairs(self, tmp_path: Path) -> None:
+        """Total pairs capped at max_pairs regardless of candidates."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+
+        # Three provisionals, three permanents — all high sim
+        for i in range(3):
+            _insert_provisional_record(
+                conn, f"prov_bound_{i}", f"candidate body {i}",
+                embedding_bytes=np.array([1.0, float(i) * 0.01], dtype=np.float32).tobytes(),
+            )
+            _write_crystallized_md(roots, f"prov_bound_{i}", f"candidate body {i}", provisional=True)
+            _insert_record(
+                conn,
+                {"id": f"perm_bound_{i}", "body": f"permanent body {i}", "kind": "note"},
+                np.array([0.98, float(i) * 0.01], dtype=np.float32).tobytes(),
+            )
+            _write_crystallized_md(roots, f"perm_bound_{i}", f"permanent body {i}", provisional=False)
+        conn.commit()
+        conn.close()
+
+        pairs, evaluated = _find_contradiction_candidates(
+            store, max_pairs=2, roots=roots,
+        )
+        # max_pairs=2 caps total pairs, even though more exist
+        assert len(pairs) <= 2, f"max_pairs=2 but got {len(pairs)}"
+        assert evaluated <= 2
+
+    def test_source_dispatch_to_clearance(self, tmp_path: Path) -> None:
+        """Knob llm_contradiction_candidate_source='clearance' dispatches correctly."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+        _ensure_entity_index_table(conn)
+
+        _insert_provisional_record(
+            conn, "prov_disp", "dispatch test candidate",
+            embedding_bytes=np.array([1.0, 0.1], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "prov_disp", "dispatch test candidate", provisional=True)
+        _insert_record(
+            conn,
+            {"id": "perm_disp", "body": "dispatch test permanent", "kind": "note"},
+            np.array([0.98, 0.05], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "perm_disp", "dispatch test permanent", provisional=False)
+        _insert_entity_link(conn, "ent_disp", "dispatch_entity", "prov_disp")
+        _insert_entity_link(conn, "ent_disp", "dispatch_entity", "perm_disp")
+        conn.commit()
+        conn.close()
+
+        pairs, _ = _find_contradiction_candidates(
+            store, max_pairs=100, roots=roots,
+        )
+        # Clearance source uses provisional × permanent, not crystallized × crystallized
+        assert len(pairs) >= 1
+        # Verify the pairs are provisional→permanent, not perm→perm
+        for p in pairs:
+            assert p["a"]["id"].startswith("prov_"), f"side A should be provisional, got {p['a']['id']}"
+            assert p["b"]["id"].startswith("perm_"), f"side B should be permanent, got {p['b']['id']}"
+
+    def test_no_eligible_provisionals_yields_no_pairs(self, tmp_path: Path) -> None:
+        """Zero eligible provisional records → 0 pairs."""
+        roots = FakeRoots(tmp_path)
+        store = FakeStore(roots)
+        self._setup_clearance_knob(roots)
+
+        conn = sqlite3.connect(str(roots.index_path))
+        _create_tables(conn)
+        # Only permanents, no provisionals
+        _insert_record(
+            conn,
+            {"id": "perm_only", "body": "just a permanent record", "kind": "note"},
+            np.array([1.0, 0.0], dtype=np.float32).tobytes(),
+        )
+        _write_crystallized_md(roots, "perm_only", "just a permanent record", provisional=False)
+        conn.commit()
+        conn.close()
+
+        pairs, evaluated = _find_contradiction_candidates(
+            store, max_pairs=100, roots=roots,
+        )
+        assert len(pairs) == 0
+        assert evaluated == 0

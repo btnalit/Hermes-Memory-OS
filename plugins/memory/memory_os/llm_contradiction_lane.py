@@ -129,6 +129,10 @@ def _find_contradiction_candidates(
         return _find_entity_candidates(
             store, max_pairs=max_pairs, roots=roots, error_records=error_records,
         )
+    if source == "clearance":
+        return _find_clearance_candidates(
+            store, max_pairs=max_pairs, roots=roots, error_records=error_records,
+        )
     return _find_cosine_candidates(
         store, max_pairs=max_pairs, roots=roots, error_records=error_records,
     )
@@ -369,6 +373,194 @@ def _find_entity_candidates(
             "similarity": sim,
         })
 
+    return candidate_pairs, pairs_evaluated
+
+
+def _find_clearance_candidates(
+    store: Any,
+    *,
+    max_pairs: int = 100,
+    roots: object | None = None,
+    error_records: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Clearance pair source: eligible provisional × active permanent.
+
+    Two-tier pre-filter:
+    1. Entity intersection priority — shared entities via entity_index
+    2. Cosine similarity top-K fallback (knob ``clearance_pair_top_k``)
+
+    Per-candidate pair count is bounded by ``clearance_pair_top_k``
+    (default 5). Total pairs capped at *max_pairs*. Returns
+    ``(candidate_pairs, pairs_evaluated)`` where side A is always the
+    provisional record and side B is the permanent.
+    """
+    from .crystallized import CrystallizedMemoryService, is_active_crystallized_frontmatter
+    from .knob_overrides import resolve_knob
+    from .vector_edge_proposer import _cosine_similarity
+
+    _errs = error_records or []
+    index_path = getattr(store.roots, "index_path", None)
+    if index_path is None:
+        return [], 0
+
+    # ── Resolve knobs ──────────────────────────────────────────────────
+    top_k: int = int(resolve_knob(
+        "clearance_pair_top_k", default=5, roots=roots,
+    ))
+    same_topic_threshold: float = float(resolve_knob(
+        "llm_contradiction_same_topic_threshold", default=0.75, roots=roots,
+    ))
+
+    # ── Get eligible provisional records ───────────────────────────────
+    crystallized = CrystallizedMemoryService(store)
+    eligible_ids: set[str] = set()
+    eligible_body: dict[str, str] = {}
+    try:
+        eligibility = crystallized.collect_permanent_promotion_eligibility()
+        for erec in eligibility.get("eligible_records", []):
+            rid = str(erec.get("record_id") or "")
+            if rid:
+                eligible_ids.add(rid)
+                # Body will be loaded from index
+    except Exception:
+        return [], 0
+
+    if not eligible_ids:
+        return [], 0
+
+    # ── Get active permanent record IDs ────────────────────────────────
+    permanent_ids: set[str] = set()
+    if store.roots.crystallized_root.exists():
+        for path in sorted(store.roots.crystallized_root.glob("*.md")):
+            try:
+                for record in crystallized.read_records(path.name):
+                    fm = record.frontmatter
+                    if fm.get("provisional") is not True and is_active_crystallized_frontmatter(fm):
+                        pid = str(fm.get("id") or "")
+                        if pid and pid not in eligible_ids:
+                            permanent_ids.add(pid)
+            except Exception:
+                continue
+
+    if not permanent_ids:
+        return [], 0
+
+    # ── Load records + embeddings from index ───────────────────────────
+    conn = sqlite3.connect(str(index_path))
+    conn.row_factory = sqlite3.Row
+
+    all_ids = eligible_ids | permanent_ids
+    record_map: dict[str, dict[str, Any]] = {}
+    try:
+        placeholders = ",".join(["?" for _ in all_ids])
+        rows = conn.execute(
+            f"select cr.id, cr.kind, cr.body, me.embedding "
+            f"from crystallized_records cr "
+            f"inner join memory_embeddings me "
+            f"  on me.record_type = 'crystallized_record' "
+            f"  and me.record_id = cr.id "
+            f"where cr.id in ({placeholders})",
+            list(all_ids),
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return [], 0
+
+    for row in rows:
+        rid = str(row["id"] or "")
+        embedding = row["embedding"]
+        body = str(row["body"] or "")
+        if not rid or not embedding or not body:
+            continue
+        record_map[rid] = {
+            "id": rid, "kind": str(row["kind"] or ""),
+            "body": body, "embedding": bytes(embedding),
+        }
+
+    # ── Phase 1: entity-based pairing ──────────────────────────────────
+    candidate_pairs: list[dict[str, Any]] = []
+    paired_prov_ids: set[str] = set()
+
+    # Check if entity_index exists
+    try:
+        table_check = conn.execute(
+            "select name from sqlite_master where type='table' and name='entity_index'"
+        ).fetchone()
+    except sqlite3.Error:
+        table_check = None
+
+    if table_check is not None:
+        try:
+            from .entity_extractor import shared_entity_pairs
+
+            entity_pairs = shared_entity_pairs(
+                conn, min_shared_entities=1, max_pairs=max_pairs,
+            )
+        except Exception:
+            entity_pairs = []
+
+        # Filter entity pairs to only eligible×permanent, track per-candidate count
+        prov_pair_count: dict[str, int] = {}
+        for ep in entity_pairs:
+            if len(candidate_pairs) >= max_pairs:
+                break
+            rec_a = ep["record_a"]
+            rec_b = ep["record_b"]
+
+            # Determine which side is provisional vs permanent
+            if rec_a in eligible_ids and rec_b in permanent_ids:
+                prov_id, perm_id = rec_a, rec_b
+            elif rec_b in eligible_ids and rec_a in permanent_ids:
+                prov_id, perm_id = rec_b, rec_a
+            else:
+                continue
+
+            if prov_pair_count.get(prov_id, 0) >= top_k:
+                continue
+
+            prov_rec = record_map.get(prov_id)
+            perm_rec = record_map.get(perm_id)
+            if prov_rec is None or perm_rec is None:
+                continue
+
+            sim = _cosine_similarity(prov_rec["embedding"], perm_rec["embedding"])
+            if sim is not None and sim >= same_topic_threshold:
+                candidate_pairs.append({
+                    "a": prov_rec, "b": perm_rec, "similarity": sim,
+                })
+                prov_pair_count[prov_id] = prov_pair_count.get(prov_id, 0) + 1
+                paired_prov_ids.add(prov_id)
+
+    conn.close()
+
+    # ── Phase 2: cosine fallback for unpaired provisionals ─────────────
+    unpaired_prov = [rid for rid in eligible_ids if rid not in paired_prov_ids]
+    if unpaired_prov and len(candidate_pairs) < max_pairs:
+        perm_list = [record_map[pid] for pid in permanent_ids if pid in record_map]
+        for prov_id in unpaired_prov:
+            if len(candidate_pairs) >= max_pairs:
+                break
+            prov_rec = record_map.get(prov_id)
+            if prov_rec is None:
+                continue
+
+            prov_pair_count = 0
+            scored: list[tuple[float, dict[str, Any]]] = []
+            for perm_rec in perm_list:
+                sim = _cosine_similarity(prov_rec["embedding"], perm_rec["embedding"])
+                if sim is not None and sim >= same_topic_threshold:
+                    scored.append((sim, perm_rec))
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            for sim, perm_rec in scored[:top_k]:
+                if len(candidate_pairs) >= max_pairs:
+                    break
+                candidate_pairs.append({
+                    "a": prov_rec, "b": perm_rec, "similarity": sim,
+                })
+                prov_pair_count += 1
+
+    pairs_evaluated = len(candidate_pairs)
     return candidate_pairs, pairs_evaluated
 
 
