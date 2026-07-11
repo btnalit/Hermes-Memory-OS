@@ -341,9 +341,9 @@ def exposure_monitor_stats(store: Any) -> dict[str, Any]:
 
     # ── Telemetry degraded count: count of records with boundary violations ─
     telemetry_degraded_count = sum(
-        1 for ms_rec in ms_rec
-        if isinstance(ms_rec.get("boundary"), dict)
-        and any(v is True for v in ms_rec["boundary"].values())
+        1 for _ms_rec in ms_records
+        if isinstance(_ms_rec.get("boundary"), dict)
+        and any(v is True for v in _ms_rec["boundary"].values())
     )
 
     # Collect rollup records for cumulative stats
