@@ -821,6 +821,9 @@ def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Pat
         for frontmatter, body in _markdown_records(path.read_text(encoding="utf-8")):
             if not is_active_crystallized_frontmatter(frontmatter):
                 continue
+            record_id = frontmatter.get("id")
+            if not record_id:
+                continue  # malformed record — skip rather than crash
             conn.execute(
                 """
                 insert or replace into crystallized_records
@@ -829,8 +832,8 @@ def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Pat
                 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    str(frontmatter["id"]),
-                    str(frontmatter["kind"]),
+                    str(record_id),
+                    str(frontmatter.get("kind", "")),
                     _optional_str(frontmatter.get("created_at")),
                     _optional_str(frontmatter.get("approved_by")),
                     _optional_str(frontmatter.get("approved_at")),
@@ -844,7 +847,7 @@ def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Pat
             _replace_fts_record(
                 conn,
                 record_type="crystallized_record",
-                record_id=str(frontmatter["id"]),
+                record_id=str(record_id),
                 title=f"{frontmatter.get('kind', '')} {path.name} {' '.join(frontmatter.get('tags', []))}",
                 text=body,
             )
