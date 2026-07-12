@@ -282,6 +282,14 @@ class CrystallizedMemoryService:
                 finally:
                     if tmp_path.exists():
                         tmp_path.unlink()
+                # C2: update index canonical_state (best-effort)
+                try:
+                    from .index import update_canonical_state_in_index
+                    update_canonical_state_in_index(
+                        self.store.roots.index_path, normalized, "owner_revoked",
+                    )
+                except Exception:
+                    pass
                 append_audit(
                     self.store.roots.audit_path,
                     action="crystallized_record_revoked",
@@ -369,6 +377,14 @@ class CrystallizedMemoryService:
                 finally:
                     if tmp_path.exists():
                         tmp_path.unlink()
+                # C2: update index canonical_state (best-effort)
+                try:
+                    from .index import update_canonical_state_in_index
+                    update_canonical_state_in_index(
+                        self.store.roots.index_path, normalized, "demoted",
+                    )
+                except Exception:
+                    pass
                 append_audit(
                     self.store.roots.audit_path,
                     action="crystallized_record_demoted",
@@ -460,6 +476,14 @@ class CrystallizedMemoryService:
                 finally:
                     if tmp_path.exists():
                         tmp_path.unlink()
+                # C2: update index canonical_state (best-effort)
+                try:
+                    from .index import update_canonical_state_in_index
+                    update_canonical_state_in_index(
+                        self.store.roots.index_path, normalized, target_state,
+                    )
+                except Exception:
+                    pass
                 append_audit(
                     self.store.roots.audit_path,
                     action="provisional_record_invalidated",

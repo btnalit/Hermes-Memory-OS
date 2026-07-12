@@ -141,6 +141,7 @@ def run_vector_proposer(
             "from crystallized_records cr "
             "inner join memory_embeddings me "
             "  on me.record_type = 'crystallized_record' "
+            "where cr.canonical_state = 'permanent' "
             "  and me.record_id = cr.id "
             "order by cr.created_at "
             "limit ?",

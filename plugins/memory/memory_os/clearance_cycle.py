@@ -205,9 +205,10 @@ def run_clearance_cycle(
                 conflict_refs: list[str] = []
                 checked_entity_set = _collect_entities_from_record(store, record_id, record.frontmatter)
                 invalidation_mode = "entity_scoped" if checked_entity_set else "conservative_full"
+                unknown_reason = ""
             else:
                 # Real judge: pair against permanents, detect contradictions
-                verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+                verdict, conflict_refs, checked_entity_set, invalidation_mode, unknown_reason = (
                     _judge_against_permanents(
                         store, record_id, body, record.frontmatter,
                         permanent_records,
@@ -216,6 +217,14 @@ def run_clearance_cycle(
                         )),
                     )
                 )
+
+            # C3: infrastructure-class unknowns skip the budget queue.
+            # candidate_unindexed records would use a budget slot every cycle
+            # while producing the same unknown verdict.  Excluding them lets
+            # solvable candidates reach the judge.  When the index picks them
+            # up, they re-enter via invalidation naturally.
+            if unknown_reason == "candidate_unindexed":
+                report["infra_backoff_count"] = report.get("infra_backoff_count", 0) + 1
 
             receipt = ClearanceReceipt(
                 receipt_id=f"clr_{_uuid.uuid4().hex[:16]}",
@@ -228,6 +237,7 @@ def run_clearance_cycle(
                 invalidation_mode=invalidation_mode,
                 judge_version="v2e_llm",
                 judged_at=current.isoformat().replace("+00:00", "Z"),
+                unknown_reason=unknown_reason,
             )
             write_clearance_receipt(roots, receipt)
             report["judged"] += 1
@@ -379,12 +389,13 @@ def _judge_against_permanents(
     permanent_records: list[dict[str, Any]],
     *,
     max_pairs: int = 5,
-) -> tuple[str, list[str], list[str], str]:
+) -> tuple[str, list[str], list[str], str, str]:
     """Judge a provisional record against the permanent corpus.
 
     Constitution matrix (V2-E §5):
     - Empty permanents → ``clear`` (empty corpus clause — handled by caller)
-    - LLM unavailable → ``unknown`` (fail-closed, all records)
+    - LLM unavailable → ``unknown`` + ``judge_unavailable`` (fail-closed)
+    - No pairs found → ``unknown`` + ``candidate_unindexed`` (infra gap)
     - Contradiction detected → ``conflict`` with conflict_refs populated
     - No contradiction → ``clear``
 
@@ -392,7 +403,9 @@ def _judge_against_permanents(
     caller handles). Every path with non-empty permanents goes through LLM
     evaluation.
 
-    Returns ``(verdict, conflict_refs, checked_entity_set, invalidation_mode)``.
+    Returns ``(verdict, conflict_refs, checked_entity_set, invalidation_mode, unknown_reason)``.
+    C3: ``unknown_reason`` disambiguates infra gaps from judge decisions:
+    ``"candidate_unindexed"`` | ``"judge_unavailable"`` | ``"judge_verdict"`` | ``""``.
     """
     import hashlib
     import json as _json
@@ -406,12 +419,12 @@ def _judge_against_permanents(
 
     if not permanent_records:
         # Empty corpus — caller should have handled this, but be defensive
-        return ("clear", [], checked_entity_set, invalidation_mode)
+        return ("clear", [], checked_entity_set, invalidation_mode, "")
 
     # ── LLM availability guard ──────────────────────────────────────────
     if not _check_llm_available(store):
         # Fail-closed: every non-empty-corpus record gets "unknown"
-        return ("unknown", [], checked_entity_set, invalidation_mode)
+        return ("unknown", [], checked_entity_set, invalidation_mode, "judge_unavailable")
 
     # ── Prepare LLM config ──────────────────────────────────────────────
     from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
@@ -427,7 +440,7 @@ def _judge_against_permanents(
     }
     resolved = _resolve_hermes_default_runtime(_DEFAULT_LLM_CONFIG)
     if not resolved.get("ok"):
-        return ("unknown", [], checked_entity_set, invalidation_mode)
+        return ("unknown", [], checked_entity_set, invalidation_mode, "judge_unavailable")
     llm_config = dict(_DEFAULT_LLM_CONFIG)
 
     # ── Pair provisional with permanents ────────────────────────────────
@@ -438,8 +451,8 @@ def _judge_against_permanents(
 
     if not pairs:
         # No pairs found (e.g., no embeddings, no entity overlap) —
-        # can't judge, fail-closed
-        return ("unknown", [], checked_entity_set, invalidation_mode)
+        # can't judge, fail-closed (C3: infra gap, not judge error)
+        return ("unknown", [], checked_entity_set, invalidation_mode, "candidate_unindexed")
 
     # ── LLM claim extraction + contradiction detection per pair ─────────
     from .llm_contradiction_lane import _claims_contradict
@@ -523,9 +536,9 @@ def _judge_against_permanents(
                 for e in perm_entities:
                     if e not in checked_entity_set:
                         checked_entity_set.append(e)
-        return ("conflict", conflict_refs, checked_entity_set, invalidation_mode)
+        return ("conflict", conflict_refs, checked_entity_set, invalidation_mode, "")
 
-    return ("clear", [], checked_entity_set, invalidation_mode)
+    return ("clear", [], checked_entity_set, invalidation_mode, "")
 
 
 def _pair_with_permanents(
@@ -772,6 +785,32 @@ def clearance_monitor_stats(roots: Any) -> dict[str, Any]:
                 cf_count += 1
     conservative_full_rate = (cf_count / cf_total) if cf_total > 0 else 0.0
 
+    # C3: per-reason unknown breakdown
+    unknown_reason_counts: dict[str, int] = {}
+    for rec in records:
+        r = ClearanceReceipt.from_dict(rec)
+        if r.verdict == "unknown" and r.is_active:
+            reason = r.unknown_reason or "unspecified"
+            unknown_reason_counts[reason] = unknown_reason_counts.get(reason, 0) + 1
+
+    # C3: filter oldest-unknown-age to only judge-class unknowns (not infra gaps)
+    judge_unknowns = [
+        u for u in unknowns
+        if ClearanceReceipt.from_dict(u).unknown_reason not in ("candidate_unindexed",)
+    ]
+    judge_oldest_age = 0.0
+    if judge_unknowns:
+        now = datetime.now(timezone.utc)
+        for u in judge_unknowns:
+            judged = ClearanceReceipt.from_dict(u).judged_at
+            if judged:
+                try:
+                    dt = datetime.fromisoformat(judged.replace("Z", "+00:00"))
+                    age = (now - dt.astimezone(timezone.utc)).total_seconds() / 3600.0
+                    judge_oldest_age = max(judge_oldest_age, age)
+                except (ValueError, TypeError):
+                    pass
+
     return {
         "schema_version": "memory-os.clearance_monitor_stats.v0",
         "clearance_receipts_total": len(records),
@@ -780,6 +819,7 @@ def clearance_monitor_stats(roots: Any) -> dict[str, Any]:
         "clearance_receipts_unknown": verdict_counts["unknown"],
         "receipts_invalidated_count": invalidated_count,
         "rejudge_queue_depth": len(queue),
-        "oldest_unknown_age_hours": round(oldest_age, 1),
+        "oldest_unknown_age_hours": round(judge_oldest_age if judge_unknowns else oldest_age, 1),
         "conservative_full_invalidation_rate": round(conservative_full_rate, 2),
+        "unknown_reason_distribution": unknown_reason_counts,
     }

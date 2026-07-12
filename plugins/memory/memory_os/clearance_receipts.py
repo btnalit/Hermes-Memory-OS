@@ -63,6 +63,7 @@ class ClearanceReceipt:
     judged_at: str = ""
     invalidated_at: str | None = None
     invalidated_by: str | None = None
+    unknown_reason: str = ""  # C3: "candidate_unindexed" | "judge_unavailable" | "judge_verdict" | ""
 
     @property
     def is_active(self) -> bool:
@@ -90,6 +91,7 @@ class ClearanceReceipt:
             "judged_at": self.judged_at,
             "invalidated_at": self.invalidated_at,
             "invalidated_by": self.invalidated_by,
+            "unknown_reason": self.unknown_reason,
         }
 
     @classmethod
@@ -108,6 +110,7 @@ class ClearanceReceipt:
             judged_at=str(data.get("judged_at") or ""),
             invalidated_at=data.get("invalidated_at"),
             invalidated_by=data.get("invalidated_by"),
+            unknown_reason=str(data.get("unknown_reason") or ""),
         )
 
 

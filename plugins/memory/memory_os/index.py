@@ -561,6 +561,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "memory_edges", "invalidated_at", "text")
     _ensure_column(conn, "memory_edges", "proposed_by", "text not null default 'structural'")
     _ensure_column(conn, "crystallized_candidates", "provenance_json", "text not null default '{}'")
+    _ensure_column(conn, "crystallized_records", "canonical_state", "text not null default 'permanent'")
     _ensure_fts(conn)
     _set_metadata(conn, "fts_text_projection_version", _FTS_TEXT_PROJECTION_VERSION)
 
@@ -824,12 +825,16 @@ def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Pat
             record_id = frontmatter.get("id")
             if not record_id:
                 continue  # malformed record — skip rather than crash
+            # C1: derive canonical_state from frontmatter metadata
+            canonical_state = "permanent"
+            if frontmatter.get("provisional") is True or str(frontmatter.get("provisional", "")).lower() == "true":
+                canonical_state = "provisional"
             conn.execute(
                 """
                 insert or replace into crystallized_records
                 (id, kind, created_at, approved_by, approved_at, source_event_ids_json, tags_json,
-                 sensitivity, hindsight_indexed, file_name)
-                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 sensitivity, hindsight_indexed, file_name, canonical_state)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(record_id),
@@ -842,6 +847,7 @@ def _index_crystallized_records(conn: sqlite3.Connection, crystallized_root: Pat
                     _optional_str(frontmatter.get("sensitivity")),
                     1 if frontmatter.get("hindsight_indexed") is True else 0,
                     path.name,
+                    canonical_state,
                 ),
             )
             _replace_fts_record(
@@ -1308,6 +1314,38 @@ def _parse_frontmatter(lines: list[str]) -> dict[str, Any]:
 
 def _optional_str(value: object) -> str:
     return "" if value is None else str(value)
+
+
+# ── C2: Index state update helper (lifecycle-aware) ─────────────────────
+
+
+def update_canonical_state_in_index(
+    index_path: Path,
+    record_id: str,
+    canonical_state: str,
+) -> bool:
+    """Update ``canonical_state`` in the index's ``crystallized_records`` table.
+
+    Best-effort — if the index doesn't exist or the record isn't in it,
+    the index sync will pick up the correct state on its next run.
+    Returns ``True`` if a row was updated.
+    """
+    import sqlite3
+
+    if not index_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(index_path))
+        conn.execute("pragma journal_mode=WAL")
+        conn.execute(
+            "update crystallized_records set canonical_state = ? where id = ?",
+            (canonical_state, record_id),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.Error:
+        return False
 
 
 # ── Edge governance helpers ───────────────────────────────────────────────

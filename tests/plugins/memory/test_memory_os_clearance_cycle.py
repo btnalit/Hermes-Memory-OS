@@ -280,7 +280,7 @@ class TestAntiRubberStamp:
             "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
             return_value={"ok": True},
         ):
-            verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+            verdict, conflict_refs, checked_entity_set, invalidation_mode, _unk_reason = (
                 _judge_against_permanents(
                     store,
                     str(prov_records[0]["id"]),
@@ -389,7 +389,7 @@ class TestAntiRubberStamp:
             "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
             return_value={"ok": True},
         ):
-            verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+            verdict, conflict_refs, checked_entity_set, invalidation_mode, _unk_reason = (
                 _judge_against_permanents(
                     store,
                     str(prov_records[0]["id"]),
@@ -423,7 +423,7 @@ class TestAntiRubberStamp:
         store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
         store.initialize()
 
-        verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+        verdict, conflict_refs, checked_entity_set, invalidation_mode, _unk_reason = (
             _judge_against_permanents(
                 store,
                 "rec_empty_corpus",
@@ -466,7 +466,7 @@ class TestAntiRubberStamp:
 
         # _judge_against_permanents checks LLM availability internally;
         # without an actual LLM, it should return "unknown"
-        verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+        verdict, conflict_refs, checked_entity_set, invalidation_mode, _unk_reason = (
             _judge_against_permanents(
                 store,
                 "rec_no_llm",
@@ -480,6 +480,63 @@ class TestAntiRubberStamp:
         assert verdict == "unknown", (
             f"Fail-closed failure: LLM unavailable but returned {verdict!r}. "
             f"Constitution requires 'unknown'."
+        )
+
+
+    def test_unindexed_candidate_plus_nonempty_corpus_must_return_unknown(
+        self, tmp_path: Path,
+    ) -> None:
+        """Unindexed candidate + non-empty corpus → unknown (not clear).
+
+        Counterfactual: without this test, a candidate with no index entries
+        could fall through to the "empty corpus → clear" clause if the
+        pairing logic returned an empty list AND the permanent list appeared
+        empty to an accidental code path.  The distinction between "no
+        permanents exist" and "permanents exist but can't be paired" must
+        be explicit.
+        """
+        from plugins.memory.memory_os.clearance_cycle import (
+            _judge_against_permanents,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+
+        perm_records = [
+            {"id": "perm_exists", "body": "Permanent record body text.",
+             "frontmatter": {"id": "perm_exists", "provisional": False}}
+        ]
+
+        # No embeddings, no entity_index for this provisional —
+        # _pair_with_permanents will return [].
+
+        # NOTE: The conditional in _judge_against_permanents first checks
+        # `if not permanent_records: return clear`.  Since we pass a
+        # non-empty permanent list, it MUST NOT take that branch.
+        # It then tries pairing, gets [], and returns unknown.
+        # This test locks that ordering — the empty-corpus clause is
+        # NEVER reached when permanents exist, even if pairing fails.
+
+        verdict, conflict_refs, checked_entity_set, invalidation_mode, unknown_reason = (
+            _judge_against_permanents(
+                store,
+                "rec_unindexed",
+                "Any provisional body.",
+                {"id": "rec_unindexed"},
+                perm_records,
+                max_pairs=5,
+            )
+        )
+
+        assert verdict == "unknown", (
+            f"UNINDEXED-CORPUS FAILURE: unindexed candidate with non-empty "
+            f"corpus returned verdict={verdict!r}. Must be 'unknown', not 'clear'. "
+            f"The empty-corpus clause must not trigger when permanents exist."
+        )
+        assert unknown_reason in ("candidate_unindexed", "judge_unavailable"), (
+            f"Expected infra or judge unknown_reason, got {unknown_reason!r}"
         )
 
 
