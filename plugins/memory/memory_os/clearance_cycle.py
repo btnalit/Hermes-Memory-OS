@@ -245,15 +245,45 @@ def run_clearance_cycle(
 # ── Clearance judge helpers ──────────────────────────────────────────────
 
 
-def _check_llm_available() -> bool:
+def _check_llm_available(store: Any | None = None) -> bool:
     """Check whether the LLM runtime is available for contradiction judging.
+
+    Reads the live low-clue-recall config from *store* when available,
+    falling back to the on-disk ``config.json``.  Passing an empty dict
+    (the old behaviour) would always hit ``DEFAULT_CONFIG`` which has
+    ``enabled: False, mode: "none"`` — the judge would never be available.
 
     Returns ``False`` when the LLM cannot be reached — all non-empty-corpus
     records will receive an ``unknown`` verdict (fail-closed).
     """
     try:
         from .low_clue_recall import low_clue_judge_availability as _judge_avail
-        judge_status = _judge_avail({})
+
+        config: dict[str, Any] | None = None
+
+        # Resolve the live config from the store, then fall back to disk
+        if store is not None:
+            try:
+                config_path = store.roots.memory_os_root / "config.json"
+                if config_path.exists():
+                    import json as _json
+                    config = _json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                config = None
+
+        if config is None:
+            # Last resort: try reading from ambient roots (no store available)
+            try:
+                from .roots import MemoryOSRoots
+                ambient = MemoryOSRoots.from_profile()
+                config_path = ambient.memory_os_root / "config.json"
+                if config_path.exists():
+                    import json as _json
+                    config = _json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                config = {}
+
+        judge_status = _judge_avail(config)
         return bool(judge_status.get("available", False))
     except Exception:
         return False
@@ -370,7 +400,7 @@ def _judge_against_permanents(
         return ("clear", [], checked_entity_set, invalidation_mode)
 
     # ── LLM availability guard ──────────────────────────────────────────
-    if not _check_llm_available():
+    if not _check_llm_available(store):
         # Fail-closed: every non-empty-corpus record gets "unknown"
         return ("unknown", [], checked_entity_set, invalidation_mode)
 
