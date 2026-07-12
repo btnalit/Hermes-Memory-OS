@@ -206,6 +206,16 @@ def run_llm_proposer(
             "proposed_count": 0,
         }
 
+    # ── Guard: LLM not available ──────────────────────────────────────
+    runtime = _resolve_runtime()
+    if not runtime.get("ok"):
+        return {
+            "status": "skipped",
+            "reason": "llm_runtime_unavailable",
+            "code": runtime.get("code", "resolve_failed"),
+            "proposed_count": 0,
+        }
+
     # Enrich with body text from FTS5
     conn2 = sqlite3.connect(index_path)
     conn2.row_factory = sqlite3.Row

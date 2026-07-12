@@ -599,10 +599,25 @@ def run_contradiction_lane(
         return {"status": "skipped", "reason": "embedder_unavailable", "contradictions_found": 0, "error_records": error_records}
 
     # ── Guard: LLM not available ──────────────────────────────────────
+    # Use the same hermes_default auto-resolution pattern as the other
+    # LLM consumers.  Pass the actual default config (not {}) so that
+    # normalize_low_clue_recall_config can resolve the hermes_default
+    # provider through the Hermes agent runtime.
+    _LLM_AVAIL_CONFIG: dict[str, Any] = {
+        "enabled": True,
+        "llm_judge": {
+            "enabled": True,
+            "mode": "bounded_vote",
+            "provider": "hermes_default",
+            "timeout_ms": 15000,
+            "max_tokens": 512,
+            "on_error": "deterministic_fallback",
+        },
+    }
     llm_available = False
     try:
         from .low_clue_recall import low_clue_judge_availability as _judge_avail
-        judge_status = _judge_avail({})
+        judge_status = _judge_avail(_LLM_AVAIL_CONFIG)
         llm_available = judge_status.get("available", False)
     except Exception as _exc:
         error_records.append(_build_error_record(

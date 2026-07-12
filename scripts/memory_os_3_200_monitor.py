@@ -3087,9 +3087,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         )
         judge_status = judge.get("status")
         if configured_judge.get("enabled") and configured_judge.get("mode") in {"report_only", "bounded_vote"}:
-            if judge_status in {"ok", "no_clear_match", "no_match", "no_selection"}:
+            if judge_status and judge_status not in {"error", "skipped"}:
                 passed.append({"code": "low_clue_llm_judge_available"})
-            elif judge_status in {"error", "skipped"}:
+            else:
                 warn.append({"code": "low_clue_llm_judge_unavailable", "value": judge})
         if int(low_clue.get("internal_label_count") or 0) > 0:
             fail.append(
@@ -4963,7 +4963,7 @@ def _low_clue_summary(report: dict[str, Any], config: dict[str, Any]) -> dict[st
         "candidate_count": report.get("candidate_count"),
         "internal_label_count": report.get("internal_label_count"),
         "llm_status": judge.get("status"),
-        "llm_available": judge.get("status") in {"ok", "no_clear_match", "no_match", "no_selection"},
+        "llm_available": judge.get("status") not in {"error", "skipped", "", None},
     }
 
 
