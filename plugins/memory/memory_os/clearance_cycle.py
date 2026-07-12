@@ -249,9 +249,10 @@ def _check_llm_available(store: Any | None = None) -> bool:
     """Check whether the LLM runtime is available for contradiction judging.
 
     Reads the live low-clue-recall config from *store* when available,
-    falling back to the on-disk ``config.json``.  Passing an empty dict
-    (the old behaviour) would always hit ``DEFAULT_CONFIG`` which has
-    ``enabled: False, mode: "none"`` — the judge would never be available.
+    falling back to the on-disk ``config.json``.  Extracts the
+    ``low_clue_recall`` sub-section before passing to the availability
+    check — the top-level ``config.json`` keys (``session_mirror``, etc.)
+    are not valid fields for ``normalize_low_clue_recall_config``.
 
     Returns ``False`` when the LLM cannot be reached — all non-empty-corpus
     records will receive an ``unknown`` verdict (fail-closed).
@@ -259,7 +260,7 @@ def _check_llm_available(store: Any | None = None) -> bool:
     try:
         from .low_clue_recall import low_clue_judge_availability as _judge_avail
 
-        config: dict[str, Any] | None = None
+        full_config: dict[str, Any] | None = None
 
         # Resolve the live config from the store, then fall back to disk
         if store is not None:
@@ -267,11 +268,11 @@ def _check_llm_available(store: Any | None = None) -> bool:
                 config_path = store.roots.memory_os_root / "config.json"
                 if config_path.exists():
                     import json as _json
-                    config = _json.loads(config_path.read_text(encoding="utf-8"))
+                    full_config = _json.loads(config_path.read_text(encoding="utf-8"))
             except Exception:
-                config = None
+                full_config = None
 
-        if config is None:
+        if full_config is None:
             # Last resort: try reading from ambient roots (no store available)
             try:
                 from .roots import MemoryOSRoots
@@ -279,11 +280,19 @@ def _check_llm_available(store: Any | None = None) -> bool:
                 config_path = ambient.memory_os_root / "config.json"
                 if config_path.exists():
                     import json as _json
-                    config = _json.loads(config_path.read_text(encoding="utf-8"))
+                    full_config = _json.loads(config_path.read_text(encoding="utf-8"))
             except Exception:
-                config = {}
+                full_config = {}
 
-        judge_status = _judge_avail(config)
+        # Extract the low_clue_recall subsection — normalize_low_clue_recall_config
+        # expects a flat config with "enabled" and "llm_judge" at the top level.
+        lcr_config = (
+            full_config.get("low_clue_recall")
+            if isinstance(full_config, dict) and isinstance(full_config.get("low_clue_recall"), dict)
+            else {}
+        )
+
+        judge_status = _judge_avail(lcr_config)
         return bool(judge_status.get("available", False))
     except Exception:
         return False
