@@ -498,26 +498,35 @@ def _build_context_router_apply_prefetch(
         return None
     selected_names = [str(item.get("section") or "") for item in report.get("selected_sections", [])]
     selected_sections = _sections_for_selected_names(candidates, selected_names)
-    # ── Fill in required-but-empty sections ────────────────────────────
-    # When a section is required by the route (e.g. "Crystallized Review
-    # Candidates" for candidate_review) but its body is empty, the raw
-    # section builder drops it (_append_section's `if lines:` gate).
-    # Create a placeholder so the formatter renders the heading with an
-    # empty body — the heading contract is preserved and the monitor's
-    # RH-26 probe doesn't report a missing heading for data that exists
-    # but is empty.
-    found_names = {s.section for s in selected_sections}
-    for name in selected_names:
-        if name not in found_names:
-            selected_sections.append(
-                ContextSection(
-                    section=name,
-                    text="",
-                    source_class=_section_source_class(name),
-                    metadata={"required": True, "empty_body_placeholder": True},
-                )
+    # Required headings are a route contract, not a property of whichever
+    # non-empty candidates survived the raw builder.  Derive them directly
+    # from the selected route so empty source data cannot erase the heading.
+    required_by_route = {
+        "foreground_control": ("Current Foreground Task",),
+        "diagnostic_current_status": ("Diagnostic Grounding", "Current Memory-OS Runtime Facts"),
+        "active_task": ("Current Foreground Task", "Indexed Recall"),
+        "candidate_review": ("Crystallized Review Candidates", "Crystallized Memory"),
+        "ambiguous_recall": ("Recall Clarification Guard",),
+        "casual_continuity": ("Conversation Carryover",),
+    }
+    required_names = required_by_route.get(route, ())
+    if any(section.text.startswith(HEADER) for section in selected_sections):
+        # A preformatted aggregate already carries its own heading contract;
+        # appending placeholders would force a second wrapper/header.
+        required_names = ()
+    found_names = {section.section for section in selected_sections}
+    for name in required_names:
+        if name in found_names:
+            continue
+        selected_sections.append(
+            ContextSection(
+                section=name,
+                text="",
+                source_class=_section_source_class(name),
+                metadata={"required": True, "empty_body_placeholder": True},
             )
-    # ───────────────────────────────────────────────────────────────────
+        )
+        found_names.add(name)
     if route == "foreground_control":
         selected_sections = [section for section in selected_sections if section.section == "Current Foreground Task"]
     if not selected_sections:

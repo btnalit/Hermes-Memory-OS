@@ -5,7 +5,7 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
 
-def test_left_brain_advisor_findings_enter_owner_digest_without_action_tokens(tmp_path):
+def test_optional_left_brain_finding_stays_out_of_owner_review_digest(tmp_path):
     store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
     store.initialize()
     path = memory_projection_records_path(store.roots)
@@ -26,11 +26,10 @@ def test_left_brain_advisor_findings_enter_owner_digest_without_action_tokens(tm
         if item["target_type"] == "left_brain_advisor_finding"
     ]
 
-    assert advisor["owner_visible_finding_count"] == 1
-    assert queue["review_suggested_count"] >= 1
-    assert items
-    assert items[0]["priority"] == "review_suggested"
-    assert rendered_items
-    assert rendered_items[0]["action_tokens"] == {}
-    assert "left_brain_advisor" in digest["text"]
+    assert advisor["status"] == "warning"
+    assert advisor["finding_count"] == 1
+    assert advisor["owner_visible_finding_count"] == 0
+    assert not items
+    assert not rendered_items
+    assert "left_brain_advisor" not in digest["text"]
     assert digest["boundary"]["actual_send"] is False

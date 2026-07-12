@@ -313,14 +313,6 @@ def _section_decision(
     if required:
         score = max(score, 1.0)
         reasons = _dedupe(["required_by_route"] + reasons)
-        # Tag section so downstream formatter preserves empty required headings.
-        # ContextSection is a frozen dataclass — use object.__setattr__ to
-        # initialise metadata when it is None.
-        meta = section.metadata
-        if meta is None:
-            meta = {}
-            object.__setattr__(section, "metadata", meta)
-        meta["required"] = True
     if excluded_reason:
         return {
             "include": False,

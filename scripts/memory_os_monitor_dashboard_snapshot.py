@@ -549,22 +549,19 @@ def _render_last_status(*, raw_status: str | None, cadence_class: str) -> str:
     """
     if raw_status is not None and raw_status != "" and raw_status != "missing":
         return str(raw_status)
-    # All trigger-gated / cadence-driven modules without observed runs are idle,
-    # not missing.  The old narrow check (on_demand_ prefix only) caused false
-    # "missing" labels for on_signal, on_approved_proposal, monitor_poll_or_daily,
-    # and other legitimate idle states.
-    if cadence_class.startswith("on_demand_") or cadence_class in {
+    trigger_gated = cadence_class.startswith("on_demand_") or cadence_class in {
         "on_signal",
         "on_approved_proposal",
         "monitor_poll_or_daily",
         "daily_weekly_or_min_signal",
         "daily_or_on_new_signal",
-    }:
+    }
+    if trigger_gated:
         return "idle"
-    # Scheduled cadence classes (daily_weekly, daily, weekly) without runs
-    # might legitimately be idle if the schedule hasn't fired yet.
-    # Use "no_run_observed" instead of "missing" to avoid alarm fatigue.
-    return "idle"
+    scheduled = {"hourly", "daily", "weekly", "daily_weekly"}
+    if cadence_class in scheduled:
+        return "missing"
+    return "unobserved"
 
 
 def _modules_snapshot(cadence_report: dict[str, Any]) -> dict[str, Any]:

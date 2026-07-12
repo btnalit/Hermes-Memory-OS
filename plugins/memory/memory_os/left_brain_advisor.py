@@ -279,10 +279,12 @@ def _append_finding_once(
     dedup_key = str(finding.get("dedup_key") or finding.get("finding_id") or "")
     if dedup_key in seen_dedup_keys:
         return
-    # Cross-cycle dedup: suppress findings that already appeared in the
-    # previous advisor report (same source + same status = unchanged).
+    # Cross-cycle dedup suppresses notification only; the active finding stays
+    # in the health report so a persistent fault cannot oscillate warning/ok.
     if skip_keys and dedup_key in skip_keys:
-        return
+        finding = dict(finding)
+        finding["notification_suppressed"] = True
+        finding["owner_visible"] = False
     seen_dedup_keys.add(dedup_key)
     findings.append(finding)
 
@@ -308,6 +310,8 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
     confidence = 0.72
     target_type = "left_brain_advisor_finding"
     owner_burden_class = "review_suggested"
+    priority = "review_suggested"
+    owner_visible = True
     allowed_action_type = "review_only"
     actions_suppressed = True
     suggested_action = "review-only; no automatic apply"
@@ -318,6 +322,8 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
     if status in {"missing", "availability_missing"} and _source_is_optional(source_key):
         confidence = 0.45
         owner_burden_class = "informational"
+        priority = "fyi"
+        owner_visible = False
         suggested_action = "optional source not configured; no action needed unless this host requires it"
     if _hindsight_curation_status(source_key, status):
         target_type = "hindsight_curation"
@@ -373,8 +379,9 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
         "target_type": target_type,
         "target_id": finding_id,
         "source_module": "left_brain_advisor",
-        "priority": "review_suggested",
-        "owner_visible": True,
+        "priority": priority,
+        "owner_visible": owner_visible,
+        "notification_suppressed": False,
         "actions_suppressed": actions_suppressed,
         "title": title,
         "summary": summary,
@@ -494,20 +501,29 @@ def _latest_per_source(
     prevents stale projections from dominating the finding budget.
     """
     from collections import defaultdict
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for proj in projections:
-        grouped[str(proj.get("source_key") or "")].append(proj)
-    result: list[dict[str, Any]] = []
+    grouped: dict[str, list[tuple[int, dict[str, Any]]]] = defaultdict(list)
+    for input_order, proj in enumerate(projections):
+        grouped[str(proj.get("source_key") or "")].append((input_order, proj))
+
+    def temporal_key(item: tuple[int, dict[str, Any]]) -> tuple[datetime, int]:
+        input_order, record = item
+        raw = str(record.get("created_at") or "").strip()
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+        except ValueError:
+            parsed = datetime.min.replace(tzinfo=timezone.utc)
+        return parsed, input_order
+
+    retained: list[tuple[int, dict[str, Any]]] = []
     for source_key, group in grouped.items():
-        # Sort by created_at descending so newest come first.
-        group.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        group.sort(key=temporal_key, reverse=True)
         keep = governance_max if source_key in HINDSIGHT_GOVERNANCE_SOURCE_KEYS else default_max
-        result.extend(group[:keep])
-    # Restore original order (by created_at ascending) so older records
-    # come first — preserves the expectation that later projections
-    # override earlier ones.
-    result.sort(key=lambda r: str(r.get("created_at") or ""))
-    return result
+        retained.extend(group[:keep])
+    retained.sort(key=temporal_key)
+    return [record for _, record in retained]
 
 
 def _previous_finding_dedup_keys(store: MemoryOSStore) -> set[str]:

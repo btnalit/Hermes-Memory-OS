@@ -334,17 +334,17 @@ def test_on_demand_module_shows_idle_not_missing(tmp_path):
     module = _load_module()
     assert module._render_last_status is not None
 
-    # Direct unit tests for _render_last_status
+    # Trigger-gated modules without observed runs are legitimately idle.
     assert module._render_last_status(raw_status=None, cadence_class="on_demand_or_operator_approved_apply") == "idle"
     assert module._render_last_status(raw_status=None, cadence_class="on_demand_dry_run") == "idle"
     assert module._render_last_status(raw_status="missing", cadence_class="on_demand_or_monitor_poll") == "idle"
     assert module._render_last_status(raw_status="missing", cadence_class="on_demand_dry_run") == "idle"
+    assert module._render_last_status(raw_status=None, cadence_class="on_signal") == "idle"
 
-    # Non-on-demand cadence classes also show 'idle' when no runs observed.
-    # 'missing' implies a failure; 'idle' means the trigger hasn't fired yet.
-    assert module._render_last_status(raw_status=None, cadence_class="daily_weekly") == "idle"
-    assert module._render_last_status(raw_status="missing", cadence_class="test_host_integration_harness") == "idle"
-
+    # Scheduled cadence with no observed run is missing; an unknown cadence
+    # is unobserved rather than silently healthy/idle.
+    assert module._render_last_status(raw_status=None, cadence_class="daily_weekly") == "missing"
+    assert module._render_last_status(raw_status="missing", cadence_class="test_host_integration_harness") == "unobserved"
     # Real statuses pass through unchanged
     assert module._render_last_status(raw_status="ok", cadence_class="on_demand_dry_run") == "ok"
     assert module._render_last_status(raw_status="error", cadence_class="daily_weekly") == "error"

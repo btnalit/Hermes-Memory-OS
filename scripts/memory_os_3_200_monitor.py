@@ -7013,9 +7013,15 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
             job_name = str(spec.get("name") or "")
             cron_job = jobs_by_name.get(job_name) if isinstance(jobs_by_name, dict) else {}
             if isinstance(cron_job, dict) and str(cron_job.get("last_status") or "") == "ok":
-                reconciled_via_cron_status.append(lane)
-                continue
-            # ───────────────────────────────────────────────────────────
+                schedule = _cron_schedule_display(cron_job)
+                last_run = _parse_monitor_timestamp(str(cron_job.get("last_run_at") or ""))
+                freshness = _helper_completion_freshness_window(schedule)
+                if last_run is not None and now - last_run <= freshness:
+                    # Fresh cron success is useful degraded evidence, but it is
+                    # not a completion envelope and carries no boundary proof.
+                    reconciled_via_cron_status.append(lane)
+                    boundary_unobserved += 1
+                    continue
             missing.append(lane)
             continue
         completed.append(lane)
@@ -7057,6 +7063,8 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         "helper_completion_completed_lanes": completed,
         "helper_completion_missing_lanes": missing,
         "helper_completion_reconciled_lanes": reconciled_via_cron_status,
+        "helper_completion_reconciliation_status": "degraded" if reconciled_via_cron_status else "not_used",
+        "helper_completion_accounted_count": len(completed) + len(missing) + len(reconciled_via_cron_status),
         "helper_completion_stale_lanes": stale,
         "helper_completion_error_lanes": error,
         "helper_completion_not_due_lanes": not_due,
