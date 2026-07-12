@@ -196,6 +196,13 @@ def run_clearance_cycle(
             if record is None:
                 continue
 
+            # Skip records whose canonical_state is inactive —
+            # e.g. provisional_expired, owner_revoked.  They cannot
+            # be promoted and should not consume clearance budget.
+            if not is_active_crystallized_frontmatter(record.frontmatter):
+                report["target_inactive_skipped"] = report.get("target_inactive_skipped", 0) + 1
+                continue
+
             body = record.body
             content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
 
