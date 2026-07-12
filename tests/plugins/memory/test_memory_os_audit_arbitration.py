@@ -181,6 +181,63 @@ def test_candidate_review_required_heading_survives_empty_builder(monkeypatch):
     )
 
 
+def test_required_headings_fail_closed_below_minimum_budget():
+    from plugins.memory.memory_os.prefetch import HEADER, _fit_budget, _format
+
+    required = {"Crystallized Review Candidates", "Crystallized Memory"}
+    context = _format(
+        [
+            ("Crystallized Review Candidates", ["candidate evidence"]),
+            ("Crystallized Memory", ["approved evidence"]),
+        ]
+    )
+    headings_only = _format([(title, []) for title in required])
+    minimum = len(headings_only)
+
+    below = _fit_budget(context, minimum - 1, required_titles=required)
+    assert below == HEADER
+    assert not any(line.startswith("### ") for line in below.splitlines())
+
+    for budget in (minimum, minimum + 1):
+        fitted = _fit_budget(context, budget, required_titles=required)
+        assert len(fitted) <= budget
+        assert "### Crystallized Review Candidates" in fitted
+        assert "### Crystallized Memory" in fitted
+
+
+def test_candidate_review_preserves_both_required_headings_under_budget(monkeypatch):
+    from plugins.memory.memory_os import prefetch
+    from plugins.memory.memory_os.context_router import ContextSection
+
+    candidates = [
+        ContextSection(
+            section="Crystallized Review Candidates",
+            text="- candidate only: " + ("candidate evidence " * 90),
+            source_class="candidate",
+            metadata={},
+        ),
+        ContextSection(
+            section="Crystallized Memory (deterministic floor recall)",
+            text="- approved memory: " + ("approved evidence " * 120),
+            source_class="crystallized",
+            metadata={},
+        ),
+    ]
+    monkeypatch.setattr(prefetch, "build_prefetch_section_candidates", lambda *args, **kwargs: candidates)
+
+    result = prefetch._build_context_router_apply_prefetch(
+        "那些 crystallized candidates 是已经沉淀的长期记忆吗？",
+        budget_chars=2200,
+        store=object(),
+        context_router_config={"apply_routes": ["candidate_review"]},
+    )
+
+    assert result is not None
+    assert "### Crystallized Review Candidates" in result["context"]
+    assert "### Crystallized Memory (deterministic floor recall)" in result["context"]
+    assert len(result["context"]) <= 2200
+
+
 def test_active_task_required_indexed_recall_survives_empty_builder(monkeypatch):
     from plugins.memory.memory_os import prefetch
 

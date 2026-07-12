@@ -532,7 +532,11 @@ def _build_context_router_apply_prefetch(
     if not selected_sections:
         context = ""
     else:
-        context = _fit_budget(_format_selected_context_sections(selected_sections), budget_chars)
+        context = _fit_budget(
+            _format_selected_context_sections(selected_sections),
+            budget_chars,
+            required_titles=set(required_names),
+        )
     return {"context": context, "report": report, "selected_sections": selected_sections}
 
 
@@ -2420,7 +2424,7 @@ def _format(sections: list[tuple[str, list[str]]]) -> str:
     return "\n".join(output)
 
 
-def _fit_budget(context: str, budget_chars: int) -> str:
+def _fit_budget(context: str, budget_chars: int, *, required_titles: set[str] | None = None) -> str:
     if budget_chars <= 0:
         return ""
     if len(context) <= budget_chars:
@@ -2430,7 +2434,7 @@ def _fit_budget(context: str, budget_chars: int) -> str:
 
     sections = _parse_formatted_sections(context)
     if sections:
-        fitted = _fit_sections_budget(sections, budget_chars)
+        fitted = _fit_sections_budget(sections, budget_chars, required_titles=required_titles)
         if fitted:
             return fitted
         return HEADER[:budget_chars]
@@ -2462,19 +2466,27 @@ def _parse_formatted_sections(context: str) -> list[tuple[str, list[str]]]:
     return sections
 
 
-def _fit_sections_budget(sections: list[tuple[str, list[str]]], budget_chars: int) -> str:
+def _fit_sections_budget(
+    sections: list[tuple[str, list[str]]],
+    budget_chars: int,
+    *,
+    required_titles: set[str] | None = None,
+) -> str:
+    required = {_base_section_title(title) for title in (required_titles or set())}
     kept = [True for _ in sections]
     for index, (title, lines) in enumerate(sections):
-        if not _section_has_body(lines):
+        if not _section_has_body(lines) and _base_section_title(title) not in required:
             kept[index] = False
     while True:
         output = _format([section for section, include in zip(sections, kept, strict=False) if include])
         if len(output) <= budget_chars:
             return output
         remaining = [section for section, include in zip(sections, kept, strict=False) if include]
+        if remaining and all(_base_section_title(title) in required for title, _ in remaining):
+            return _fit_required_sections_budget(remaining, budget_chars)
         if len(remaining) == 1:
             return _fit_single_section_budget(remaining[0], budget_chars)
-        drop_index = _next_budget_drop_index(sections, kept)
+        drop_index = _next_budget_drop_index(sections, kept, required_titles=required)
         if drop_index is None:
             return HEADER if len(HEADER) <= budget_chars else HEADER[:budget_chars]
         kept[drop_index] = False
@@ -2497,14 +2509,50 @@ def _fit_single_section_budget(section: tuple[str, list[str]], budget_chars: int
     return "\n".join(output_lines)
 
 
+def _fit_required_sections_budget(sections: list[tuple[str, list[str]]], budget_chars: int) -> str:
+    """Keep every route-required heading while fitting bounded body evidence."""
+    fitted = [(title, []) for title, _ in sections]
+    headings_only = _format(fitted)
+    if len(headings_only) > budget_chars:
+        return HEADER if len(HEADER) <= budget_chars else HEADER[:budget_chars]
+
+    for section_index, (_, lines) in enumerate(sections):
+        for line in lines:
+            if not line.strip():
+                continue
+            candidate_sections = [(title, list(body)) for title, body in fitted]
+            candidate_sections[section_index][1].append(line)
+            candidate = _format(candidate_sections)
+            if len(candidate) <= budget_chars:
+                fitted = candidate_sections
+                continue
+            remaining = budget_chars - len(_format(fitted)) - 1
+            if remaining > 0:
+                candidate_sections = [(title, list(body)) for title, body in fitted]
+                candidate_sections[section_index][1].append(_clip_multiline(line, remaining))
+                clipped = _format(candidate_sections)
+                if len(clipped) <= budget_chars:
+                    fitted = candidate_sections
+            break
+    return _format(fitted)
+
+
 def _section_has_body(lines: list[str]) -> bool:
     return any(line.strip() and not line.strip().startswith("### ") for line in lines)
 
 
-def _next_budget_drop_index(sections: list[tuple[str, list[str]]], kept: list[bool]) -> int | None:
+def _next_budget_drop_index(
+    sections: list[tuple[str, list[str]]],
+    kept: list[bool],
+    *,
+    required_titles: set[str] | None = None,
+) -> int | None:
+    required = required_titles or set()
     candidates: list[tuple[int, int, int]] = []
     for index, (title, lines) in enumerate(sections):
         if not kept[index]:
+            continue
+        if _base_section_title(title) in required:
             continue
         priority = _budget_keep_priority(title)
         section_size = len(_format([(title, lines)])) - len(HEADER)
@@ -2517,8 +2565,7 @@ def _next_budget_drop_index(sections: list[tuple[str, list[str]]], kept: list[bo
 
 def _budget_keep_priority(title: str) -> int:
     """Higher value means survive budget pressure longer."""
-    # Strip degradation annotation suffix (e.g. "Crystallized Memory (deterministic floor recall)")
-    base_title = title.split(" (")[0] if " (" in title else title
+    base_title = _base_section_title(title)
     priorities = {
         "Identity Memory": 10,
         "Last Session": 62,  # above Crystallized Memory(60): temporal anchor outranks older crystallized under budget
@@ -2538,6 +2585,10 @@ def _budget_keep_priority(title: str) -> int:
         "Current Memory-OS Runtime Facts": 130,
     }
     return priorities.get(base_title, 50)
+
+
+def _base_section_title(title: str) -> str:
+    return title.split(" (")[0] if " (" in title else title
 
 
 def _clip(value: str, limit: int) -> str:

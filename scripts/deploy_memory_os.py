@@ -12,6 +12,7 @@ import json
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -66,7 +67,7 @@ def deploy_memory_os(
     )
     command_repo_root = str(repo_root) if not host else host_profile.remote_repo_root
     command_hermes_home = host_profile.hermes_home if host else hermes_home
-    effective_python_bin = python_bin or host_profile.python_bin
+    effective_python_bin = python_bin or (host_profile.python_bin if host else sys.executable)
     source_repo_head = _repo_head(repo_root)
     commands = _build_commands(
         repo_root=command_repo_root,
@@ -98,6 +99,7 @@ def deploy_memory_os(
         "apply": {"status": "not_run"},
         "postcheck": {"status": "not_run"},
         "deployment_manifest_write": {"status": "not_run"},
+        "memory_projection_refresh": {"status": "not_run"},
         "deployment_manifest_status": {"status": "not_run"},
         "llm_judge_probe": {"status": "not_run"},
         "cron_adapter_probe": {"status": "not_run"},
@@ -177,6 +179,8 @@ def deploy_memory_os(
             expected_schema="memory-os.install.v0",
         )
         report["apply"] = _classify_install(apply_result, expected_dry_run=False)
+        if report["apply"]["status"] != "applied":
+            return report
         if report["restart_requested"]:
             report["restart"] = _redact_process_result(
                 runner(commands["restart"], host=host or None, timeout=timeout)
@@ -187,6 +191,14 @@ def deploy_memory_os(
             host=host,
             timeout=timeout,
         )
+        if report["deployment_manifest_write"]["status"] == "pass":
+            report["memory_projection_refresh"] = _run_memory_projection_refresh(
+                commands,
+                runner=runner,
+                host=host,
+                timeout=timeout,
+                deployed_at=str(report["deployment_manifest_write"].get("manifest", {}).get("deployed_at") or ""),
+            )
         postcheck = _run_json(
             commands["compat"],
             runner=runner,
@@ -309,6 +321,14 @@ def _build_commands(
             "memory-os-agent-os",
             "deployment-manifest",
             "status",
+        ],
+        "memory_projection_refresh": [
+            "hermes",
+            "memory-os-agent-os",
+            "projection",
+            "collect",
+            "--manual-run-ref",
+            "deployment_refresh",
         ],
     }
     if allow_restart and restart_command:
@@ -611,6 +631,67 @@ def _classify_boundary_runtime_probe(result: dict[str, Any]) -> dict[str, Any]:
     return {"status": "pass", "probe": data}
 
 
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _run_memory_projection_refresh(
+    commands: dict[str, list[str]],
+    *,
+    runner: Runner,
+    host: str,
+    timeout: int,
+    deployed_at: str,
+) -> dict[str, Any]:
+    result = _run_json(
+        commands["memory_projection_refresh"],
+        runner=runner,
+        host=host,
+        timeout=timeout,
+        expected_schema="memory-os.memory_projection.v0",
+    )
+    data = result.get("json")
+    if int(result.get("exit_code", 1)) != 0:
+        return {"status": "fail", "reason": "memory_projection_refresh_command_failed", "projection": result}
+    if not isinstance(data, dict) or data.get("schema_version") != "memory-os.memory_projection.v0":
+        return {"status": "fail", "reason": "memory_projection_refresh_json_invalid", "projection": result}
+    true_paths = boundary_true_paths(data.get("boundary") if isinstance(data.get("boundary"), dict) else {})
+    if true_paths:
+        return {
+            "status": "fail",
+            "reason": "memory_projection_refresh_boundary_true",
+            "boundary_true_paths": true_paths,
+            "projection": data,
+        }
+    projection_status = str(data.get("status") or "")
+    if projection_status == "warning":
+        return {"status": "fail", "reason": "memory_projection_refresh_warning", "projection": data}
+    if projection_status != "ok":
+        return {"status": "fail", "reason": "memory_projection_refresh_failed", "projection": data}
+    try:
+        written_count = int(data.get("written_count") or 0)
+    except (TypeError, ValueError):
+        written_count = 0
+    if written_count <= 0:
+        return {"status": "fail", "reason": "memory_projection_refresh_no_new_records", "projection": data}
+    summary_raw = data.get("summary")
+    summary = summary_raw if isinstance(summary_raw, dict) else {}
+    latest_created_at = str(summary.get("latest_created_at") or "")
+    if not latest_created_at:
+        return {"status": "fail", "reason": "memory_projection_refresh_freshness_missing", "projection": data}
+    latest_ts = _parse_utc_timestamp(latest_created_at)
+    deployed_ts = _parse_utc_timestamp(deployed_at)
+    if latest_ts is None or deployed_ts is None or latest_ts < deployed_ts:
+        return {"status": "fail", "reason": "memory_projection_refresh_stale_after_deploy", "projection": data}
+    return {"status": "pass", "projection": data}
+
+
 def _run_deployment_manifest_write(
     commands: dict[str, list[str]],
     *,
@@ -749,6 +830,7 @@ def classify_deploy_report(report: dict[str, Any]) -> dict[str, list[dict[str, A
         "apply",
         "postcheck",
         "deployment_manifest_write",
+        "memory_projection_refresh",
         "deployment_manifest_status",
         "llm_judge_probe",
         "cron_adapter_probe",
@@ -839,6 +921,7 @@ def render_deploy_plan(report: dict[str, Any]) -> str:
         "apply",
         "postcheck",
         "deployment_manifest_write",
+        "memory_projection_refresh",
         "deployment_manifest_status",
         "llm_judge_probe",
         "cron_adapter_probe",

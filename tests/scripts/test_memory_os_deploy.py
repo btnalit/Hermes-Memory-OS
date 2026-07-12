@@ -3,14 +3,66 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from scripts.deploy_memory_os import (
     _classify_boundary_runtime_probe,
     _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
+    _run_memory_projection_refresh,
     classify_deploy_report,
     deploy_memory_os,
     render_deploy_plan,
 )
+
+
+def test_projection_refresh_rejects_nonzero_command_even_with_valid_json():
+    def fake_runner(argv, *, host=None, timeout=30):
+        result = _projection_refresh_result()
+        result["exit_code"] = 2
+        return result
+
+    report = _run_memory_projection_refresh(
+        {"memory_projection_refresh": ["hermes", "projection", "collect"]},
+        runner=fake_runner,
+        host="",
+        timeout=30,
+        deployed_at="2026-06-03T01:00:00Z",
+    )
+
+    assert report["status"] == "fail"
+    assert report["reason"] == "memory_projection_refresh_command_failed"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (lambda data: data.update(status="warning"), "memory_projection_refresh_warning"),
+        (lambda data: data.update(written_count=0), "memory_projection_refresh_no_new_records"),
+        (
+            lambda data: data["summary"].update(latest_created_at="2026-06-03T00:59:59Z"),
+            "memory_projection_refresh_stale_after_deploy",
+        ),
+    ],
+)
+def test_projection_refresh_requires_new_post_deploy_evidence(mutation, reason):
+    def fake_runner(argv, *, host=None, timeout=30):
+        result = _projection_refresh_result()
+        data = json.loads(result["stdout"])
+        mutation(data)
+        result["stdout"] = json.dumps(data)
+        return result
+
+    report = _run_memory_projection_refresh(
+        {"memory_projection_refresh": ["hermes", "projection", "collect"]},
+        runner=fake_runner,
+        host="",
+        timeout=30,
+        deployed_at="2026-06-03T01:00:00Z",
+    )
+
+    assert report["status"] == "fail"
+    assert report["reason"] == reason
 
 
 def test_deploy_script_plan_bootstraps_repo_import_path(tmp_path):
@@ -127,6 +179,27 @@ def _deployment_manifest_result():
                 "status": "present",
                 "deployed_head": "abc123",
                 "deployed_at": "2026-06-03T01:00:00Z",
+            }
+        ),
+        "stderr": "",
+    }
+
+
+def _projection_refresh_result():
+    return {
+        "exit_code": 0,
+        "stdout": json.dumps(
+            {
+                "schema_version": "memory-os.memory_projection.v0",
+                "status": "ok",
+                "written_count": 1,
+                "summary": {"latest_created_at": "2026-06-03T01:00:01Z"},
+                "boundary": {
+                    "actual_send": False,
+                    "actual_execute": False,
+                    "actual_identity_write": False,
+                    "actual_crystallized_approval": False,
+                },
             }
         ),
         "stderr": "",
@@ -303,7 +376,10 @@ def test_plan_phase_includes_deployment_runtime_manifest_commands(tmp_path):
 
     assert "deployment_manifest_write" in commands
     assert "deployment_manifest_status" in commands
+    assert "memory_projection_refresh" in commands
+    assert commands["compat"][0] == sys.executable
     assert "deployment-manifest write" in " ".join(commands["deployment_manifest_write"])
+    assert "projection collect" in " ".join(commands["memory_projection_refresh"])
     assert "--install-profile upgrade" in " ".join(commands["deployment_manifest_write"])
 
 
@@ -343,12 +419,33 @@ def test_apply_phase_writes_and_verifies_deployment_runtime_manifest(tmp_path):
                 ),
                 "stderr": "",
             }
+        if "projection collect" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.memory_projection.v0",
+                        "status": "ok",
+                        "written_count": 1,
+                        "summary": {"latest_created_at": "2026-06-03T01:00:01Z"},
+                        "boundary": {
+                            "actual_send": False,
+                            "actual_execute": False,
+                            "actual_identity_write": False,
+                            "actual_crystallized_approval": False,
+                        },
+                    }
+                ),
+                "stderr": "",
+            }
         if "memory_os_cron_adapter_probe.py" in command:
             return _cron_adapter_probe_result()
         if "memory_os_boundary_runtime_probe.py" in command:
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -364,8 +461,58 @@ def test_apply_phase_writes_and_verifies_deployment_runtime_manifest(tmp_path):
     )
 
     assert report["deployment_manifest_write"]["status"] == "pass"
+    assert report["memory_projection_refresh"]["status"] == "pass"
     assert report["deployment_manifest_status"]["status"] == "pass"
     assert any("deployment-manifest write" in call for call in calls)
+    assert any("projection collect" in call for call in calls)
+
+
+def test_apply_failure_does_not_write_manifest_or_refresh_projection(tmp_path):
+    calls: list[str] = []
+
+    def fake_runner(argv, *, host=None, timeout=30):
+        command = " ".join(argv)
+        calls.append(command)
+        if "memory_os_upgrade_compat_check.py" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps(
+                    {
+                        "schema_version": "memory-os.hermes_upgrade_compat.v0",
+                        "classification": {"pass": [{"code": "memory_provider_active"}], "warn": [], "fail": []},
+                    }
+                ),
+                "stderr": "",
+            }
+        if "install_memory_os.sh" in command and "--dry-run" in command:
+            return {
+                "exit_code": 0,
+                "stdout": json.dumps({"schema_version": "memory-os.install.v0", "dry_run": True}),
+                "stderr": "",
+            }
+        if "install_memory_os.sh" in command:
+            return {
+                "exit_code": 2,
+                "stdout": json.dumps({"schema_version": "memory-os.install.v0", "dry_run": False}),
+                "stderr": "install failed",
+            }
+        raise AssertionError(f"unexpected command after failed apply: {command}")
+
+    report = deploy_memory_os(
+        repo_root=tmp_path,
+        hermes_home="/root/.hermes",
+        mode="production-safe",
+        hindsight_mode="auto",
+        phase="apply",
+        profile="upgrade",
+        run_command=fake_runner,
+    )
+
+    assert report["apply"]["status"] == "fail"
+    assert report["deployment_manifest_write"]["status"] == "not_run"
+    assert report["memory_projection_refresh"]["status"] == "not_run"
+    assert not any("deployment-manifest" in call for call in calls)
+    assert not any("projection collect" in call for call in calls)
 
 
 def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
@@ -392,6 +539,8 @@ def test_upgrade_profile_blocks_apply_when_preflight_compat_fails(tmp_path):
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -475,6 +624,8 @@ def test_fresh_profile_allows_preinstall_provider_mismatch_but_requires_postchec
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -573,6 +724,8 @@ def test_fresh_profile_allows_missing_memory_os_shell_before_install(tmp_path):
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -644,6 +797,8 @@ def test_upgrade_profile_allows_preinstall_hindsight_status_gap_but_requires_pos
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -731,6 +886,8 @@ def test_upgrade_profile_allows_preinstall_fixable_shell_doctor_index_mismatch(t
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -802,6 +959,8 @@ def test_upgrade_profile_allows_preinstall_shell_doctor_gap_when_postcheck_repai
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -883,6 +1042,8 @@ def test_upgrade_profile_allows_preinstall_provider_bank_evidence_gap_but_requir
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -1001,6 +1162,8 @@ def test_postcheck_summary_renders_status_and_classification(tmp_path):
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -1050,6 +1213,8 @@ def test_postcheck_exposes_full_monitor_timeout_policy(tmp_path):
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
@@ -1109,6 +1274,8 @@ def test_postcheck_fails_and_renders_cognitive_loop_timer_failure(tmp_path):
             return _boundary_runtime_probe_result()
         if "low-clue-recall" in command:
             return _llm_judge_probe_result()
+        if "projection collect" in command:
+            return _projection_refresh_result()
         if "deployment-manifest" in command:
             return _deployment_manifest_result()
         raise AssertionError(f"unexpected command: {command}")
