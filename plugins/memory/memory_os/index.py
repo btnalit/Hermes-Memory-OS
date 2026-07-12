@@ -1319,33 +1319,10 @@ def _optional_str(value: object) -> str:
 # ── C2: Index state update helper (lifecycle-aware) ─────────────────────
 
 
-def update_canonical_state_in_index(
-    index_path: Path,
-    record_id: str,
-    canonical_state: str,
-) -> bool:
-    """Update ``canonical_state`` in the index's ``crystallized_records`` table.
-
-    Best-effort — if the index doesn't exist or the record isn't in it,
-    the index sync will pick up the correct state on its next run.
-    Returns ``True`` if a row was updated.
-    """
-    import sqlite3
-
-    if not index_path.exists():
-        return False
-    try:
-        conn = sqlite3.connect(str(index_path))
-        conn.execute("pragma journal_mode=WAL")
-        conn.execute(
-            "update crystallized_records set canonical_state = ? where id = ?",
-            (canonical_state, record_id),
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.Error:
-        return False
+# update_canonical_state_in_index extracted to _canonical_state_sync.py
+# (C2 lifecycle hook — breaks crystallized ↔ index import cycle).
+# Re-exported here so existing callers that import from .index keep working.
+from ._canonical_state_sync import update_canonical_state_in_index  # noqa: F401
 
 
 # ── Edge governance helpers ───────────────────────────────────────────────

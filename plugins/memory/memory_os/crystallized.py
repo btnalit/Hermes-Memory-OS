@@ -284,7 +284,7 @@ class CrystallizedMemoryService:
                         tmp_path.unlink()
                 # C2: update index canonical_state (best-effort)
                 try:
-                    from .index import update_canonical_state_in_index
+                    from ._canonical_state_sync import update_canonical_state_in_index
                     update_canonical_state_in_index(
                         self.store.roots.index_path, normalized, "owner_revoked",
                     )
@@ -379,7 +379,7 @@ class CrystallizedMemoryService:
                         tmp_path.unlink()
                 # C2: update index canonical_state (best-effort)
                 try:
-                    from .index import update_canonical_state_in_index
+                    from ._canonical_state_sync import update_canonical_state_in_index
                     update_canonical_state_in_index(
                         self.store.roots.index_path, normalized, "demoted",
                     )
@@ -478,7 +478,7 @@ class CrystallizedMemoryService:
                         tmp_path.unlink()
                 # C2: update index canonical_state (best-effort)
                 try:
-                    from .index import update_canonical_state_in_index
+                    from ._canonical_state_sync import update_canonical_state_in_index
                     update_canonical_state_in_index(
                         self.store.roots.index_path, normalized, target_state,
                     )

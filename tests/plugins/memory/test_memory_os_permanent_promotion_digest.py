@@ -388,7 +388,7 @@ def test_ppmt_owner_reply_uses_same_host_ingress_and_preserves_token_case(tmp_pa
     from plugins.memory.memory_os.owner_actions import parse_owner_review_reply, read_owner_action_records
     from plugins.memory.memory_os.permanent_promotion import prepare_permanent_promotion_delivery
 
-    now = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
     store = _store(tmp_path)
     record_id = _add_aged_provisional(
         store,
