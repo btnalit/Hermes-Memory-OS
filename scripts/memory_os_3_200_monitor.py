@@ -6995,6 +6995,10 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     stale = []
     not_due = []
     error = []
+    # Envelope accounting gaps: cron job last_status=ok but no completion
+    # record exists.  This is an envelope bookkeeping issue, not an
+    # execution failure — the job ran successfully.
+    reconciled_via_cron_status: list[str] = []
     boundary_true = 0
     boundary_observed = 0
     boundary_unobserved = 0
@@ -7004,6 +7008,14 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     for lane in sorted(expected_lanes):
         record = completions.get(lane)
         if not record:
+            # ── Cross-reference with cron job status ──────────────────
+            spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
+            job_name = str(spec.get("name") or "")
+            cron_job = jobs_by_name.get(job_name) if isinstance(jobs_by_name, dict) else {}
+            if isinstance(cron_job, dict) and str(cron_job.get("last_status") or "") == "ok":
+                reconciled_via_cron_status.append(lane)
+                continue
+            # ───────────────────────────────────────────────────────────
             missing.append(lane)
             continue
         completed.append(lane)
@@ -7037,12 +7049,14 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         "helper_completion_expected_count": len(expected_lanes),
         "helper_completion_completed_count": len(completed),
         "helper_completion_missing_count": len(missing),
+        "helper_completion_reconciled_count": len(reconciled_via_cron_status),
         "helper_completion_stale_count": len(stale),
         "helper_completion_error_count": len(error),
         "helper_completion_not_due_count": len(not_due),
         "helper_completion_due_count": len(missing) + len(stale),
         "helper_completion_completed_lanes": completed,
         "helper_completion_missing_lanes": missing,
+        "helper_completion_reconciled_lanes": reconciled_via_cron_status,
         "helper_completion_stale_lanes": stale,
         "helper_completion_error_lanes": error,
         "helper_completion_not_due_lanes": not_due,

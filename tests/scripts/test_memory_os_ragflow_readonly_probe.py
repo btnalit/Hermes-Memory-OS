@@ -64,7 +64,7 @@ def test_ragflow_readonly_probe_disabled_does_not_mutate_canonical(tmp_path):
         text=True,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, f"exit {result.returncode} — provider disabled should exit 1 (boundary ok, retrieval n/a)"
     payload = json.loads(result.stdout)
     assert payload["schema_version"] == "memory-os.ragflow_readonly_probe.v0"
     assert payload["mode"] == "read_only_external_evidence"
@@ -72,7 +72,7 @@ def test_ragflow_readonly_probe_disabled_does_not_mutate_canonical(tmp_path):
     assert payload["memory_write_allowed"] is False
     assert payload["crystallization_allowed"] is False
     assert payload["canonical_unchanged"] is True
-    assert payload["status"] in {"disabled", "ok"}
+    assert payload["status"] == "disabled"
 
     after_hash = hashlib.sha256(
         (home / "memory-os" / "crystallized" / "owner_approved.md").read_bytes()
@@ -107,7 +107,7 @@ def test_ragflow_readonly_probe_masks_sensitive_config(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, f"exit {result.returncode} — provider disabled should exit 1"
     payload = json.loads(result.stdout)
     assert payload["config"]["api_key_file"] == "[REDACTED]"
     assert "secret" not in result.stdout
@@ -134,7 +134,7 @@ def test_ragflow_readonly_probe_supports_ephemeral_cli_overrides(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode in {0, 2}, f"exit {result.returncode} — enabled probe: 0=ok 2=no_results_or_unreachable"
     payload = json.loads(result.stdout)
     assert payload["config"]["enabled"] is True
     assert payload["config"]["dataset_id"] == "dataset-123"
@@ -162,7 +162,7 @@ def test_ragflow_probe_intake_dry_run_without_execute(tmp_path):
         ],
         capture_output=True, text=True,
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, f"exit {result.returncode} — provider disabled should exit 1 (boundary ok, retrieval n/a)"
     payload = json.loads(result.stdout)
     assert "intake" in payload, f"intake section missing: {list(payload.keys())}"
     assert payload["intake"]["executed"] is False

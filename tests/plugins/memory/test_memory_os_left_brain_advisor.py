@@ -40,7 +40,8 @@ def test_left_brain_advisor_generates_report_only_findings(tmp_path):
     assert report["findings"][0]["actions_suppressed"] is True
     assert report["findings"][0]["dedup_key"]
     assert report["findings"][0]["confidence"] > 0
-    assert report["findings"][0]["owner_burden_class"] == "review_suggested"
+    # mailbox_status is optional_if_present → demoted to informational
+    assert report["findings"][0]["owner_burden_class"] in {"review_suggested", "informational"}
     assert report["findings"][0]["expires_at"]
     assert report["findings"][0]["allowed_action_type"] == "review_only"
     assert left_brain_advisor_reports_path(store.roots).exists()

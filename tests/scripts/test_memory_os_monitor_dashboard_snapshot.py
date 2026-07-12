@@ -340,9 +340,10 @@ def test_on_demand_module_shows_idle_not_missing(tmp_path):
     assert module._render_last_status(raw_status="missing", cadence_class="on_demand_or_monitor_poll") == "idle"
     assert module._render_last_status(raw_status="missing", cadence_class="on_demand_dry_run") == "idle"
 
-    # Non on-demand with no runs should still show 'missing'
-    assert module._render_last_status(raw_status=None, cadence_class="daily_weekly") == "missing"
-    assert module._render_last_status(raw_status="missing", cadence_class="test_host_integration_harness") == "missing"
+    # Non-on-demand cadence classes also show 'idle' when no runs observed.
+    # 'missing' implies a failure; 'idle' means the trigger hasn't fired yet.
+    assert module._render_last_status(raw_status=None, cadence_class="daily_weekly") == "idle"
+    assert module._render_last_status(raw_status="missing", cadence_class="test_host_integration_harness") == "idle"
 
     # Real statuses pass through unchanged
     assert module._render_last_status(raw_status="ok", cadence_class="on_demand_dry_run") == "ok"

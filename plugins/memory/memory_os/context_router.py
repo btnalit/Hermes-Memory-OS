@@ -313,6 +313,14 @@ def _section_decision(
     if required:
         score = max(score, 1.0)
         reasons = _dedupe(["required_by_route"] + reasons)
+        # Tag section so downstream formatter preserves empty required headings.
+        # ContextSection is a frozen dataclass — use object.__setattr__ to
+        # initialise metadata when it is None.
+        meta = section.metadata
+        if meta is None:
+            meta = {}
+            object.__setattr__(section, "metadata", meta)
+        meta["required"] = True
     if excluded_reason:
         return {
             "include": False,
@@ -342,7 +350,7 @@ def _is_required_by_route(section: ContextSection, route: str) -> bool:
     if route == "diagnostic_current_status":
         return name in {"diagnostic grounding", "current memory-os runtime facts"}
     if route == "active_task":
-        return name == "current foreground task"
+        return name in {"current foreground task", "indexed recall"}
     if route == "candidate_review":
         return "candidate" in name or "crystallized" in name
     if route == "ambiguous_recall":

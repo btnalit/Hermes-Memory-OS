@@ -76,10 +76,10 @@ class StateOverlay:
         source="crystallized (kind=preference)",
     ))
     capability_map: OverlaySection = field(default_factory=lambda: OverlaySection(
-        source="TBD",
+        source="not_wired: provider interface defined but no data source connected — known architectural placeholder, not a runtime failure",
     ))
     material_index: OverlaySection = field(default_factory=lambda: OverlaySection(
-        source="TBD",
+        source="not_wired: provider interface defined but no data source connected — known architectural placeholder, not a runtime failure",
     ))
     risk_notes: list[str] = field(default_factory=list)
     evidence_refs: list[str] = field(default_factory=list)

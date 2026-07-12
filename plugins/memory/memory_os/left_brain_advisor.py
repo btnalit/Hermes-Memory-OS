@@ -94,6 +94,16 @@ def run_left_brain_advisor(
                 "boundary": _false_boundary(),
             }
     projections = _read_jsonl(memory_projection_records_path(store.roots))
+    # ── Fix 1: Keep only the latest projections per source_key.
+    # Historical (stale) projections from resolved incidents cause noise —
+    # the advisor re-flags them every cycle even though they no longer
+    # represent current state.  Governance-evidence sources keep 3 latest
+    # (cron failure patterns need a window); all others keep only 1.
+    projections = _latest_per_source(
+        projections,
+        governance_max=3,
+        default_max=1,
+    )
     boundary_true_count = sum(1 for record in projections if _any_true(record.get("boundary")))
     if boundary_true_count:
         return _base_report(
@@ -107,7 +117,11 @@ def run_left_brain_advisor(
             manual_run_ref=manual_run_ref,
             execution_gate_resolution=resolution,
         )
-    findings = _build_findings(projections, max_findings=max_findings)
+    # ── Fix 2: Load previous cycle dedup keys to avoid re-flagging the
+    # same finding on every cycle.  A finding that already appeared in the
+    # previous report is suppressed unless its status/state has changed.
+    previous_keys = _previous_finding_dedup_keys(store) if automatic else set()
+    findings = _build_findings(projections, max_findings=max_findings, suppress_dedup_keys=previous_keys)
     status = "warning" if findings else "ok"
     report = _base_report(
         store,
@@ -194,9 +208,15 @@ def _base_report(
     }
 
 
-def _build_findings(projections: list[dict[str, Any]], *, max_findings: int) -> list[dict[str, Any]]:
+def _build_findings(
+    projections: list[dict[str, Any]],
+    *,
+    max_findings: int,
+    suppress_dedup_keys: set[str] | None = None,
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     seen_dedup_keys: set[str] = set()
+    skipped_keys: set[str] = suppress_dedup_keys or set()
     for projection in projections:
         source_key = str(projection.get("source_key") or "")
         payload = projection.get("payload") if isinstance(projection.get("payload"), dict) else {}
@@ -207,6 +227,7 @@ def _build_findings(projections: list[dict[str, Any]], *, max_findings: int) -> 
                 findings,
                 seen_dedup_keys,
                 _finding(source_key, projection, status="external_cron_failure"),
+                skip_keys=skipped_keys,
             )
         if source_key in HINDSIGHT_GOVERNANCE_SOURCE_KEYS:
             if int(payload.get("projection_stale_count") or 0) > 0:
@@ -214,39 +235,53 @@ def _build_findings(projections: list[dict[str, Any]], *, max_findings: int) -> 
                     findings,
                     seen_dedup_keys,
                     _finding(source_key, projection, status="hindsight_projection_stale"),
+                    skip_keys=skipped_keys,
                 )
             if int(payload.get("raw_retained_count") or 0) > 0:
                 _append_finding_once(
                     findings,
                     seen_dedup_keys,
                     _finding(source_key, projection, status="hindsight_raw_retain_detected"),
+                    skip_keys=skipped_keys,
                 )
             if int(payload.get("pollution_indicator_count") or 0) > 0:
                 _append_finding_once(
                     findings,
                     seen_dedup_keys,
                     _finding(source_key, projection, status="hindsight_pollution_indicator"),
+                    skip_keys=skipped_keys,
                 )
             if int(payload.get("suggestion_count") or 0) > 0:
                 _append_finding_once(
                     findings,
                     seen_dedup_keys,
                     _finding(source_key, projection, status="hindsight_governance_suggestion"),
+                    skip_keys=skipped_keys,
                 )
         if status in {"missing", "error", "blocked"}:
-            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status=status or "missing"))
+            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status=status or "missing"), skip_keys=skipped_keys)
         elif available is False:
-            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status="availability_missing"))
+            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status="availability_missing"), skip_keys=skipped_keys)
         if int(payload.get("boundary_true_count") or 0) > 0:
-            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status="boundary_true_count"))
+            _append_finding_once(findings, seen_dedup_keys, _finding(source_key, projection, status="boundary_true_count"), skip_keys=skipped_keys)
         if len(findings) >= max(max_findings, 0):
             break
     return findings
 
 
-def _append_finding_once(findings: list[dict[str, Any]], seen_dedup_keys: set[str], finding: dict[str, Any]) -> None:
+def _append_finding_once(
+    findings: list[dict[str, Any]],
+    seen_dedup_keys: set[str],
+    finding: dict[str, Any],
+    *,
+    skip_keys: set[str] | None = None,
+) -> None:
     dedup_key = str(finding.get("dedup_key") or finding.get("finding_id") or "")
     if dedup_key in seen_dedup_keys:
+        return
+    # Cross-cycle dedup: suppress findings that already appeared in the
+    # previous advisor report (same source + same status = unchanged).
+    if skip_keys and dedup_key in skip_keys:
         return
     seen_dedup_keys.add(dedup_key)
     findings.append(finding)
@@ -276,6 +311,14 @@ def _finding(source_key: str, projection: dict[str, Any], *, status: str) -> dic
     allowed_action_type = "review_only"
     actions_suppressed = True
     suggested_action = "review-only; no automatic apply"
+    # ── Fix 3: Demote optional-source missing to informational severity.
+    # Optional signal sources (optional_if_present) are expected to be
+    # absent on hosts that don't configure them.  Flagging them at
+    # "review_suggested" every cycle creates owner noise.
+    if status in {"missing", "availability_missing"} and _source_is_optional(source_key):
+        confidence = 0.45
+        owner_burden_class = "informational"
+        suggested_action = "optional source not configured; no action needed unless this host requires it"
     if _hindsight_curation_status(source_key, status):
         target_type = "hindsight_curation"
         allowed_action_type = "owner_gated_hindsight_curation_decision"
@@ -424,6 +467,65 @@ def _any_true(value: Any) -> bool:
     if isinstance(value, list):
         return any(_any_true(item) for item in value)
     return False
+
+
+def _source_is_optional(source_key: str) -> bool:
+    """Return True if *source_key* is optional (not required) per the signal registry."""
+    try:
+        from .signal_source_registry import signal_source_specs as _specs
+        for spec in _specs():
+            if spec.source_key == source_key:
+                return spec.requirement_policy == "optional_if_present"
+    except Exception:
+        pass
+    return False
+
+
+def _latest_per_source(
+    projections: list[dict[str, Any]],
+    *,
+    governance_max: int = 3,
+    default_max: int = 1,
+) -> list[dict[str, Any]]:
+    """Keep only the N latest projection records per source_key.
+
+    Governance-evidence sources (hindsight, cron) can accumulate historical
+    records that the advisor re-flags every cycle.  Capping per source
+    prevents stale projections from dominating the finding budget.
+    """
+    from collections import defaultdict
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for proj in projections:
+        grouped[str(proj.get("source_key") or "")].append(proj)
+    result: list[dict[str, Any]] = []
+    for source_key, group in grouped.items():
+        # Sort by created_at descending so newest come first.
+        group.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        keep = governance_max if source_key in HINDSIGHT_GOVERNANCE_SOURCE_KEYS else default_max
+        result.extend(group[:keep])
+    # Restore original order (by created_at ascending) so older records
+    # come first — preserves the expectation that later projections
+    # override earlier ones.
+    result.sort(key=lambda r: str(r.get("created_at") or ""))
+    return result
+
+
+def _previous_finding_dedup_keys(store: MemoryOSStore) -> set[str]:
+    """Return dedup keys from the most recent advisor report.
+
+    Used to suppress findings that appeared unchanged in the previous
+    cycle — a stable condition should not raise the same finding every
+    time the advisor runs.
+    """
+    try:
+        reports = read_left_brain_advisor_reports(store.roots, limit=1)
+        if not reports:
+            return set()
+        latest = reports[0]
+        findings = latest.get("findings") if isinstance(latest.get("findings"), list) else []
+        return {str(f.get("dedup_key") or f.get("finding_id") or "") for f in findings if f}
+    except Exception:
+        return set()
 
 
 def _false_boundary() -> dict[str, bool]:

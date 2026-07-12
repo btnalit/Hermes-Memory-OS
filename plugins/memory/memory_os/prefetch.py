@@ -498,6 +498,26 @@ def _build_context_router_apply_prefetch(
         return None
     selected_names = [str(item.get("section") or "") for item in report.get("selected_sections", [])]
     selected_sections = _sections_for_selected_names(candidates, selected_names)
+    # ── Fill in required-but-empty sections ────────────────────────────
+    # When a section is required by the route (e.g. "Crystallized Review
+    # Candidates" for candidate_review) but its body is empty, the raw
+    # section builder drops it (_append_section's `if lines:` gate).
+    # Create a placeholder so the formatter renders the heading with an
+    # empty body — the heading contract is preserved and the monitor's
+    # RH-26 probe doesn't report a missing heading for data that exists
+    # but is empty.
+    found_names = {s.section for s in selected_sections}
+    for name in selected_names:
+        if name not in found_names:
+            selected_sections.append(
+                ContextSection(
+                    section=name,
+                    text="",
+                    source_class=_section_source_class(name),
+                    metadata={"required": True, "empty_body_placeholder": True},
+                )
+            )
+    # ───────────────────────────────────────────────────────────────────
     if route == "foreground_control":
         selected_sections = [section for section in selected_sections if section.section == "Current Foreground Task"]
     if not selected_sections:
@@ -801,7 +821,10 @@ def _sections_for_selected_names(candidates: list[ContextSection], selected_name
 
 
 def _format_selected_context_sections(sections: list[ContextSection]) -> str:
-    nonempty = [section for section in sections if section.text.strip()]
+    nonempty: list[ContextSection] = []
+    for section in sections:
+        if section.text.strip() or (section.metadata or {}).get("required"):
+            nonempty.append(section)
     if len(nonempty) == 1 and nonempty[0].text.startswith(HEADER):
         return nonempty[0].text
     return _format([(section.section, section.text.splitlines()) for section in nonempty])

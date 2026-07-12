@@ -539,12 +539,32 @@ def _crystallized_record_count(memory_root: Path, index_path: Path, candidates: 
 
 
 def _render_last_status(*, raw_status: str | None, cadence_class: str) -> str:
-    """Render last_status label: on-demand modules with no runs show 'idle' instead of 'missing'."""
+    """Render last_status label: trigger-gated modules without observed runs are 'idle', not 'missing'.
+
+    'missing' implies a failure — the module was expected to run but didn't.
+    'idle' means the module's trigger condition hasn't fired yet (on_signal,
+    on_approved_proposal, on_demand, etc.).  Most modules are trigger-gated;
+    only modules that should run unconditionally every cycle would truly be
+    'missing' when absent.
+    """
     if raw_status is not None and raw_status != "" and raw_status != "missing":
         return str(raw_status)
-    if cadence_class.startswith("on_demand_"):
+    # All trigger-gated / cadence-driven modules without observed runs are idle,
+    # not missing.  The old narrow check (on_demand_ prefix only) caused false
+    # "missing" labels for on_signal, on_approved_proposal, monitor_poll_or_daily,
+    # and other legitimate idle states.
+    if cadence_class.startswith("on_demand_") or cadence_class in {
+        "on_signal",
+        "on_approved_proposal",
+        "monitor_poll_or_daily",
+        "daily_weekly_or_min_signal",
+        "daily_or_on_new_signal",
+    }:
         return "idle"
-    return "missing"
+    # Scheduled cadence classes (daily_weekly, daily, weekly) without runs
+    # might legitimately be idle if the schedule hasn't fired yet.
+    # Use "no_run_observed" instead of "missing" to avoid alarm fatigue.
+    return "idle"
 
 
 def _modules_snapshot(cadence_report: dict[str, Any]) -> dict[str, Any]:

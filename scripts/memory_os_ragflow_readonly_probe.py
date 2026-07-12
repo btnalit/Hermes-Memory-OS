@@ -335,7 +335,16 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if report.get("canonical_unchanged") is True else 2
+    # Exit codes distinguish health semantics (not just canonical-side-effect):
+    #   0 — retrieval succeeded (status=ok, chunks returned)
+    #   1 — boundary is healthy but provider is disabled (no retrieval)
+    #   2 — enabled but retrieval failed (no_results_or_unreachable) or error
+    status = str(report.get("status") or "")
+    if status == "ok":
+        return 0
+    if status == "disabled":
+        return 1
+    return 2
 
 
 if __name__ == "__main__":
