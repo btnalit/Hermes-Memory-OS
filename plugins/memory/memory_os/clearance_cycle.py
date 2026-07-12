@@ -106,8 +106,18 @@ def run_clearance_cycle(
     invalidation = invalidate_receipts_since(roots, watermark=0)
     report["invalidated"] = invalidation["invalidated_count"]
 
-    # Step 2: select rejudge batch
-    queue = get_rejudge_queue(roots)
+    # Step 2: select rejudge batch, excluding inactive targets
+    raw_queue = get_rejudge_queue(roots)
+    # Filter: skip records whose canonical_state is inactive —
+    # they can never be promoted and should not cycle through rejudge.
+    queue: list[dict[str, Any]] = []
+    for item in raw_queue:
+        record = crystallized.find_record(item["record_id"])
+        if record is not None and not is_active_crystallized_frontmatter(record.frontmatter):
+            report.setdefault("target_inactive_filtered_from_queue", 0)
+            report["target_inactive_filtered_from_queue"] += 1
+            continue
+        queue.append(item)
 
     # ── Step 2.5 (E9): collect never-judged provisional records ───────────
     # These are records with no clearance receipt at all — they would be
