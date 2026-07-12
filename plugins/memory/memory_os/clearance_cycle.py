@@ -92,6 +92,7 @@ def run_clearance_cycle(
         "oldest_unknown_age_hours": 0.0,
         "budget_used": 0,
         "error_records": [],
+        "verdict_distribution": {"clear": 0, "conflict": 0, "unknown": 0},
     }
 
     budget: int = int(resolve_knob(
@@ -171,7 +172,23 @@ def run_clearance_cycle(
         except (ValueError, TypeError):
             pass
 
-    # Step 3: judge each candidate (flag-off: heuristic judge)
+    # Pre-load permanent records once (shared across batch judges)
+    permanent_records: list[dict[str, Any]] = []
+    if roots.crystallized_root.exists():
+        for path in sorted(roots.crystallized_root.glob("*.md")):
+            try:
+                for rec in crystallized.read_records(path.name):
+                    fm = rec.frontmatter
+                    if fm.get("provisional") is not True and is_active_crystallized_frontmatter(fm):
+                        permanent_records.append({
+                            "id": str(fm.get("id") or ""),
+                            "body": rec.body,
+                            "frontmatter": fm,
+                        })
+            except Exception:
+                continue
+
+    # Step 3: judge each candidate with real contradiction detection
     for item in batch:
         record_id = item["record_id"]
         try:
@@ -182,22 +199,23 @@ def run_clearance_cycle(
             body = record.body
             content_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
 
-            # Collect active permanent IDs
-            permanent_ids: list[str] = []
-            if roots.crystallized_root.exists():
-                for path in sorted(roots.crystallized_root.glob("*.md")):
-                    try:
-                        for rec in crystallized.read_records(path.name):
-                            fm = rec.frontmatter
-                            if fm.get("provisional") is not True and is_active_crystallized_frontmatter(fm):
-                                permanent_ids.append(str(fm.get("id") or ""))
-                    except Exception:
-                        continue
-
-            # Heuristic judge: clear when no permanents, conflict when permanents exist
-            verdict = "clear" if not permanent_ids else "clear"
-            conflict_refs: list[str] = []
-            checked_entity_set: list[str] = []
+            if not permanent_records:
+                # Empty corpus clause: no permanents → always clear
+                verdict = "clear"
+                conflict_refs: list[str] = []
+                checked_entity_set = _collect_entities_from_record(store, record_id, record.frontmatter)
+                invalidation_mode = "entity_scoped" if checked_entity_set else "conservative_full"
+            else:
+                # Real judge: pair against permanents, detect contradictions
+                verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+                    _judge_against_permanents(
+                        store, record_id, body, record.frontmatter,
+                        permanent_records,
+                        max_pairs=int(resolve_knob(
+                            "clearance_pair_top_k", default=5, roots=roots,
+                        )),
+                    )
+                )
 
             receipt = ClearanceReceipt(
                 receipt_id=f"clr_{_uuid.uuid4().hex[:16]}",
@@ -207,12 +225,13 @@ def run_clearance_cycle(
                 conflict_refs=conflict_refs,
                 corpus_watermark=latest_corpus_watermark(roots),
                 checked_entity_set=checked_entity_set,
-                invalidation_mode="entity_scoped",
-                judge_version="v2e_heuristic",
+                invalidation_mode=invalidation_mode,
+                judge_version="v2e_llm",
                 judged_at=current.isoformat().replace("+00:00", "Z"),
             )
             write_clearance_receipt(roots, receipt)
             report["judged"] += 1
+            report["verdict_distribution"][verdict] += 1
         except Exception as exc:
             report["error_records"].append({
                 "record_id": record_id,
@@ -221,6 +240,402 @@ def run_clearance_cycle(
             })
 
     return report
+
+
+# ── Clearance judge helpers ──────────────────────────────────────────────
+
+
+def _check_llm_available() -> bool:
+    """Check whether the LLM runtime is available for contradiction judging.
+
+    Returns ``False`` when the LLM cannot be reached — all non-empty-corpus
+    records will receive an ``unknown`` verdict (fail-closed).
+    """
+    try:
+        from .low_clue_recall import low_clue_judge_availability as _judge_avail
+        judge_status = _judge_avail({})
+        return bool(judge_status.get("available", False))
+    except Exception:
+        return False
+
+
+def _collect_entities_from_record(
+    store: Any,
+    record_id: str,
+    frontmatter: dict[str, Any],
+) -> list[str]:
+    """Collect entity IDs associated with a crystallized record.
+
+    Sources (in priority order):
+    1. Frontmatter ``entities`` field (list of entity strings)
+    2. Entity index (SQLite entity_index table)
+    3. Frontmatter ``tags`` field as fallback
+
+    Returns a deduplicated list of normalized entity IDs. Returns an empty
+    list when no entities can be extracted (caller should set
+    ``invalidation_mode=conservative_full`` in that case).
+    """
+    entities: list[str] = []
+
+    # Source 1: explicit entities field in frontmatter
+    fm_entities = frontmatter.get("entities")
+    if isinstance(fm_entities, list):
+        for ent in fm_entities:
+            if isinstance(ent, str) and ent.strip():
+                entities.append(ent.strip().lower())
+
+    # Source 2: entity index (SQLite)
+    if not entities:
+        try:
+            import sqlite3
+            index_path = getattr(store.roots, "index_path", None)
+            if index_path is not None:
+                conn = sqlite3.connect(str(index_path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    table_check = conn.execute(
+                        "select name from sqlite_master "
+                        "where type='table' and name='entity_index'"
+                    ).fetchone()
+                    if table_check is not None:
+                        rows = conn.execute(
+                            "select distinct entity_id from entity_index "
+                            "where record_id = ?",
+                            (record_id,),
+                        ).fetchall()
+                        for row in rows:
+                            eid = str(row["entity_id"] or "").strip().lower()
+                            if eid:
+                                entities.append(eid)
+                except sqlite3.Error:
+                    pass
+                finally:
+                    conn.close()
+        except Exception:
+            pass
+
+    # Source 3: tags fallback
+    if not entities:
+        fm_tags = frontmatter.get("tags")
+        if isinstance(fm_tags, list):
+            for tag in fm_tags:
+                if isinstance(tag, str) and tag.strip():
+                    entities.append(f"tag:{tag.strip().lower()}")
+
+    # Deduplicate preserving order
+    seen: set[str] = set()
+    result: list[str] = []
+    for e in entities:
+        if e not in seen:
+            seen.add(e)
+            result.append(e)
+    return result
+
+
+def _judge_against_permanents(
+    store: Any,
+    record_id: str,
+    body: str,
+    frontmatter: dict[str, Any],
+    permanent_records: list[dict[str, Any]],
+    *,
+    max_pairs: int = 5,
+) -> tuple[str, list[str], list[str], str]:
+    """Judge a provisional record against the permanent corpus.
+
+    Constitution matrix (V2-E §5):
+    - Empty permanents → ``clear`` (empty corpus clause — handled by caller)
+    - LLM unavailable → ``unknown`` (fail-closed, all records)
+    - Contradiction detected → ``conflict`` with conflict_refs populated
+    - No contradiction → ``clear``
+
+    **No path returns a constant verdict** (except empty corpus, which the
+    caller handles). Every path with non-empty permanents goes through LLM
+    evaluation.
+
+    Returns ``(verdict, conflict_refs, checked_entity_set, invalidation_mode)``.
+    """
+    import hashlib
+    import json as _json
+    import sqlite3
+
+    from .knob_overrides import resolve_knob
+
+    # Collect entities from the provisional record (R2)
+    checked_entity_set = _collect_entities_from_record(store, record_id, frontmatter)
+    invalidation_mode = "entity_scoped" if checked_entity_set else "conservative_full"
+
+    if not permanent_records:
+        # Empty corpus — caller should have handled this, but be defensive
+        return ("clear", [], checked_entity_set, invalidation_mode)
+
+    # ── LLM availability guard ──────────────────────────────────────────
+    if not _check_llm_available():
+        # Fail-closed: every non-empty-corpus record gets "unknown"
+        return ("unknown", [], checked_entity_set, invalidation_mode)
+
+    # ── Prepare LLM config ──────────────────────────────────────────────
+    from .low_clue_recall import _call_hermes_runtime_model, _resolve_hermes_default_runtime
+
+    _DEFAULT_LLM_CONFIG: dict[str, Any] = {
+        "enabled": True,
+        "mode": "bounded_vote",
+        "provider": "hermes_default",
+        "temperature": 0,
+        "timeout_ms": 15000,
+        "max_tokens": 512,
+        "on_error": "deterministic_fallback",
+    }
+    resolved = _resolve_hermes_default_runtime(_DEFAULT_LLM_CONFIG)
+    if not resolved.get("ok"):
+        return ("unknown", [], checked_entity_set, invalidation_mode)
+    llm_config = dict(_DEFAULT_LLM_CONFIG)
+
+    # ── Pair provisional with permanents ────────────────────────────────
+    # Priority: entity-index shared entities → cosine fallback
+    pairs = _pair_with_permanents(
+        store, record_id, body, permanent_records, max_pairs=max_pairs,
+    )
+
+    if not pairs:
+        # No pairs found (e.g., no embeddings, no entity overlap) —
+        # can't judge, fail-closed
+        return ("unknown", [], checked_entity_set, invalidation_mode)
+
+    # ── LLM claim extraction + contradiction detection per pair ─────────
+    from .llm_contradiction_lane import _claims_contradict
+
+    conflict_refs: list[str] = []
+
+    _JUDGE_PROMPT = (
+        "You are a precise fact extractor. Given two memory records, "
+        "extract the core factual claim from each.\n\n"
+        "For each record, output a JSON object with:\n"
+        "- subject: the entity or concept the claim is about (short phrase)\n"
+        "- predicate: the property or relationship being asserted (short phrase)\n"
+        "- object: the value or conclusion being asserted (short phrase)\n"
+        "- confidence: your confidence that this is the core claim (0.0-1.0)\n\n"
+        "If a record does not contain a clear factual claim, set confidence to 0.\n\n"
+        "Return ONLY a JSON object with keys \"claim_a\" and \"claim_b\".\n\n"
+        "Record A (provisional):\n"
+        "__BODY_A__\n\n"
+        "Record B (permanent):\n"
+        "__BODY_B__"
+    )
+
+    for pair in pairs:
+        perm = pair["permanent"]
+        prompt = (
+            _JUDGE_PROMPT
+            .replace("__BODY_A__", body[:1200])
+            .replace("__BODY_B__", str(perm.get("body", ""))[:1200])
+        )
+
+        try:
+            response = _call_hermes_runtime_model(prompt, llm_config)
+        except Exception:
+            # LLM call failed → this pair can't be judged, skip to next
+            continue
+
+        if not response or not response.strip():
+            continue
+
+        # Parse LLM response (robust JSON extraction)
+        try:
+            parsed = _json.loads(response.strip())
+        except _json.JSONDecodeError:
+            start = response.find("{")
+            if start == -1:
+                continue
+            depth = 0
+            end = -1
+            for _i in range(start, len(response)):
+                if response[_i] == "{":
+                    depth += 1
+                elif response[_i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = _i
+                        break
+            if end == -1:
+                continue
+            try:
+                parsed = _json.loads(response[start:end + 1])
+            except _json.JSONDecodeError:
+                continue
+
+        claim_a = parsed.get("claim_a") if isinstance(parsed.get("claim_a"), dict) else {}
+        claim_b = parsed.get("claim_b") if isinstance(parsed.get("claim_b"), dict) else {}
+
+        if not claim_a or not claim_b:
+            continue
+
+        if _claims_contradict(claim_a, claim_b):
+            conflict_refs.append(str(perm.get("id") or ""))
+
+    if conflict_refs:
+        # Also collect entities from conflicting permanents
+        for perm in permanent_records:
+            if str(perm.get("id") or "") in conflict_refs:
+                perm_entities = _collect_entities_from_record(
+                    store, str(perm.get("id") or ""),
+                    perm.get("frontmatter") if isinstance(perm.get("frontmatter"), dict) else {},
+                )
+                for e in perm_entities:
+                    if e not in checked_entity_set:
+                        checked_entity_set.append(e)
+        return ("conflict", conflict_refs, checked_entity_set, invalidation_mode)
+
+    return ("clear", [], checked_entity_set, invalidation_mode)
+
+
+def _pair_with_permanents(
+    store: Any,
+    record_id: str,
+    body: str,
+    permanent_records: list[dict[str, Any]],
+    *,
+    max_pairs: int = 5,
+) -> list[dict[str, Any]]:
+    """Pair a provisional record with permanent records for contradiction check.
+
+    Two-tier strategy:
+    1. Entity-index shared entities (priority)
+    2. Cosine similarity top-K fallback
+
+    Returns a list of ``{"permanent": dict, "similarity": float}`` entries,
+    bounded by *max_pairs*.
+    """
+    import sqlite3
+
+    from .knob_overrides import resolve_knob
+    from .vector_edge_proposer import _cosine_similarity
+
+    index_path = getattr(store.roots, "index_path", None)
+    if index_path is None or not permanent_records:
+        return []
+
+    roots = store.roots
+    same_topic_threshold: float = float(resolve_knob(
+        "llm_contradiction_same_topic_threshold", default=0.75, roots=roots,
+    ))
+
+    # Build a map of permanent ID → record for lookup
+    perm_by_id: dict[str, dict[str, Any]] = {}
+    for pr in permanent_records:
+        pid = str(pr.get("id") or "")
+        if pid:
+            perm_by_id[pid] = pr
+
+    pairs: list[dict[str, Any]] = []
+    paired_perm_ids: set[str] = set()
+
+    conn = sqlite3.connect(str(index_path))
+    conn.row_factory = sqlite3.Row
+
+    # ── Phase 1: entity-index based pairing ────────────────────────────
+    try:
+        table_check = conn.execute(
+            "select name from sqlite_master where type='table' and name='entity_index'"
+        ).fetchone()
+    except sqlite3.Error:
+        table_check = None
+
+    if table_check is not None:
+        try:
+            from .entity_extractor import shared_entity_pairs
+
+            entity_pairs = shared_entity_pairs(
+                conn, min_shared_entities=1, max_pairs=max_pairs * 2,
+            )
+
+            # Filter to only provisional×permanent pairs
+            for ep in entity_pairs:
+                if len(pairs) >= max_pairs:
+                    break
+                rec_a = ep["record_a"]
+                rec_b = ep["record_b"]
+
+                # Find which side is our provisional, which is permanent
+                perm_id = ""
+                if rec_a == record_id and rec_b in perm_by_id:
+                    perm_id = rec_b
+                elif rec_b == record_id and rec_a in perm_by_id:
+                    perm_id = rec_a
+                else:
+                    continue
+
+                if perm_id in paired_perm_ids:
+                    continue
+
+                perm_rec = perm_by_id[perm_id]
+                pairs.append({
+                    "permanent": perm_rec,
+                    "similarity": 0.0,  # entity-based: no cosine score
+                })
+                paired_perm_ids.add(perm_id)
+        except Exception:
+            pass
+
+    conn.close()
+
+    # ── Phase 2: cosine-similarity fallback ─────────────────────────────
+    remaining_slots = max_pairs - len(pairs)
+    if remaining_slots <= 0:
+        return pairs
+
+    # Get embedding for the provisional record
+    try:
+        conn2 = sqlite3.connect(str(index_path))
+        conn2.row_factory = sqlite3.Row
+        prov_row = conn2.execute(
+            "select me.embedding from memory_embeddings me "
+            "where me.record_type = 'crystallized_record' and me.record_id = ?",
+            (record_id,),
+        ).fetchone()
+        conn2.close()
+    except sqlite3.Error:
+        return pairs
+
+    if prov_row is None or not prov_row["embedding"]:
+        return pairs
+
+    prov_embedding = bytes(prov_row["embedding"])
+
+    # Get embeddings for unpaired permanents
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for pr in permanent_records:
+        pid = str(pr.get("id") or "")
+        if pid in paired_perm_ids:
+            continue
+        if not pid:
+            continue
+
+        try:
+            conn3 = sqlite3.connect(str(index_path))
+            conn3.row_factory = sqlite3.Row
+            perm_row = conn3.execute(
+                "select me.embedding from memory_embeddings me "
+                "where me.record_type = 'crystallized_record' and me.record_id = ?",
+                (pid,),
+            ).fetchone()
+            conn3.close()
+        except sqlite3.Error:
+            continue
+
+        if perm_row is None or not perm_row["embedding"]:
+            continue
+
+        perm_embedding = bytes(perm_row["embedding"])
+        sim = _cosine_similarity(prov_embedding, perm_embedding)
+        if sim is not None and sim >= same_topic_threshold:
+            scored.append((sim, pr))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    for sim, pr in scored[:remaining_slots]:
+        pairs.append({"permanent": pr, "similarity": sim})
+
+    return pairs
 
 
 # ── E7: Flag flip ──────────────────────────────────────────────────────────

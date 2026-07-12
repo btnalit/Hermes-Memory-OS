@@ -54,6 +54,8 @@ SOURCE_ENTITY_INDEX_REFRESH = REPO_ROOT / "scripts" / "memory_os_entity_index_re
 SOURCE_ENTITY_INDEX_REFRESH_GATE = REPO_ROOT / "scripts" / "memory_os_cron_entity_index_refresh_gate.py"
 SOURCE_HINDSIGHT_ADVISORY_DIGEST = REPO_ROOT / "scripts" / "memory_os_hindsight_advisory_digest.py"
 SOURCE_HINDSIGHT_HEALTH_PROBE = REPO_ROOT / "scripts" / "memory_os_hindsight_health_probe.py"
+SOURCE_CLEARANCE_CYCLE_HELPER = REPO_ROOT / "scripts" / "memory_os_clearance_cycle_helper.py"
+SOURCE_CLEARANCE_CYCLE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_clearance_cycle_gate.py"
 SOURCE_RAGFLOW_READONLY_PROBE = REPO_ROOT / "scripts" / "memory_os_ragflow_readonly_probe.py"
 SOURCE_EXTERNAL_EVIDENCE_RAGFLOW_WRAPPER = REPO_ROOT / "scripts" / "external_evidence_ragflow_readonly_probe.sh"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
@@ -1149,6 +1151,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "entity_index_refresh_gate": SOURCE_ENTITY_INDEX_REFRESH_GATE,
         "hindsight_advisory_digest": SOURCE_HINDSIGHT_ADVISORY_DIGEST,
         "hindsight_health_probe": SOURCE_HINDSIGHT_HEALTH_PROBE,
+        "clearance_cycle_helper": SOURCE_CLEARANCE_CYCLE_HELPER,
+        "clearance_cycle_gate": SOURCE_CLEARANCE_CYCLE_GATE,
         "ragflow_readonly_probe": SOURCE_RAGFLOW_READONLY_PROBE,
         "external_evidence_ragflow_wrapper": SOURCE_EXTERNAL_EVIDENCE_RAGFLOW_WRAPPER,
     }

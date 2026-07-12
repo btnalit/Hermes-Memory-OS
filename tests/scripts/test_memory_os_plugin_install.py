@@ -492,7 +492,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 17
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 18
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert {job["name"] for job in jobs} == {
@@ -513,6 +513,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
         "memory-os-hindsight-health-probe",
+        "memory-os-clearance-cycle",
     }
     by_name = {job["name"]: job for job in jobs}
     assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"

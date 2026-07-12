@@ -97,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--entity-index-refresh-schedule", default="25,55 * * * *")
     parser.add_argument("--hindsight-advisory-digest-schedule", default="20 2 * * 0")
     parser.add_argument("--hindsight-health-probe-schedule", default="33 * * * *")
+    parser.add_argument("--clearance-cycle-schedule", default="*/10 * * * *")
     parser.add_argument(
         "--cron-profile",
         choices=("active-closure", "full"),

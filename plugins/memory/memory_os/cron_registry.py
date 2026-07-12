@@ -253,6 +253,19 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         no_agent=True,
         requires_boundary_report=False,
     ),
+    MemoryOSCronSpec(
+        key="clearance_cycle",
+        name="memory-os-clearance-cycle",
+        raw_script="memory_os_clearance_cycle_helper.py",
+        wrapper_script="memory_os_cron_clearance_cycle_gate.py",
+        lane_id="clearance_cycle",
+        helper_kind="local_helper",
+        schedule_arg="clearance_cycle_schedule",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        requires_boundary_report=False,
+    ),
 )
 
 

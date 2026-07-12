@@ -178,6 +178,8 @@ def _home_with_helpers(
         "memory_os_hindsight_advisory_digest.py",
         "memory_os_cron_hindsight_advisory_digest_gate.py",
         "memory_os_hindsight_health_probe.py",
+        "memory_os_clearance_cycle_helper.py",
+        "memory_os_cron_clearance_cycle_gate.py",
     ):
         if helper in omitted:
             continue
@@ -348,7 +350,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 17
+    assert len(report["operational_cron_jobs"]) == 18
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -369,6 +371,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-hindsight-health-probe",
         "memory-os-working-cleanup",
         "memory-os-l3-probe-verification",
+        "memory-os-clearance-cycle",
     }
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "telegram"
     assert by_name["memory-os-owner-review-digest"]["script"] == "memory_os_cron_owner_review_digest_gate.py"

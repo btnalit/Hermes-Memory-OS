@@ -187,6 +187,302 @@ class TestInitialAndRejudgeSharedBudget:
         assert report["judged"] >= 1
 
 
+class TestAntiRubberStamp:
+    """R4: anti-rubber-stamp poison — permanent test matrix.
+
+    These tests verify that the clearance judge can NEVER be a constant
+    function.  Their absence was the root cause that allowed the heuristic
+    stub (always-``clear``) to survive into production.
+    """
+
+    def test_known_conflict_pair_must_return_conflict_not_clear(
+        self, tmp_path: Path,
+    ) -> None:
+        """A pair of known-contradictory records MUST produce ``conflict``.
+
+        Counterfactual: if this test were absent, a constant-judge stub
+        that always returns ``clear`` would pass all existing tests.
+        """
+        from unittest.mock import patch
+
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.clearance_cycle import (
+            _judge_against_permanents,
+            _collect_entities_from_record,
+        )
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+
+        # Create a provisional record asserting "X is A"
+        provisional = CrystallizedCandidate(
+            "cand_conflict_a", "fact",
+            "The project status is complete and ready for production deployment.",
+            ["evt_conflict"],
+        )
+        prov_decision = ApprovalDecision(
+            "cand_conflict_a", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-07-01T00:00:00Z", provisional=True,
+            expires_at="2026-08-01T00:00:00Z",
+        )
+        service.write_approved_record(provisional, prov_decision, file_name="prov.md")
+
+        # Create a permanent record asserting "X is NOT A" (contradiction)
+        permanent = CrystallizedCandidate(
+            "cand_conflict_b", "fact",
+            "The project status is blocked and not ready for production deployment.",
+            ["evt_conflict2"],
+        )
+        perm_decision = ApprovalDecision(
+            "cand_conflict_b", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-06-15T00:00:00Z", provisional=False,
+        )
+        service.write_approved_record(permanent, perm_decision, file_name="perm.md")
+
+        prov_records = service.list_provisional_records()
+        assert len(prov_records) == 1
+        prov_record = service.find_record(str(prov_records[0]["id"]))
+        assert prov_record is not None
+
+        perm_records_list = [
+            {"id": str(perm_decision.candidate_id), "body": permanent.body,
+             "frontmatter": {"id": perm_decision.candidate_id, "provisional": False}}
+        ]
+
+        # Mock the LLM to return contradictory claims
+        mock_llm_response = (
+            '{"claim_a": {"subject": "project status", "predicate": "is", '
+            '"object": "complete and ready", "confidence": 0.9}, '
+            '"claim_b": {"subject": "project status", "predicate": "is", '
+            '"object": "blocked and not ready", "confidence": 0.9}}'
+        )
+
+        # Build a mock pair so the judge has something to evaluate
+        mock_pairs = [{"permanent": perm_records_list[0], "similarity": 0.9}]
+
+        with patch(
+            "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+            return_value=mock_pairs,
+        ), patch(
+            "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+            return_value=mock_llm_response,
+        ), patch(
+            "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+            return_value=True,
+        ), patch(
+            "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+            return_value={"ok": True},
+        ):
+            verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+                _judge_against_permanents(
+                    store,
+                    str(prov_records[0]["id"]),
+                    prov_record.body,
+                    prov_record.frontmatter,
+                    perm_records_list,
+                    max_pairs=5,
+                )
+            )
+
+        # The critical assertion: must NOT be "clear"
+        assert verdict in {"conflict", "unknown"}, (
+            f"ANTI-RUBBER-STAMP FAILURE: known-conflict pair returned verdict={verdict!r}. "
+            f"Constitution requires 'conflict' (or 'unknown' if LLM unavailable). "
+            f"Constant 'clear' is forbidden."
+        )
+        # With mocked LLM returning contradictory claims, we expect "conflict"
+        assert verdict == "conflict", (
+            f"Expected 'conflict' with mocked contradictory claims, got {verdict!r}"
+        )
+        assert len(conflict_refs) > 0, (
+            "conflict_refs must be populated when verdict is 'conflict'"
+        )
+
+    def test_known_unrelated_pair_must_return_clear(
+        self, tmp_path: Path,
+    ) -> None:
+        """A pair of known-unrelated records MUST produce ``clear``.
+
+        The dual of the conflict test: the judge must be able to return
+        ``clear`` when records genuinely don't conflict — but only after
+        actual evaluation, never as a constant.
+        """
+        from unittest.mock import patch
+
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.clearance_cycle import (
+            _judge_against_permanents,
+            _collect_entities_from_record,
+        )
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+
+        # Two records about completely different topics
+        provisional = CrystallizedCandidate(
+            "cand_unrel_a", "weather",
+            "The temperature in Beijing today is 25 degrees Celsius.",
+            ["evt_unrel"],
+        )
+        prov_decision = ApprovalDecision(
+            "cand_unrel_a", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-07-01T00:00:00Z", provisional=True,
+            expires_at="2026-08-01T00:00:00Z",
+        )
+        service.write_approved_record(provisional, prov_decision, file_name="prov2.md")
+
+        permanent2 = CrystallizedCandidate(
+            "cand_unrel_b", "sports",
+            "The local football team won their match yesterday 3-1.",
+            ["evt_unrel2"],
+        )
+        perm_decision2 = ApprovalDecision(
+            "cand_unrel_b", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-06-15T00:00:00Z", provisional=False,
+        )
+        service.write_approved_record(permanent2, perm_decision2, file_name="perm2.md")
+
+        prov_records = service.list_provisional_records()
+        prov_record = service.find_record(str(prov_records[0]["id"]))
+        assert prov_record is not None
+
+        perm_records_list = [
+            {"id": str(perm_decision2.candidate_id), "body": permanent2.body,
+             "frontmatter": {"id": perm_decision2.candidate_id, "provisional": False}}
+        ]
+
+        # Mock the LLM to return unrelated claims (different subjects)
+        mock_llm_response = (
+            '{"claim_a": {"subject": "temperature", "predicate": "is", '
+            '"object": "25 degrees", "confidence": 0.9}, '
+            '"claim_b": {"subject": "football team", "predicate": "won", '
+            '"object": "3-1", "confidence": 0.9}}'
+        )
+
+        # Build a mock pair so the judge has something to evaluate
+        mock_pairs2 = [{"permanent": perm_records_list[0], "similarity": 0.82}]
+
+        with patch(
+            "plugins.memory.memory_os.clearance_cycle._pair_with_permanents",
+            return_value=mock_pairs2,
+        ), patch(
+            "plugins.memory.memory_os.low_clue_recall._call_hermes_runtime_model",
+            return_value=mock_llm_response,
+        ), patch(
+            "plugins.memory.memory_os.clearance_cycle._check_llm_available",
+            return_value=True,
+        ), patch(
+            "plugins.memory.memory_os.low_clue_recall._resolve_hermes_default_runtime",
+            return_value={"ok": True},
+        ):
+            verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+                _judge_against_permanents(
+                    store,
+                    str(prov_records[0]["id"]),
+                    prov_record.body,
+                    prov_record.frontmatter,
+                    perm_records_list,
+                    max_pairs=5,
+                )
+            )
+
+        assert verdict == "clear", (
+            f"ANTI-RUBBER-STAMP FAILURE: known-unrelated pair returned verdict={verdict!r}. "
+            f"Constitution requires 'clear' when no contradiction is detected."
+        )
+
+    def test_empty_permanents_returns_clear(
+        self, tmp_path: Path,
+    ) -> None:
+        """Empty permanent corpus MUST return ``clear`` (empty corpus clause).
+
+        This is the ONLY path where a constant verdict is valid — the
+        constitution explicitly allows it: with no permanent records, there
+        is nothing to conflict against.
+        """
+        from plugins.memory.memory_os.clearance_cycle import (
+            _judge_against_permanents,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+
+        verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+            _judge_against_permanents(
+                store,
+                "rec_empty_corpus",
+                "Any body text.",
+                {"id": "rec_empty_corpus", "tags": ["test"]},
+                [],  # empty permanent corpus
+                max_pairs=5,
+            )
+        )
+
+        assert verdict == "clear", (
+            f"Empty corpus clause: expected 'clear', got {verdict!r}"
+        )
+        assert conflict_refs == []
+        # Entity set should be collected from the provisional's own frontmatter
+        assert isinstance(checked_entity_set, list)
+
+    def test_llm_unavailable_returns_unknown_fail_closed(
+        self, tmp_path: Path,
+    ) -> None:
+        """LLM unavailable MUST return ``unknown`` (fail-closed).
+
+        This is the constitutional requirement: when the judge cannot
+        evaluate, the receipt must be ``unknown``, which blocks automatic
+        promotion.  Never fabricate ``clear``.
+        """
+        from plugins.memory.memory_os.clearance_cycle import (
+            _judge_against_permanents,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+
+        perm_records_list = [
+            {"id": "perm_1", "body": "Some permanent record body.",
+             "frontmatter": {"id": "perm_1", "provisional": False}}
+        ]
+
+        # _judge_against_permanents checks LLM availability internally;
+        # without an actual LLM, it should return "unknown"
+        verdict, conflict_refs, checked_entity_set, invalidation_mode = (
+            _judge_against_permanents(
+                store,
+                "rec_no_llm",
+                "Any provisional body text.",
+                {"id": "rec_no_llm", "tags": ["test"]},
+                perm_records_list,
+                max_pairs=5,
+            )
+        )
+
+        assert verdict == "unknown", (
+            f"Fail-closed failure: LLM unavailable but returned {verdict!r}. "
+            f"Constitution requires 'unknown'."
+        )
+
+
 class TestClearanceCycleMonitorStats:
     """E8: monitor stats coverage."""
 

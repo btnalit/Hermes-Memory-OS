@@ -334,6 +334,58 @@ def latest_corpus_watermark(roots: Any) -> int:
     return max((int(e.get("event_id") or 0) for e in events), default=0)
 
 
+# ── E3.5: Bulk invalidation by judge version (escape hatch) ────────────────
+
+
+def invalidate_receipts_by_judge_version(
+    roots: Any,
+    judge_version: str,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Invalidate all active receipts produced by a specific judge version.
+
+    Escape hatch for recalling receipts from a known-bad judge (e.g., the
+    v2e_heuristic stub that always returned ``clear``).  Marked receipts
+    enter the rejudge queue for the next clearance cycle.
+
+    Returns a structured report.  Idempotent — running twice produces the
+    same set of invalidated receipts.
+    """
+    from .jsonl_io import append_jsonl_locked
+
+    records = read_clearance_receipts(roots)
+    invalidated_count = 0
+    invalidated_receipt_ids: list[str] = []
+
+    for rec_dict in records:
+        receipt = ClearanceReceipt.from_dict(rec_dict)
+        if not receipt.is_active:
+            continue
+        if receipt.judge_version != judge_version:
+            continue
+
+        if dry_run:
+            invalidated_count += 1
+            invalidated_receipt_ids.append(receipt.receipt_id)
+            continue
+
+        invalidated = receipt.to_dict()
+        invalidated["invalidated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        invalidated["invalidated_by"] = f"judge_version_recall:{judge_version}"
+        append_jsonl_locked(clearance_receipts_path(roots), invalidated)
+        invalidated_count += 1
+        invalidated_receipt_ids.append(receipt.receipt_id)
+
+    return {
+        "status": "ok",
+        "dry_run": dry_run,
+        "judge_version": judge_version,
+        "invalidated_count": invalidated_count,
+        "invalidated_receipt_ids": invalidated_receipt_ids,
+    }
+
+
 # ── E3: Invalidation engine ────────────────────────────────────────────────
 
 
