@@ -17,7 +17,7 @@ from typing import Iterable
 
 SCHEMA_VERSION = "memory-os.public_checkout_probe.v1"
 
-PUBLIC_DOCS = {"README.md", "configuration.md", "quickstart.md"}
+PUBLIC_DOCS = {"README.md", "V3_INNER_LIFE_RUNBOOK.md", "configuration.md", "quickstart.md"}
 PRIVATE_DOCS = {
     "memory-os-v7-3-200-grounded-task-plan.md",
     "memory-os-v7-promotion-matrix.md",

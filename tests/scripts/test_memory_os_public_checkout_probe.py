@@ -22,7 +22,7 @@ def test_working_tree_public_checkout_candidate_is_complete_and_public_safe():
 
     assert report["schema_version"] == "memory-os.public_checkout_probe.v1"
     assert report["classification"]["status"] == "PASS"
-    assert report["public_docs"] == ["README.md", "configuration.md", "quickstart.md"]
+    assert report["public_docs"] == ["README.md", "V3_INNER_LIFE_RUNBOOK.md", "configuration.md", "quickstart.md"]
     assert report["internal_docs_visible"] is False
     assert report["private_docs_present"] == []
     assert report["required_public_files"]["eval/memory_os/adapters/retrieval_shadow.py"] is True
