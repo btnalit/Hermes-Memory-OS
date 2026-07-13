@@ -123,6 +123,48 @@ def test_memory_sources_dry_run_router_records_actual_fallback_with_reason(tmp_p
     assert any(item["heading"] == "Working Memory" for item in record["selected"])
 
 
+def test_memory_sources_dropped_sections_preserve_safe_source_ids(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+    dropped_section = ContextSection(
+        section="Crystallized Memory",
+        text="bounded",
+        source_class="crystallized",
+        metadata={"source_ids": ["crystallized:drop_1", "token:unsafe"]},
+    )
+    from plugins.memory.memory_os.context_router import route_context_sections
+
+    route_report = route_context_sections(
+        "普通聊天",
+        sections=[dropped_section],
+        budget_chars=1000,
+        mode="apply",
+    )
+    record = build_memory_source_record(
+        roots=roots,
+        route_report=route_report,
+        selected_sections=[],
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        router_applied=True,
+        prefetch_mode="indexed",
+    )
+
+    assert record["dropped"][0]["source_ids"] == ["crystallized:drop_1"]
+
+
+def test_context_router_report_filters_unsafe_source_ids():
+    section = ContextSection(
+        section="Crystallized Memory",
+        text="safe context",
+        source_class="crystallized",
+        metadata={"source_ids": ["crystallized:safe", "token:unsafe", "raw private value"]},
+    )
+    from plugins.memory.memory_os.context_router import route_context_sections
+
+    report = route_context_sections("普通聊天", sections=[section], budget_chars=1000, mode="apply")
+    entries = list(report.get("selected_sections") or []) + list(report.get("dropped_sections") or [])
+    assert entries[0]["source_ids"] == ["crystallized:safe"]
+
+
 def test_memory_sources_filter_safe_source_ids_omits_unsafe_values():
     section = ContextSection(
         section="Working Memory",

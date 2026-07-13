@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import re
+
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +13,7 @@ from uuid import uuid4
 from .audit import append_audit
 from .context_router import ContextSection
 from .roots import MemoryOSRoots
+from .source_ids import filter_safe_source_id_values
 
 
 SCHEMA_VERSION = "memory-os.memory_sources.v0"
@@ -39,23 +40,6 @@ ALLOWED_FEEDBACK_RATINGS = {
 GUARD_RECALL_CLARIFICATION = "guard:recall_clarification"
 GUARD_FOREGROUND_CONTROL = "guard:foreground_control"
 GUARD_CANDIDATE_BOUNDARY = "guard:candidate_boundary"
-SYNTHETIC_GUARD_IDS = {
-    GUARD_RECALL_CLARIFICATION,
-    GUARD_FOREGROUND_CONTROL,
-    GUARD_CANDIDATE_BOUNDARY,
-}
-
-_ALLOWED_SOURCE_ID_PATTERNS = (
-    re.compile(r"^event:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^working:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^candidate:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^crystallized:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^digest:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^reflection_card:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^governance_feedback:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^proposal:[A-Za-z0-9_.:-]+$"),
-    re.compile(r"^foreground_task:[A-Za-z0-9_.:-]+$"),
-)
 
 _FORBIDDEN_FIELD_NAMES = {
     "raw_prompt",
@@ -226,17 +210,11 @@ def build_memory_source_record(
 
 def filter_safe_source_ids(section: ContextSection) -> list[str]:
     metadata = section.metadata if isinstance(section.metadata, dict) else {}
-    raw_ids = metadata.get("source_ids") or []
-    if isinstance(raw_ids, str):
-        raw_ids = [raw_ids]
-    result: list[str] = []
-    for item in raw_ids:
-        value = str(item).strip()
-        if not value:
-            continue
-        if value in SYNTHETIC_GUARD_IDS or any(pattern.match(value) for pattern in _ALLOWED_SOURCE_ID_PATTERNS):
-            result.append(value)
-    return _dedupe(result)
+    return _filter_safe_source_ids(metadata.get("source_ids") or [])
+
+
+def _filter_safe_source_ids(raw_ids: Any) -> list[str]:
+    return filter_safe_source_id_values(raw_ids)
 
 
 def read_memory_source_records(roots: MemoryOSRoots, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -546,6 +524,7 @@ def _dropped_report(dropped_entries: list[dict[str, Any]]) -> list[dict[str, Any
             {
                 "heading": str(entry.get("section") or ""),
                 "source_class": str(entry.get("source_class") or "unknown"),
+                "source_ids": _filter_safe_source_ids(entry.get("source_ids") or []),
                 "count": 1,
                 "chars": int(entry.get("char_cost") or 0),
                 "score": entry.get("score"),

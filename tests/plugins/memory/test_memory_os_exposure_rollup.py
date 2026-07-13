@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,77 @@ import pytest
 
 class TestExposureRollupCycle:
     """A3: exposure rollup with conservation math and idempotency."""
+
+    def test_equal_timestamp_after_prior_cycle_is_processed_by_source_cursor(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        append_memory_source_record(roots, {"record_id": "msrc_cursor_1", "created_at": "2026-07-12T02:00:00Z", "selected": [{"source_ids": ["crystallized:cursor_1"]}], "dropped": []})
+        first = run_exposure_rollup_cycle(store, now=datetime.fromisoformat("2026-07-12T02:00:00+00:00"))
+        assert first["records_processed"] == 1
+        append_memory_source_record(roots, {"record_id": "msrc_cursor_2", "created_at": "2026-07-12T02:00:00Z", "selected": [{"source_ids": ["crystallized:cursor_2"]}], "dropped": []})
+        second = run_exposure_rollup_cycle(store, now=datetime.fromisoformat("2026-07-12T03:00:00+00:00"))
+        assert second["skipped"] is False
+        assert second["records_processed"] == 1
+        assert second["source_offset_start"] == 1
+        assert second["source_offset_end"] == 2
+
+    def test_gate_start_failure_prevents_rollup_and_snapshot_writes(self, tmp_path: Path, monkeypatch) -> None:
+        from plugins.memory.memory_os import exposure_rollup
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        append_memory_source_record(roots, {"record_id": "msrc_gate_fail", "created_at": "2026-07-12T02:00:00Z", "selected": [{"source_ids": ["crystallized:gate_fail"]}], "dropped": []})
+        monkeypatch.setattr(exposure_rollup, "start_execution_gate_envelope", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("gate unavailable")))
+        report = exposure_rollup.run_exposure_rollup_cycle(store)
+        assert report["status"] == "error"
+        assert report["error_records"][0]["operation"] == "start_execution_gate"
+        assert not (roots.memory_os_root / "system" / "exposure_rollup.jsonl").exists()
+        assert not (roots.memory_os_root / "system" / "exposure_rollup_snapshot.json").exists()
+
+    def test_spoofed_external_envelope_is_rejected_without_writes(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        append_memory_source_record(roots, {"record_id": "msrc_spoof", "created_at": "2026-07-12T02:00:00Z", "selected": [{"source_ids": ["crystallized:spoof"]}], "dropped": []})
+        report = run_exposure_rollup_cycle(store, execution_gate_envelope_id="xgate_nonexistent_spoof")
+        assert report["status"] == "error"
+        assert report["error_records"][0]["operation"] == "resolve_execution_gate"
+        assert not (roots.memory_os_root / "system" / "exposure_rollup.jsonl").exists()
+
+    def test_missing_cursor_after_compaction_fails_closed(self, tmp_path: Path) -> None:
+        import json
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        rollup_path = roots.memory_os_root / "system" / "exposure_rollup.jsonl"
+        rollup_path.parent.mkdir(parents=True, exist_ok=True)
+        rollup_path.write_text(json.dumps({"records_processed": 100, "source_offset_end": 100, "source_cursor_record_id": "msrc_pruned", "window_end": "2026-07-12T02:00:00Z"}) + "\n")
+        for index in range(120):
+            append_memory_source_record(roots, {"record_id": f"msrc_retained_{index}", "created_at": "2026-07-12T03:00:00Z", "selected": [{"source_ids": [f"crystallized:retained_{index}"]}], "dropped": []})
+        report = run_exposure_rollup_cycle(store)
+        assert report["status"] == "error"
+        assert report["error_records"][0]["error_code"] == "source_cursor_not_found"
+        assert len(rollup_path.read_text().splitlines()) == 1
 
     def test_rollup_idempotent_same_window(self, tmp_path: Path) -> None:
         """Same window re-run produces skipped result (idempotent)."""
@@ -75,7 +147,7 @@ class TestExposureRollupCycle:
                     "count": 1,
                     "chars": 30,
                     "score": 0.3,
-                    "reason_codes": ["budget"],
+                    "reason_codes": ["budget_exceeded"],
                 },
                 {
                     "heading": "Crystallized Memory",
@@ -142,7 +214,7 @@ class TestExposureRollupCycle:
                     "count": 1,
                     "chars": 30,
                     "score": 0.3,
-                    "reason_codes": ["budget"],
+                    "reason_codes": ["budget_exceeded"],
                 },
                 {
                     "heading": "Crystallized Memory",

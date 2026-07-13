@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .source_ids import filter_safe_source_id_values
+
 from .ingress import (
     classify_ingress as _classify_ingress,
     is_low_clue_deictic_continue_query as _ingress_is_low_clue_deictic_continue_query,
@@ -422,6 +424,8 @@ def _risk_reason_codes(section: ContextSection) -> list[str]:
 
 def _section_report_entry(section: ContextSection, decision: dict[str, Any]) -> dict[str, Any]:
     redacted = _redact(section.text)
+    metadata = section.metadata if isinstance(section.metadata, dict) else {}
+    source_ids = filter_safe_source_id_values(metadata.get("source_ids") or [])
     return {
         "section": section.section,
         "source_class": section.source_class,
@@ -429,6 +433,7 @@ def _section_report_entry(section: ContextSection, decision: dict[str, Any]) -> 
         "score": decision["score"],
         "required": decision["required"],
         "reason_codes": decision["reason_codes"],
+        "source_ids": source_ids,
         "preview": _clip(redacted, 180),
     }
 
