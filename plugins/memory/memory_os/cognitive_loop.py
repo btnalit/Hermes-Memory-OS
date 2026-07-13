@@ -202,12 +202,17 @@ class CognitiveLoopRunner:
         max_events: int,
         apply: bool,
     ) -> list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]]:
+        legacy_right_brain_step = (
+            None
+            if self._legacy_right_brain_enabled()
+            else lambda _context: self._legacy_right_brain_disabled_result()
+        )
         return [
             ("heartbeat_pre", lambda context: self._heartbeat(max_events=max_events)),
             ("working_decay", self._working_decay),
             ("household_digest", self._household_digest),
             ("digest_consolidation", self._digest_consolidation),
-            ("wandering_mind", self._wandering_mind),
+            ("wandering_mind", legacy_right_brain_step or self._wandering_mind),
             ("ops_gate", self._ops_gate),
             ("evidence_scoring", self._evidence_scoring),
             ("confidence_router", self._confidence_router),
@@ -225,8 +230,8 @@ class CognitiveLoopRunner:
             ("override_sweep", self._override_sweep),
             ("migration_controller", self._migration_controller),
             ("abstraction_distillation", self._abstraction_distillation),
-            ("grounded_expression_judge", self._grounded_expression_judge),
-            ("spontaneous_expression", self._spontaneous_expression),
+            ("grounded_expression_judge", legacy_right_brain_step or self._grounded_expression_judge),
+            ("spontaneous_expression", legacy_right_brain_step or self._spontaneous_expression),
             ("self_evolution", self._self_evolution),
             # DESIGN NOTE: Each edge proposer step creates a fresh
             # MemoryOSIndex(store.roots) instance. MemoryOSIndex.__init__ is O(1)
@@ -249,6 +254,22 @@ class CognitiveLoopRunner:
             ("heartbeat_post", lambda context: self._heartbeat(max_events=max_events)),
             ("doctor_boundary_report", self._doctor_boundary_report),
         ]
+
+    def _legacy_right_brain_enabled(self) -> bool:
+        from plugins.memory.memory_os.config import load_config
+
+        config = load_config(self.hermes_home).get("right_brain_expression", {})
+        return isinstance(config, dict) and config.get("legacy_cognitive_loop_enabled") is True
+
+    @staticmethod
+    def _legacy_right_brain_disabled_result() -> dict[str, Any]:
+        return {
+            "schema_version": "memory-os.cognitive_loop.legacy_right_brain_gate.v0",
+            "status": "skipped",
+            "reason": "legacy_right_brain_disabled",
+            "actual_send": False,
+            "actual_execute": False,
+        }
 
     def _run_step(
         self,

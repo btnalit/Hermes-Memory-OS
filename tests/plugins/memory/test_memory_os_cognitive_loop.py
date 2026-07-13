@@ -22,6 +22,44 @@ def test_cognitive_loop_rejects_apply_without_test_host(tmp_path):
     assert result["boundaries"]["actual_execute"] is False
 
 
+def test_cognitive_loop_default_disables_legacy_right_brain_without_writes(tmp_path):
+    store = _init_store(tmp_path)
+    _append_event(store, "evt_legacy_gate", "User discussed a foreground task that must not become inner speech.")
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+
+    steps = {step["step"]: step for step in result["steps"]}
+    for step_name in ("wandering_mind", "grounded_expression_judge", "spontaneous_expression"):
+        step = steps[step_name]
+        assert step["status"] == "skipped"
+        assert step["result"]["reason"] == "legacy_right_brain_disabled"
+        assert step["result"]["actual_send"] is False
+
+    assert not (tmp_path / "system-modules" / "wandering_mind" / "outputs.jsonl").exists()
+    assert not (tmp_path / "system-modules" / "expression_draft" / "drafts.jsonl").exists()
+    assert not (tmp_path / "system-modules" / "grounded_expression_judge" / "verdicts.jsonl").exists()
+    assert not (tmp_path / "system-modules" / "speak_gate" / "would_send.jsonl").exists()
+
+
+@pytest.mark.parametrize("configured_value", ["true", 1, {}, [True]])
+def test_cognitive_loop_legacy_gate_requires_literal_json_boolean_true(tmp_path, configured_value):
+    store = _init_store(tmp_path)
+    config_path = tmp_path / "memory-os" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"right_brain_expression": {"legacy_cognitive_loop_enabled": configured_value}}) + "\n",
+        encoding="utf-8",
+    )
+
+    runner = CognitiveLoopRunner(store)
+    steps = dict(runner._step_functions(max_events=1, apply=False))
+
+    for step_name in ("wandering_mind", "grounded_expression_judge", "spontaneous_expression"):
+        result = steps[step_name]({})
+        assert result["status"] == "skipped"
+        assert result["reason"] == "legacy_right_brain_disabled"
+
+
 def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     store = _init_store(tmp_path)
     _write_deep_reflection_test_host_config(tmp_path)
@@ -298,6 +336,7 @@ def test_spontaneous_expression_completes_execution_gate_envelope_on_delivery_er
 
 def test_cognitive_loop_continues_after_step_failure(tmp_path, monkeypatch):
     store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
     _append_event(store, "evt_1", "User discussed failure isolation.")
 
     def fail_household_digest(self, **kwargs):
@@ -321,6 +360,7 @@ def test_cognitive_loop_continues_after_step_failure(tmp_path, monkeypatch):
 
 def test_cognitive_loop_reports_hard_boundary_violation(tmp_path, monkeypatch):
     store = _init_store(tmp_path)
+    _write_deep_reflection_test_host_config(tmp_path)
     _append_event(store, "evt_1", "User discussed hard boundary enforcement.")
 
     def unsafe_wandering(self, **kwargs):
@@ -633,6 +673,12 @@ def _append_event(store: MemoryOSStore, event_id: str, summary: str) -> None:
 
 
 def _write_deep_reflection_test_host_config(tmp_path) -> None:
+    memory_os_config_path = tmp_path / "memory-os" / "config.json"
+    memory_os_config_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_os_config_path.write_text(
+        json.dumps({"right_brain_expression": {"legacy_cognitive_loop_enabled": True}}, indent=2) + "\n",
+        encoding="utf-8",
+    )
     config_path = tmp_path / "system-modules" / "deep_reflection" / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(

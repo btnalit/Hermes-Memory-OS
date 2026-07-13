@@ -99,6 +99,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_fyi": 5,
     },
     "right_brain_expression": {
+        "legacy_cognitive_loop_enabled": False,
         "recurring_delivery_enabled": False,
         "recurring_delivery_mode": "disabled",
         "recurring_delivery_channel": "unknown",
@@ -406,6 +407,7 @@ def _merge_right_brain_expression_config(value: Any) -> dict[str, Any]:
     for key in default:
         if key in value:
             merged[key] = value[key]
+    merged["legacy_cognitive_loop_enabled"] = merged.get("legacy_cognitive_loop_enabled") is True
     merged["recurring_delivery_enabled"] = bool(merged.get("recurring_delivery_enabled"))
     merged["recurring_delivery_mode"] = str(merged.get("recurring_delivery_mode") or "disabled")
     merged["recurring_delivery_channel"] = str(merged.get("recurring_delivery_channel") or "unknown")
