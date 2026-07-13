@@ -131,6 +131,43 @@ def test_query_trace_is_written_before_results_and_contains_no_query_body(tmp_pa
         query_journal(store, scope_class="all")
 
 
+def test_journal_lineage_expands_to_roots_and_enforces_max_hops(tmp_path):
+    store, packet = _store_and_packet(tmp_path)
+    first = ingest_thought_batch(
+        store,
+        packet=packet,
+        model_entries=[_entry()],
+        ttl_days=3,
+        max_entry_chars=200,
+        max_lineage_hops=2,
+    )[0]
+
+    def derive(source, concept):
+        source_ref = "journal:" + source["entry_id"]
+        child_packet = build_body_state_packet(
+            quiet_state=True,
+            source_window={},
+            source_cursors={},
+            seed_candidates=[{"ref": source_ref, "kind": "private_thought", "bounded_text": source["content"], "epistemic_status": "private_uncommitted", "salience_reasons": []}],
+            edges=[],
+            sampler_seed=concept,
+            max_text_chars=200,
+        )
+        write_body_packet_manifest(store, child_packet)
+        return child_packet, [{"tier": "interpretation", "content": concept, "provenance_refs": [source_ref], "concept_key": concept, "requested_fate": "hold"}]
+
+    packet1, entries1 = derive(first, "hop-one")
+    hop_one = ingest_thought_batch(store, packet=packet1, model_entries=entries1, ttl_days=3, max_entry_chars=200, max_lineage_hops=2)[0]
+    assert hop_one["lineage_hop"] == 1
+    assert hop_one["lineage_root_refs"] == ["crystallized:cry_a"]
+    packet2, entries2 = derive(hop_one, "hop-two")
+    hop_two = ingest_thought_batch(store, packet=packet2, model_entries=entries2, ttl_days=3, max_entry_chars=200, max_lineage_hops=2)[0]
+    assert hop_two["lineage_hop"] == 2
+    packet3, entries3 = derive(hop_two, "hop-three")
+    with pytest.raises(ValueError, match="lineage_hop"):
+        ingest_thought_batch(store, packet=packet3, model_entries=entries3, ttl_days=3, max_entry_chars=200, max_lineage_hops=2)
+
+
 def test_empty_model_output_removes_per_run_manifest(tmp_path):
     store, packet = _store_and_packet(tmp_path)
     assert ingest_thought_batch(

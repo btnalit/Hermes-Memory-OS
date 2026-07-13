@@ -35,6 +35,7 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/execution_gate.py::_append_jsonl::path.open_a::path": "execution_gate_private_writer",
     "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::append_jsonl_locked_call::v3_seed_edges_daily_path(store)": "v3_seed_evidence_daily_observation",
     "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::atomic_json_replace_call::v3_seed_evidence_snapshot_path(store)": "v3_seed_evidence_snapshot_observation",
+    "plugins/memory/memory_os/v3_wandering.py::record_v3_wandering_run::append_jsonl_locked_call::v3_wandering_runs_path(store)": "v3_wandering_aggregate_run_ledger",
     "plugins/memory/memory_os/v3_body_packet.py::write_body_packet_manifest::governed_append_under_lock_call::target": "v3_body_packet_manifest",
     "plugins/memory/memory_os/v3_body_packet.py::remove_body_manifests::governed_atomic_rewrite_call::target": "v3_body_packet_manifest_retention",
     "plugins/memory/memory_os/wandering_journal.py::query_journal.mutate::governed_atomic_rewrite_call::wandering_journal_path(store)": "v3_private_query_trace",
@@ -249,7 +250,10 @@ class _WriteSurfaceVisitor(ast.NodeVisitor):
         elif isinstance(node.func, ast.Name) and node.func.id in {"_append_jsonl", "append_jsonl"}:
             kind = "append_jsonl_call"
             target = ast.unparse(node.args[0]) if node.args else ""
-        elif self.rel_path == "plugins/memory/memory_os/v3_seed_evidence.py" and isinstance(node.func, ast.Name):
+        elif self.rel_path in {
+            "plugins/memory/memory_os/v3_seed_evidence.py",
+            "plugins/memory/memory_os/v3_wandering.py",
+        } and isinstance(node.func, ast.Name):
             if node.func.id == "append_jsonl_locked":
                 kind = "append_jsonl_locked_call"
                 target = ast.unparse(node.args[0]) if node.args else ""

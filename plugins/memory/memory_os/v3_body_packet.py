@@ -15,8 +15,8 @@ from .store import MemoryOSStore
 
 BODY_PACKET_SCHEMA_VERSION = "memory-os.v3_body_state.v0"
 BODY_MANIFEST_SCHEMA_VERSION = "memory-os.v3_body_packet_manifest.v0"
-_ALLOWED_KINDS = {"stable_memory", "working_attention", "open_thread", "unsettled_candidate"}
-_ALLOWED_EPISTEMIC = {"approved", "working", "unapproved"}
+_ALLOWED_KINDS = {"stable_memory", "working_attention", "open_thread", "unsettled_candidate", "private_thought"}
+_ALLOWED_EPISTEMIC = {"approved", "working", "unapproved", "private_uncommitted"}
 _ALLOWED_EDGE_KINDS = {"co_selected", "shared_entity", "contrasts"}
 _ALLOWED_SEED_PREFIXES = ("crystallized:", "event:", "working:", "candidate:", "digest:", "reflection_card:")
 
@@ -199,6 +199,8 @@ def _validate_packet(packet: dict[str, Any]) -> None:
 
 
 def _is_safe_seed_ref(ref: str) -> bool:
+    if ref.startswith("journal:wnd_") and all(ch.isalnum() or ch in "_-" for ch in ref.split(":", 1)[1]):
+        return True
     return (
         ref not in SYNTHETIC_GUARD_IDS
         and ref.startswith(_ALLOWED_SEED_PREFIXES)

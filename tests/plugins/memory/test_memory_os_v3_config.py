@@ -11,6 +11,7 @@ def test_v3_inner_life_defaults_all_active_lanes_closed(tmp_path):
     assert config["seed_evidence"]["enabled"] is False
     assert config["wandering_enabled"] is False
     assert config["expression_enabled"] is False
+    assert config["outlet_shadow_enabled"] is False
     assert config["synthesis_admission_enabled"] is False
     assert config["wandering_max_attempts_per_window"] is None
     assert config["journal_ttl_days"] is None
@@ -33,6 +34,8 @@ def test_v3_inner_life_rejects_truthy_and_invalid_activation_values(tmp_path):
                     "expression_enabled": 1,
                     "synthesis_admission_enabled": [True],
                     "journal_ttl_days": "7",
+                    "wandering_attempt_window_seconds": True,
+                    "wandering_quiet_hours_utc": [2, 2, 25],
                     "semantic_dedupe_threshold": True,
                 }
             }
@@ -49,6 +52,9 @@ def test_v3_inner_life_rejects_truthy_and_invalid_activation_values(tmp_path):
     }
     assert config["wandering_enabled"] is False
     assert config["expression_enabled"] is False
+    assert config["outlet_shadow_enabled"] is False
     assert config["synthesis_admission_enabled"] is False
     assert config["journal_ttl_days"] is None
+    assert config["wandering_attempt_window_seconds"] is None
+    assert config["wandering_quiet_hours_utc"] is None
     assert config["semantic_dedupe_threshold"] is None

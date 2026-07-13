@@ -51,6 +51,8 @@ SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refr
 SOURCE_EXPOSURE_ROLLUP = REPO_ROOT / "scripts" / "memory_os_exposure_rollup.py"
 SOURCE_V3_SEED_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_v3_seed_evidence.py"
 SOURCE_V3_SEED_EVIDENCE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_seed_evidence_gate.py"
+SOURCE_V3_WANDERING = REPO_ROOT / "scripts" / "memory_os_v3_wandering.py"
+SOURCE_V3_WANDERING_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_wandering_gate.py"
 SOURCE_V3_JOURNAL_SWEEP = REPO_ROOT / "scripts" / "memory_os_v3_journal_sweep.py"
 SOURCE_V3_JOURNAL_SWEEP_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_journal_sweep_gate.py"
 SOURCE_STATE_OVERLAY_REFRESH = REPO_ROOT / "scripts" / "memory_os_state_overlay_refresh.py"
@@ -1155,6 +1157,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "exposure_rollup": SOURCE_EXPOSURE_ROLLUP,
         "v3_seed_evidence": SOURCE_V3_SEED_EVIDENCE,
         "v3_seed_evidence_gate": SOURCE_V3_SEED_EVIDENCE_GATE,
+        "v3_wandering": SOURCE_V3_WANDERING,
+        "v3_wandering_gate": SOURCE_V3_WANDERING_GATE,
         "v3_journal_sweep": SOURCE_V3_JOURNAL_SWEEP,
         "v3_journal_sweep_gate": SOURCE_V3_JOURNAL_SWEEP_GATE,
         "state_overlay_refresh": SOURCE_STATE_OVERLAY_REFRESH,

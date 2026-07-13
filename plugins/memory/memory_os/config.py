@@ -116,13 +116,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "min_coverage_ratio": 1.0,
             "require_shared_entity": True,
         },
+        "host_agent_root": None,
         "wandering_enabled": False,
         "expression_enabled": False,
+        "outlet_shadow_enabled": False,
         "synthesis_admission_enabled": False,
+        "synthesis_min_inputs": None,
+        "synthesis_min_provenance_diversity": None,
+        "synthesis_min_semantic_distance": None,
         "wandering_max_attempts_per_window": None,
+        "wandering_attempt_window_seconds": None,
         "wandering_model_input_char_budget": None,
+        "wandering_quiet_hours_utc": None,
         "share_max_per_window": None,
+        "share_window_seconds": None,
         "share_cooldown_seconds": None,
+        "share_min_lineage_diversity": None,
         "journal_ttl_days": None,
         "journal_max_entry_chars": None,
         "journal_max_lineage_hops": None,
@@ -444,27 +453,44 @@ def _merge_v3_inner_life_config(value: Any) -> dict[str, Any]:
         seed["require_shared_entity"] = seed_value.get("require_shared_entity") is True
         merged["seed_evidence"] = seed
 
-    for key in ("wandering_enabled", "expression_enabled", "synthesis_admission_enabled"):
+    host_root = value.get("host_agent_root")
+    merged["host_agent_root"] = (
+        str(Path(host_root).expanduser().resolve())
+        if isinstance(host_root, str) and host_root.strip() and Path(host_root).expanduser().is_absolute()
+        else None
+    )
+    for key in ("wandering_enabled", "expression_enabled", "outlet_shadow_enabled", "synthesis_admission_enabled"):
         merged[key] = value.get(key) is True
     for key in (
         "wandering_max_attempts_per_window",
+        "wandering_attempt_window_seconds",
         "wandering_model_input_char_budget",
+        "synthesis_min_inputs",
+        "synthesis_min_provenance_diversity",
         "share_max_per_window",
+        "share_window_seconds",
         "share_cooldown_seconds",
+        "share_min_lineage_diversity",
         "journal_ttl_days",
         "journal_max_entry_chars",
         "journal_max_lineage_hops",
     ):
         candidate = value.get(key)
         merged[key] = candidate if type(candidate) is int and candidate > 0 else None
-    threshold = value.get("semantic_dedupe_threshold")
-    merged["semantic_dedupe_threshold"] = (
-        float(threshold)
-        if isinstance(threshold, (int, float))
-        and not isinstance(threshold, bool)
-        and 0.0 <= float(threshold) <= 1.0
-        else None
-    )
+    quiet_hours = value.get("wandering_quiet_hours_utc")
+    if isinstance(quiet_hours, list) and quiet_hours and all(type(item) is int and 0 <= item <= 23 for item in quiet_hours):
+        merged["wandering_quiet_hours_utc"] = sorted(set(quiet_hours))
+    else:
+        merged["wandering_quiet_hours_utc"] = None
+    for key in ("semantic_dedupe_threshold", "synthesis_min_semantic_distance"):
+        threshold = value.get(key)
+        merged[key] = (
+            float(threshold)
+            if isinstance(threshold, (int, float))
+            and not isinstance(threshold, bool)
+            and 0.0 <= float(threshold) <= 1.0
+            else None
+        )
     return merged
 
 

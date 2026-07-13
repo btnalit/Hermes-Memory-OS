@@ -23,6 +23,18 @@ def test_private_journal_and_manifest_are_not_indexed_prefetched_or_projected():
             assert private_name not in source, f"{path} consumes private V3 store {private_name}"
 
 
+def test_v3_external_speech_has_exactly_one_speak_gate_adapter():
+    modules = list((REPO_ROOT / "plugins/memory/memory_os").glob("v3_*.py"))
+    speak_gate_users = []
+    for path in modules:
+        source = path.read_text(encoding="utf-8")
+        assert "send_message(" not in source
+        assert "delivery/outbox" not in source
+        if "SpeakGateModule" in source:
+            speak_gate_users.append(path.name)
+    assert speak_gate_users == ["v3_outlet.py"]
+
+
 def test_private_store_names_do_not_appear_in_ragflow_or_backup_payload_builders():
     private_names = ("wandering_journal.jsonl", "v3_body_packet_manifests.jsonl")
     candidates = [

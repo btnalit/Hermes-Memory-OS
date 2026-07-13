@@ -35,6 +35,7 @@ ACTIVE_CLOSURE_CRON_KEYS = frozenset({
     "event_stats_refresh",
     "exposure_rollup",
     "v3_seed_evidence",
+    "v3_wandering",
     "v3_journal_sweep",
     "state_overlay_refresh",
     "entity_index_refresh",
@@ -98,6 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--event-stats-refresh-schedule", default="7,22,37,52 * * * *")
     parser.add_argument("--exposure-rollup-schedule", default="5 0 * * *")
     parser.add_argument("--v3-seed-evidence-schedule", default="15 0 * * *")
+    parser.add_argument("--v3-wandering-schedule", default="17 */6 * * *")
     parser.add_argument("--v3-journal-sweep-schedule", default="30 3 * * *")
     parser.add_argument("--state-overlay-refresh-schedule", default="17,47 * * * *")
     parser.add_argument("--entity-index-refresh-schedule", default="25,55 * * * *")

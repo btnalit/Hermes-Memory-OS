@@ -126,6 +126,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     session_mirror = _session_mirror_snapshot(hermes_home)
     v3_seed_evidence = _v3_seed_evidence_snapshot(memory_root)
     v3_private_journal = _v3_private_journal_snapshot(memory_root)
+    v3_inner_life = _v3_inner_life_snapshot(memory_root)
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     monitor = _monitor_snapshot(
         now=now,
@@ -163,6 +164,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "sessionMirror": session_mirror,
         "v3SeedEvidence": v3_seed_evidence,
         "v3PrivateJournal": v3_private_journal,
+        "v3InnerLife": v3_inner_life,
     }
     _fill_audit_from_monitor_if_empty(snapshot)
     return snapshot
@@ -806,6 +808,36 @@ def _owner_aging_snapshot(memory_root: Path) -> dict[str, Any]:
         else:
             aging[">30d"] += 1
     return {"aging_buckets": aging, "pending_total": sum(aging.values())}
+
+
+def _v3_inner_life_snapshot(memory_root: Path) -> dict[str, Any]:
+    config = _read_json(memory_root / "config.json")
+    inner = config.get("v3_inner_life") if isinstance(config, dict) else {}
+    inner = inner if isinstance(inner, dict) else {}
+    runs = _read_jsonl(memory_root / "system" / "v3_wandering_runs.jsonl")
+    journal = _read_jsonl(memory_root / "system" / "wandering_journal.jsonl")
+    queued = [item for item in journal if item.get("record_type") == "thought" and item.get("outlet_status") == "queued"]
+    manifests = _read_jsonl(memory_root / "system" / "v3_body_packet_manifests.jsonl")
+    try:
+        from plugins.memory.memory_os.v3_ephemeral_adapter import HermesEphemeralAdapter
+
+        capability = HermesEphemeralAdapter(
+            host_agent_root=Path(inner["host_agent_root"]) if inner.get("host_agent_root") else None,
+            hermes_home=memory_root.parent,
+        ).capability
+    except Exception:
+        capability = False
+    return {
+        "ephemeral_inference_capability": capability,
+        "wandering_enabled": inner.get("wandering_enabled") is True,
+        "synthesis_admission_enabled": inner.get("synthesis_admission_enabled") is True,
+        "outlet_shadow_enabled": inner.get("outlet_shadow_enabled") is True,
+        "expression_enabled": inner.get("expression_enabled") is True,
+        "latest_wandering_status": str((runs[-1] if runs else {}).get("status") or "never_run"),
+        "active_manifest_count": len(manifests),
+        "queued_share_count": sum(1 for item in queued if item.get("requested_fate") == "share"),
+        "queued_proposal_count": sum(1 for item in queued if item.get("requested_fate") == "propose"),
+    }
 
 
 def _v3_private_journal_snapshot(memory_root: Path) -> dict[str, Any]:

@@ -57,6 +57,7 @@ def ingest_thought_batch(
     born_at = current.isoformat()
     expires_at = (current + timedelta(days=ttl_days)).isoformat()
     allowed_refs = {str(item) for item in manifest.get("source_refs") or []}
+    journal_sources = _journal_source_map(read_journal(store))
     validated: list[dict[str, Any]] = []
     try:
         for raw in model_entries:
@@ -65,6 +66,7 @@ def ingest_thought_batch(
                     raw,
                     packet=packet,
                     allowed_refs=allowed_refs,
+                    journal_sources=journal_sources,
                     born_at=born_at,
                     expires_at=expires_at,
                     max_entry_chars=max_entry_chars,
@@ -200,6 +202,7 @@ def _validate_and_build_entry(
     *,
     packet: dict[str, Any],
     allowed_refs: set[str],
+    journal_sources: dict[str, dict[str, Any]],
     born_at: str,
     expires_at: str,
     max_entry_chars: int,
@@ -227,13 +230,31 @@ def _validate_and_build_entry(
     refs = sorted({str(item).strip() for item in refs_value if str(item).strip()})
     if not refs or any(ref not in allowed_refs for ref in refs):
         raise ValueError("provenance_not_in_packet")
-    if not any(not ref.startswith("journal:") for ref in refs):
+    lineage_roots: set[str] = set()
+    derived_hop = 0
+    for ref in refs:
+        if not ref.startswith("journal:"):
+            lineage_roots.add(ref)
+            continue
+        source = journal_sources.get(ref)
+        if source is None:
+            raise ValueError("journal_provenance_not_found")
+        source_roots = source.get("lineage_root_refs")
+        if not isinstance(source_roots, list) or not source_roots:
+            source_roots = [item for item in source.get("provenance_refs") or [] if not str(item).startswith("journal:")]
+        if not source_roots:
+            raise ValueError("journal_provenance_has_no_root")
+        lineage_roots.update(str(item) for item in source_roots)
+        derived_hop = max(derived_hop, int(source.get("lineage_hop") or 0) + 1)
+    if not lineage_roots:
         raise ValueError("non_journal_root_required")
-    lineage_hop = raw.get("lineage_hop", 0)
-    if type(lineage_hop) is not int or lineage_hop < 0 or lineage_hop > max_lineage_hops:
+    if derived_hop > max_lineage_hops:
         raise ValueError("lineage_hop")
+    if "lineage_hop" in raw and raw.get("lineage_hop") != derived_hop:
+        raise ValueError("lineage_hop_not_derived")
+    lineage_hop = derived_hop
 
-    lineage_payload = "|".join([str(packet["snapshot_id"]), *refs, concept_key.casefold()])
+    lineage_payload = "|".join([str(packet["snapshot_id"]), *sorted(lineage_roots), concept_key.casefold()])
     content_hash = "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
     outlet_status = "queued" if requested_fate in {"share", "propose"} else "none"
     record: dict[str, Any] = {
@@ -245,6 +266,7 @@ def _validate_and_build_entry(
         "tier": tier,
         "epistemic_status": "private_uncommitted",
         "provenance_refs": refs,
+        "lineage_root_refs": sorted(lineage_roots),
         "body_snapshot_id": str(packet["snapshot_id"]),
         "concept_key": concept_key,
         "content": content,
@@ -263,6 +285,21 @@ def _validate_and_build_entry(
         value = raw.get(field)
         record[field] = None if value is None else str(value).strip()[:max_entry_chars] or None
     return record
+
+
+def _journal_source_map(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    duplicates: set[str] = set()
+    for item in records:
+        if item.get("record_type") != "thought":
+            continue
+        ref = "journal:" + str(item.get("entry_id") or "")
+        if ref in result:
+            duplicates.add(ref)
+        result[ref] = item
+    for ref in duplicates:
+        result.pop(ref, None)
+    return result
 
 
 def _mutate_journal(
