@@ -124,6 +124,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "share_max_per_window": None,
         "share_cooldown_seconds": None,
         "journal_ttl_days": None,
+        "journal_max_entry_chars": None,
+        "journal_max_lineage_hops": None,
         "semantic_dedupe_threshold": None,
     },
     "session_mirror": {
@@ -450,6 +452,8 @@ def _merge_v3_inner_life_config(value: Any) -> dict[str, Any]:
         "share_max_per_window",
         "share_cooldown_seconds",
         "journal_ttl_days",
+        "journal_max_entry_chars",
+        "journal_max_lineage_hops",
     ):
         candidate = value.get(key)
         merged[key] = candidate if type(candidate) is int and candidate > 0 else None

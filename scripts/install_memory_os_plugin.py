@@ -51,6 +51,8 @@ SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refr
 SOURCE_EXPOSURE_ROLLUP = REPO_ROOT / "scripts" / "memory_os_exposure_rollup.py"
 SOURCE_V3_SEED_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_v3_seed_evidence.py"
 SOURCE_V3_SEED_EVIDENCE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_seed_evidence_gate.py"
+SOURCE_V3_JOURNAL_SWEEP = REPO_ROOT / "scripts" / "memory_os_v3_journal_sweep.py"
+SOURCE_V3_JOURNAL_SWEEP_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_journal_sweep_gate.py"
 SOURCE_STATE_OVERLAY_REFRESH = REPO_ROOT / "scripts" / "memory_os_state_overlay_refresh.py"
 SOURCE_STATE_OVERLAY_REFRESH_GATE = REPO_ROOT / "scripts" / "memory_os_cron_state_overlay_refresh_gate.py"
 SOURCE_ENTITY_INDEX_REFRESH = REPO_ROOT / "scripts" / "memory_os_entity_index_refresh.py"
@@ -403,6 +405,7 @@ def install_plugin(
         hermes_home,
         dry_run=dry_run,
     )
+    v3_backup_exclusions_path = _write_v3_backup_exclusions(hermes_home, dry_run=dry_run)
     expired_cleanup_report = _run_expired_working_migration(
         hermes_home,
         dry_run=dry_run,
@@ -677,6 +680,7 @@ def install_plugin(
         "hindsight_mode": hindsight_mode,
         "hindsight_adoption": hindsight_adoption,
         "config_defaults": config_defaults_report,
+        "v3_backup_exclusions_path": str(v3_backup_exclusions_path),
         "expired_working_cleanup": expired_cleanup_report,
         "smoke_test": {
             "requested": not skip_verify and not dry_run,
@@ -1151,6 +1155,8 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "exposure_rollup": SOURCE_EXPOSURE_ROLLUP,
         "v3_seed_evidence": SOURCE_V3_SEED_EVIDENCE,
         "v3_seed_evidence_gate": SOURCE_V3_SEED_EVIDENCE_GATE,
+        "v3_journal_sweep": SOURCE_V3_JOURNAL_SWEEP,
+        "v3_journal_sweep_gate": SOURCE_V3_JOURNAL_SWEEP_GATE,
         "state_overlay_refresh": SOURCE_STATE_OVERLAY_REFRESH,
         "state_overlay_refresh_gate": SOURCE_STATE_OVERLAY_REFRESH_GATE,
         "entity_index_refresh": SOURCE_ENTITY_INDEX_REFRESH,
@@ -1820,6 +1826,22 @@ def main() -> int:
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def _write_v3_backup_exclusions(hermes_home: Path, *, dry_run: bool) -> Path:
+    path = hermes_home / "memory-os" / "private_backup_exclusions.json"
+    payload = {
+        "schema_version": "memory-os.v3_private_backup_exclusions.v0",
+        "policy": "exclude_or_apply_same_ttl",
+        "relative_paths": [
+            "system/wandering_journal.jsonl",
+            "system/v3_body_packet_manifests.jsonl",
+        ],
+    }
+    if not dry_run:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
 
 
 def _ensure_config_defaults(

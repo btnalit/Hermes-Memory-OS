@@ -175,6 +175,8 @@ def _home_with_helpers(
         "memory_os_cron_exposure_rollup_gate.py",
         "memory_os_v3_seed_evidence.py",
         "memory_os_cron_v3_seed_evidence_gate.py",
+        "memory_os_v3_journal_sweep.py",
+        "memory_os_cron_v3_journal_sweep_gate.py",
         "memory_os_state_overlay_refresh.py",
         "memory_os_cron_state_overlay_refresh_gate.py",
         "memory_os_entity_index_refresh.py",
@@ -236,7 +238,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 16
+    assert len(report["operational_cron_jobs"]) == 17
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
@@ -248,6 +250,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
         "memory-os-event-stats-refresh",
         "memory-os-exposure-rollup",
         "memory-os-v3-seed-evidence",
+        "memory-os-v3-journal-sweep",
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",
@@ -362,7 +365,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 20
+    assert len(report["operational_cron_jobs"]) == 21
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -379,6 +382,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-event-stats-refresh",
         "memory-os-exposure-rollup",
         "memory-os-v3-seed-evidence",
+        "memory-os-v3-journal-sweep",
         "memory-os-state-overlay-refresh",
         "memory-os-entity-index-refresh",
         "memory-os-hindsight-advisory-digest",

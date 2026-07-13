@@ -35,6 +35,11 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/execution_gate.py::_append_jsonl::path.open_a::path": "execution_gate_private_writer",
     "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::append_jsonl_locked_call::v3_seed_edges_daily_path(store)": "v3_seed_evidence_daily_observation",
     "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::atomic_json_replace_call::v3_seed_evidence_snapshot_path(store)": "v3_seed_evidence_snapshot_observation",
+    "plugins/memory/memory_os/v3_body_packet.py::write_body_packet_manifest::governed_append_under_lock_call::target": "v3_body_packet_manifest",
+    "plugins/memory/memory_os/v3_body_packet.py::remove_body_manifests::governed_atomic_rewrite_call::target": "v3_body_packet_manifest_retention",
+    "plugins/memory/memory_os/wandering_journal.py::query_journal.mutate::governed_atomic_rewrite_call::wandering_journal_path(store)": "v3_private_query_trace",
+    "plugins/memory/memory_os/wandering_journal.py::_mutate_journal::governed_atomic_rewrite_call::target": "v3_private_active_journal",
+    "plugins/memory/memory_os/v3_retention.py::sweep_pending_expired::governed_atomic_status_call::v3_journal_sweep_status_path(store)": "v3_private_ttl_aggregate_status",
     "plugins/memory/memory_os/left_brain_advisor.py::run_left_brain_advisor::append_jsonl_call::left_brain_advisor_reports_path(store.roots)": "left_brain_advisor_manual_fallback",
     "plugins/memory/memory_os/left_brain_advisor.py::_append_jsonl::path.open_a::path": "left_brain_advisor_private_manual_writer",
     "plugins/memory/memory_os/memory_projection.py::collect_and_project_signals::append_jsonl_call::memory_projection_records_path(store.roots)": "memory_projection_manual_fallback",
@@ -250,6 +255,20 @@ class _WriteSurfaceVisitor(ast.NodeVisitor):
                 target = ast.unparse(node.args[0]) if node.args else ""
             elif node.func.id == "_atomic_write_json":
                 kind = "atomic_json_replace_call"
+                target = ast.unparse(node.args[0]) if node.args else ""
+        elif self.rel_path in {
+            "plugins/memory/memory_os/v3_body_packet.py",
+            "plugins/memory/memory_os/wandering_journal.py",
+            "plugins/memory/memory_os/v3_retention.py",
+        } and isinstance(node.func, ast.Name):
+            if node.func.id == "_append_line_under_lock":
+                kind = "governed_append_under_lock_call"
+                target = ast.unparse(node.args[0]) if node.args else ""
+            elif node.func.id == "_rewrite_records_under_lock":
+                kind = "governed_atomic_rewrite_call"
+                target = ast.unparse(node.args[0]) if node.args else ""
+            elif node.func.id == "_write_status":
+                kind = "governed_atomic_status_call"
                 target = ast.unparse(node.args[0]) if node.args else ""
         elif (
             self.rel_path == "plugins/memory/memory_os/permanent_promotion.py"

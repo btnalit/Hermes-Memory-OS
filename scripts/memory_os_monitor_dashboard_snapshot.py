@@ -41,6 +41,7 @@ CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-event-stats-refresh",
     "memory-os-exposure-rollup",
     "memory-os-v3-seed-evidence",
+    "memory-os-v3-journal-sweep",
     "memory-os-expression-feedback-request",
     "memory-os-memory-sources-feedback-request",
 })
@@ -124,6 +125,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     owner_aging = _owner_aging_snapshot(memory_root)
     session_mirror = _session_mirror_snapshot(hermes_home)
     v3_seed_evidence = _v3_seed_evidence_snapshot(memory_root)
+    v3_private_journal = _v3_private_journal_snapshot(memory_root)
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     monitor = _monitor_snapshot(
         now=now,
@@ -160,6 +162,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "ownerReviewAging": owner_aging,
         "sessionMirror": session_mirror,
         "v3SeedEvidence": v3_seed_evidence,
+        "v3PrivateJournal": v3_private_journal,
     }
     _fill_audit_from_monitor_if_empty(snapshot)
     return snapshot
@@ -803,6 +806,22 @@ def _owner_aging_snapshot(memory_root: Path) -> dict[str, Any]:
         else:
             aging[">30d"] += 1
     return {"aging_buckets": aging, "pending_total": sum(aging.values())}
+
+
+def _v3_private_journal_snapshot(memory_root: Path) -> dict[str, Any]:
+    rows = _read_jsonl(memory_root / "system" / "wandering_journal.jsonl")
+    thoughts = [item for item in rows if item.get("record_type") == "thought"]
+    tiers = Counter(str(item.get("tier") or "unknown") for item in thoughts)
+    fates = Counter(str(item.get("fate") or "unknown") for item in thoughts)
+    sweep = _read_json(memory_root / "system" / "v3_journal_sweep_status.json")
+    return {
+        "status": "private_active_store",
+        "thought_count": len(thoughts),
+        "query_trace_count": sum(1 for item in rows if item.get("record_type") == "query_trace"),
+        "tier_counts": dict(sorted(tiers.items())),
+        "fate_counts": dict(sorted(fates.items())),
+        "sweep_cycle_status": str(sweep.get("cycle_status") or "never_run"),
+    }
 
 
 def _v3_seed_evidence_snapshot(memory_root: Path) -> dict[str, Any]:
