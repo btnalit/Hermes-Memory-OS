@@ -33,6 +33,8 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/execution_gate.py::complete_execution_gate_envelope::append_jsonl_call::execution_gate_records_path(store.roots)": "execution_gate_completion_ledger",
     "plugins/memory/memory_os/execution_gate.py::rotate_execution_gate_records::path.open_a::rotated_path": "execution_gate_retention_archive",
     "plugins/memory/memory_os/execution_gate.py::_append_jsonl::path.open_a::path": "execution_gate_private_writer",
+    "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::append_jsonl_locked_call::v3_seed_edges_daily_path(store)": "v3_seed_evidence_daily_observation",
+    "plugins/memory/memory_os/v3_seed_evidence.py::run_v3_seed_evidence_cycle::atomic_json_replace_call::v3_seed_evidence_snapshot_path(store)": "v3_seed_evidence_snapshot_observation",
     "plugins/memory/memory_os/left_brain_advisor.py::run_left_brain_advisor::append_jsonl_call::left_brain_advisor_reports_path(store.roots)": "left_brain_advisor_manual_fallback",
     "plugins/memory/memory_os/left_brain_advisor.py::_append_jsonl::path.open_a::path": "left_brain_advisor_private_manual_writer",
     "plugins/memory/memory_os/memory_projection.py::collect_and_project_signals::append_jsonl_call::memory_projection_records_path(store.roots)": "memory_projection_manual_fallback",
@@ -242,6 +244,13 @@ class _WriteSurfaceVisitor(ast.NodeVisitor):
         elif isinstance(node.func, ast.Name) and node.func.id in {"_append_jsonl", "append_jsonl"}:
             kind = "append_jsonl_call"
             target = ast.unparse(node.args[0]) if node.args else ""
+        elif self.rel_path == "plugins/memory/memory_os/v3_seed_evidence.py" and isinstance(node.func, ast.Name):
+            if node.func.id == "append_jsonl_locked":
+                kind = "append_jsonl_locked_call"
+                target = ast.unparse(node.args[0]) if node.args else ""
+            elif node.func.id == "_atomic_write_json":
+                kind = "atomic_json_replace_call"
+                target = ast.unparse(node.args[0]) if node.args else ""
         elif (
             self.rel_path == "plugins/memory/memory_os/permanent_promotion.py"
             and isinstance(node.func, ast.Name)

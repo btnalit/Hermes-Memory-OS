@@ -168,7 +168,13 @@ def build_memory_source_record(
     router_applied: bool,
     prefetch_mode: str,
     boundary: dict[str, bool] | None = None,
+    traffic_class: str = "production",
+    natural_production: bool = True,
 ) -> dict[str, Any]:
+    normalized_traffic_class = str(traffic_class).strip()
+    if normalized_traffic_class not in {"production", "test", "shadow", "backfill", "synthetic"}:
+        raise ValueError(f"unsupported MemorySources traffic_class: {normalized_traffic_class!r}")
+    is_natural_production = normalized_traffic_class == "production" and natural_production is True
     created_at = datetime.now(timezone.utc)
     route_available = bool(route_report.get("route"))
     route = str(route_report.get("route") or "unknown")
@@ -193,6 +199,8 @@ def build_memory_source_record(
         "route": route,
         "route_reason_codes": route_reason_codes,
         "prefetch_mode": prefetch_mode,
+        "traffic_class": normalized_traffic_class,
+        "natural_production": is_natural_production,
         "context_router_mode": router_mode,
         "context_router_routes_applied": _context_router_routes_applied(context_router_config),
         "router_applied": bool(router_applied),

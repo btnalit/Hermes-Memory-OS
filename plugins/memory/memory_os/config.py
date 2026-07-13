@@ -109,6 +109,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "target_ref": "",
         "hermes_bin": "hermes",
     },
+    "v3_inner_life": {
+        "seed_evidence": {
+            "enabled": False,
+            "max_edges": 10000,
+            "min_coverage_ratio": 1.0,
+            "require_shared_entity": True,
+        },
+        "wandering_enabled": False,
+        "expression_enabled": False,
+        "synthesis_admission_enabled": False,
+        "wandering_max_attempts_per_window": None,
+        "wandering_model_input_char_budget": None,
+        "share_max_per_window": None,
+        "share_cooldown_seconds": None,
+        "journal_ttl_days": None,
+        "semantic_dedupe_threshold": None,
+    },
     "session_mirror": {
         "test_host_apply_allowed": False,
         "test_host_marker": "",
@@ -186,6 +203,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "default": DEFAULT_CONFIG["right_brain_expression"],
         },
         {
+            "key": "v3_inner_life",
+            "description": "V3 private inner-life observation, journal, wandering, synthesis, and expression gates",
+            "default": DEFAULT_CONFIG["v3_inner_life"],
+        },
+        {
             "key": "session_mirror",
             "description": "SessionMirror bounded apply governance gates",
             "default": DEFAULT_CONFIG["session_mirror"],
@@ -238,6 +260,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
     merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
     merged["right_brain_expression"] = _merge_right_brain_expression_config(merged.get("right_brain_expression"))
+    merged["v3_inner_life"] = _merge_v3_inner_life_config(merged.get("v3_inner_life"))
     merged["session_mirror"] = _merge_session_mirror_config(merged.get("session_mirror"))
     merged["l4"] = _merge_l4_config(merged.get("l4"))
     return merged
@@ -396,6 +419,48 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["recurring_delivery_target_class"] = str(merged.get("recurring_delivery_target_class") or "missing")
     merged["cron_job_name"] = str(merged.get("cron_job_name") or "memory-os-owner-review-digest")
     merged["aging_enabled"] = bool(merged.get("aging_enabled"))
+    return merged
+
+
+def _merge_v3_inner_life_config(value: Any) -> dict[str, Any]:
+    default = DEFAULT_CONFIG["v3_inner_life"]
+    merged = dict(default)
+    merged["seed_evidence"] = dict(default["seed_evidence"])
+    if not isinstance(value, dict):
+        return merged
+
+    seed_value = value.get("seed_evidence")
+    if isinstance(seed_value, dict):
+        seed = dict(default["seed_evidence"])
+        seed["enabled"] = seed_value.get("enabled") is True
+        max_edges = seed_value.get("max_edges")
+        if type(max_edges) is int and 1 <= max_edges <= 1_000_000:
+            seed["max_edges"] = max_edges
+        coverage = seed_value.get("min_coverage_ratio")
+        if isinstance(coverage, (int, float)) and not isinstance(coverage, bool) and 0.0 <= float(coverage) <= 1.0:
+            seed["min_coverage_ratio"] = float(coverage)
+        seed["require_shared_entity"] = seed_value.get("require_shared_entity") is True
+        merged["seed_evidence"] = seed
+
+    for key in ("wandering_enabled", "expression_enabled", "synthesis_admission_enabled"):
+        merged[key] = value.get(key) is True
+    for key in (
+        "wandering_max_attempts_per_window",
+        "wandering_model_input_char_budget",
+        "share_max_per_window",
+        "share_cooldown_seconds",
+        "journal_ttl_days",
+    ):
+        candidate = value.get(key)
+        merged[key] = candidate if type(candidate) is int and candidate > 0 else None
+    threshold = value.get("semantic_dedupe_threshold")
+    merged["semantic_dedupe_threshold"] = (
+        float(threshold)
+        if isinstance(threshold, (int, float))
+        and not isinstance(threshold, bool)
+        and 0.0 <= float(threshold) <= 1.0
+        else None
+    )
     return merged
 
 

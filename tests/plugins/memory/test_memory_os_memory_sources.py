@@ -149,6 +149,26 @@ def test_memory_sources_dropped_sections_preserve_safe_source_ids(tmp_path):
     )
 
     assert record["dropped"][0]["source_ids"] == ["crystallized:drop_1"]
+    assert record["traffic_class"] == "production"
+    assert record["natural_production"] is True
+
+
+def test_memory_sources_record_can_explicitly_mark_nonproduction_traffic(tmp_path):
+    store = _store(tmp_path)
+
+    record = build_memory_source_record(
+        roots=store.roots,
+        route_report={"route": "shadow", "selected_sections": [], "dropped_sections": []},
+        selected_sections=[],
+        context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        router_applied=True,
+        prefetch_mode="indexed",
+        traffic_class="shadow",
+        natural_production=False,
+    )
+
+    assert record["traffic_class"] == "shadow"
+    assert record["natural_production"] is False
 
 
 def test_context_router_report_filters_unsafe_source_ids():

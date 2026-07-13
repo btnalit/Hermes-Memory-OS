@@ -40,6 +40,7 @@ CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-fact-judge",
     "memory-os-event-stats-refresh",
     "memory-os-exposure-rollup",
+    "memory-os-v3-seed-evidence",
     "memory-os-expression-feedback-request",
     "memory-os-memory-sources-feedback-request",
 })
@@ -122,6 +123,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     execution_gate = _execution_gate_snapshot(memory_root)
     owner_aging = _owner_aging_snapshot(memory_root)
     session_mirror = _session_mirror_snapshot(hermes_home)
+    v3_seed_evidence = _v3_seed_evidence_snapshot(memory_root)
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     monitor = _monitor_snapshot(
         now=now,
@@ -157,6 +159,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "executionGate": execution_gate,
         "ownerReviewAging": owner_aging,
         "sessionMirror": session_mirror,
+        "v3SeedEvidence": v3_seed_evidence,
     }
     _fill_audit_from_monitor_if_empty(snapshot)
     return snapshot
@@ -800,6 +803,23 @@ def _owner_aging_snapshot(memory_root: Path) -> dict[str, Any]:
         else:
             aging[">30d"] += 1
     return {"aging_buckets": aging, "pending_total": sum(aging.values())}
+
+
+def _v3_seed_evidence_snapshot(memory_root: Path) -> dict[str, Any]:
+    snapshot = _read_json(memory_root / "system" / "v3_seed_evidence_snapshot.json")
+    daily_rows = _read_jsonl(memory_root / "system" / "v3_seed_edges_daily.jsonl")
+    latest = daily_rows[-1] if daily_rows else {}
+    return {
+        "status": "observing" if snapshot else "empty",
+        "valid_day_count": int(snapshot.get("valid_day_count") or 0),
+        "consecutive_valid_day_count": int(snapshot.get("consecutive_valid_day_count") or 0),
+        "activation_evidence_ready": bool(snapshot.get("activation_evidence_ready")),
+        "latest_natural_date": str(snapshot.get("latest_natural_date") or ""),
+        "latest_valid": bool(latest.get("valid")),
+        "latest_coverage_ratio": float(latest.get("coverage_ratio") or 0.0),
+        "latest_cursor_contiguous": bool(latest.get("source_cursor_contiguous")),
+        "latest_invalid_reasons": [str(item) for item in latest.get("invalid_reasons") or []][:8],
+    }
 
 
 def _session_mirror_snapshot(hermes_home: Path) -> dict[str, Any]:
