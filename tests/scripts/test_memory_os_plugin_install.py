@@ -8,7 +8,12 @@ from pathlib import Path
 
 import yaml
 
-from scripts.install_memory_os_plugin import SOURCE_AGENT_OS_SHELL_DIR, SOURCE_PLUGIN_DIR, install_plugin
+from scripts.install_memory_os_plugin import (
+    SOURCE_AGENT_OS_SHELL_DIR,
+    SOURCE_PLUGIN_DIR,
+    _write_operational_helper_scripts,
+    install_plugin,
+)
 
 
 def test_installer_copies_memory_provider_shape_without_cache_files(tmp_path):
@@ -26,6 +31,15 @@ def test_installer_copies_memory_provider_shape_without_cache_files(tmp_path):
     assert target.joinpath("plugin.yaml").is_file()
     assert target.joinpath("cli.py").is_file()
     assert not target.joinpath("__pycache__", "ignored.pyc").exists()
+
+
+def test_installer_copies_monitor_dashboard_snapshot_operational_helper(tmp_path):
+    target_home = tmp_path / "home"
+    source = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
+    _write_operational_helper_scripts(target_home, dry_run=False)
+    installed = target_home / "scripts" / source.name
+
+    assert installed.read_bytes() == source.read_bytes()
 
 
 def test_installer_copies_agent_os_shell_by_default_without_cache_files(tmp_path):
