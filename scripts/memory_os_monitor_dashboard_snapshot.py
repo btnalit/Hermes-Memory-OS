@@ -57,6 +57,7 @@ CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-event-stats-refresh",
     "memory-os-exposure-rollup",
     "memory-os-v3-seed-evidence",
+    "memory-os-v3-wandering",
     "memory-os-v3-journal-sweep",
     "memory-os-expression-feedback-request",
     "memory-os-memory-sources-feedback-request",

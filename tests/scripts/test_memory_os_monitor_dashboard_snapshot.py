@@ -528,6 +528,15 @@ def test_full_monitor_fallback_to_legacy_results_key(tmp_path):
     assert "something_warned" in fm["warn_codes"]
 
 
+def test_v3_crons_are_part_of_core_monitor_contract():
+    module = _load_module()
+    assert {
+        "memory-os-v3-seed-evidence",
+        "memory-os-v3-wandering",
+        "memory-os-v3-journal-sweep",
+    }.issubset(module.CORE_MEMORY_OS_CRON)
+
+
 def test_dashboard_snapshot_script_bootstraps_from_installed_layout(tmp_path):
     repo_root = Path(__file__).resolve().parents[2]
     source_script = repo_root / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
