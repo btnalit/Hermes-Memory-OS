@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
-from plugins.memory.memory_os.v3_body_packet import build_body_state_packet, write_body_packet_manifest
+from plugins.memory.memory_os.v3_body_packet import (
+    body_packet_manifests_path,
+    build_body_state_packet,
+    write_body_packet_manifest,
+)
+from plugins.memory.memory_os.v3_retention import sweep_pending_expired
 from plugins.memory.memory_os.v3_synthesis import run_v3_synthesis_cycle
 from plugins.memory.memory_os.wandering_journal import ingest_thought_batch, read_journal
 
@@ -153,3 +160,50 @@ def test_admission_and_semantic_gates_fail_closed(tmp_path):
     )
     assert result["status"] == "semantic_gate_rejected"
     assert not any(item.get("concept_key") == "close" for item in read_journal(store))
+
+
+def test_synthesis_source_swept_during_inference_fails_closed(tmp_path):
+    store = _store(tmp_path)
+    sweep_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    first = _source(store, "alpha", "crystallized:cry_a")
+    second = _source(store, "beta", "crystallized:cry_b")
+    refs = ["journal:" + first["entry_id"], "journal:" + second["entry_id"]]
+
+    class SweepDuringInference(Adapter):
+        def infer(self, *, packet, prompt_contract, route_snapshot):
+            sweep_pending_expired(store, now=sweep_at)
+            return super().infer(
+                packet=packet,
+                prompt_contract=prompt_contract,
+                route_snapshot=route_snapshot,
+            )
+
+    adapter = SweepDuringInference(
+        [
+            {
+                "tier": "claim",
+                "content": "Must not survive dangling provenance",
+                "provenance_refs": refs,
+                "concept_key": "dangling-source-race",
+                "requested_fate": "propose",
+                "reusable_insight": True,
+            }
+        ]
+    )
+    result = run_v3_synthesis_cycle(
+        store,
+        adapter=adapter,
+        route_snapshot=_route(),
+        min_inputs=2,
+        min_provenance_diversity=2,
+        min_semantic_distance=0.4,
+        semantic_distance=lambda _content, _roots: 1.0,
+        ttl_days=3,
+        max_entry_chars=300,
+        max_lineage_hops=2,
+    )
+
+    assert result["status"] == "schema_rejected"
+    assert not any(item.get("concept_key") == "dangling-source-race" for item in read_journal(store))
+    manifests = body_packet_manifests_path(store)
+    assert not manifests.exists() or not manifests.read_text(encoding="utf-8").strip()
