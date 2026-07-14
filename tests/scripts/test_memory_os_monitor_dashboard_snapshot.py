@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -525,3 +526,27 @@ def test_full_monitor_fallback_to_legacy_results_key(tmp_path):
     fm = snapshot["fullMonitor"]
     assert fm["status"] == "WARN", f"Legacy results artifact must still be readable, got {fm['status']}"
     assert "something_warned" in fm["warn_codes"]
+
+
+def test_dashboard_snapshot_script_bootstraps_from_installed_layout(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    source_script = repo_root / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir(parents=True)
+    installed = scripts_dir / source_script.name
+    shutil.copy2(source_script, installed)
+    shutil.copy2(repo_root / "scripts" / "memory_os_module_cadence_report.py", scripts_dir)
+    runtime = tmp_path / "memory-os" / "runtime" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.symlink_to(repo_root, target_is_directory=True)
+
+    completed = subprocess.run(
+        [sys.executable, str(installed), "--hermes-home", str(tmp_path), "--help"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--hermes-home" in completed.stdout

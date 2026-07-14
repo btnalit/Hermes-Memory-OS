@@ -21,9 +21,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+def _preparse_hermes_home(argv: list[str]) -> str:
+    for index, arg in enumerate(argv):
+        if arg == "--hermes-home" and index + 1 < len(argv) and not argv[index + 1].startswith("--"):
+            return argv[index + 1]
+        if arg.startswith("--hermes-home="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+_SELF = Path(__file__).absolute()
+_REPO_ROOT = _SELF.parents[1]
+if (_REPO_ROOT / "plugins" / "memory" / "memory_os").exists():
+    _PATH_CANDIDATES = [_REPO_ROOT]
+else:
+    _HOME = Path(_preparse_hermes_home(sys.argv[1:]) or os.environ.get("HERMES_HOME", "") or _SELF.parents[1]).expanduser()
+    _PATH_CANDIDATES = [_HOME / "memory-os" / "runtime" / "python", _HOME]
+for _candidate in reversed(_PATH_CANDIDATES):
+    if _candidate.exists() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 from scripts.memory_os_module_cadence_report import build_cadence_report
 from plugins.memory.memory_os.audit import read_audit_records
