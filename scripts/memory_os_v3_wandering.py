@@ -8,9 +8,25 @@ import os
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+def _preparse_cli_arg(argv: list[str], flag: str) -> str:
+    for index, arg in enumerate(argv):
+        if arg == flag and index + 1 < len(argv) and not argv[index + 1].startswith("--"):
+            return argv[index + 1]
+        if arg.startswith(f"{flag}="):
+            return arg.split("=", 1)[1]
+    return ""
+
+
+_HERMES_HOME = _preparse_cli_arg(sys.argv, "--hermes-home") or os.environ.get("HERMES_HOME", "") or str(Path.home() / ".hermes")
+_SELF = Path(__file__).absolute()
+_REPO_ROOT = _SELF.parents[1]
+if (_REPO_ROOT / "plugins" / "memory" / "memory_os").exists():
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+else:
+    _RUNTIME_ROOT = Path(_HERMES_HOME) / "memory-os" / "runtime" / "python"
+    if _RUNTIME_ROOT.exists() and str(_RUNTIME_ROOT) not in sys.path:
+        sys.path.insert(0, str(_RUNTIME_ROOT))
 
 from plugins.memory.memory_os.config import load_config
 from plugins.memory.memory_os.roots import MemoryOSRoots

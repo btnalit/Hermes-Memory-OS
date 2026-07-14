@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -36,3 +37,23 @@ def test_journal_sweep_helper_stdout_is_status_only(tmp_path):
     assert json.loads(completed.stdout) == {"cycle_status": "ok"}
     assert "wnd_" not in completed.stdout
     assert "v3body_" not in completed.stdout
+
+
+def test_journal_sweep_helper_bootstraps_from_installed_layout(tmp_path):
+    installed = tmp_path / "scripts" / SCRIPT.name
+    installed.parent.mkdir(parents=True)
+    shutil.copy2(SCRIPT, installed)
+    runtime = tmp_path / "memory-os" / "runtime" / "python"
+    runtime.parent.mkdir(parents=True)
+    runtime.symlink_to(REPO_ROOT, target_is_directory=True)
+
+    completed = subprocess.run(
+        [sys.executable, str(installed), "--hermes-home", str(tmp_path)],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == '{"cycle_status":"skipped"}'
