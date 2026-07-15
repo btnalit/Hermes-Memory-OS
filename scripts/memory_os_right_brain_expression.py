@@ -39,29 +39,46 @@ def main(argv: list[str] | None = None) -> int:
     hermes_home = Path(args.hermes_home).expanduser().resolve()
     _ensure_runtime_path(hermes_home)
 
+    from plugins.memory.memory_os.legacy_right_brain_retirement import (
+        legacy_right_brain_is_retired,
+        legacy_right_brain_read_lock,
+    )
     from plugins.memory.memory_os.roots import MemoryOSRoots
     from plugins.memory.memory_os.store import MemoryOSStore
     from plugins.modules.expression.expression_draft import ExpressionDraftModule
 
-    roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=args.profile)
-    store = MemoryOSStore(roots)
-    store.initialize()
-    module = ExpressionDraftModule(hermes_home, profile=args.profile)
-    context = module.build_context(store=store, max_refs=max(int(args.max_refs), 1))
-    summaries = [str(item).strip() for item in context.get("summaries", []) if str(item).strip()]
-    if not summaries:
+    if legacy_right_brain_is_retired(hermes_home):
         return 0
-    policy = _read_expression_policy(hermes_home)
+    with legacy_right_brain_read_lock(hermes_home):
+        if legacy_right_brain_is_retired(hermes_home):
+            return 0
+        roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=args.profile)
+        store = MemoryOSStore(roots)
+        store.initialize()
+        module = ExpressionDraftModule(hermes_home, profile=args.profile)
+        context = module.build_context(store=store, max_refs=max(int(args.max_refs), 1))
+        summaries = [str(item).strip() for item in context.get("summaries", []) if str(item).strip()]
+        if not summaries:
+            return 0
+        policy = _read_expression_policy(hermes_home)
 
-    request = _record_request(
-        hermes_home=hermes_home,
-        profile=args.profile,
-        channel=args.channel,
-        source_refs=[str(ref) for ref in context.get("source_refs", [])],
-        summary_count=len(summaries),
-        policy=policy,
-    )
-    print(_render_prompt(profile=args.profile, channel=args.channel, request=request, summaries=summaries, policy=policy))
+        request = _record_request(
+            hermes_home=hermes_home,
+            profile=args.profile,
+            channel=args.channel,
+            source_refs=[str(ref) for ref in context.get("source_refs", [])],
+            summary_count=len(summaries),
+            policy=policy,
+        )
+        print(
+            _render_prompt(
+                profile=args.profile,
+                channel=args.channel,
+                request=request,
+                summaries=summaries,
+                policy=policy,
+            )
+        )
     return 0
 
 
@@ -72,7 +89,7 @@ def _ensure_runtime_path(hermes_home: Path) -> None:
         if text not in sys.path:
             sys.path.insert(0, text)
     repo_root = Path(__file__).resolve().parents[1]
-    if (repo_root / "plugins").exists():
+    if (repo_root / "plugins" / "memory" / "memory_os").is_dir():
         text = str(repo_root)
         if text not in sys.path:
             sys.path.insert(0, text)

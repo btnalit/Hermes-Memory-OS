@@ -12,6 +12,7 @@ from plugins.memory.memory_os.audit import append_audit
 from plugins.memory.memory_os.crystallized import read_candidate_queue
 from plugins.memory.memory_os.execution_gate import complete_execution_gate_envelope, start_execution_gate_envelope
 from plugins.memory.memory_os.index import MemoryOSIndex
+from plugins.memory.memory_os.legacy_right_brain_retirement import legacy_right_brain_read_lock
 from plugins.memory.memory_os.runtime import MemoryOSRuntime
 from plugins.memory.memory_os.signal_source_registry import signal_source_specs
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -101,11 +102,15 @@ class CognitiveLoopRunner:
         started_at = datetime.now(timezone.utc)
         context: dict[str, Any] = {}
         steps: list[dict[str, Any]] = []
+        legacy_lock = None
         try:
+            legacy_lock = legacy_right_brain_read_lock(self.hermes_home)
+            legacy_lock.__enter__()
             for name, fn in self._step_functions(max_events=max_events, apply=apply):
                 steps.append(self._run_step(name, fn, context))
             boundary_state = _boundary_state(steps)
             status = self._cycle_status(steps, boundary_state)
+            legacy_retired = self._legacy_right_brain_retired()
             result = {
                 "schema_version": "memory-os.cognitive_loop.v0",
                 "cycle_id": cycle_id,
@@ -117,6 +122,12 @@ class CognitiveLoopRunner:
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "duration_ms": int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000),
                 "steps": steps,
+                "retired_steps": list(self._legacy_right_brain_step_names()) if legacy_retired else [],
+                "disabled_steps": (
+                    list(self._legacy_right_brain_step_names())
+                    if not legacy_retired and not self._legacy_right_brain_enabled()
+                    else []
+                ),
                 "boundaries": boundary_state,
                 "report_path": str(self.reports_path),
             }
@@ -135,6 +146,8 @@ class CognitiveLoopRunner:
             )
             return result
         finally:
+            if legacy_lock is not None:
+                legacy_lock.__exit__(None, None, None)
             coordinator.release_lock(self.lock_resource_id, owner=owner)
 
     def status(self) -> dict[str, Any]:
@@ -202,17 +215,16 @@ class CognitiveLoopRunner:
         max_events: int,
         apply: bool,
     ) -> list[tuple[str, Callable[[dict[str, Any]], dict[str, Any]]]]:
-        legacy_right_brain_step = (
-            None
-            if self._legacy_right_brain_enabled()
-            else lambda _context: self._legacy_right_brain_disabled_result()
+        legacy_right_brain_enabled = (
+            self._legacy_right_brain_enabled()
+            and not self._legacy_right_brain_retired()
         )
         return [
             ("heartbeat_pre", lambda context: self._heartbeat(max_events=max_events)),
             ("working_decay", self._working_decay),
             ("household_digest", self._household_digest),
             ("digest_consolidation", self._digest_consolidation),
-            ("wandering_mind", legacy_right_brain_step or self._wandering_mind),
+            *([("wandering_mind", self._wandering_mind)] if legacy_right_brain_enabled else []),
             ("ops_gate", self._ops_gate),
             ("evidence_scoring", self._evidence_scoring),
             ("confidence_router", self._confidence_router),
@@ -230,8 +242,14 @@ class CognitiveLoopRunner:
             ("override_sweep", self._override_sweep),
             ("migration_controller", self._migration_controller),
             ("abstraction_distillation", self._abstraction_distillation),
-            ("grounded_expression_judge", legacy_right_brain_step or self._grounded_expression_judge),
-            ("spontaneous_expression", legacy_right_brain_step or self._spontaneous_expression),
+            *(
+                [
+                    ("grounded_expression_judge", self._grounded_expression_judge),
+                    ("spontaneous_expression", self._spontaneous_expression),
+                ]
+                if legacy_right_brain_enabled
+                else []
+            ),
             ("self_evolution", self._self_evolution),
             # DESIGN NOTE: Each edge proposer step creates a fresh
             # MemoryOSIndex(store.roots) instance. MemoryOSIndex.__init__ is O(1)
@@ -260,6 +278,19 @@ class CognitiveLoopRunner:
 
         config = load_config(self.hermes_home).get("right_brain_expression", {})
         return isinstance(config, dict) and config.get("legacy_cognitive_loop_enabled") is True
+
+    def _legacy_right_brain_retired(self) -> bool:
+        from plugins.memory.memory_os.legacy_right_brain_retirement import legacy_right_brain_is_retired
+
+        return legacy_right_brain_is_retired(self.hermes_home)
+
+    @staticmethod
+    def _legacy_right_brain_step_names() -> tuple[str, ...]:
+        return (
+            "wandering_mind",
+            "grounded_expression_judge",
+            "spontaneous_expression",
+        )
 
     @staticmethod
     def _legacy_right_brain_disabled_result() -> dict[str, Any]:

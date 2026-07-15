@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from plugins.memory.memory_os.cron_registry import MemoryOSCronSpec, memory_os_cron_specs
+from plugins.memory.memory_os.cron_registry import (
+    MemoryOSCronSpec,
+    RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
+    RETIRED_MEMORY_OS_CRON_SCRIPTS,
+    memory_os_cron_specs,
+)
 
 
 @dataclass(frozen=True)
@@ -92,9 +97,11 @@ def classify_hermes_cron_jobs(
     known_specs_by_name = {spec.name: spec for spec in memory_os_cron_specs()}
     known_specs_by_wrapper = {spec.wrapper_script: spec for spec in memory_os_cron_specs()}
     known_specs_by_raw = {spec.raw_script: spec for spec in memory_os_cron_specs()}
+    retired_scripts = set(RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES)
     wrapped: list[dict[str, Any]] = []
     naked: list[dict[str, Any]] = []
     known_optional: list[dict[str, Any]] = []
+    retired_legacy: list[dict[str, Any]] = []
     unregistered_like: list[dict[str, Any]] = []
     hermes_host_owned: list[dict[str, Any]] = []
     external_unmanaged: list[dict[str, Any]] = []
@@ -112,6 +119,12 @@ def classify_hermes_cron_jobs(
         spec = specs_by_name.get(name)
         if spec:
             (wrapped if script == spec.wrapper_script else naked).append(safe)
+            continue
+        retired_name = name if name in RETIRED_MEMORY_OS_CRON_SCRIPTS else ""
+        retired_script = script in retired_scripts
+        if retired_name or retired_script:
+            safe["retirement_reason"] = "legacy_right_brain_retired"
+            retired_legacy.append(safe)
             continue
         known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
         if known_spec:
@@ -142,6 +155,8 @@ def classify_hermes_cron_jobs(
         + _enabled_count(unregistered_like),
         "memory_os_known_optional_count": len(known_optional),
         "enabled_known_optional_outside_active_registry_count": _enabled_count(known_optional),
+        "memory_os_retired_legacy_count": len(retired_legacy),
+        "enabled_retired_legacy_count": _enabled_count(retired_legacy),
         "memory_os_like_unregistered_count": len(unregistered_like),
         "hermes_host_owned_count": len(hermes_host_owned),
         "external_unmanaged_count": len(external_unmanaged),
@@ -149,6 +164,7 @@ def classify_hermes_cron_jobs(
         "wrapped_jobs": wrapped,
         "naked_jobs": naked,
         "known_optional_jobs": known_optional,
+        "retired_legacy_jobs": retired_legacy,
         "enabled_known_optional_outside_active_registry_jobs": [job for job in known_optional if job.get("enabled") is True],
         "unregistered_like_jobs": unregistered_like,
         "external_unmanaged_jobs": external_unmanaged,

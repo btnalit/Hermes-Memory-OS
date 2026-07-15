@@ -4,6 +4,8 @@ import json
 import sqlite3
 import hashlib
 
+import pytest
+
 from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.crystallized import (
@@ -21,6 +23,10 @@ from plugins.memory.memory_os.memory_sources import (
     memory_sources_feedback_path,
     memory_sources_policy_path,
     memory_sources_stats_report,
+)
+from plugins.memory.memory_os.legacy_right_brain_retirement import (
+    load_retirement_manifest,
+    retire_legacy_right_brain,
 )
 from plugins.memory.memory_os.owner_actions import (
     approved_proposal_followups_report,
@@ -82,6 +88,50 @@ def _candidate() -> CrystallizedCandidate:
 
 def _jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_retired_right_brain_outcomes_do_not_reenter_active_owner_surface(tmp_path):
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
+    live = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
+    live.parent.mkdir(parents=True)
+    live.write_text('{"outcome_id":"legacy-outcome","outcome_preview":"PRIVATE"}\n', encoding="utf-8")
+    retire_legacy_right_brain(tmp_path, apply=True)
+    retirement = load_retirement_manifest(tmp_path)
+    archived = tmp_path / retirement["archive_relative_path"] / live.relative_to(tmp_path)
+
+    resolved = owner_actions_module.right_brain_expression_outcomes_path(roots)
+
+    assert archived.is_file()
+    assert resolved == live
+    assert not resolved.exists()
+
+
+def test_retired_right_brain_blocks_speak_permission_ticket_and_delivery(tmp_path):
+    store = _store(tmp_path)
+    retire_legacy_right_brain(tmp_path, apply=True)
+
+    with pytest.raises(RuntimeError, match="speak permission is retired"):
+        owner_actions_module._append_speak_ticket(
+            store,
+            {"target_id": "legacy-would-send", "owner_action_id": "oa_legacy", "boundary": {}},
+        )
+
+    assert owner_actions_module.read_speak_permission_tickets(store.roots) == []
+    assert not (tmp_path / "memory-os" / "system" / "speak_permission_tickets.jsonl").exists()
+
+
+def test_retired_right_brain_blocks_expression_policy_write(tmp_path):
+    store = _store(tmp_path)
+    retire_legacy_right_brain(tmp_path, apply=True)
+
+    with pytest.raises(RuntimeError, match="retired"):
+        owner_actions_module._write_right_brain_expression_policy(
+            store,
+            proposal={"candidate_id": "legacy-proposal"},
+            policy={"created_at": "2026-07-14T00:00:00Z"},
+        )
+
+    assert not (tmp_path / "system-modules" / "right_brain_expression_adapter").exists()
 
 
 def test_rendered_digest_records_audit_when_edge_error_record_write_fails(tmp_path, monkeypatch):

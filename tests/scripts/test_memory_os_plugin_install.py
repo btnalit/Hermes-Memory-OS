@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from scripts.install_memory_os_plugin import (
@@ -35,11 +36,15 @@ def test_installer_copies_memory_provider_shape_without_cache_files(tmp_path):
 
 def test_installer_copies_monitor_dashboard_snapshot_operational_helper(tmp_path):
     target_home = tmp_path / "home"
-    source = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
+    scripts_root = Path(__file__).resolve().parents[2] / "scripts"
+    source = scripts_root / "memory_os_monitor_dashboard_snapshot.py"
+    retirement_source = scripts_root / "memory_os_retire_legacy_right_brain.py"
     _write_operational_helper_scripts(target_home, dry_run=False)
     installed = target_home / "scripts" / source.name
+    retirement_installed = target_home / "scripts" / retirement_source.name
 
     assert installed.read_bytes() == source.read_bytes()
+    assert retirement_installed.read_bytes() == retirement_source.read_bytes()
 
 
 def test_installer_copies_agent_os_shell_by_default_without_cache_files(tmp_path):
@@ -154,6 +159,7 @@ def test_installer_cli_hindsight_config_imports_when_run_by_absolute_path(tmp_pa
     assert exclusions["policy"] == "exclude_or_apply_same_ttl"
     assert "system/wandering_journal.jsonl" in exclusions["relative_paths"]
     assert "system/v3_body_packet_manifests.jsonl" in exclusions["relative_paths"]
+    assert "legacy-archive/right-brain" in exclusions["relative_paths"]
 
 
 def test_installer_hindsight_auto_adopts_existing_legacy_config_without_printing_secret(tmp_path):
@@ -380,23 +386,15 @@ def test_installer_can_copy_owner_review_cron_helper_without_enabling_cron(tmp_p
     assert "Explicit opt-in gate" in gate.read_text(encoding="utf-8")
 
 
-def test_installer_can_copy_right_brain_expression_cron_helper_without_enabling_cron(tmp_path):
-    report = install_plugin(hermes_home=tmp_path / "home", install_right_brain_expression_cron_helper=True)
+def test_installer_rejects_retired_right_brain_expression_cron_helper_install(tmp_path):
+    home = tmp_path / "home"
 
-    helper = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression.py"
-    gate = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_cron_gate.py"
-    outcome = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_outcome.py"
-    assert report["right_brain_expression_cron_helper_install_requested"] is True
-    assert report["right_brain_expression_cron_helper_installed"] is True
-    assert report["right_brain_expression_cron_helper_path"] == str(helper)
-    assert report["right_brain_expression_cron_gate_path"] == str(gate)
-    assert report["right_brain_expression_outcome_path"] == str(outcome)
-    assert helper.is_file()
-    assert gate.is_file()
-    assert outcome.is_file()
-    assert "Hermes agent owns the final expression" in helper.read_text(encoding="utf-8")
-    assert "Right-brain expression Hermes cron" in gate.read_text(encoding="utf-8")
-    assert "Hermes owns the agent turn" in outcome.read_text(encoding="utf-8")
+    with pytest.raises(RuntimeError, match="legacy right-brain expression cron installation is retired"):
+        install_plugin(hermes_home=home, install_right_brain_expression_cron_helper=True)
+
+    assert not (home / "scripts" / "memory_os_right_brain_expression.py").exists()
+    assert not (home / "scripts" / "memory_os_right_brain_expression_cron_gate.py").exists()
+    assert not (home / "scripts" / "memory_os_right_brain_expression_outcome.py").exists()
 
 
 def test_installer_can_copy_owner_cron_onboarding_without_enabling_cron(tmp_path):
@@ -514,14 +512,12 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 22
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 20
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert {job["name"] for job in jobs} == {
         "memory-os-owner-review-digest",
-        "memory-os-right-brain-expression",
         "memory-os-module-cadence-report",
-        "memory-os-right-brain-expression-outcome",
         "memory-os-proposal-followups-opsgate",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
@@ -599,7 +595,6 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     runtime_root = runtime_python / "plugins"
     cadence_report = tmp_path / "home" / "scripts" / "memory_os_module_cadence_report.py"
     cadence_report_cron = tmp_path / "home" / "scripts" / "memory_os_module_cadence_report_cron.py"
-    right_brain_outcome_cron = tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_outcome_cron.py"
     expression_feedback_prompt = tmp_path / "home" / "scripts" / "memory_os_expression_feedback_prompt.py"
     memory_sources_feedback_prompt = tmp_path / "home" / "scripts" / "memory_os_memory_sources_feedback_prompt.py"
     proposal_followups_ops_gate = tmp_path / "home" / "scripts" / "memory_os_proposal_followups_ops_gate.py"
@@ -610,20 +605,19 @@ def test_installer_can_install_system_module_runtime_package(tmp_path):
     assert report["eval_runtime_file_count"] > 0
     assert report["module_cadence_report_path"] == str(cadence_report)
     assert report["module_cadence_report_cron_path"] == str(cadence_report_cron)
-    assert report["right_brain_expression_outcome_cron_path"] == str(right_brain_outcome_cron)
+    assert report["right_brain_expression_outcome_cron_path"] == ""
     assert report["expression_feedback_prompt_path"] == str(expression_feedback_prompt)
     assert report["memory_sources_feedback_prompt_path"] == str(memory_sources_feedback_prompt)
     assert report["proposal_followups_ops_gate_path"] == str(proposal_followups_ops_gate)
     assert cadence_report.is_file()
     assert cadence_report_cron.is_file()
-    assert right_brain_outcome_cron.is_file()
+    assert not (tmp_path / "home" / "scripts" / "memory_os_right_brain_expression_outcome_cron.py").exists()
     assert expression_feedback_prompt.is_file()
     assert memory_sources_feedback_prompt.is_file()
     assert proposal_followups_ops_gate.is_file()
     assert index_sync_gate.is_file()
     assert "Hermes owns cron" in cadence_report.read_text(encoding="utf-8")
     assert "--apply" in cadence_report_cron.read_text(encoding="utf-8")
-    assert "--apply" in right_brain_outcome_cron.read_text(encoding="utf-8")
     assert "Hermes agent owns the owner interaction" in expression_feedback_prompt.read_text(encoding="utf-8")
     assert "Hermes agent owns the owner interaction" in memory_sources_feedback_prompt.read_text(encoding="utf-8")
     assert "OpsGate report-only" in proposal_followups_ops_gate.read_text(encoding="utf-8")

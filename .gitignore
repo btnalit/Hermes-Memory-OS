@@ -12,6 +12,7 @@ build/
 /memory-os/
 docs/*.md
 !docs/README.md
+!docs/LEGACY_RIGHT_BRAIN_RETIREMENT.md
 !docs/configuration.md
 !docs/quickstart.md
 docs/memory-os/

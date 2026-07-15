@@ -181,7 +181,9 @@ def test_cron_adapter_probe_classifies_known_optional_jobs_outside_active_snapsh
     assert result.returncode == 0
     assert report["classification"]["memory_os_owned_expected_count"] == 1
     assert report["classification"]["memory_os_owned_wrapped_count"] == 1
-    assert report["classification"]["memory_os_known_optional_count"] == 2
+    assert report["classification"]["memory_os_known_optional_count"] == 1
+    assert report["classification"]["memory_os_retired_legacy_count"] == 1
+    assert report["classification"]["enabled_retired_legacy_count"] == 0
     assert report["classification"]["enabled_known_optional_outside_active_registry_count"] == 1
     assert report["classification"]["enabled_memory_os_job_count"] == 2
     assert report["classification"]["memory_os_like_unregistered_count"] == 0

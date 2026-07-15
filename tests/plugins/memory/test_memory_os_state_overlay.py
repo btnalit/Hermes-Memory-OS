@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -231,7 +232,7 @@ class TestBuildStateOverlay:
     def test_build_overlay_with_candidates_populates_open_threads(self, tmp_path):
         """owner_eligible candidates within 7 days appear in open_threads."""
         roots = _make_roots(tmp_path)
-        now_ts = "2026-07-07T10:00:00+00:00"
+        now_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         candidates_path = roots.crystallized_root / "candidates.jsonl"
         candidates_path.write_text(
             json.dumps({
@@ -285,7 +286,7 @@ class TestBuildStateOverlay:
     def test_candidates_non_owner_eligible_filtered_out(self, tmp_path):
         """Only canonical_state=owner_eligible candidates enter open_threads."""
         roots = _make_roots(tmp_path)
-        now_ts = "2026-07-07T10:00:00+00:00"
+        now_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         candidates_path = roots.crystallized_root / "candidates.jsonl"
         candidates_path.write_text(
             json.dumps({
@@ -327,7 +328,7 @@ class TestBuildStateOverlay:
                                    foreground="Fixed anchor pollution bug",
                                    ended_at="2026-07-06T10:00:00+00:00")
         # Write candidate
-        now_ts = "2026-07-07T10:00:00+00:00"
+        now_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         candidates_path = roots.crystallized_root / "candidates.jsonl"
         candidates_path.write_text(
             json.dumps({

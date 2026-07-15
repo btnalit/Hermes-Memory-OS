@@ -50,6 +50,7 @@ SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refresh.py"
 SOURCE_EXPOSURE_ROLLUP = REPO_ROOT / "scripts" / "memory_os_exposure_rollup.py"
 SOURCE_MONITOR_DASHBOARD_SNAPSHOT = REPO_ROOT / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
+SOURCE_LEGACY_RIGHT_BRAIN_RETIREMENT = REPO_ROOT / "scripts" / "memory_os_retire_legacy_right_brain.py"
 SOURCE_V3_SEED_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_v3_seed_evidence.py"
 SOURCE_V3_SEED_EVIDENCE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_seed_evidence_gate.py"
 SOURCE_V3_WANDERING = REPO_ROOT / "scripts" / "memory_os_v3_wandering.py"
@@ -432,10 +433,7 @@ def install_plugin(
         owner_review_cron_helper = _write_owner_review_cron_helper(hermes_home, dry_run=dry_run)
     right_brain_expression_cron_helper: dict[str, Path] = {}
     if install_right_brain_expression_cron_helper:
-        right_brain_expression_cron_helper = _write_right_brain_expression_cron_helper(
-            hermes_home,
-            dry_run=dry_run,
-        )
+        raise RuntimeError("legacy right-brain expression cron installation is retired")
     owner_cron_onboarding_path: Path | None = None
     if install_owner_cron_onboarding or run_owner_cron_onboarding:
         owner_cron_onboarding_path = _write_owner_cron_onboarding_script(hermes_home, dry_run=dry_run)
@@ -469,11 +467,6 @@ def install_plugin(
     if run_owner_cron_onboarding:
         if not owner_review_cron_helper:
             owner_review_cron_helper = _write_owner_review_cron_helper(hermes_home, dry_run=dry_run)
-        if not right_brain_expression_cron_helper:
-            right_brain_expression_cron_helper = _write_right_brain_expression_cron_helper(
-                hermes_home,
-                dry_run=dry_run,
-            )
         if module_cadence_report is None:
             module_cadence_report = _write_module_cadence_report_script(hermes_home, dry_run=dry_run)
         if not operational_helper_paths:
@@ -1141,7 +1134,6 @@ def _write_module_cadence_report_script(hermes_home: Path, *, dry_run: bool) -> 
 def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
     sources = {
         "module_cadence_report_cron": SOURCE_MODULE_CADENCE_REPORT_CRON,
-        "right_brain_expression_outcome_cron": SOURCE_RIGHT_BRAIN_EXPRESSION_OUTCOME_CRON,
         "expression_feedback_prompt": SOURCE_EXPRESSION_FEEDBACK_PROMPT,
         "memory_sources_feedback_prompt": SOURCE_MEMORY_SOURCES_FEEDBACK_PROMPT,
         "proposal_followups_ops_gate": SOURCE_PROPOSAL_FOLLOWUPS_OPS_GATE,
@@ -1157,6 +1149,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "event_stats_refresh": SOURCE_EVENT_STATS_REFRESH,
         "exposure_rollup": SOURCE_EXPOSURE_ROLLUP,
         "monitor_dashboard_snapshot": SOURCE_MONITOR_DASHBOARD_SNAPSHOT,
+        "legacy_right_brain_retirement": SOURCE_LEGACY_RIGHT_BRAIN_RETIREMENT,
         "v3_seed_evidence": SOURCE_V3_SEED_EVIDENCE,
         "v3_seed_evidence_gate": SOURCE_V3_SEED_EVIDENCE_GATE,
         "v3_wandering": SOURCE_V3_WANDERING,
@@ -1842,6 +1835,7 @@ def _write_v3_backup_exclusions(hermes_home: Path, *, dry_run: bool) -> Path:
         "relative_paths": [
             "system/wandering_journal.jsonl",
             "system/v3_body_packet_manifests.jsonl",
+            "legacy-archive/right-brain",
         ],
     }
     if not dry_run:

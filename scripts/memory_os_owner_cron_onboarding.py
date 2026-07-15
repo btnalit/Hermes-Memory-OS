@@ -19,7 +19,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, write_cron_registry_snapshot
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+IMPORT_ROOT = (
+    REPO_ROOT
+    if (REPO_ROOT / "plugins" / "memory" / "memory_os").is_dir()
+    else REPO_ROOT / "memory-os" / "runtime" / "python"
+)
+if str(IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(IMPORT_ROOT))
+
+from plugins.memory.memory_os.cron_registry import (
+    RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
+    memory_os_cron_specs,
+    write_cron_registry_snapshot,
+)
 from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 
 
@@ -464,23 +478,32 @@ def _pause_known_optional_cron_jobs(
     active_specs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     active_names = {str(spec.get("name") or "") for spec in active_specs}
-    known_specs_by_name = {spec.name: spec for spec in memory_os_cron_specs()}
+    known_keys_by_name = {spec.name: spec.key for spec in memory_os_cron_specs()}
+    known_keys_by_name.update(
+        {
+            "memory-os-right-brain-expression": "right_brain_expression",
+            "memory-os-right-brain-expression-outcome": "right_brain_expression_outcome",
+        }
+    )
     adapter = HermesCronAdapter(hermes_home=hermes_home, hermes_bin=hermes_bin)
     results: list[dict[str, Any]] = []
     env = dict(os.environ)
     env["HERMES_HOME"] = str(hermes_home)
     for job in adapter.read_jobs():
         name = str(job.get("name") or "")
-        spec = known_specs_by_name.get(name)
-        if not spec or name in active_names:
+        script = str(job.get("script") or "")
+        registry_key = known_keys_by_name.get(name)
+        if registry_key is None and script in RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES:
+            registry_key = "legacy_right_brain_retired"
+        if not registry_key or name in active_names:
             continue
         job_id = str(job.get("id") or job.get("job_id") or "")
         enabled = job.get("enabled") is not False
         base = {
             "name": name,
             "job_id": job_id,
-            "registry_key": spec.key,
-            "script": str(job.get("script") or ""),
+            "registry_key": registry_key,
+            "script": script,
             "was_enabled": enabled,
         }
         if not enabled:

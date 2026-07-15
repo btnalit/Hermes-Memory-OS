@@ -4456,6 +4456,7 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "shell_alias_no_env" in rendered
     assert "MemorySources" in rendered
     assert "ModuleArtifacts" in rendered
+    assert "LegacyRightBrainArchive" in rendered
     assert "feedback_ratings" in rendered
     assert "audit_actions" in rendered
     assert "heartbeat_state" in rendered
@@ -4469,6 +4470,83 @@ def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     assert "raw event" not in rendered.lower()
     assert "User:" not in rendered
     assert json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_remote_module_artifact_summary_guards_retired_legacy_reads():
+    script = monitor._remote_probe_script()
+
+    assert "def module_artifact_summary(*, include_retired_legacy=None):" in script
+    assert "if include_retired_legacy" in script
+    assert 'else []' in script
+    for path in (
+        "memory-os/system/speak_permission_tickets.jsonl",
+        "system-modules/right_brain_expression_adapter/requests.jsonl",
+        "system-modules/right_brain_expression_adapter/policy.json",
+        "system-modules/right_brain_expression_adapter/policy_applies.jsonl",
+        "system-modules/right_brain_expression_adapter/outcomes.jsonl",
+    ):
+        assert path in script
+
+
+def test_classify_snapshot_fails_closed_on_retired_archive_integrity_violation():
+    snapshot = _healthy_snapshot()
+    snapshot["legacy_right_brain_archive"] = {
+        "schema_version": "memory-os.legacy_right_brain_retirement_status.v0",
+        "lifecycle": "retired",
+        "status": "error",
+        "violations": ["legacy_live_root_recreated"],
+        "raw_body_included": False,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "legacy_right_brain_retirement_integrity_failed"
+        for item in classification["fail"]
+    )
+
+
+def test_classify_snapshot_excludes_retired_right_brain_from_active_findings():
+    snapshot = _healthy_snapshot()
+    snapshot["legacy_right_brain_archive"] = {
+        "schema_version": "memory-os.legacy_right_brain_retirement_status.v0",
+        "lifecycle": "retired",
+        "status": "ok",
+        "violations": [],
+        "raw_body_included": False,
+    }
+    snapshot["module_artifacts"] = {
+        "schema_version": "memory-os.module_artifact_summary.v0",
+        "grounded_expression_judge": {"verdict_count": 1, "verdict_distribution": {}},
+        "right_brain_expression_adapter": {"request_count": 1, "outcome_count": 0},
+        "expression_feedback": {"linked_outcome_missing_count": 3, "linked_outcome_count": 0},
+    }
+    snapshot["expression_artifacts"] = {
+        "schema_version": "memory-os.expression_artifact_summary.v0",
+        "latest_expression_draft_missing_count": 0,
+        "latest_speak_gate_missing_evaluation_count": 0,
+        "speak_gate_actual_send": False,
+    }
+    snapshot["v7_governance"] = {
+        "components": _v7_component_records(exclude={"grounded_expression_judge"})
+    }
+
+    classification = classify_snapshot(snapshot)
+    codes = {
+        str(item.get("code") or "")
+        for bucket in ("pass", "warn", "fail")
+        for item in classification[bucket]
+    }
+
+    assert not any(code.startswith("grounded_expression_") for code in codes)
+    assert "right_brain_expression_adapter_visible" not in codes
+    assert "right_brain_expression_outcome_missing" not in codes
+    assert "right_brain_expression_outcome_recorded" not in codes
+    assert "right_brain_expression_feedback_missing_outcome" not in codes
+    assert "right_brain_expression_draft_created" not in codes
+    assert "right_brain_speak_gate_evaluation_complete" not in codes
+    assert "v7_required_components_missing" not in codes
 
 
 def test_classify_snapshot_warns_when_wandering_outputs_skip_speak_gate():

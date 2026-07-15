@@ -516,7 +516,8 @@ class DeepReflectionModule:
                     item["dedupe_key"] = dedupe_key
                     proposal_created_count += 1
                 elif output_kind == "wandering_seed":
-                    self._append_wandering_seed(item)
+                    if self._append_wandering_seed(item) is None:
+                        continue
                     wandering_seed_created_count += 1
                 writable_selected.append(item)
             selected = writable_selected
@@ -986,7 +987,11 @@ class DeepReflectionModule:
                         "source_classes": source_classes,
                     }
                 )
-        if bool(config.get("wandering_seed_enabled", False)):
+        from plugins.memory.memory_os.legacy_right_brain_retirement import legacy_right_brain_is_retired
+
+        if bool(config.get("wandering_seed_enabled", False)) and not legacy_right_brain_is_retired(
+            self.hermes_home
+        ):
             seed = analysis.get("wandering_seed")
             if isinstance(seed, dict):
                 source_refs = _normalize_source_refs(seed.get("source_refs", []), input_snapshot)
@@ -1002,23 +1007,31 @@ class DeepReflectionModule:
                 )
         return candidates
 
-    def _append_wandering_seed(self, item: dict[str, Any]) -> dict[str, Any]:
-        now = datetime.now(timezone.utc)
-        record = {
-            "schema_version": "hermes.deep_reflection.wandering_seed.v0",
-            "seed_id": f"drseed_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
-            "generated_at": now.isoformat(),
-            "profile": self.profile,
-            "source_refs": list(item.get("source_refs", [])),
-            "source_classes": list(item.get("source_classes", [])),
-            "seed_text": str(item.get("seed_text", "")),
-            "delivery_mode": "no-send",
-            "actual_send": False,
-            "actual_execute": False,
-        }
-        _append_jsonl(self.wandering_seeds_path, record)
-        item["seed_id"] = record["seed_id"]
-        return record
+    def _append_wandering_seed(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        from plugins.memory.memory_os.legacy_right_brain_retirement import (
+            legacy_right_brain_is_retired,
+            legacy_right_brain_read_lock,
+        )
+
+        with legacy_right_brain_read_lock(self.hermes_home):
+            if legacy_right_brain_is_retired(self.hermes_home):
+                return None
+            now = datetime.now(timezone.utc)
+            record = {
+                "schema_version": "hermes.deep_reflection.wandering_seed.v0",
+                "seed_id": f"drseed_{now.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:10]}",
+                "generated_at": now.isoformat(),
+                "profile": self.profile,
+                "source_refs": list(item.get("source_refs", [])),
+                "source_classes": list(item.get("source_classes", [])),
+                "seed_text": str(item.get("seed_text", "")),
+                "delivery_mode": "no-send",
+                "actual_send": False,
+                "actual_execute": False,
+            }
+            _append_jsonl(self.wandering_seeds_path, record)
+            item["seed_id"] = record["seed_id"]
+            return record
 
 
 def _deep_reflection_proposal_class(item: dict[str, Any]) -> str:

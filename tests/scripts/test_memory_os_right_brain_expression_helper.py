@@ -56,6 +56,24 @@ def test_right_brain_expression_helper_outputs_agent_prompt_and_records_request(
     assert records[-1]["raw_body_included"] is False
 
 
+def test_right_brain_expression_helper_is_inert_after_retirement_marker(tmp_path, capsys, monkeypatch):
+    module = _load_helper()
+    home = tmp_path / "home"
+    marker = home / "memory-os" / "system" / "legacy_right_brain_retirement.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{not-json\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    old_argv = sys.argv
+    try:
+        sys.argv = ["memory_os_right_brain_expression.py"]
+        assert module.main() == 0
+    finally:
+        sys.argv = old_argv
+
+    assert capsys.readouterr().out == ""
+    assert not (home / "system-modules" / "right_brain_expression_adapter").exists()
+
+
 def test_right_brain_expression_helper_stays_silent_without_context(tmp_path, capsys, monkeypatch):
     module = _load_helper()
     MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path / "home", profile="main")).initialize()

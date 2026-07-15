@@ -6,6 +6,7 @@ import pytest
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
+from plugins.memory.memory_os.legacy_right_brain_retirement import retire_legacy_right_brain
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -30,10 +31,8 @@ def test_cognitive_loop_default_disables_legacy_right_brain_without_writes(tmp_p
 
     steps = {step["step"]: step for step in result["steps"]}
     for step_name in ("wandering_mind", "grounded_expression_judge", "spontaneous_expression"):
-        step = steps[step_name]
-        assert step["status"] == "skipped"
-        assert step["result"]["reason"] == "legacy_right_brain_disabled"
-        assert step["result"]["actual_send"] is False
+        assert step_name not in steps
+        assert step_name in result["disabled_steps"]
 
     assert not (tmp_path / "system-modules" / "wandering_mind" / "outputs.jsonl").exists()
     assert not (tmp_path / "system-modules" / "expression_draft" / "drafts.jsonl").exists()
@@ -55,9 +54,32 @@ def test_cognitive_loop_legacy_gate_requires_literal_json_boolean_true(tmp_path,
     steps = dict(runner._step_functions(max_events=1, apply=False))
 
     for step_name in ("wandering_mind", "grounded_expression_judge", "spontaneous_expression"):
-        result = steps[step_name]({})
-        assert result["status"] == "skipped"
-        assert result["reason"] == "legacy_right_brain_disabled"
+        assert step_name not in steps
+
+
+def test_cognitive_loop_retirement_manifest_overrides_literal_true_compatibility_flag(tmp_path):
+    store = _init_store(tmp_path)
+    config_path = tmp_path / "memory-os" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps({"right_brain_expression": {"legacy_cognitive_loop_enabled": False}}) + "\n",
+        encoding="utf-8",
+    )
+    retire_legacy_right_brain(tmp_path, apply=True)
+    config_path.write_text(
+        json.dumps({"right_brain_expression": {"legacy_cognitive_loop_enabled": True}}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = CognitiveLoopRunner(store).run_once(apply=True, test_host=True)
+    step_names = {step["step"] for step in result["steps"]}
+
+    assert set(result["retired_steps"]) == {
+        "wandering_mind",
+        "grounded_expression_judge",
+        "spontaneous_expression",
+    }
+    assert not step_names.intersection(result["retired_steps"])
 
 
 def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):

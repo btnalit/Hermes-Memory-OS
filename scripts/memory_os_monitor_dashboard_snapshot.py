@@ -43,6 +43,10 @@ for _candidate in reversed(_PATH_CANDIDATES):
 
 from scripts.memory_os_module_cadence_report import build_cadence_report
 from plugins.memory.memory_os.audit import read_audit_records
+from plugins.memory.memory_os.legacy_right_brain_retirement import (
+    LEGACY_CRON_NAMES,
+    retirement_status,
+)
 
 
 SCHEMA_VERSION = "memory-os.monitor_dashboard_snapshot.v0"
@@ -63,9 +67,7 @@ CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-memory-sources-feedback-request",
 })
 OPTIONAL_MEMORY_OS_CRON = frozenset({
-    "memory-os-right-brain-expression",
     "memory-os-module-cadence-report",
-    "memory-os-right-brain-expression-outcome",
     "memory-os-l3-probe-verification",
 })
 # Keep legacy tuple for backward-compatible reference; health now uses the
@@ -128,9 +130,18 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     status_report = _safe_status_report(hermes_home, memory_root, profile)
     cadence_report = build_cadence_report(hermes_home=hermes_home, profile=profile, apply=False)
     cron_jobs = _read_cron_jobs(hermes_home)
+    legacy_right_brain_archive = retirement_status(hermes_home)
+    legacy_right_brain_inactive = legacy_right_brain_archive.get("lifecycle") in {
+        "retirement_pending",
+        "retired",
+    }
     owner = _owner_review_snapshot(memory_root)
     memory = _memory_snapshot(memory_root)
-    expression = _expression_snapshot(hermes_home, memory_root)
+    expression = _expression_snapshot(
+        hermes_home,
+        memory_root,
+        legacy_right_brain_inactive=legacy_right_brain_inactive,
+    )
     proposals = _proposal_snapshot(hermes_home, memory_root)
     hindsight = _hindsight_snapshot(hermes_home, memory_root, status_report)
     feedback = _feedback_snapshot(memory_root)
@@ -164,7 +175,14 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "meta": _meta_snapshot(now, hermes_home, profile, status_report, cron_jobs, hindsight),
         "monitor": monitor,
         "kpis": _kpis_snapshot(memory, owner, cron_jobs, cadence_report, hindsight),
-        "cron": _cron_snapshot(cron_jobs),
+        "cron": _cron_snapshot(
+            cron_jobs,
+            retired_names=(
+                set(LEGACY_CRON_NAMES)
+                if legacy_right_brain_archive.get("lifecycle") in {"retirement_pending", "retired"}
+                else set()
+            ),
+        ),
         "ownerReview": owner,
         "memory": memory,
         "modules": _modules_snapshot(cadence_report),
@@ -182,6 +200,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "v3SeedEvidence": v3_seed_evidence,
         "v3PrivateJournal": v3_private_journal,
         "v3InnerLife": v3_inner_life,
+        "legacyRightBrainArchive": legacy_right_brain_archive,
     }
     _fill_audit_from_monitor_if_empty(snapshot)
     return snapshot
@@ -367,14 +386,19 @@ def _kpi(
     return item
 
 
-def _cron_snapshot(cron_jobs: list[dict[str, Any]]) -> dict[str, Any]:
-    jobs = [_cron_job_snapshot(job) for job in cron_jobs]
+def _cron_snapshot(
+    cron_jobs: list[dict[str, Any]],
+    *,
+    retired_names: set[str] | None = None,
+) -> dict[str, Any]:
+    retired = retired_names or set()
+    jobs = [_cron_job_snapshot(job) for job in cron_jobs if str(job.get("name") or job.get("id") or "") not in retired]
     core_jobs = [j for j in jobs if j["name"] in CORE_MEMORY_OS_CRON]
     optional_jobs = [j for j in jobs if j["name"] in OPTIONAL_MEMORY_OS_CRON]
     other_jobs = [j for j in jobs if j["name"] not in CORE_MEMORY_OS_CRON | OPTIONAL_MEMORY_OS_CRON]
     return {
         "enabled": sum(1 for j in core_jobs if j["status"] == "ok"),
-        "total": len(cron_jobs),
+        "total": len(jobs),
         "core_total": len(core_jobs),
         "optional_total": len(optional_jobs),
         "other_total": len(other_jobs),
@@ -635,12 +659,25 @@ def _modules_snapshot(cadence_report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _expression_snapshot(hermes_home: Path, memory_root: Path) -> dict[str, Any]:
+def _expression_snapshot(
+    hermes_home: Path,
+    memory_root: Path,
+    *,
+    legacy_right_brain_inactive: bool = False,
+) -> dict[str, Any]:
     modules = hermes_home / "system-modules"
-    drafts = _read_jsonl(modules / "expression_draft" / "drafts.jsonl")
-    would_send = _read_jsonl(modules / "speak_gate" / "would_send.jsonl")
-    requests = _read_jsonl(modules / "right_brain_expression_adapter" / "requests.jsonl")
-    outcomes = _read_jsonl(modules / "right_brain_expression_adapter" / "outcomes.jsonl")
+    drafts = [] if legacy_right_brain_inactive else _read_jsonl(modules / "expression_draft" / "drafts.jsonl")
+    would_send = [] if legacy_right_brain_inactive else _read_jsonl(modules / "speak_gate" / "would_send.jsonl")
+    requests = (
+        []
+        if legacy_right_brain_inactive
+        else _read_jsonl(modules / "right_brain_expression_adapter" / "requests.jsonl")
+    )
+    outcomes = (
+        []
+        if legacy_right_brain_inactive
+        else _read_jsonl(modules / "right_brain_expression_adapter" / "outcomes.jsonl")
+    )
     feedback_records = _read_jsonl(memory_root / "system" / "expression_feedback_ledger.jsonl")
     feedback_counts = Counter(str(item.get("rating") or item.get("action_type") or item.get("feedback") or "neutral") for item in feedback_records)
     silent = sum(1 for item in outcomes if "[SILENT]" in str(item.get("outcome_preview") or item.get("preview") or ""))

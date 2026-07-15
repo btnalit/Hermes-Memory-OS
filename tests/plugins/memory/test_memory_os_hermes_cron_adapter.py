@@ -29,26 +29,32 @@ def test_hermes_cron_adapter_classifies_wrapped_naked_and_unregistered_jobs():
     assert summary["enabled_memory_os_job_count"] == 1
 
 
-def test_hermes_cron_adapter_counts_enabled_known_optional_jobs_outside_active_registry():
+def test_hermes_cron_adapter_separates_retired_legacy_from_known_optional_jobs():
     owner_review = memory_os_cron_spec_by_key("owner_review_digest")
     memory_sources = memory_os_cron_spec_by_key("memory_sources_feedback_request")
     right_brain = memory_os_cron_spec_by_key("right_brain_expression")
     assert owner_review is not None
     assert memory_sources is not None
-    assert right_brain is not None
+    assert right_brain is None
 
     summary = classify_hermes_cron_jobs(
         [
             {"name": owner_review.name, "script": owner_review.wrapper_script, "enabled": True},
             {"name": memory_sources.name, "script": memory_sources.wrapper_script, "enabled": True},
-            {"name": right_brain.name, "script": right_brain.wrapper_script, "enabled": False},
+            {
+                "name": "memory-os-right-brain-expression",
+                "script": "memory_os_cron_right_brain_expression_gate.py",
+                "enabled": False,
+            },
         ],
         [owner_review],
     )
 
     assert summary["active_registry_job_count"] == 1
     assert summary["memory_os_owned_wrapped_count"] == 1
-    assert summary["memory_os_known_optional_count"] == 2
+    assert summary["memory_os_known_optional_count"] == 1
+    assert summary["memory_os_retired_legacy_count"] == 1
+    assert summary["enabled_retired_legacy_count"] == 0
     assert summary["enabled_known_optional_outside_active_registry_count"] == 1
     assert summary["enabled_memory_os_job_count"] == 2
     assert summary["enabled_known_optional_outside_active_registry_jobs"] == [
@@ -62,6 +68,27 @@ def test_hermes_cron_adapter_counts_enabled_known_optional_jobs_outside_active_r
             "known_optional_reason": "not_in_active_installed_snapshot",
         }
     ]
+
+
+def test_hermes_cron_adapters_classify_raw_script_aliases_as_enabled_retired_legacy():
+    jobs = [
+        {
+            "name": "renamed-expression-job",
+            "script": "memory_os_right_brain_expression.py",
+            "enabled": True,
+        },
+        {
+            "name": "renamed-outcome-job",
+            "script": "memory_os_right_brain_expression_outcome_cron.py",
+            "enabled": True,
+        },
+    ]
+
+    for classifier in (classify_hermes_cron_jobs, legacy_cron_adapter.classify_hermes_cron_jobs):
+        summary = classifier(jobs, ())
+        assert summary["memory_os_retired_legacy_count"] == 2
+        assert summary["enabled_retired_legacy_count"] == 2
+        assert summary["memory_os_like_unregistered_count"] == 0
 
 
 def test_hermes_cron_adapter_classifies_renamed_ragflow_probe_as_external_seam_job():

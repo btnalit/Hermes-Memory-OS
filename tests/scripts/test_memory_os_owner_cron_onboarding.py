@@ -368,14 +368,12 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 22
+    assert len(report["operational_cron_jobs"]) == 20
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
         "memory-os-owner-review-digest",
-        "memory-os-right-brain-expression",
         "memory-os-module-cadence-report",
-        "memory-os-right-brain-expression-outcome",
         "memory-os-proposal-followups-opsgate",
         "memory-os-expression-feedback-request",
         "memory-os-memory-sources-feedback-request",
@@ -398,9 +396,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "telegram"
     assert by_name["memory-os-owner-review-digest"]["script"] == "memory_os_cron_owner_review_digest_gate.py"
     assert by_name["memory-os-owner-review-digest"]["no_agent"] is False
-    assert by_name["memory-os-right-brain-expression"]["deliver"] == "origin"
-    assert by_name["memory-os-right-brain-expression"]["script"] == "memory_os_cron_right_brain_expression_gate.py"
-    assert by_name["memory-os-right-brain-expression"]["no_agent"] is False
+
     assert by_name["memory-os-module-cadence-report"]["deliver"] == "local"
     assert by_name["memory-os-module-cadence-report"]["script"] == "memory_os_cron_module_cadence_report_gate.py"
     assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
@@ -413,9 +409,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-hindsight-health-probe"]["no_agent"] is True
     assert by_name["memory-os-hindsight-health-probe"]["schedule_display"] == "33 * * * *"
     assert home.joinpath("scripts", "memory_os_hindsight_health_probe.py").read_text(encoding="utf-8") == "#!/usr/bin/env python3\n"
-    assert by_name["memory-os-right-brain-expression-outcome"]["deliver"] == "local"
-    assert by_name["memory-os-right-brain-expression-outcome"]["script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
-    assert by_name["memory-os-right-brain-expression-outcome"]["no_agent"] is True
+
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
     assert by_name["memory-os-proposal-followups-opsgate"]["script"] == "memory_os_cron_proposal_followups_opsgate_gate.py"
     assert by_name["memory-os-proposal-followups-opsgate"]["no_agent"] is True
@@ -432,7 +426,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert "只输出 OWNER_MESSAGE_BEGIN 和 OWNER_MESSAGE_END 之间的内容" in memory_sources_prompt
     config = json.loads(home.joinpath("memory-os", "config.json").read_text(encoding="utf-8"))
     assert config["owner_review"]["recurring_delivery_enabled"] is True
-    assert config["right_brain_expression"]["recurring_delivery_enabled"] is True
+    assert config.get("right_brain_expression", {}).get("recurring_delivery_enabled", False) is False
 
 
 def test_onboarding_migrates_existing_memory_os_raw_helper_to_gate_wrapper(tmp_path):
@@ -511,6 +505,15 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
                         "no_agent": False,
                         "prompt": "",
                     },
+                    {
+                        "id": "job_right_brain_alias",
+                        "name": "renamed-right-brain-outcome",
+                        "enabled": True,
+                        "deliver": "local",
+                        "script": "memory_os_right_brain_expression_outcome_cron.py",
+                        "no_agent": True,
+                        "prompt": "",
+                    },
                 ]
             }
         ),
@@ -543,7 +546,15 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
             "script": "memory_os_cron_right_brain_expression_gate.py",
             "was_enabled": True,
             "status": "paused",
-        }
+        },
+        {
+            "name": "renamed-right-brain-outcome",
+            "job_id": "job_right_brain_alias",
+            "registry_key": "legacy_right_brain_retired",
+            "script": "memory_os_right_brain_expression_outcome_cron.py",
+            "was_enabled": True,
+            "status": "paused",
+        },
     ]
     jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
@@ -554,6 +565,7 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
     assert by_name["memory-os-index-sync"]["no_agent"] is True
     # Right-brain expression stays optional (not in active-closure) and gets paused
     assert by_name["memory-os-right-brain-expression"]["enabled"] is False
+    assert by_name["renamed-right-brain-outcome"]["enabled"] is False
 
 
 def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypatch):

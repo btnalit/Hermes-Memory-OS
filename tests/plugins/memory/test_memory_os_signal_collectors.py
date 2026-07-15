@@ -284,8 +284,7 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["hindsight_governance_signals"]["payload"]["raw_body_included"] is False
     assert by_source["mailbox_status"]["payload"]["inbox_count"] == 1
     assert by_source["mailbox_status"]["payload"]["would_send_count"] == 1
-    assert by_source["wandering_mind_state"]["payload"]["output_count"] == 1
-    assert by_source["wandering_mind_state"]["payload"]["would_send_count"] == 1
+    assert "wandering_mind_state" not in by_source
     assert by_source["mcp_server_health"]["payload"]["configured_server_count"] == 1
     assert by_source["mcp_server_health"]["payload"]["failed_server_count"] == 1
     assert by_source["skills_inventory"]["payload"]["skill_directory_count"] == 1
@@ -307,8 +306,7 @@ def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
     assert by_source["hindsight_bank_inventory"]["payload"]["substrate_operation_count"] == 2
     assert by_source["mailbox_delivery_trace"]["payload"]["delivery_record_count"] == 1
     assert by_source["mailbox_delivery_trace"]["payload"]["owner_channel_delivery_count"] == 1
-    assert by_source["wandering_mind_cadence"]["payload"]["generated_count"] == 2
-    assert by_source["wandering_mind_cadence"]["payload"]["would_send_pending_count"] == 1
+    assert "wandering_mind_cadence" not in by_source
     assert by_source["mcp_tool_inventory"]["payload"]["server_name_count"] == 1
     assert by_source["mcp_tool_inventory"]["payload"]["config_file_count"] == 1
     assert by_source["cognitive_loop_status"]["payload"]["step_count"] == len(cognitive_steps)

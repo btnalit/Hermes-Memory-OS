@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -53,10 +54,75 @@ def main(argv: list[str] | None = None) -> int:
         apply=bool(args.apply),
     )
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if report["status"] in {"ok", "warning"} else 2
+    return 0 if report["status"] in {"ok", "warning", "retired"} else 2
 
 
 def scan_outcomes(
+    *,
+    hermes_home: Path,
+    profile: str,
+    job_name: str,
+    max_preview_chars: int = 360,
+    apply: bool = False,
+) -> dict[str, Any]:
+    hermes_home = Path(hermes_home).expanduser().resolve()
+    _ensure_runtime_path(hermes_home)
+    from plugins.memory.memory_os.legacy_right_brain_retirement import (
+        legacy_right_brain_is_retired,
+        legacy_right_brain_read_lock,
+    )
+
+    if legacy_right_brain_is_retired(hermes_home):
+        return _retired_report(profile=profile, job_name=job_name, apply=apply)
+    with legacy_right_brain_read_lock(hermes_home):
+        if legacy_right_brain_is_retired(hermes_home):
+            return _retired_report(profile=profile, job_name=job_name, apply=apply)
+        return _scan_outcomes_unlocked(
+            hermes_home=hermes_home,
+            profile=profile,
+            job_name=job_name,
+            max_preview_chars=max_preview_chars,
+            apply=apply,
+        )
+
+
+def _ensure_runtime_path(hermes_home: Path) -> None:
+    runtime = hermes_home / "memory-os" / "runtime" / "python"
+    if runtime.exists() and str(runtime) not in sys.path:
+        sys.path.insert(0, str(runtime))
+    repo_root = Path(__file__).resolve().parents[1]
+    if (
+        (repo_root / "plugins" / "memory" / "memory_os").is_dir()
+        and str(repo_root) not in sys.path
+    ):
+        sys.path.insert(0, str(repo_root))
+
+
+def _retired_report(*, profile: str, job_name: str, apply: bool) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "retired",
+        "profile": profile,
+        "job_name": job_name,
+        "job_count": 0,
+        "existing_outcome_count": 0,
+        "new_outcome_count": 0,
+        "written_outcome_count": 0,
+        "apply": apply,
+        "outcomes_path": "",
+        "internal_marker_count": 0,
+        "findings": [{"code": "legacy_right_brain_retired", "severity": "info"}],
+        "boundary": {
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_unapproved_crystallized_approval": False,
+            "raw_body_included": False,
+        },
+    }
+
+
+def _scan_outcomes_unlocked(
     *,
     hermes_home: Path,
     profile: str,

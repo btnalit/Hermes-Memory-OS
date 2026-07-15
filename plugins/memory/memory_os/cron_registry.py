@@ -8,6 +8,19 @@ from pathlib import Path
 from typing import Any
 
 
+RETIRED_MEMORY_OS_CRON_SCRIPTS = {
+    "memory-os-right-brain-expression": "memory_os_cron_right_brain_expression_gate.py",
+    "memory-os-right-brain-expression-outcome": "memory_os_cron_right_brain_expression_outcome_gate.py",
+}
+RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES = frozenset(
+    {
+        *RETIRED_MEMORY_OS_CRON_SCRIPTS.values(),
+        "memory_os_right_brain_expression.py",
+        "memory_os_right_brain_expression_outcome_cron.py",
+    }
+)
+
+
 @dataclass(frozen=True)
 class MemoryOSCronSpec:
     key: str
@@ -51,18 +64,7 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         prompt_ref="owner_review_agent_prompt",
         no_agent=False,
     ),
-    MemoryOSCronSpec(
-        key="right_brain_expression",
-        name="memory-os-right-brain-expression",
-        raw_script="memory_os_right_brain_expression.py",
-        wrapper_script="memory_os_cron_right_brain_expression_gate.py",
-        lane_id="right_brain_expression_render",
-        helper_kind="owner_channel_render",
-        schedule_arg="right_brain_schedule",
-        deliver_role="right_brain",
-        prompt_ref="right_brain_agent_prompt",
-        no_agent=False,
-    ),
+
     MemoryOSCronSpec(
         key="module_cadence_report",
         name="memory-os-module-cadence-report",
@@ -75,18 +77,7 @@ MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
         prompt_ref="empty",
         no_agent=True,
     ),
-    MemoryOSCronSpec(
-        key="right_brain_expression_outcome",
-        name="memory-os-right-brain-expression-outcome",
-        raw_script="memory_os_right_brain_expression_outcome_cron.py",
-        wrapper_script="memory_os_cron_right_brain_expression_outcome_gate.py",
-        lane_id="right_brain_expression_outcome",
-        helper_kind="local_helper",
-        schedule_arg="right_brain_outcome_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-    ),
+
     MemoryOSCronSpec(
         key="proposal_followups_opsgate",
         name="memory-os-proposal-followups-opsgate",

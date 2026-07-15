@@ -2941,6 +2941,10 @@ def read_owner_review_rendered_digest_records(roots: MemoryOSRoots, *, limit: in
 
 
 def read_speak_permission_tickets(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
+    from plugins.memory.memory_os.legacy_right_brain_retirement import legacy_right_brain_is_retired
+
+    if legacy_right_brain_is_retired(roots.hermes_home):
+        return []
     records = _read_jsonl(speak_permission_tickets_path(roots))
     if limit > 0:
         return records[-limit:]
@@ -3798,6 +3802,20 @@ def _append_feedback(store: MemoryOSStore, record: dict[str, Any], *, rating: st
 
 
 def _append_speak_ticket(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
+    from plugins.memory.memory_os.legacy_right_brain_retirement import (
+        legacy_right_brain_is_retired,
+        legacy_right_brain_read_lock,
+    )
+
+    if legacy_right_brain_is_retired(store.roots.hermes_home):
+        raise RuntimeError("legacy right-brain speak permission is retired")
+    with legacy_right_brain_read_lock(store.roots.hermes_home):
+        if legacy_right_brain_is_retired(store.roots.hermes_home):
+            raise RuntimeError("legacy right-brain speak permission is retired")
+        return _append_speak_ticket_unlocked(store, record)
+
+
+def _append_speak_ticket_unlocked(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
     created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(hours=24)
     target_id = str(record["target_id"])
@@ -7722,6 +7740,27 @@ def _expression_policy_tone_guidance(*, title: str, body: str) -> list[str]:
 
 
 def _write_right_brain_expression_policy(
+    store: MemoryOSStore,
+    *,
+    proposal: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    from plugins.memory.memory_os.legacy_right_brain_retirement import (
+        legacy_right_brain_is_retired,
+        legacy_right_brain_read_lock,
+    )
+
+    with legacy_right_brain_read_lock(store.roots.hermes_home):
+        if legacy_right_brain_is_retired(store.roots.hermes_home):
+            raise RuntimeError("legacy right-brain expression policy writes are retired")
+        return _write_right_brain_expression_policy_unlocked(
+            store,
+            proposal=proposal,
+            policy=policy,
+        )
+
+
+def _write_right_brain_expression_policy_unlocked(
     store: MemoryOSStore,
     *,
     proposal: dict[str, Any],

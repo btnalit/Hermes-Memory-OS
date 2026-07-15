@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from plugins.memory.memory_os.legacy_right_brain_retirement import retire_legacy_right_brain
+
 
 def _load_module():
     path = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
@@ -164,7 +166,7 @@ def test_dashboard_snapshot_maps_read_only_evidence_without_writing_reports(tmp_
     assert snapshot["schema_version"] == "memory-os.monitor_dashboard_snapshot.v0"
     assert snapshot["cron"]["enabled"] == 7  # 7 core cron jobs enabled
     assert snapshot["cron"]["core_total"] == 7
-    assert snapshot["cron"]["optional_total"] == 3
+    assert snapshot["cron"]["optional_total"] == 1
     assert {item["key"]: item["unit"] for item in snapshot["kpis"]}["cron_ok"] == "enabled jobs"
     assert snapshot["ownerReview"]["counts"]["action_required_shown"] == 1
     assert snapshot["ownerReview"]["counts"]["action_required"] >= 0  # real backlog
@@ -535,6 +537,41 @@ def test_v3_crons_are_part_of_core_monitor_contract():
         "memory-os-v3-wandering",
         "memory-os-v3-journal-sweep",
     }.issubset(module.CORE_MEMORY_OS_CRON)
+
+
+def test_retired_right_brain_is_removed_from_active_cron_surface(tmp_path):
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    jobs_path = home / "cron" / "jobs.json"
+    jobs = json.loads(jobs_path.read_text(encoding="utf-8"))
+    for job in jobs["jobs"]:
+        if job["name"] in module.LEGACY_CRON_NAMES:
+            job["enabled"] = False
+            job["state"] = "paused"
+    jobs_path.write_text(json.dumps(jobs) + "\n", encoding="utf-8")
+    config_path = home / "memory-os" / "config.json"
+    config_path.write_text(
+        json.dumps({"right_brain_expression": {"legacy_cognitive_loop_enabled": False}}) + "\n",
+        encoding="utf-8",
+    )
+
+    retired = retire_legacy_right_brain(home, apply=True)
+    recreated = home / "system-modules" / "right_brain_expression_adapter"
+    recreated.mkdir(parents=True)
+    (recreated / "requests.jsonl").write_text('{"body":"PRIVATE_RECREATED_BODY"}\n', encoding="utf-8")
+    (recreated / "outcomes.jsonl").write_text('{"actual_send":true}\n', encoding="utf-8")
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+
+    assert retired["retirement"]["status"] == "ok"
+    assert snapshot["legacyRightBrainArchive"]["lifecycle"] == "retired"
+    assert snapshot["legacyRightBrainArchive"]["raw_body_included"] is False
+    active_job_names = {job["name"] for job in snapshot["cron"]["jobs"]}
+    assert active_job_names.isdisjoint(module.LEGACY_CRON_NAMES)
+    assert snapshot["expression"]["sent"] == 0
+    assert snapshot["expression"]["outcomes_recorded"] == 0
 
 
 def test_dashboard_snapshot_script_bootstraps_from_installed_layout(tmp_path):

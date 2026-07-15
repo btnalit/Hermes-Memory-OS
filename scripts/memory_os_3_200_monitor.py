@@ -18,8 +18,13 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+IMPORT_ROOT = (
+    REPO_ROOT
+    if (REPO_ROOT / "plugins" / "modules").is_dir()
+    else REPO_ROOT / "memory-os" / "runtime" / "python"
+)
+if str(IMPORT_ROOT) not in sys.path:
+    sys.path.insert(0, str(IMPORT_ROOT))
 
 from plugins.modules.governance.live_guard import live_guard_registration_report
 from plugins.seam.hermes_memory_os.host_capability_adapter import (
@@ -27,7 +32,10 @@ from plugins.seam.hermes_memory_os.host_capability_adapter import (
     HOST_CAPABILITY_REQUIRED_FIELDS,
     HOST_CAPABILITY_REQUIRED_KEYS,
 )
-from scripts.memory_os_host_profile import resolve_host_runtime_profile
+try:
+    from scripts.memory_os_host_profile import resolve_host_runtime_profile
+except ModuleNotFoundError:
+    from memory_os_host_profile import resolve_host_runtime_profile
 
 
 EXPECTED_RH26_HEADINGS: dict[str, list[str]] = {
@@ -1372,6 +1380,11 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     fail: list[dict[str, Any]] = []
     monitor_profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
     clean_host = monitor_profile == "clean_host"
+    legacy_retired = (
+        isinstance(snapshot.get("legacy_right_brain_archive"), dict)
+        and snapshot["legacy_right_brain_archive"].get("lifecycle")
+        in {"retirement_pending", "retired"}
+    )
     runtime_contract = (
         snapshot.get("full_monitor_runtime_contract")
         if isinstance(snapshot.get("full_monitor_runtime_contract"), dict)
@@ -1725,14 +1738,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 passed.append({"code": "expression_feedback_report_only"})
             linked_missing = int(expression_feedback.get("linked_outcome_missing_count") or 0)
             linked_count = int(expression_feedback.get("linked_outcome_count") or 0)
-            if linked_missing > 0:
+            if not legacy_retired and linked_missing > 0:
                 fail.append(
                     {
                         "code": "right_brain_expression_feedback_missing_outcome",
                         "linked_outcome_missing_count": linked_missing,
                     }
                 )
-            elif linked_count > 0:
+            elif not legacy_retired and linked_count > 0:
                 passed.append(
                     {
                         "code": "right_brain_expression_feedback_linked",
@@ -1821,7 +1834,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             else:
                 warn.append({"code": "left_brain_maturity_scoring_primary_incomplete", "value": evidence})
         grounded_expression = (
-            module_artifacts.get("grounded_expression_judge")
+            {}
+            if legacy_retired
+            else module_artifacts.get("grounded_expression_judge")
             if isinstance(module_artifacts.get("grounded_expression_judge"), dict)
             else {}
         )
@@ -1886,7 +1901,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
         right_brain_adapter = (
-            module_artifacts.get("right_brain_expression_adapter")
+            {}
+            if legacy_retired
+            else module_artifacts.get("right_brain_expression_adapter")
             if isinstance(module_artifacts.get("right_brain_expression_adapter"), dict)
             else {}
         )
@@ -2059,8 +2076,15 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             warn.append({"code": "module_cadence_report_unavailable", "value": module_cadence})
 
+    legacy_archive = snapshot.get("legacy_right_brain_archive", {})
+    if (
+        legacy_archive.get("lifecycle") in {"retirement_pending", "retired"}
+        and legacy_archive.get("status") != "ok"
+    ):
+        fail.append({"code": "legacy_right_brain_retirement_integrity_failed", "value": legacy_archive})
+
     expression_artifacts = snapshot.get("expression_artifacts", {})
-    if expression_artifacts.get("schema_version") == "memory-os.expression_artifact_summary.v0":
+    if not legacy_retired and expression_artifacts.get("schema_version") == "memory-os.expression_artifact_summary.v0":
         if expression_artifacts.get("speak_gate_actual_send") is True:
             fail.append({"code": "expression_artifact_speak_gate_actual_send_true", "value": expression_artifacts})
         else:
@@ -2095,7 +2119,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             passed.append({"code": "right_brain_speak_gate_evaluation_complete"})
-    elif expression_artifacts:
+    elif expression_artifacts and not legacy_retired:
         warn.append({"code": "expression_artifact_summary_unavailable", "value": expression_artifacts})
 
     session_mirror = snapshot.get("session_mirror", {})
@@ -3257,6 +3281,10 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         )
     enforce_expected_components = "v7_governance" in snapshot or bool(snapshot.get("v7_component_policy"))
     missing_required_components = list(v7_governance.get("missing_required_components") or [])
+    if legacy_retired:
+        missing_required_components = [
+            component for component in missing_required_components if component != "grounded_expression_judge"
+        ]
     enabled_optional_missing_components = list(v7_governance.get("enabled_optional_missing_components") or [])
     if enforce_expected_components and clean_host:
         if missing_required_components:
@@ -4209,6 +4237,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- RH-26 probe={_probe_summary(snapshot.get('rh26_apply_probe') or [])}",
         f"- MemorySources={_memory_sources_summary(snapshot.get('memory_sources') or {})}",
         f"- ModuleArtifacts={_module_artifacts_summary(snapshot.get('module_artifacts') or {})}",
+        f"- LegacyRightBrainArchive={snapshot.get('legacy_right_brain_archive')}",
         f"- ErrorObservability={_error_observability_summary(snapshot.get('error_observability') or monitor_error_observability(snapshot))}",
         f"- ModuleCadence={snapshot.get('module_cadence')}",
         f"- ExpressionArtifacts={_expression_artifacts_summary(snapshot.get('expression_artifacts') or {})}",
@@ -4531,7 +4560,6 @@ def _rh31_summary(summary: dict[str, Any]) -> dict[str, Any]:
 def _module_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "digest": summary.get("digest"),
-        "wandering": summary.get("wandering"),
         "evidence": summary.get("evidence"),
         "imagination_loop": summary.get("imagination_loop"),
         "proposal_queue": summary.get("proposal_queue"),
@@ -4588,9 +4616,6 @@ def _full_monitor_runtime_summary(summary: dict[str, Any]) -> dict[str, Any]:
 
 def _expression_artifacts_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {
-        "wandering_output_count": summary.get("wandering_output_count"),
-        "wandering_would_send_count": summary.get("wandering_would_send_count"),
-        "wandering_silent_count": summary.get("wandering_silent_count"),
         "expression_draft_count": summary.get("expression_draft_count"),
         "expression_draft_created_count": summary.get("expression_draft_created_count"),
         "expression_draft_missing_count": summary.get("expression_draft_missing_count"),
@@ -5577,7 +5602,12 @@ def low_clue_recall_probe():
         }
     return report
 
-def module_artifact_summary():
+def module_artifact_summary(*, include_retired_legacy=None):
+    if include_retired_legacy is None:
+        include_retired_legacy = legacy_right_brain_archive_summary().get("lifecycle") not in {
+            "retirement_pending",
+            "retired",
+        }
     report = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
     if not isinstance(report, dict) or report.get("schema_version") != "memory-os.modules_status.v0":
         return {
@@ -5596,7 +5626,7 @@ def module_artifact_summary():
 
     digest = status("digest_consolidation")
     household = status("household_digest")
-    wandering = status("wandering_mind")
+    wandering = status("wandering_mind") if include_retired_legacy else {}
     evidence = status("evidence_scoring")
     imagination_loop = status("imagination_loop")
     confabulation_detector = status("confabulation_detector")
@@ -5617,9 +5647,9 @@ def module_artifact_summary():
     crystallized_revalidator = status("crystallized_revalidator")
     deep_reflection = status("deep_reflection")
     ops_gate = status("ops_gate")
-    speak_gate = status("speak_gate")
-    expression_draft = status("expression_draft")
-    grounded_expression_judge = status("grounded_expression_judge")
+    speak_gate = status("speak_gate") if include_retired_legacy else {}
+    expression_draft = status("expression_draft") if include_retired_legacy else {}
+    grounded_expression_judge = status("grounded_expression_judge") if include_retired_legacy else {}
     mailbox = status("mailbox")
 
     def prefetch_observability_summary():
@@ -5661,15 +5691,25 @@ def module_artifact_summary():
 
     prefetch_observability = prefetch_observability_summary()
     expression_feedback = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/expression_feedback_ledger.jsonl"))
-    speak_permission_tickets = _read_jsonl(os.path.join(_hermes_home, "memory-os/system/speak_permission_tickets.jsonl"))
-    right_brain_expression_requests = _read_jsonl(
-        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/requests.jsonl")
+    speak_permission_tickets = (
+        _read_jsonl(os.path.join(_hermes_home, "memory-os/system/speak_permission_tickets.jsonl"))
+        if include_retired_legacy
+        else []
     )
-    right_brain_expression_policy = _read_json(
-        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/policy.json")
+    right_brain_expression_requests = (
+        _read_jsonl(os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/requests.jsonl"))
+        if include_retired_legacy
+        else []
     )
-    right_brain_expression_policy_applies = _read_jsonl(
-        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/policy_applies.jsonl")
+    right_brain_expression_policy = (
+        _read_json(os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/policy.json"))
+        if include_retired_legacy
+        else {}
+    )
+    right_brain_expression_policy_applies = (
+        _read_jsonl(os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/policy_applies.jsonl"))
+        if include_retired_legacy
+        else []
     )
     repo_roots = (
         os.path.join(_hermes_home, "plugins/memory_os"),
@@ -5691,8 +5731,10 @@ def module_artifact_summary():
     proposal_queue_legacy_template_cleanup_applies = _read_jsonl(
         os.path.join(_hermes_home, "system-modules/proposal_queue/legacy_template_cleanup_applies.jsonl")
     )
-    right_brain_expression_outcomes = _read_jsonl(
-        os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/outcomes.jsonl")
+    right_brain_expression_outcomes = (
+        _read_jsonl(os.path.join(_hermes_home, "system-modules/right_brain_expression_adapter/outcomes.jsonl"))
+        if include_retired_legacy
+        else []
     )
     latest_right_brain_expression_request = (
         right_brain_expression_requests[-1]
@@ -5754,7 +5796,7 @@ def module_artifact_summary():
     duplicate_proposal_followup_extra_count = sum(
         max(count - 1, 0) for count in proposal_followup_action_counts.values()
     )
-    return {
+    summary = {
       "schema_version": "memory-os.module_artifact_summary.v0",
       "status": "ok",
       "module_count": report.get("module_count"),
@@ -6173,10 +6215,61 @@ def module_artifact_summary():
         "raw_body_included": False,
       },
     }
+    if not include_retired_legacy:
+        for key in (
+            "wandering",
+            "grounded_expression_judge",
+            "expression_draft",
+            "speak_gate",
+            "right_brain_expression_adapter",
+            "speak_permission",
+        ):
+            summary.pop(key, None)
+    return summary
+
+def legacy_right_brain_archive_summary():
+    from plugins.memory.memory_os.legacy_right_brain_retirement import retirement_status
+
+    return retirement_status(_hermes_home)
+
+
+def active_module_artifact_summary():
+    summary = module_artifact_summary()
+    if legacy_right_brain_archive_summary().get("lifecycle") not in {"retirement_pending", "retired"}:
+        return summary
+    for key in (
+        "wandering",
+        "grounded_expression_judge",
+        "expression_draft",
+        "speak_gate",
+        "right_brain_expression_adapter",
+        "speak_permission",
+    ):
+        summary.pop(key, None)
+    deep_reflection = summary.get("deep_reflection")
+    if isinstance(deep_reflection, dict):
+        deep_reflection.pop("wandering_seed_count", None)
+    return summary
+
 
 def expression_artifact_summary():
+    legacy_archive = legacy_right_brain_archive_summary()
+    legacy_retired = legacy_archive.get("lifecycle") in {"retirement_pending", "retired"}
+    if legacy_retired:
+        return {
+            "schema_version": "memory-os.expression_artifact_summary.v0",
+            "status": "retired",
+            "active_observation": False,
+            "actual_send": False,
+            "actual_execute": False,
+            "raw_body_included": False,
+        }
     modules = module_artifact_summary()
-    wandering = modules.get("wandering") if isinstance(modules.get("wandering"), dict) else {}
+    wandering = (
+        {}
+        if legacy_retired
+        else modules.get("wandering") if isinstance(modules.get("wandering"), dict) else {}
+    )
     speak_gate = modules.get("speak_gate") if isinstance(modules.get("speak_gate"), dict) else {}
     expression_draft = modules.get("expression_draft") if isinstance(modules.get("expression_draft"), dict) else {}
     right_brain_adapter = (
@@ -6185,7 +6278,11 @@ def expression_artifact_summary():
         else {}
     )
     speak_permission = modules.get("speak_permission") if isinstance(modules.get("speak_permission"), dict) else {}
-    reports = _read_jsonl(os.path.join(_hermes_home, "system-modules/cognitive_loop/reports.jsonl"))
+    reports = (
+        []
+        if legacy_retired
+        else _read_jsonl(os.path.join(_hermes_home, "system-modules/cognitive_loop/reports.jsonl"))
+    )
     wandering_result_count = 0
     wandering_would_send_result_count = 0
     wandering_silent_count = 0
@@ -7795,7 +7892,8 @@ print(json.dumps({
   "owner_review_reply_dry_run": owner_review_reply_dry_run,
   "owner_review_surface": owner_review_surface,
   "owner_review_ingress_guard": owner_review_ingress_guard,
-  "module_artifacts": module_artifact_summary(),
+  "module_artifacts": active_module_artifact_summary(),
+  "legacy_right_brain_archive": legacy_right_brain_archive_summary(),
   "module_cadence": module_cadence_summary(),
   "expression_artifacts": expression_artifact_summary(),
   "session_mirror": session_mirror_summary(),

@@ -21,7 +21,7 @@ def test_signal_source_registry_declares_read_only_sources():
         "hindsight_provider_stats",
         "hindsight_governance_signals",
         "mailbox_status",
-        "wandering_mind_state",
+
         "skills_inventory",
         "mcp_server_health",
         "profile_config",
@@ -31,7 +31,7 @@ def test_signal_source_registry_declares_read_only_sources():
         "hermes_session_index",
         "hindsight_bank_inventory",
         "mailbox_delivery_trace",
-        "wandering_mind_cadence",
+
         "mcp_tool_inventory",
         "cognitive_loop_status",
         "gateway_runtime_status",
@@ -44,6 +44,8 @@ def test_signal_source_registry_declares_read_only_sources():
     assert all(spec.allowed_payload_fields for spec in specs)
     assert all(spec.retention_class for spec in specs)
     by_source = {spec.source_key: spec for spec in specs}
+    assert "wandering_mind_state" not in by_source
+    assert "wandering_mind_cadence" not in by_source
     assert by_source["session_mirror_apply"].source_path_candidates == (
         "memory-os/system/session_mirror_applies.jsonl",
     )
@@ -53,7 +55,7 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "curation_decision_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
     assert "authoritative_claim_count" in by_source["hindsight_governance_signals"].allowed_payload_fields
     assert "would_send_count" in by_source["mailbox_status"].allowed_payload_fields
-    assert "latest_output_at" in by_source["wandering_mind_state"].allowed_payload_fields
+
     assert "configured_server_count" in by_source["mcp_server_health"].allowed_payload_fields
     assert "error_log_exists" in by_source["runtime_logs"].allowed_payload_fields
     assert "skill_manifest_count" in by_source["skills_inventory"].allowed_payload_fields
@@ -63,7 +65,7 @@ def test_signal_source_registry_declares_read_only_sources():
     assert "session_event_count" in by_source["hermes_session_index"].allowed_payload_fields
     assert "bank_file_count" in by_source["hindsight_bank_inventory"].allowed_payload_fields
     assert "failed_delivery_count" in by_source["mailbox_delivery_trace"].allowed_payload_fields
-    assert "would_send_pending_count" in by_source["wandering_mind_cadence"].allowed_payload_fields
+
     assert "stdio_server_count" in by_source["mcp_tool_inventory"].allowed_payload_fields
     assert "step_count" in by_source["cognitive_loop_status"].allowed_payload_fields
     assert "heartbeat_state_exists" in by_source["gateway_runtime_status"].allowed_payload_fields

@@ -610,6 +610,38 @@ def test_deep_reflection_apply_skips_same_day_unchanged_input(tmp_path):
     assert [report["status"] for report in reports] == ["ok", "skipped"]
 
 
+def test_deep_reflection_retirement_manifest_blocks_legacy_wandering_seed(tmp_path):
+    store = _store(tmp_path)
+    module = DeepReflectionModule(tmp_path, profile="main")
+    module.config_path.parent.mkdir(parents=True, exist_ok=True)
+    module.config_path.write_text(json.dumps({"wandering_seed_enabled": True}) + "\n", encoding="utf-8")
+    manifest = tmp_path / "memory-os" / "system" / "legacy_right_brain_retirement.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.legacy_right_brain_retirement.v0",
+                "lifecycle": "retired",
+                "active_observation": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    input_snapshot = module.collect_inputs(store=store)
+
+    report = module.emit_optional_outputs(
+        store=store,
+        analysis={"wandering_seed": {"seed_text": "OLD LANE", "source_refs": []}},
+        input_snapshot=input_snapshot,
+        proposal_queue=ProposalQueueModule(tmp_path, profile="main"),
+        apply=True,
+    )
+
+    assert report["wandering_seed_created_count"] == 0
+    assert not module.wandering_seeds_path.exists()
+
+
 def test_deep_reflection_optional_outputs_create_proposal_and_wandering_seed_no_send(tmp_path):
     store = _store(tmp_path)
     event = EventEnvelope.from_dict(

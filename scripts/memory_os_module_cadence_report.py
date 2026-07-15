@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -168,9 +169,38 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if report["status"] in {"ok", "warning"} else 2
 
 
+def _ensure_runtime_path(hermes_home: Path) -> None:
+    runtime = hermes_home / "memory-os" / "runtime" / "python"
+    if runtime.is_dir() and str(runtime) not in sys.path:
+        sys.path.insert(0, str(runtime))
+    repo_root = Path(__file__).resolve().parents[1]
+    if (
+        (repo_root / "plugins" / "memory" / "memory_os").is_dir()
+        and str(repo_root) not in sys.path
+    ):
+        sys.path.insert(0, str(repo_root))
+
+
 def build_cadence_report(*, hermes_home: Path, profile: str = DEFAULT_PROFILE, apply: bool = False) -> dict[str, Any]:
+    _ensure_runtime_path(hermes_home)
+    from plugins.memory.memory_os.legacy_right_brain_retirement import (
+        LEGACY_CRON_NAMES,
+        legacy_right_brain_is_retired,
+    )
+
     created_at = datetime.now(timezone.utc).isoformat()
-    cron_jobs = _read_cron_jobs(hermes_home)
+    legacy_retired = legacy_right_brain_is_retired(hermes_home)
+    retired_modules = {
+        "right_brain_expression_adapter",
+        "wandering_mind",
+        "expression_draft",
+        "speak_gate",
+    }
+    cron_jobs = [
+        job
+        for job in _read_cron_jobs(hermes_home)
+        if not legacy_retired or str(job.get("name") or "") not in LEGACY_CRON_NAMES
+    ]
     cron_by_name: dict[str, list[dict[str, Any]]] = {}
     for job in cron_jobs:
         cron_by_name.setdefault(str(job.get("name") or ""), []).append(job)
@@ -183,6 +213,8 @@ def build_cadence_report(*, hermes_home: Path, profile: str = DEFAULT_PROFILE, a
 
     for target in MODULE_TARGETS:
         module = str(target["module"])
+        if legacy_retired and module in retired_modules:
+            continue
         cron_matches = _matching_jobs(cron_by_name, target.get("cron_names", ()))
         if target.get("current_runner") == "hermes_cron":
             _merge_artifact_counter(
@@ -243,6 +275,7 @@ def build_cadence_report(*, hermes_home: Path, profile: str = DEFAULT_PROFILE, a
         "status": status,
         "apply": apply,
         "module_count": len(modules),
+        "retired_modules": sorted(retired_modules) if legacy_retired else [],
         "cron_job_count": len(cron_jobs),
         "cognitive_loop_report_count": len(cognitive_reports),
         "latest_cognitive_loop_cycle_id": str(latest_cycle.get("cycle_id") or ""),

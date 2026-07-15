@@ -55,7 +55,7 @@ class SignalSourceSpec:
 
 
 def signal_source_specs() -> tuple[SignalSourceSpec, ...]:
-    """Return the single source of truth for 53 signal inputs.
+    """Return the single source of truth for active signal inputs.
 
     The registry intentionally includes broader Hermes surfaces than the first
     collectors use. Requirement evaluation decides which sources are required
@@ -378,31 +378,7 @@ def signal_source_specs() -> tuple[SignalSourceSpec, ...]:
             retention_class="short_lived_status",
             tier=1,
         ),
-        _spec(
-            "wandering_mind_state",
-            "hermes",
-            "wandering_mind",
-            "wandering_mind",
-            "optional_if_present",
-            ("system-modules/wandering_mind",),
-            status_fields
-            + (
-                "state_exists",
-                "output_count",
-                "would_send_count",
-                "generated_count",
-                "skipped_count",
-                "latest_status",
-                "latest_reason",
-                "latest_output_at",
-                "latest_would_send_at",
-                "actual_send_count",
-                "household_digest_exists",
-                "journal_count",
-            ),
-            retention_class="short_lived_status",
-            tier=1,
-        ),
+
         _spec(
             "skills_inventory",
             "hermes",
@@ -561,26 +537,7 @@ def signal_source_specs() -> tuple[SignalSourceSpec, ...]:
             retention_class="short_lived_status",
             tier=2,
         ),
-        _spec(
-            "wandering_mind_cadence",
-            "hermes",
-            "wandering_mind",
-            "wandering_mind_cadence",
-            "optional_if_present",
-            ("system-modules/wandering_mind",),
-            status_fields
-            + (
-                "state_exists",
-                "cadence_config_present",
-                "latest_output_age_seconds",
-                "generated_count",
-                "skipped_count",
-                "would_send_pending_count",
-                "cooldown_active",
-            ),
-            retention_class="short_lived_status",
-            tier=2,
-        ),
+
         _spec(
             "mcp_tool_inventory",
             "hermes",

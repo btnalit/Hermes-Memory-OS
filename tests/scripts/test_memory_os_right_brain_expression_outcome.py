@@ -35,6 +35,25 @@ def _write_job(home: Path, *, job_id: str = "job-rb") -> None:
     )
 
 
+def test_outcome_scanner_is_inert_after_retirement_marker(tmp_path):
+    module = _load_module()
+    home = tmp_path / "home"
+    marker = home / "memory-os" / "system" / "legacy_right_brain_retirement.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{not-json\n", encoding="utf-8")
+
+    report = module.scan_outcomes(
+        hermes_home=home,
+        profile="main",
+        job_name="memory-os-right-brain-expression",
+        apply=True,
+    )
+
+    assert report["status"] == "retired"
+    assert report["written_outcome_count"] == 0
+    assert not (home / "system-modules" / "right_brain_expression_adapter").exists()
+
+
 def test_outcome_scanner_records_bounded_cron_expression_once(tmp_path):
     module = _load_module()
     home = tmp_path / "home"

@@ -166,8 +166,7 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         return _skills_inventory_payload(roots, base)
     if spec.source_key == "mcp_server_health":
         return _mcp_payload(roots, base)
-    if spec.source_key == "wandering_mind_state":
-        return _wandering_mind_payload(roots, base)
+
     if spec.source_key == "hindsight_provider_stats":
         return _hindsight_payload(roots, base, capability)
     if spec.source_key == "hindsight_governance_signals":
@@ -186,8 +185,7 @@ def _collect_payload(roots: MemoryOSRoots, spec: SignalSourceSpec, host_capabili
         return _hindsight_bank_inventory_payload(roots, base)
     if spec.source_key == "mailbox_delivery_trace":
         return _mailbox_delivery_trace_payload(roots, base)
-    if spec.source_key == "wandering_mind_cadence":
-        return _wandering_mind_cadence_payload(roots, base)
+
     if spec.source_key == "mcp_tool_inventory":
         return _mcp_tool_inventory_payload(roots, base)
     return base
@@ -405,32 +403,6 @@ def _mailbox_delivery_trace_payload(roots: MemoryOSRoots, base: dict[str, Any]) 
         "cooldown_marker_count": sum(1 for item in cooldown_markers if item.exists()),
     }
 
-
-def _wandering_mind_cadence_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
-    root = roots.hermes_home / "system-modules" / "wandering_mind"
-    state = _safe_json_dict(root / "state.json")
-    output_records = _read_jsonl(root / "outputs.jsonl")
-    would_send_records = _read_jsonl(root / "would_send.jsonl")
-    config_present = any((root / name).exists() for name in ("config.json", "policy.json", "cadence.json"))
-    cooldown_active = any((root / name).exists() for name in ("cooldown.json", "cooldown.lock", "mute.lock"))
-    latest_output_at = _latest_record_time(output_records)
-    return {
-        **base,
-        "status": "ok" if root.exists() or state or output_records or would_send_records else base["status"],
-        "available": bool(root.exists() or state or output_records or would_send_records) or base["available"],
-        "record_count": len(output_records) + len(would_send_records) + (1 if state else 0),
-        "state_exists": bool(state),
-        "cadence_config_present": config_present,
-        "latest_output_age_seconds": _age_seconds_from_iso(latest_output_at),
-        "generated_count": int(state.get("generated_count") or _status_count(output_records, "generated")),
-        "skipped_count": int(state.get("skipped_count") or _status_count(output_records, "skipped")),
-        "would_send_pending_count": sum(
-            1
-            for record in would_send_records
-            if str(record.get("status") or "pending") in {"pending", "would_send", "ready"}
-        ),
-        "cooldown_active": cooldown_active,
-    }
 
 
 def _mcp_tool_inventory_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
@@ -818,34 +790,6 @@ def _mailbox_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, An
         "actual_send_count": _actual_send_count(would_send_records),
     }
 
-
-def _wandering_mind_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
-    root = roots.hermes_home / "system-modules" / "wandering_mind"
-    state = _safe_json_dict(root / "state.json")
-    output_records = _read_jsonl(root / "outputs.jsonl")
-    would_send_records = _read_jsonl(root / "would_send.jsonl")
-    output_count = len(output_records)
-    would_send_count = len(would_send_records)
-    latest_status = str(state.get("latest_status") or _latest_status(output_records) or _latest_status(would_send_records) or "")
-    latest_reason = str(state.get("latest_reason") or _latest_reason(output_records) or _latest_reason(would_send_records) or "")
-    return {
-        **base,
-        "status": "ok" if root.exists() or state or output_records or would_send_records else base["status"],
-        "available": root.exists() or base["available"],
-        "record_count": output_count + would_send_count + (1 if state else 0),
-        "state_exists": bool(state),
-        "output_count": output_count,
-        "would_send_count": would_send_count,
-        "generated_count": int(state.get("generated_count") or _status_count(output_records, "generated")),
-        "skipped_count": int(state.get("skipped_count") or _status_count(output_records, "skipped")),
-        "latest_status": latest_status[:80],
-        "latest_reason": latest_reason[:180],
-        "latest_output_at": _latest_record_time(output_records),
-        "latest_would_send_at": _latest_record_time(would_send_records),
-        "actual_send_count": _actual_send_count(would_send_records),
-        "household_digest_exists": (root / "household_digest.md").exists() or (root / "household_digest.json").exists(),
-        "journal_count": _safe_file_count(root),
-    }
 
 
 def _mcp_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:

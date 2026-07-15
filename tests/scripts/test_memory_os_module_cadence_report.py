@@ -289,6 +289,37 @@ def test_module_cadence_report_treats_disabled_deep_reflection_as_skipped_not_er
     assert report["current_window_error_count"] == 0
 
 
+def test_module_cadence_report_excludes_retired_right_brain_modules_and_cron(tmp_path):
+    module = _load_module()
+    home = tmp_path / "home"
+    _write_jobs(home)
+    manifest = home / "memory-os" / "system" / "legacy_right_brain_retirement.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "memory-os.legacy_right_brain_retirement.v0",
+                "lifecycle": "retired",
+                "active_observation": False,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = module.build_cadence_report(hermes_home=home, profile="main")
+    active_modules = {item["module"] for item in report["modules"]}
+
+    assert report["cron_job_count"] == 1
+    assert set(report["retired_modules"]) == {
+        "right_brain_expression_adapter",
+        "wandering_mind",
+        "expression_draft",
+        "speak_gate",
+    }
+    assert active_modules.isdisjoint(report["retired_modules"])
+
+
 def test_module_cadence_cli_summary_does_not_write_without_apply(tmp_path, capsys, monkeypatch):
     module = _load_module()
     home = tmp_path / "home"

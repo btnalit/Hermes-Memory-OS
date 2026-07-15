@@ -174,6 +174,14 @@ def probe_hermes_cron_adapter(*, hermes_home: Path, hermes_bin: str = "hermes") 
     capabilities = adapter.probe_capabilities()
     findings = list(capabilities.findings)
     status = "ok" if classification.get("status") == "ok" else "warning"
+    if int(classification.get("enabled_retired_legacy_count") or 0) > 0:
+        findings.append(
+            {
+                "code": "retired_legacy_cron_enabled",
+                "count": int(classification.get("enabled_retired_legacy_count") or 0),
+            }
+        )
+        status = "warning"
     if capabilities.status != "ok":
         findings.append({"code": "hermes_cron_capability_probe_not_ok", "status": capabilities.status})
         status = "warning"
