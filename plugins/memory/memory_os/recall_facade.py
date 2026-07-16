@@ -112,11 +112,15 @@ class RetrieverFacade:
                 flattened,
                 mode=self._arbitration_mode,
                 budget_chars=int((scope or {}).get("budget_chars") or 1800),
+                current_query=query,
                 current_task_revision=task_revision,
                 session_ledger=self._session_injection_ledger,
                 freshness_guard_mode=self._freshness_guard_mode,
                 conflict_resolution_mode=self._conflict_resolution_mode,
             )
+            from .recall_policy import append_recall_observation
+
+            append_recall_observation(store.roots, self.last_recall_plan)
             if self._arbitration_mode == "apply_canary":
                 return apply_recall_plan(self.last_recall_plan)
         return results

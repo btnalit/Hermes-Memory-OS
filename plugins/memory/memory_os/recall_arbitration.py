@@ -6,30 +6,21 @@ import re
 from collections import defaultdict
 from typing import Any
 
+from .recall_policy import (
+    AUTHORITY_FRESHNESS_MATRIX,
+    AUTHORITY_FRESHNESS_MATRIX_DIGEST,
+    AUTHORITY_FRESHNESS_MATRIX_VERSION,
+    OBSERVATION_WINDOW_ID,
+)
 from .recall_types import RecallObject, RecallType
 
 SCHEMA_VERSION = "memory-os.recall_plan.v0"
-_AUTHORITY_RANK = {
-    "direct_current_task": 6,
-    "owner_confirmed": 5,
-    "approved_canonical": 5,
-    "session_working": 4,
-    "state_projection": 3,
-    "indexed_derived": 2,
-    "external_unverified": 1,
-    "": 0,
-}
-_DEFAULT_AUTHORITY = {
-    RecallType.STATE_OVERLAY.value: "state_projection",
-    RecallType.CRYSTALLIZED.value: "approved_canonical",
-    RecallType.WORKING.value: "session_working",
-    RecallType.INDEXED_FTS.value: "indexed_derived",
-    RecallType.VECTOR.value: "indexed_derived",
-    RecallType.ENTITY_GRAPH.value: "indexed_derived",
-    RecallType.TEMPORAL.value: "indexed_derived",
-    RecallType.HINDSIGHT.value: "external_unverified",
-    RecallType.EXTERNAL_EVIDENCE.value: "external_unverified",
-}
+_AUTHORITY_RANK = AUTHORITY_FRESHNESS_MATRIX["authority_rank"]
+_DEFAULT_AUTHORITY = AUTHORITY_FRESHNESS_MATRIX["default_authority_by_recall_type"]
+_EXPLICIT_RECALL_PATTERN = re.compile(
+    r"(还记得|記得|记不记得|记得吗|继续上次|繼續上次|do you remember|remember|continue (?:the )?last)",
+    re.I,
+)
 
 
 def build_recall_plan(
@@ -37,6 +28,7 @@ def build_recall_plan(
     *,
     mode: str = "shadow",
     budget_chars: int = 1800,
+    current_query: str = "",
     current_task_revision: str = "",
     session_ledger: dict[str, str] | None = None,
     near_duplicate_threshold: float = 0.88,
@@ -54,6 +46,7 @@ def build_recall_plan(
         authority = obj.authority_class or str(obj.metadata.get("authority_class") or "") or _DEFAULT_AUTHORITY.get(obj.recall_type, "")
         task_revision = obj.task_revision or str(obj.metadata.get("task_revision") or "")
         claim_key = obj.claim_key or str(obj.metadata.get("claim_key") or "")
+        cooldown_escape_reason = _cooldown_escape_reason(obj, current_query=current_query)
         entry = {
             "index": index,
             "object": obj,
@@ -63,6 +56,7 @@ def build_recall_plan(
             "freshness": max(0.0, min(1.0, float(obj.freshness))),
             "task_revision": task_revision,
             "claim_key": claim_key,
+            "cooldown_escape_reason": cooldown_escape_reason,
         }
         if obj.recall_type == RecallType.STATE_OVERLAY.value and current_task_revision and task_revision != current_task_revision:
             finding = _suppression(entry, "stale_task_revision")
@@ -73,7 +67,11 @@ def build_recall_plan(
                 continue
             if freshness_guard_mode == "shadow":
                 shadow_findings.append(finding)
-        if fingerprint in ledger and ledger[fingerprint] == current_task_revision:
+        if (
+            fingerprint in ledger
+            and ledger[fingerprint] == current_task_revision
+            and not cooldown_escape_reason
+        ):
             suppressed.append(_suppression(entry, "session_duplicate"))
             continue
         candidates.append(entry)
@@ -162,6 +160,9 @@ def build_recall_plan(
 
     return {
         "schema_version": SCHEMA_VERSION,
+        "authority_freshness_matrix_version": AUTHORITY_FRESHNESS_MATRIX_VERSION,
+        "authority_freshness_matrix_digest": AUTHORITY_FRESHNESS_MATRIX_DIGEST,
+        "observation_window_id": OBSERVATION_WINDOW_ID,
         "mode": mode if mode in {"off", "shadow", "apply_canary"} else "shadow",
         "freshness_guard_mode": freshness_guard_mode,
         "conflict_resolution_mode": conflict_resolution_mode,
@@ -213,6 +214,131 @@ def content_fingerprint(content: str) -> str:
     return "sha256:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _cooldown_escape_reason(obj: RecallObject, *, current_query: str) -> str:
+    """Return an auditable object-level cooldown escape reason, or empty."""
+
+    query = str(current_query or "").strip()
+    metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+    entity_refs = _object_entity_refs(obj)
+    entity_match = query and any(_query_mentions_entity(query, ref) for ref in entity_refs)
+    if (
+        query
+        and _EXPLICIT_RECALL_PATTERN.search(query)
+        and _query_references_object(
+            query,
+            obj,
+            entity_match=bool(entity_match),
+            has_entity_refs=bool(entity_refs),
+        )
+    ):
+        return "explicit_recall"
+
+    critical_class = str(metadata.get("critical_recall_class") or "").strip().casefold()
+    trusted_task_boundary = (
+        obj.recall_type == RecallType.TEMPORAL.value
+        and obj.authority_class == "direct_current_task"
+        and critical_class == "task_boundary"
+    )
+    trusted_owner_record = (
+        obj.recall_type == RecallType.CRYSTALLIZED.value
+        and obj.authority_class in {"owner_confirmed", "approved_canonical"}
+        and metadata.get("owner_approved_permanent") is True
+    )
+    if trusted_task_boundary:
+        return "task_boundary"
+    if trusted_owner_record and (metadata.get("owner_pinned") is True or critical_class == "owner_pin"):
+        return "owner_pin"
+    if trusted_owner_record and (metadata.get("safety_rule") is True or critical_class == "safety_rule"):
+        return "safety_rule"
+
+    if entity_match:
+        return "current_query_entity"
+    return ""
+
+
+def _object_entity_refs(obj: RecallObject) -> tuple[str, ...]:
+    metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+    values: list[Any] = []
+    for key in ("entity_refs", "entities"):
+        value = metadata.get(key)
+        if isinstance(value, (list, tuple, set)):
+            values.extend(value)
+        elif isinstance(value, str):
+            values.append(value)
+    for key in ("shared_entity", "entity_ref", "entity_text"):
+        value = metadata.get(key)
+        if isinstance(value, str):
+            values.append(value)
+    refs = {
+        " ".join(str(value or "").strip().split())
+        for value in values
+        if len(" ".join(str(value or "").strip().split())) >= 2
+    }
+    return tuple(sorted(refs, key=lambda value: (value.casefold(), value)))
+
+
+def _query_references_object(
+    query: str,
+    obj: RecallObject,
+    *,
+    entity_match: bool,
+    has_entity_refs: bool,
+) -> bool:
+    # Structured entity identity is authoritative and fail-closed: once an
+    # object declares refs, lexical overlap cannot override a ref mismatch.
+    if has_entity_refs:
+        return entity_match
+    if entity_match:
+        return True
+    claim_key = str(obj.claim_key or "").strip()
+    raw_query = _EXPLICIT_RECALL_PATTERN.sub(" ", str(query or ""))
+    cleaned_query = raw_query.casefold()
+    content = f"{str(obj.content or '')} {claim_key}".casefold()
+    stopwords = {
+        "a", "about", "again", "an", "and", "are", "at", "could", "did", "do",
+        "does", "for", "from", "in", "is", "it", "last", "me", "my", "of", "on",
+        "or", "our", "please", "previous", "remember", "that", "the", "this", "to",
+        "us", "was", "we", "were", "what", "when", "where", "with", "would", "you",
+    }
+    query_ascii: set[str] = set()
+    for raw_token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.+#/-]*", raw_query):
+        token = raw_token.casefold()
+        short_upper_identifier = raw_token.isupper() and len(raw_token) <= 3
+        if token not in stopwords or short_upper_identifier:
+            query_ascii.add(token)
+    content_ascii = set(re.findall(r"[a-z0-9][a-z0-9_.+#/-]*", content))
+    ascii_matches = not query_ascii or query_ascii <= content_ascii
+    cjk_query = cleaned_query
+    for filler in ("帮我", "我们", "咱们", "上次", "之前", "以前", "那个", "这个", "一下"):
+        cjk_query = cjk_query.replace(filler, "")
+    cjk_query = re.sub(r"[的了吗呢啊呀么吧]", "", cjk_query)
+    query_cjk = set(_cjk_bigrams(cjk_query))
+    content_cjk = set(_cjk_bigrams(content))
+    cjk_matches = not query_cjk or query_cjk <= content_cjk
+    return bool(query_ascii or query_cjk) and ascii_matches and cjk_matches
+
+
+def _cjk_bigrams(text: str) -> list[str]:
+    bigrams: list[str] = []
+    for run in re.findall(r"[\u3400-\u9fff]+", text):
+        bigrams.extend(run[index:index + 2] for index in range(max(0, len(run) - 1)))
+    return bigrams
+
+
+def _query_mentions_entity(query: str, entity_ref: str) -> bool:
+    normalized_query = " ".join(str(query or "").casefold().split())
+    normalized_ref = " ".join(str(entity_ref or "").casefold().split())
+    if len(normalized_ref) < 2:
+        return False
+    escaped = re.escape(normalized_ref).replace(r"\ ", r"\s+")
+    if re.search(r"[\u3400-\u9fff]", normalized_ref):
+        pattern = rf"(?<![\u3400-\u9fff]){escaped}(?![\u3400-\u9fff])"
+    else:
+        entity_char = r"a-z0-9_.+#/@:-"
+        pattern = rf"(?<![{entity_char}]){escaped}(?![{entity_char}])"
+    return re.search(pattern, normalized_query) is not None
+
+
 def _rank_key(entry: dict[str, Any]) -> tuple[float, float, float, int]:
     return (
         -float(entry["authority_rank"]),
@@ -227,9 +353,11 @@ def _public_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "object": entry["object"].to_dict(),
         "fingerprint": entry["fingerprint"],
         "authority_class": entry["authority_class"],
+        "authority_rank": entry["authority_rank"],
         "freshness": entry["freshness"],
         "task_revision": entry["task_revision"],
         "claim_key": entry["claim_key"],
+        "cooldown_escape_reason": entry.get("cooldown_escape_reason", ""),
     }
 
 

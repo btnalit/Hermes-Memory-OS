@@ -200,6 +200,58 @@ class TestRetrieverFacade:
         assert _find_primary_record_ids(store.roots.crystallized_root, "release boundary") == ["mem-active"]
         assert _read_record_body(store.roots.crystallized_root, "mem-revoked") == ""
 
+    def test_crystallized_retriever_exposes_structured_cooldown_escape_metadata(self, tmp_path):
+        from plugins.memory.memory_os.retrievers.crystallized import CrystallizedRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        (store.roots.crystallized_root / "rules.md").write_text(
+            "---\nid: rule-1\nkind: safety_rule\ncanonical_state: active\napproved_by: owner\n"
+            "owner_pinned: true\nentity_refs: Flask, Memory-OS\n---\nFlask production safety boundary\n",
+            encoding="utf-8",
+        )
+
+        objects = CrystallizedRetriever().retrieve(store, "Flask safety")
+
+        assert len(objects) == 1
+        assert objects[0].metadata["entity_refs"] == ["Flask", "Memory-OS"]
+        assert objects[0].metadata["owner_approved_permanent"] is True
+        assert objects[0].metadata["owner_pinned"] is True
+        assert objects[0].metadata["safety_rule"] is True
+
+    def test_provisional_or_non_owner_record_cannot_claim_owner_pin_or_safety_privilege(self, tmp_path):
+        from plugins.memory.memory_os.retrievers.crystallized import CrystallizedRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        (store.roots.crystallized_root / "provisional.md").write_text(
+            "---\nid: provisional-1\nkind: safety_rule\ncanonical_state: active\n"
+            "approved_by: resolver\nprovisional: true\nowner_pinned: true\n---\nclaimed safety boundary\n",
+            encoding="utf-8",
+        )
+
+        obj = CrystallizedRetriever().retrieve(store, "safety boundary")[0]
+
+        assert obj.authority_class == "session_working"
+        assert obj.metadata["owner_approved_permanent"] is False
+        assert obj.metadata["owner_pinned"] is False
+        assert obj.metadata["safety_rule"] is False
+
+    def test_owner_approval_identity_is_exact_not_prefix_based(self, tmp_path):
+        from plugins.memory.memory_os.retrievers.crystallized import CrystallizedRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        (store.roots.crystallized_root / "spoof.md").write_text(
+            "---\nid: spoof-1\nkind: safety_rule\ncanonical_state: active\n"
+            "approved_by: ownership_attacker\nowner_pinned: true\n---\nspoof safety boundary\n",
+            encoding="utf-8",
+        )
+
+        obj = CrystallizedRetriever().retrieve(store, "spoof safety boundary")[0]
+
+        assert obj.authority_class == "session_working"
+        assert obj.metadata["owner_approved_permanent"] is False
+        assert obj.metadata["owner_pinned"] is False
+        assert obj.metadata["safety_rule"] is False
+
     def test_indexed_fts_retriever_uses_real_index_schema_and_excludes_revoked_records(self, tmp_path):
         from plugins.memory.memory_os.index import MemoryOSIndex
         from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
@@ -404,6 +456,66 @@ class TestRetrieverFacade:
 
         assert second == {}
         assert facade.last_recall_plan["suppressed"][0]["reason"] == "session_duplicate"
+
+    def test_facade_passes_current_query_for_implicit_entity_cooldown_escape(self, tmp_path):
+        store = _make_store(_make_roots(tmp_path))
+        obj = RecallObject(
+            recall_type="crystallized",
+            content="Flask deployment uses a blue-green boundary",
+            source_ref="crystallized:flask",
+            authority_class="approved_canonical",
+            metadata={"entity_refs": ["Flask"]},
+        )
+        facade = RetrieverFacade(arbitration_mode="apply_canary")
+        facade.register(StubRetriever(RecallType.CRYSTALLIZED, [obj]))
+
+        first = facade.retrieve(store, "先看 Flask 部署", scope={"task_revision": "task:r1"})
+        assert facade.format_context(first, budget=300)
+        second = facade.retrieve(store, "继续 Flask 部署下一步", scope={"task_revision": "task:r1"})
+
+        assert second["crystallized"][0].source_ref == "crystallized:flask"
+        assert facade.last_recall_plan["selected"][0]["cooldown_escape_reason"] == "current_query_entity"
+
+    def test_shadow_facade_persists_metadata_only_matrix_bound_observation_and_invalidates_old_window(self, tmp_path):
+        from plugins.memory.memory_os.jsonl_io import append_jsonl_locked, read_jsonl
+        from plugins.memory.memory_os.recall_policy import (
+            OBSERVATION_WINDOW_ID,
+            read_recall_observation_window,
+            recall_observation_path,
+        )
+
+        store = _make_store(_make_roots(tmp_path))
+        path = recall_observation_path(store.roots)
+        append_jsonl_locked(path, {
+            "schema_version": "memory-os.recall_observation.v1",
+            "observation_window_id": "old-version:old-digest",
+            "observed_at": "2026-07-15T00:00:00Z",
+        })
+        facade = RetrieverFacade(arbitration_mode="shadow")
+        facade.register(StubRetriever(RecallType.CRYSTALLIZED, [
+            RecallObject(
+                recall_type="crystallized",
+                content="private body must not enter observation ledger",
+                source_ref="crystallized:private",
+                authority_class="owner_confirmed",
+            ),
+        ]))
+
+        facade.retrieve(store, "private query must not enter observation ledger")
+        status = read_recall_observation_window(store.roots)
+        rows = read_jsonl(path)
+
+        assert status["window_reset_required"] is True
+        assert status["invalidated_observation_count"] == 1
+        assert status["current_observation_count"] == 1
+        assert status["observation_window_id"] == OBSERVATION_WINDOW_ID
+        current = rows[-1]
+        assert current["observation_window_id"] == OBSERVATION_WINDOW_ID
+        assert current["selected_count"] == 1
+        serialized = json.dumps(current, ensure_ascii=False)
+        assert "private query" not in serialized
+        assert "private body" not in serialized
+        assert not ({"query", "content", "object", "selected", "suppressed"} & set(current))
 
     def test_format_context_respects_budget(self, tmp_path):
         roots = _make_roots(tmp_path)
@@ -624,7 +736,9 @@ class TestTemporalRetriever:
             scope={"current_task_anchor": "Implement temporal retriever"},
         )
         assert len(results) >= 1
-        assert any("temporal retriever" in r.content.lower() for r in results)
+        task = next(r for r in results if "temporal retriever" in r.content.lower())
+        assert task.authority_class == "direct_current_task"
+        assert task.metadata["critical_recall_class"] == "task_boundary"
 
     def test_format_context(self, tmp_path):
         from plugins.memory.memory_os.retrievers.temporal import TemporalRetriever

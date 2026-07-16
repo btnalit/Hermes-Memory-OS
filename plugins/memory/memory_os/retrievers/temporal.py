@@ -110,7 +110,12 @@ class TemporalRetriever:
                 content=current_task_anchor[:300],
                 score=0.85,
                 source_ref="temporal:current_task",
-                metadata={"anchor": "current_task", "signals": signals},
+                metadata={
+                    "anchor": "current_task",
+                    "signals": signals,
+                    "critical_recall_class": "task_boundary",
+                },
+                authority_class="direct_current_task",
             ))
 
         # 3) Event stats — recent summaries

@@ -908,10 +908,15 @@ class MemoryOSProvider(MemoryProvider):
         candidate_count = len(read_candidate_queue(self._roots))
         candidate_views = read_effective_candidates(self._store)
         recall_plan = self._recall_facade.last_recall_plan if self._recall_facade is not None else {}
+        from .recall_policy import read_recall_observation_window
+
+        recall_observation_window = read_recall_observation_window(self._roots)
         recall_plan_status = {
             key: recall_plan.get(key)
             for key in (
-                "schema_version", "mode", "current_task_revision", "input_count",
+                "schema_version", "authority_freshness_matrix_version",
+                "authority_freshness_matrix_digest", "observation_window_id",
+                "mode", "current_task_revision", "input_count",
                 "selected_count", "suppressed_count", "exact_duplicate_count",
                 "near_duplicate_count", "conflict_count", "would_change_live_recall",
             )
@@ -947,6 +952,7 @@ class MemoryOSProvider(MemoryProvider):
             ),
             "suppressed_terminal_candidate_count": sum(1 for view in candidate_views if view.terminal),
             "recall_plan": recall_plan_status,
+            "recall_observation_window": recall_observation_window,
             "crystallized_candidates_label": "review candidates only; not approved crystallized memory",
             "crystallized_records": int(index_counts.get("crystallized_records", 0)),
             "crystallized_records_label": "approved crystallized memory records",
