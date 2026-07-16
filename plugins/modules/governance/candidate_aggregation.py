@@ -132,15 +132,28 @@ _CHAT_PATTERNS: frozenset[str] = frozenset({
 _MIN_SUBSTANTIVE_CHARS = 15
 
 
-def provisional_write_postcheck() -> dict[str, Any]:
-    """Truthful receipt for a reversible provisional crystallized write."""
+def crystallized_write_receipt(provisional_write_count: int = 0) -> dict[str, Any]:
+    """Return one truthful vocabulary for every candidate-aggregation report."""
 
+    count = max(0, int(provisional_write_count))
+    wrote_provisional = count > 0
     return {
-        "crystallized_write": "provisional_success",
-        "actual_provisional_crystallized_write": True,
+        "crystallized_write": "provisional_success" if wrote_provisional else "none",
+        "provisional_crystallized_write_count": count,
+        # Compatibility field: true means a crystallized approval/write occurred;
+        # permanence is expressed only by the explicit field below.
+        "actual_crystallized_approval": wrote_provisional,
+        "actual_provisional_crystallized_write": wrote_provisional,
         "actual_permanent_crystallized_approval": False,
+        "actual_unapproved_permanent_crystallized_write": False,
         "actual_unapproved_crystallized_approval": False,
     }
+
+
+def provisional_write_postcheck() -> dict[str, Any]:
+    """Truthful ExecutionGate receipt for one reversible provisional write."""
+
+    return crystallized_write_receipt(1)
 
 
 # Auto-demote candidates that have been rejected N+ times by owner
@@ -190,8 +203,9 @@ def run_candidate_aggregation_lane(
       5. Compact archived candidates.
       6. Return summary.
 
-    Returns a dict with counts for monitor integration.
-    Never crystallizes. All writes are queue-state-only.
+    Returns counts plus a truthful crystallized-write receipt. Resolver-approved
+    paths may write bounded, reversible provisional records; permanent approval
+    remains Owner-only.
     """
     _now = now or datetime.now(timezone.utc)
     candidates = read_candidate_queue(store)
@@ -238,7 +252,7 @@ def run_candidate_aggregation_lane(
     archive = store.roots.memory_os_root / "system" / "candidate_archive.jsonl"
     compact_count = compact_candidate_queue(store, archive_path=archive, retention_days=7)
 
-    return {
+    result = {
         "candidates_read": len(candidates),
         "pending": len(pending),
         "already_triaged": len(already_triaged),
@@ -249,11 +263,13 @@ def run_candidate_aggregation_lane(
         "fleeting_count": fleeting_results["fleeting_count"],
         "compacted_count": compact_count,
         "action": "candidate_aggregation_tick",
-        "actual_crystallized_approval": False,
+        "promotion_result": promote_results,
         "actual_send": False,
         "actual_execute": False,
         "actual_identity_write": False,
     }
+    result.update(crystallized_write_receipt(promote_results["provisional_crystallized_write_count"]))
+    return result
 
 
 def _auto_demote_rejected(
@@ -360,7 +376,8 @@ def _cluster_and_promote(
 ) -> dict[str, Any]:
     """Cluster pending candidates by theme, promote high-signal clusters.
 
-    Heuristics only — never crystallizes. Only promotes to owner_eligible.
+    Heuristics may route resolver-safe candidates into bounded provisional
+    crystallization; all other candidates remain queue-state-only.
     Cluster criteria: shared keyword matches, same kind, shared source_event_ids.
     Skips candidates already written by earlier pipeline stages via processed_ids.
 
@@ -398,6 +415,7 @@ def _cluster_and_promote(
 
     # Promote clusters that meet the threshold
     promoted_count = 0
+    provisional_write_count = 0
     cluster_summaries: list[dict[str, Any]] = []
     for cluster_key, members in clusters.items():
         if len(members) < min_cluster_size:
@@ -558,6 +576,7 @@ def _cluster_and_promote(
                 crystallized_service.write_approved_record(
                     member, decision, file_name="owner_approved.md",
                 )
+                provisional_write_count += 1
                 complete_execution_gate_envelope(
                     store,
                     envelope_id=envelope["execution_gate_envelope_id"],
@@ -727,6 +746,7 @@ def _cluster_and_promote(
                 crystallized_service.write_approved_record(
                     c, decision, file_name="owner_approved.md",
                 )
+                provisional_write_count += 1
                 complete_execution_gate_envelope(
                     store,
                     envelope_id=envelope["execution_gate_envelope_id"],
@@ -762,7 +782,9 @@ def _cluster_and_promote(
     # min_cluster_size=1 — when the cluster gate is lifted entirely, every
     # candidate deserves a resolver verdict path.
     if min_cluster_size != 1:
-        return {"promoted_count": promoted_count, "clusters": cluster_summaries}
+        result = {"promoted_count": promoted_count, "clusters": cluster_summaries}
+        result.update(crystallized_write_receipt(provisional_write_count))
+        return result
     for c in candidates_for_promote:
         if c.candidate_id in processed_ids:
             continue
@@ -866,6 +888,7 @@ def _cluster_and_promote(
                 recurrence=0,
             )
             _crystallized_service2.write_approved_record(c, _decision2, file_name="owner_approved.md")
+            provisional_write_count += 1
             _cege2(
                 store, envelope_id=_envelope2["execution_gate_envelope_id"],
                 lane_id=_RAL2, execution_status="completed",
@@ -883,7 +906,9 @@ def _cluster_and_promote(
         processed_ids.add(c.candidate_id)
         promoted_count += 1
 
-    return {"promoted_count": promoted_count, "clusters": cluster_summaries}
+    result = {"promoted_count": promoted_count, "clusters": cluster_summaries}
+    result.update(crystallized_write_receipt(provisional_write_count))
+    return result
 
 
 # ── Age-out demote ──────────────────────────────────────────────────────

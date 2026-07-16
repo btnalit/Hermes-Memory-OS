@@ -561,18 +561,60 @@ class TestTagFleeting:
 
 
 class TestA1Boundary:
-    """A1: lane never crystallizes, never auto-approves, never writes candidates.jsonl."""
+    """A1: lane reports reversible provisional writes without implying permanence."""
 
-    def test_lane_tick_returns_no_crystallize(self, tmp_path):
-        """run_candidate_aggregation_lane return dict asserts no-crystallize."""
+    def test_lane_tick_without_crystallized_write_reports_none(self, tmp_path):
+        """An empty triage-only tick truthfully reports no crystallized write."""
         from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
 
         store = _store_with_gate(tmp_path)
         result = run_candidate_aggregation_lane(store, execution_gate_envelope_id=_VALID_ENVELOPE_ID)
-        assert result.get("actual_crystallized_approval") is False
+        assert result["crystallized_write"] == "none"
+        assert result["provisional_crystallized_write_count"] == 0
+        assert result["actual_provisional_crystallized_write"] is False
+        assert result["actual_crystallized_approval"] is False
+        assert result["actual_permanent_crystallized_approval"] is False
+        assert result["actual_unapproved_permanent_crystallized_write"] is False
         assert result.get("actual_send") is False
         assert result.get("actual_execute") is False
         assert result.get("actual_identity_write") is False
+
+    def test_lane_nested_result_and_execution_gate_truthfully_report_provisional_write(self, tmp_path):
+        """A resolver write must be admitted by all three report surfaces."""
+        from plugins.memory.memory_os.crystallized import append_candidate_queue
+        from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
+
+        store = _store_with_gate(tmp_path)
+        candidate = _cand("cand-truthful-receipt", body="记住：每次启动必须检查日志")
+        append_candidate_queue(store, candidate)
+
+        result = run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+        nested = result["promotion_result"]
+        expected = {
+            "crystallized_write": "provisional_success",
+            "provisional_crystallized_write_count": 1,
+            "actual_provisional_crystallized_write": True,
+            "actual_crystallized_approval": True,
+            "actual_permanent_crystallized_approval": False,
+            "actual_unapproved_permanent_crystallized_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        }
+        assert {key: result[key] for key in expected} == expected
+        assert {key: nested[key] for key in expected} == expected
+
+        gate_path = store.roots.memory_os_root / "system" / "execution_gate_envelopes.jsonl"
+        envelopes = [json.loads(line) for line in gate_path.read_text().splitlines() if line.strip()]
+        completions = [
+            row for row in envelopes
+            if row.get("stage") == "completion"
+            and row.get("lane_id") == "resolver_auto_approve"
+        ]
+        assert completions
+        postcheck = completions[-1]["postcheck"]
+        assert {key: postcheck[key] for key in expected} == expected
 
     def test_promote_writes_triage_not_crystallized(self, tmp_path):
         """Non-resolver-eligible candidates still write triage not crystallized.

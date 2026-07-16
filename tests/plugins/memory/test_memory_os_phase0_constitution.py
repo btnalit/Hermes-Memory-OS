@@ -84,8 +84,11 @@ def test_provisional_write_postcheck_distinguishes_write_from_permanent_approval
 
     assert report == {
         "crystallized_write": "provisional_success",
+        "provisional_crystallized_write_count": 1,
+        "actual_crystallized_approval": True,
         "actual_provisional_crystallized_write": True,
         "actual_permanent_crystallized_approval": False,
+        "actual_unapproved_permanent_crystallized_write": False,
         "actual_unapproved_crystallized_approval": False,
     }
 
