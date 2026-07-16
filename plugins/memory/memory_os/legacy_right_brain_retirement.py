@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - fcntl is always present on POSIX
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - msvcrt exists only on Windows
+    msvcrt = None  # type: ignore[assignment]
 
 from plugins.memory.memory_os.cron_registry import (
     RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
@@ -73,15 +81,75 @@ def _legacy_right_brain_lock(hermes_home: str | Path, *, exclusive: bool):
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, stat.S_IRUSR | stat.S_IWUSR)
+    locked = False
     try:
-        mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(descriptor, mode)
+        _lock_descriptor(descriptor, exclusive=exclusive)
+        locked = True
         yield
     finally:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if locked:
+                _unlock_descriptor(descriptor)
         finally:
             os.close(descriptor)
+
+
+_WIN32_LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
+
+
+def _win32_lockfileex(descriptor: int, *, exclusive: bool, unlock: bool) -> None:
+    """Windows advisory lock through LockFileEx/UnlockFileEx.
+
+    Semantics mirror POSIX ``fcntl.flock``: shared locks admit concurrent
+    readers, an exclusive lock waits for every current holder, and acquisition
+    blocks (no LOCKFILE_FAIL_IMMEDIATELY).  One byte at offset 0 of the
+    dedicated lock file is locked; only this module locks that file.
+    """
+
+    import ctypes
+
+    if msvcrt is None:  # pragma: no cover - neither fcntl nor msvcrt present
+        raise RuntimeError("no advisory file lock primitive available on this platform")
+
+    class _Overlapped(ctypes.Structure):
+        _fields_ = (
+            ("Internal", ctypes.c_void_p),
+            ("InternalHigh", ctypes.c_void_p),
+            ("Offset", ctypes.c_uint32),
+            ("OffsetHigh", ctypes.c_uint32),
+            ("hEvent", ctypes.c_void_p),
+        )
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = ctypes.c_void_p(msvcrt.get_osfhandle(descriptor))
+    overlapped = _Overlapped()
+    if unlock:
+        ok = kernel32.UnlockFileEx(handle, 0, 1, 0, ctypes.byref(overlapped))
+    else:
+        mode = _WIN32_LOCKFILE_EXCLUSIVE_LOCK if exclusive else 0
+        ok = kernel32.LockFileEx(handle, mode, 0, 1, 0, ctypes.byref(overlapped))
+    if not ok:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _lock_descriptor(descriptor: int, *, exclusive: bool) -> None:
+    """Block until *descriptor* holds a shared (read) or exclusive (write) lock.
+
+    POSIX keeps the pre-existing ``fcntl.flock`` semantics unchanged; Windows
+    falls back to LockFileEx with equivalent shared/exclusive semantics.
+    """
+
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        return
+    _win32_lockfileex(descriptor, exclusive=exclusive, unlock=False)
+
+
+def _unlock_descriptor(descriptor: int) -> None:
+    if fcntl is not None:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return
+    _win32_lockfileex(descriptor, exclusive=False, unlock=True)
 
 
 def retirement_manifest_path(hermes_home: str | Path) -> Path:
@@ -766,7 +834,19 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    """Best-effort directory fsync after an atomic replace.
+
+    POSIX keeps the pre-existing durability semantics: open a directory
+    descriptor and fsync it, propagating fsync errors.  Platforms that cannot
+    open directory descriptors (Windows raises PermissionError from os.open)
+    skip the directory fsync; the file itself is already flushed+fsynced and
+    os.replace stays atomic.
+    """
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except (NotImplementedError, OSError):
+        return
     try:
         os.fsync(descriptor)
     finally:
@@ -774,6 +854,12 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_file(path: Path) -> None:
+    if os.name == "nt":
+        # FlushFileBuffers requires a writable handle, but this durability
+        # fsync targets manifest/archive files that are chmod'ed read-only
+        # first, so a read-only descriptor cannot be fsynced on Windows.
+        # The content was already flush+fsync'ed before os.replace.
+        return
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:

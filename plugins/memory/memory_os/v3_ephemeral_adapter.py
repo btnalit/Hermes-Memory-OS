@@ -7,6 +7,7 @@ hooks, persisted traces, delivery, cron-output, or gateway-capture lifecycle.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,30 @@ def _resolve_actual_route(response_model: str, route_snapshot: dict[str, Any]) -
     return exact[0] if len(exact) == 1 else None
 
 
+def _isolated_worker_env(home: Path, root: Path, host_python: Path) -> dict[str, str]:
+    """Build the scrubbed worker environment (no session/delivery ambient state).
+
+    POSIX keeps the fixed minimal PATH. Windows cannot run a Python whose
+    install directory is off PATH (interpreter DLL resolution) or a process
+    without SystemRoot, so those two are added — both are location facts,
+    not ambient credentials or session state.
+    """
+    env = {
+        "HOME": str(home.parent),
+        "HERMES_HOME": str(home),
+        "PYTHONPATH": str(root),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    if os.name == "nt":
+        interpreter_dir = Path(os.path.realpath(host_python)).parent
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        env["PATH"] = os.pathsep.join(
+            [str(interpreter_dir), str(Path(system_root) / "System32"), system_root]
+        )
+        env["SystemRoot"] = system_root
+    return env
+
+
 def _load_auxiliary_callable(host_agent_root: Path | None, hermes_home: Path | None):
     if host_agent_root is None or hermes_home is None:
         return None
@@ -137,12 +162,7 @@ def _load_auxiliary_callable(host_agent_root: Path | None, hermes_home: Path | N
             text=True,
             capture_output=True,
             cwd=root,
-            env={
-                "HOME": str(home.parent),
-                "HERMES_HOME": str(home),
-                "PYTHONPATH": str(root),
-                "PATH": "/usr/local/bin:/usr/bin:/bin",
-            },
+            env=_isolated_worker_env(home, root, host_python),
             timeout=float(request.get("timeout") or 120.0) + 30.0,
             check=False,
         )

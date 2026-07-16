@@ -121,11 +121,27 @@ def _write_status(path: Path, status: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        _fsync_directory(path.parent)
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory fsync after an atomic replace.
+
+    POSIX keeps the pre-existing durability semantics: open a directory
+    descriptor and fsync it, propagating fsync errors.  Platforms that cannot
+    open directory descriptors (Windows raises PermissionError from os.open)
+    skip the directory fsync; the file itself is already flushed+fsynced and
+    os.replace stays atomic.
+    """
+
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+    except (NotImplementedError, OSError):
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
