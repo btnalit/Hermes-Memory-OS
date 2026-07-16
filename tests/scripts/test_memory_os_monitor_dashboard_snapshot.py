@@ -26,6 +26,87 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
     )
 
 
+def test_owner_backlog_failure_is_fail_visible_without_raw_candidate_fallback(tmp_path, monkeypatch):
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_jsonl(
+        memory_root / "crystallized" / "candidates.jsonl",
+        [{"candidate_id": "cand-raw", "bridge_state": "owner_eligible"}],
+    )
+    monkeypatch.setattr(module, "owner_review_queue_report", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    snapshot = module._owner_review_backlog_snapshot(memory_root)
+
+    assert snapshot["agenda_source"] == "effective_owner_review_queue_unavailable"
+    assert snapshot["backlog"]["pending_total"] == 0
+
+
+def test_owner_aging_uses_effective_review_projection(tmp_path):
+    module = _load_module()
+    home = tmp_path / ".hermes"
+    memory_root = home / "memory-os"
+    _write_jsonl(
+        memory_root / "crystallized" / "candidates.jsonl",
+        [{
+            "candidate_id": "cand-terminal",
+            "kind": "fact",
+            "body": "terminal candidate must not age in review",
+            "bridge_state": "owner_eligible",
+            "created_at": "2026-01-01T00:00:00Z",
+        }],
+    )
+    _write_jsonl(
+        memory_root / "crystallized" / "candidate_triage.jsonl",
+        [{
+            "candidate_id": "cand-terminal",
+            "target_state": "demoted",
+            "created_at": "2026-07-15T00:00:00Z",
+        }],
+    )
+
+    snapshot = module._owner_aging_snapshot(memory_root)
+
+    assert sum(snapshot["aging_buckets"].values()) == 0
+    assert snapshot["source"] == "effective_owner_review_queue"
+
+
+def test_execution_gate_snapshot_uses_canonical_stage_and_boundary_fields(tmp_path):
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_jsonl(
+        memory_root / "system" / "execution_gate_envelopes.jsonl",
+        [
+            {
+                "stage": "permit",
+                "execution_gate_envelope_id": "xgate-resolver",
+                "lane_id": "resolver_auto_approve",
+                "boundary_true": False,
+            },
+            {
+                "stage": "completion",
+                "execution_gate_envelope_id": "xgate-resolver",
+                "lane_id": "resolver_auto_approve",
+                "postcheck_boundary_true": True,
+            },
+            {
+                "stage": "permit",
+                "execution_gate_envelope_id": "xgate-other",
+                "lane_id": "other",
+                "boundary_true": False,
+            },
+        ],
+    )
+
+    snapshot = module._execution_gate_snapshot(memory_root)
+
+    assert snapshot["total_envelopes"] == 2
+    assert snapshot["completions"] == 1
+    assert snapshot["boundary_violations"] == 1
+    assert snapshot["resolver_provisional_permits"] == 1
+    assert snapshot["resolver_provisional_completions"] == 1
+    assert snapshot["permanent_approvals"] == 0
+
+
 def _write_jobs(home: Path) -> None:
     jobs = []
     core_names = [
@@ -230,6 +311,25 @@ def test_dashboard_snapshot_reads_host_and_hindsight_runtime_meta(tmp_path, monk
     assert snapshot["hindsight"]["mode"] == "active"
     assert snapshot["monitor"]["next_run_in"] == "1m"
     assert snapshot["monitor"]["duration_ms"] >= 0
+
+
+def test_v3_private_journal_distinguishes_operational_sweep_evidence_from_per_item_telemetry(tmp_path):
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_jsonl(
+        memory_root / "system" / "execution_gate_envelopes.jsonl",
+        [{
+            "lane_id": "v3_journal_ttl_sweep",
+            "stage": "completion",
+            "scope": {"operation": "pending_ttl_sweep"},
+        }],
+    )
+
+    snapshot = module._v3_private_journal_snapshot(memory_root)
+
+    assert snapshot["per_item_annihilation_telemetry_persisted"] is False
+    assert snapshot["sweep_execution_gate_evidence_persisted"] is True
+    assert "annihilation_telemetry_persisted" not in snapshot
 
 
 def test_dashboard_snapshot_cli_writes_js_payload(tmp_path):

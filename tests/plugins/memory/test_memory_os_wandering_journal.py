@@ -115,14 +115,7 @@ def test_query_trace_is_written_before_results_and_contains_no_query_body(tmp_pa
     assert len(results) == 1
     rows = read_journal(store)
     trace = rows[-1]
-    assert trace["record_type"] == "query_trace"
-    assert set(trace) == {
-        "record_type",
-        "trace_id",
-        "queried_at",
-        "scope_class",
-        "result_count_bucket",
-    }
+    assert set(trace) == {"queried_at", "scope"}
 
     from plugins.memory.memory_os import wandering_journal
 

@@ -622,12 +622,27 @@ def _build_prefetch_sections(
     if recall_facade is not None:
         try:
             from .recall_types import RecallType
-            results = recall_facade.retrieve(
-                store, query,
-                recall_types=[RecallType.STATE_OVERLAY, RecallType.INDEXED_FTS],
+            from .task_state import read_effective_current_task
+
+            facade: Any = recall_facade
+            effective_task = read_effective_current_task(store.roots, max_age_hours=0)
+            task_revision = str((effective_task or {}).get("revision") or "")
+            results = facade.retrieve(
+                store,
+                query,
                 top_k=10,
+                scope={"task_revision": task_revision, "budget_chars": 800},
             )
-            facade_text = recall_facade.format_context(results, budget=800)
+            plan = getattr(facade, "last_recall_plan", {})
+            if isinstance(plan, dict) and plan.get("mode") == "apply_canary":
+                live_results = results
+            else:
+                live_results = {
+                    key: value
+                    for key, value in results.items()
+                    if key in {RecallType.STATE_OVERLAY.value, RecallType.INDEXED_FTS.value}
+                }
+            facade_text = facade.format_context(live_results, budget=800)
             if facade_text.strip():
                 sections.append(("Recall Facade (unified)", [facade_text]))
         except Exception as exc:

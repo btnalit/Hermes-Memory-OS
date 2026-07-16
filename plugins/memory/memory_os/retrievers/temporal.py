@@ -150,5 +150,5 @@ class TemporalRetriever:
         for obj in objects:
             anchor = obj.metadata.get("anchor", "")
             tag = f" [{anchor}]" if anchor else ""
-            lines.append(f"-{tag} {obj.content[:200]}")
+            lines.append(f"-{tag} {obj.content}")
         return "\n".join(lines)

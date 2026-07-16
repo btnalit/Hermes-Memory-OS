@@ -693,9 +693,13 @@ def _proposal_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[
 
 
 def _candidate_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
+    from .crystallized import read_effective_candidates
+    from .store import MemoryOSStore
+
     records = _candidate_queue_records(roots)
-    triage_records = _read_candidate_triage_records(roots)
-    active_count = _active_candidate_count(records, triage_records)
+    views = read_effective_candidates(MemoryOSStore(roots))
+    effective_pending = [view for view in views if not view.terminal]
+    owner_agenda = [view for view in views if view.owner_review_eligible]
     kind_values = {str(record.get("kind") or record.get("candidate_kind") or "") for record in records}
     bridge_states = {
         str(record.get("bridge_state") or record.get("candidate_bridge_state") or "")
@@ -707,9 +711,16 @@ def _candidate_queue_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict
         "status": "ok" if records else base["status"],
         "available": bool(records) or base["available"],
         "record_count": len(records),
+        "raw_candidate_count": len(records),
         "candidate_count": len(records),
-        "active_candidate_count": active_count,
-        "fleeting_candidate_count": len(records) - active_count,
+        "effective_pending_candidate_count": len(effective_pending),
+        "active_candidate_count": len(effective_pending),
+        "owner_agenda_candidate_count": len(owner_agenda),
+        "suppressed_terminal_candidate_count": sum(1 for view in views if view.terminal),
+        "suppressed_noneligible_candidate_count": sum(
+            1 for view in views if not view.terminal and not view.owner_review_eligible
+        ),
+        "fleeting_candidate_count": sum(1 for view in views if view.effective_state == "fleeting"),
         "private_candidate_count": sum(1 for record in records if record.get("visibility") == "private" or record.get("is_private") is True),
         "public_candidate_count": sum(1 for record in records if record.get("visibility") == "public" or record.get("is_private") is False),
         "latest_candidate_at": _latest_record_time(records),
@@ -723,7 +734,9 @@ def _owner_review_pressure_payload(roots: MemoryOSRoots, base: dict[str, Any]) -
     owner_actions = _read_jsonl(owner_actions_path(roots))
     proposal_items = _proposal_queue_items(roots)
     candidate_records = _candidate_queue_records(roots)
-    triage_records = _read_candidate_triage_records(roots)
+    from .crystallized import read_effective_candidates
+    from .store import MemoryOSStore
+    candidate_views = read_effective_candidates(MemoryOSStore(roots))
     advisor_records = _read_jsonl(roots.hermes_home / "system-modules" / "left_brain_advisor" / "reports.jsonl")
     findings: list[dict[str, Any]] = []
     for record in advisor_records:
@@ -736,10 +749,9 @@ def _owner_review_pressure_payload(roots: MemoryOSRoots, base: dict[str, Any]) -
         or str(item.get("followup_state") or "") in {"awaiting_ops_gate", "ops_gate_reviewed"}
     ]
     pending_candidates = [
-        record
-        for record in candidate_records
-        if str(record.get("state") or record.get("status") or "pending") in {"pending", "candidate", "needs_review"}
-        and _candidate_effective_state(record, triage_records) != "fleeting"
+        view.candidate
+        for view in candidate_views
+        if view.owner_review_eligible
     ]
     action_required = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "action_required")
     review_suggested = sum(1 for item in findings if str(item.get("owner_burden_class") or "") == "review_suggested")

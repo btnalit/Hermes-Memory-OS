@@ -4382,6 +4382,44 @@ def test_classify_snapshot_fails_when_cognitive_loop_persisted_report_omits_tail
     assert any(item["code"] == "cognitive_loop_tail_step_omitted_by_bounded_report" for item in classification["fail"])
 
 
+def test_v2_and_clearance_freshness_classification_respects_activation_boundary():
+    frozen = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "downstream_clearance_closure_frozen": True,
+            "v2c_unfreeze_ready": False,
+            "freeze_reasons": ["production_observation_days:2/30"],
+        },
+        "clearance_snapshot_freshness": {"status": "stale"},
+    })
+    assert any(item["code"] == "v2_downstream_clearance_frozen_by_evidence_gates" for item in frozen["pass"])
+    assert any(item["code"] == "clearance_snapshot_not_fresh" for item in frozen["warn"])
+
+    activation_ready = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "v2c_unfreeze_ready": True,
+        },
+        "clearance_snapshot_freshness": {"status": "stale"},
+    })
+    assert any(item["code"] == "clearance_snapshot_not_fresh" for item in activation_ready["fail"])
+
+    activation_unavailable = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": True,
+            "v2c_unfreeze_ready": True,
+        },
+        "clearance_snapshot_freshness": {"status": "unavailable_remote_projection"},
+    })
+    assert any(item["code"] == "clearance_snapshot_not_fresh" for item in activation_unavailable["fail"])
+
+
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     snapshot = _healthy_snapshot()
     snapshot["deltas"] = {

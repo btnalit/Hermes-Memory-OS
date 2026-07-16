@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 
-from .crystallized import CrystallizedCandidate, read_candidate_queue
+from .crystallized import CrystallizedCandidate, read_effective_candidates
 from .store import MemoryOSStore
 
 CANDIDATE_CLUSTER_SCHEMA_VERSION = "memory-os.candidate_clusters.v0"
@@ -153,7 +153,11 @@ def candidate_cluster_report(
     """Build a bounded, read-only top-K candidate cluster review report."""
     bounded_limit = max(int(limit), 0)
     threshold = _normalize_threshold(min_similarity)
-    candidates = read_candidate_queue(store)
+    candidates = [
+        item.candidate
+        for item in read_effective_candidates(store)
+        if item.owner_review_eligible
+    ]
     clusters = build_candidate_clusters(candidates, min_similarity=threshold)
     return {
         "schema_version": CANDIDATE_CLUSTER_SCHEMA_VERSION,
@@ -249,7 +253,12 @@ def find_candidate_cluster_by_target(
     cluster_id, expected_hash = _split_cluster_target(target_id)
     if not cluster_id or not expected_hash:
         return None, {}, "candidate_cluster_scope_invalid"
-    for cluster in build_candidate_clusters(read_candidate_queue(store), min_similarity=min_similarity):
+    candidates = [
+        item.candidate
+        for item in read_effective_candidates(store)
+        if item.owner_review_eligible
+    ]
+    for cluster in build_candidate_clusters(candidates, min_similarity=min_similarity):
         if cluster.cluster_id != cluster_id:
             continue
         scope = candidate_cluster_scope(cluster)

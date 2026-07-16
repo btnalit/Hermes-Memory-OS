@@ -87,7 +87,7 @@ for _base in reversed(_path_candidates):
     if _base_str not in sys.path:
         sys.path.insert(0, _base_str)
 
-from plugins.memory.memory_os.cron_registry import memory_os_cron_specs, specs_from_snapshot
+from plugins.memory.memory_os.cron_registry import specs_from_snapshot
 from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 from scripts.memory_os_host_profile import resolve_host_runtime_profile
 
@@ -168,12 +168,20 @@ def run_remote_probe(command: list[str]) -> int:
 
 
 def probe_hermes_cron_adapter(*, hermes_home: Path, hermes_bin: str = "hermes") -> dict[str, Any]:
-    specs = _load_installed_specs(hermes_home)
+    registry_error = ""
+    try:
+        specs = _load_installed_specs(hermes_home)
+    except (FileNotFoundError, ValueError) as exc:
+        specs = ()
+        registry_error = str(exc)
     adapter = HermesCronAdapter(hermes_home=hermes_home, hermes_bin=hermes_bin)
     classification = adapter.classify_jobs(specs)
     capabilities = adapter.probe_capabilities()
     findings = list(capabilities.findings)
     status = "ok" if classification.get("status") == "ok" else "warning"
+    if registry_error:
+        findings.append({"code": registry_error})
+        status = "error"
     if int(classification.get("enabled_retired_legacy_count") or 0) > 0:
         findings.append(
             {
@@ -190,7 +198,7 @@ def probe_hermes_cron_adapter(*, hermes_home: Path, hermes_bin: str = "hermes") 
         "adapter_owner": "hermes_memory_os_seam",
         "status": status,
         "hermes_home": str(hermes_home),
-        "spec_source": "installed_snapshot" if _snapshot_path(hermes_home).exists() else "package_registry",
+        "spec_source": "installed_snapshot" if not registry_error else registry_error,
         "capabilities": {
             "supports_script": capabilities.supports_script,
             "supports_no_agent": capabilities.supports_no_agent,
@@ -209,15 +217,16 @@ def _snapshot_path(hermes_home: Path) -> Path:
 
 def _load_installed_specs(hermes_home: Path):
     path = _snapshot_path(hermes_home)
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            loaded = {}
-        specs = specs_from_snapshot(loaded) if isinstance(loaded, dict) else ()
-        if specs:
-            return specs
-    return memory_os_cron_specs()
+    if not path.exists():
+        raise FileNotFoundError("installed_cron_registry_missing")
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("installed_cron_registry_invalid") from exc
+    specs = specs_from_snapshot(loaded) if isinstance(loaded, dict) else ()
+    if not specs:
+        raise ValueError("installed_cron_registry_empty_or_invalid")
+    return specs
 
 
 if __name__ == "__main__":

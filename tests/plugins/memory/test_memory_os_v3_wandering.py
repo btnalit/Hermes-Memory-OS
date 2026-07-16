@@ -78,7 +78,8 @@ def test_empty_entries_is_success_and_removes_manifest(tmp_path):
     store = _store(tmp_path)
     adapter = FakeAdapter({"entries": []})
     result = _run(store, adapter)
-    assert result["status"] == "ok_empty"
+    assert result["status"] == "healthy_no_sample"
+    assert result["reason"] == "empty_entries"
     assert adapter.called == 1
     assert read_journal(store) == []
     manifest = store.roots.memory_os_root / "system" / "v3_body_packet_manifests.jsonl"

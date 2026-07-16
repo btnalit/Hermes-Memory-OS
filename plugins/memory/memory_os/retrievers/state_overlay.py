@@ -54,6 +54,7 @@ class StateOverlayRetriever:
             )
 
         objects: list[RecallObject] = []
+        overlay_task_revision = str(overlay.get("task_revision") or "")
         for section_key in (
             "active_projects", "open_threads", "recent_events",
             "owner_preferences", "identity_snapshot", "relationship_snapshot",
@@ -73,7 +74,9 @@ class StateOverlayRetriever:
                         content=text,
                         score=0.8,
                         source_ref=str(entry.get("source", "")),
-                        metadata={"section": section_key},
+                        metadata={"section": section_key, "task_revision": overlay_task_revision},
+                        authority_class="state_projection",
+                        task_revision=overlay_task_revision,
                     ))
 
         # Simple relevance: query term overlap

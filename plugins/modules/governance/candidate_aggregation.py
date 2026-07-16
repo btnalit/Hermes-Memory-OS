@@ -131,6 +131,18 @@ _CHAT_PATTERNS: frozenset[str] = frozenset({
 # Minimum body length to be considered substantive
 _MIN_SUBSTANTIVE_CHARS = 15
 
+
+def provisional_write_postcheck() -> dict[str, Any]:
+    """Truthful receipt for a reversible provisional crystallized write."""
+
+    return {
+        "crystallized_write": "provisional_success",
+        "actual_provisional_crystallized_write": True,
+        "actual_permanent_crystallized_approval": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+
+
 # Auto-demote candidates that have been rejected N+ times by owner
 _REJECTION_THRESHOLD = 3
 
@@ -551,7 +563,7 @@ def _cluster_and_promote(
                     envelope_id=envelope["execution_gate_envelope_id"],
                     lane_id=RESOLVER_AUTO_APPROVE_LANE,
                     execution_status="completed",
-                    postcheck={"crystallized_write": "success"},
+                    postcheck=provisional_write_postcheck(),
                 )
             else:
                 target_state = "owner_eligible"
@@ -720,7 +732,7 @@ def _cluster_and_promote(
                     envelope_id=envelope["execution_gate_envelope_id"],
                     lane_id=RESOLVER_AUTO_APPROVE_LANE,
                     execution_status="completed",
-                    postcheck={"crystallized_write": "success"},
+                    postcheck=provisional_write_postcheck(),
                 )
             else:
                 target_state = "owner_eligible"
@@ -857,7 +869,7 @@ def _cluster_and_promote(
             _cege2(
                 store, envelope_id=_envelope2["execution_gate_envelope_id"],
                 lane_id=_RAL2, execution_status="completed",
-                postcheck={"crystallized_write": "success"},
+                postcheck=provisional_write_postcheck(),
             )
         else:
             target_state = "owner_eligible"

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from typing import Any, TYPE_CHECKING
 
+from plugins.memory.memory_os.crystallized import (
+    _parse_markdown_records,
+    is_active_crystallized_frontmatter,
+)
 from plugins.memory.memory_os.recall_types import RecallObject, RecallType
 
 if TYPE_CHECKING:
@@ -32,45 +37,65 @@ class IndexedFTSRetriever:
         scope: dict[str, Any] | None = None,
     ) -> list[RecallObject]:
         index_path = store.roots.index_path
-        if not index_path.exists():
+        limit = max(0, int(top_k))
+        if not index_path.exists() or limit == 0:
             return []
 
+        active_crystallized_bodies = _active_crystallized_record_bodies(store.roots.crystallized_root)
+        objects: list[RecallObject] = []
+        batch_size = max(50, limit * 4)
+        offset = 0
         conn = sqlite3.connect(str(index_path))
         try:
             conn.row_factory = sqlite3.Row
-            # Use FTS5 with BM25 scoring
-            rows = conn.execute(
-                """
-                SELECT m.record_id, m.content, m.kind, m.source_file,
-                       rank
-                FROM memory_fts(:query)
-                JOIN memory_records m ON memory_fts.record_id = m.record_id
-                ORDER BY rank
-                LIMIT :limit
-                """,
-                {"query": _fts5_safe_query(query), "limit": top_k},
-            ).fetchall()
-        except (sqlite3.Error, sqlite3.OperationalError):
+            while len(objects) < limit:
+                rows = conn.execute(
+                    """
+                    SELECT record_type,
+                           record_id,
+                           title,
+                           text,
+                           bm25(memory_fts) AS rank
+                    FROM memory_fts
+                    WHERE memory_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ? OFFSET ?
+                    """,
+                    (_fts5_safe_query(query), batch_size, offset),
+                ).fetchall()
+                if not rows:
+                    break
+                offset += len(rows)
+                for row in rows:
+                    if row["record_type"] == "crystallized_record":
+                        record_id = str(row["record_id"] or "")
+                        source_body = active_crystallized_bodies.get(record_id)
+                        if source_body is None or source_body.strip() != str(row["text"] or "").strip():
+                            continue
+                    content = (row["text"] or "")[:500]
+                    if not content.strip():
+                        continue
+                    rank = max(-60.0, min(60.0, float(row["rank"] or 0.0)))
+                    objects.append(RecallObject(
+                        recall_type=RecallType.INDEXED_FTS.value,
+                        content=content,
+                        score=1.0 / (1.0 + math.exp(rank)),
+                        source_ref=f"fts5:{row['record_id']}",
+                        authority_class="indexed_derived",
+                        metadata={
+                            "kind": row["record_type"] or "",
+                            "title": row["title"] or "",
+                            "record_id": row["record_id"],
+                        },
+                    ))
+                    if len(objects) >= limit:
+                        break
+                if len(rows) < batch_size:
+                    break
+        except sqlite3.Error:
             return []
         finally:
             conn.close()
-
-        objects: list[RecallObject] = []
-        for row in rows:
-            content = (row["content"] or "")[:500]
-            if not content.strip():
-                continue
-            objects.append(RecallObject(
-                recall_type=RecallType.INDEXED_FTS.value,
-                content=content,
-                score=min(1.0, 1.0 / (1.0 + abs(float(row["rank"] or 0)))),
-                source_ref=f"fts5:{row['record_id']}",
-                metadata={
-                    "kind": row["kind"] or "",
-                    "source_file": row["source_file"] or "",
-                    "record_id": row["record_id"],
-                },
-            ))
         return objects
 
     def format_context(
@@ -83,8 +108,22 @@ class IndexedFTSRetriever:
             return ""
         lines = ["### Indexed Recall (FTS5)"]
         for obj in objects:
-            lines.append(f"- {obj.content[:200]}")
+            lines.append(f"- {obj.content}")
         return "\n".join(lines)
+
+
+def _active_crystallized_record_bodies(crystallized_root: Any) -> dict[str, str]:
+    active_bodies: dict[str, str] = {}
+    for path in sorted(crystallized_root.glob("*.md")):
+        try:
+            records = _parse_markdown_records(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        for frontmatter, body in records:
+            record_id = str(frontmatter.get("id") or "")
+            if record_id and is_active_crystallized_frontmatter(frontmatter):
+                active_bodies[record_id] = body
+    return active_bodies
 
 
 def _fts5_safe_query(query: str) -> str:

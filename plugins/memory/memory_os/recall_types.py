@@ -68,6 +68,10 @@ class RecallObject:
     score: float = 1.0
     source_ref: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    authority_class: str = ""
+    freshness: float = 1.0
+    task_revision: str = ""
+    claim_key: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

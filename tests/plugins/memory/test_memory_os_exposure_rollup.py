@@ -30,6 +30,38 @@ class TestExposureRollupCycle:
         assert second["source_offset_start"] == 1
         assert second["source_offset_end"] == 2
 
+    def test_successful_snapshot_is_explicitly_ok(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.exposure_rollup import (
+            exposure_monitor_stats,
+            exposure_rollup_snapshot,
+            run_exposure_rollup_cycle,
+        )
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+        append_memory_source_record(roots, {
+            "record_id": "msrc_snapshot_ok",
+            "created_at": "2026-07-12T02:00:00Z",
+            "selected": [{"source_ids": ["crystallized:snapshot_ok"]}],
+            "dropped": [],
+        })
+
+        report = run_exposure_rollup_cycle(
+            store,
+            now=datetime.fromisoformat("2026-07-12T03:00:00+00:00"),
+        )
+
+        assert report["status"] == "ok"
+        assert exposure_rollup_snapshot(store)["status"] == "ok"
+        assert exposure_monitor_stats(
+            store,
+            now=datetime.fromisoformat("2026-07-12T03:00:00+00:00"),
+        )["snapshot_status"] == "ok"
+
     def test_gate_start_failure_prevents_rollup_and_snapshot_writes(self, tmp_path: Path, monkeypatch) -> None:
         from plugins.memory.memory_os import exposure_rollup
         from plugins.memory.memory_os.memory_sources import append_memory_source_record

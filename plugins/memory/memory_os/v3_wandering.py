@@ -56,6 +56,8 @@ def run_v3_wandering_cycle(
 ) -> dict[str, Any]:
     if not isinstance(quiet_gate, dict) or quiet_gate.get("quiet") is not True:
         return {"status": "skipped", "reason": str((quiet_gate or {}).get("reason") or "quiet_gate_closed")}
+    if not seed_candidates:
+        return _boundary_result("healthy_no_sample", reason="no_eligible_input")
     if not getattr(adapter, "capability", False):
         return _boundary_result("capability_unavailable")
     if (
@@ -128,7 +130,10 @@ def run_v3_wandering_cycle(
         remove_body_manifests(store, {snapshot_id})
         return _boundary_result("schema_rejected")
     if not ingested:
-        return {**_boundary_result("ok_empty"), "model_input_transmitted": True}
+        return {
+            **_boundary_result("healthy_no_sample", reason="empty_entries"),
+            "model_input_transmitted": True,
+        }
     return {
         **_boundary_result("ingested"),
         "entry_count": len(ingested),
@@ -238,6 +243,7 @@ def record_v3_wandering_run(store: MemoryOSStore, result: dict[str, Any], *, now
         "schema_version": "memory-os.v3_wandering_run.v0",
         "created_at": (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(),
         "status": str(result.get("status") or "unknown"),
+        "reason": str(result.get("reason") or ""),
         "model_input_transmitted": result.get("model_input_transmitted") is True,
         "owner_delivery_attempted": result.get("owner_delivery_attempted") is True,
         "external_action_executed": result.get("external_action_executed") is True,
@@ -297,10 +303,13 @@ def _result_boundaries_are_safe(result: Any) -> bool:
     )
 
 
-def _boundary_result(status: str) -> dict[str, Any]:
-    return {
+def _boundary_result(status: str, *, reason: str = "") -> dict[str, Any]:
+    result = {
         "status": status,
         "model_input_transmitted": False,
         "owner_delivery_attempted": False,
         "external_action_executed": False,
     }
+    if reason:
+        result["reason"] = reason
+    return result

@@ -118,7 +118,7 @@ def test_ttl_physically_deletes_only_pending_and_orphan_manifest(tmp_path):
     report = sweep_pending_expired(store, now=datetime.now(timezone.utc))
     assert report == {"cycle_status": "ok"}
     assert entry["entry_id"] not in journal_path.read_text(encoding="utf-8")
-    assert any(item.get("record_type") == "query_trace" for item in read_journal(store))
+    assert any(set(item) == {"queried_at", "scope"} for item in read_journal(store))
     with pytest.raises(ValueError, match="manifest_not_found"):
         resolve_body_manifest(store, packet["snapshot_id"])
     status_path = store.roots.memory_os_root / "system" / "v3_journal_sweep_status.json"

@@ -1394,6 +1394,28 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     hermes_gateway_running = hermes_status.get("gateway_running") is True
 
+    raw_v2_exposure = snapshot.get("v2_exposure_monitor")
+    v2_exposure: dict[str, Any] = raw_v2_exposure if isinstance(raw_v2_exposure, dict) else {}
+    v2_health = str(v2_exposure.get("schema_era_health") or "unavailable")
+    if v2_health in {"PASS", "healthy_no_sample"}:
+        passed.append({"code": "v2_exposure_schema_era_healthy", "value": v2_health})
+    elif v2_health == "FAIL":
+        warn.append({"code": "v2_exposure_schema_era_unhealthy", "value": v2_exposure})
+    if v2_exposure and v2_exposure.get("conservation_total_passes") is False:
+        fail.append({"code": "v2_exposure_conservation_failed", "value": v2_exposure})
+    if v2_exposure.get("downstream_clearance_closure_frozen") is True:
+        passed.append({"code": "v2_downstream_clearance_frozen_by_evidence_gates", "reasons": v2_exposure.get("freeze_reasons")})
+
+    raw_clearance_freshness = snapshot.get("clearance_snapshot_freshness")
+    clearance_freshness: dict[str, Any] = raw_clearance_freshness if isinstance(raw_clearance_freshness, dict) else {}
+    clearance_status = str(clearance_freshness.get("status") or "unavailable")
+    if clearance_status == "fresh":
+        passed.append({"code": "clearance_snapshot_fresh"})
+    elif v2_exposure.get("v2c_unfreeze_ready") is True:
+        fail.append({"code": "clearance_snapshot_not_fresh", "value": clearance_freshness})
+    elif clearance_status in {"stale", "missing"}:
+        warn.append({"code": "clearance_snapshot_not_fresh", "value": clearance_freshness})
+
     if snapshot.get("gateway", {}).get("ActiveState") == "active":
         passed.append({"code": "gateway_active"})
     elif hermes_gateway_running:
@@ -4398,6 +4420,26 @@ def collect_snapshot(
     }
     if not host:
         _lm_kwargs["memory_os_root"] = Path(hermes_home) / "memory-os"
+        try:
+            from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness
+            from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
+            from plugins.memory.memory_os.roots import MemoryOSRoots
+            from plugins.memory.memory_os.store import MemoryOSStore
+
+            _roots = MemoryOSRoots.from_hermes_home(hermes_home, profile="default")
+            _store = MemoryOSStore(_roots)
+            _v2_exposure = exposure_monitor_stats(_store)
+            raw["v2_exposure_monitor"] = _v2_exposure
+            raw["clearance_snapshot_freshness"] = clearance_snapshot_freshness(
+                _roots,
+                for_activation=_v2_exposure.get("v2c_unfreeze_ready") is True,
+            )
+        except Exception as exc:
+            raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": type(exc).__name__}
+            raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": type(exc).__name__}
+    else:
+        raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable_remote_projection"}
+        raw["clearance_snapshot_freshness"] = {"status": "unavailable_remote_projection"}
     raw["living_memory_promotion"] = summarize_living_memory_promotion(**_lm_kwargs)
     raw["classification"] = classify_snapshot(raw)
     return raw

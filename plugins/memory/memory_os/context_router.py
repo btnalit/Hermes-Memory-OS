@@ -261,7 +261,9 @@ def route_context_sections(
     dropped: list[dict[str, Any]] = []
     used_budget = 0
 
-    for section in sections:
+    evaluated: list[tuple[int, dict[str, Any]]] = []
+    excluded: list[tuple[int, dict[str, Any]]] = []
+    for index, section in enumerate(sections):
         decision = _section_decision(
             section,
             query=query,
@@ -270,15 +272,42 @@ def route_context_sections(
         )
         entry = _section_report_entry(section, decision)
         if decision["include"]:
-            if used_budget + entry["char_cost"] <= budget_chars or decision["required"]:
-                selected.append(entry)
-                used_budget += entry["char_cost"]
-            else:
-                entry = dict(entry)
-                entry["reason_codes"] = _dedupe(entry["reason_codes"] + ["budget_exceeded"])
-                dropped.append(entry)
+            evaluated.append((index, entry))
         else:
-            dropped.append(entry)
+            excluded.append((index, entry))
+
+    required_entries = sorted(
+        (item for item in evaluated if item[1]["required"]),
+        key=lambda item: item[0],
+    )
+    optional_entries = sorted(
+        (item for item in evaluated if not item[1]["required"]),
+        key=lambda item: (-float(item[1]["score"]), item[0]),
+    )
+    budget_limit = max(0, int(budget_chars))
+    for _index, entry in [*required_entries, *optional_entries]:
+        remaining_budget = max(0, budget_limit - used_budget)
+        if entry["required"]:
+            selected_entry = dict(entry)
+            allocated = min(int(entry["char_cost"]), remaining_budget)
+            selected_entry["allocated_chars"] = allocated
+            if allocated < int(entry["char_cost"]):
+                selected_entry["reason_codes"] = _dedupe(
+                    selected_entry["reason_codes"] + ["budget_truncated"]
+                )
+            selected.append(selected_entry)
+            used_budget += allocated
+        elif int(entry["char_cost"]) <= remaining_budget:
+            selected_entry = dict(entry)
+            selected_entry["allocated_chars"] = int(entry["char_cost"])
+            selected.append(selected_entry)
+            used_budget += int(entry["char_cost"])
+        else:
+            budget_entry = dict(entry)
+            budget_entry["allocated_chars"] = 0
+            budget_entry["reason_codes"] = _dedupe(budget_entry["reason_codes"] + ["budget_exceeded"])
+            dropped.append(budget_entry)
+    dropped.extend(entry for _index, entry in sorted(excluded, key=lambda item: item[0]))
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -287,7 +316,7 @@ def route_context_sections(
         "route_reason_codes": route["reason_codes"],
         "open_issue": route.get("open_issue"),
         "query_redacted": _clip(_redact(_normalize(query)), 160),
-        "budget_chars": budget_chars,
+        "budget_chars": budget_limit,
         "used_budget_chars": used_budget,
         "ranking_mode": RANKING_MODE,
         "include_threshold": INCLUDE_THRESHOLD,

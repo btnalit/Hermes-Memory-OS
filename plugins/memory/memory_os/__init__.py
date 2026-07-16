@@ -22,7 +22,7 @@ except ImportError:
 from . import config as memory_os_config
 from .adapters.hindsight import HindsightHttpClient
 from .audit import append_audit, read_audit_entries
-from .crystallized import read_candidate_queue
+from .crystallized import read_candidate_queue, read_effective_candidates
 from .event_stats import build_event_stats, read_event_stats, write_event_stats
 from .ids import new_event_id
 from .index import MemoryOSIndex
@@ -190,20 +190,33 @@ class MemoryOSProvider(MemoryProvider):
             self._recall_facade_initialized = True
             return None
 
-        from .retrievers.state_overlay import StateOverlayRetriever
+        from .retrievers.crystallized import CrystallizedRetriever
+        from .retrievers.entity_graph import EntityGraphRetriever
         from .retrievers.indexed_fts import IndexedFTSRetriever
+        from .retrievers.state_overlay import StateOverlayRetriever
+        from .retrievers.temporal import TemporalRetriever
 
-        self._recall_facade = RetrieverFacade()
-        try:
-            self._recall_facade.register(StateOverlayRetriever())
-        except Exception:
-            # fail-open: registration failure must not block startup;
-            # recorded as suppressed count for monitor visibility
-            self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
-        try:
-            self._recall_facade.register(IndexedFTSRetriever())
-        except Exception:
-            self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
+        arbitration_cfg = self._config.get("recall_arbitration") if isinstance(self._config, dict) else {}
+        arbitration_cfg = arbitration_cfg if isinstance(arbitration_cfg, dict) else {}
+        self._recall_facade = RetrieverFacade(
+            arbitration_mode=str(arbitration_cfg.get("mode") or "off"),
+            freshness_guard_mode=str(arbitration_cfg.get("freshness_guard_mode") or "shadow"),
+            conflict_resolution_mode=str(arbitration_cfg.get("conflict_resolution_mode") or "shadow"),
+        )
+        retrievers = (
+            StateOverlayRetriever,
+            IndexedFTSRetriever,
+            CrystallizedRetriever,
+            EntityGraphRetriever,
+            TemporalRetriever,
+        )
+        for retriever_class in retrievers:
+            try:
+                self._recall_facade.register(retriever_class())
+            except Exception:
+                # fail-open: registration failure must not block startup;
+                # recorded as suppressed count for monitor visibility
+                self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
         self._recall_facade_initialized = True  # set after successful init
         return self._recall_facade
 
@@ -893,6 +906,17 @@ class MemoryOSProvider(MemoryProvider):
         uses_hindsight_http_api = False
         working_count = _working_item_count(self._roots)
         candidate_count = len(read_candidate_queue(self._roots))
+        candidate_views = read_effective_candidates(self._store)
+        recall_plan = self._recall_facade.last_recall_plan if self._recall_facade is not None else {}
+        recall_plan_status = {
+            key: recall_plan.get(key)
+            for key in (
+                "schema_version", "mode", "current_task_revision", "input_count",
+                "selected_count", "suppressed_count", "exact_duplicate_count",
+                "near_duplicate_count", "conflict_count", "would_change_live_recall",
+            )
+            if key in recall_plan
+        }
         # A3: resolve knob for status report
         from .knob_overrides import resolve_knob as _resolve_knob_status
         return {
@@ -918,6 +942,11 @@ class MemoryOSProvider(MemoryProvider):
             "working_items": working_count,
             "crystallized_candidate_count": candidate_count,
             "crystallized_candidates": candidate_count,
+            "effective_owner_eligible_candidate_count": sum(
+                1 for view in candidate_views if view.owner_review_eligible
+            ),
+            "suppressed_terminal_candidate_count": sum(1 for view in candidate_views if view.terminal),
+            "recall_plan": recall_plan_status,
             "crystallized_candidates_label": "review candidates only; not approved crystallized memory",
             "crystallized_records": int(index_counts.get("crystallized_records", 0)),
             "crystallized_records_label": "approved crystallized memory records",
@@ -1192,80 +1221,42 @@ class MemoryOSProvider(MemoryProvider):
         """
         if self._roots is None:
             return ""
-        path = _active_task_anchor_path(self._roots)
-        if not path.exists():
-            return ""
+        from .task_state import read_effective_current_task
+
         now = datetime.now(timezone.utc)
-        for line in reversed(path.read_text(encoding="utf-8").splitlines()):
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(record, dict):
-                continue
-            if str(record.get("profile") or self.profile) not in {self.profile, ""}:
-                continue
-            # Most recent record for this profile decides the state
-            status = str(record.get("status") or "")
-            if status != "active":
-                return ""
-            # ── Age gate: reject anchors older than max_age_hours ──────
-            # Parse created_at once for both the age gate and the
-            # cross-session marker below.
-            created_at = None
-            try:
-                created_at = datetime.fromisoformat(
-                    str(record.get("created_at", "")).replace("Z", "+00:00")
-                )
-            except (ValueError, TypeError):
-                pass  # unparseable — handled per-branch below
-            if max_age_hours > 0:
-                if created_at is None:
-                    # Unparseable timestamp with age gate active → reject.
-                    # A corrupt created_at cannot prove freshness; treating
-                    # it as stale is the safe default.
-                    return ""
-                age_h = (now - created_at).total_seconds() / 3600
-                if age_h > max_age_hours:
-                    return ""
-            # ───────────────────────────────────────────────────────────
-            anchor = str(record.get("anchor") or "")
-            if anchor.strip():
-                anchor_session_id = str(record.get("session_id", ""))
-                if anchor_session_id and anchor_session_id != self.session_id:
-                    # ── Cross-session recovery: rebuild a sanitised anchor ──
-                    # Strip completed_operations and active tool/process state —
-                    # both belong to the old session's working state and must not
-                    # leak into the new session as "Current Foreground Task".
-                    # The old anchor's task line is preserved; the compression
-                    # rule is replaced with a "may be complete, verify" version.
-                    if created_at is not None:
-                        age_min = int(
-                            (now - created_at).total_seconds() / 60
-                        )
-                        if age_min < 60:
-                            age_label = f"{max(1, age_min)}m前"
-                        else:
-                            age_label = f"{age_min // 60}h前"
-                    else:
-                        age_label = "?"
-                    task = _extract_anchor_current_task(anchor)
-                    if task:
-                        anchor = _format_recovered_cross_session_anchor(
-                            task=task,
-                            age_label=age_label,
-                            original_session=anchor_session_id,
-                            current_session=self.session_id,
-                        )
-                    # If the old anchor has no parseable task line, fall through
-                    # and return "" — don't inject an unreadable anchor.
-                    else:
-                        return ""
-                return anchor
+        record = read_effective_current_task(
+            self._roots,
+            profile=self.profile,
+            max_age_hours=max_age_hours,
+            now=now,
+        )
+        if record is None:
             return ""
-        return ""
+        anchor = str(record.get("anchor") or "")
+        created_at = None
+        try:
+            created_at = datetime.fromisoformat(
+                str(record.get("source_at") or "").replace("Z", "+00:00")
+            )
+        except (ValueError, TypeError):
+            pass
+        anchor_session_id = str(record.get("session_id") or "")
+        if anchor_session_id and anchor_session_id != self.session_id:
+            if created_at is not None:
+                age_min = int((now - created_at).total_seconds() / 60)
+                age_label = f"{max(1, age_min)}m前" if age_min < 60 else f"{age_min // 60}h前"
+            else:
+                age_label = "?"
+            task = _extract_anchor_current_task(anchor)
+            if not task:
+                return ""
+            anchor = _format_recovered_cross_session_anchor(
+                task=task,
+                age_label=age_label,
+                original_session=anchor_session_id,
+                current_session=self.session_id,
+            )
+        return anchor
 
     def _clear_active_task_anchor(self) -> None:
         """Write a tombstone record to mark the active anchor as completed."""

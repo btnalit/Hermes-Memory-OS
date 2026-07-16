@@ -100,6 +100,18 @@ class CrystallizedCandidate:
 
 
 @dataclass(frozen=True)
+class EffectiveCandidate:
+    """Read-only projection of one candidate's current governance state."""
+
+    candidate: CrystallizedCandidate
+    effective_state: str
+    latest_triage: dict[str, Any] | None
+    owner_review_eligible: bool
+    terminal: bool
+    exclusion_reason: str
+
+
+@dataclass(frozen=True)
 class CrystallizedRecord:
     file_name: str
     frontmatter: dict[str, Any]
@@ -1414,6 +1426,109 @@ def resolve_candidate_effective_state(
         if rec.get("candidate_id") == cid:
             return str(rec.get("target_state", candidate.bridge_state))
     return candidate.bridge_state
+
+
+_TERMINAL_CANDIDATE_STATES = frozenset(
+    {
+        "demoted",
+        "fleeting",
+        "absorbed",
+        "discarded",
+        "rejected",
+        "owner_rejected",
+        "closed",
+        "archived",
+        "crystallized",
+        "owner_closed",
+    }
+)
+_TERMINAL_CANDIDATE_ACTIONS = frozenset(
+    {"approve_candidate", "reject_candidate", "approve_external_evidence"}
+)
+
+
+def read_effective_candidates(store: MemoryOSStore) -> list[EffectiveCandidate]:
+    """Return the common latest-effective candidate projection.
+
+    Raw queue rows remain available through :func:`read_candidate_queue` for
+    audit and conservation reporting. This reader never writes, compacts, or
+    approves memory.
+    """
+
+    triage_records = read_candidate_triage(store)
+    latest_triage: dict[str, dict[str, Any]] = {}
+    for record in triage_records:  # newest first
+        candidate_id = str(record.get("candidate_id") or "")
+        if candidate_id and candidate_id not in latest_triage:
+            latest_triage[candidate_id] = dict(record)
+
+    canonical_candidate_ids: set[str] = set()
+    service = CrystallizedMemoryService(store)
+    if store.roots.crystallized_root.exists():
+        for path in sorted(store.roots.crystallized_root.glob("*.md")):
+            for record in service.read_records(path.name):
+                candidate_id = str(record.frontmatter.get("candidate_id") or "")
+                if candidate_id and is_active_crystallized_frontmatter(record.frontmatter):
+                    canonical_candidate_ids.add(candidate_id)
+
+    owner_closed_ids: set[str] = set()
+    owner_actions_path = store.roots.memory_os_root / "system" / "owner_actions.jsonl"
+    if owner_actions_path.exists():
+        for raw in owner_actions_path.read_text(encoding="utf-8").splitlines():
+            if not raw.strip():
+                continue
+            try:
+                action = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(action, dict):
+                continue
+            if str(action.get("target_type") or "") != "candidate":
+                continue
+            if str(action.get("action_type") or "") not in _TERMINAL_CANDIDATE_ACTIONS:
+                continue
+            if str(action.get("result") or "") not in {"applied", "duplicate_ignored"}:
+                continue
+            candidate_id = str(action.get("target_id") or "")
+            if candidate_id:
+                owner_closed_ids.add(candidate_id)
+
+    raw_candidates = read_candidate_queue(store.roots)
+    latest_candidates_reversed: list[CrystallizedCandidate] = []
+    seen_candidate_ids: set[str] = set()
+    for candidate in reversed(raw_candidates):
+        if candidate.candidate_id in seen_candidate_ids:
+            continue
+        seen_candidate_ids.add(candidate.candidate_id)
+        latest_candidates_reversed.append(candidate)
+    latest_candidates = list(reversed(latest_candidates_reversed))
+
+    projected: list[EffectiveCandidate] = []
+    for candidate in latest_candidates:
+        triage = latest_triage.get(candidate.candidate_id)
+        state = resolve_candidate_effective_state(candidate, triage_records).strip().lower()
+        if candidate.candidate_id in canonical_candidate_ids:
+            state = "crystallized"
+        elif candidate.candidate_id in owner_closed_ids:
+            state = "owner_closed"
+        terminal = state in _TERMINAL_CANDIDATE_STATES
+        owner_review_eligible = state in {"owner_eligible", ""} and not terminal
+        exclusion_reason = ""
+        if terminal:
+            exclusion_reason = "terminal_state"
+        elif not owner_review_eligible:
+            exclusion_reason = "not_owner_eligible"
+        projected.append(
+            EffectiveCandidate(
+                candidate=candidate,
+                effective_state=state,
+                latest_triage=dict(triage) if triage is not None else None,
+                owner_review_eligible=owner_review_eligible,
+                terminal=terminal,
+                exclusion_reason=exclusion_reason,
+            )
+        )
+    return projected
 
 
 def compact_candidate_queue(

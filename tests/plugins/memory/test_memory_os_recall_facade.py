@@ -176,6 +176,120 @@ class TestRetrieverFacade:
         results = facade.retrieve(store, "test", recall_types=[RecallType.INDEXED_FTS])
         assert results["indexed_fts"] == []
 
+    def test_crystallized_retriever_excludes_revoked_records(self, tmp_path):
+        from plugins.memory.memory_os.retrievers.crystallized import CrystallizedRetriever
+        from plugins.memory.memory_os.retrievers.entity_graph import (
+            _find_primary_record_ids,
+            _read_record_body,
+        )
+
+        store = _make_store(_make_roots(tmp_path))
+        (store.roots.crystallized_root / "active.md").write_text(
+            "---\nid: mem-active\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nactive release boundary\n",
+            encoding="utf-8",
+        )
+        (store.roots.crystallized_root / "revoked.md").write_text(
+            "---\nid: mem-revoked\nkind: fact\ncanonical_state: owner_revoked\napproved_by: owner\n---\nrevoked release boundary\n",
+            encoding="utf-8",
+        )
+
+        objects = CrystallizedRetriever().retrieve(store, "release boundary")
+
+        assert [obj.source_ref for obj in objects] == ["crystallized:mem-active"]
+        assert objects[0].authority_class == "owner_confirmed"
+        assert _find_primary_record_ids(store.roots.crystallized_root, "release boundary") == ["mem-active"]
+        assert _read_record_body(store.roots.crystallized_root, "mem-revoked") == ""
+
+    def test_indexed_fts_retriever_uses_real_index_schema_and_excludes_revoked_records(self, tmp_path):
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        (store.roots.crystallized_root / "active.md").write_text(
+            "---\nid: mem-active\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nactive release boundary\n",
+            encoding="utf-8",
+        )
+        (store.roots.crystallized_root / "revoked.md").write_text(
+            "---\nid: mem-revoked\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nrevoked release boundary\n",
+            encoding="utf-8",
+        )
+        MemoryOSIndex(store.roots).rebuild_from_store(store)
+        (store.roots.crystallized_root / "revoked.md").write_text(
+            "---\nid: mem-revoked\nkind: fact\ncanonical_state: owner_revoked\napproved_by: owner\n---\nrevoked release boundary\n",
+            encoding="utf-8",
+        )
+
+        objects = IndexedFTSRetriever().retrieve(store, "release boundary")
+
+        assert [obj.source_ref for obj in objects] == ["fts5:mem-active"]
+        assert objects[0].content == "active release boundary"
+        assert objects[0].authority_class == "indexed_derived"
+
+    def test_indexed_fts_retriever_fails_closed_when_active_canonical_body_changed_after_index(self, tmp_path):
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        path = store.roots.crystallized_root / "active.md"
+        path.write_text(
+            "---\nid: mem-active\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nold release boundary\n",
+            encoding="utf-8",
+        )
+        MemoryOSIndex(store.roots).rebuild_from_store(store)
+        path.write_text(
+            "---\nid: mem-active\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nnew unrelated canonical truth\n",
+            encoding="utf-8",
+        )
+
+        assert IndexedFTSRetriever().retrieve(store, "old release boundary") == []
+
+    def test_indexed_fts_top_k_backfills_past_any_number_of_stale_or_revoked_hits(self, tmp_path):
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        for index in range(30):
+            (store.roots.crystallized_root / f"stale-{index:02d}.md").write_text(
+                f"---\nid: stale-{index}\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\n"
+                + "release boundary " * 8,
+                encoding="utf-8",
+            )
+        (store.roots.crystallized_root / "z-active.md").write_text(
+            "---\nid: active\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nrelease boundary weaker surviving fact\n",
+            encoding="utf-8",
+        )
+        MemoryOSIndex(store.roots).rebuild_from_store(store)
+        for index in range(30):
+            (store.roots.crystallized_root / f"stale-{index:02d}.md").write_text(
+                f"---\nid: stale-{index}\nkind: fact\ncanonical_state: owner_revoked\napproved_by: owner\n---\n"
+                + "release boundary " * 8,
+                encoding="utf-8",
+            )
+
+        objects = IndexedFTSRetriever().retrieve(store, "release boundary", top_k=1)
+
+        assert [obj.source_ref for obj in objects] == ["fts5:active"]
+
+    def test_indexed_fts_retriever_preserves_bm25_relevance_before_top_k(self, tmp_path):
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        (store.roots.crystallized_root / "a-weak.md").write_text(
+            "---\nid: weak\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nrelease boundary incidental filler words\n",
+            encoding="utf-8",
+        )
+        (store.roots.crystallized_root / "z-strong.md").write_text(
+            "---\nid: strong\nkind: fact\ncanonical_state: active\napproved_by: owner\n---\nrelease boundary release boundary release boundary\n",
+            encoding="utf-8",
+        )
+        MemoryOSIndex(store.roots).rebuild_from_store(store)
+
+        objects = IndexedFTSRetriever().retrieve(store, "release boundary", top_k=1)
+
+        assert [obj.source_ref for obj in objects] == ["fts5:strong"]
+        assert 0.0 < objects[0].score <= 1.0
+
     def test_format_context(self, tmp_path):
         roots = _make_roots(tmp_path)
         store = _make_store(roots)
@@ -189,6 +303,108 @@ class TestRetrieverFacade:
         assert "Item 1" in ctx
         assert "Item 2" in ctx
 
+    def test_session_injection_ledger_records_only_context_that_was_formatted(self, tmp_path):
+        roots = _make_roots(tmp_path)
+        store = _make_store(roots)
+        facade = RetrieverFacade(arbitration_mode="shadow")
+        facade.register(StubRetriever(RecallType.STATE_OVERLAY, [
+            RecallObject(
+                recall_type="state_overlay",
+                content="current task context that fills the tiny budget",
+                source_ref="state:1",
+                task_revision="task:r1",
+            ),
+        ]))
+        facade.register(StubRetriever(RecallType.CRYSTALLIZED, [
+            RecallObject(recall_type="crystallized", content="stable memory excluded by budget", source_ref="mem:1"),
+        ]))
+        results = facade.retrieve(store, "memory", scope={"task_revision": "task:r1"})
+        assert not any(item["reason"] == "session_duplicate" for item in facade.last_recall_plan["suppressed"])
+
+        assert facade.format_context(results, budget=len("- current task context that fills the tiny budget"))
+        facade.retrieve(store, "memory", scope={"task_revision": "task:r1"})
+
+        session_suppressed = {
+            item["source_ref"]
+            for item in facade.last_recall_plan["suppressed"]
+            if item["reason"] == "session_duplicate"
+        }
+        assert session_suppressed == {"state:1"}
+
+    def test_session_injection_ledger_uses_exact_whole_objects_not_shared_text_prefixes(self, tmp_path):
+        store = _make_store(_make_roots(tmp_path))
+        common = "shared prefix exactly over twenty four characters "
+        first = RecallObject(
+            recall_type="state_overlay",
+            content=common + "first",
+            source_ref="state:first",
+            task_revision="task:r1",
+        )
+        second = RecallObject(
+            recall_type="state_overlay",
+            content=common + "second",
+            source_ref="state:second",
+            task_revision="task:r1",
+        )
+        retriever = StubRetriever(RecallType.STATE_OVERLAY, [first, second])
+        facade = RetrieverFacade(arbitration_mode="shadow")
+        facade.register(retriever)
+
+        results = facade.retrieve(store, "shared", scope={"task_revision": "task:r1"})
+        first_only = retriever.format_context([first])
+        assert facade.format_context(results, budget=len(first_only)) == first_only
+
+        facade.retrieve(store, "shared", scope={"task_revision": "task:r1"})
+        suppressed = {
+            item["source_ref"]
+            for item in facade.last_recall_plan["suppressed"]
+            if item["reason"] == "session_duplicate"
+        }
+        assert suppressed == {"state:first"}
+
+    def test_session_ledger_never_marks_an_object_whose_tail_was_not_rendered(self, tmp_path):
+        store = _make_store(_make_roots(tmp_path))
+        content = "x" * 220 + "UNFORMATTED_TAIL"
+        obj = RecallObject(
+            recall_type="indexed_fts",
+            content=content,
+            source_ref="fts5:long",
+            authority_class="indexed_derived",
+            task_revision="task:r1",
+        )
+        retriever = StubRetriever(RecallType.INDEXED_FTS, [obj])
+        from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
+        retriever.format_context = IndexedFTSRetriever().format_context  # type: ignore[method-assign]
+        facade = RetrieverFacade(arbitration_mode="apply_canary")
+        facade.register(retriever)
+        full_render = retriever.format_context([obj])
+
+        first = facade.retrieve(store, "long", scope={"task_revision": "task:r1"})
+        rendered = facade.format_context(first, budget=len(full_render))
+        assert "UNFORMATTED_TAIL" in rendered
+
+        second = facade.retrieve(store, "long", scope={"task_revision": "task:r1"})
+        assert second == {}
+        assert facade.last_recall_plan["suppressed"][0]["reason"] == "session_duplicate"
+
+    def test_session_ledger_suppresses_duplicates_when_no_active_task_revision_exists(self, tmp_path):
+        store = _make_store(_make_roots(tmp_path))
+        obj = RecallObject(
+            recall_type="indexed_fts",
+            content="ordinary session recall",
+            source_ref="fts5:no-task",
+            authority_class="indexed_derived",
+        )
+        facade = RetrieverFacade(arbitration_mode="apply_canary")
+        facade.register(StubRetriever(RecallType.INDEXED_FTS, [obj]))
+
+        first = facade.retrieve(store, "ordinary")
+        assert facade.format_context(first, budget=200)
+        second = facade.retrieve(store, "ordinary")
+
+        assert second == {}
+        assert facade.last_recall_plan["suppressed"][0]["reason"] == "session_duplicate"
+
     def test_format_context_respects_budget(self, tmp_path):
         roots = _make_roots(tmp_path)
         store = _make_store(roots)
@@ -198,8 +414,36 @@ class TestRetrieverFacade:
         ]))
         results = facade.retrieve(store, "test")
         ctx = facade.format_context(results, budget=100)
-        # StubRetriever doesn't trim, but facade won't exceed budget on second lane
-        assert len(results["crystallized"]) == 1  # retrieves the object
+        assert len(results["crystallized"]) == 1
+        assert len(ctx) <= 100
+
+    def test_shadow_arbitration_reports_but_preserves_live_results(self, tmp_path):
+        store = _make_store(_make_roots(tmp_path))
+        facade = RetrieverFacade(arbitration_mode="shadow")
+        duplicate = [
+            RecallObject(recall_type="crystallized", content="same", source_ref="one"),
+            RecallObject(recall_type="crystallized", content="same", source_ref="two"),
+        ]
+        facade.register(StubRetriever(RecallType.CRYSTALLIZED, duplicate))
+
+        results = facade.retrieve(store, "same", scope={"task_revision": "rev-1"})
+
+        assert len(results["crystallized"]) == 2
+        assert facade.last_recall_plan["mode"] == "shadow"
+        assert facade.last_recall_plan["selected_count"] == 1
+        assert facade.last_recall_plan["exact_duplicate_count"] == 1
+
+    def test_apply_canary_arbitration_uses_plan(self, tmp_path):
+        store = _make_store(_make_roots(tmp_path))
+        facade = RetrieverFacade(arbitration_mode="apply_canary")
+        facade.register(StubRetriever(RecallType.CRYSTALLIZED, [
+            RecallObject(recall_type="crystallized", content="same", source_ref="one"),
+            RecallObject(recall_type="crystallized", content="same", source_ref="two"),
+        ]))
+
+        results = facade.retrieve(store, "same", scope={"task_revision": "rev-1"})
+
+        assert len(results["crystallized"]) == 1
 
     def test_base_retriever_protocol(self):
         assert isinstance(StubRetriever(RecallType.CRYSTALLIZED), BaseRetriever)

@@ -19,6 +19,10 @@ from __future__ import annotations
 import json
 from typing import Any, TYPE_CHECKING
 
+from plugins.memory.memory_os.crystallized import (
+    _parse_markdown_records,
+    is_active_crystallized_frontmatter,
+)
 from plugins.memory.memory_os.recall_types import RecallObject, RecallType
 from plugins.memory.memory_os.entity_extractor import classify_entity
 
@@ -125,7 +129,7 @@ class EntityGraphRetriever:
             if entity_class and entity_class != "unknown":
                 tag_parts.append(entity_class)
             tag = f" [{' | '.join(tag_parts)}]" if tag_parts else ""
-            lines.append(f"-{tag} {obj.content[:200]}")
+            lines.append(f"-{tag} {obj.content}")
         return "\n".join(lines)
 
 
@@ -142,24 +146,19 @@ def _find_primary_record_ids(crystallized_root: Any, query: str) -> list[str]:
     scored: list[tuple[int, str]] = []
     for md_path in sorted(crystallized_root.glob("*.md")):
         try:
-            text = md_path.read_text(encoding="utf-8")
+            records = _parse_markdown_records(md_path.read_text(encoding="utf-8"))
         except OSError:
             continue
-        body_lower = text.lower()
-        hits = sum(1 for w in q_words if w in body_lower)
-        if hits > 0:
-            # Extract record_id from frontmatter
-            rid = ""
-            if text.startswith("---"):
-                parts = text.split("---", 2)
-                if len(parts) >= 3:
-                    for line in parts[1].strip().split("\n"):
-                        if line.startswith("id:"):
-                            rid = line.split(":", 1)[1].strip()
-                            break
+        for frontmatter, body in records:
+            if not is_active_crystallized_frontmatter(frontmatter):
+                continue
+            rid = str(frontmatter.get("id") or "").strip()
             if not rid:
-                rid = md_path.stem
-            scored.append((hits, rid))
+                continue
+            body_lower = body.lower()
+            hits = sum(1 for word in q_words if word in body_lower)
+            if hits > 0:
+                scored.append((hits, rid))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [rid for _, rid in scored[:5]]
@@ -172,13 +171,13 @@ def _read_record_body(crystallized_root: Any, record_id: str) -> str:
     """
     for md_path in sorted(crystallized_root.glob("*.md")):
         try:
-            text = md_path.read_text(encoding="utf-8")
+            records = _parse_markdown_records(md_path.read_text(encoding="utf-8"))
         except OSError:
             continue
-        if f"id: {record_id}" not in text and f'id: "{record_id}"' not in text:
-            continue
-        parts = text.split("---", 2)
-        body = parts[-1].strip() if len(parts) >= 3 else text.strip()
-        first_para = body.split("\n\n")[0].strip() if body else ""
-        return first_para
+        for frontmatter, body in records:
+            if str(frontmatter.get("id") or "") != record_id:
+                continue
+            if not is_active_crystallized_frontmatter(frontmatter):
+                return ""
+            return body.split("\n\n")[0].strip() if body else ""
     return ""

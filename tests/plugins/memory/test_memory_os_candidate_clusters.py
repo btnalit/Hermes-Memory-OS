@@ -3,7 +3,11 @@ import json
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
-from plugins.memory.memory_os.candidate_clusters import build_candidate_clusters, candidate_cluster_report
+from plugins.memory.memory_os.candidate_clusters import (
+    build_candidate_clusters,
+    candidate_cluster_action_target,
+    candidate_cluster_report,
+)
 from plugins.memory.memory_os.owner_actions import apply_owner_action, owner_review_queue_report, read_owner_action_records
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -190,26 +194,33 @@ def test_candidate_cluster_action_scope_change_fails_closed_without_canonical_wr
 
 def test_mixed_sensitivity_candidate_cluster_action_fails_closed(tmp_path):
     store = _store(tmp_path)
-    append_candidate_queue(
-        store,
+    candidates = [
         _candidate("cand-public", "mixed sensitivity cluster approval must not approve high sensitivity item", ["evt-public"], sensitivity="public"),
-    )
-    append_candidate_queue(
-        store,
         _candidate("cand-sensitive", "mixed sensitivity cluster approval must not approve high sensitivity items", ["evt-sensitive"], sensitivity="sensitive"),
-    )
-    item = _first_cluster_review_item(store)
+    ]
+    for candidate in candidates:
+        append_candidate_queue(store, candidate)
+    cluster = next(item for item in build_candidate_clusters(candidates) if item.member_count == 2)
+    target_id = candidate_cluster_action_target(cluster)
+
+    queue = owner_review_queue_report(store, limit=20)
+    assert all(item.get("target_type") != "candidate_cluster" for item in queue["items"])
+    assert {
+        item["target_id"]
+        for item in queue["items"]
+        if item.get("target_type") == "candidate"
+    } == {"cand-public", "cand-sensitive"}
 
     result = apply_owner_action(
         store,
         action_type="approve_candidate_cluster",
-        target=f"candidate_cluster:{item['target_id']}",
+        target=f"candidate_cluster:{target_id}",
         owner_id="owner-test",
         channel="test",
         apply=True,
     )
 
-    assert item["cluster_scope"]["mixed_sensitivity"] is True
+    assert cluster.mixed_sensitivity is True
     assert result["status"] == "error"
     assert result["code"] == "candidate_cluster_mixed_sensitivity"
     assert list(store.roots.crystallized_root.glob("*.md")) == []

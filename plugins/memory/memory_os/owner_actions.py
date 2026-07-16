@@ -22,8 +22,7 @@ from .crystallized import (
     CrystallizedMemoryService,
     is_active_crystallized_frontmatter,
     read_candidate_queue,
-    read_candidate_triage,
-    resolve_candidate_effective_state,
+    read_effective_candidates,
 )
 from .memory_sources import (
     ALLOWED_FEEDBACK_RATINGS,
@@ -2657,8 +2656,19 @@ def owner_review_queue_report(
     permanent_promotion_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     closed = _closed_targets(read_owner_action_records(store.roots))
-    items = _candidate_cluster_review_items(store, closed)
-    items.extend(_candidate_review_items(store, closed))
+    items: list[dict[str, Any]] = []
+    cluster_items = _candidate_cluster_review_items(store, closed)
+    collapsed_candidate_ids = {
+        str(candidate_id)
+        for item in cluster_items
+        for candidate_id in (item.get("member_candidate_ids") or [])
+    }
+    items.extend(cluster_items)
+    items.extend(
+        item
+        for item in _candidate_review_items(store, closed)
+        if str(item.get("target_id") or "") not in collapsed_candidate_ids
+    )
     items.extend(_proposal_review_items(store, closed))
     items.extend(_proposal_apply_review_items(store, closed))
     items.extend(_session_mirror_apply_review_items(store, closed))
@@ -2677,12 +2687,33 @@ def owner_review_queue_report(
         if target_type in LIVING_MEMORY_TARGET_TYPES:
             item["delivery_eligible"] = target_type == "permanent_memory_promotion"
     aged_items, aging = _apply_review_aging(store, items)
-    sorted_items = sorted(
-        aged_items,
-        key=lambda item: (_priority_sort_key(item["priority"]), item["target_type"], item["target_id"]),
-    )
+    review_config = load_config(store.roots.hermes_home).get("owner_review", {})
+    review_config = review_config if isinstance(review_config, dict) else {}
+    agenda_mode = str(review_config.get("review_agenda_v2_mode") or "shadow")
+    for item in aged_items:
+        item["agenda_score"] = _review_agenda_score(item)
+    if agenda_mode in {"apply", "apply_canary"}:
+        sorted_items = sorted(
+            aged_items,
+            key=lambda item: (
+                _priority_sort_key(item["priority"]),
+                -float(item.get("agenda_score") or 0.0),
+                item["target_type"],
+                item["target_id"],
+            ),
+        )
+    else:
+        sorted_items = sorted(
+            aged_items,
+            key=lambda item: (
+                _priority_sort_key(item["priority"]),
+                item["target_type"],
+                item["target_id"],
+            ),
+        )
     anchored = _with_anchors(sorted_items[: max(int(limit), 0)])
     counts = Counter(str(item.get("priority", "")) for item in sorted_items)
+    burden = _review_burden_projection(store, sorted_items, counts)
     return {
         "schema_version": OWNER_REVIEW_QUEUE_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
@@ -2694,7 +2725,55 @@ def owner_review_queue_report(
         "overflow_count": max(len(sorted_items) - max(int(limit), 0), 0),
         "raw_body_included": False,
         "review_aging": _review_aging_summary(sorted_items, aging),
+        "agenda_ranking_mode": f"risk_value_{agenda_mode}",
+        "burden": burden,
         "items": anchored,
+    }
+
+
+def _review_agenda_score(item: dict[str, Any]) -> float:
+    """Deterministic risk×value score; priority remains the hard first key."""
+    target_type = str(item.get("target_type") or "")
+    risk = {
+        "provisional_crystallized": 1.0,
+        "proposal_apply": 0.95,
+        "session_mirror_apply": 0.95,
+        "proposal": 0.85,
+        "candidate_cluster": 0.8,
+        "candidate": 0.75,
+    }.get(target_type, 0.5)
+    evidence = 1.0 if item.get("evidence_refs") or item.get("source_event_ids") else 0.6
+    age_bucket = str(item.get("aging_bucket") or "")
+    age_value = {"overdue": 1.0, "aging": 0.8, "fresh": 0.5}.get(age_bucket, 0.5)
+    return round(risk * 0.55 + evidence * 0.25 + age_value * 0.20, 4)
+
+
+def _review_burden_projection(
+    store: MemoryOSStore,
+    items: list[dict[str, Any]],
+    counts: Counter[str],
+) -> dict[str, Any]:
+    views = read_effective_candidates(store)
+    suppressed_terminal = sum(1 for view in views if view.terminal)
+    suppressed_noneligible = sum(
+        1 for view in views if not view.terminal and not view.owner_review_eligible
+    )
+    deferred = sum(
+        1
+        for record in read_owner_action_records(store.roots)
+        if str(record.get("action_type") or "").startswith("defer_")
+        and str(record.get("result") or "") in {"applied", "duplicate_ignored"}
+    )
+    decision_minutes = int(counts.get("action_required", 0)) * 2 + int(counts.get("review_suggested", 0))
+    return {
+        "raw_candidate_count": len(views),
+        "effective_owner_eligible_candidate_count": sum(1 for view in views if view.owner_review_eligible),
+        "suppressed_terminal_candidate_count": suppressed_terminal,
+        "suppressed_noneligible_candidate_count": suppressed_noneligible,
+        "decision_item_count": len(items),
+        "estimated_decision_minutes": decision_minutes,
+        "deferred_decision_count": deferred,
+        "repeat_decision_item_count": 0,
     }
 
 
@@ -2760,6 +2839,8 @@ def apply_owner_action(
         action_type=idempotency_action_type,
     )
     existing = _find_idempotent_action(store.roots, idempotency_key)
+    if existing and action_type == "defer_candidate_cluster" and not _defer_action_is_active(existing):
+        existing = None
     if existing:
         duplicate = _duplicate_record(existing, idempotency_key, action_type, target_type, target_id, owner_id, channel)
         if apply:
@@ -2800,6 +2881,8 @@ def apply_owner_action(
         note=note,
         rating=rating,
     )
+    if action_type == "defer_candidate_cluster":
+        record["deferred_until"] = _normalized_defer_until(deferred_until)
     _attach_owner_reply_context(record, reply_context or {})
     if original_target_id != target_id:
         record["original_target_id"] = original_target_id
@@ -4360,10 +4443,15 @@ def _attach_owner_reply_context(record: dict[str, Any], context: dict[str, Any])
 
 
 def _candidate_cluster_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
-    clusters = build_candidate_clusters(read_candidate_queue(store.roots))
+    candidates = [
+        item.candidate
+        for item in read_effective_candidates(store)
+        if item.owner_review_eligible
+    ]
+    clusters = build_candidate_clusters(candidates)
     items: list[dict[str, Any]] = []
     for cluster in clusters:
-        if cluster.member_count < 2:
+        if cluster.member_count < 2 or cluster.mixed_sensitivity:
             continue
         target_id = candidate_cluster_action_target(cluster)
         target_ref = f"candidate_cluster:{target_id}"
@@ -4406,19 +4494,12 @@ def _candidate_cluster_review_items(store: MemoryOSStore, closed: set[str]) -> l
 
 def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    # Read triage records to compute effective states
-    triage_records = read_candidate_triage(store)
-    for candidate in read_candidate_queue(store.roots):
+    for effective in read_effective_candidates(store):
+        if not effective.owner_review_eligible:
+            continue
+        candidate = effective.candidate
         target_ref = f"candidate:{candidate.candidate_id}"
         if target_ref in closed:
-            continue
-        # Skip candidates already tagged as fleeting (no owner action needed)
-        effective_state = resolve_candidate_effective_state(candidate, triage_records)
-        if effective_state == "fleeting":
-            continue
-        # Candidates already crystallized — skip
-        crystallized_matches = CrystallizedMemoryService(store).find_records_by_candidate_id(candidate.candidate_id)
-        if crystallized_matches:
             continue
         needs_consolidation = _candidate_needs_consolidation(candidate.body)
         created_at, created_at_source = _candidate_created_at_info(store, candidate)
@@ -4435,7 +4516,7 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
                 "created_at": created_at,
                 "created_at_source": created_at_source,
                 "status": "pending",
-                "effective_state": effective_state,
+                "effective_state": effective.effective_state,
                 "summary": (
                     "Memory candidate is a transcript/event excerpt and needs consolidation before approval"
                     if needs_consolidation
@@ -6648,9 +6729,9 @@ def _first_existing(columns: set[str], names: tuple[str, ...]) -> str:
 
 
 def _find_candidate(store: MemoryOSStore, candidate_id: str) -> CrystallizedCandidate | None:
-    for candidate in read_candidate_queue(store.roots):
-        if candidate.candidate_id == candidate_id:
-            return candidate
+    for effective in read_effective_candidates(store):
+        if effective.candidate.candidate_id == candidate_id:
+            return effective.candidate
     return None
 
 
@@ -8391,8 +8472,39 @@ def _closed_targets(actions: list[dict[str, Any]]) -> set[str]:
         action_type = str(action.get("action_type", ""))
         if action_type not in TERMINAL_ACTIONS_BY_TARGET_TYPE.get(target_type, set()):
             continue
+        if action_type == "defer_candidate_cluster" and not _defer_action_is_active(action):
+            continue
         closed.add(f"{target_type}:{action.get('target_id', '')}")
     return closed
+
+
+def _normalized_defer_until(value: str, *, now: datetime | None = None) -> str:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    parsed = _parse_owner_action_time(value)
+    if parsed is None or parsed <= current:
+        parsed = current + timedelta(days=7)
+    return parsed.isoformat()
+
+
+def _defer_action_is_active(record: dict[str, Any], *, now: datetime | None = None) -> bool:
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    deferred_until = _parse_owner_action_time(record.get("deferred_until"))
+    if deferred_until is None:
+        created = _parse_owner_action_time(record.get("created_at"))
+        if created is None:
+            return False
+        deferred_until = created + timedelta(days=7)
+    return deferred_until > current
+
+
+def _parse_owner_action_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _normalize_target(action_type: str, target: str) -> tuple[str, str]:

@@ -304,6 +304,7 @@ def run_exposure_rollup_cycle(
         all_rollups = _read_rollup_records(store)
         snapshot = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
+            "status": "ok",
             "latest_window_start": window_start,
             "latest_window_end": window_end,
             "latest_created_at": current.isoformat().replace("+00:00", "Z"),
@@ -355,74 +356,168 @@ def exposure_rollup_snapshot(store: Any) -> dict[str, Any]:
         }
 
 
-def exposure_monitor_stats(store: Any) -> dict[str, Any]:
-    """Return monitor-facing exposure telemetry stats (A6).
-
-    Computes lag cycles, attribution gap, and degradation count from
-    memory_sources and exposure rollup records.  Does not produce owner
-    review items — observation-only metrics.
-    """
-    from datetime import timezone as _tz
+def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[str, Any]:
+    """Return monitor-facing V2 exposure telemetry without mutating state."""
+    from datetime import timedelta, timezone as _tz
 
     from .memory_sources import read_memory_source_records
 
-    now = datetime.now(_tz.utc)
+    current = (now or datetime.now(_tz.utc)).astimezone(_tz.utc)
     snapshot = exposure_rollup_snapshot(store)
 
-    # ── Lag cycles: hours since last rollup window end ─────────────────
     lag_hours = 0.0
     latest_end = str(snapshot.get("latest_window_end") or "")
     if latest_end and snapshot.get("status") != "empty":
-        try:
-            end_dt = datetime.fromisoformat(latest_end.replace("Z", "+00:00"))
-            lag_hours = max(0.0, (now - end_dt.astimezone(_tz.utc)).total_seconds() / 3600.0)
-        except (ValueError, TypeError):
-            pass
+        end_dt = _parse_monitor_time(latest_end)
+        if end_dt is not None:
+            lag_hours = max(0.0, (current - end_dt).total_seconds() / 3600.0)
 
-    # ── Attribution gap: memory_sources records with selected source_ids
-    #    that cannot be mapped to any canonical record ───────────────────
-    ms_records = read_memory_source_records(store.roots, limit=1000)
-    attribution_gap_count = 0
-    for ms_rec in ms_records:
-        selected = ms_rec.get("selected") if isinstance(ms_rec.get("selected"), list) else []
-        has_source_ids = False
-        for section in selected:
-            if not isinstance(section, dict):
-                continue
-            sids = section.get("source_ids") or []
-            crystallized_ids = [
-                s for s in (sids if isinstance(sids, list) else [])
-                if str(s).startswith("crystallized:")
-            ]
-            if crystallized_ids:
-                has_source_ids = True
-                break
-        # A gap exists when a record has 0 selected sections but had sections
-        # available — detected via selected_chars_total > 0 and 0 selected sections
-        if not has_source_ids and int(ms_rec.get("selected_chars_total") or 0) > 0:
-            attribution_gap_count += 1
+    ms_records = read_memory_source_records(store.roots, limit=1_000_000)
+    natural_records = [
+        record
+        for record in ms_records
+        if record.get("natural_production") is True
+        and str(record.get("traffic_class") or "") == "production"
+    ]
+    rolling_cutoff = current - timedelta(days=7)
+    rolling_records = [
+        record for record in natural_records
+        if (_parse_monitor_time(record.get("created_at")) or datetime.min.replace(tzinfo=_tz.utc)) >= rolling_cutoff
+    ]
 
-    # ── Telemetry degraded count: count of records with boundary violations ─
+    all_history_gap = sum(1 for record in ms_records if _memory_source_has_attribution_gap(record))
+    schema_gap = sum(1 for record in natural_records if _memory_source_has_attribution_gap(record))
+    rolling_gap = sum(1 for record in rolling_records if _memory_source_has_attribution_gap(record))
     telemetry_degraded_count = sum(
-        1 for _ms_rec in ms_records
-        if isinstance(_ms_rec.get("boundary"), dict)
-        and any(v is True for v in _ms_rec["boundary"].values())
+        1 for record in natural_records
+        if isinstance(record.get("boundary"), dict)
+        and any(value is True for value in record["boundary"].values())
     )
 
-    # Collect rollup records for cumulative stats
     rollup_records = _read_rollup_records(store)
-    total_eligible = sum(int(r.get("eligible") or 0) for r in rollup_records)
-    total_selected = sum(int(r.get("selected") or 0) for r in rollup_records)
+    total_eligible = sum(int(record.get("eligible") or 0) for record in rollup_records)
+    total_selected = sum(int(record.get("selected") or 0) for record in rollup_records)
+    total_budget = sum(int(record.get("dropped_by_budget") or 0) for record in rollup_records)
+    total_rank = sum(int(record.get("dropped_by_rank") or 0) for record in rollup_records)
+    first_natural_at = min(
+        (_parse_monitor_time(record.get("created_at")) for record in natural_records),
+        default=None,
+        key=lambda value: value or datetime.max.replace(tzinfo=_tz.utc),
+    )
+    schema_rollups = [
+        record for record in rollup_records
+        if first_natural_at is not None
+        and (_parse_monitor_time(record.get("window_end") or record.get("created_at")) or datetime.min.replace(tzinfo=_tz.utc)) >= first_natural_at
+    ]
+    conservation_failures = sum(
+        1 for record in schema_rollups
+        if record.get("conservation_passes") is not True
+        or int(record.get("eligible") or 0)
+        != int(record.get("selected") or 0)
+        + int(record.get("dropped_by_budget") or 0)
+        + int(record.get("dropped_by_rank") or 0)
+    )
+    processed = sum(int(record.get("records_processed") or 0) for record in schema_rollups)
+    classified = sum(int(record.get("records_classified") or 0) for record in schema_rollups)
+    classified_ratio = min(1.0, classified / processed) if processed > 0 else None
 
+    daily: dict[str, dict[str, int | bool]] = {}
+    for record in schema_rollups:
+        timestamp = _parse_monitor_time(record.get("window_end") or record.get("created_at"))
+        if timestamp is None or int(record.get("records_processed") or 0) <= 0:
+            continue
+        date_key = timestamp.date().isoformat()
+        bucket = daily.setdefault(date_key, {"budget": 0, "valid": True})
+        bucket["budget"] = int(bucket["budget"]) + int(record.get("dropped_by_budget") or 0)
+        bucket["valid"] = bool(bucket["valid"]) and record.get("conservation_passes") is True
+    valid_natural_days = sum(1 for bucket in daily.values() if bucket["valid"] is True)
+    pressure_streak = 0
+    latest_completed_date = current.date() - timedelta(days=1)
+    ordered_dates = sorted(
+        (datetime.fromisoformat(key).date() for key in daily if datetime.fromisoformat(key).date() <= latest_completed_date),
+        reverse=True,
+    )
+    expected_date = latest_completed_date
+    for observed_date in ordered_dates:
+        if expected_date is None or observed_date != expected_date:
+            break
+        date_key = observed_date.isoformat()
+        if int(daily[date_key]["budget"]) <= 0 or daily[date_key]["valid"] is not True:
+            break
+        pressure_streak += 1
+        expected_date = observed_date - timedelta(days=1)
+    observation_days = 0.0
+    if first_natural_at is not None:
+        observation_days = max(0.0, (current - first_natural_at).total_seconds() / 86400.0)
+
+    freeze_reasons: list[str] = []
+    if valid_natural_days < 3:
+        freeze_reasons.append(f"initial_natural_cycles:{valid_natural_days}/3")
+    if observation_days < 30:
+        freeze_reasons.append(f"production_observation_days:{observation_days:.1f}/30")
+    if pressure_streak < 7:
+        freeze_reasons.append(f"budget_pressure_streak:{pressure_streak}/7")
+    if schema_gap or conservation_failures or telemetry_degraded_count:
+        freeze_reasons.append("schema_era_health_not_pass")
+
+    schema_health = "FAIL" if schema_gap or conservation_failures or telemetry_degraded_count else (
+        "healthy_no_sample" if not natural_records else "PASS"
+    )
     return {
-        "schema_version": "memory-os.exposure_monitor_stats.v0",
+        "schema_version": "memory-os.exposure_monitor_stats.v1",
         "exposure_rollup_lag_hours": round(lag_hours, 1),
         "exposure_rollup_records_total": len(rollup_records),
         "cumulative_eligible": total_eligible,
         "cumulative_selected": total_selected,
-        "attribution_gap_count": attribution_gap_count,
+        "cumulative_dropped_by_budget": total_budget,
+        "cumulative_dropped_by_rank": total_rank,
+        "conservation_total_passes": total_eligible == total_selected + total_budget + total_rank,
+        "attribution_gap_count": all_history_gap,
+        "all_history_attribution_gap_count": all_history_gap,
+        "schema_era_attribution_gap_count": schema_gap,
+        "rolling_7d_attribution_gap_count": rolling_gap,
+        "schema_era_conservation_failure_count": conservation_failures,
+        "schema_era_natural_record_count": len(natural_records),
+        "rolling_7d_natural_record_count": len(rolling_records),
+        "schema_era_classified_ratio": None if classified_ratio is None else round(classified_ratio, 4),
+        "schema_era_health": schema_health,
         "telemetry_degraded_count": telemetry_degraded_count,
+        "initial_natural_cycle_count": valid_natural_days,
+        "production_observation_days": round(observation_days, 1),
+        "budget_pressure_streak_days": pressure_streak,
+        "v2c_unfreeze_ready": not freeze_reasons,
+        "downstream_clearance_closure_frozen": bool(freeze_reasons),
+        "freeze_reasons": freeze_reasons,
         "latest_window_start": snapshot.get("latest_window_start", ""),
         "latest_window_end": snapshot.get("latest_window_end", ""),
-        "snapshot_status": snapshot.get("status", "unknown"),
+        "snapshot_status": snapshot.get("status", "ok" if snapshot.get("schema_version") == SNAPSHOT_SCHEMA_VERSION else "unknown"),
     }
+
+
+def _memory_source_has_attribution_gap(record: dict[str, Any]) -> bool:
+    attributable_classes = {"crystallized", "working", "entity_graph", "indexed_recall", "vector", "hindsight"}
+    sections: list[dict[str, Any]] = []
+    for key in ("selected", "dropped"):
+        raw_values = record.get(key)
+        values: list[Any] = raw_values if isinstance(raw_values, list) else []
+        sections.extend(value for value in values if isinstance(value, dict))
+    for section in sections:
+        if str(section.get("source_class") or "") not in attributable_classes:
+            continue
+        if int(section.get("chars") or 0) <= 0 and int(section.get("count") or 0) <= 0:
+            continue
+        raw_source_ids = section.get("source_ids")
+        source_ids: list[Any] = raw_source_ids if isinstance(raw_source_ids, list) else []
+        if not any(str(source_id).strip() for source_id in source_ids):
+            return True
+    return False
+
+
+def _parse_monitor_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

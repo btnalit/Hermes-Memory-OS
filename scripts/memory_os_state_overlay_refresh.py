@@ -58,6 +58,7 @@ from plugins.memory.memory_os.state_overlay import (
     append_overlay_run,
 )
 from plugins.memory.memory_os.state_overlay_renderer import render_state_overlay_md
+from plugins.memory.memory_os.task_state import read_effective_current_task
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,25 +92,17 @@ def main(argv: list[str] | None = None) -> int:
         store = MemoryOSStore(roots)
         store.initialize()
 
-        # Read current task anchor (most recent active)
-        current_task_anchor = ""
-        anchor_path = roots.memory_os_root / "system" / "active_task_anchor.jsonl"
-        if anchor_path.exists():
-            try:
-                for line in anchor_path.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    record = json.loads(line)
-                    if isinstance(record, dict) and record.get("status") == "active":
-                        current_task_anchor = str(record.get("anchor", ""))
-            except (json.JSONDecodeError, OSError):
-                pass  # fail-open
+        effective_task = read_effective_current_task(roots, profile=args.profile)
+        current_task_anchor = str((effective_task or {}).get("anchor") or "")
 
         overlay = build_state_overlay(
             store,
             roots,
             current_task_anchor=current_task_anchor,
         )
+        overlay["task_revision"] = str((effective_task or {}).get("revision") or "")
+        overlay["task_source_at"] = str((effective_task or {}).get("source_at") or "")
+        overlay["task_source_watermark"] = str((effective_task or {}).get("source_watermark") or "")
 
         # Count populated sections
         for key in (

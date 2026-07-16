@@ -231,6 +231,54 @@ def test_casual_continuity_report_selects_safe_carryover_without_mechanism_worki
     assert "memory_os canonical store" not in rendered_selected
 
 
+def test_score_then_budget_ranks_globally_before_consuming_budget():
+    query = "请部署记忆系统插件并检查网关状态"
+    low = ContextSection(
+        "Low Relevance",
+        "部署 记忆 系统 " + "x" * 20,
+        source_class="other",
+    )
+    high = ContextSection(
+        "High Relevance",
+        "部署 记忆 系统 插件 网关 状态 " + "y" * 20,
+        source_class="other",
+        metadata={"fresh": True},
+    )
+    budget = high.char_cost
+
+    report = route_context_sections(query, sections=[low, high], budget_chars=budget)
+
+    assert report["ranking_mode"] == "score_then_budget"
+    assert [item["section"] for item in report["selected_sections"]] == ["High Relevance"]
+    assert any(
+        item["section"] == "Low Relevance" and "budget_exceeded" in item["reason_codes"]
+        for item in report["dropped_sections"]
+    )
+
+
+def test_required_section_reserves_only_available_budget_in_router_projection():
+    section = ContextSection(
+        "Current Foreground Task",
+        "continue the owner-approved release task " + "x" * 100,
+        source_class="foreground",
+    )
+
+    report = route_context_sections(
+        "继续",
+        sections=[section],
+        current_task_anchor="continue the owner-approved release task",
+        budget_chars=10,
+    )
+
+    assert report["used_budget_chars"] == 10
+    assert report["used_budget_chars"] <= report["budget_chars"]
+    assert len(report["selected_sections"]) == 1
+    selected = report["selected_sections"][0]
+    assert selected["required"] is True
+    assert selected["allocated_chars"] == 10
+    assert "budget_truncated" in selected["reason_codes"]
+
+
 def test_router_report_redacts_secrets():
     sections = [
         ContextSection(

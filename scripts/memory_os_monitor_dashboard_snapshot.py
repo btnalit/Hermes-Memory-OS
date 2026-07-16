@@ -43,6 +43,11 @@ for _candidate in reversed(_PATH_CANDIDATES):
 
 from scripts.memory_os_module_cadence_report import build_cadence_report
 from plugins.memory.memory_os.audit import read_audit_records
+from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness
+from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
+from plugins.memory.memory_os.owner_actions import owner_review_queue_report
+from plugins.memory.memory_os.roots import MemoryOSRoots
+from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.legacy_right_brain_retirement import (
     LEGACY_CRON_NAMES,
     retirement_status,
@@ -135,7 +140,9 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "retirement_pending",
         "retired",
     }
-    owner = _owner_review_snapshot(memory_root)
+    roots = MemoryOSRoots.from_hermes_home(hermes_home, profile=profile)
+    store = MemoryOSStore(roots)
+    owner = _owner_review_snapshot(memory_root, profile=profile)
     memory = _memory_snapshot(memory_root)
     expression = _expression_snapshot(
         hermes_home,
@@ -150,11 +157,16 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     full_monitor = _full_monitor_snapshot(memory_root)
     rh26 = _rh26_snapshot(memory_root)
     execution_gate = _execution_gate_snapshot(memory_root)
-    owner_aging = _owner_aging_snapshot(memory_root)
+    owner_aging = _owner_aging_snapshot(memory_root, profile=profile)
     session_mirror = _session_mirror_snapshot(hermes_home)
     v3_seed_evidence = _v3_seed_evidence_snapshot(memory_root)
     v3_private_journal = _v3_private_journal_snapshot(memory_root)
     v3_inner_life = _v3_inner_life_snapshot(memory_root)
+    v2_exposure = exposure_monitor_stats(store)
+    clearance_freshness = clearance_snapshot_freshness(
+        roots,
+        for_activation=v2_exposure.get("v2c_unfreeze_ready") is True,
+    )
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     monitor = _monitor_snapshot(
         now=now,
@@ -200,6 +212,8 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
         "v3SeedEvidence": v3_seed_evidence,
         "v3PrivateJournal": v3_private_journal,
         "v3InnerLife": v3_inner_life,
+        "v2Exposure": v2_exposure,
+        "clearanceFreshness": clearance_freshness,
         "legacyRightBrainArchive": legacy_right_brain_archive,
     }
     _fill_audit_from_monitor_if_empty(snapshot)
@@ -440,52 +454,57 @@ def _cron_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _owner_review_backlog_snapshot(memory_root: Path) -> dict[str, Any]:
-    """Aggregate real owner-review backlog from candidate states.
+def _owner_review_backlog_snapshot(memory_root: Path, *, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
+    """Project backlog from the same effective Review Agenda used by delivery."""
+    latest_digest = _latest_jsonl(memory_root / "system" / "owner_review_rendered_digests.jsonl") or {}
+    raw_sections = latest_digest.get("sections")
+    sections: dict[str, Any] = raw_sections if isinstance(raw_sections, dict) else {}
+    try:
+        roots = MemoryOSRoots.from_hermes_home(memory_root.parent, profile=profile)
+        report = owner_review_queue_report(MemoryOSStore(roots), limit=1000)
+        return {
+            "backlog": {
+                "pending_total": int(report.get("pending_count") or 0),
+                "action_required": int(report.get("action_required_count") or 0),
+                "review_suggested": int(report.get("review_suggested_count") or 0),
+                "fyi": int(report.get("fyi_count") or 0),
+            },
+            "latest_digest_visible": {
+                "action_required_shown": len(sections.get("action_required") or []),
+                "review_suggested_shown": len(sections.get("review_suggested") or []),
+                "fyi_shown": len(sections.get("fyi") or []),
+            },
+            "digest_mode": str(latest_digest.get("digest_mode") or latest_digest.get("mode") or "unknown"),
+            "agenda_schema_version": str(report.get("schema_version") or ""),
+            "agenda_source": "effective_owner_review_queue",
+        }
+    except Exception:
+        # Effective-state projection failures must be visible; never silently
+        # reconstruct governance eligibility from raw candidate history.
+        return {
+            "backlog": {
+                "pending_total": 0,
+                "action_required": 0,
+                "review_suggested": 0,
+                "fyi": 0,
+            },
+            "latest_digest_visible": {
+                "action_required_shown": len(sections.get("action_required") or []),
+                "review_suggested_shown": len(sections.get("review_suggested") or []),
+                "fyi_shown": len(sections.get("fyi") or []),
+            },
+            "digest_mode": str(latest_digest.get("digest_mode") or latest_digest.get("mode") or "unknown"),
+            "agenda_schema_version": "",
+            "agenda_source": "effective_owner_review_queue_unavailable",
+            "status": "unavailable",
+        }
 
-    Returns both *total* backlog counts (across all candidates) and the
-    *visible* subset from the latest rendered digest, so the dashboard
-    can show when the digest is a partial agenda view.
-    """
-    candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
-    pending_total = 0
-    action_required = 0
-    review_suggested = 0
-    fyi = 0
-    for c in candidates:
-        state = str(c.get("canonical_state") or c.get("bridge_state") or "")
-        if state in ("owner_eligible", "pending"):
-            pending_total += 1
-            severity = str(c.get("owner_severity") or "")
-            if severity == "action_required":
-                action_required += 1
-            elif severity == "review_suggested":
-                review_suggested += 1
-            else:
-                fyi += 1
 
-    latest_digest = _latest_jsonl(memory_root / "system" / "owner_review_rendered_digests.jsonl")
-    sections = latest_digest.get("sections") if isinstance(latest_digest.get("sections"), dict) else {}
-    return {
-        "backlog": {
-            "pending_total": pending_total,
-            "action_required": action_required,
-            "review_suggested": review_suggested,
-            "fyi": fyi,
-        },
-        "latest_digest_visible": {
-            "action_required_shown": len(sections.get("action_required") or []),
-            "review_suggested_shown": len(sections.get("review_suggested") or []),
-            "fyi_shown": len(sections.get("fyi") or []),
-        },
-        "digest_mode": str(latest_digest.get("digest_mode") or "unknown"),
-    }
-
-
-def _owner_review_snapshot(memory_root: Path) -> dict[str, Any]:
-    backlog = _owner_review_backlog_snapshot(memory_root)
-    latest_digest = _latest_jsonl(memory_root / "system" / "owner_review_rendered_digests.jsonl")
-    sections = latest_digest.get("sections") if isinstance(latest_digest.get("sections"), dict) else {}
+def _owner_review_snapshot(memory_root: Path, *, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
+    backlog = _owner_review_backlog_snapshot(memory_root, profile=profile)
+    latest_digest = _latest_jsonl(memory_root / "system" / "owner_review_rendered_digests.jsonl") or {}
+    raw_sections = latest_digest.get("sections")
+    sections: dict[str, Any] = raw_sections if isinstance(raw_sections, dict) else {}
     items = []
     for section_name, severity in (
         ("action_required", "action_required"),
@@ -828,40 +847,70 @@ def _rh26_snapshot(memory_root: Path) -> dict[str, Any]:
 
 
 def _execution_gate_snapshot(memory_root: Path) -> dict[str, Any]:
-    """Read ExecutionGate envelope ledger for completion / violation counts."""
-    envelopes = _read_jsonl(memory_root / "system" / "execution_gate_envelopes.jsonl")
-    completions = sum(1 for e in envelopes if e.get("phase") == "completed")
-    violations = sum(1 for e in envelopes if e.get("boundary_violation"))
+    """Read canonical ExecutionGate permit/completion semantics."""
+    records = _read_jsonl(memory_root / "system" / "execution_gate_envelopes.jsonl")
+    permits = [record for record in records if record.get("stage") == "permit"]
+    completions = [record for record in records if record.get("stage") == "completion"]
+    permit_violations = sum(1 for record in permits if record.get("boundary_true") is True)
+    postcheck_violations = sum(
+        1 for record in completions if record.get("postcheck_boundary_true") is True
+    )
+    resolver_lane = "resolver_auto_approve"
+    violations = permit_violations + postcheck_violations
     return {
-        "total_envelopes": len(envelopes),
-        "completions": completions,
+        "total_envelopes": len(permits),
+        "permit_count": len(permits),
+        "completions": len(completions),
+        "completion_count": len(completions),
         "boundary_violations": violations,
+        "permit_boundary_violations": permit_violations,
+        "postcheck_boundary_violations": postcheck_violations,
+        "resolver_provisional_permits": sum(
+            1 for record in permits if record.get("lane_id") == resolver_lane
+        ),
+        "resolver_provisional_completions": sum(
+            1 for record in completions if record.get("lane_id") == resolver_lane
+        ),
+        # Permanent approval is a separate Owner-governed ledger and is never
+        # inferred from ExecutionGate records.
+        "permanent_approvals": 0,
         "status": "warn" if violations > 0 else "ok",
     }
 
 
-def _owner_aging_snapshot(memory_root: Path) -> dict[str, Any]:
-    """Read candidate ages for owner-review aging distribution."""
-    candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
-    now = datetime.now(timezone.utc)
+def _owner_aging_snapshot(memory_root: Path, *, profile: str = DEFAULT_PROFILE) -> dict[str, Any]:
+    """Read age distribution from the effective Owner Review projection."""
     aging: dict[str, int] = {"<24h": 0, "1-7d": 0, "7-30d": 0, ">30d": 0}
-    for c in candidates:
-        state = str(c.get("canonical_state") or c.get("bridge_state") or "")
-        if state not in ("owner_eligible", "pending"):
-            continue
-        created = _parse_datetime(c.get("created_at") or c.get("approved_at"))
-        if not created:
-            continue
-        age_hours = (now - created).total_seconds() / 3600
-        if age_hours < 24:
-            aging["<24h"] += 1
-        elif age_hours < 168:
-            aging["1-7d"] += 1
-        elif age_hours < 720:
-            aging["7-30d"] += 1
-        else:
-            aging[">30d"] += 1
-    return {"aging_buckets": aging, "pending_total": sum(aging.values())}
+    try:
+        roots = MemoryOSRoots.from_hermes_home(memory_root.parent, profile=profile)
+        report = owner_review_queue_report(MemoryOSStore(roots), limit=1000)
+        now = datetime.now(timezone.utc)
+        for item in report.get("items") or []:
+            created = _parse_datetime(item.get("created_at")) if isinstance(item, dict) else None
+            if not created:
+                continue
+            age_hours = (now - created).total_seconds() / 3600
+            if age_hours < 24:
+                aging["<24h"] += 1
+            elif age_hours < 168:
+                aging["1-7d"] += 1
+            elif age_hours < 720:
+                aging["7-30d"] += 1
+            else:
+                aging[">30d"] += 1
+        return {
+            "aging_buckets": aging,
+            "pending_total": sum(aging.values()),
+            "source": "effective_owner_review_queue",
+            "review_aging": report.get("review_aging") or {},
+        }
+    except Exception:
+        return {
+            "aging_buckets": aging,
+            "pending_total": 0,
+            "source": "effective_owner_review_queue_unavailable",
+            "review_aging": {},
+        }
 
 
 def _v3_inner_life_snapshot(memory_root: Path) -> dict[str, Any]:
@@ -897,16 +946,27 @@ def _v3_inner_life_snapshot(memory_root: Path) -> dict[str, Any]:
 def _v3_private_journal_snapshot(memory_root: Path) -> dict[str, Any]:
     rows = _read_jsonl(memory_root / "system" / "wandering_journal.jsonl")
     thoughts = [item for item in rows if item.get("record_type") == "thought"]
-    tiers = Counter(str(item.get("tier") or "unknown") for item in thoughts)
-    fates = Counter(str(item.get("fate") or "unknown") for item in thoughts)
+    traces = [item for item in rows if set(item) == {"queried_at", "scope"}]
+    legacy_traces = [item for item in rows if item.get("record_type") == "query_trace"]
+    latest_trace = traces[-1] if traces else legacy_traces[-1] if legacy_traces else {}
+    expected_trace_keys = {"queried_at", "scope"}
+    if latest_trace:
+        trace_contract = "pass" if set(latest_trace) == expected_trace_keys else "legacy_or_invalid"
+    else:
+        trace_contract = "no_query_observed"
     sweep = _read_json(memory_root / "system" / "v3_journal_sweep_status.json")
+    execution_gate_rows = _read_jsonl(memory_root / "system" / "execution_gate_envelopes.jsonl")
+    sweep_execution_evidence = any(
+        str(item.get("lane_id") or "") == "v3_journal_ttl_sweep"
+        for item in execution_gate_rows
+    )
     return {
         "status": "private_active_store",
-        "thought_count": len(thoughts),
-        "query_trace_count": sum(1 for item in rows if item.get("record_type") == "query_trace"),
-        "tier_counts": dict(sorted(tiers.items())),
-        "fate_counts": dict(sorted(fates.items())),
+        "has_active_thoughts": bool(thoughts),
+        "latest_query_trace_contract": trace_contract,
         "sweep_cycle_status": str(sweep.get("cycle_status") or "never_run"),
+        "per_item_annihilation_telemetry_persisted": False,
+        "sweep_execution_gate_evidence_persisted": sweep_execution_evidence,
     }
 
 

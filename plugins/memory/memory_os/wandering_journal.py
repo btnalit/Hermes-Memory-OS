@@ -160,13 +160,9 @@ def query_journal(
         else:
             result = thoughts
         result = result[:limit]
-        count = len(result)
         trace = {
-            "record_type": "query_trace",
-            "trace_id": "wndq_" + uuid4().hex,
             "queried_at": queried_at,
-            "scope_class": scope_class,
-            "result_count_bucket": "0" if count == 0 else "1-5" if count <= 5 else "6+",
+            "scope": scope_class,
         }
         _rewrite_records_under_lock(wandering_journal_path(store), [*records, trace])
         return [*records, trace], result

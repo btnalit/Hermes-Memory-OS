@@ -100,7 +100,7 @@ class HindsightRetriever:
         lines = ["### Hindsight Advisory (read-only)"]
         lines.append("- ⚠ Advisory only — not canonical memory")
         for obj in objects:
-            lines.append(f"- [advisory] {obj.content[:200]}")
+            lines.append(f"- [advisory] {obj.content}")
         return "\n".join(lines)
 
 

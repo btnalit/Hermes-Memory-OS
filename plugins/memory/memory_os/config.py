@@ -49,6 +49,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "dry_run_routes": [],
         "llm_judge_mode": "disabled",
     },
+    "recall_arbitration": {
+        "mode": "off",
+        "budget_chars": 1800,
+        "freshness_guard_mode": "shadow",
+        "conflict_resolution_mode": "shadow",
+    },
     "memory_sources": {
         "enabled": False,
         "mode": "metadata_only",
@@ -97,6 +103,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_action_required": 3,
         "max_review_suggested": 5,
         "max_fyi": 5,
+        "review_agenda_v2_mode": "shadow",
     },
     "right_brain_expression": {
         "legacy_cognitive_loop_enabled": False,
@@ -194,6 +201,11 @@ def get_config_schema() -> list[dict[str, Any]]:
             "default": DEFAULT_CONFIG["context_router"],
         },
         {
+            "key": "recall_arbitration",
+            "description": "Shadow-first recall deduplication, freshness, and claim conflict arbitration",
+            "default": DEFAULT_CONFIG["recall_arbitration"],
+        },
+        {
             "key": "memory_sources",
             "description": "Memory Sources attribution metadata ledger",
             "default": DEFAULT_CONFIG["memory_sources"],
@@ -267,6 +279,7 @@ def _merge_known(values: dict[str, Any]) -> dict[str, Any]:
     merged.update(_known_values(values))
     merged["substrate_providers"] = _merge_substrate_providers_config(merged.get("substrate_providers"))
     merged["context_router"] = _merge_context_router_config(merged.get("context_router"))
+    merged["recall_arbitration"] = _merge_recall_arbitration_config(merged.get("recall_arbitration"))
     merged["memory_sources"] = _merge_memory_sources_config(merged.get("memory_sources"))
     merged["low_clue_recall"] = _merge_low_clue_recall_config(merged.get("low_clue_recall"))
     merged["owner_review"] = _merge_owner_review_config(merged.get("owner_review"))
@@ -344,6 +357,24 @@ def _merge_context_router_config(value: Any) -> dict[str, Any]:
         merged["apply_routes"] = []
     if not isinstance(merged.get("dry_run_routes"), list):
         merged["dry_run_routes"] = []
+    return merged
+
+
+def _merge_recall_arbitration_config(value: Any) -> dict[str, Any]:
+    default = dict(DEFAULT_CONFIG["recall_arbitration"])
+    if not isinstance(value, dict):
+        return default
+    merged = {key: value.get(key, default_value) for key, default_value in default.items()}
+    if merged["mode"] not in {"off", "shadow", "apply_canary"}:
+        merged["mode"] = "off"
+    if merged["freshness_guard_mode"] not in {"off", "shadow", "apply", "apply_canary"}:
+        merged["freshness_guard_mode"] = "shadow"
+    if merged["conflict_resolution_mode"] not in {"off", "shadow", "apply", "apply_canary"}:
+        merged["conflict_resolution_mode"] = "shadow"
+    try:
+        merged["budget_chars"] = max(200, int(merged["budget_chars"]))
+    except (TypeError, ValueError):
+        merged["budget_chars"] = int(default["budget_chars"])
     return merged
 
 
@@ -430,6 +461,8 @@ def _merge_owner_review_config(value: Any) -> dict[str, Any]:
     merged["recurring_delivery_target_class"] = str(merged.get("recurring_delivery_target_class") or "missing")
     merged["cron_job_name"] = str(merged.get("cron_job_name") or "memory-os-owner-review-digest")
     merged["aging_enabled"] = bool(merged.get("aging_enabled"))
+    agenda_mode = str(merged.get("review_agenda_v2_mode") or "shadow")
+    merged["review_agenda_v2_mode"] = agenda_mode if agenda_mode in {"shadow", "apply", "apply_canary"} else "shadow"
     return merged
 
 

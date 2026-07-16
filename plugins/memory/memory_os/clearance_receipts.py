@@ -220,9 +220,12 @@ def write_clearance_receipt(
 
 
 def rebuild_clearance_receipt_snapshot(roots: Any) -> dict[str, Any]:
-    """Derive the receipt snapshot from the journal (lock+tmp+os.replace)."""
+    """Derive the effective receipt snapshot from the append-only journal."""
     records = read_clearance_receipts(roots)
+    ledger_path = clearance_receipts_path(roots)
     snapshot_path = clearance_receipt_snapshot_path(roots)
+    ledger_bytes = ledger_path.read_bytes() if ledger_path.exists() else b""
+    raw_rows = sum(1 for line in ledger_bytes.splitlines() if line.strip())
 
     receipts_by_id: dict[str, dict[str, Any]] = {}
     active_count = 0
@@ -236,15 +239,27 @@ def rebuild_clearance_receipt_snapshot(roots: Any) -> dict[str, Any]:
             if verdict in verdict_counts:
                 verdict_counts[verdict] += 1
 
+    latest_source_at = max(
+        (
+            str(record.get("invalidated_at") or record.get("judged_at") or "")
+            for record in records
+        ),
+        default="",
+    )
     snapshot: dict[str, Any] = {
-        "schema_version": "memory-os.clearance_receipt_snapshot.v0",
+        "schema_version": "memory-os.clearance_receipt_snapshot.v1",
         "built_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "total_receipts": len(records),
+        "total_receipts": len(records),  # compatibility alias: effective logical receipts
+        "effective_receipts": len(records),
+        "raw_ledger_rows": raw_rows,
         "active_receipts": active_count,
         "verdict_distribution": verdict_counts,
         "latest_watermark": max(
             (int(r.get("corpus_watermark") or 0) for r in records), default=0,
         ),
+        "latest_source_at": latest_source_at,
+        "source_ledger_sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+        "source_ledger_size_bytes": len(ledger_bytes),
         "receipts": receipts_by_id,
     }
 
@@ -277,6 +292,49 @@ def read_clearance_receipt_snapshot(roots: Any) -> dict[str, Any] | None:
         return json.loads(snapshot_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def clearance_snapshot_freshness(roots: Any, *, for_activation: bool = False) -> dict[str, Any]:
+    """Compare a derived snapshot with its authoritative append-only ledger."""
+
+    snapshot = read_clearance_receipt_snapshot(roots)
+    if not isinstance(snapshot, dict):
+        return {
+            "status": "missing",
+            "severity": "FAIL" if for_activation else "WARN",
+            "reason": "snapshot_missing",
+            "would_gate_activation": bool(for_activation),
+        }
+    ledger_path = clearance_receipts_path(roots)
+    ledger_bytes = ledger_path.read_bytes() if ledger_path.exists() else b""
+    actual_hash = hashlib.sha256(ledger_bytes).hexdigest()
+    actual_size = len(ledger_bytes)
+    actual_effective = read_clearance_receipts(roots)
+    actual_watermark = max(
+        (int(record.get("corpus_watermark") or 0) for record in actual_effective),
+        default=0,
+    )
+    reasons: list[str] = []
+    if str(snapshot.get("source_ledger_sha256") or "") != actual_hash:
+        reasons.append("ledger_hash_mismatch")
+    if int(snapshot.get("source_ledger_size_bytes") or 0) != actual_size:
+        reasons.append("ledger_size_mismatch")
+    if int(snapshot.get("effective_receipts") or snapshot.get("total_receipts") or 0) != len(actual_effective):
+        reasons.append("ledger_effective_count_mismatch")
+    if int(snapshot.get("latest_watermark") or 0) != actual_watermark:
+        reasons.append("ledger_watermark_mismatch")
+    stale = bool(reasons)
+    return {
+        "status": "stale" if stale else "fresh",
+        "severity": ("FAIL" if for_activation else "WARN") if stale else "OK",
+        "reason": ",".join(reasons) if reasons else "ledger_snapshot_match",
+        "would_gate_activation": bool(for_activation and stale),
+        "snapshot_built_at": str(snapshot.get("built_at") or ""),
+        "snapshot_watermark": int(snapshot.get("latest_watermark") or 0),
+        "ledger_watermark": actual_watermark,
+        "snapshot_effective_receipts": int(snapshot.get("effective_receipts") or snapshot.get("total_receipts") or 0),
+        "ledger_effective_receipts": len(actual_effective),
+    }
 
 
 # ── Corpus change event journal ─────────────────────────────────────────────

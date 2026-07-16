@@ -1001,6 +1001,19 @@ def test_interactive_install_shell_exposes_safe_operator_flow():
     assert "plugins.memory.memory_os cognitive-loop status" in text
 
 
+def test_install_shell_never_reenables_retired_right_brain_helper_by_default():
+    text = Path("scripts/install_memory_os.sh").read_text(encoding="utf-8")
+
+    assert 'default_right_brain_expression_cron_helper="no"' in text
+    operational = text[text.index("--operational)"):text.index("--test-host)")]
+    assert "INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1" not in operational
+    explicit_onboarding = text[text.index("--enable-owner-cron-onboarding)"):text.index("--no-enable-owner-cron-onboarding)")]
+    assert "INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1" not in explicit_onboarding
+    onboarding = text[text.index('if [[ "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" ]]'):text.index("if [[ -z \"${DEEP_REFLECTION_PRESET}\" ]]")]
+    assert "ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1" not in onboarding
+    assert "INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1" not in onboarding
+
+
 def test_install_shell_exposes_one_command_operational_product_install():
     text = Path("scripts/install_memory_os.sh").read_text(encoding="utf-8")
 

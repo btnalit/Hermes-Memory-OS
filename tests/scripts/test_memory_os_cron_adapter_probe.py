@@ -107,6 +107,19 @@ def test_cron_adapter_probe_uses_installed_snapshot_and_adapter_classification(t
     assert report["classification"]["memory_os_owned_wrapped_count"] == 1
 
 
+def test_cron_adapter_probe_missing_installed_registry_is_fail_visible(tmp_path):
+    hermes_home = tmp_path / "home"
+    report = cron_probe.probe_hermes_cron_adapter(
+        hermes_home=hermes_home,
+        hermes_bin=str(_fake_hermes(tmp_path)),
+    )
+
+    assert report["status"] == "error"
+    assert report["spec_source"] == "installed_cron_registry_missing"
+    assert any(item["code"] == "installed_cron_registry_missing" for item in report["findings"])
+    assert report["classification"]["memory_os_owned_expected_count"] == 0
+
+
 def test_cron_adapter_probe_classifies_known_optional_jobs_outside_active_snapshot(tmp_path):
     hermes_home = tmp_path / "home"
     snapshot_path = hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json"

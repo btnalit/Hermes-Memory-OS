@@ -147,7 +147,6 @@ while [[ $# -gt 0 ]]; do
       LLM_JUDGE_PRESET="${LLM_JUDGE_PRESET:-active}"
       ENABLE_OWNER_CRON_ONBOARDING=1
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
-      INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
       shift
       ;;
     --test-host)
@@ -230,7 +229,6 @@ while [[ $# -gt 0 ]]; do
     --enable-owner-cron-onboarding)
       ENABLE_OWNER_CRON_ONBOARDING=1
       INSTALL_OWNER_REVIEW_CRON_HELPER=1
-      INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
       shift
       ;;
     --no-enable-owner-cron-onboarding)
@@ -541,7 +539,7 @@ select_options() {
   local default_enable_cognitive_loop="yes"
   local default_owner_review_cron_helper="yes"
   local default_enable_owner_cron_onboarding="yes"
-  local default_right_brain_expression_cron_helper="yes"
+  local default_right_brain_expression_cron_helper="no"
   local default_preset="production-safe"
   local default_memory_sources_preset="production-safe"
   local default_llm_judge_preset="report-only"
@@ -582,12 +580,9 @@ select_options() {
   [[ -n "${ENABLE_OWNER_CRON_ONBOARDING}" ]] || { ask_yes_no "Enable Memory-OS active-closure Hermes cron onboarding?" "${default_enable_owner_cron_onboarding}" && ENABLE_OWNER_CRON_ONBOARDING=1 || ENABLE_OWNER_CRON_ONBOARDING=0; }
   if [[ "${ENABLE_OWNER_CRON_ONBOARDING}" == "1" ]]; then
     ENABLE_OWNER_REVIEW_CRON=1
-    ENABLE_RIGHT_BRAIN_EXPRESSION_CRON=1
     INSTALL_OWNER_REVIEW_CRON_HELPER=1
-    INSTALL_RIGHT_BRAIN_EXPRESSION_CRON_HELPER=1
     resolve_owner_review_cron_deliver
     resolve_owner_review_cron_channel
-    resolve_right_brain_expression_cron_deliver
   fi
 
   if [[ -z "${DEEP_REFLECTION_PRESET}" ]]; then
