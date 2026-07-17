@@ -212,6 +212,12 @@ def test_snapshot_counts_only_latest_revision_of_30_consecutive_valid_days(tmp_p
                 "coverage_ratio": 1.0,
                 "source_cursor_contiguous": True,
                 "rebuild_digest": f"sha256:{day}",
+                # These fixtures model 30 days of legitimate cron history —
+                # the natural-cycle gate (BB.6-2) only counts trigger_class
+                # "natural_cron" rows, so the fixture must be tagged as such
+                # to keep testing the latest-revision/consecutive-day logic
+                # this test is actually about.
+                "trigger_class": "natural_cron",
             }
         )
     snapshot = build_v3_seed_evidence_snapshot(store, daily_records=rows)
@@ -221,3 +227,95 @@ def test_snapshot_counts_only_latest_revision_of_30_consecutive_valid_days(tmp_p
     assert snapshot["activation_evidence_ready"] is True
     assert snapshot["first_valid_date"] == "2026-06-01"
     assert snapshot["last_valid_date"] == "2026-06-30"
+    assert snapshot["legacy_unmarked_day_count"] == 0
+
+
+def test_manual_trigger_days_do_not_count_toward_natural_activation_gate(tmp_path):
+    """BB.6-2: a manually-triggered (no MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID
+    env var) run must not be able to inflate consecutive_valid_day_count or
+    mark activation_evidence_ready — only trigger_class=natural_cron rows
+    count toward the 30-day readiness gate."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    rows = [
+        {
+            "schema_version": "memory-os.v3_seed_edges_daily.v0",
+            "natural_date": f"2026-06-{day:02d}",
+            "created_at": f"2026-07-01T00:00:{day:02d}Z",
+            "valid": True,
+            "coverage_ratio": 1.0,
+            "source_cursor_contiguous": True,
+            "rebuild_digest": f"sha256:{day}",
+            "trigger_class": "manual",
+        }
+        for day in range(1, 31)
+    ]
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=rows)
+
+    assert snapshot["valid_day_count"] == 0
+    assert snapshot["consecutive_valid_day_count"] == 0
+    assert snapshot["activation_evidence_ready"] is False
+    assert snapshot["legacy_unmarked_day_count"] == 0
+
+
+def test_legacy_unmarked_days_counted_separately_and_excluded_from_natural_gate(tmp_path):
+    """BB.6-2: rows written before trigger_class existed are visible via
+    legacy_unmarked_day_count but never counted as natural (same treatment
+    as manual runs — pre-fix history cannot silently satisfy the gate)."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    rows = [
+        {
+            "schema_version": "memory-os.v3_seed_edges_daily.v0",
+            "natural_date": f"2026-06-{day:02d}",
+            "created_at": f"2026-07-01T00:00:{day:02d}Z",
+            "valid": True,
+            "coverage_ratio": 1.0,
+            "source_cursor_contiguous": True,
+            "rebuild_digest": f"sha256:{day}",
+        }
+        for day in range(1, 31)
+    ]
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=rows)
+
+    assert snapshot["valid_day_count"] == 0
+    assert snapshot["consecutive_valid_day_count"] == 0
+    assert snapshot["activation_evidence_ready"] is False
+    assert snapshot["legacy_unmarked_day_count"] == 30
+
+
+def test_daily_record_stamps_trigger_class_from_execution_gate_envelope_env_var(tmp_path, monkeypatch):
+    """BB.6-2: run_v3_seed_evidence_cycle stamps trigger_class on the daily
+    record from MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID — only a process
+    launched under the cron ExecutionGate wrapper has this env var set."""
+    from plugins.memory.memory_os.v3_seed_evidence import run_v3_seed_evidence_cycle
+
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        _record("msrc_manual", "2026-07-12T01:00:00Z", "crystallized:a", "crystallized:b"),
+    )
+    monkeypatch.delenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", raising=False)
+
+    manual_report = run_v3_seed_evidence_cycle(
+        store,
+        target_date="2026-07-12",
+        now=datetime(2026, 7, 13, 1, tzinfo=timezone.utc),
+        require_shared_entity=False,
+    )
+    assert manual_report["daily_record"]["trigger_class"] == "manual"
+
+    monkeypatch.setenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "real-cron-envelope")
+    append_memory_source_record(
+        store.roots,
+        _record("msrc_natural", "2026-07-13T01:00:00Z", "crystallized:c", "crystallized:d"),
+    )
+    natural_report = run_v3_seed_evidence_cycle(
+        store,
+        target_date="2026-07-13",
+        now=datetime(2026, 7, 14, 1, tzinfo=timezone.utc),
+        require_shared_entity=False,
+    )
+    assert natural_report["daily_record"]["trigger_class"] == "natural_cron"

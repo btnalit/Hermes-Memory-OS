@@ -52,6 +52,13 @@ def run_v3_seed_evidence_cycle(
 ) -> dict[str, Any]:
     """Build one exact UTC-day product and its 30-day readiness snapshot."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    # BB.6-2: trigger provenance (mirrors exposure_rollup.py Fix 3) — only a
+    # process launched under the cron ExecutionGate wrapper
+    # (memory_os_execution_gate_runner.py) has this env var set. Basing the
+    # signal on the OS environment — not the execution_gate_envelope_id
+    # parameter — means a manual/direct call cannot forge "natural_cron" by
+    # passing a fabricated envelope id.
+    trigger_class = "natural_cron" if os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID") else "manual"
     natural_date = _coerce_date(target_date) if target_date is not None else current.date() - timedelta(days=1)
     window_start = datetime.combine(natural_date, datetime.min.time(), tzinfo=timezone.utc)
     window_end = window_start + timedelta(days=1)
@@ -206,6 +213,7 @@ def run_v3_seed_evidence_cycle(
         "valid": not invalid_reasons,
         "invalid_reasons": invalid_reasons,
         "execution_gate_envelope_id": envelope_id,
+        "trigger_class": trigger_class,
     }
 
     try:
@@ -265,7 +273,18 @@ def build_v3_seed_evidence_snapshot(
         previous = latest_by_date.get(natural_date)
         if previous is None or str(row.get("created_at") or "") >= str(previous.get("created_at") or ""):
             latest_by_date[natural_date] = row
-    valid_dates = sorted(_coerce_date(value) for value, row in latest_by_date.items() if row.get("valid") is True)
+    # BB.6-2: the 30-day activation-readiness gate must only count days
+    # produced by the cron ExecutionGate wrapper — a manual/backfill run of
+    # this lane must not be able to inflate consecutive_valid_day_count or
+    # mark activation_evidence_ready early (mirrors exposure_rollup.py Fix 3's
+    # natural_cron gating). Rows written before trigger_class existed are
+    # visible via legacy_unmarked_day_count but never counted as natural.
+    natural_by_date = {
+        natural_date: row for natural_date, row in latest_by_date.items()
+        if row.get("trigger_class") == "natural_cron"
+    }
+    legacy_unmarked_day_count = sum(1 for row in latest_by_date.values() if "trigger_class" not in row)
+    valid_dates = sorted(_coerce_date(value) for value, row in natural_by_date.items() if row.get("valid") is True)
     longest: list[date] = []
     current_run: list[date] = []
     for item in valid_dates:
@@ -276,7 +295,7 @@ def build_v3_seed_evidence_snapshot(
         current_run.append(item)
     if len(current_run) > len(longest):
         longest = current_run
-    coverage_values = [float(row.get("coverage_ratio") or 0.0) for row in latest_by_date.values() if row.get("valid") is True]
+    coverage_values = [float(row.get("coverage_ratio") or 0.0) for row in natural_by_date.values() if row.get("valid") is True]
     return {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
@@ -288,6 +307,7 @@ def build_v3_seed_evidence_snapshot(
         "minimum_valid_coverage_ratio": min(coverage_values) if coverage_values else 0.0,
         "invalid_day_count": sum(1 for row in latest_by_date.values() if row.get("valid") is not True),
         "latest_natural_date": max(latest_by_date) if latest_by_date else "",
+        "legacy_unmarked_day_count": legacy_unmarked_day_count,
     }
 
 

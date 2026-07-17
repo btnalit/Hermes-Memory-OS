@@ -128,6 +128,78 @@ def test_collect_snapshot_remote_probe_missing_field_is_not_silent(monkeypatch):
     )
 
 
+def test_collect_snapshot_remote_populates_living_memory_promotion_ledger_from_successful_probe(monkeypatch):
+    """BB.6-1: a successful living_memory_promotion_probe result from the
+    remote SSH probe is consumed as real ledger counts, instead of leaving
+    decision_recovery_failure_count/stale_open_proposal_count stuck at the
+    hardcoded-0 placeholders (the pre-fix silent-zero behavior that made
+    those FAIL checks structurally unreachable in production)."""
+    fake_counts = {
+        "proposal_ledger_counts": {"open": 1, "deciding": 0, "approved": 0, "rejected": 0, "deferred": 0, "revoked": 0, "expired": 0},
+        "token_ledger_counts": {"open": 0, "consumed": 0, "revoked": 0, "expired": 0},
+        "decision_recovery_failure_count": 2,
+        "stale_open_proposal_count": 3,
+    }
+
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {"living_memory_promotion_probe": {"ok": True, "counts": fake_counts}}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    section = snapshot["living_memory_promotion"]
+    assert section["decision_recovery_failure_count"] == 2
+    assert section["stale_open_proposal_count"] == 3
+    assert section["ledger_state_collection_status"] == "collected"
+    fail_codes = {item["code"] for item in snapshot["classification"]["fail"]}
+    assert "living_memory_decision_recovery_failure" in fail_codes
+    assert "living_memory_stale_open_proposal" in fail_codes
+
+
+def test_collect_snapshot_remote_ledger_probe_failure_becomes_explicit_warn(monkeypatch):
+    """BB.6-1: SSH/runtime/bad-JSON style remote ledger sub-probe failure
+    never silently leaves the ledger counts looking like a verified zero —
+    it becomes an explicit unavailable+error_code shape which classify_snapshot
+    turns into a WARN (never a silent pass)."""
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {"living_memory_promotion_probe": {"ok": False, "error_code": "ImportError"}}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    section = snapshot["living_memory_promotion"]
+    assert section["ledger_state_collection_status"] == "unavailable"
+    assert section["ledger_state_collection_error_code"] == "ImportError"
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
+        for item in snapshot["classification"]["warn"]
+    )
+
+
+def test_collect_snapshot_remote_ledger_probe_missing_field_is_not_silent(monkeypatch):
+    """Defensive: even if the remote probe response is missing the
+    living_memory_promotion_probe field entirely, this must still surface
+    as an explicit failure — never silently 'unavailable' with no signal."""
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    section = snapshot["living_memory_promotion"]
+    assert section["ledger_state_collection_status"] == "unavailable"
+    assert section["ledger_state_collection_error_code"] == "remote_probe_field_missing"
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:
@@ -6071,6 +6143,55 @@ def test_remote_probe_v2_exposure_and_clearance_probe_failure_is_bounded_not_rai
     )
 
     result = namespace["v2_exposure_and_clearance_probe"]()
+
+    assert result["ok"] is False
+    assert result["error_code"] == "RuntimeError"
+
+
+def test_remote_probe_script_includes_living_memory_promotion_probe():
+    """BB.6-1: the generated remote probe script collects permanent-promotion
+    ledger state counts using the same SSH remote-execution pattern as the
+    other remote projections, instead of leaving production hosts to always
+    report hardcoded-0 recovery/stale-open counts."""
+    script = monitor._remote_probe_script()
+    assert "def living_memory_promotion_probe():" in script
+    assert '"living_memory_promotion_probe": living_memory_promotion_probe_result,' in script
+    assert "living_memory_promotion_probe_result = living_memory_promotion_probe()" in script
+    assert "from plugins.memory.memory_os.permanent_promotion import read_permanent_promotion_ledger_counts" in script
+    compile(script, "<probe_living_memory_promotion>", "exec")
+
+
+def test_remote_probe_living_memory_promotion_probe_returns_ok_shape():
+    """The remote-side function returns the same ok/counts shape
+    collect_snapshot() expects, using the real permanent_promotion module —
+    a non-existent hermes_home simply yields empty/zeroed ledger counts."""
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+
+    result = namespace["living_memory_promotion_probe"]()
+
+    assert result["ok"] is True
+    assert result["counts"]["proposal_ledger_counts"] == {
+        "open": 0, "deciding": 0, "approved": 0, "rejected": 0, "deferred": 0, "revoked": 0, "expired": 0,
+    }
+    assert result["counts"]["decision_recovery_failure_count"] == 0
+
+
+def test_remote_probe_living_memory_promotion_probe_failure_is_bounded_not_raised(monkeypatch):
+    """BB.6-1: if the remote host's runtime raises (missing package, corrupt
+    local state, etc.), the sub-probe must catch it and report ok=False —
+    never let an exception here crash the rest of the remote probe script."""
+    from plugins.memory.memory_os import permanent_promotion as _permanent_promotion_module
+
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    monkeypatch.setattr(
+        _permanent_promotion_module,
+        "read_permanent_promotion_ledger_counts",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    result = namespace["living_memory_promotion_probe"]()
 
     assert result["ok"] is False
     assert result["error_code"] == "RuntimeError"
