@@ -186,6 +186,14 @@ def write_clearance_receipt(
     Checks the idempotency key before writing — an existing active receipt
     with the same key suppresses the write, UNLESS that receipt's record_id
     has been invalidated by a newer journal entry (rejudge path).
+
+    On a successful append, the derived receipt snapshot is rebuilt in the
+    same call so ``clearance_snapshot_freshness`` reports fresh in
+    production — the snapshot previously only got (re)built from tests,
+    never from the live write path. This is fail-visible by design: if the
+    rebuild raises, the exception propagates to the caller instead of being
+    swallowed (the per-item try/except in ``run_clearance_cycle`` records it
+    as a bounded ``error_record``; it is never silently dropped).
     """
     from .jsonl_io import append_jsonl_locked, read_jsonl
 
@@ -213,6 +221,9 @@ def write_clearance_receipt(
             return {"status": "idempotent", "receipt_id": existing_receipt.receipt_id, "written": False}
 
     append_jsonl_locked(path, receipt_dict)
+    # Fail-visible: no try/except here. A rebuild failure must surface to
+    # the caller, not vanish silently (No Silent Failures).
+    rebuild_clearance_receipt_snapshot(roots)
     return {"status": "ok", "receipt_id": receipt.receipt_id, "written": True}
 
 

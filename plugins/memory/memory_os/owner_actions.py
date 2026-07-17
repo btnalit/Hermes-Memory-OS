@@ -2773,8 +2773,43 @@ def _review_burden_projection(
         "decision_item_count": len(items),
         "estimated_decision_minutes": decision_minutes,
         "deferred_decision_count": deferred,
-        "repeat_decision_item_count": 0,
+        "repeat_decision_item_count": _repeat_decision_item_count(store, items),
     }
+
+
+def _repeat_decision_item_count(store: MemoryOSStore, items: list[dict[str, Any]]) -> int:
+    """Count current agenda items that already appeared in the most recently
+    rendered owner digest.
+
+    Comparison key is the stable ``review_item_id`` (e.g.
+    ``review:candidate:cand_123``) — never display text (``summary``,
+    ``question``, ...), which is re-derived per render and would produce
+    false negatives/positives on wording changes alone.  ``review_item_id``
+    is exactly the identity ``_bounded_rendered_item`` persists into the
+    rendered-digest ledger, so this reads the same key both sides write.
+    """
+    records = read_owner_review_rendered_digest_records(store.roots)
+    if not records:
+        return 0
+    latest = _rendered_digest_from_record(records[-1])
+    sections = latest.get("sections") if isinstance(latest.get("sections"), dict) else {}
+    prior_review_item_ids: set[str] = set()
+    for section_items in sections.values():
+        if not isinstance(section_items, list):
+            continue
+        for prior_item in section_items:
+            if not isinstance(prior_item, dict):
+                continue
+            review_item_id = str(prior_item.get("review_item_id") or "")
+            if review_item_id:
+                prior_review_item_ids.add(review_item_id)
+    if not prior_review_item_ids:
+        return 0
+    return sum(
+        1
+        for item in items
+        if str(item.get("review_item_id") or "") in prior_review_item_ids
+    )
 
 
 def _assemble_living_memory_delivery_items(
@@ -5518,6 +5553,20 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     if target_type == "hindsight_curation":
         summary = _safe_review_summary(item.get("summary"), fallback="Hindsight 治理建议")
         return _bounded_text(f"要记录这条 Hindsight 治理决策吗？{summary}", 180)
+    if target_type == "provisional_crystallized_record":
+        remaining_days = item.get("remaining_days")
+        remaining = str(remaining_days) if remaining_days is not None else "?"
+        return _bounded_text(
+            f"这条 provisional crystallized 记录还剩 {remaining} 天自动到期"
+            "（confirm 当前是禁用的空操作，不会生效）；要现在 reject 让它提前失效吗？",
+            180,
+        )
+    if target_type == "knob_override":
+        knob_name = str(item.get("knob_name") or "")
+        return _bounded_text(
+            f"这个自演化旋钮调整（{knob_name}）要确认为永久生效，还是回退到调整前的值？",
+            180,
+        )
     return "请看一下这条 Memory-OS 状态信号。"
 
 
@@ -5545,6 +5594,13 @@ def _review_suggested_action(actions: list[dict[str, str]], target_type: str) ->
         return "这次摘要里不需要操作；等待后续整理或 review queue 清理"
     if target_type == "permanent_memory_promotion" and examples:
         return " or ".join(examples[:3])
+    if target_type == "provisional_crystallized_record" and len(examples) >= 2:
+        # examples[0] is confirm (a disabled no-op); examples[1] is reject
+        # (the only action that actually changes state) — do not present
+        # them as an equally-valid "X or Y" choice.
+        return f"{examples[1]}（confirm 在当前 constitution 下是禁用的空操作，不会生效）"
+    if target_type == "knob_override" and len(examples) >= 2:
+        return f"{examples[0]} or {examples[1]}"
     return "不需要操作"
 
 
@@ -5669,6 +5725,19 @@ def _review_consequence(target_type: str) -> str:
         return "仅进入 owner digest 可见面；不会创建审批 token、不会 apply、不会改策略或长期记忆。"
     if target_type == "hindsight_curation":
         return "批准只记录一条 Hindsight curation owner decision；不会写入、删除、降级或提升 Hindsight，也不会让 Hindsight authoritative。"
+    if target_type == "provisional_crystallized_record":
+        return (
+            "confirm 在当前 V2-0 constitution 下是被禁用的历史动作，deterministically rejected"
+            "（reason=legacy_permanent_action_rejected），不会产生任何效果；"
+            "reject 会让这条 provisional 记录立即失效（invalidate_provisional_record）并退出晋升队列，"
+            "不等自然到期，也不会影响其它 canonical 记录。"
+        )
+    if target_type == "knob_override":
+        return (
+            "confirm 会把这个 provisional 旋钮调整写成永久 override（不再到期）；"
+            "reject 会把旋钮值回退到调整前的 prior_value；两者都会写入 owner-gated override store 并留痕 audit，"
+            "都是真实的状态变更。"
+        )
     return "仅供了解；不需要状态变更。"
 
 

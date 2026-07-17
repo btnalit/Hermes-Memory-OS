@@ -97,7 +97,7 @@ Do not enable R3–R5 until all are true:
 Recommended order:
 
 1. enable R3 only;
-2. observe private-journal aggregates and TTL deletion;
+2. confirm R3 stays inside the boundary — no canonical V2 write, no owner-visible surface, no session/trajectory/outbox drift — via `wandering_journal.jsonl` query traces and `v3_journal_sweep_status.json` `cycle_status`; confirm TTL sweep removes only expired pending thoughts and never touches shared/proposed records or query traces;
 3. enable R4 synthesis admission;
 4. enable R5 shadow only;
 5. enable actual expression last.

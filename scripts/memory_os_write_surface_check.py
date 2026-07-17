@@ -154,6 +154,67 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/knob_overrides.py::confirm_override::path.open_a::store_path": "knob_override_store",
     "plugins/modules/governance/override_sweep.py::OverrideSweepModule.run_once::path.open_a::self.runs_path": "module_report_only_existing_surface",
     "plugins/modules/governance/knob_ab_eval.py::KnobABEvalModule.run_once::path.open_a::self.runs_path": "module_report_only_existing_surface",
+
+    # ── Generalized append_jsonl_locked / _atomic_write_json detection ──────
+    # These call sites were always live write surfaces but were invisible to
+    # the scanner while the AST visitor only inspected them inside
+    # v3_seed_evidence.py / v3_wandering.py. Generalizing the detection to
+    # every scanned file (P2 fix) surfaced them for the first time; each is
+    # classified below by what it already, truthfully, does — no behavior
+    # changed, only visibility.
+    "plugins/memory/memory_os/audit.py::append_audit::append_jsonl_locked_call::_audit_monthly_path(audit_path)": "audit_only",
+    "plugins/memory/memory_os/clearance_receipts.py::write_clearance_receipt::append_jsonl_locked_call::path": "clearance_receipt_journal_ledger",
+    "plugins/memory/memory_os/clearance_receipts.py::append_corpus_change_event::append_jsonl_locked_call::path": "corpus_change_event_ledger",
+    "plugins/memory/memory_os/clearance_receipts.py::invalidate_receipts_by_judge_version::append_jsonl_locked_call::clearance_receipts_path(roots)": "clearance_receipt_invalidation_ledger",
+    "plugins/memory/memory_os/clearance_receipts.py::invalidate_receipts_since::append_jsonl_locked_call::clearance_receipts_path(roots)": "clearance_receipt_invalidation_ledger",
+    "plugins/memory/memory_os/deployment_runtime_manifest.py::write_deployment_runtime_manifest::atomic_json_replace_call::path": "deployment_runtime_manifest_write",
+    "plugins/memory/memory_os/execution_gate.py::_append_jsonl::append_jsonl_locked_call::path": "execution_gate_private_writer",
+    "plugins/memory/memory_os/exposure_rollup.py::run_exposure_rollup_cycle::append_jsonl_locked_call::_rollup_path(store)": "exposure_rollup_cycle_ledger",
+    "plugins/memory/memory_os/index.py::_write_edge_canonical::append_jsonl_locked_call::edges_path": "graph_edge_canonical",
+    "plugins/memory/memory_os/left_brain_advisor.py::_append_jsonl::append_jsonl_locked_call::path": "left_brain_advisor_private_manual_writer",
+    "plugins/memory/memory_os/legacy_right_brain_retirement.py::_retire_legacy_right_brain_locked::atomic_json_replace_call::manifest_path": "legacy_right_brain_retirement_manifest",
+    "plugins/memory/memory_os/memory_projection.py::_append_jsonl::append_jsonl_locked_call::path": "memory_projection_private_manual_writer",
+    "plugins/memory/memory_os/memory_sources.py::append_memory_source_record::append_jsonl_locked_call::path": "memory_sources_existing_surface",
+    "plugins/memory/memory_os/owner_actions.py::_append_jsonl::append_jsonl_locked_call::path": "owner_actions_private_writer",
+    "plugins/memory/memory_os/permanent_promotion.py::_write_absorption_audit::append_jsonl_locked_call::path": "permanent_promotion_absorption_audit",
+    "plugins/memory/memory_os/prefetch.py::_record_substrate_shadow_recall::append_jsonl_locked_call::path": "report_only_shadow_recall",
+    "plugins/memory/memory_os/prefetch.py::_record_graph_layer_shadow::append_jsonl_locked_call::path": "report_only_graph_layer_shadow",
+    "plugins/memory/memory_os/recall_policy.py::append_recall_observation::append_jsonl_locked_call::recall_observation_path(roots)": "recall_plan_shadow_observation_ledger",
+    "plugins/memory/memory_os/session_mirror.py::_append_jsonl::append_jsonl_locked_call::path": "session_mirror_private_writer",
+    "plugins/memory/memory_os/state_overlay.py::write_state_overlay::atomic_json_replace_call::out_path": "state_overlay_projection_write",
+    "plugins/memory/memory_os/state_overlay.py::_write_overlay_quality::atomic_json_replace_call::out_dir / 'quality.json'": "state_overlay_quality_report",
+    "plugins/memory/memory_os/store.py::MemoryOSStore.append_event::append_jsonl_locked_call::path": "canonical_event_store",
+    "plugins/memory/memory_os/store.py::MemoryOSStore.write_working_document::atomic_json_replace_call::path": "working_document_store",
+    "plugins/memory/memory_os/store.py::MemoryOSStore._quarantine_malformed_event::append_jsonl_locked_call::quarantine_path": "quarantine_only",
+    "plugins/memory/memory_os/structural_write_gate.py::append_governed_jsonl::append_jsonl_locked_call::destination": "structural_write_gate",
+    "plugins/memory/memory_os/substrates/ledger.py::SubstrateOperationLedger.append::append_jsonl_locked_call::self.path": "substrate_governance_ledger",
+    "plugins/memory/memory_os/substrates/projection.py::ProjectionLedger.append::append_jsonl_locked_call::self.path": "projection_coherence_ledger",
+    "plugins/modules/cognition/deep_reflection.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/cognition/wandering_mind.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/context/digest_consolidation.py::DigestConsolidationModule.build_daily_digest::atomic_json_replace_call::artifact_path": "digest_consolidation_daily_artifact",
+    "plugins/modules/context/digest_consolidation.py::DigestConsolidationModule.build_weekly_consolidation::atomic_json_replace_call::artifact_path": "digest_consolidation_weekly_artifact",
+    "plugins/modules/evidence/confabulation.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/evidence/scoring.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/expression/expression_draft.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/candidate_review.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/cascade_routing_policy.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/confidence_router.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/crystallized_revalidator.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/fact_judge.py::_append_verdict::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/ground_truth_miner.py::_append_jsonl::append_jsonl_locked_call::path": "reversible_labels_private_manual_writer",
+    "plugins/modules/governance/judge_calibration.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/knob_ab_eval.py::KnobABEvalModule.run_once::append_jsonl_locked_call::self.runs_path": "module_report_only_existing_surface",
+    "plugins/modules/governance/migration_controller.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "plugins/modules/governance/ops_gate.py::OpsGateModule._append_report::append_jsonl_locked_call::self.reports_path": "ops_gate_report_only",
+    "plugins/modules/governance/ops_gate.py::OpsGateModule._append_run::append_jsonl_locked_call::self.runs_path": "ops_gate_report_only",
+    "plugins/modules/governance/override_sweep.py::OverrideSweepModule.run_once::append_jsonl_locked_call::self.runs_path": "module_report_only_existing_surface",
+    "plugins/modules/governance/provisional.py::_append_jsonl::append_jsonl_locked_call::path": "module_report_only_existing_surface",
+    "plugins/modules/governance/provisional_sweep.py::ProvisionalSweepModule.run_once::append_jsonl_locked_call::self.runs_path": "module_report_only_existing_surface",
+    "plugins/modules/governance/self_evolution.py::SelfEvolutionGovernorModule._write_report::append_jsonl_locked_call::self.reports_path": "module_report_only_existing_surface",
+    "plugins/modules/governance/self_evolution.py::SelfEvolutionGovernorModule._write_agenda_candidate::append_jsonl_locked_call::self.agenda_candidates_path": "self_evolution_agenda_report_only",
+    "plugins/modules/governance/shadow_recall.py::_append_jsonl::append_jsonl_locked_call::path": "module_private_writer_existing_surface",
+    "scripts/memory_os_candidate_aggregation_lane.py::main::append_jsonl_locked_call::store.roots.memory_os_root / 'system' / 'error_records.jsonl'": "owner_digest_error_record",
+    "scripts/memory_os_execution_gate_runner.py::_update_sidecar_index::atomic_json_replace_call::index_path": "cron_execution_gate_sidecar_index",
 }
 
 
@@ -253,16 +314,19 @@ class _WriteSurfaceVisitor(ast.NodeVisitor):
         elif isinstance(node.func, ast.Name) and node.func.id in {"_append_jsonl", "append_jsonl"}:
             kind = "append_jsonl_call"
             target = ast.unparse(node.args[0]) if node.args else ""
-        elif self.rel_path in {
-            "plugins/memory/memory_os/v3_seed_evidence.py",
-            "plugins/memory/memory_os/v3_wandering.py",
-        } and isinstance(node.func, ast.Name):
-            if node.func.id == "append_jsonl_locked":
-                kind = "append_jsonl_locked_call"
-                target = ast.unparse(node.args[0]) if node.args else ""
-            elif node.func.id == "_atomic_write_json":
-                kind = "atomic_json_replace_call"
-                target = ast.unparse(node.args[0]) if node.args else ""
+        elif isinstance(node.func, ast.Name) and node.func.id == "append_jsonl_locked":
+            # Generalized project-wide (was hardcoded to v3_seed_evidence.py /
+            # v3_wandering.py only) — every direct call site to the governed
+            # locked-append primitive must be classified, in whichever file
+            # it appears.
+            kind = "append_jsonl_locked_call"
+            target = ast.unparse(node.args[0]) if node.args else ""
+        elif isinstance(node.func, ast.Name) and node.func.id == "_atomic_write_json":
+            # Generalized project-wide for the same reason — each file that
+            # defines its own private `_atomic_write_json` helper still needs
+            # its call sites classified, not just the two V3 files.
+            kind = "atomic_json_replace_call"
+            target = ast.unparse(node.args[0]) if node.args else ""
         elif self.rel_path in {
             "plugins/memory/memory_os/v3_body_packet.py",
             "plugins/memory/memory_os/wandering_journal.py",

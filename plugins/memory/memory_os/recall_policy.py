@@ -86,9 +86,41 @@ def evaluate_observation_window(observations: Iterable[Mapping[str, Any]]) -> di
 
 RECALL_OBSERVATION_SCHEMA_VERSION = "memory-os.recall_observation.v1"
 
+# Size-gated retention (P2 fix): append_recall_observation grew the ledger
+# forever. Once it exceeds RECALL_OBSERVATION_COMPACT_THRESHOLD records, it
+# is rewritten to keep only the newest RECALL_OBSERVATION_RETAIN_COUNT — a
+# contiguous tail (oldest rows dropped from the head only), so
+# evaluate_observation_window's contiguous-suffix invariant is preserved:
+# dropping old head rows can never corrupt the current-era suffix, since the
+# suffix is defined relative to the trailing rows, which are never touched.
+RECALL_OBSERVATION_COMPACT_THRESHOLD = 2000
+RECALL_OBSERVATION_RETAIN_COUNT = 1000
+
 
 def recall_observation_path(roots: Any) -> Path:
     return Path(roots.memory_os_root) / "system" / "recall_plan_observations.jsonl"
+
+
+def _compact_recall_observation_ledger(roots: Any) -> None:
+    """Trim the ledger to the newest ``RECALL_OBSERVATION_RETAIN_COUNT`` rows.
+
+    No-op until the ledger exceeds ``RECALL_OBSERVATION_COMPACT_THRESHOLD``.
+    Uses ``write_jsonl_atomic_locked`` — the same sidecar-lock primitive
+    (``locked_jsonl_file``) that ``append_jsonl_locked`` uses for the append
+    itself, so this runs under the identical lock discipline (Win32-safe:
+    falls back to a threading.Lock when fcntl is unavailable, exactly like
+    the append path). Called as a separate, sequential lock acquisition
+    after the append's lock is released — nesting the two under one lock
+    would trip the reentrant-lock guard in jsonl_io, since both target the
+    same sidecar path.
+    """
+    from .jsonl_io import read_jsonl, write_jsonl_atomic_locked
+
+    path = recall_observation_path(roots)
+    records = read_jsonl(path)
+    if len(records) <= RECALL_OBSERVATION_COMPACT_THRESHOLD:
+        return
+    write_jsonl_atomic_locked(path, records[-RECALL_OBSERVATION_RETAIN_COUNT:])
 
 
 def append_recall_observation(
@@ -131,6 +163,7 @@ def append_recall_observation(
         from .jsonl_io import append_jsonl_locked
 
         append_jsonl_locked(recall_observation_path(roots), record, durable=True)
+        _compact_recall_observation_ledger(roots)
     except OSError:
         return False
     return True

@@ -202,6 +202,57 @@ class TestReceiptSnapshot:
         assert read_clearance_receipt_snapshot(roots) is None
 
 
+class TestReceiptSnapshotAutoRebuild:
+    """P2 fix: rebuild_clearance_receipt_snapshot had no production caller —
+    write_clearance_receipt is the only live write path (clearance_cycle.py),
+    so clearance_snapshot_freshness always reported stale/missing in
+    production even though tests exercised the rebuild directly."""
+
+    def test_write_clearance_receipt_rebuilds_snapshot_freshness(self, tmp_path: Path) -> None:
+        from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness
+
+        roots = FakeRoots(tmp_path)
+        # No explicit rebuild_clearance_receipt_snapshot(roots) call here —
+        # write_clearance_receipt alone must leave the snapshot fresh.
+        write_clearance_receipt(roots, ClearanceReceipt(
+            receipt_id="clr_fresh_1", record_id="pF", content_hash="hF",
+            verdict="clear", corpus_watermark=1, judge_version="v1",
+            judged_at="2026-07-11T00:00:00Z",
+        ))
+        freshness = clearance_snapshot_freshness(roots)
+        assert freshness["status"] == "fresh"
+        assert freshness["ledger_effective_receipts"] == 1
+        assert freshness["snapshot_effective_receipts"] == 1
+
+    def test_write_clearance_receipt_rebuild_failure_propagates(self, tmp_path: Path, monkeypatch) -> None:
+        """Fail-visible: if the snapshot rebuild raises, the exception must
+        propagate out of write_clearance_receipt rather than being silently
+        swallowed. The receipt append itself must already have happened —
+        this is about VISIBILITY of the rebuild failure, not about losing
+        the write."""
+        import plugins.memory.memory_os.clearance_receipts as cr_mod
+
+        roots = FakeRoots(tmp_path)
+
+        def _boom(_roots):
+            raise RuntimeError("simulated snapshot rebuild failure")
+
+        monkeypatch.setattr(cr_mod, "rebuild_clearance_receipt_snapshot", _boom)
+
+        receipt = ClearanceReceipt(
+            receipt_id="clr_boom", record_id="pB", content_hash="hB",
+            verdict="clear", corpus_watermark=1, judge_version="v1",
+            judged_at="2026-07-11T00:00:00Z",
+        )
+        with pytest.raises(RuntimeError, match="simulated snapshot rebuild failure"):
+            write_clearance_receipt(roots, receipt)
+
+        # The append already happened before the rebuild step raised.
+        records = read_clearance_receipts(roots)
+        assert len(records) == 1
+        assert records[0]["receipt_id"] == "clr_boom"
+
+
 # ── ClearanceReceipt dataclass ─────────────────────────────────────────────
 
 

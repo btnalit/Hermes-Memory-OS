@@ -4592,3 +4592,124 @@ def test_digest_fyi_includes_candidate_aggregation_when_available(tmp_path):
     assert aggr_item is not None, "candidate_aggregation fyi item must appear when a lane has run"
     assert "promoted=3" in aggr_item["summary"]
     assert aggr_item["source_module"] == "candidate_aggregation"
+
+
+# ── P2 fix: _review_consequence / _review_question / _review_suggested_action ──
+# must not lie for provisional_crystallized_record / knob_override, whose
+# approval DOES change state (see owner_actions.py ~3639-3651 apply_owner_action
+# dispatch and ~3821-3839 _validate_action_target for the actual apply semantics).
+
+
+def test_review_consequence_truthful_for_provisional_crystallized_record():
+    """confirm_provisional_crystallized_record is a deterministically-rejected
+    legacy no-op (apply_owner_action dispatch at owner_actions.py:3639-3641
+    always returns status=rejected/legacy_permanent_action_rejected), while
+    reject_provisional_crystallized_record DOES invalidate the provisional
+    record (:3642-3647). The old generic fallback ('仅供了解；不需要状态变更。')
+    was false for this type — reject is a real, material state change."""
+    text = owner_actions_module._review_consequence("provisional_crystallized_record")
+    assert text != "仅供了解；不需要状态变更。"
+    assert "confirm" in text
+    assert "reject" in text
+
+
+def test_review_consequence_truthful_for_knob_override():
+    """Both confirm_provisional_knob_override (writes a permanent override
+    record, owner_actions.py:3669-3724) and reject_provisional_knob_override
+    (reverts to prior_value, :3727-3741) are real state changes — the
+    generic 'no state change' fallback was false for this type too."""
+    text = owner_actions_module._review_consequence("knob_override")
+    assert text != "仅供了解；不需要状态变更。"
+    assert "confirm" in text
+    assert "reject" in text
+
+
+def test_review_question_has_specific_branch_for_provisional_and_knob_override():
+    item_provisional = {"remaining_days": 4}
+    question = owner_actions_module._review_question("provisional_crystallized_record", item_provisional)
+    assert question != "请看一下这条 Memory-OS 状态信号。"
+    assert "4" in question
+
+    item_knob = {"knob_name": "clearance_pair_top_k"}
+    question2 = owner_actions_module._review_question("knob_override", item_knob)
+    assert question2 != "请看一下这条 Memory-OS 状态信号。"
+    assert "clearance_pair_top_k" in question2
+
+
+def test_review_suggested_action_does_not_claim_no_action_needed():
+    """The default fallback ('不需要操作' — 'no action needed') is false for
+    both types: real confirm/reject actions exist and change state (for
+    provisional_crystallized_record, confirm specifically is a disabled
+    no-op that must be called out, not silently defaulted past)."""
+    actions_provisional = [
+        {"owner_utterance_example": "confirm the provisional record"},
+        {"owner_utterance_example": "reject the provisional record"},
+    ]
+    suggestion = owner_actions_module._review_suggested_action(
+        actions_provisional, "provisional_crystallized_record",
+    )
+    assert suggestion != "不需要操作"
+    assert "reject the provisional record" in suggestion
+
+    actions_knob = [
+        {"owner_utterance_example": "confirm the knob override"},
+        {"owner_utterance_example": "reject the knob override"},
+    ]
+    suggestion2 = owner_actions_module._review_suggested_action(actions_knob, "knob_override")
+    assert suggestion2 != "不需要操作"
+    assert "confirm the knob override" in suggestion2
+    assert "reject the knob override" in suggestion2
+
+
+# ── P2 fix: repeat_decision_item_count was hardcoded to 0 ──────────────────
+
+
+def test_repeat_decision_item_count_zero_with_no_prior_digest(tmp_path):
+    """No rendered digest ever recorded → nothing can repeat."""
+    store = _store(tmp_path)
+    count = owner_actions_module._repeat_decision_item_count(store, [{"review_item_id": "review:candidate:x"}])
+    assert count == 0
+
+
+def test_repeat_decision_item_count_counts_by_stable_review_item_id(tmp_path):
+    """Counts by the stable review_item_id key, not display text — an item
+    whose summary/question text changed between renders (but whose identity
+    is the same target_type:target_id) must still be counted as a repeat."""
+    store = _store(tmp_path)
+    rendered = {
+        "digest_id": "d1",
+        "created_at": "2026-07-01T00:00:00Z",
+        "profile": "main",
+        "owner_id": "owner",
+        "status": "ok",
+        "sections": {
+            "action_required": [{"review_item_id": "review:candidate:cand_1", "summary": "old wording"}],
+            "review_suggested": [{"review_item_id": "review:knob_override:ko_1"}],
+            "fyi": [],
+        },
+    }
+    owner_actions_module._append_owner_review_rendered_digest(store, rendered, channel="test")
+
+    current_items = [
+        {"review_item_id": "review:candidate:cand_1", "summary": "brand new wording, does not matter"},
+        {"review_item_id": "review:candidate:cand_2"},
+        {"review_item_id": "review:knob_override:ko_1"},
+    ]
+    count = owner_actions_module._repeat_decision_item_count(store, current_items)
+    assert count == 2
+
+
+def test_repeat_decision_item_count_integration_across_two_digest_renders(tmp_path):
+    """End-to-end: a candidate that is still pending across two rendered
+    digests must be counted as a repeat in the second digest's burden."""
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate())
+
+    # First render — persisted as the "latest previously-rendered digest".
+    render_owner_review_digest(store, owner_id="owner", channel="cli", record_active=True)
+
+    # Candidate is still pending (not approved/rejected) — it reappears in
+    # the freshly generated agenda, with the SAME review_item_id.
+    report = owner_review_queue_report(store)
+    burden = report["burden"]
+    assert burden["repeat_decision_item_count"] >= 1
