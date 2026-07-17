@@ -580,8 +580,14 @@ class TestA1Boundary:
         assert result.get("actual_identity_write") is False
 
     def test_lane_nested_result_and_execution_gate_truthfully_report_provisional_write(self, tmp_path):
-        """A resolver write must be admitted by all three report surfaces."""
+        """A resolver write must be admitted by both report surfaces truthfully,
+        AND the real ExecutionGate completion postcheck it produces must not
+        trip postcheck_boundary_true (P1-1: boundary-safe postcheck; reverting
+        provisional_write_postcheck() to the old bare-True shape flips this
+        to True — see test_candidate_aggregation_lane_provisional_write_does_not_trip_boundary
+        for the isolated counterfactual)."""
         from plugins.memory.memory_os.crystallized import append_candidate_queue
+        from plugins.memory.memory_os.execution_gate import any_boundary_true
         from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
 
         store = _store_with_gate(tmp_path)
@@ -593,6 +599,9 @@ class TestA1Boundary:
             execution_gate_envelope_id=_VALID_ENVELOPE_ID,
         )
         nested = result["promotion_result"]
+        # result/promotion_result use crystallized_write_receipt() — that stays
+        # truthful (bare bools included) since it is genuine lane-run evidence,
+        # never fed to ExecutionGate's any_boundary_true() scan.
         expected = {
             "crystallized_write": "provisional_success",
             "provisional_crystallized_write_count": 1,
@@ -613,8 +622,22 @@ class TestA1Boundary:
             and row.get("lane_id") == "resolver_auto_approve"
         ]
         assert completions
-        postcheck = completions[-1]["postcheck"]
-        assert {key: postcheck[key] for key in expected} == expected
+        completion = completions[-1]
+        # The real ExecutionGate postcheck uses provisional_write_postcheck(),
+        # which is boundary-safe: no bare True anywhere.
+        assert completion["postcheck"] == {
+            "crystallized_write": "provisional_success",
+            "provisional_crystallized_write_count": 1,
+            "actual_permanent_crystallized_approval": False,
+            "actual_unapproved_permanent_crystallized_write": False,
+            "actual_unapproved_crystallized_approval": False,
+        }
+        assert any_boundary_true(completion["postcheck"]) is False
+        # This is the field the boundary probe/monitor actually key off of —
+        # it was computed at write time by complete_execution_gate_envelope()
+        # via any_boundary_true(postcheck). Before the P1-1 fix this was True
+        # for every legitimate provisional write.
+        assert completion["postcheck_boundary_true"] is False
 
     def test_promote_writes_triage_not_crystallized(self, tmp_path):
         """Non-resolver-eligible candidates still write triage not crystallized.

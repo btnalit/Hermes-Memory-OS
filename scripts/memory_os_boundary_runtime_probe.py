@@ -255,13 +255,49 @@ _BOUNDARY_KEYS = {
 }
 
 
+def _provisional_write_exempt(postcheck: dict[str, Any]) -> bool:
+    """P1-1: historical-shape exemption for legacy provisional-write postchecks.
+
+    Before the P1-1 fix, `provisional_write_postcheck()` in
+    candidate_aggregation.py returned a bare `actual_crystallized_approval:
+    True` for every bounded, reversible provisional crystallized write
+    (permanence was always separately False). That is not a boundary
+    violation -- it is evidence of a legitimate, ExecutionGate-wrapped
+    provisional write -- but records already written to disk in that old
+    shape must not start FAILing once `_postcheck_boundary_true` is fixed
+    for new records.
+
+    Exempt ONLY when there is no permanent approval recorded alongside it
+    AND provisional evidence is present. A record with
+    actual_permanent_crystallized_approval=True is NEVER exempt -- permanent
+    crystallization completing through an automatic postcheck remains a
+    real violation.
+    """
+    if postcheck.get("actual_permanent_crystallized_approval") is True:
+        return False
+    if postcheck.get("actual_provisional_crystallized_write") is True:
+        return True
+    try:
+        if int(postcheck.get("provisional_crystallized_write_count") or 0) >= 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return postcheck.get("crystallized_write") == "provisional_success"
+
+
 def _postcheck_boundary_true(record: dict[str, Any]) -> bool:
     postcheck = record.get("postcheck")
     if not isinstance(postcheck, dict):
         return record.get("postcheck_boundary_true") is True
     if _any_true(postcheck.get("boundary")) or _any_true(postcheck.get("boundaries")):
         return True
-    return any(postcheck.get(key) is True for key in _BOUNDARY_KEYS)
+    for key in _BOUNDARY_KEYS:
+        if postcheck.get(key) is not True:
+            continue
+        if key == "actual_crystallized_approval" and _provisional_write_exempt(postcheck):
+            continue
+        return True
+    return False
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

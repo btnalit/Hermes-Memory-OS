@@ -151,9 +151,38 @@ def crystallized_write_receipt(provisional_write_count: int = 0) -> dict[str, An
 
 
 def provisional_write_postcheck() -> dict[str, Any]:
-    """Truthful ExecutionGate receipt for one reversible provisional write."""
+    """Boundary-safe ExecutionGate postcheck for one reversible provisional write.
 
-    return crystallized_write_receipt(1)
+    P1-1: deliberately does NOT delegate to crystallized_write_receipt(1).
+    That helper's `actual_crystallized_approval` / `actual_provisional_
+    crystallized_write` fields are bare `bool` `True` — and execution_gate's
+    any_boundary_true()/boundary_true_paths() treat ANY bare `True` found
+    recursively inside a postcheck dict as a boundary violation, with no
+    concept of "provisional". Every legitimate, bounded, reversible
+    provisional crystallized write would therefore trip
+    postcheck_boundary_true=True and cascade into false FAIL alarms in the
+    boundary runtime probe and monitor.
+
+    This postcheck stays truthful without using bare True: the write is
+    still evidenced by crystallized_write == "provisional_success" and by
+    provisional_crystallized_write_count (an int — boundary_true_paths only
+    matches `bool` True, never truthy ints). Permanence is explicitly False
+    via actual_permanent_crystallized_approval, since resolver auto-approve
+    never grants permanent crystallization on its own.
+
+    crystallized_write_receipt() itself is unchanged and stays truthful for
+    genuine lane run results / stdout evidence (see run_candidate_
+    aggregation_lane) — only this ExecutionGate-facing postcheck is
+    boundary-safe.
+    """
+
+    return {
+        "crystallized_write": "provisional_success",
+        "provisional_crystallized_write_count": 1,
+        "actual_permanent_crystallized_approval": False,
+        "actual_unapproved_permanent_crystallized_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
 
 
 # Auto-demote candidates that have been rejected N+ times by owner

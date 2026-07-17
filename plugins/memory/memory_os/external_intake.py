@@ -120,7 +120,7 @@ def external_intake(
         envelope_id=envelope_id,
         lane_id="external_evidence_intake",
         execution_status="completed",
-        postcheck={"event_appended": True},
+        postcheck={"event_appended_count": 1},
         result_summary={"event_id": event.id},
     )
 

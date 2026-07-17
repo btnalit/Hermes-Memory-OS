@@ -137,6 +137,32 @@ class TestExternalIntake:
         assert completions[0]["lane_id"] == "external_evidence_intake"
         assert completions[0]["execution_status"] == "completed"
 
+    def test_intake_completion_postcheck_does_not_trip_boundary(self, tmp_path):
+        """A routine intake append is not a boundary event: no bare-True postcheck values."""
+        from plugins.memory.memory_os.execution_gate import any_boundary_true
+
+        store = _store(tmp_path)
+        external_intake(
+            store,
+            content="boundary test content",
+            external_ref="ragflow:doc:chunk-005",
+            provider="test",
+        )
+
+        gate_path = execution_gate_records_path(store.roots)
+        records = [
+            json.loads(line)
+            for line in gate_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        completions = [r for r in records if r.get("stage") == "completion"]
+        assert len(completions) == 1
+        completion = completions[0]
+
+        assert completion["postcheck"] == {"event_appended_count": 1}
+        assert any_boundary_true(completion["postcheck"]) is False
+        assert completion["postcheck_boundary_true"] is False
+
     def test_intake_tainted_candidate_blocked_by_p0_wall(self, tmp_path):
         """Verify candidate from external_intake event is tainted (is_tainted returns True)."""
         from plugins.memory.memory_os.provenance import is_tainted

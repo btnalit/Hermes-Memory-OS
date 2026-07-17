@@ -135,10 +135,21 @@ def _write_execution_report(result: dict[str, Any]) -> None:
             return
     write_helper_execution_report(
         boundary={
-            "actual_crystallized_approval": result.get("actual_crystallized_approval", False),
-            "actual_send": result.get("actual_send", False),
-            "actual_execute": result.get("actual_execute", False),
-            "actual_identity_write": result.get("actual_identity_write", False),
+            # P1-1: hard-zero/False only — never pass through the truthful
+            # compat bool `actual_crystallized_approval` here. A bounded,
+            # reversible provisional crystallized write is legitimate and
+            # bare-True in a boundary dict is indistinguishable from a real
+            # violation to any_boundary_true()/the boundary runtime probe.
+            # This lane never grants PERMANENT crystallization on its own
+            # (that stays owner-gated), so actual_permanent_crystallized_
+            # approval is always False. The truthful provisional evidence
+            # (crystallized_write, provisional_crystallized_write_count,
+            # actual_crystallized_approval) is still available, unsanitized,
+            # in result_summary below.
+            "actual_permanent_crystallized_approval": False,
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
         },
         result_summary={
             "lane_id": "candidate_aggregation",

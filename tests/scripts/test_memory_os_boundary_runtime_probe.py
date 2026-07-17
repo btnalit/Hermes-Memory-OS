@@ -190,6 +190,110 @@ def test_boundary_runtime_probe_does_not_treat_boundary_observed_as_boundary_tru
     assert report["execution_gate"]["completion_postcheck_boundary_true_count"] == 0
 
 
+def _legacy_provisional_postcheck(*, permanent: bool) -> dict:
+    """The exact pre-P1-1-fix shape `provisional_write_postcheck()` used to
+    return: a bare `actual_crystallized_approval: True` / `actual_provisional_
+    crystallized_write: True` alongside provisional evidence. Records already
+    on disk in this shape must not start FAILing once the probe's
+    `actual_crystallized_approval` handling is fixed.
+    """
+    return {
+        "crystallized_write": "provisional_success",
+        "provisional_crystallized_write_count": 1,
+        "actual_crystallized_approval": True,
+        "actual_provisional_crystallized_write": True,
+        "actual_permanent_crystallized_approval": permanent,
+        "actual_unapproved_permanent_crystallized_write": False,
+        "actual_unapproved_crystallized_approval": False,
+    }
+
+
+def test_boundary_runtime_probe_exempts_legacy_provisional_write_postcheck(tmp_path):
+    """P1-1: a historical completion record in the old provisional-write
+    postcheck shape (bare actual_crystallized_approval=True + provisional
+    evidence, actual_permanent_crystallized_approval=False) is exempt --
+    it is not a real boundary violation, just a legitimate bounded,
+    reversible provisional write recorded before the postcheck shape fix.
+
+    Counterfactual: reverting the `_provisional_write_exempt` exemption in
+    `_postcheck_boundary_true` (i.e. treating `actual_crystallized_approval`
+    like every other key in `_BOUNDARY_KEYS`) flips this record back to a
+    violation and the probe FAILs.
+    """
+    hermes_home = tmp_path / "home"
+    _jsonl(
+        hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl",
+        [
+            {
+                "stage": "permit",
+                "execution_gate_envelope_id": "xgate_legacy_prov",
+                "lane_id": "resolver_auto_approve",
+                "permit_decision": "allowed",
+                "boundary_true": False,
+                "boundary": {"actual_send": False},
+            },
+            {
+                "stage": "completion",
+                "execution_gate_envelope_id": "xgate_legacy_prov",
+                "lane_id": "resolver_auto_approve",
+                "execution_status": "completed",
+                "postcheck_boundary_true": True,
+                "postcheck": _legacy_provisional_postcheck(permanent=False),
+            },
+        ],
+    )
+
+    result = _run_probe(hermes_home)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert report["status"] == "ok"
+    assert report["execution_gate"]["completion_postcheck_boundary_true_count"] == 0
+    assert report["permanent_boundary_counters"]["execution_gate_completion_boundary_true_count"] == 0
+    assert report["findings"] == []
+
+
+def test_boundary_runtime_probe_still_fails_legacy_shape_with_permanent_approval(tmp_path):
+    """The same legacy postcheck shape, but with
+    actual_permanent_crystallized_approval=True, must remain a violation --
+    the provisional exemption never covers a recorded permanent approval.
+    """
+    hermes_home = tmp_path / "home"
+    _jsonl(
+        hermes_home / "memory-os" / "system" / "execution_gate_envelopes.jsonl",
+        [
+            {
+                "stage": "permit",
+                "execution_gate_envelope_id": "xgate_legacy_perm",
+                "lane_id": "resolver_auto_approve",
+                "permit_decision": "allowed",
+                "boundary_true": False,
+                "boundary": {"actual_send": False},
+            },
+            {
+                "stage": "completion",
+                "execution_gate_envelope_id": "xgate_legacy_perm",
+                "lane_id": "resolver_auto_approve",
+                "execution_status": "completed",
+                "postcheck_boundary_true": True,
+                "postcheck": _legacy_provisional_postcheck(permanent=True),
+            },
+        ],
+    )
+
+    result = _run_probe(hermes_home)
+    report = json.loads(result.stdout)
+
+    assert result.returncode == 1
+    assert report["status"] == "fail"
+    assert report["execution_gate"]["completion_postcheck_boundary_true_count"] == 1
+    assert {
+        "severity": "fail",
+        "code": "boundary_counter_nonzero:execution_gate_completion_boundary_true_count",
+        "value": 1,
+    } in report["findings"]
+
+
 def test_boundary_runtime_probe_builds_host_remote_command():
     command = boundary_probe.remote_probe_command(
         host="hermes-feiniu",

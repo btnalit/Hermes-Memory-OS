@@ -78,19 +78,28 @@ def test_clearance_snapshot_detects_ledger_drift_and_fails_closed_for_activation
 
 
 def test_provisional_write_postcheck_distinguishes_write_from_permanent_approval():
+    """P1-1: provisional_write_postcheck() must be boundary-safe.
+
+    No bare `bool` True anywhere in the returned dict -- execution_gate's
+    any_boundary_true()/boundary_true_paths() treat ANY nested bare True as
+    a boundary violation, with no concept of "provisional". The write is
+    still truthfully evidenced by crystallized_write=="provisional_success"
+    and by the int provisional_crystallized_write_count (boundary_true_paths
+    only matches `bool` True, never truthy ints).
+    """
     from plugins.modules.governance.candidate_aggregation import provisional_write_postcheck
+    from plugins.memory.memory_os.execution_gate import any_boundary_true
 
     report = provisional_write_postcheck()
 
     assert report == {
         "crystallized_write": "provisional_success",
         "provisional_crystallized_write_count": 1,
-        "actual_crystallized_approval": True,
-        "actual_provisional_crystallized_write": True,
         "actual_permanent_crystallized_approval": False,
         "actual_unapproved_permanent_crystallized_write": False,
         "actual_unapproved_crystallized_approval": False,
     }
+    assert any_boundary_true(report) is False
 
 
 def test_v3_wandering_contract_is_boundary_only_and_empty_output_is_healthy(tmp_path):
