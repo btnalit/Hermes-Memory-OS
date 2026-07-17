@@ -102,7 +102,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         overlay["task_revision"] = str((effective_task or {}).get("revision") or "")
         overlay["task_source_at"] = str((effective_task or {}).get("source_at") or "")
-        overlay["task_source_watermark"] = str((effective_task or {}).get("source_watermark") or "")
+        # `source_watermark` was never populated by read_effective_current_task
+        # (it emits revision/source_at/observed_at, plus the raw record's own
+        # record_id) -- this key was a dead write with no consumer. Use the
+        # anchor record's own record_id instead, which is real and stable.
+        overlay["task_record_id"] = str((effective_task or {}).get("record_id") or "")
 
         # Count populated sections
         for key in (

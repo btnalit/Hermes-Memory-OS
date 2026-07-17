@@ -136,6 +136,41 @@ class TestStateOverlayRefreshScript:
         assert overlay["active_projects"]["status"] == "ok"
         assert len(overlay["active_projects"]["data"]) >= 1
 
+    def test_script_overlay_exposes_task_record_id_not_dead_watermark_field(self, tmp_path):
+        """Counterfactual for FIX 2: the overlay must expose the effective
+        task's real `record_id` under `task_record_id`, and must not write
+        the dead `task_source_watermark` field (never populated by
+        read_effective_current_task, so it was always an empty string with
+        no consumer)."""
+        home = tmp_path / ".hermes"
+        (home / "memory-os" / "crystallized").mkdir(parents=True)
+        (home / "memory-os" / "system").mkdir(parents=True)
+
+        anchor_path = home / "memory-os" / "system" / "active_task_anchor.jsonl"
+        anchor_path.write_text(json.dumps({
+            "record_id": "ata_counterfactualtest01",
+            "anchor": "### Current Foreground Task\nImplement task_record_id fix",
+            "status": "active",
+            "session_id": "sess-002",
+            "profile": "default",
+        }) + "\n")
+
+        env = {**__import__("os").environ, "HERMES_HOME": str(home)}
+        result = subprocess.run(
+            [sys.executable, str(_script_path()),
+             "--hermes-home", str(home),
+             "--profile", "default",
+             "--output", "json"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0
+
+        json_path = home / "memory-os" / "system" / "state_overlay" / "current.json"
+        overlay = json.loads(json_path.read_text(encoding="utf-8"))
+
+        assert overlay["task_record_id"] == "ata_counterfactualtest01"
+        assert "task_source_watermark" not in overlay
+
 
 class TestStateOverlayCronRegistration:
     def test_state_overlay_refresh_in_cron_specs(self):

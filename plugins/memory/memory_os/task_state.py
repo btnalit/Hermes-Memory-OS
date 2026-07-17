@@ -27,6 +27,23 @@ def read_effective_current_task(
     object is authoritative: only ``status=active`` projects a task. Terminal
     and unknown statuses fail closed so an older active row cannot become a
     zombie after a lifecycle tombstone.
+
+    Fail-closed tail corruption tradeoff: this ledger can be shared by
+    multiple profiles interleaved in a single append-only file. We only ever
+    know a line is malformed once we try to parse it -- we cannot recover
+    which profile it belonged to. So "the last valid record" used to decide
+    whether a trailing malformed line is dangerous is the last line (of ANY
+    profile) that parsed as a JSON object, not the last valid line for
+    ``target_profile`` specifically. A malformed non-empty line found AFTER
+    that point fails the whole read closed (returns None), even when the
+    corruption actually belongs to a different profile's write. This
+    over-blocks in the rare cross-profile-corruption case, but it is the
+    safe choice: without it, a partially-written terminal record (e.g. a
+    crash mid-append of a ``completed`` tombstone) could be silently
+    skipped, letting an earlier ``active`` row for this profile resurface
+    as a zombie task. A malformed line BEFORE the last valid record keeps
+    the existing skip-and-continue behavior, since a healthy write already
+    landed after it.
     """
 
     path = active_task_anchor_path(roots)
@@ -34,6 +51,7 @@ def read_effective_current_task(
         return None
     target_profile = str(profile or roots.profile or "default").strip() or "default"
     latest: tuple[int, dict[str, Any]] | None = None
+    trailing_malformed = False
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -44,13 +62,20 @@ def read_effective_current_task(
         try:
             record = json.loads(raw)
         except json.JSONDecodeError:
+            trailing_malformed = True
             continue
         if not isinstance(record, dict):
+            trailing_malformed = True
             continue
+        # A syntactically valid record line resets the "corrupted tail"
+        # flag -- only malformed lines after the LAST such line matter.
+        trailing_malformed = False
         record_profile = str(record.get("profile") or roots.profile or "default").strip() or "default"
         if record_profile != target_profile:
             continue
         latest = (revision, record)
+    if trailing_malformed:
+        return None
     if latest is None:
         return None
     revision, record = latest

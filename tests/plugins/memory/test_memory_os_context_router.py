@@ -4,6 +4,7 @@ import json
 from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.context_router import (
+    ALLOCATED_CHARS_SEMANTICS,
     INCLUDE_THRESHOLD,
     ContextSection,
     plan_context_route,
@@ -277,6 +278,92 @@ def test_required_section_reserves_only_available_budget_in_router_projection():
     assert selected["required"] is True
     assert selected["allocated_chars"] == 10
     assert "budget_truncated" in selected["reason_codes"]
+
+
+def test_allocated_chars_is_explicitly_marked_advisory_not_enforced():
+    """Counterfactual for FIX 3 (option b): `allocated_chars` has no
+    consumer -- the real formatter (prefetch._fit_budget) recomputes its
+    own truncation independently. This report must say so explicitly so a
+    future maintainer cannot mistake it for an enforced directive. Without
+    the fix, this key does not exist on the report."""
+    report = route_context_sections(
+        "帮我继续安装 ComfyUI 插件",
+        sections=[
+            ContextSection(
+                "Current Foreground Task",
+                "continue the owner-approved release task",
+                source_class="foreground",
+            )
+        ],
+        current_task_anchor="continue the owner-approved release task",
+        budget_chars=1200,
+    )
+
+    assert report["allocated_chars_semantics"] == ALLOCATED_CHARS_SEMANTICS
+    assert report["allocated_chars_semantics"] == "advisory_projection_not_enforced_by_formatter"
+
+
+def test_router_budget_accounting_never_exceeds_stated_budget_locked_invariant():
+    """Locked invariant: regardless of how many sections compete for
+    budget, this router's own advisory `used_budget_chars` and the sum of
+    per-entry `allocated_chars` must never exceed `budget_chars`. This is
+    the router's half of "final assembled context length <= budget_chars";
+    the other half (the real formatter) is covered by
+    test_context_router_apply_respects_budget_despite_advisory_allocation
+    below and by prefetch's own required-heading budget tests."""
+    sections = [
+        ContextSection(
+            "Current Foreground Task",
+            "continue the owner-approved release task " + ("x" * 400),
+            source_class="foreground",
+        ),
+        ContextSection("Working Memory", "部署 记忆 系统 " + ("y" * 300), source_class="working"),
+        ContextSection("Working Memory", "部署 记忆 系统 " + ("z" * 300), source_class="working"),
+        ContextSection("Conversation Carryover", "记忆 架构 " + ("w" * 300), source_class="carryover"),
+    ]
+
+    for budget in (0, 1, 10, 50, 200, 1200):
+        report = route_context_sections(
+            "帮我继续安装 ComfyUI 插件，部署记忆系统",
+            sections=sections,
+            current_task_anchor="continue the owner-approved release task",
+            budget_chars=budget,
+        )
+        assert report["used_budget_chars"] <= report["budget_chars"]
+        assert sum(item["allocated_chars"] for item in report["selected_sections"]) <= budget
+
+
+def test_context_router_apply_respects_budget_despite_advisory_allocation(tmp_path):
+    """The real 'apply' path ignores context_router's `allocated_chars`
+    entirely (it re-fetches full, untruncated candidate text and hands it
+    to prefetch's own `_fit_budget`/`required_titles` formatter). Lock the
+    real invariant here: the final assembled context length never exceeds
+    budget_chars, which is what makes option (b) safe -- the advisory
+    numbers being unenforced does not create a budget-overrun risk because
+    a separate, independently-tested mechanism already enforces it."""
+    store = _store(tmp_path)
+    working_item = build_working_item(seed=501, source_event_id="evt-working-501")
+    store.write_working_document(
+        "lingering",
+        {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": working_item.updated_at,
+            "items": [
+                {**working_item.__dict__, "text": "ComfyUI plugin install failed at github.com clone. " * 40},
+            ],
+        },
+    )
+
+    for budget in (50, 120, 400, 2200):
+        context = build_prefetch(
+            "帮我继续安装 ComfyUI 插件",
+            budget_chars=budget,
+            store=store,
+            index=None,
+            current_task_anchor="Current task: install ComfyUI plugin.",
+            context_router_config={"enabled": True, "mode": "apply", "apply_routes": ["all"]},
+        )
+        assert len(context) <= budget
 
 
 def test_router_report_redacts_secrets():

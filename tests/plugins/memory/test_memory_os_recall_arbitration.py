@@ -21,6 +21,14 @@ def _obj(content: str, *, recall_type=RecallType.INDEXED_FTS.value, authority="i
     )
 
 
+def _ledger_value(task_revision: str, *, source_rev: str = "") -> dict[str, str]:
+    """FIX 4 new-format session-ledger value: suppression requires BOTH
+    task_revision and source_rev to match. `source_rev=""` matches objects
+    with no `metadata["source_updated_at"]`, which is the default for
+    every fixture built by `_obj` unless a test sets it explicitly."""
+    return {"task_revision": task_revision, "source_rev": source_rev}
+
+
 def test_recall_plan_deduplicates_then_ranks_globally_before_budget():
     low = _obj("deployment boundary legacy", score=0.4, authority="indexed_derived", ref="low")
     duplicate = _obj("deployment boundary legacy", score=0.9, authority="approved_canonical", ref="canonical")
@@ -43,7 +51,7 @@ def test_recall_plan_suppresses_stale_overlay_and_session_duplicate():
         revision="rev-old",
     )
     repeated = _obj("already injected", revision="rev-current")
-    ledger = {content_fingerprint(repeated.content): "rev-current"}
+    ledger = {content_fingerprint(repeated.content): _ledger_value("rev-current")}
 
     plan = build_recall_plan(
         [overlay, repeated],
@@ -98,11 +106,11 @@ def test_apply_plan_and_session_ledger_are_provider_local_structures():
     obj = _obj("approved canonical memory", recall_type=RecallType.CRYSTALLIZED.value, authority="approved_canonical")
     plan = build_recall_plan([obj], mode="apply_canary", current_task_revision="rev-1")
     applied = apply_recall_plan(plan)
-    ledger: dict[str, str] = {}
+    ledger: dict[str, object] = {}
     record_session_injection(ledger, applied, task_revision="rev-1")
 
     assert applied[RecallType.CRYSTALLIZED.value][0].content == obj.content
-    assert ledger == {content_fingerprint(obj.content): "rev-1"}
+    assert ledger == {content_fingerprint(obj.content): _ledger_value("rev-1")}
 
 
 def test_recall_plan_binds_a_versioned_authority_freshness_matrix():
@@ -165,8 +173,8 @@ def test_explicit_recall_escapes_only_query_relevant_objects_from_session_cooldo
     postgres = _obj("PostgreSQL deployment boundary", ref="postgres")
     postgres.metadata["entity_refs"] = ["PostgreSQL"]
     ledger = {
-        content_fingerprint(flask.content): "rev-current",
-        content_fingerprint(postgres.content): "rev-current",
+        content_fingerprint(flask.content): _ledger_value("rev-current"),
+        content_fingerprint(postgres.content): _ledger_value("rev-current"),
     }
 
     plan = build_recall_plan(
@@ -186,8 +194,8 @@ def test_explicit_recall_without_entity_refs_requires_full_query_term_coverage()
     flask = _obj("Flask deployment boundary", ref="flask-no-refs")
     postgres = _obj("PostgreSQL deployment boundary", ref="postgres-no-refs")
     ledger = {
-        content_fingerprint(flask.content): "rev-current",
-        content_fingerprint(postgres.content): "rev-current",
+        content_fingerprint(flask.content): _ledger_value("rev-current"),
+        content_fingerprint(postgres.content): _ledger_value("rev-current"),
     }
 
     plan = build_recall_plan(
@@ -207,8 +215,8 @@ def test_explicit_recall_without_refs_requires_ascii_and_cjk_topics_to_match():
     target = _obj("Flask 部署边界", ref="mixed-target")
     control = _obj("Flask 数据库备份", ref="mixed-control")
     ledger = {
-        content_fingerprint(target.content): "rev-current",
-        content_fingerprint(control.content): "rev-current",
+        content_fingerprint(target.content): _ledger_value("rev-current"),
+        content_fingerprint(control.content): _ledger_value("rev-current"),
     }
 
     plan = build_recall_plan(
@@ -232,8 +240,8 @@ def test_claim_key_contributes_identity_without_bypassing_topic_coverage():
         current_query="还记得 Flask 的数据库备份吗？",
         current_task_revision="rev-current",
         session_ledger={
-            content_fingerprint(target.content): "rev-current",
-            content_fingerprint(control.content): "rev-current",
+            content_fingerprint(target.content): _ledger_value("rev-current"),
+            content_fingerprint(control.content): _ledger_value("rev-current"),
         },
     )
 
@@ -257,8 +265,8 @@ def test_explicit_recall_preserves_short_ascii_identifiers_in_mixed_queries():
             current_query=f"还记得 {wanted} 的部署边界吗？",
             current_task_revision="rev-current",
             session_ledger={
-                content_fingerprint(target.content): "rev-current",
-                content_fingerprint(control.content): "rev-current",
+                content_fingerprint(target.content): _ledger_value("rev-current"),
+                content_fingerprint(control.content): _ledger_value("rev-current"),
             },
         )
 
@@ -272,7 +280,7 @@ def test_explicit_recall_ignores_bounded_english_possessive_stopword():
         [target],
         current_query="Do you remember our Flask deployment boundary?",
         current_task_revision="rev-current",
-        session_ledger={content_fingerprint(target.content): "rev-current"},
+        session_ledger={content_fingerprint(target.content): _ledger_value("rev-current")},
     )
 
     assert plan["selected_count"] == 1
@@ -282,7 +290,7 @@ def test_explicit_recall_ignores_bounded_english_possessive_stopword():
 def test_current_query_entity_reference_escapes_session_cooldown_for_implicit_continuation():
     repeated = _obj("Flask deployment uses a blue-green boundary", ref="entity")
     repeated.metadata["entity_refs"] = ["Flask"]
-    ledger = {content_fingerprint(repeated.content): "rev-current"}
+    ledger = {content_fingerprint(repeated.content): _ledger_value("rev-current")}
 
     plan = build_recall_plan(
         [repeated],
@@ -298,7 +306,7 @@ def test_current_query_entity_reference_escapes_session_cooldown_for_implicit_co
 def test_unrelated_implicit_continuation_remains_in_session_cooldown():
     repeated = _obj("Flask deployment uses a blue-green boundary", ref="entity")
     repeated.metadata["entity_refs"] = ["Flask"]
-    ledger = {content_fingerprint(repeated.content): "rev-current"}
+    ledger = {content_fingerprint(repeated.content): _ledger_value("rev-current")}
 
     plan = build_recall_plan(
         [repeated],
@@ -335,7 +343,7 @@ def test_critical_recall_classes_escape_session_cooldown_only_from_trusted_lanes
             ref=expected_reason,
         )
         repeated.metadata.update(metadata)
-        ledger = {content_fingerprint(repeated.content): "rev-current"}
+        ledger = {content_fingerprint(repeated.content): _ledger_value("rev-current")}
 
         plan = build_recall_plan(
             [repeated],
@@ -367,7 +375,7 @@ def test_untrusted_lane_cannot_spoof_owner_pin_or_safety_rule_escape():
             [spoof],
             current_query="继续",
             current_task_revision="rev-current",
-            session_ledger={content_fingerprint(spoof.content): "rev-current"},
+            session_ledger={content_fingerprint(spoof.content): _ledger_value("rev-current")},
         )
 
         assert plan["selected_count"] == 0
@@ -390,7 +398,7 @@ def test_entity_escape_uses_fail_closed_boundaries_for_ascii_special_and_cjk_ref
             [repeated],
             current_query=query,
             current_task_revision="rev-current",
-            session_ledger={content_fingerprint(repeated.content): "rev-current"},
+            session_ledger={content_fingerprint(repeated.content): _ledger_value("rev-current")},
         )
 
         assert (plan["selected_count"] == 1) is should_escape
@@ -413,8 +421,191 @@ def test_explicit_recall_cannot_override_structured_entity_boundary_mismatch():
             [repeated],
             current_query=query,
             current_task_revision="rev-current",
-            session_ledger={content_fingerprint(repeated.content): "rev-current"},
+            session_ledger={content_fingerprint(repeated.content): _ledger_value("rev-current")},
         )
 
         assert plan["selected_count"] == 0
         assert plan["suppressed"][0]["reason"] == "session_duplicate"
+
+
+# --- FIX 4: session-ledger dedup key granularity (task_revision + source_rev) ---
+
+
+def test_source_updated_mid_task_is_not_suppressed_even_with_same_task_revision():
+    """Counterfactual for FIX 4: the pre-fix ledger only stored
+    task_revision, so a source object edited mid-task (same rendered
+    content/fingerprint, newer source_updated_at) was wrongly suppressed
+    as a session duplicate. The ledger entry now also carries source_rev,
+    and suppression requires BOTH to match."""
+    ledger = {
+        content_fingerprint("source object body original"): _ledger_value(
+            "rev-1", source_rev="2026-07-15T00:00:00Z"
+        ),
+    }
+    updated = _obj("source object body original", ref="src-1")
+    updated.metadata["source_updated_at"] = "2026-07-15T01:00:00Z"
+
+    plan = build_recall_plan(
+        [updated],
+        current_task_revision="rev-1",
+        session_ledger=ledger,
+    )
+
+    assert plan["selected_count"] == 1
+    assert plan["suppressed"] == []
+
+
+def test_unchanged_task_and_source_rev_still_suppresses_session_duplicate():
+    """Regression guard: when BOTH task_revision and source_rev are
+    unchanged, session_duplicate suppression must still fire."""
+    obj = _obj("stable unchanged source body", ref="src-stable")
+    obj.metadata["source_updated_at"] = "2026-07-15T00:00:00Z"
+    ledger = {
+        content_fingerprint(obj.content): _ledger_value("rev-1", source_rev="2026-07-15T00:00:00Z"),
+    }
+
+    plan = build_recall_plan(
+        [obj],
+        current_task_revision="rev-1",
+        session_ledger=ledger,
+    )
+
+    assert plan["selected_count"] == 0
+    assert plan["suppressed"][0]["reason"] == "session_duplicate"
+
+
+def test_legacy_string_ledger_entry_is_treated_as_changed_then_upgraded_on_rerecord():
+    """Old-format ledger values (plain strings, the pre-FIX-4 shape) must
+    be handled gracefully: treated as changed (never suppress), then
+    upgraded to the new {task_revision, source_rev} shape the next time
+    record_session_injection runs for that fingerprint."""
+    obj = _obj("legacy ledger format object", ref="legacy-1")
+    legacy_ledger: dict[str, object] = {content_fingerprint(obj.content): "rev-current"}
+
+    plan = build_recall_plan(
+        [obj],
+        current_task_revision="rev-current",
+        session_ledger=legacy_ledger,
+    )
+    assert plan["selected_count"] == 1
+    assert plan["suppressed"] == []
+
+    record_session_injection(
+        legacy_ledger,
+        {RecallType.INDEXED_FTS.value: [obj]},
+        task_revision="rev-current",
+    )
+    assert legacy_ledger == {content_fingerprint(obj.content): _ledger_value("rev-current")}
+
+    plan_two = build_recall_plan(
+        [obj],
+        current_task_revision="rev-current",
+        session_ledger=legacy_ledger,
+    )
+    assert plan_two["selected_count"] == 0
+    assert plan_two["suppressed"][0]["reason"] == "session_duplicate"
+
+
+# --- FIX 5: L0 exact source_ref dedup + L4 ambiguity marking ---
+
+
+def test_l0_exact_source_ref_dedup_runs_across_recall_types_before_near_dup_logic():
+    """Counterfactual for FIX 5(a): two entries sharing the identical
+    source_ref (surfaced by two different recall_type lanes) with
+    DIFFERENT content -- so L1 content-digest dedup would NOT catch this,
+    and their jaccard similarity is far below the near-duplicate band, so
+    L3 would not catch it either -- must still collapse to one via L0.
+    Reverting FIX 5(a) would leave both selected."""
+    low = _obj(
+        "deployment note early draft",
+        recall_type=RecallType.WORKING.value,
+        score=0.4,
+        ref="shared:1",
+    )
+    high = _obj(
+        "deployment note later revision with more detail",
+        recall_type=RecallType.INDEXED_FTS.value,
+        score=0.9,
+        ref="shared:1",
+    )
+
+    plan = build_recall_plan([low, high], budget_chars=10_000)
+
+    assert plan["selected_count"] == 1
+    assert plan["selected"][0]["object"]["source_ref"] == "shared:1"
+    assert plan["selected"][0]["object"]["score"] == 0.9
+    assert {item["reason"] for item in plan["suppressed"]} == {"exact_source_duplicate"}
+
+
+def test_exact_duplicate_count_combines_l0_source_ref_and_l1_content_digest_dedup():
+    """Counting decision for FIX 5: L0 (exact source_ref) and the
+    pre-existing L1 (exact content digest) are both deterministic,
+    non-fuzzy dedup layers, so both fold into `exact_duplicate_count`.
+    recall_policy.append_recall_observation only exposes an exact/near
+    split for shadow observability; keeping L0 out of `exact_duplicate_count`
+    would under-report deterministic dedup work once L0 starts catching
+    cases L1 does not."""
+    l0_primary = _obj("l0 primary content", ref="shared:l0", score=0.9)
+    l0_dup = _obj("l0 secondary content", ref="shared:l0", score=0.1)
+    l1_primary = _obj("repeated content body", ref="l1-a", score=0.9)
+    l1_dup = _obj("repeated content body", ref="l1-b", score=0.1)
+
+    plan = build_recall_plan(
+        [l0_primary, l0_dup, l1_primary, l1_dup],
+        budget_chars=10_000,
+    )
+
+    assert plan["exact_duplicate_count"] == 2
+    assert plan["selected_count"] == 2
+    assert {item["reason"] for item in plan["suppressed"]} == {"exact_source_duplicate", "exact_duplicate"}
+
+
+def test_l4_ambiguous_pair_neither_suppressed_and_cross_linked_by_fingerprint():
+    """Counterfactual for FIX 5(b): pairs with jaccard similarity in
+    [0.70, near_duplicate_threshold) must NOT be suppressed -- both survive
+    and are cross-linked via `ambiguity_related`, and the plan exposes
+    `ambiguous_pair_count`. Reverting FIX 5(b) removes both the field and
+    the plan key entirely (KeyError), and the pre-fix code has no
+    mechanism to record this relationship at all."""
+    left = _obj("alpha beta gamma delta epsilon zeta eta", ref="amb-left")
+    right = _obj("alpha beta gamma delta epsilon zeta theta", ref="amb-right")
+
+    # Sanity: confirm the fixture actually lands in the intended [0.70, 0.88) band.
+    from plugins.memory.memory_os.recall_arbitration import _token_jaccard
+    assert 0.70 <= _token_jaccard(left.content, right.content) < 0.88
+
+    plan = build_recall_plan([left, right], budget_chars=10_000)
+
+    assert plan["ambiguous_pair_count"] == 1
+    assert plan["suppressed"] == []
+    selected_by_ref = {entry["object"]["source_ref"]: entry for entry in plan["selected"]}
+    assert set(selected_by_ref) == {"amb-left", "amb-right"}
+    left_fp = content_fingerprint(left.content)
+    right_fp = content_fingerprint(right.content)
+    assert selected_by_ref["amb-left"]["ambiguity_related"] == [right_fp]
+    assert selected_by_ref["amb-right"]["ambiguity_related"] == [left_fp]
+
+
+def test_apply_recall_plan_ignores_ambiguity_related_and_still_returns_both_objects():
+    """`apply_recall_plan` reads only the "object" key of each selected
+    entry -- confirm it stays unbroken when entries also carry the new
+    `ambiguity_related` sibling key."""
+    left = _obj(
+        "alpha beta gamma delta epsilon zeta eta",
+        ref="amb-left-2",
+        recall_type=RecallType.CRYSTALLIZED.value,
+        authority="approved_canonical",
+    )
+    right = _obj(
+        "alpha beta gamma delta epsilon zeta theta",
+        ref="amb-right-2",
+        recall_type=RecallType.CRYSTALLIZED.value,
+        authority="approved_canonical",
+    )
+
+    plan = build_recall_plan([left, right], mode="apply_canary", budget_chars=10_000)
+    assert plan["ambiguous_pair_count"] == 1
+
+    applied = apply_recall_plan(plan)
+    refs = {obj.source_ref for obj in applied[RecallType.CRYSTALLIZED.value]}
+    assert refs == {"amb-left-2", "amb-right-2"}

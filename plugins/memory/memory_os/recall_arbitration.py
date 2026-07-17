@@ -22,6 +22,13 @@ _EXPLICIT_RECALL_PATTERN = re.compile(
     re.I,
 )
 
+# FIX 5(b): L4 "ambiguous but not suppressed" band. Pairs at or above this
+# jaccard similarity but below `near_duplicate_threshold` are too similar to
+# ignore but not similar enough to collapse deterministically (no LLM on the
+# hot path per the dedup-ladder design doc). Both entries survive and are
+# cross-linked via `ambiguity_related` instead of one suppressing the other.
+_AMBIGUITY_JACCARD_FLOOR = 0.70
+
 
 def build_recall_plan(
     objects: list[RecallObject],
@@ -30,7 +37,7 @@ def build_recall_plan(
     budget_chars: int = 1800,
     current_query: str = "",
     current_task_revision: str = "",
-    session_ledger: dict[str, str] | None = None,
+    session_ledger: dict[str, Any] | None = None,
     near_duplicate_threshold: float = 0.88,
     freshness_guard_mode: str = "shadow",
     conflict_resolution_mode: str = "shadow",
@@ -46,6 +53,8 @@ def build_recall_plan(
         authority = obj.authority_class or str(obj.metadata.get("authority_class") or "") or _DEFAULT_AUTHORITY.get(obj.recall_type, "")
         task_revision = obj.task_revision or str(obj.metadata.get("task_revision") or "")
         claim_key = obj.claim_key or str(obj.metadata.get("claim_key") or "")
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        source_rev = str(metadata.get("source_updated_at") or "")
         cooldown_escape_reason = _cooldown_escape_reason(obj, current_query=current_query)
         entry = {
             "index": index,
@@ -55,6 +64,7 @@ def build_recall_plan(
             "authority_rank": _AUTHORITY_RANK.get(authority, 0),
             "freshness": max(0.0, min(1.0, float(obj.freshness))),
             "task_revision": task_revision,
+            "source_rev": source_rev,
             "claim_key": claim_key,
             "cooldown_escape_reason": cooldown_escape_reason,
         }
@@ -68,19 +78,48 @@ def build_recall_plan(
             if freshness_guard_mode == "shadow":
                 shadow_findings.append(finding)
         if (
-            fingerprint in ledger
-            and ledger[fingerprint] == current_task_revision
+            _session_ledger_hit(ledger.get(fingerprint), task_revision=current_task_revision, source_rev=source_rev)
             and not cooldown_escape_reason
         ):
             suppressed.append(_suppression(entry, "session_duplicate"))
             continue
         candidates.append(entry)
 
-    exact_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    # --- FIX 5(a): L0 exact source_ref dedup, ACROSS recall_types. Runs
+    # before the existing L1 (exact content digest) and L3 (near-duplicate
+    # jaccard) logic below, per the dedup-ladder design (L0 -> L1 -> ... ->
+    # L4). Two entries that carry the identical non-empty source_ref are
+    # the same underlying source object surfaced by more than one retriever
+    # lane; keep the best-ranked one and drop the rest.
+    source_ref_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in candidates:
+        source_ref = str(entry["object"].source_ref or "").strip()
+        if source_ref:
+            source_ref_groups[source_ref].append(entry)
+    # `exact_duplicate_count` is the shadow-observability bucket for ALL
+    # deterministic (non-fuzzy) dedup -- both L0 (source_ref identity) and
+    # the pre-existing L1 (content-digest identity) below fold into it.
+    # recall_policy.append_recall_observation only exposes two buckets
+    # (exact vs near); L0 is exact by construction (same literal source, not
+    # a fuzzy match), so folding it into `exact_duplicate_count` keeps that
+    # counter meaning "deterministic duplicates removed" instead of
+    # under-reporting once L0 starts catching cases L1 used to miss.
+    exact_duplicate_count = 0
+    l0_suppressed_ids: set[int] = set()
+    for group in source_ref_groups.values():
+        if len(group) < 2:
+            continue
+        ranked = sorted(group, key=_rank_key)
+        for duplicate in ranked[1:]:
+            exact_duplicate_count += 1
+            l0_suppressed_ids.add(id(duplicate))
+            suppressed.append(_suppression(duplicate, "exact_source_duplicate"))
+    l0_survivors = [entry for entry in candidates if id(entry) not in l0_suppressed_ids]
+
+    exact_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for entry in l0_survivors:
         exact_groups[entry["fingerprint"]].append(entry)
     deduped: list[dict[str, Any]] = []
-    exact_duplicate_count = 0
     for group in exact_groups.values():
         ranked = sorted(group, key=_rank_key)
         deduped.append(ranked[0])
@@ -90,20 +129,28 @@ def build_recall_plan(
 
     near_deduped: list[dict[str, Any]] = []
     near_duplicate_count = 0
+    ambiguous_pair_count = 0
     for entry in sorted(deduped, key=_rank_key):
-        duplicate_of = next(
-            (
-                retained
-                for retained in near_deduped
-                if _token_jaccard(entry["object"].content, retained["object"].content) >= near_duplicate_threshold
-            ),
-            None,
-        )
-        if duplicate_of is None:
-            near_deduped.append(entry)
-        else:
+        duplicate_of = None
+        ambiguous_with: list[dict[str, Any]] = []
+        for retained in near_deduped:
+            similarity = _token_jaccard(entry["object"].content, retained["object"].content)
+            if similarity >= near_duplicate_threshold:
+                duplicate_of = retained
+                break
+            if similarity >= _AMBIGUITY_JACCARD_FLOOR:
+                ambiguous_with.append(retained)
+        if duplicate_of is not None:
             near_duplicate_count += 1
             suppressed.append(_suppression(entry, "near_duplicate", related=duplicate_of["fingerprint"]))
+            continue
+        # FIX 5(b): L4 -- similarity landed in [floor, threshold) against one
+        # or more retained entries. Neither side is suppressed; both are
+        # cross-linked so a consumer can see the ambiguity and decide.
+        for retained in ambiguous_with:
+            if _link_ambiguous_pair(entry, retained):
+                ambiguous_pair_count += 1
+        near_deduped.append(entry)
 
     conflict_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for entry in near_deduped:
@@ -172,6 +219,7 @@ def build_recall_plan(
         "suppressed_count": len(suppressed),
         "exact_duplicate_count": exact_duplicate_count,
         "near_duplicate_count": near_duplicate_count,
+        "ambiguous_pair_count": ambiguous_pair_count,
         "conflict_count": len(conflicts),
         "used_budget_chars": used_chars,
         "budget_chars": max(0, int(budget_chars)),
@@ -198,15 +246,29 @@ def apply_recall_plan(plan: dict[str, Any]) -> dict[str, list[RecallObject]]:
 
 
 def record_session_injection(
-    session_ledger: dict[str, str],
+    session_ledger: dict[str, Any],
     results: dict[str, list[RecallObject]],
     *,
     task_revision: str,
 ) -> None:
-    """Record only actually formatted objects in the provider-local ledger."""
+    """Record only actually formatted objects in the provider-local ledger.
+
+    FIX 4: the ledger value is now ``{"task_revision": str, "source_rev":
+    str}`` instead of a bare ``task_revision`` string. ``source_rev`` is the
+    object's own ``metadata["source_updated_at"]`` (empty string when
+    absent). Storing both means a source object that gets updated mid-task
+    (same task_revision, new source_updated_at) is no longer wrongly
+    suppressed as a session duplicate -- see `_session_ledger_hit`. This
+    always writes the new shape, so a legacy plain-string entry for the
+    same fingerprint is upgraded the moment the object is re-formatted.
+    """
     for objects in results.values():
         for obj in objects:
-            session_ledger[content_fingerprint(obj.content)] = task_revision
+            metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+            session_ledger[content_fingerprint(obj.content)] = {
+                "task_revision": task_revision,
+                "source_rev": str(metadata.get("source_updated_at") or ""),
+            }
 
 
 def content_fingerprint(content: str) -> str:
@@ -356,9 +418,52 @@ def _public_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "authority_rank": entry["authority_rank"],
         "freshness": entry["freshness"],
         "task_revision": entry["task_revision"],
+        "source_rev": entry.get("source_rev", ""),
         "claim_key": entry["claim_key"],
         "cooldown_escape_reason": entry.get("cooldown_escape_reason", ""),
+        "ambiguity_related": list(entry.get("ambiguity_related") or []),
     }
+
+
+def _session_ledger_hit(entry_value: Any, *, task_revision: str, source_rev: str) -> bool:
+    """FIX 4: return True only when the ledger entry is in the new
+    ``{"task_revision": str, "source_rev": str}`` shape AND both fields
+    match the object's current values -- i.e. suppress only when BOTH the
+    task and the source object are unchanged since the last injection.
+
+    Backward-compat tradeoff: a legacy plain-string ledger entry (the
+    pre-fix shape, which stored only ``task_revision`` and had no way to
+    express ``source_rev``) is always treated as changed, so it never
+    suppresses. This costs one extra "already seen" re-injection per
+    legacy entry during the transition, but it is fail-safe: we would
+    rather show an object once more than silently suppress one that was
+    actually updated mid-task just because an old-format ledger couldn't
+    record that. `record_session_injection` always writes the new shape,
+    so the moment an object is (re)formatted its ledger entry is upgraded
+    and the grace period is one-shot.
+    """
+    if not isinstance(entry_value, dict):
+        return False
+    return (
+        str(entry_value.get("task_revision") or "") == task_revision
+        and str(entry_value.get("source_rev") or "") == source_rev
+    )
+
+
+def _link_ambiguous_pair(entry: dict[str, Any], retained: dict[str, Any]) -> bool:
+    """FIX 5(b): cross-link two L4-ambiguous entries by fingerprint.
+
+    Neither entry is suppressed; both keep a list of the other ambiguous
+    fingerprint(s) so a consumer can see the relationship. Returns True
+    only when this is a newly recorded pair (for accurate counting)."""
+    entry_related: list[str] = entry.setdefault("ambiguity_related", [])
+    retained_related: list[str] = retained.setdefault("ambiguity_related", [])
+    is_new = retained["fingerprint"] not in entry_related
+    if is_new:
+        entry_related.append(retained["fingerprint"])
+    if entry["fingerprint"] not in retained_related:
+        retained_related.append(entry["fingerprint"])
+    return is_new
 
 
 def _suppression(entry: dict[str, Any], reason: str, *, related: str = "") -> dict[str, Any]:

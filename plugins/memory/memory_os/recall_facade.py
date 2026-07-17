@@ -64,7 +64,12 @@ class RetrieverFacade:
         self._arbitration_mode = arbitration_mode if arbitration_mode in {"off", "shadow", "apply_canary"} else "off"
         self._freshness_guard_mode = freshness_guard_mode
         self._conflict_resolution_mode = conflict_resolution_mode
-        self._session_injection_ledger: dict[str, str] = {}
+        # FIX 4: values are {"task_revision": str, "source_rev": str} (see
+        # recall_arbitration.record_session_injection / _session_ledger_hit).
+        # `Any` (not `str`) because a legacy plain-string value may still
+        # transiently appear here if an older snapshot of this ledger was
+        # ever handed in; both shapes are handled gracefully on read.
+        self._session_injection_ledger: dict[str, Any] = {}
         self._last_task_revision = ""
         self.last_recall_plan: dict[str, Any] = {}
 

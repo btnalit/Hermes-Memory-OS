@@ -137,6 +137,46 @@ def test_effective_task_skips_malformed_rows_and_isolates_profiles_without_write
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
 
 
+def test_effective_task_fails_closed_on_malformed_tail_after_last_valid_record(tmp_path):
+    """Counterfactual for FIX 1: a malformed non-empty line AFTER the last
+    valid record must fail closed (return None), not resurrect the earlier
+    active row. This guards against a crashed/partial write of a
+    terminal (completed/cancelled/superseded) tombstone silently vanishing
+    and leaving a stale `active` row authoritative."""
+    from plugins.memory.memory_os.task_state import read_effective_current_task
+
+    roots = _roots(tmp_path)
+    _write_task_rows(
+        roots,
+        [
+            _task(status="active", profile="default"),
+            "{this-line-is-corrupted-and-comes-after-the-last-valid-record",
+        ],
+    )
+
+    assert read_effective_current_task(roots, profile="default") is None
+
+
+def test_effective_task_malformed_line_before_last_valid_record_still_resolves(tmp_path):
+    """Regression guard: a malformed line BEFORE the last valid record must
+    keep the pre-existing skip-and-continue behavior (only trailing
+    corruption fails closed)."""
+    from plugins.memory.memory_os.task_state import read_effective_current_task
+
+    roots = _roots(tmp_path)
+    _write_task_rows(
+        roots,
+        [
+            "{this-line-is-corrupted-but-comes-before-the-last-valid-record",
+            _task(status="active", profile="default"),
+        ],
+    )
+
+    result = read_effective_current_task(roots, profile="default")
+    assert result is not None
+    assert result["anchor"] == "Ship Phase 0"
+
+
 def test_effective_task_age_gate_fails_closed(tmp_path):
     from plugins.memory.memory_os.task_state import read_effective_current_task
 

@@ -19,6 +19,32 @@ SCHEMA_VERSION = "memory-os.context_router.v0"
 INCLUDE_THRESHOLD = 0.30
 RANKING_MODE = "score_then_budget"
 
+# FIX 3 (P3 audit): `allocated_chars` on each selected-section entry below is
+# an ADVISORY per-section budget projection computed by this dry-run/apply
+# router only -- it has no consumer. The real "apply" path
+# (`prefetch._build_context_router_apply_prefetch`) re-reads the FULL,
+# untruncated candidate sections by name and hands them to its own
+# formatter/truncator (`prefetch._fit_budget` / `_fit_sections_budget`,
+# which own the RH-26 `required_titles` fail-closed contract). That
+# formatter recomputes its own per-section char budget from scratch and is
+# the sole thing that actually clips text for the final assembled context.
+#
+# Two options were considered to close this gap:
+#   (a) Make the real formatter consume `allocated_chars` directly.
+#   (b) Make the advisory nature explicit and lock the real invariant with
+#       a test, without touching the formatter.
+# We chose (b): `prefetch.py` is out of this fix's file ownership, and its
+# `_fit_budget`/`required_titles` contract is a battle-tested, separately
+# unit-tested fail-closed mechanism (RH-26) for keeping route-required
+# headings alive under budget pressure. Wiring `allocated_chars` into it
+# would require redesigning that contract's truncation order and risks
+# regressing the required-heading guarantee for no behavioral gain, since
+# the formatter already enforces `len(final_context) <= budget_chars`
+# independently. `allocated_chars_semantics` below makes the advisory-only
+# status a discoverable, testable part of this report's own contract so a
+# future maintainer cannot mistake it for an enforced truncation directive.
+ALLOCATED_CHARS_SEMANTICS = "advisory_projection_not_enforced_by_formatter"
+
 INCLUDE_REASONS = {
     "required_by_route",
     "high_relevance",
@@ -285,6 +311,10 @@ def route_context_sections(
         key=lambda item: (-float(item[1]["score"]), item[0]),
     )
     budget_limit = max(0, int(budget_chars))
+    # NOTE: `allocated_chars` below (and this loop's `used_budget` running
+    # total) is this router's own advisory bookkeeping only -- see
+    # ALLOCATED_CHARS_SEMANTICS above. It is never read back to truncate
+    # text; the real formatter in prefetch.py computes its own budget fit.
     for _index, entry in [*required_entries, *optional_entries]:
         remaining_budget = max(0, budget_limit - used_budget)
         if entry["required"]:
@@ -320,6 +350,7 @@ def route_context_sections(
         "used_budget_chars": used_budget,
         "ranking_mode": RANKING_MODE,
         "include_threshold": INCLUDE_THRESHOLD,
+        "allocated_chars_semantics": ALLOCATED_CHARS_SEMANTICS,
         "selected_sections": selected,
         "dropped_sections": dropped,
         "risk_flags": _risk_flags(selected + dropped),
