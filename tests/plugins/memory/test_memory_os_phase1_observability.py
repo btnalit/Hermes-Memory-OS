@@ -26,6 +26,11 @@ def _section(*, source_ids):
 
 
 def _write_rollups(store, rows):
+    # Default to trigger_class="natural_cron" unless a row overrides it: these
+    # fixtures model legitimate cron-driven rollup history for schema-era
+    # health / natural-cycle-gating tests, distinct from the manual/legacy
+    # rows exercised by the Fix 3 provenance tests below.
+    rows = [{**row, "trigger_class": row.get("trigger_class", "natural_cron")} for row in rows]
     path = store.roots.memory_os_root / "system" / "exposure_rollup.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
@@ -217,3 +222,90 @@ def test_exposure_stats_fail_current_window_on_schema_attribution_gap(tmp_path):
     assert stats["schema_era_attribution_gap_count"] == 1
     assert stats["schema_era_health"] == "FAIL"
     assert "schema_era_health_not_pass" in stats["freeze_reasons"]
+
+
+def test_manual_trigger_rollups_do_not_count_toward_natural_cycle_gate(tmp_path):
+    """Fix 3: manual runs must not pollute natural-cycle cadence telemetry."""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "natural-anchor-manual",
+        "created_at": "2026-08-01T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "selected": [_section(source_ids=["crystallized:one"])],
+        "dropped": [],
+    })
+    _write_rollups(store, [
+        {
+            "window_start": f"2026-08-{day:02d}T00:00:00Z",
+            "window_end": f"2026-08-{day:02d}T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            "selected": 0,
+            "dropped_by_budget": 1,
+            "dropped_by_rank": 0,
+            "conservation_passes": True,
+            "trigger_class": "manual",
+        }
+        for day in range(8, 15)
+    ])
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+
+    # Same 7-consecutive-day shape as
+    # test_budget_pressure_streak_accepts_seven_recent_completed_calendar_days,
+    # but every row is a manual run — none of it may count as natural cadence.
+    assert stats["initial_natural_cycle_count"] == 0
+    assert stats["budget_pressure_streak_days"] == 0
+    assert stats["v2c_unfreeze_ready"] is False
+    assert "initial_natural_cycles:0/3" in stats["freeze_reasons"]
+    assert stats["legacy_unmarked_rollup_count"] == 0
+
+
+def test_legacy_unmarked_rollups_counted_separately_and_excluded_from_natural_gate(tmp_path):
+    """Fix 3: rollup rows written before trigger_class existed are legacy —
+    visible via legacy_unmarked_rollup_count, never silently folded into the
+    natural-cycle gate."""
+    store = _store(tmp_path)
+    append_memory_source_record(store.roots, {
+        "record_id": "natural-anchor-legacy",
+        "created_at": "2026-08-01T00:00:00Z",
+        "natural_production": True,
+        "traffic_class": "production",
+        "selected": [_section(source_ids=["crystallized:one"])],
+        "dropped": [],
+    })
+    path = store.roots.memory_os_root / "system" / "exposure_rollup.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_rows = [
+        {
+            "window_start": f"2026-08-{day:02d}T00:00:00Z",
+            "window_end": f"2026-08-{day:02d}T23:00:00Z",
+            "records_processed": 1,
+            "records_classified": 1,
+            "eligible": 1,
+            "selected": 0,
+            "dropped_by_budget": 1,
+            "dropped_by_rank": 0,
+            "conservation_passes": True,
+            # deliberately no "trigger_class" — pre-Fix-3 legacy shape
+        }
+        for day in range(8, 15)
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in legacy_rows) + "\n", encoding="utf-8")
+    (path.parent / "exposure_rollup_snapshot.json").write_text(
+        json.dumps({
+            "schema_version": "memory-os.exposure_rollup_snapshot.v0",
+            "latest_window_start": legacy_rows[-1]["window_start"],
+            "latest_window_end": legacy_rows[-1]["window_end"],
+        }),
+        encoding="utf-8",
+    )
+
+    stats = exposure_monitor_stats(store, now=datetime(2026, 8, 15, 12, tzinfo=timezone.utc))
+
+    assert stats["legacy_unmarked_rollup_count"] == 7
+    assert stats["initial_natural_cycle_count"] == 0
+    assert stats["budget_pressure_streak_days"] == 0
+    assert stats["v2c_unfreeze_ready"] is False

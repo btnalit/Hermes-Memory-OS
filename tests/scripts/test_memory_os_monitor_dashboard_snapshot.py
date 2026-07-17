@@ -696,3 +696,108 @@ def test_dashboard_snapshot_script_bootstraps_from_installed_layout(tmp_path):
 
     assert completed.returncode == 0, completed.stderr
     assert "--hermes-home" in completed.stdout
+
+
+def _write_v3_inner_life_config(memory_root: Path, *, wandering_enabled: bool, synthesis_admission_enabled: bool = False) -> None:
+    memory_root.mkdir(parents=True, exist_ok=True)
+    (memory_root / "config.json").write_text(
+        json.dumps({
+            "v3_inner_life": {
+                "wandering_enabled": wandering_enabled,
+                "synthesis_admission_enabled": synthesis_admission_enabled,
+            }
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_wandering_admission_status_disabled_when_flag_off(tmp_path):
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_v3_inner_life_config(memory_root, wandering_enabled=False)
+
+    snapshot = module._v3_inner_life_snapshot(memory_root, v3_seed_evidence={"activation_evidence_ready": True})
+
+    assert snapshot["wandering_admission_status"] == "disabled"
+    # Additive: existing raw fields remain unchanged.
+    assert snapshot["wandering_enabled"] is False
+
+
+def test_wandering_admission_status_blocked_when_seed_evidence_not_ready(tmp_path):
+    """Fix 4: wandering_enabled=true with seed evidence not ready must read as
+    configured_on_but_admission_blocked(reason=seed_evidence_not_ready), per
+    the quiet-cognitive-partner plan (9.1) — not R3 active/validated."""
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_v3_inner_life_config(memory_root, wandering_enabled=True)
+
+    snapshot = module._v3_inner_life_snapshot(
+        memory_root,
+        v3_seed_evidence={"activation_evidence_ready": False, "valid_day_count": 0, "consecutive_valid_day_count": 0},
+    )
+
+    assert snapshot["wandering_admission_status"] == "configured_on_but_admission_blocked(reason=seed_evidence_not_ready)"
+    assert snapshot["wandering_enabled"] is True
+
+
+def test_wandering_admission_status_pending_owner_gate_when_evidence_ready(tmp_path):
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_v3_inner_life_config(memory_root, wandering_enabled=True, synthesis_admission_enabled=False)
+
+    snapshot = module._v3_inner_life_snapshot(memory_root, v3_seed_evidence={"activation_evidence_ready": True})
+
+    assert snapshot["wandering_admission_status"] == "admission_evidence_ready_owner_gate_pending"
+
+
+def test_wandering_admission_status_active_when_owner_gate_granted(tmp_path):
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_v3_inner_life_config(memory_root, wandering_enabled=True, synthesis_admission_enabled=True)
+
+    snapshot = module._v3_inner_life_snapshot(memory_root, v3_seed_evidence={"activation_evidence_ready": True})
+
+    assert snapshot["wandering_admission_status"] == "admission_active"
+
+
+def test_wandering_admission_status_treats_missing_seed_evidence_as_not_ready(tmp_path):
+    """A malformed/missing v3_seed_evidence snapshot must fail closed to
+    'not ready' rather than crash or default to evidence-ready."""
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    _write_v3_inner_life_config(memory_root, wandering_enabled=True)
+
+    snapshot = module._v3_inner_life_snapshot(memory_root, v3_seed_evidence={})
+
+    assert snapshot["wandering_admission_status"] == "configured_on_but_admission_blocked(reason=seed_evidence_not_ready)"
+
+
+def test_dashboard_snapshot_wires_v3_seed_evidence_into_inner_life_composite(tmp_path):
+    """End-to-end: build_dashboard_snapshot must pass the already-computed
+    v3SeedEvidence into v3InnerLife so wandering_admission_status reflects
+    real seed-evidence state, not a hardcoded default."""
+    module = _load_module()
+    home = tmp_path / "home"
+    memory_root = home / "memory-os"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    _write_v3_inner_life_config(memory_root, wandering_enabled=True)
+    (memory_root / "system").mkdir(parents=True, exist_ok=True)
+    (memory_root / "system" / "v3_seed_evidence_snapshot.json").write_text(
+        json.dumps({
+            "schema_version": "memory-os.v3_seed_evidence_snapshot.v0",
+            "valid_day_count": 0,
+            "consecutive_valid_day_count": 0,
+            "activation_evidence_ready": False,
+        }),
+        encoding="utf-8",
+    )
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+
+    assert snapshot["v3SeedEvidence"]["activation_evidence_ready"] is False
+    assert (
+        snapshot["v3InnerLife"]["wandering_admission_status"]
+        == "configured_on_but_admission_blocked(reason=seed_evidence_not_ready)"
+    )

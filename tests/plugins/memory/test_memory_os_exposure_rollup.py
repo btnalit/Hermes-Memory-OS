@@ -114,6 +114,38 @@ class TestExposureRollupCycle:
         assert report["error_records"][0]["error_code"] == "source_cursor_not_found"
         assert len(rollup_path.read_text().splitlines()) == 1
 
+    def test_trigger_class_reflects_execution_gate_envelope_env_var(self, tmp_path: Path, monkeypatch) -> None:
+        """Fix 3: trigger_class is derived from MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID
+        being present in the process environment — not from the
+        execution_gate_envelope_id call parameter — so a manual/direct
+        invocation cannot forge itself as natural_cron by merely passing an
+        envelope id string."""
+        import json as _json
+
+        from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle
+        from plugins.memory.memory_os.memory_sources import append_memory_source_record
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="default")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        monkeypatch.delenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", raising=False)
+        append_memory_source_record(roots, {"record_id": "msrc_manual", "created_at": "2026-07-12T02:00:00Z", "selected": [{"source_ids": ["crystallized:manual_1"]}], "dropped": []})
+        manual_report = run_exposure_rollup_cycle(store, now=datetime.fromisoformat("2026-07-12T03:00:00+00:00"))
+        assert manual_report["trigger_class"] == "manual"
+
+        monkeypatch.setenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "xgate-fake-natural")
+        append_memory_source_record(roots, {"record_id": "msrc_natural", "created_at": "2026-07-12T04:00:00Z", "selected": [{"source_ids": ["crystallized:natural_1"]}], "dropped": []})
+        natural_report = run_exposure_rollup_cycle(store, now=datetime.fromisoformat("2026-07-12T05:00:00+00:00"))
+        assert natural_report["trigger_class"] == "natural_cron"
+
+        rollup_path = roots.memory_os_root / "system" / "exposure_rollup.jsonl"
+        rows = [_json.loads(line) for line in rollup_path.read_text(encoding="utf-8").splitlines()]
+        assert rows[0]["trigger_class"] == "manual"
+        assert rows[1]["trigger_class"] == "natural_cron"
+
     def test_rollup_idempotent_same_window(self, tmp_path: Path) -> None:
         """Same window re-run produces skipped result (idempotent)."""
         from plugins.memory.memory_os.exposure_rollup import run_exposure_rollup_cycle

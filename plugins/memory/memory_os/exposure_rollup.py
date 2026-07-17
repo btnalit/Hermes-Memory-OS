@@ -8,6 +8,7 @@ an execution-gate envelope.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,6 +106,12 @@ def run_exposure_rollup_cycle(
     from .memory_sources import read_memory_source_records
 
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    # Trigger provenance (Fix 3): only a process actually launched under the
+    # cron ExecutionGate wrapper (memory_os_execution_gate_runner.py) has this
+    # env var set. Basing the signal on the OS environment — not on the
+    # execution_gate_envelope_id parameter — means a manual/direct call cannot
+    # forge "natural_cron" simply by passing a fabricated envelope id.
+    trigger_class = "natural_cron" if os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID") else "manual"
     report: dict[str, Any] = {
         "status": "ok",
         "records_processed": 0,
@@ -116,6 +123,7 @@ def run_exposure_rollup_cycle(
         "conservation_passes": False,
         "skipped": False,
         "error_records": [],
+        "trigger_class": trigger_class,
     }
 
     # ── Append-order cursor gate (idempotency without timestamp races) ──
@@ -285,6 +293,7 @@ def run_exposure_rollup_cycle(
         "conservation_passes": conservation_passes,
         "co_selected_top": co_selected_top,
         "execution_gate_envelope": execution_gate_envelope_id or (envelope["execution_gate_envelope_id"] if envelope else None),
+        "trigger_class": trigger_class,
     }
 
     try:
@@ -395,6 +404,10 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     )
 
     rollup_records = _read_rollup_records(store)
+    # Fix 3: rollup records written before trigger_class existed cannot be
+    # attributed either way — surface them separately rather than silently
+    # folding them into (or out of) the natural-cycle cadence gate.
+    legacy_unmarked_rollup_count = sum(1 for record in rollup_records if "trigger_class" not in record)
     total_eligible = sum(int(record.get("eligible") or 0) for record in rollup_records)
     total_selected = sum(int(record.get("selected") or 0) for record in rollup_records)
     total_budget = sum(int(record.get("dropped_by_budget") or 0) for record in rollup_records)
@@ -423,6 +436,10 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
 
     daily: dict[str, dict[str, int | bool]] = {}
     for record in schema_rollups:
+        if record.get("trigger_class") != "natural_cron":
+            # Fix 3: manual runs and legacy (unmarked) rollups must never
+            # inflate the natural-cycle cadence/pressure-streak gate.
+            continue
         timestamp = _parse_monitor_time(record.get("window_end") or record.get("created_at"))
         if timestamp is None or int(record.get("records_processed") or 0) <= 0:
             continue
@@ -467,6 +484,7 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
         "schema_version": "memory-os.exposure_monitor_stats.v1",
         "exposure_rollup_lag_hours": round(lag_hours, 1),
         "exposure_rollup_records_total": len(rollup_records),
+        "legacy_unmarked_rollup_count": legacy_unmarked_rollup_count,
         "cumulative_eligible": total_eligible,
         "cumulative_selected": total_selected,
         "cumulative_dropped_by_budget": total_budget,

@@ -59,6 +59,75 @@ def test_run_probe_with_stdin_script_does_not_conflict_with_devnull():
     assert result == {"ok": True, "probe": "stdin"}
 
 
+def test_collect_snapshot_remote_populates_v2_exposure_from_successful_probe(monkeypatch):
+    """Fix 1: a successful v2_exposure_and_clearance_probe result from the
+    remote SSH probe is consumed directly, instead of leaving
+    v2_exposure_monitor/clearance_snapshot_freshness marked
+    unavailable_remote_projection (the pre-fix silent-skip behavior)."""
+    fake_v2_exposure = {"schema_era_health": "PASS", "conservation_total_passes": True}
+    fake_clearance = {"status": "fresh"}
+
+    def fake_run_probe(host, script, python_bin="python3"):
+        assert host == "fake-host"
+        return {
+            "v2_exposure_and_clearance_probe": {
+                "ok": True,
+                "v2_exposure_monitor": fake_v2_exposure,
+                "clearance_snapshot_freshness": fake_clearance,
+            },
+        }
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    assert snapshot["v2_exposure_monitor"] == fake_v2_exposure
+    assert snapshot["clearance_snapshot_freshness"] == fake_clearance
+
+
+def test_collect_snapshot_remote_probe_failure_becomes_explicit_unavailable_with_error_code(monkeypatch):
+    """Fix 1: SSH/runtime/bad-JSON style remote sub-probe failure never
+    silently skips — it becomes an explicit unavailable+error_code shape
+    which classify_snapshot turns into a WARN (Fix 2)."""
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {"v2_exposure_and_clearance_probe": {"ok": False, "error_code": "ImportError"}}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    assert snapshot["v2_exposure_monitor"] == {"schema_era_health": "unavailable", "error_code": "ImportError"}
+    assert snapshot["clearance_snapshot_freshness"] == {"status": "unavailable", "error_code": "ImportError"}
+    assert any(
+        item["code"] == "v2_exposure_monitor_collection_failed" for item in snapshot["classification"]["warn"]
+    )
+
+
+def test_collect_snapshot_remote_probe_missing_field_is_not_silent(monkeypatch):
+    """Defensive: even if the remote probe response is missing the
+    v2_exposure_and_clearance_probe field entirely (e.g. an unexpected/older
+    remote payload shape), this must still surface as an explicit failure —
+    never silently 'unavailable' with no signal at all."""
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    assert snapshot["v2_exposure_monitor"]["error_code"] == "remote_probe_field_missing"
+    assert snapshot["clearance_snapshot_freshness"]["error_code"] == "remote_probe_field_missing"
+    assert any(
+        item["code"] == "v2_exposure_monitor_collection_failed" for item in snapshot["classification"]["warn"]
+    )
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:
@@ -4420,6 +4489,110 @@ def test_v2_and_clearance_freshness_classification_respects_activation_boundary(
     assert any(item["code"] == "clearance_snapshot_not_fresh" for item in activation_unavailable["fail"])
 
 
+def test_v2_exposure_schema_era_fail_is_monitor_fail_not_warn():
+    """Fix 2a: a real schema-era attribution/conservation/telemetry break is
+    a correctness bug — it must FAIL the monitor, not just warn."""
+    classification = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "FAIL",
+            "conservation_total_passes": True,
+            "schema_era_conservation_failure_count": 0,
+        },
+    })
+    assert classification["status"] == "FAIL"
+    assert any(item["code"] == "v2_exposure_schema_era_unhealthy" for item in classification["fail"])
+    assert not any(item["code"] == "v2_exposure_schema_era_unhealthy" for item in classification["warn"])
+
+
+def test_v2_exposure_conservation_fail_requires_schema_era_failure_count():
+    """Fix 2b/2c: all-history conservation drift with zero schema-era
+    failures is migration debt (INFO only); a real schema-era failure count
+    still FAILs."""
+    migration_debt_only = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": False,
+            "schema_era_conservation_failure_count": 0,
+            "all_history_attribution_gap_count": 3,
+            "schema_era_attribution_gap_count": 0,
+        },
+    })
+    assert not any(item["code"] == "v2_exposure_conservation_failed" for item in migration_debt_only["fail"])
+    assert not any(item["code"] == "v2_exposure_conservation_failed" for item in migration_debt_only["warn"])
+    assert any(item["code"] == "v2_exposure_all_history_migration_debt" for item in migration_debt_only["info"])
+    migration_info = next(
+        item for item in migration_debt_only["info"] if item["code"] == "v2_exposure_all_history_migration_debt"
+    )
+    assert migration_info["value"]["migration_debt_attribution_gap_count"] == 3
+
+    real_schema_era_failure = monitor.classify_snapshot({
+        "monitor_profile": "live",
+        "v2_exposure_monitor": {
+            "schema_era_health": "PASS",
+            "conservation_total_passes": False,
+            "schema_era_conservation_failure_count": 2,
+            "all_history_attribution_gap_count": 3,
+            "schema_era_attribution_gap_count": 0,
+        },
+    })
+    assert real_schema_era_failure["status"] == "FAIL"
+    assert any(item["code"] == "v2_exposure_conservation_failed" for item in real_schema_era_failure["fail"])
+
+
+def test_v2_exposure_and_clearance_collection_failure_escalates_to_fail_in_production():
+    """Fix 1/Fix 2: a collection failure (local exception or failed remote
+    SSH projection) must never be a silent pass. On a live/production run it
+    escalates all the way to FAIL — production hosts must not silently
+    tolerate a broken remote SSH/runtime collection. Clean-host tolerates the
+    same signal as WARN only (see the clean-host test below)."""
+    snapshot = _healthy_snapshot()
+    snapshot["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": "RuntimeError"}
+    snapshot["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": "RuntimeError"}
+    classification = monitor.classify_snapshot(snapshot)
+    assert any(item["code"] == "v2_exposure_monitor_collection_failed" for item in classification["warn"])
+    assert any(
+        item["code"] == "clearance_snapshot_freshness_collection_failed" for item in classification["warn"]
+    )
+    assert classification["status"] == "FAIL"
+    assert any(
+        item["code"] == "v2_exposure_monitor_collection_failed_in_production" for item in classification["fail"]
+    )
+    assert any(
+        item["code"] == "clearance_snapshot_freshness_collection_failed_in_production"
+        for item in classification["fail"]
+    )
+
+    # A snapshot that simply never set these fields at all (e.g. an older
+    # test fixture / schema) must NOT be treated as a collection failure —
+    # only an explicit error_code (or the legacy sentinel) triggers the warn.
+    silent_baseline = monitor.classify_snapshot({"monitor_profile": "live"})
+    assert not any(
+        item["code"] in {"v2_exposure_monitor_collection_failed", "clearance_snapshot_freshness_collection_failed"}
+        for item in silent_baseline["warn"]
+    )
+
+
+def test_clean_host_classifies_new_v2_and_clearance_collection_failure_codes():
+    """Fix 2: the new codes must be gated through CLEAN_HOST_WARN_CLASSIFICATIONS
+    as an expected clean-host WARN, instead of falling into
+    clean_host_warn_unclassified or escalating to FAIL as production does."""
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": "ConnectionError"}
+    snapshot["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": "ConnectionError"}
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert any(item["code"] == "v2_exposure_monitor_collection_failed" for item in classification["warn"])
+    assert any(
+        item["code"] == "clearance_snapshot_freshness_collection_failed" for item in classification["warn"]
+    )
+
+
 def test_render_chinese_summary_omits_private_bodies_and_reports_trends():
     snapshot = _healthy_snapshot()
     snapshot["deltas"] = {
@@ -5852,6 +6025,55 @@ def test_remote_probe_script_custom_home_compiles():
     """Generated probe script with custom home is syntactically valid Python."""
     script = monitor._remote_probe_script("/tmp/custom-hermes")
     compile(script, "<probe_custom>", "exec")
+
+
+def test_remote_probe_script_includes_v2_exposure_and_clearance_probe():
+    """Fix 1: the generated remote probe script collects V2 exposure stats
+    and clearance snapshot freshness using the same SSH remote-execution
+    pattern as other remote projections (e.g. seam_host_probe), instead of
+    leaving production hosts to silently skip these checks."""
+    script = monitor._remote_probe_script()
+    assert "def v2_exposure_and_clearance_probe():" in script
+    assert '"v2_exposure_and_clearance_probe": v2_exposure_and_clearance_probe_result,' in script
+    assert "v2_exposure_and_clearance_probe_result = v2_exposure_and_clearance_probe()" in script
+    assert "from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats" in script
+    assert "from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness" in script
+    compile(script, "<probe_v2_exposure>", "exec")
+
+
+def test_remote_probe_v2_exposure_and_clearance_probe_returns_ok_shape():
+    """The remote-side function returns the same ok/v2_exposure_monitor/
+    clearance_snapshot_freshness shape collect_snapshot() expects, using the
+    real exposure_rollup/clearance_receipts modules (no filesystem needed —
+    a non-existent hermes_home simply yields empty/near-empty stats)."""
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+
+    result = namespace["v2_exposure_and_clearance_probe"]()
+
+    assert result["ok"] is True
+    assert result["v2_exposure_monitor"]["schema_version"] == "memory-os.exposure_monitor_stats.v1"
+    assert "status" in result["clearance_snapshot_freshness"]
+
+
+def test_remote_probe_v2_exposure_and_clearance_probe_failure_is_bounded_not_raised(monkeypatch):
+    """Fix 1: if the remote host's runtime raises (missing package, corrupt
+    local state, etc.), the sub-probe must catch it and report ok=False —
+    never let an exception here crash the rest of the remote probe script."""
+    from plugins.memory.memory_os import exposure_rollup as _exposure_rollup_module
+
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    monkeypatch.setattr(
+        _exposure_rollup_module,
+        "exposure_monitor_stats",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    result = namespace["v2_exposure_and_clearance_probe"]()
+
+    assert result["ok"] is False
+    assert result["error_code"] == "RuntimeError"
 
 
 def test_remote_probe_script_default_still_uses_root_hermes():

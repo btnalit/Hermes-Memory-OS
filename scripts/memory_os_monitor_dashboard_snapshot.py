@@ -161,7 +161,7 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     session_mirror = _session_mirror_snapshot(hermes_home)
     v3_seed_evidence = _v3_seed_evidence_snapshot(memory_root)
     v3_private_journal = _v3_private_journal_snapshot(memory_root)
-    v3_inner_life = _v3_inner_life_snapshot(memory_root)
+    v3_inner_life = _v3_inner_life_snapshot(memory_root, v3_seed_evidence=v3_seed_evidence)
     v2_exposure = exposure_monitor_stats(store)
     clearance_freshness = clearance_snapshot_freshness(
         roots,
@@ -913,7 +913,24 @@ def _owner_aging_snapshot(memory_root: Path, *, profile: str = DEFAULT_PROFILE) 
         }
 
 
-def _v3_inner_life_snapshot(memory_root: Path) -> dict[str, Any]:
+def _wandering_admission_status(
+    *, wandering_enabled: bool, activation_evidence_ready: bool, synthesis_admission_enabled: bool
+) -> str:
+    """Fix 4: derive a single owner-legible composite from the raw V3 inner
+    life flags, instead of making the owner cross-reference wandering_enabled
+    against v3SeedEvidence themselves. Per the quiet-cognitive-partner plan
+    (9.1/9.6): wandering_enabled=true with seed evidence not ready is
+    'configured_on_but_admission_blocked', not R3-active or R3-validated."""
+    if not wandering_enabled:
+        return "disabled"
+    if not activation_evidence_ready:
+        return "configured_on_but_admission_blocked(reason=seed_evidence_not_ready)"
+    if not synthesis_admission_enabled:
+        return "admission_evidence_ready_owner_gate_pending"
+    return "admission_active"
+
+
+def _v3_inner_life_snapshot(memory_root: Path, *, v3_seed_evidence: dict[str, Any]) -> dict[str, Any]:
     config = _read_json(memory_root / "config.json")
     inner = config.get("v3_inner_life") if isinstance(config, dict) else {}
     inner = inner if isinstance(inner, dict) else {}
@@ -930,16 +947,26 @@ def _v3_inner_life_snapshot(memory_root: Path) -> dict[str, Any]:
         ).capability
     except Exception:
         capability = False
+    wandering_enabled = inner.get("wandering_enabled") is True
+    synthesis_admission_enabled = inner.get("synthesis_admission_enabled") is True
+    activation_evidence_ready = bool(
+        isinstance(v3_seed_evidence, dict) and v3_seed_evidence.get("activation_evidence_ready")
+    )
     return {
         "ephemeral_inference_capability": capability,
-        "wandering_enabled": inner.get("wandering_enabled") is True,
-        "synthesis_admission_enabled": inner.get("synthesis_admission_enabled") is True,
+        "wandering_enabled": wandering_enabled,
+        "synthesis_admission_enabled": synthesis_admission_enabled,
         "outlet_shadow_enabled": inner.get("outlet_shadow_enabled") is True,
         "expression_enabled": inner.get("expression_enabled") is True,
         "latest_wandering_status": str((runs[-1] if runs else {}).get("status") or "never_run"),
         "active_manifest_count": len(manifests),
         "queued_share_count": sum(1 for item in queued if item.get("requested_fate") == "share"),
         "queued_proposal_count": sum(1 for item in queued if item.get("requested_fate") == "propose"),
+        "wandering_admission_status": _wandering_admission_status(
+            wandering_enabled=wandering_enabled,
+            activation_evidence_ready=activation_evidence_ready,
+            synthesis_admission_enabled=synthesis_admission_enabled,
+        ),
     }
 
 

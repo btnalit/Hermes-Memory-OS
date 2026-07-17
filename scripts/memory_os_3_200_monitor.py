@@ -405,6 +405,21 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "optional V7 component is intentionally absent with an explicit reason",
         "production_behavior": "warn_if_production",
     },
+    "clearance_snapshot_not_fresh": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host may not have a fresh clearance snapshot before V2C unfreeze readiness accumulates",
+        "production_behavior": "warn_if_production",
+    },
+    "v2_exposure_monitor_collection_failed": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host remote projection collection (SSH/runtime) may be unavailable during compatibility smoke",
+        "production_behavior": "fail_if_production",
+    },
+    "clearance_snapshot_freshness_collection_failed": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host remote projection collection (SSH/runtime) may be unavailable during compatibility smoke",
+        "production_behavior": "fail_if_production",
+    },
 }
 
 
@@ -1378,6 +1393,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     passed: list[dict[str, Any]] = []
     warn: list[dict[str, Any]] = []
     fail: list[dict[str, Any]] = []
+    info: list[dict[str, Any]] = []
     monitor_profile = _normalize_monitor_profile(snapshot.get("monitor_profile"))
     clean_host = monitor_profile == "clean_host"
     legacy_retired = (
@@ -1400,9 +1416,39 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if v2_health in {"PASS", "healthy_no_sample"}:
         passed.append({"code": "v2_exposure_schema_era_healthy", "value": v2_health})
     elif v2_health == "FAIL":
-        warn.append({"code": "v2_exposure_schema_era_unhealthy", "value": v2_exposure})
-    if v2_exposure and v2_exposure.get("conservation_total_passes") is False:
+        # A real schema-era attribution gap / conservation break / telemetry
+        # degradation inside natural production records is a correctness bug
+        # on any host — it must FAIL the monitor outright, not warn (Fix 2a).
+        fail.append({"code": "v2_exposure_schema_era_unhealthy", "value": v2_exposure})
+    elif v2_health == "unavailable_remote_projection" or v2_exposure.get("error_code"):
+        # Collection was attempted (locally or via remote SSH projection) and
+        # failed — this must never be a silent pass (Fix 1 / Fix 2).
+        warn.append({"code": "v2_exposure_monitor_collection_failed", "value": v2_exposure})
+    schema_era_conservation_failure_count = int(v2_exposure.get("schema_era_conservation_failure_count") or 0)
+    if schema_era_conservation_failure_count > 0:
+        # Only a conservation break inside the schema era (natural production
+        # records) is a real FAIL driver — all-history/migration-era breaks
+        # are surfaced separately below as INFO (Fix 2b).
         fail.append({"code": "v2_exposure_conservation_failed", "value": v2_exposure})
+    all_history_gap_count = int(v2_exposure.get("all_history_attribution_gap_count") or 0)
+    schema_era_gap_count = int(v2_exposure.get("schema_era_attribution_gap_count") or 0)
+    migration_debt_gap_count = max(0, all_history_gap_count - schema_era_gap_count)
+    all_history_conservation_ok = v2_exposure.get("conservation_total_passes")
+    migration_debt_conservation_issue = (
+        all_history_conservation_ok is False and schema_era_conservation_failure_count == 0
+    )
+    if v2_exposure and (migration_debt_gap_count > 0 or migration_debt_conservation_issue):
+        # All-history migration debt (pre-schema-era data) is visible but must
+        # never drive FAIL/WARN on its own (Fix 2c).
+        info.append({
+            "code": "v2_exposure_all_history_migration_debt",
+            "value": {
+                "migration_debt_attribution_gap_count": migration_debt_gap_count,
+                "all_history_attribution_gap_count": all_history_gap_count,
+                "schema_era_attribution_gap_count": schema_era_gap_count,
+                "conservation_total_passes": all_history_conservation_ok,
+            },
+        })
     if v2_exposure.get("downstream_clearance_closure_frozen") is True:
         passed.append({"code": "v2_downstream_clearance_frozen_by_evidence_gates", "reasons": v2_exposure.get("freeze_reasons")})
 
@@ -1415,6 +1461,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         fail.append({"code": "clearance_snapshot_not_fresh", "value": clearance_freshness})
     elif clearance_status in {"stale", "missing"}:
         warn.append({"code": "clearance_snapshot_not_fresh", "value": clearance_freshness})
+    elif clearance_status == "unavailable_remote_projection" or clearance_freshness.get("error_code"):
+        # Same "never silent" requirement as v2_exposure above (Fix 1 / Fix 2).
+        warn.append({"code": "clearance_snapshot_freshness_collection_failed", "value": clearance_freshness})
 
     if snapshot.get("gateway", {}).get("ActiveState") == "active":
         passed.append({"code": "gateway_active"})
@@ -3483,6 +3532,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         "pass": passed,
         "warn": warn,
         "fail": fail,
+        "info": info,
         "clean_host_warn_classification": clean_host_warn_classification,
         "evidence_labels": evidence_labels,
     }
@@ -4438,8 +4488,27 @@ def collect_snapshot(
             raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": type(exc).__name__}
             raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": type(exc).__name__}
     else:
-        raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable_remote_projection"}
-        raw["clearance_snapshot_freshness"] = {"status": "unavailable_remote_projection"}
+        # Fix 1: collect exposure_monitor_stats / clearance_snapshot_freshness
+        # on the remote host too, using the same SSH remote-execution pattern
+        # as the rest of _remote_probe_script() (see
+        # v2_exposure_and_clearance_probe() inside the generated script).
+        # Production hosts must not silently skip these checks — if the
+        # remote sub-probe is missing or reports failure (SSH error, missing
+        # runtime, bad JSON), fall through to an explicit "unavailable" +
+        # error_code shape, which classify_snapshot turns into a WARN
+        # (never a silent pass).
+        _remote_v2_probe = raw.get("v2_exposure_and_clearance_probe")
+        if isinstance(_remote_v2_probe, dict) and _remote_v2_probe.get("ok") is True:
+            raw["v2_exposure_monitor"] = _remote_v2_probe.get("v2_exposure_monitor") or {}
+            raw["clearance_snapshot_freshness"] = _remote_v2_probe.get("clearance_snapshot_freshness") or {}
+        else:
+            _remote_error_code = (
+                _remote_v2_probe.get("error_code")
+                if isinstance(_remote_v2_probe, dict)
+                else "remote_probe_field_missing"
+            )
+            raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": _remote_error_code}
+            raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": _remote_error_code}
     raw["living_memory_promotion"] = summarize_living_memory_promotion(**_lm_kwargs)
     raw["classification"] = classify_snapshot(raw)
     return raw
@@ -5218,6 +5287,27 @@ def seam_host_probe():
         return _seam_probe(_roots)
     except ImportError:
         return memory_os_cli(["host-probe", "--json"])
+
+def v2_exposure_and_clearance_probe():
+    # Fix 1: remote collection of V2 exposure telemetry and clearance
+    # snapshot freshness, mirroring collect_snapshot()'s local-run branch.
+    # Any failure here (missing runtime package, corrupt local state, etc.)
+    # must not crash the rest of this probe script — report it explicitly
+    # so the caller can turn it into a WARN instead of a silent pass.
+    try:
+        from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness
+        from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+        _roots = MemoryOSRoots.from_hermes_home(_hermes_home, profile="default")
+        _store = MemoryOSStore(_roots)
+        _v2_exposure = exposure_monitor_stats(_store)
+        _clearance = clearance_snapshot_freshness(
+            _roots, for_activation=_v2_exposure.get("v2c_unfreeze_ready") is True
+        )
+        return {"ok": True, "v2_exposure_monitor": _v2_exposure, "clearance_snapshot_freshness": _clearance}
+    except Exception as exc:
+        return {"ok": False, "error_code": type(exc).__name__, "error_detail": str(exc)[:200]}
 
 def compaction_stats():
     r = run(["journalctl", "--user", "-u", "hermes-gateway.service", "--since", "6 hours ago", "--no-pager", "-o", "cat"])
@@ -7863,6 +7953,7 @@ owner_review_delivery_gate = memory_os_cli(["review", "delivery-gate"])
 owner_review_proposal_followups = memory_os_cli(["review", "proposal-followups", "--limit", "10"])
 owner_review_proposal_auto_route = memory_os_cli(["review", "proposal-followups", "--auto-route", "--limit", "10"])
 host_capability_probe = seam_host_probe()
+v2_exposure_and_clearance_probe_result = v2_exposure_and_clearance_probe()
 signal_source_requirements = memory_os_cli(["signal-sources", "--json"])
 memory_projection = memory_os_cli(["projection", "status"])
 memory_projection_retention = memory_os_cli(["projection", "retention-status"])
@@ -7923,6 +8014,7 @@ print(json.dumps({
   "owner_review_proposal_followups": owner_review_proposal_followups,
   "owner_review_proposal_auto_route": owner_review_proposal_auto_route,
   "host_capability_probe": host_capability_probe,
+  "v2_exposure_and_clearance_probe": v2_exposure_and_clearance_probe_result,
   "signal_source_requirements": signal_source_requirements,
   "memory_projection": memory_projection,
   "memory_projection_retention": memory_projection_retention,
