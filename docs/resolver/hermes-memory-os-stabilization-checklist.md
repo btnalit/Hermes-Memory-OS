@@ -119,16 +119,115 @@
 
 ---
 
-## 待办 — BC 代码评审遗留项（P1–P3，尚未重做）
+## BE — BC 代码评审 P1 四项重做（2026-07-18，提交 `e6629a6..efcc202`）
 
-### P1 — 静默假阴性 / 监控崩溃
+沿用丢失周期已定语义重做四项 P1（BD 之后的遗留项 #4–#7），另含一项全量红灯阻断的
+顺带修复（BE.5）。
 
-| # | 位置 | 问题 | 修法 |
-|---|------|------|------|
-| 4 | `permanent_promotion.py:2049` | 裸 `except` 吞异常，`stale_open_evaluation_status` 全仓库无消费者：stale-open 评估失败时计数停在 0、状态仍 "collected"，真实 stale 提案零信号漏报（违反 No Silent Failures） | `classify_snapshot` 消费该状态（unavailable → WARN，复用 BD.1 修好的升级通道）；except 记 bounded error_record |
-| 5 | `memory_os_3_200_monitor.py:1235` | 本地分支读账本无 try/except（read_text 在 try 外）：损坏/非 UTF-8 文件让整个本地 monitor 崩溃，而远端同场景只 WARN | 本地调用包 try/except，降级为 ledger_collection_error，与远端对称 |
-| 6 | `permanent_promotion.py:2062` | `int(latest_recovery.get(...))` 缺 `or 0`（邻行有）：历史 result_summary 缺 success_count 键 → `int(None)` TypeError → 经 #5 的无保护路径崩掉 monitor [PLAUSIBLE] | 补 `or 0`，与 #5 一起修 |
-| 7 | `v3_wandering.py:202` | 种子数据选取只看 valid 不看 trigger_class:门开后手动行仍供给真实 wandering 数据——BC.2 要关的风险在门下一层敞开 | 行过滤加 `trigger_class == "natural_cron"`（与快照门控同语义） |
+### BE.1 stale-open 评估失败被裸 except 吞掉且状态无消费者（BC 评审 #4）
+
+- **根因**：`read_permanent_promotion_ledger_counts` 的 stale-open 评估循环包在
+  `except Exception: stale_open_evaluation_status = "unavailable"` 里——异常类型被丢弃
+  （违反 No Silent Failures），且该状态全仓库无消费者：评估失败时
+  `stale_open_proposal_count` 停在 0、section 仍报 `ledger_state_collection_status ==
+  "collected"`，真实 stale 提案被静默漏报为"已验证的零"。
+- **修复**：except 捕获 `stale_open_evaluation_error_code = type(exc).__name__`（本路径的
+  有界错误记录）并随返回 dict 输出；`classify_snapshot` Living Memory 块消费该状态
+  （unavailable → WARN `living_memory_stale_open_evaluation_unavailable`，value 为
+  error_code）；分类表注册 `expected_clean_host` + `fail_if_production`（复用 BD.1 移到
+  函数末尾的升级通道）。
+- **第四路径防御（规则 4）**：`summarize_living_memory_promotion` 在
+  `ledger_state_collection_status == "collected"` 时对缺失的
+  `stale_open_evaluation_status` 键 setdefault 为 "unavailable"（error_code
+  `missing_from_collected_counts`）——版本偏斜远端插件返回的旧 counts dict 不可能把
+  "缺键"读成"评估健康"。未采集路径不受影响：remote 失败由更强的
+  ledger-collection-failed WARN 覆盖；三参数全 None 的硬零占位路径是 P2 #9 既有缺口，
+  超出本次范围，本次新字段在该路径与 status 键一同缺失、不新增隐式路径。
+- **反事实**：revert 插件 hunk → 插件测试 FAIL（KeyError）；revert monitor 三处 hunk →
+  3 个 monitor 测试 FAIL；restore → 全过。
+- **新测试**：`tests/plugins/memory/test_memory_os_permanent_promotion.py::`
+  `test_ledger_counts_stale_open_evaluation_failure_is_reported_not_swallowed`；
+  `tests/scripts/test_memory_os_3_200_monitor.py` ——
+  `test_production_living_memory_stale_open_evaluation_unavailable_escalates_to_fail`、
+  `test_clean_host_living_memory_stale_open_evaluation_unavailable_stays_classified_warn`、
+  `test_summarize_collected_counts_missing_stale_open_evaluation_status_never_reads_ok`
+  （镜像 BD.1 的生产/clean-host 测试对）。
+
+### BE.2 本地账本读取无保护，损坏文件崩掉整个本地 monitor（BC 评审 #5）
+
+- **根因**：`summarize_living_memory_promotion` 本地分支直接
+  `section.update(read_permanent_promotion_ledger_counts(...))`——损坏/非 UTF-8 账本文件
+  的 UnicodeDecodeError 直接崩掉整个本地 monitor run，而远端同场景只降级为 WARN。
+- **修复**：本地调用包 try/except，失败置 `ledger_state_collection_status =
+  "unavailable"` + `ledger_state_collection_error_code = type(exc).__name__`，与远端
+  `ledger_collection_error` 路径完全对称，走 BD.1 的 WARN/升级通道。
+- **反事实**：revert → 新测试以 UnicodeDecodeError 崩溃 FAIL；restore → PASS。
+- **新测试**：`tests/scripts/test_memory_os_3_200_monitor.py::`
+  `test_summarize_living_memory_promotion_local_ledger_read_failure_does_not_crash`
+  （真实写入非 UTF-8 字节的账本文件，非 monkeypatch）。
+
+### BE.3 历史 result_summary 行缺键 → int(None) TypeError（BC 评审 #6）
+
+- **根因**：`recovery_success_count` / `recovery_attempt_count` 的
+  `int(latest_recovery.get(...))` 在 latest_recovery 为真但键缺失/为 None 的历史
+  envelope 行上抛 TypeError（邻行 failure_count 已有 `or 0`），并经 #5 的无保护路径
+  崩掉 monitor。
+- **修复**：两处 int() 内补 `(... or 0)`，保留原 `if latest_recovery else ...` 回退结构
+  （不重复前一会话被 revert 的"删 or 0"方向）。
+- **规则 5 清扫**：多行感知扫描全仓 `int(...get(...))` 无回退模式——除本函数两处外，
+  monitor 脚本命中均在 `_optional_int`/`_to_int` 安全转换内部；`owner_actions.py`
+  rendered_counts（进程内构造恒为 int）与 `inner_drive.py` `_source_cap`（config 形状）
+  为同语法不同可达性，不经历史文件行可达 None，记录不改。
+- **反事实**：revert → 新测试 TypeError FAIL；restore → PASS。
+- **新测试**：`tests/plugins/memory/test_memory_os_permanent_promotion.py::`
+  `test_ledger_counts_tolerate_historical_recovery_summary_missing_keys`
+  （缺键与 None 值两种历史行形状）。
+
+### BE.4 种子行选取只看 valid 不看 trigger_class（BC 评审 #7）
+
+- **根因**：`collect_seed_inputs_from_store` 行过滤只要求 `valid is True`——activation
+  gate 打开后，更晚的 valid 手动行会成为真实 wandering 的种子来源，BC.2 在门上关掉的
+  手动注入风险在门下一层敞开。
+- **修复**：行过滤加 `item.get("trigger_class") == "natural_cron"`（与快照门控同语义；
+  legacy 无字段行同样排除）。
+- **与问题陈述的差异**：wandering 两个测试文件现有用例并无写 daily 行的 fixture（全仓库
+  仅 v3_seed_evidence 测试写该文件，且不经过 `collect_seed_inputs_from_store`），
+  无需按预期更新既有 fixture。
+- **同模式检查（规则 5）**：`memory_os_monitor_dashboard_snapshot.py` 取物理最后一行
+  不看 trigger_class——即 P3 #15（纯展示层），维持待办不动。
+- **反事实**：revert → 两个新测试双 FAIL（seeds 来自 manual 行 / manual-only 仍产出）；
+  restore → 全过。
+- **新测试**：`tests/plugins/memory/test_memory_os_v3_wandering.py` ——
+  `test_collect_seed_inputs_uses_latest_natural_cron_row_not_later_manual_row`、
+  `test_collect_seed_inputs_manual_or_legacy_only_rows_yield_no_seed_inputs`。
+
+### BE.5 顺带修复：digest 渲染测试日期腐化（非 P1 范围，全量红灯阻断）
+
+- **现象**：`test_permanent_items_render_with_raw_token_only_in_ephemeral_delivery` 在
+  未改动基线上自 2026-07-18T00:00Z 起 FAIL——fixture 固定 `now = 2026-07-10`，而
+  `render_owner_review_digest` 内部 `_apply_review_aging` 用真实 `datetime.now()`
+  （aging_action_required_days=7）：wall clock 越过 7 天阈值后条目从 action_required
+  降级隐藏，token 断言落空。
+- **修复**：fixture 改锚定真实时钟（同文件 `test_ppmt_owner_reply_...` 的既有写法），
+  条目年龄恒为 0，测试不再随日期腐化。
+- **验证**：stash 全部改动后该测试在干净基线上仍 FAIL（证明与本次四项修复无关）；
+  修复后单测与全量均过。
+
+### BE 验证结论
+
+- 全量测试：**2579 passed, 0 failed, 13 skipped**。本机当日干净基线（`e6629a6`）实测为
+  2570 passed / 1 failed（即 BE.5 日期腐化）/ 13 skipped；本次 +8 新测试 +1 修复。
+- 基线口径说明：BD 记录的 2579/8 与本机当日实测不一致，属环境态差异非回归——5 个
+  closure-matrix 测试在公共检出（无 gitignored `docs/internal-memory-os/`）下按设计
+  skip，另有 3 个环境条件测试本环境未收集。
+- 静态门：import cycle pass / write surface `unclassified_count=0` / static hygiene pass /
+  public checkout probe `--strict` PASS（exit 0）/ `git diff --check` 干净。
+- 证据级别：`local_pass`（本机 pytest）。生产远端（hermes-media live monitor）验证未做，
+  部署后需跑 `memory_os_3_200_monitor.py --host hermes-media --monitor-profile live`。
+
+---
+
+## 待办 — BC 代码评审遗留项（P2–P3，尚未重做）
 
 ### P2 — 潜伏性缺陷
 
@@ -159,3 +258,8 @@
   fail_if_production 生产契约；digest 去重加 provenance upgrade（manual/legacy→cron 不再
   skip）；natural_by_date 改独立 last-writer-wins 防迟到 manual 行顶掉 natural 天。
   2579 passed / 8 skipped，静态门全过。
+- `e6629a6..efcc202`：BC 评审 P1 四项重做——stale-open 评估失败记 error_code 并由
+  classify_snapshot 消费（unavailable → WARN，fail_if_production 升级）；本地账本读取
+  包 try/except 与远端降级对称；recovery 计数补 `or 0` 防历史行 int(None)；wandering
+  种子行过滤加 natural_cron 门控。另修 digest 渲染测试日期腐化。2579 passed /
+  0 failed / 13 skipped（本机当日基线 2570+1F/13，口径见 BE 验证结论），静态门全过。
