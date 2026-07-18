@@ -42,6 +42,7 @@ design_handoff_memory_os_monitor/
 # (2026-07-18) when a local checkout was wiped.
 docs/resolver/*
 !docs/resolver/hermes-memory-os-stabilization-checklist.md
+!docs/resolver/hermes-memory-os-optimization-roadmap.md
 .superpowers/sdd/
 *.patch
 scripts/prod_check*.py
