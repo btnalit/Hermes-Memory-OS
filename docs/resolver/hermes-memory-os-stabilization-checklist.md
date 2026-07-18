@@ -227,15 +227,97 @@
 
 ---
 
-## 待办 — BC 代码评审遗留项（P2–P3，尚未重做）
+## BF — BC 代码评审 P2 三项重做（2026-07-18，提交 `e72f2c1..069484a`）
 
-### P2 — 潜伏性缺陷
+沿用评审既定修法重做三项 P2（BE 之后的遗留项 #8–#10）。
 
-| # | 位置 | 问题 | 修法 |
-|---|------|------|------|
-| 8 | `v3_seed_evidence.py:308` | 计数不对称：valid 的 manual 天从所有桶消失（实测复现）；manual 跑今天会推进 latest_natural_date 掩盖 cron 停摆 | 加 manual_day_count 或统一口径 |
-| 9 | `memory_os_3_200_monitor.py:1234` | 三参数全 None 的隐式第四路径：无 status 键、硬零占位（Section W 规则 4 默认参数陷阱；现有测试已走此路径） | 末分支改无条件 else 置 unavailable |
-| 10 | `v3_seed_evidence.py:274` | created_at 字符串比较在微秒省略边界上字典序≠时间序，可能选错"最新修订"→ 错的 trigger_class 进门控 | 改用时间戳解析比较 |
+### BF.1 快照计数不对称：valid 的 manual 天从所有桶消失（BC 评审 #8）
+
+- **根因（a）**：`build_v3_seed_evidence_snapshot` 中一个"全部行都是 manual 且 valid"的日期
+  不落任何计数桶——非 natural（正确）、非 invalid（它是 valid）、非 legacy（它有
+  trigger_class）——直接从快照消失（BC 评审实测复现）。
+- **根因（b）**：`latest_natural_date = max(latest_by_date)`（全行口径）——manual 跑今天会
+  推进该字段，新鲜度监控看不到 cron 已停摆。
+- **消费者普查（决定统一口径的依据）**：`latest_natural_date` 全仓库仅两个消费者——
+  `monitor_dashboard_snapshot.py:1009`（纯展示字符串）与
+  `test_memory_os_v3_seed_evidence.py:447`（该 fixture 下新旧口径同值）；
+  `memory_os_3_200_monitor.py`、wandering（只读 activation_evidence_ready）、seed CLI helper
+  均不消费。无消费者依赖全行口径的正确性 → 采用统一修法。
+- **修复**：`latest_natural_date` 改为仅对 `natural_by_date` 求 max（cron 真实新鲜度，
+  无 natural 行时为空串）；新增 `latest_recorded_date = max(latest_by_date)` 保留全行
+  展示口径；新增 `manual_day_count`：`latest_by_date` 中无 natural_cron 行（不在
+  `natural_by_date`）且 latest 行**有** trigger_class 的日期数。与
+  `legacy_unmarked_day_count`（保持既有定义：latest 行缺 trigger_class 字段的日期）
+  构成无 natural 覆盖日期的完整二分——任何日期不可能同时漏出两桶（源码内注释记录该分区）。
+- **反事实**：仅 revert 快照返回口径 → 4 个新测试 FAIL（manual-only 天 KeyError、分区
+  KeyError、latest_natural_date 被 manual 推进、空行口径）；restore → 全过。
+- **新测试**：`tests/plugins/memory/test_memory_os_v3_seed_evidence.py` ——
+  `test_valid_manual_only_day_is_counted_in_manual_day_count`、
+  `test_manual_and_legacy_days_partition_without_fallthrough`、
+  `test_manual_run_today_does_not_advance_latest_natural_date`、
+  `test_snapshot_no_rows_has_empty_freshness_fields`。
+
+### BF.2 monitor 三参数全 None 的隐式第四路径（BC 评审 #9）
+
+- **根因**：`summarize_living_memory_promotion` 的分支链
+  `if memory_os_root ... elif ledger_counts ... elif ledger_collection_error ...` 在三参数
+  全 None 时静默保留硬零占位且**没有** `ledger_state_collection_status` 键——对任何不
+  防御性检查键存在的消费者与"健康的已验证零"不可区分（Section W 规则 4 默认参数陷阱）。
+- **修复**：末分支改无条件 `else`：置 `ledger_state_collection_status = "unavailable"` +
+  `ledger_state_collection_error_code = "ledger_state_not_supplied"`（新错误码常量，
+  docstring 与源码内注释记录语义：标记"section 构建时无任何账本来源"）。
+  classify_snapshot 对此发 `living_memory_promotion_ledger_state_collection_failed`
+  WARN（生产升级 FAIL）——这是有意的诚实行为。
+- **真实调用方核查**：`collect_snapshot` 本地路径恒设 `memory_os_root`，远端路径恒设
+  `ledger_counts`（探针 ok）或 `ledger_collection_error`（探针失败/字段缺失）——所有真实
+  路径必供三参数之一，新 else 在生产不可达；若可达即是本修复要暴露的静默零缺陷本身。
+- **既有 fixture 核查**：仅 2 个测试无账本参数调用该函数
+  （`test_summarize_living_memory_promotion_counts_only_registered_target_types`、
+  `test_summarize_flags_nonpromotion_living_memory_delivery`），均为 target-type 计数
+  单测、不断言账本状态也不喂 classify_snapshot，语义不是"账本已采集且健康"，无需修改；
+  classify 侧 fixture 均用 `_living_memory_promotion_section` 字面 dict，不经此函数。
+- **反事实**：revert else → 新测试 KeyError FAIL；restore → PASS。
+- **新测试**：`tests/scripts/test_memory_os_3_200_monitor.py::`
+  `test_summarize_with_no_ledger_source_reports_ledger_state_not_supplied`
+  （unavailable + 错误码 + WARN + 生产 FAIL 全链断言）。
+
+### BF.3 created_at 字符串比较在微秒省略边界选错"最新修订"（BC 评审 #10）
+
+- **根因**：快照两处 last-writer-wins 归并（`latest_by_date` 与 BD.3 `natural_by_date`）
+  用 `str(created_at) >= str(previous)` 比较——微秒省略时字典序≠时间序
+  （`"...T10:00:00.500000Z" < "...T10:00:00Z"`，`.` 排在 `Z` 前，实际却更晚），可能选错
+  最新修订 → 错的 trigger_class/valid 进 activation gate。
+- **修复**：抽单一 helper `_created_at_is_at_least()` 供**两处**归并共用（防漂移）：
+  双方都可解析（复用 `_parse_datetime`）→ 按 datetime `>=` 比较（保留同刻后写者胜的
+  tie 语义）；任一解析失败 → 回退原字符串比较（稳定、docstring 记录）。
+- **同模式清扫（规则 5）**：全仓 grep created_at/时间戳字符串比较——真正的
+  "latest-revision 选取"字符串比较仅此两处。其余命中均为排序/展示且后果有界，不改：
+  `owner_actions.py:8915`（已用 `_parse_dt` 解析，安全）；`permanent_promotion.py:349`
+  （pending 提案交付顺序，非修订选取，同秒混合格式仅影响顺序不丢数据）；
+  `candidate_clusters.py:91/132/182`、`owner_actions.py:531/5229`、
+  `owner_channel_adapter.py:236`、`wandering_journal.py:159`、`working.py:92`、
+  `deep_reflection.py:647`（展示/迭代/淘汰排序，同秒边界只影响次序）；
+  `v3_outlet.py:125`（`max` 作用于已解析 datetime，安全）。
+- **反事实**：仅 revert 两处比较为字符串 → 2 个边界测试 FAIL（回退语义测试按设计仍过，
+  锁定与旧行为一致）；restore → 全过。
+- **新测试**：`tests/plugins/memory/test_memory_os_v3_seed_evidence.py` ——
+  `test_snapshot_latest_revision_survives_microsecond_omission_boundary`（全行归并）、
+  `test_snapshot_natural_merge_survives_microsecond_omission_boundary`（natural 归并）、
+  `test_snapshot_unparseable_created_at_falls_back_to_string_comparison`（回退语义锁定）。
+
+### BF 验证结论
+
+- 全量测试：**2587 passed, 13 skipped**（BE 基线 2579 + 8 新测试）。
+- 静态门：import cycle pass / write surface `unclassified_count=0` / static hygiene pass /
+  public checkout probe `--strict` PASS / `git diff --check` 干净。
+- 证据级别：`local_pass`（本机 pytest）。生产远端（hermes-media live monitor）验证未做，
+  部署后需跑 `memory_os_3_200_monitor.py --host hermes-media --monitor-profile live`。
+  注意：部署本次 monitor 改动后，任何无账本来源构建的 living_memory_promotion section
+  会开始如实报 WARN/FAIL——这是暴露既有静默零，不是回归。
+
+---
+
+## 待办 — BC 代码评审遗留项（P3，尚未重做）
 
 ### P3 — 清理类
 
@@ -263,3 +345,8 @@
   包 try/except 与远端降级对称；recovery 计数补 `or 0` 防历史行 int(None)；wandering
   种子行过滤加 natural_cron 门控。另修 digest 渲染测试日期腐化。2579 passed /
   0 failed / 13 skipped（本机当日基线 2570+1F/13，口径见 BE 验证结论），静态门全过。
+- `e72f2c1..069484a`：BC 评审 P2 三项重做——快照加 manual_day_count 补齐无 natural
+  覆盖日期分区、latest_natural_date 改 natural-only（cron 真实新鲜度）并新增
+  latest_recorded_date 保留全行展示口径；monitor 三参数全 None 隐式第四路径改无条件
+  else 置 unavailable（错误码 ledger_state_not_supplied）；created_at 归并比较改时间戳
+  解析（微秒省略边界）并抽共享 helper。2587 passed / 13 skipped，静态门全过。
