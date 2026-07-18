@@ -317,19 +317,85 @@
 
 ---
 
-## 待办 — BC 代码评审遗留项（P3，尚未重做）
+## BG — BC 代码评审 P3 五项清理（2026-07-19，提交 `54aea76..eaf718c`）
 
-### P3 — 清理类
+BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF，P3×5 → 本节）。
+本轮采用并行多智能体执行（4 个文件互不重叠的工作包，按复杂度匹配模型），主会话
+统一复核 diff、跑全量与静态门。
 
-| # | 位置 | 问题 |
-|---|------|------|
-| 11 | `permanent_promotion.py:1952` | 搬入函数重复实现同模块已有的 parse_timestamp/content_hash/jsonl_io.read_jsonl（三处一行级替换，顺带修掉 _events 静默丢坏行） |
-| 12 | `v3_seed_evidence.py:61` | trigger_class 判定与 `exposure_rollup.py:114` 逐字重复，抽共享 helper（如 `execution_gate.resolve_trigger_class()`）防漂移重开伪造风险 |
-| 13 | `permanent_promotion.py:2039` | stale-open 循环 O(proposals × crystallized 文件数) 全量扫描，每周期含 SSH 端；先建 id→record 索引 |
-| 14 | `memory_os_3_200_monitor.py:4384` | 第三份手抄的子探针消费块 + 错误字段名第三种变体；抽 `_consume_remote_probe()` 并统一 error_code 命名 |
-| 15 | `monitor_dashboard_snapshot.py:1003` | dashboard 取物理最后一行不看 trigger_class，与门控后计数显示矛盾（纯展示层） |
+### BG.1 搬入函数重复实现模块已有 helper；`_events` 静默丢坏行（BC 评审 #11）
 
-注：行号以 `074be97` 时点为准，后续修复会漂移；按符号/语义定位为准。
+- **修复**：`read_permanent_promotion_ledger_counts` 的本地 `_events` 改走
+  `jsonl_io.read_jsonl_result`（有界 error records 契约）——坏行/非对象行不再静默消失，
+  以新计数字段 `ledger_read_suppressed_error_count` 随返回 dict 输出；整文件读失败
+  （`jsonl_read_error`）保留原抛出语义，调用方（本地 summarize / SSH 探针）仍整体降级
+  unavailable+error_code 而非把硬零当已采集。本地 `_parse_ts` 删除、3 处调用点改用模块级
+  `parse_timestamp`（语义逐字节等价，多出的 astimezone 为 no-op）；内联 sha256 改用模块级
+  `content_hash()`（同定义，模块内 8+ 处已用）。
+- **反事实**：临时删除计数字段 → 新测试 KeyError FAIL；恢复 → 68/68 过。
+- **新测试**：`tests/plugins/memory/test_memory_os_permanent_promotion.py::`
+  `test_ledger_counts_malformed_lines_are_suppressed_not_fatal`（坏行+非对象行+有效行混合）。
+
+### BG.2 trigger_class 判定逐字重复（BC 评审 #12）
+
+- **修复**：`execution_gate.resolve_trigger_class()` 共享 helper（防伪造理由收进
+  docstring：只认 OS 环境变量 `MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID`，不认调用参数；
+  运行时读取，monkeypatch 与逐进程门控均正常）；`v3_seed_evidence.py` 与
+  `exposure_rollup.py` 两处改用之。
+- **新测试**：`tests/plugins/memory/test_memory_os_execution_gate.py` ——
+  设值/未设/空串三态各一（锁空串按 falsy 读 manual 的既有边界），外加同对象断言
+  `v3_seed_evidence.resolve_trigger_class is exposure_rollup.resolve_trigger_class is
+  execution_gate.resolve_trigger_class`（未来若重新引入本地拷贝即 FAIL，防漂移）。
+
+### BG.3 stale-open 循环 O(proposals × crystallized 文件数)（BC 评审 #13）
+
+- **修复**：循环前一次性建 `record_index: dict[id, CrystallizedRecord]`，精确复刻
+  `find_record` 语义（sorted glob 文件序 + 文件内文档序 + 同 id 首见胜 + 空 id 短路
+  None）；每提案的 provisional/active/content-hash 检查保持在循环体内；索引构建在既有
+  try 块内，异常仍走 unavailable+error_code。
+- **等价性**：既有 stale-open 测试全数不改通过；新增
+  `test_ledger_counts_stale_open_loop_uses_index_for_multiple_proposals`
+  （双开放提案：一 fresh 一 stale → count==1，status ok）。
+
+### BG.4 子探针消费块手抄重复与错误字段命名变体（BC 评审 #14）
+
+- **实况澄清（与评审条目的差异）**：全文件与历史（abcce26/074be97）核查均只有 **2** 份
+  真正的探针消费块（v2 / lm）；评审所称"第三份"实为错误形状的第三个产生点——本地
+  `if not host:` 分支从捕获异常构造同形输出（无 ok/error_code 可消费，结构上不可走
+  helper），维持原样。lm 侧 `ledger_state_collection_error_code` 即"命名第三变体"。
+- **修复**：抽 `_consume_remote_probe(raw, probe_key) -> (payload | None, error_code)`，
+  两份消费块统一改写；各 section 输出字段名与形状零漂移（既有 193 个 monitor 测试
+  不改全过）。
+- **有意行为改进（已标记评审）**：探针值为 dict 但 ok 非 True 且无可用 error_code 的
+  （生产不可达、原先无测试）路径，旧代码静默产出 error_code=None，新 helper 统一回退
+  `"remote_probe_field_missing"`——符合 No Silent Failures，新测试锁定。
+- **新测试**：helper 五态直测（ok 载荷 / ok=False 带码 / 键缺失 / 非 dict / dict 无码）
+  + `test_collect_snapshot_remote_probe_field_present_but_not_dict_is_not_silent`。
+
+### BG.5 dashboard latest 行不看 trigger_class（BC 评审 #15）
+
+- **修复**：`_v3_seed_evidence_snapshot` 的 `latest` 改取**最后一条 natural_cron 行**
+  （reversed 首匹配，无则空 dict）——latest_* 展示字段与旁列的门控计数口径一致，
+  manual/backfill/legacy 行不再进入展示；防御性强转全保留。
+- **反事实**：revert → natural 后跟 manual 行的测试 FAIL（错取 manual 行）；restore → 过。
+- **新测试**：`tests/scripts/test_memory_os_monitor_dashboard_snapshot.py` ——
+  `test_v3_seed_evidence_latest_fields_use_only_natural_cron_rows`、
+  `test_v3_seed_evidence_latest_fields_empty_when_no_natural_cron_rows`。
+
+### BG 验证结论
+
+- 全量测试：**2601 passed, 13 skipped**（BF 基线 2587 + 14 新测试：BG.1×1 + BG.2×4 +
+  BG.3×1 + BG.4×6 + BG.5×2）。主会话亲跑复核，非仅子智能体自述。
+- 静态门：import cycle pass / write surface `unclassified_count=0` / static hygiene pass /
+  public checkout probe `--strict` PASS / `git diff --check` 干净。
+- 证据级别：`local_pass`。生产远端 live monitor 验证仍待部署后执行。
+
+---
+
+## 待办
+
+BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
+P2×3（BF）、P3×5（BG）。当前无遗留待办。
 
 ---
 
@@ -350,3 +416,8 @@
   latest_recorded_date 保留全行展示口径；monitor 三参数全 None 隐式第四路径改无条件
   else 置 unavailable（错误码 ledger_state_not_supplied）；created_at 归并比较改时间戳
   解析（微秒省略边界）并抽共享 helper。2587 passed / 13 skipped，静态门全过。
+- `54aea76..eaf718c`：BC 评审 P3 五项清理——ledger 读取走 jsonl_io 契约并计数坏行；
+  trigger_class 判定抽 execution_gate.resolve_trigger_class() 防漂移；stale-open 循环
+  建 id→record 索引去 O(P×F)；探针消费抽 _consume_remote_probe() 统一 fallback；
+  dashboard latest 行改 natural_cron-only。BC 评审 15 项全部关闭。2601 passed /
+  13 skipped，静态门全过。
