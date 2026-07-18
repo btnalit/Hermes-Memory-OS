@@ -1000,7 +1000,15 @@ def _v3_private_journal_snapshot(memory_root: Path) -> dict[str, Any]:
 def _v3_seed_evidence_snapshot(memory_root: Path) -> dict[str, Any]:
     snapshot = _read_json(memory_root / "system" / "v3_seed_evidence_snapshot.json")
     daily_rows = _read_jsonl(memory_root / "system" / "v3_seed_edges_daily.jsonl")
-    latest = daily_rows[-1] if daily_rows else {}
+    # BB.6-2: latest_* display fields must reflect ONLY natural_cron rows for
+    # consistency with the gate counts (latest_natural_date, valid_day_count, etc.).
+    # Manual/backfill rows and legacy rows (missing trigger_class) never populate
+    # the latest_* display. Iterate in reverse to find the last natural_cron row.
+    latest = {}
+    for row in reversed(daily_rows):
+        if row.get("trigger_class") == "natural_cron":
+            latest = row
+            break
     return {
         "status": "observing" if snapshot else "empty",
         "valid_day_count": int(snapshot.get("valid_day_count") or 0),

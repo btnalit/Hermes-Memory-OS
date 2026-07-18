@@ -22,6 +22,23 @@ RESOLVER_AUTO_APPROVE_LANE = "resolver_auto_approve"
 RESOLVER_AUTO_APPROVE_RISK_CLASS = "reversible_llm_auto_approval"
 
 
+def resolve_trigger_class() -> str:
+    """Trigger provenance for automatic-lane records: ``natural_cron`` | ``manual``.
+
+    Anti-forgery rationale (BB.6-2 / exposure_rollup Fix 3): only a process
+    actually launched under the cron ExecutionGate wrapper
+    (``scripts/memory_os_execution_gate_runner.py``) has
+    ``MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID`` set in its OS environment.
+    Basing the signal on the environment — never on an
+    ``execution_gate_envelope_id`` call parameter — means a manual/direct
+    invocation cannot forge ``natural_cron`` by passing a fabricated envelope
+    id.  An empty-string env var is falsy and therefore reads as ``manual``,
+    exactly like an unset one.  The env var is read at call time (not import
+    time) so per-process gating and test monkeypatching both behave.
+    """
+    return "natural_cron" if os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID") else "manual"
+
+
 def execution_gate_records_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "execution_gate_envelopes.jsonl"
 

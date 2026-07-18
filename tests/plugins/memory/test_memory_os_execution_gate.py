@@ -660,3 +660,49 @@ class TestGateIndex:
         )
         assert result is not None
         assert result["reason"] == "execution_gate_lane_mismatch"
+
+
+# ── resolve_trigger_class() tests ────────────────────────────────────────────
+
+
+def test_resolve_trigger_class_returns_natural_cron_when_env_var_set(monkeypatch):
+    """resolve_trigger_class() returns "natural_cron" when MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID is set to non-empty value."""
+    from plugins.memory.memory_os.execution_gate import resolve_trigger_class
+
+    monkeypatch.setenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "xgate_12345")
+    assert resolve_trigger_class() == "natural_cron"
+
+
+def test_resolve_trigger_class_returns_manual_when_env_var_unset(monkeypatch):
+    """resolve_trigger_class() returns "manual" when MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID is unset."""
+    from plugins.memory.memory_os.execution_gate import resolve_trigger_class
+
+    monkeypatch.delenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", raising=False)
+    assert resolve_trigger_class() == "manual"
+
+
+def test_resolve_trigger_class_returns_manual_when_env_var_empty_string(monkeypatch):
+    """resolve_trigger_class() returns "manual" when MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID is set to empty string (falsy edge case)."""
+    from plugins.memory.memory_os.execution_gate import resolve_trigger_class
+
+    monkeypatch.setenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "")
+    assert resolve_trigger_class() == "manual"
+
+
+def test_resolve_trigger_class_shared_between_modules():
+    """Both v3_seed_evidence and exposure_rollup reference the same resolve_trigger_class from execution_gate."""
+    from plugins.memory.memory_os import execution_gate, v3_seed_evidence, exposure_rollup
+
+    # Assert that both modules have resolve_trigger_class and it's the same function object
+    assert hasattr(v3_seed_evidence, "resolve_trigger_class"), (
+        "v3_seed_evidence should import resolve_trigger_class"
+    )
+    assert hasattr(exposure_rollup, "resolve_trigger_class"), (
+        "exposure_rollup should import resolve_trigger_class"
+    )
+    assert v3_seed_evidence.resolve_trigger_class is execution_gate.resolve_trigger_class, (
+        "v3_seed_evidence.resolve_trigger_class should be the same object as execution_gate.resolve_trigger_class"
+    )
+    assert exposure_rollup.resolve_trigger_class is execution_gate.resolve_trigger_class, (
+        "exposure_rollup.resolve_trigger_class should be the same object as execution_gate.resolve_trigger_class"
+    )

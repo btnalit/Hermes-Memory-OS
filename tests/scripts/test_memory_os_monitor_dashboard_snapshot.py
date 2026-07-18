@@ -801,3 +801,123 @@ def test_dashboard_snapshot_wires_v3_seed_evidence_into_inner_life_composite(tmp
         snapshot["v3InnerLife"]["wandering_admission_status"]
         == "configured_on_but_admission_blocked(reason=seed_evidence_not_ready)"
     )
+
+
+def test_v3_seed_evidence_latest_fields_use_only_natural_cron_rows(tmp_path):
+    """P3 #15: latest_valid, latest_coverage_ratio, latest_cursor_contiguous,
+    latest_invalid_reasons must reflect ONLY natural_cron rows for consistency
+    with the gated counts (valid_day_count, latest_natural_date, etc.).
+
+    Counterfactual: a valid natural_cron row followed by an invalid manual row
+    in the daily file. The latest_* fields must show the natural row's values,
+    not the manual row's invalid state."""
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+
+    # Write snapshot with one valid day (from natural_cron row)
+    _write_jsonl(
+        memory_root / "system" / "v3_seed_evidence_snapshot.json" if False else (memory_root / "system" / "v3_seed_evidence_snapshot.json"),
+        [{"valid_day_count": 1, "consecutive_valid_day_count": 1, "activation_evidence_ready": False}],
+    )
+    (memory_root / "system" / "v3_seed_evidence_snapshot.json").write_text(
+        json.dumps({
+            "schema_version": "memory-os.v3_seed_evidence_snapshot.v0",
+            "valid_day_count": 1,
+            "consecutive_valid_day_count": 1,
+            "activation_evidence_ready": False,
+            "latest_natural_date": "2026-07-12",
+        }),
+        encoding="utf-8",
+    )
+
+    # Write daily rows: valid natural_cron row, then a later invalid manual row
+    _write_jsonl(
+        memory_root / "system" / "v3_seed_edges_daily.jsonl",
+        [
+            {
+                "schema_version": "memory-os.v3_seed_edges_daily.v0",
+                "natural_date": "2026-07-12",
+                "created_at": "2026-07-13T00:00:00Z",
+                "valid": True,
+                "coverage_ratio": 0.95,
+                "source_cursor_contiguous": True,
+                "invalid_reasons": [],
+                "trigger_class": "natural_cron",
+            },
+            {
+                "schema_version": "memory-os.v3_seed_edges_daily.v0",
+                "natural_date": "2026-07-12",
+                "created_at": "2026-07-14T00:00:00Z",  # Later than natural row
+                "valid": False,
+                "coverage_ratio": 0.0,
+                "source_cursor_contiguous": False,
+                "invalid_reasons": ["insufficient_coverage"],
+                "trigger_class": "manual",
+            },
+        ],
+    )
+
+    snapshot = module._v3_seed_evidence_snapshot(memory_root)
+
+    # latest_* fields must reflect the natural_cron row, not the manual row
+    assert snapshot["latest_valid"] is True, "latest_valid should use natural_cron row"
+    assert snapshot["latest_coverage_ratio"] == 0.95, "latest_coverage_ratio should use natural_cron row"
+    assert snapshot["latest_cursor_contiguous"] is True, "latest_cursor_contiguous should use natural_cron row"
+    assert snapshot["latest_invalid_reasons"] == [], "latest_invalid_reasons should use natural_cron row"
+
+
+def test_v3_seed_evidence_latest_fields_empty_when_no_natural_cron_rows(tmp_path):
+    """P3 #15: when daily file contains ONLY manual/legacy rows (no natural_cron),
+    latest_* display fields must show empty-row defaults (False/0.0/[]) for
+    consistency with the gate counts showing no valid days."""
+    module = _load_module()
+    memory_root = tmp_path / "memory-os"
+    system_dir = memory_root / "system"
+    system_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write snapshot with zero valid days (no natural_cron rows exist)
+    (system_dir / "v3_seed_evidence_snapshot.json").write_text(
+        json.dumps({
+            "schema_version": "memory-os.v3_seed_evidence_snapshot.v0",
+            "valid_day_count": 0,
+            "consecutive_valid_day_count": 0,
+            "activation_evidence_ready": False,
+            "latest_natural_date": "",
+        }),
+        encoding="utf-8",
+    )
+
+    # Write daily rows with ONLY manual rows (no natural_cron)
+    _write_jsonl(
+        memory_root / "system" / "v3_seed_edges_daily.jsonl",
+        [
+            {
+                "schema_version": "memory-os.v3_seed_edges_daily.v0",
+                "natural_date": "2026-07-12",
+                "created_at": "2026-07-13T00:00:00Z",
+                "valid": True,
+                "coverage_ratio": 0.99,
+                "source_cursor_contiguous": True,
+                "invalid_reasons": [],
+                "trigger_class": "manual",
+            },
+            {
+                "schema_version": "memory-os.v3_seed_edges_daily.v0",
+                "natural_date": "2026-07-13",
+                "created_at": "2026-07-14T00:00:00Z",
+                "valid": False,
+                "coverage_ratio": 0.5,
+                "source_cursor_contiguous": False,
+                "invalid_reasons": ["low_coverage"],
+                "trigger_class": "manual",
+            },
+        ],
+    )
+
+    snapshot = module._v3_seed_evidence_snapshot(memory_root)
+
+    # All latest_* fields must use empty-row defaults: no natural_cron rows exist
+    assert snapshot["latest_valid"] is False, "latest_valid should default to False when no natural_cron rows"
+    assert snapshot["latest_coverage_ratio"] == 0.0, "latest_coverage_ratio should default to 0.0 when no natural_cron rows"
+    assert snapshot["latest_cursor_contiguous"] is False, "latest_cursor_contiguous should default to False when no natural_cron rows"
+    assert snapshot["latest_invalid_reasons"] == [], "latest_invalid_reasons should default to [] when no natural_cron rows"

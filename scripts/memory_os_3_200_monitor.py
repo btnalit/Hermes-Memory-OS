@@ -4372,6 +4372,35 @@ def _merge_runtime_contract_classification(snapshot: dict[str, Any]) -> None:
     )
 
 
+def _consume_remote_probe(raw: dict[str, Any], probe_key: str) -> tuple[dict[str, Any] | None, str]:
+    """Consume a remote SSH sub-probe result stored at ``raw[probe_key]``.
+
+    P3 #14: the never-silent "isinstance-dict check -> ok is True -> extract
+    payload; else derive an error code" shape was hand-copied at every
+    collect_snapshot() remote-consumption call site. This is the single
+    shared implementation.
+
+    Returns ``(probe_dict, "")`` when the sub-probe reported ``ok is True``
+    -- callers pick out their own payload fields from ``probe_dict`` with
+    their existing ``or {}`` defaults, since different probes shape their
+    payload differently (this helper does not know which fields a given
+    probe carries).
+
+    Returns ``(None, error_code)`` otherwise, where ``error_code`` is the
+    probe dict's own ``error_code`` (when the key is present and truthy) or
+    the fallback ``"remote_probe_field_missing"`` when the probe is absent,
+    not a dict, or lacks a usable ``error_code`` -- never a silent pass.
+    """
+    probe = raw.get(probe_key)
+    if isinstance(probe, dict) and probe.get("ok") is True:
+        return probe, ""
+    if isinstance(probe, dict):
+        error_code = probe.get("error_code")
+        if error_code:
+            return None, error_code
+    return None, "remote_probe_field_missing"
+
+
 def collect_snapshot(
     *,
     host: str = "",
@@ -4426,18 +4455,13 @@ def collect_snapshot(
         # runtime, bad JSON), fall through to an explicit "unavailable" +
         # error_code shape, which classify_snapshot turns into a WARN
         # (never a silent pass).
-        _remote_v2_probe = raw.get("v2_exposure_and_clearance_probe")
-        if isinstance(_remote_v2_probe, dict) and _remote_v2_probe.get("ok") is True:
-            raw["v2_exposure_monitor"] = _remote_v2_probe.get("v2_exposure_monitor") or {}
-            raw["clearance_snapshot_freshness"] = _remote_v2_probe.get("clearance_snapshot_freshness") or {}
+        _v2_payload, _v2_error_code = _consume_remote_probe(raw, "v2_exposure_and_clearance_probe")
+        if _v2_payload is not None:
+            raw["v2_exposure_monitor"] = _v2_payload.get("v2_exposure_monitor") or {}
+            raw["clearance_snapshot_freshness"] = _v2_payload.get("clearance_snapshot_freshness") or {}
         else:
-            _remote_error_code = (
-                _remote_v2_probe.get("error_code")
-                if isinstance(_remote_v2_probe, dict)
-                else "remote_probe_field_missing"
-            )
-            raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": _remote_error_code}
-            raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": _remote_error_code}
+            raw["v2_exposure_monitor"] = {"schema_era_health": "unavailable", "error_code": _v2_error_code}
+            raw["clearance_snapshot_freshness"] = {"status": "unavailable", "error_code": _v2_error_code}
 
         # BB.6-1: collect permanent-promotion ledger counts on the remote
         # host too. Without this, decision_recovery_failure_count and
@@ -4445,15 +4469,11 @@ def collect_snapshot(
         # (production) run, making their FAIL checks in classify_snapshot
         # structurally unreachable — a silent production false-negative.
         # Same never-silent contract as the v2_exposure block above.
-        _remote_lm_probe = raw.get("living_memory_promotion_probe")
-        if isinstance(_remote_lm_probe, dict) and _remote_lm_probe.get("ok") is True:
-            _lm_kwargs["ledger_counts"] = _remote_lm_probe.get("counts") or {}
+        _lm_payload, _lm_error_code = _consume_remote_probe(raw, "living_memory_promotion_probe")
+        if _lm_payload is not None:
+            _lm_kwargs["ledger_counts"] = _lm_payload.get("counts") or {}
         else:
-            _lm_kwargs["ledger_collection_error"] = (
-                _remote_lm_probe.get("error_code")
-                if isinstance(_remote_lm_probe, dict)
-                else "remote_probe_field_missing"
-            )
+            _lm_kwargs["ledger_collection_error"] = _lm_error_code
     raw["living_memory_promotion"] = summarize_living_memory_promotion(**_lm_kwargs)
     raw["classification"] = classify_snapshot(raw)
     return raw

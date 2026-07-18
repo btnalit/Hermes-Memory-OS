@@ -19,6 +19,7 @@ from uuid import uuid4
 from .execution_gate import (
     complete_execution_gate_envelope,
     resolve_execution_gate_permit,
+    resolve_trigger_class,
     start_execution_gate_envelope,
 )
 from .jsonl_io import append_jsonl_locked, read_jsonl
@@ -52,13 +53,9 @@ def run_v3_seed_evidence_cycle(
 ) -> dict[str, Any]:
     """Build one exact UTC-day product and its 30-day readiness snapshot."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    # BB.6-2: trigger provenance (mirrors exposure_rollup.py Fix 3) — only a
-    # process launched under the cron ExecutionGate wrapper
-    # (memory_os_execution_gate_runner.py) has this env var set. Basing the
-    # signal on the OS environment — not the execution_gate_envelope_id
-    # parameter — means a manual/direct call cannot forge "natural_cron" by
-    # passing a fabricated envelope id.
-    trigger_class = "natural_cron" if os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID") else "manual"
+    # BB.6-2: env-var-based trigger provenance — anti-forgery rationale lives
+    # in execution_gate.resolve_trigger_class() (shared with exposure_rollup).
+    trigger_class = resolve_trigger_class()
     natural_date = _coerce_date(target_date) if target_date is not None else current.date() - timedelta(days=1)
     window_start = datetime.combine(natural_date, datetime.min.time(), tzinfo=timezone.utc)
     window_end = window_start + timedelta(days=1)

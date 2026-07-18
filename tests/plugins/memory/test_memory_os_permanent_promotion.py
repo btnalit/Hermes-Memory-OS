@@ -1516,3 +1516,85 @@ def test_ledger_counts_tolerate_historical_recovery_summary_missing_keys(tmp_pat
     assert counts["decision_recovery_attempt_count"] == 0
     assert counts["decision_recovery_success_count"] == 0
     assert counts["decision_recovery_failure_count"] == 0
+
+
+def test_ledger_counts_malformed_lines_are_suppressed_not_fatal(tmp_path):
+    """Counterfactual (P3 #11): read_permanent_promotion_ledger_counts reads
+    ledger files through jsonl_io.read_jsonl_result, which returns bounded
+    error records for malformed/non-object lines instead of raising or
+    silently dropping them. A ledger file with malformed lines mixed in
+    with valid ones must: (a) still count the valid lines, (b) not raise,
+    and (c) surface the suppressed-line count via
+    ledger_read_suppressed_error_count so a partially-bad ledger is
+    distinguishable from a verified-clean read."""
+    import json
+
+    from plugins.memory.memory_os.permanent_promotion import read_permanent_promotion_ledger_counts
+
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    (system / "permanent_promotion_proposals.jsonl").write_text(
+        "\n".join([
+            json.dumps({"proposal_id": "ppm_valid_1", "status": "open", "target_id": "cry_1", "content_hash": "h1"}),
+            "{not valid json",
+            "[1, 2, 3]",
+            json.dumps({"proposal_id": "ppm_valid_2", "status": "rejected"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+
+    # Valid lines are counted despite the malformed/non-object lines sharing the file.
+    assert counts["proposal_ledger_counts"]["open"] == 1
+    assert counts["proposal_ledger_counts"]["rejected"] == 1
+    # The malformed line and the non-object line are both bounded, suppressed errors.
+    assert counts["ledger_read_suppressed_error_count"] >= 2
+
+
+def test_ledger_counts_stale_open_loop_uses_index_for_multiple_proposals(tmp_path):
+    """Equivalence (P3 #13): the stale-open evaluation builds a single
+    id -> record index (reproducing crystallized.find_record's sorted
+    file order / first-match-per-id semantics) instead of calling
+    find_record() once per open proposal. With two open proposals -- one
+    whose target record exists, is provisional, active, and
+    content-hash-matches (fresh), and one whose target record does not
+    exist at all (stale) -- the index-based lookup must still classify
+    exactly one of the two as stale."""
+    import json
+
+    from plugins.memory.memory_os.permanent_promotion import (
+        content_hash,
+        read_permanent_promotion_ledger_counts,
+    )
+
+    service, record_id = _provisional_service(tmp_path, body="A stable fact.", candidate_id="cand_fresh")
+    record = service.read_records("owner_approved.md")[0]
+    fresh_hash = content_hash(record.body)
+
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True, exist_ok=True)
+    (system / "permanent_promotion_proposals.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "proposal_id": "ppm_fresh",
+                "status": "open",
+                "target_id": record_id,
+                "content_hash": fresh_hash,
+            }),
+            json.dumps({
+                "proposal_id": "ppm_stale",
+                "status": "open",
+                "target_id": "cry_does_not_exist",
+                "content_hash": "irrelevant",
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+
+    assert counts["open_proposal_backlog_count"] == 2
+    assert counts["stale_open_proposal_count"] == 1
+    assert counts["stale_open_evaluation_status"] == "ok"
+    assert counts["stale_open_evaluation_error_code"] == ""

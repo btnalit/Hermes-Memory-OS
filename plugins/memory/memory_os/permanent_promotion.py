@@ -12,7 +12,12 @@ from typing import Any
 from uuid import uuid4
 
 from .audit import append_audit
-from .jsonl_io import _append_line_under_lock, locked_jsonl_file, write_jsonl_atomic_locked
+from .jsonl_io import (
+    _append_line_under_lock,
+    locked_jsonl_file,
+    read_jsonl_result,
+    write_jsonl_atomic_locked,
+)
 
 PROPOSAL_SCHEMA_VERSION = "memory-os.permanent-promotion-proposal.v1"
 TOKEN_SCHEMA_VERSION = "memory-os.permanent-promotion-token.v1"
@@ -1949,19 +1954,33 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
     """
     root = Path(memory_os_root)
 
+    # P3 #11: ledger files are read through the shared jsonl_io contract
+    # (bounded error records) instead of an ad-hoc reader that silently
+    # dropped malformed lines.  Valid lines still count; malformed and
+    # non-object lines surface as the bounded
+    # ``ledger_read_suppressed_error_count`` counter in the returned dict, so
+    # a partially unreadable ledger is distinguishable from a verified
+    # complete read.
+    ledger_read_error_records: list[dict[str, Any]] = []
+
     def _events(path: Path) -> list[dict[str, Any]]:
-        records: list[dict[str, Any]] = []
-        if not path.exists():
-            return records
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(event, dict):
-                continue
-            records.append(event)
-        return records
+        result = read_jsonl_result(
+            path,
+            component="memory_os.permanent_promotion",
+            operation="read_permanent_promotion_ledger_counts",
+        )
+        for error_record in result.error_records:
+            if error_record.get("error_code") == "jsonl_read_error":
+                # Whole-file read failure (not a malformed line): preserve the
+                # pre-P3#11 contract where an unreadable ledger file raises so
+                # the caller (summarize_living_memory_promotion locally, the
+                # SSH probe remotely) degrades the whole section to
+                # unavailable+error_code instead of presenting hard zeros as
+                # a collected read.
+                details = error_record.get("details") or {}
+                raise OSError(f"{details.get('error_type', 'OSError')} reading {path.name}")
+        ledger_read_error_records.extend(result.error_records)
+        return result.records
 
     def _final_states(events: list[dict[str, Any]], id_key: str) -> dict[str, dict[str, Any]]:
         states: dict[str, dict[str, Any]] = {}
@@ -1977,15 +1996,6 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
             status = str(state.get("status") or "")
             tally[status] = tally.get(status, 0) + 1
         return tally
-
-    def _parse_ts(value: Any) -> datetime | None:
-        try:
-            parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
-        except (TypeError, ValueError):
-            return None
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
 
     now = datetime.now(timezone.utc)
     proposal_events = _events(root / "system" / "permanent_promotion_proposals.jsonl")
@@ -2009,7 +2019,7 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
     due_reminder_count = sum(
         1 for proposal_id in open_states
         if proposal_id in deliveries
-        and (_parse_ts(deliveries[proposal_id].get("next_reminder_at")) or datetime.max.replace(tzinfo=timezone.utc))
+        and (parse_timestamp(deliveries[proposal_id].get("next_reminder_at")) or datetime.max.replace(tzinfo=timezone.utc))
         <= now
     )
     open_bindings = {
@@ -2019,7 +2029,7 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
     deferred_past_due_count = sum(
         1 for state in proposals.values()
         if state.get("status") == "deferred"
-        and (_parse_ts(state.get("deferred_until")) or datetime.max.replace(tzinfo=timezone.utc)) <= now
+        and (parse_timestamp(state.get("deferred_until")) or datetime.max.replace(tzinfo=timezone.utc)) <= now
         and (str(state.get("target_id") or ""), str(state.get("content_hash") or "")) not in open_bindings
     )
 
@@ -2029,6 +2039,7 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
     try:
         from plugins.memory.memory_os.crystallized import (
             CrystallizedMemoryService,
+            CrystallizedRecord,
             is_active_crystallized_frontmatter,
         )
         from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -2036,13 +2047,27 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
 
         store = MemoryOSStore(MemoryOSRoots.from_hermes_home(root.parent, profile="monitor"))
         crystallized = CrystallizedMemoryService(store)
+        # P3 #13: crystallized.find_record() rescans every *.md file under
+        # crystallized_root per call (sorted file order, in-file document
+        # order, first match per id wins). Calling it once per open
+        # proposal made this O(open_proposals * store files). Build the
+        # identical first-match-wins id -> record index exactly once, then
+        # look up per proposal below instead of rescanning per lookup.
+        record_index: dict[str, CrystallizedRecord] = {}
+        if crystallized.store.roots.crystallized_root.exists():
+            for path in sorted(crystallized.store.roots.crystallized_root.glob("*.md")):
+                for record in crystallized.read_records(path.name):
+                    record_id = str(record.frontmatter.get("id") or "")
+                    if record_id and record_id not in record_index:
+                        record_index[record_id] = record
         for state in open_states.values():
-            record = crystallized.find_record(str(state.get("target_id") or ""))
+            target_id = str(state.get("target_id") or "")
+            record = record_index.get(target_id) if target_id else None
             if (
                 record is None
                 or record.frontmatter.get("provisional") is not True
                 or not is_active_crystallized_frontmatter(record.frontmatter)
-                or hashlib.sha256(record.body.encode("utf-8")).hexdigest()
+                or content_hash(record.body)
                 != str(state.get("content_hash") or "")
             ):
                 stale_open_count += 1
@@ -2076,7 +2101,7 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
     )
 
     def _oldest_age_days(states: dict[str, dict[str, Any]], key: str) -> int | None:
-        values = [_parse_ts(state.get(key)) for state in states.values()]
+        values = [parse_timestamp(state.get(key)) for state in states.values()]
         parsed = [value for value in values if value is not None]
         if not parsed:
             return None
@@ -2112,4 +2137,5 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
         "oldest_open_proposal_age_days": _oldest_age_days(open_states, "created_at"),
         "oldest_never_delivered_age_days": _oldest_age_days(never_delivered, "created_at"),
         "oldest_delivery_age_days": _oldest_age_days(deliveries, "delivered_at"),
+        "ledger_read_suppressed_error_count": len(ledger_read_error_records),
     }

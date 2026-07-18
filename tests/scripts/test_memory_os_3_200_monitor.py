@@ -200,6 +200,86 @@ def test_collect_snapshot_remote_ledger_probe_missing_field_is_not_silent(monkey
     assert section["ledger_state_collection_error_code"] == "remote_probe_field_missing"
 
 
+def test_collect_snapshot_remote_probe_field_present_but_not_dict_is_not_silent(monkeypatch):
+    """Defensive: an unexpected remote payload shape where the probe field
+    is present but not a dict (e.g. a string/list from a version-skewed
+    remote script) must be treated the same as a missing field — explicit
+    unavailable+error_code, never a silent pass. Covers the
+    _consume_remote_probe branch that a present-but-absent test cannot."""
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {
+            "v2_exposure_and_clearance_probe": "not-a-dict",
+            "living_memory_promotion_probe": ["also", "not", "a", "dict"],
+        }
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    assert snapshot["v2_exposure_monitor"]["error_code"] == "remote_probe_field_missing"
+    assert snapshot["clearance_snapshot_freshness"]["error_code"] == "remote_probe_field_missing"
+    section = snapshot["living_memory_promotion"]
+    assert section["ledger_state_collection_error_code"] == "remote_probe_field_missing"
+
+
+def test_consume_remote_probe_returns_payload_and_empty_error_code_when_ok():
+    """Direct unit test: ok payload -- the whole probe dict comes back as
+    the payload (call sites pick fields themselves), error_code is ""."""
+    raw = {"some_probe": {"ok": True, "counts": {"open": 1}}}
+
+    payload, error_code = monitor._consume_remote_probe(raw, "some_probe")
+
+    assert payload == {"ok": True, "counts": {"open": 1}}
+    assert error_code == ""
+
+
+def test_consume_remote_probe_ok_false_with_error_code_returns_it():
+    """Direct unit test: ok is False and error_code is present/truthy ->
+    payload is None, error_code is passed through verbatim."""
+    raw = {"some_probe": {"ok": False, "error_code": "ImportError", "error_detail": "boom"}}
+
+    payload, error_code = monitor._consume_remote_probe(raw, "some_probe")
+
+    assert payload is None
+    assert error_code == "ImportError"
+
+
+def test_consume_remote_probe_missing_key_falls_back():
+    """Direct unit test: probe_key absent from raw entirely -> fallback."""
+    payload, error_code = monitor._consume_remote_probe({}, "some_probe")
+
+    assert payload is None
+    assert error_code == "remote_probe_field_missing"
+
+
+def test_consume_remote_probe_non_dict_value_falls_back():
+    """Direct unit test: probe_key present but the value is not a dict ->
+    same fallback as a missing key, never crashes on .get()."""
+    payload, error_code = monitor._consume_remote_probe({"some_probe": "oops"}, "some_probe")
+
+    assert payload is None
+    assert error_code == "remote_probe_field_missing"
+
+
+def test_consume_remote_probe_dict_without_error_code_falls_back():
+    """Direct unit test: probe is a dict, ok is not True, and error_code is
+    absent (or falsy) -> falls back to remote_probe_field_missing rather
+    than surfacing None/"" as a fake error code."""
+    payload, error_code = monitor._consume_remote_probe({"some_probe": {"ok": False}}, "some_probe")
+
+    assert payload is None
+    assert error_code == "remote_probe_field_missing"
+
+    payload2, error_code2 = monitor._consume_remote_probe(
+        {"some_probe": {"ok": False, "error_code": ""}}, "some_probe"
+    )
+
+    assert payload2 is None
+    assert error_code2 == "remote_probe_field_missing"
+
+
 def test_production_living_memory_ledger_collection_failure_escalates_to_fail():
     """Counterfactual for the WARN-ordering fix: the ledger-collection WARN is
     registered fail_if_production, so classify_snapshot must append it BEFORE

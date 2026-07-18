@@ -8,7 +8,6 @@ an execution-gate envelope.
 from __future__ import annotations
 
 import json
-import os
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Any
 from .execution_gate import (
     complete_execution_gate_envelope,
     resolve_execution_gate_permit,
+    resolve_trigger_class,
     start_execution_gate_envelope,
 )
 
@@ -106,12 +106,9 @@ def run_exposure_rollup_cycle(
     from .memory_sources import read_memory_source_records
 
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    # Trigger provenance (Fix 3): only a process actually launched under the
-    # cron ExecutionGate wrapper (memory_os_execution_gate_runner.py) has this
-    # env var set. Basing the signal on the OS environment — not on the
-    # execution_gate_envelope_id parameter — means a manual/direct call cannot
-    # forge "natural_cron" simply by passing a fabricated envelope id.
-    trigger_class = "natural_cron" if os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID") else "manual"
+    # Trigger provenance (Fix 3): env-var-based — anti-forgery rationale lives
+    # in execution_gate.resolve_trigger_class() (shared with v3_seed_evidence).
+    trigger_class = resolve_trigger_class()
     report: dict[str, Any] = {
         "status": "ok",
         "records_processed": 0,
