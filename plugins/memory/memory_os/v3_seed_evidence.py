@@ -285,7 +285,7 @@ def build_v3_seed_evidence_snapshot(
         if not natural_date:
             continue
         previous = latest_by_date.get(natural_date)
-        if previous is None or str(row.get("created_at") or "") >= str(previous.get("created_at") or ""):
+        if previous is None or _created_at_is_at_least(row.get("created_at"), previous.get("created_at")):
             latest_by_date[natural_date] = row
     # BB.6-2: the 30-day activation-readiness gate must only count days
     # produced by the cron ExecutionGate wrapper — a manual/backfill run of
@@ -297,7 +297,7 @@ def build_v3_seed_evidence_snapshot(
     # natural_cron rows — filtering the mixed latest_by_date instead would let
     # a later manual/backfill row evict an already-earned natural day and
     # silently regress activation_evidence_ready.  latest_by_date (all rows)
-    # intentionally keeps feeding invalid_day_count, latest_natural_date, and
+    # intentionally keeps feeding invalid_day_count, latest_recorded_date, and
     # legacy_unmarked_day_count below.
     natural_by_date: dict[str, dict[str, Any]] = {}
     for row in rows:
@@ -307,9 +307,28 @@ def build_v3_seed_evidence_snapshot(
         if not natural_date:
             continue
         previous = natural_by_date.get(natural_date)
-        if previous is None or str(row.get("created_at") or "") >= str(previous.get("created_at") or ""):
+        if previous is None or _created_at_is_at_least(row.get("created_at"), previous.get("created_at")):
             natural_by_date[natural_date] = row
     legacy_unmarked_day_count = sum(1 for row in latest_by_date.values() if "trigger_class" not in row)
+    # P2 #8 — bucket partition for dates that lack natural_cron coverage.
+    # Every date in latest_by_date that has NO natural_cron row (i.e. is not
+    # in natural_by_date) falls in exactly one of two buckets:
+    #   - manual_day_count: its latest row HAS a trigger_class (manual /
+    #     backfill — a deliberately non-natural run);
+    #   - legacy_unmarked_day_count: its latest row is missing trigger_class
+    #     entirely (written before the field existed; existing definition kept
+    #     — it counts latest-row-missing-field dates regardless of natural
+    #     coverage, so a natural day whose latest revision is legacy is
+    #     counted there too).
+    # Before this counter existed, a date whose rows were all manual and
+    # valid appeared in NO bucket at all: not natural (correct), not invalid
+    # (it is valid), not legacy (it has trigger_class) — it simply vanished
+    # from the snapshot.
+    manual_day_count = sum(
+        1
+        for natural_date, row in latest_by_date.items()
+        if natural_date not in natural_by_date and "trigger_class" in row
+    )
     valid_dates = sorted(_coerce_date(value) for value, row in natural_by_date.items() if row.get("valid") is True)
     longest: list[date] = []
     current_run: list[date] = []
@@ -332,7 +351,14 @@ def build_v3_seed_evidence_snapshot(
         "last_valid_date": longest[-1].isoformat() if longest else "",
         "minimum_valid_coverage_ratio": min(coverage_values) if coverage_values else 0.0,
         "invalid_day_count": sum(1 for row in latest_by_date.values() if row.get("valid") is not True),
-        "latest_natural_date": max(latest_by_date) if latest_by_date else "",
+        # P2 #8 — latest_natural_date is cron-true freshness: the max over
+        # dates with a natural_cron row only.  A manual run covering today
+        # must NOT advance it, otherwise freshness monitoring cannot see that
+        # cron has stalled.  latest_recorded_date preserves the previous
+        # all-rows view (any trigger class, incl. legacy) for display.
+        "latest_natural_date": max(natural_by_date) if natural_by_date else "",
+        "latest_recorded_date": max(latest_by_date) if latest_by_date else "",
+        "manual_day_count": manual_day_count,
         "legacy_unmarked_day_count": legacy_unmarked_day_count,
     }
 
@@ -495,3 +521,25 @@ def _parse_datetime(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _created_at_is_at_least(candidate: Any, previous: Any) -> bool:
+    """Last-writer-wins ``created_at`` comparison for same-day daily rows.
+
+    Lexicographic comparison of ISO-8601 strings breaks on the
+    microsecond-omission boundary: ``"...T10:00:00.500000Z"`` sorts BEFORE
+    ``"...T10:00:00Z"`` (``.`` < ``Z``) although it is temporally LATER, so a
+    wrong "latest revision" could be picked and the wrong trigger_class/valid
+    would enter the activation gate.  Both candidates are therefore parsed and
+    compared as datetimes.  ``>=`` deliberately preserves the pre-existing
+    tie behavior: on equal timestamps the row appearing later in file order
+    wins.  If either side fails to parse, fall back to the plain string
+    comparison — stable and identical to the historical behavior for
+    malformed rows.  Used by BOTH snapshot merge passes (latest_by_date and
+    natural_by_date) so their semantics cannot drift.
+    """
+    candidate_parsed = _parse_datetime(candidate)
+    previous_parsed = _parse_datetime(previous)
+    if candidate_parsed is not None and previous_parsed is not None:
+        return candidate_parsed >= previous_parsed
+    return str(candidate or "") >= str(previous or "")

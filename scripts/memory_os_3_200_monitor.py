@@ -1190,6 +1190,10 @@ def summarize_living_memory_promotion(
     in ``_remote_probe_script``). If neither is available, ``ledger_collection_error``
     marks the section as explicitly uncollected rather than leaving the
     hard-zero placeholders below indistinguishable from a verified zero.
+    When ALL THREE ledger parameters are omitted the section is still marked
+    explicitly unavailable with error_code ``ledger_state_not_supplied`` —
+    there is deliberately no implicit fourth path that keeps the hard-zero
+    placeholders without a ``ledger_state_collection_status`` key.
     """
     try:
         from plugins.memory.memory_os.owner_actions import LIVING_MEMORY_TARGET_TYPES
@@ -1254,6 +1258,21 @@ def summarize_living_memory_promotion(
     elif ledger_collection_error is not None:
         section["ledger_state_collection_status"] = "unavailable"
         section["ledger_state_collection_error_code"] = ledger_collection_error
+    else:
+        # P2 #9 (Section W rule 4 — default parameters must never be traps):
+        # with no ledger source at all (all three params None) the section
+        # previously kept its hard-zero placeholders with NO
+        # ledger_state_collection_status key — indistinguishable from healthy
+        # verified zeros to any consumer that does not defensively check key
+        # presence.  The unconditional else makes the absence explicit:
+        # "ledger_state_not_supplied" marks a section built without any
+        # ledger source, and classify_snapshot turns it into the
+        # ledger-collection-failed WARN (fail_if_production).  The real
+        # caller collect_snapshot always supplies exactly one of the three
+        # parameters, so reaching this branch from production would itself
+        # be the silent-zero bug this fix surfaces.
+        section["ledger_state_collection_status"] = "unavailable"
+        section["ledger_state_collection_error_code"] = "ledger_state_not_supplied"
     if section.get("ledger_state_collection_status") == "collected":
         # A "collected" ledger dict that omits the stale-open evaluation
         # status (e.g. a version-skewed remote plugin whose

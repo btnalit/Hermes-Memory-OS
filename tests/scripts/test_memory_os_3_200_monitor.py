@@ -367,6 +367,35 @@ def test_summarize_living_memory_promotion_local_ledger_read_failure_does_not_cr
     )
 
 
+def test_summarize_with_no_ledger_source_reports_ledger_state_not_supplied():
+    """Counterfactual (P2 #9, Section W rule 4): when ALL THREE ledger params
+    are None, the section previously kept its hard-zero placeholders with NO
+    ledger_state_collection_status key at all — an implicit fourth path
+    indistinguishable from healthy verified zeros.  The unconditional else
+    must mark it unavailable with error_code ledger_state_not_supplied, and
+    classify_snapshot must emit the ledger-collection-failed WARN, escalating
+    to FAIL on the production profile."""
+    section = monitor.summarize_living_memory_promotion()
+
+    assert section["ledger_state_collection_status"] == "unavailable"
+    assert section["ledger_state_collection_error_code"] == "ledger_state_not_supplied"
+
+    snapshot = _healthy_snapshot()
+    snapshot["living_memory_promotion"] = section
+    classification = classify_snapshot(snapshot)
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
+        and item["value"] == "ledger_state_not_supplied"
+        for item in classification["warn"]
+    )
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed_in_production"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["fail"]
+    )
+    assert classification["status"] == "FAIL"
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:

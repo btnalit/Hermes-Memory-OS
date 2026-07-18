@@ -441,10 +441,15 @@ def test_snapshot_later_manual_row_cannot_evict_natural_day(tmp_path):
     assert snapshot["first_valid_date"] == "2026-06-01"
     assert snapshot["last_valid_date"] == "2026-06-01"
     # latest_by_date fields intentionally still reflect ALL rows: the latest
-    # (manual, invalid) revision drives invalid_day_count even though the
-    # natural gate keeps the day.
+    # (manual, invalid) revision drives invalid_day_count and
+    # latest_recorded_date even though the natural gate keeps the day.
+    # latest_natural_date is cron-true freshness (P2 #8): here the day has a
+    # natural row, so both views agree.
     assert snapshot["invalid_day_count"] == 1
     assert snapshot["latest_natural_date"] == "2026-06-01"
+    assert snapshot["latest_recorded_date"] == "2026-06-01"
+    # The date HAS natural coverage, so it never lands in manual_day_count.
+    assert snapshot["manual_day_count"] == 0
     assert snapshot["legacy_unmarked_day_count"] == 0
 
 
@@ -491,3 +496,256 @@ def test_snapshot_30_day_natural_streak_survives_interleaved_manual_rows(tmp_pat
     assert snapshot["first_valid_date"] == "2026-06-01"
     assert snapshot["last_valid_date"] == "2026-06-30"
     assert snapshot["legacy_unmarked_day_count"] == 0
+
+
+def test_valid_manual_only_day_is_counted_in_manual_day_count(tmp_path):
+    """P2 #8 counterfactual (a): a date whose rows are all manual and valid
+    previously appeared in NO snapshot bucket — not natural (correct), not
+    invalid (it is valid), not legacy (it has trigger_class).  It must land in
+    manual_day_count, and ONLY there."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    manual_valid_row = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T00:00:01Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "source_cursor_contiguous": True,
+        "rebuild_digest": "sha256:manual-valid",
+        "trigger_class": "manual",
+    }
+
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=[manual_valid_row])
+
+    assert snapshot["manual_day_count"] == 1
+    # ... and nowhere else: the day is not natural, not invalid, not legacy.
+    assert snapshot["valid_day_count"] == 0
+    assert snapshot["consecutive_valid_day_count"] == 0
+    assert snapshot["invalid_day_count"] == 0
+    assert snapshot["legacy_unmarked_day_count"] == 0
+
+
+def test_manual_and_legacy_days_partition_without_fallthrough(tmp_path):
+    """P2 #8: dates lacking natural_cron coverage split cleanly between
+    manual_day_count (latest row has trigger_class) and
+    legacy_unmarked_day_count (latest row missing trigger_class) — no date can
+    fall through both buckets."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    rows = [
+        {
+            "schema_version": "memory-os.v3_seed_edges_daily.v0",
+            "natural_date": "2026-06-01",
+            "created_at": "2026-06-02T00:00:01Z",
+            "valid": True,
+            "coverage_ratio": 1.0,
+            "rebuild_digest": "sha256:manual",
+            "trigger_class": "manual",
+        },
+        {
+            "schema_version": "memory-os.v3_seed_edges_daily.v0",
+            "natural_date": "2026-06-02",
+            "created_at": "2026-06-03T00:00:01Z",
+            "valid": True,
+            "coverage_ratio": 1.0,
+            "rebuild_digest": "sha256:legacy",
+        },
+        {
+            "schema_version": "memory-os.v3_seed_edges_daily.v0",
+            "natural_date": "2026-06-03",
+            "created_at": "2026-06-04T00:00:01Z",
+            "valid": True,
+            "coverage_ratio": 1.0,
+            "rebuild_digest": "sha256:natural",
+            "trigger_class": "natural_cron",
+        },
+    ]
+
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=rows)
+
+    assert snapshot["manual_day_count"] == 1
+    assert snapshot["legacy_unmarked_day_count"] == 1
+    assert snapshot["valid_day_count"] == 1
+
+
+def test_manual_run_today_does_not_advance_latest_natural_date(tmp_path):
+    """P2 #8 counterfactual (b): latest_natural_date is cron-true freshness —
+    a manual run covering today must NOT advance it (pre-fix it was the max
+    over ALL rows, so a manual run masked a stalled cron), while a natural
+    row must.  The all-rows view stays visible as latest_recorded_date."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    natural_yesterday = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T00:00:01Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "rebuild_digest": "sha256:natural-1",
+        "trigger_class": "natural_cron",
+    }
+    manual_today = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-02",
+        "created_at": "2026-06-03T00:00:01Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "rebuild_digest": "sha256:manual-2",
+        "trigger_class": "manual",
+    }
+
+    snapshot = build_v3_seed_evidence_snapshot(
+        store, daily_records=[natural_yesterday, manual_today]
+    )
+    # Cron freshness stalls at the last natural day; the manual run only
+    # advances the display-oriented all-rows view.
+    assert snapshot["latest_natural_date"] == "2026-06-01"
+    assert snapshot["latest_recorded_date"] == "2026-06-02"
+
+    natural_today = dict(
+        natural_yesterday,
+        natural_date="2026-06-02",
+        created_at="2026-06-03T01:00:00Z",
+        rebuild_digest="sha256:natural-2",
+    )
+    snapshot = build_v3_seed_evidence_snapshot(
+        store, daily_records=[natural_yesterday, manual_today, natural_today]
+    )
+    assert snapshot["latest_natural_date"] == "2026-06-02"
+    assert snapshot["latest_recorded_date"] == "2026-06-02"
+
+
+def test_snapshot_no_rows_has_empty_freshness_fields(tmp_path):
+    """P2 #8: both freshness fields degrade to empty strings with no rows."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=[])
+
+    assert snapshot["latest_natural_date"] == ""
+    assert snapshot["latest_recorded_date"] == ""
+    assert snapshot["manual_day_count"] == 0
+
+
+def test_snapshot_latest_revision_survives_microsecond_omission_boundary(tmp_path):
+    """P2 #10 counterfactual (all-rows merge): lexicographic created_at
+    comparison picks the WRONG latest revision on the microsecond-omission
+    boundary — "...T10:00:00.500000Z" < "...T10:00:00Z" as strings ("." sorts
+    before "Z") although it is temporally LATER.  The temporally-later manual
+    invalid revision must win the all-rows merge and drive invalid_day_count;
+    under the pre-fix string comparison the earlier natural row wins and
+    invalid_day_count stays 0."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    temporally_later_manual = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T10:00:00.500000Z",
+        "valid": False,
+        "coverage_ratio": 0.0,
+        "rebuild_digest": "sha256:manual-revision",
+        "trigger_class": "manual",
+    }
+    temporally_earlier_natural = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T10:00:00Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "rebuild_digest": "sha256:natural-original",
+        "trigger_class": "natural_cron",
+    }
+
+    # File order: the temporally-later row first, the temporally-earlier row
+    # last — string comparison would let the later-in-file row win ("Z" >= ".").
+    snapshot = build_v3_seed_evidence_snapshot(
+        store, daily_records=[temporally_later_manual, temporally_earlier_natural]
+    )
+
+    # The temporally-later (invalid manual) revision is the true latest row.
+    assert snapshot["invalid_day_count"] == 1
+    # The independent natural merge still keeps the natural day (BD.3).
+    assert snapshot["valid_day_count"] == 1
+
+
+def test_snapshot_natural_merge_survives_microsecond_omission_boundary(tmp_path):
+    """P2 #10 counterfactual (natural-only merge): same boundary inside
+    natural_by_date — the temporally-later invalid natural revision must win
+    over the temporally-earlier valid one even though it sorts first as a
+    string and appears first in the file."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    temporally_later_invalid = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T10:00:00.500000Z",
+        "valid": False,
+        "coverage_ratio": 0.0,
+        "rebuild_digest": "sha256:cron-invalid-revision",
+        "trigger_class": "natural_cron",
+    }
+    temporally_earlier_valid = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T10:00:00Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "rebuild_digest": "sha256:cron-valid-original",
+        "trigger_class": "natural_cron",
+    }
+
+    snapshot = build_v3_seed_evidence_snapshot(
+        store, daily_records=[temporally_later_invalid, temporally_earlier_valid]
+    )
+
+    # The temporally-later revision is invalid, so the day earns no credit.
+    assert snapshot["valid_day_count"] == 0
+    assert snapshot["consecutive_valid_day_count"] == 0
+    assert snapshot["invalid_day_count"] == 1
+
+
+def test_snapshot_unparseable_created_at_falls_back_to_string_comparison(tmp_path):
+    """P2 #10 documented fallback: if either created_at fails to parse, the
+    merge falls back to the historical string comparison (stable — later in
+    string order wins, later in file order wins ties)."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    unparseable_row = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "zzz-not-a-timestamp",
+        "valid": False,
+        "coverage_ratio": 0.0,
+        "rebuild_digest": "sha256:garbage",
+        "trigger_class": "natural_cron",
+    }
+    parseable_row = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T00:00:00Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "rebuild_digest": "sha256:parseable",
+        "trigger_class": "natural_cron",
+    }
+
+    # String fallback: "2026-..." < "zzz-..." so the unparseable row keeps
+    # winning regardless of file order — identical to pre-fix behavior.
+    snapshot = build_v3_seed_evidence_snapshot(
+        store, daily_records=[unparseable_row, parseable_row]
+    )
+    assert snapshot["valid_day_count"] == 0
+    assert snapshot["invalid_day_count"] == 1
+
+    snapshot = build_v3_seed_evidence_snapshot(
+        store, daily_records=[parseable_row, unparseable_row]
+    )
+    assert snapshot["valid_day_count"] == 0
+    assert snapshot["invalid_day_count"] == 1
