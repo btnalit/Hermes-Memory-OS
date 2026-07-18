@@ -319,3 +319,175 @@ def test_daily_record_stamps_trigger_class_from_execution_gate_envelope_env_var(
         require_shared_entity=False,
     )
     assert natural_report["daily_record"]["trigger_class"] == "natural_cron"
+
+
+def test_manual_then_natural_cron_same_day_upgrades_provenance_instead_of_skipping(tmp_path, monkeypatch):
+    """BB.6-2 provenance upgrade counterfactual: a manual run that writes day D
+    first must not permanently block that day's natural_cron credit.  When the
+    cron run arrives with an identical rebuild_digest, the digest-match skip
+    must be bypassed and a natural_cron row written (normal write path)."""
+    from plugins.memory.memory_os.v3_seed_evidence import run_v3_seed_evidence_cycle
+
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        _record("msrc_up", "2026-07-12T01:00:00Z", "crystallized:a", "crystallized:b"),
+    )
+
+    monkeypatch.delenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", raising=False)
+    manual_report = run_v3_seed_evidence_cycle(
+        store,
+        target_date="2026-07-12",
+        now=datetime(2026, 7, 13, 1, tzinfo=timezone.utc),
+        require_shared_entity=False,
+    )
+    assert manual_report["skipped"] is False
+    assert manual_report["daily_record"]["trigger_class"] == "manual"
+
+    monkeypatch.setenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "real-cron-envelope")
+    natural_report = run_v3_seed_evidence_cycle(
+        store,
+        target_date="2026-07-12",
+        now=datetime(2026, 7, 13, 2, tzinfo=timezone.utc),
+        require_shared_entity=False,
+    )
+
+    assert natural_report["skipped"] is False
+    assert natural_report["daily_record"]["trigger_class"] == "natural_cron"
+    assert natural_report["daily_record"]["rebuild_digest"] == manual_report["daily_record"]["rebuild_digest"]
+    persisted = [
+        json.loads(line)
+        for line in (store.roots.memory_os_root / "system" / "v3_seed_edges_daily.jsonl").read_text().splitlines()
+    ]
+    assert len(persisted) == 2
+    assert persisted[-1]["trigger_class"] == "natural_cron"
+    assert natural_report["snapshot"]["valid_day_count"] == 1
+    assert natural_report["snapshot"]["consecutive_valid_day_count"] == 1
+
+
+def test_natural_cron_then_manual_same_day_still_skips(tmp_path, monkeypatch):
+    """BB.6-2: the reverse order must keep skipping — a manual rerun after the
+    cron row exists must never overwrite/downgrade natural provenance."""
+    from plugins.memory.memory_os.v3_seed_evidence import run_v3_seed_evidence_cycle
+
+    store = _store(tmp_path)
+    append_memory_source_record(
+        store.roots,
+        _record("msrc_rev", "2026-07-12T01:00:00Z", "crystallized:a", "crystallized:b"),
+    )
+
+    monkeypatch.setenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", "real-cron-envelope")
+    natural_report = run_v3_seed_evidence_cycle(
+        store,
+        target_date="2026-07-12",
+        now=datetime(2026, 7, 13, 1, tzinfo=timezone.utc),
+        require_shared_entity=False,
+    )
+    assert natural_report["skipped"] is False
+    assert natural_report["daily_record"]["trigger_class"] == "natural_cron"
+
+    monkeypatch.delenv("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", raising=False)
+    manual_report = run_v3_seed_evidence_cycle(
+        store,
+        target_date="2026-07-12",
+        now=datetime(2026, 7, 13, 2, tzinfo=timezone.utc),
+        require_shared_entity=False,
+    )
+
+    assert manual_report["skipped"] is True
+    assert manual_report["reason"] == "daily_product_unchanged"
+    persisted = [
+        json.loads(line)
+        for line in (store.roots.memory_os_root / "system" / "v3_seed_edges_daily.jsonl").read_text().splitlines()
+    ]
+    assert len(persisted) == 1
+    assert persisted[0]["trigger_class"] == "natural_cron"
+
+
+def test_snapshot_later_manual_row_cannot_evict_natural_day(tmp_path):
+    """BB.6-2 eviction counterfactual: natural_by_date must be an independent
+    last-writer-wins pass over ONLY natural_cron rows.  If the mixed
+    latest_by_date is filtered instead (the pre-fix shape), a LATER manual row
+    for the same date wins the merge, gets filtered out, and the already-earned
+    natural day silently vanishes from the activation gate."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    natural_row = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-02T00:00:01Z",
+        "valid": True,
+        "coverage_ratio": 1.0,
+        "source_cursor_contiguous": True,
+        "rebuild_digest": "sha256:natural",
+        "trigger_class": "natural_cron",
+    }
+    later_manual_row = {
+        "schema_version": "memory-os.v3_seed_edges_daily.v0",
+        "natural_date": "2026-06-01",
+        "created_at": "2026-06-03T00:00:00Z",
+        "valid": False,
+        "coverage_ratio": 0.0,
+        "source_cursor_contiguous": True,
+        "rebuild_digest": "sha256:manual",
+        "trigger_class": "manual",
+    }
+
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=[natural_row, later_manual_row])
+
+    assert snapshot["valid_day_count"] == 1
+    assert snapshot["consecutive_valid_day_count"] == 1
+    assert snapshot["first_valid_date"] == "2026-06-01"
+    assert snapshot["last_valid_date"] == "2026-06-01"
+    # latest_by_date fields intentionally still reflect ALL rows: the latest
+    # (manual, invalid) revision drives invalid_day_count even though the
+    # natural gate keeps the day.
+    assert snapshot["invalid_day_count"] == 1
+    assert snapshot["latest_natural_date"] == "2026-06-01"
+    assert snapshot["legacy_unmarked_day_count"] == 0
+
+
+def test_snapshot_30_day_natural_streak_survives_interleaved_manual_rows(tmp_path):
+    """BB.6-2: an achieved 30-day natural streak (activation_evidence_ready)
+    must not regress when later manual/backfill rows are appended for the same
+    dates."""
+    from plugins.memory.memory_os.v3_seed_evidence import build_v3_seed_evidence_snapshot
+
+    store = _store(tmp_path)
+    rows = []
+    for day in range(1, 31):
+        rows.append(
+            {
+                "schema_version": "memory-os.v3_seed_edges_daily.v0",
+                "natural_date": f"2026-06-{day:02d}",
+                "created_at": f"2026-07-01T00:00:{day:02d}Z",
+                "valid": True,
+                "coverage_ratio": 1.0,
+                "source_cursor_contiguous": True,
+                "rebuild_digest": f"sha256:{day}",
+                "trigger_class": "natural_cron",
+            }
+        )
+    # Later manual reruns for every other day — all newer than the natural rows.
+    for day in range(1, 31, 2):
+        rows.append(
+            {
+                "schema_version": "memory-os.v3_seed_edges_daily.v0",
+                "natural_date": f"2026-06-{day:02d}",
+                "created_at": f"2026-07-02T00:00:{day:02d}Z",
+                "valid": True,
+                "coverage_ratio": 1.0,
+                "rebuild_digest": f"sha256:manual-{day}",
+                "trigger_class": "manual",
+            }
+        )
+
+    snapshot = build_v3_seed_evidence_snapshot(store, daily_records=rows)
+
+    assert snapshot["valid_day_count"] == 30
+    assert snapshot["consecutive_valid_day_count"] == 30
+    assert snapshot["activation_evidence_ready"] is True
+    assert snapshot["first_valid_date"] == "2026-06-01"
+    assert snapshot["last_valid_date"] == "2026-06-30"
+    assert snapshot["legacy_unmarked_day_count"] == 0

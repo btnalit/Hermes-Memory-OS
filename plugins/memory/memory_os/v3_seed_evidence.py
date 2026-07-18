@@ -164,15 +164,29 @@ def run_v3_seed_evidence_cycle(
         None,
     )
     if latest_same_day and str(latest_same_day.get("rebuild_digest") or "") == rebuild_digest:
-        return {
-            "schema_version": DAILY_SCHEMA_VERSION,
-            "status": "ok",
-            "skipped": True,
-            "reason": "daily_product_unchanged",
-            "valid": bool(latest_same_day.get("valid")),
-            "daily_record": latest_same_day,
-            "snapshot": build_v3_seed_evidence_snapshot(store, daily_records=existing),
-        }
+        # BB.6-2 provenance upgrade: a digest match must never block a
+        # natural_cron run from recording natural provenance for the day.  If
+        # the latest same-day row is manual (or legacy, without trigger_class)
+        # and this run IS natural_cron, fall through to the normal write path
+        # so the day can count toward the 30-day activation gate — otherwise a
+        # harmless manual run earlier in the day would permanently deny the
+        # day its natural_cron credit.  Same-class repeats (manual→manual,
+        # cron→cron) and cron-then-manual still skip: a manual rerun must
+        # never overwrite/downgrade already-recorded natural provenance.
+        natural_provenance_upgrade = (
+            trigger_class == "natural_cron"
+            and str(latest_same_day.get("trigger_class") or "") != "natural_cron"
+        )
+        if not natural_provenance_upgrade:
+            return {
+                "schema_version": DAILY_SCHEMA_VERSION,
+                "status": "ok",
+                "skipped": True,
+                "reason": "daily_product_unchanged",
+                "valid": bool(latest_same_day.get("valid")),
+                "daily_record": latest_same_day,
+                "snapshot": build_v3_seed_evidence_snapshot(store, daily_records=existing),
+            }
 
     envelope, envelope_id, gate_error = _resolve_or_start_gate(
         store,
@@ -279,10 +293,22 @@ def build_v3_seed_evidence_snapshot(
     # mark activation_evidence_ready early (mirrors exposure_rollup.py Fix 3's
     # natural_cron gating). Rows written before trigger_class existed are
     # visible via legacy_unmarked_day_count but never counted as natural.
-    natural_by_date = {
-        natural_date: row for natural_date, row in latest_by_date.items()
-        if row.get("trigger_class") == "natural_cron"
-    }
+    # natural_by_date is an INDEPENDENT last-writer-wins pass over ONLY
+    # natural_cron rows — filtering the mixed latest_by_date instead would let
+    # a later manual/backfill row evict an already-earned natural day and
+    # silently regress activation_evidence_ready.  latest_by_date (all rows)
+    # intentionally keeps feeding invalid_day_count, latest_natural_date, and
+    # legacy_unmarked_day_count below.
+    natural_by_date: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("trigger_class") != "natural_cron":
+            continue
+        natural_date = str(row.get("natural_date") or "")
+        if not natural_date:
+            continue
+        previous = natural_by_date.get(natural_date)
+        if previous is None or str(row.get("created_at") or "") >= str(previous.get("created_at") or ""):
+            natural_by_date[natural_date] = row
     legacy_unmarked_day_count = sum(1 for row in latest_by_date.values() if "trigger_class" not in row)
     valid_dates = sorted(_coerce_date(value) for value, row in natural_by_date.items() if row.get("valid") is True)
     longest: list[date] = []

@@ -3295,32 +3295,13 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
 
-    clean_host_warn_classification: list[dict[str, str]] = []
-    if clean_host:
-        for item in warn:
-            code = str(item.get("code") or "")
-            policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
-            if policy is None:
-                fail.append({"code": "clean_host_warn_unclassified", "warn_code": code})
-                continue
-            clean_host_warn_classification.append({"code": code, **policy})
-    else:
-        for item in warn:
-            code = str(item.get("code") or "")
-            policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
-            if policy and policy.get("production_behavior") == "fail_if_production":
-                failure = {
-                    "code": f"{code}_in_production",
-                    "reason": policy["reason"],
-                    "production_behavior": policy["production_behavior"],
-                }
-                if "value" in item:
-                    failure["value"] = item["value"]
-                if "finding" in item:
-                    failure["finding"] = item["finding"]
-                fail.append(failure)
-
     # ── Living Memory V2-0 permanent-promotion invariants (Task 8) ──────────
+    # This block must run BEFORE the clean-host/production WARN classification
+    # loop below: its WARN codes (notably
+    # living_memory_promotion_ledger_state_collection_failed, registered as
+    # fail_if_production) are consumed by that loop for production escalation.
+    # Appending them after the loop would make the production contract dead
+    # code — a remote ledger-collection failure could only ever WARN.
     living_memory_promotion = snapshot.get("living_memory_promotion", {})
     if isinstance(living_memory_promotion, dict) and living_memory_promotion:
         if living_memory_promotion.get("schema_version") == "memory-os.living_memory_promotion.v0":
@@ -3352,7 +3333,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 # SSH/runtime probe failure) — the recovery_failures/stale_open
                 # checks above ran against un-collected placeholder zeros, so
                 # this must never be a silent pass (mirrors Fix 1/2 for
-                # v2_exposure_monitor / clearance_snapshot_freshness).
+                # v2_exposure_monitor / clearance_snapshot_freshness), and on
+                # production it must escalate to FAIL via the classification
+                # loop below (fail_if_production).
                 warn.append({
                     "code": "living_memory_promotion_ledger_state_collection_failed",
                     "value": living_memory_promotion.get("ledger_state_collection_error_code"),
@@ -3388,6 +3371,31 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             })
         else:
             warn.append({"code": "living_memory_promotion_unavailable", "value": living_memory_promotion})
+
+    clean_host_warn_classification: list[dict[str, str]] = []
+    if clean_host:
+        for item in warn:
+            code = str(item.get("code") or "")
+            policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
+            if policy is None:
+                fail.append({"code": "clean_host_warn_unclassified", "warn_code": code})
+                continue
+            clean_host_warn_classification.append({"code": code, **policy})
+    else:
+        for item in warn:
+            code = str(item.get("code") or "")
+            policy = CLEAN_HOST_WARN_CLASSIFICATIONS.get(code)
+            if policy and policy.get("production_behavior") == "fail_if_production":
+                failure = {
+                    "code": f"{code}_in_production",
+                    "reason": policy["reason"],
+                    "production_behavior": policy["production_behavior"],
+                }
+                if "value" in item:
+                    failure["value"] = item["value"]
+                if "finding" in item:
+                    failure["finding"] = item["finding"]
+                fail.append(failure)
 
     status = "FAIL" if fail else "WARN" if warn else "PASS"
     evidence_labels = _monitor_evidence_labels(monitor_profile=monitor_profile, status=status)

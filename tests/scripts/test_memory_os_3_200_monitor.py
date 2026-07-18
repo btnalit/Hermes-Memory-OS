@@ -200,6 +200,60 @@ def test_collect_snapshot_remote_ledger_probe_missing_field_is_not_silent(monkey
     assert section["ledger_state_collection_error_code"] == "remote_probe_field_missing"
 
 
+def test_production_living_memory_ledger_collection_failure_escalates_to_fail():
+    """Counterfactual for the WARN-ordering fix: the ledger-collection WARN is
+    registered fail_if_production, so classify_snapshot must append it BEFORE
+    the clean-host/production escalation loop. If it is appended after the
+    loop (the pre-fix ordering), a production remote ledger-collection failure
+    can only ever WARN and the fail_if_production contract is dead code."""
+    snapshot = _healthy_snapshot()
+    snapshot["living_memory_promotion"] = monitor.summarize_living_memory_promotion(
+        ledger_collection_error="ImportError",
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
+        for item in classification["warn"]
+    )
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed_in_production"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["fail"]
+    )
+    assert classification["status"] == "FAIL"
+
+
+def test_clean_host_living_memory_ledger_collection_failure_stays_classified_warn():
+    """Clean-host counterpart: the same collection failure stays an expected
+    WARN (expected_clean_host classification record, no escalation, no
+    clean_host_warn_unclassified FAIL)."""
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["living_memory_promotion"] = monitor.summarize_living_memory_promotion(
+        ledger_collection_error="ImportError",
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
+        for item in classification["warn"]
+    )
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert not any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed_in_production"
+        for item in classification["fail"]
+    )
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:
