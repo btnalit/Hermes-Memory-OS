@@ -37,7 +37,11 @@ monitor_dashboard/snapshot.generated.json
 /HERMES_GOVERNANCE_PLAN.md
 /V1_CURRENT_BASELINE.md
 design_handoff_memory_os_monitor/
-docs/resolver/
+# Resolver working notes stay local, but the stabilization checklist is
+# tracked: it is mandatory process state (CLAUDE.md) and was lost once
+# (2026-07-18) when a local checkout was wiped.
+docs/resolver/*
+!docs/resolver/hermes-memory-os-stabilization-checklist.md
 .superpowers/sdd/
 *.patch
 scripts/prod_check*.py
