@@ -1421,3 +1421,98 @@ class TestV2EX4Poison:
         assert proposal_state["clearance"]["status"] == "conflict"
         assert proposal_state["clearance"]["owner_override"] is True
         assert set(proposal_state["clearance"]["conflict_refs"]) == {"perm_AAA", "perm_BBB"}
+
+
+def test_ledger_counts_stale_open_evaluation_failure_is_reported_not_swallowed(tmp_path, monkeypatch):
+    """Counterfactual (P1 #4): when the stale-open evaluation raises, the
+    broad except used to swallow the exception class entirely — the count
+    silently regressed to 0 while the section still looked collected. The
+    failure must surface as an explicit status plus the exception class name
+    (the bounded error record for this path)."""
+    import json
+
+    from plugins.memory.memory_os import crystallized as crystallized_module
+    from plugins.memory.memory_os.permanent_promotion import read_permanent_promotion_ledger_counts
+
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    (system / "permanent_promotion_proposals.jsonl").write_text(
+        json.dumps({
+            "proposal_id": "ppm_stale",
+            "status": "open",
+            "target_id": "cry_missing",
+            "content_hash": "h1",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    # Healthy baseline: the open proposal's target record does not exist, so
+    # the evaluation runs and reports one genuinely stale open proposal.
+    healthy = read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+    assert healthy["stale_open_proposal_count"] == 1
+    assert healthy["stale_open_evaluation_status"] == "ok"
+    assert healthy["stale_open_evaluation_error_code"] == ""
+
+    class ExplodingCrystallizedService:
+        def __init__(self, store):
+            raise RuntimeError("crystallized store unreadable")
+
+    monkeypatch.setattr(
+        crystallized_module, "CrystallizedMemoryService", ExplodingCrystallizedService
+    )
+
+    counts = read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+
+    # The stale count silently regresses to 0 (evaluation never ran) — which
+    # is exactly why the failure must be visible, never swallowed.
+    assert counts["stale_open_proposal_count"] == 0
+    assert counts["stale_open_evaluation_status"] == "unavailable"
+    assert counts["stale_open_evaluation_error_code"] == "RuntimeError"
+
+
+def test_ledger_counts_tolerate_historical_recovery_summary_missing_keys(tmp_path):
+    """Counterfactual (P1 #6): a historical permanent_promotion_producer
+    completion envelope whose result_summary carries
+    decision_recovery_attempt_count but lacks (or None-values) the
+    success/failure keys must yield ints, not an int(None) TypeError."""
+    import json
+
+    from plugins.memory.memory_os.permanent_promotion import read_permanent_promotion_ledger_counts
+
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    envelopes = system / "execution_gate_envelopes.jsonl"
+    envelopes.write_text(
+        json.dumps({
+            "stage": "completion",
+            "lane_id": "permanent_promotion_producer",
+            "result_summary": {"decision_recovery_attempt_count": 3},
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+
+    assert counts["decision_recovery_attempt_count"] == 3
+    assert counts["decision_recovery_success_count"] == 0
+    assert counts["decision_recovery_failure_count"] == 0
+
+    # None-valued keys (another historical row shape) must degrade to 0 too.
+    envelopes.write_text(
+        json.dumps({
+            "stage": "completion",
+            "lane_id": "permanent_promotion_producer",
+            "result_summary": {
+                "decision_recovery_attempt_count": None,
+                "decision_recovery_success_count": None,
+                "decision_recovery_failure_count": None,
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    counts = read_permanent_promotion_ledger_counts(tmp_path / "memory-os")
+
+    assert counts["decision_recovery_attempt_count"] == 0
+    assert counts["decision_recovery_success_count"] == 0
+    assert counts["decision_recovery_failure_count"] == 0

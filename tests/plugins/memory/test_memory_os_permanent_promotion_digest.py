@@ -351,7 +351,11 @@ def test_permanent_items_render_with_raw_token_only_in_ephemeral_delivery(tmp_pa
     )
     from plugins.memory.memory_os.permanent_promotion import prepare_permanent_promotion_delivery
 
-    now = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    # Anchor to the real clock (like test_ppmt_owner_reply_... below):
+    # render_owner_review_digest applies review aging against
+    # datetime.now(), so a fixed historical date rots out of the
+    # action_required bucket once the wall clock moves 7+ days past it.
+    now = datetime.now(timezone.utc)
     store = _store(tmp_path)
     _add_aged_provisional(store, candidate_id="cand_render", body="Durable owner preference.", now=now)
     prepared = prepare_permanent_promotion_delivery(store, delivery_ref="odig_render", now=now)

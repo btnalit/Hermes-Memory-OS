@@ -426,6 +426,11 @@ CLEAN_HOST_WARN_CLASSIFICATIONS: dict[str, dict[str, str]] = {
         "reason": "clean-host remote projection collection (SSH/runtime) may be unavailable during compatibility smoke",
         "production_behavior": "fail_if_production",
     },
+    "living_memory_stale_open_evaluation_unavailable": {
+        "classification": "expected_clean_host",
+        "reason": "clean-host may not have a warmed crystallized-record store, so stale-open evaluation can be unavailable during compatibility smoke",
+        "production_behavior": "fail_if_production",
+    },
 }
 
 
@@ -1232,14 +1237,34 @@ def summarize_living_memory_promotion(
         "duplicate_delivery_suppressed_count": 0,
     }
     if memory_os_root is not None:
-        section.update(read_permanent_promotion_ledger_counts(memory_os_root))
-        section["ledger_state_collection_status"] = "collected"
+        try:
+            section.update(read_permanent_promotion_ledger_counts(memory_os_root))
+            section["ledger_state_collection_status"] = "collected"
+        except Exception as exc:
+            # A corrupted / non-UTF-8 ledger file must degrade to the same
+            # explicit unavailable+error_code shape as a remote collection
+            # failure (ledger_collection_error below) instead of crashing
+            # the entire local monitor run — classify_snapshot turns this
+            # into the ledger-collection-failed WARN (never a silent pass).
+            section["ledger_state_collection_status"] = "unavailable"
+            section["ledger_state_collection_error_code"] = type(exc).__name__
     elif ledger_counts is not None:
         section.update(ledger_counts)
         section["ledger_state_collection_status"] = "collected"
     elif ledger_collection_error is not None:
         section["ledger_state_collection_status"] = "unavailable"
         section["ledger_state_collection_error_code"] = ledger_collection_error
+    if section.get("ledger_state_collection_status") == "collected":
+        # A "collected" ledger dict that omits the stale-open evaluation
+        # status (e.g. a version-skewed remote plugin whose
+        # read_permanent_promotion_ledger_counts predates the field) must
+        # never read as a healthy evaluation — deliberately mark it
+        # unavailable so classify_snapshot warns instead of trusting an
+        # un-evaluated stale_open_proposal_count zero. On an uncollected
+        # section the stronger ledger-collection-failed signal already
+        # covers the whole ledger state, evaluation included.
+        section.setdefault("stale_open_evaluation_status", "unavailable")
+        section.setdefault("stale_open_evaluation_error_code", "missing_from_collected_counts")
     return section
 
 
@@ -3339,6 +3364,18 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                 warn.append({
                     "code": "living_memory_promotion_ledger_state_collection_failed",
                     "value": living_memory_promotion.get("ledger_state_collection_error_code"),
+                })
+            if living_memory_promotion.get("stale_open_evaluation_status") == "unavailable":
+                # The stale-open evaluation inside
+                # read_permanent_promotion_ledger_counts failed (its broad
+                # except previously swallowed the exception with no consumer
+                # anywhere) — the stale_open check above ran against an
+                # un-evaluated zero, not a verified-clean zero. Never a
+                # silent pass; registered fail_if_production, escalated by
+                # the classification loop at the end of this function.
+                warn.append({
+                    "code": "living_memory_stale_open_evaluation_unavailable",
+                    "value": living_memory_promotion.get("stale_open_evaluation_error_code"),
                 })
             if auto_count == 0 and delivery_nonpromo == 0:
                 passed.append({"code": "living_memory_promotion_hard_zero_ok"})

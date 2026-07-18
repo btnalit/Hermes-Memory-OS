@@ -199,7 +199,16 @@ def collect_seed_inputs_from_store(
     max_edges: int = 16,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     daily_path = store.roots.memory_os_root / "system" / "v3_seed_edges_daily.jsonl"
-    rows = [item for item in (read_jsonl(daily_path) or []) if item.get("valid") is True]
+    # Same trigger-provenance gate as the activation snapshot (BB.6-2/BC.2):
+    # only cron-produced rows may feed real wandering. Without this, once the
+    # 30-day gate is open a LATER valid manual/backfill row would become the
+    # seed source — the exact manual-injection risk the gate closes, reopened
+    # one layer below it. Legacy rows without trigger_class are excluded too.
+    rows = [
+        item
+        for item in (read_jsonl(daily_path) or [])
+        if item.get("valid") is True and item.get("trigger_class") == "natural_cron"
+    ]
     if not rows:
         return [], [], {}, {}
     latest = rows[-1]

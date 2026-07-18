@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
-from plugins.memory.memory_os.v3_wandering import run_v3_wandering_cycle
+from plugins.memory.memory_os.v3_wandering import (
+    collect_seed_inputs_from_store,
+    run_v3_wandering_cycle,
+)
 from plugins.memory.memory_os.wandering_journal import read_journal
 
 
@@ -133,3 +138,81 @@ def test_quiet_gate_skip_never_calls_adapter_or_catches_up(tmp_path):
     result = _run(store, adapter, quiet_gate={"quiet": False, "reason": "foreground_task"})
     assert result == {"status": "skipped", "reason": "foreground_task"}
     assert adapter.called == 0
+
+
+def _write_daily_rows(store, rows):
+    daily_path = store.roots.memory_os_root / "system" / "v3_seed_edges_daily.jsonl"
+    daily_path.parent.mkdir(parents=True, exist_ok=True)
+    daily_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+
+def test_collect_seed_inputs_uses_latest_natural_cron_row_not_later_manual_row(tmp_path):
+    """Counterfactual (P1 #7): once the 30-day activation gate is open, a
+    LATER valid manual row must not become the seed source for real wandering
+    — the same trigger-provenance rule as the activation snapshot gate
+    (BB.6-2/BC.2), applied at the seed-selection layer below it."""
+    store = _store(tmp_path)
+    store.append_crystallized_record("seeds.md", {"id": "cry_nat_a"}, "Natural seed A")
+    store.append_crystallized_record("seeds.md", {"id": "cry_nat_b"}, "Natural seed B")
+    store.append_crystallized_record("seeds.md", {"id": "cry_man_a"}, "Manual seed A")
+    store.append_crystallized_record("seeds.md", {"id": "cry_man_b"}, "Manual seed B")
+    natural_row = {
+        "valid": True,
+        "trigger_class": "natural_cron",
+        "created_at": "2026-07-16T02:00:00Z",
+        "edges": [{"from": "crystallized:cry_nat_a", "to": "crystallized:cry_nat_b"}],
+        "source_window": {"start": "2026-07-15T00:00:00Z", "end": "2026-07-16T00:00:00Z"},
+        "source_offset_start": 10,
+        "source_offset_end": 20,
+    }
+    manual_row = {
+        "valid": True,
+        "trigger_class": "manual",
+        "created_at": "2026-07-17T09:00:00Z",
+        "edges": [{"from": "crystallized:cry_man_a", "to": "crystallized:cry_man_b"}],
+        "source_window": {"start": "2026-07-16T00:00:00Z", "end": "2026-07-17T00:00:00Z"},
+        "source_offset_start": 20,
+        "source_offset_end": 30,
+    }
+    _write_daily_rows(store, [natural_row, manual_row])
+
+    seeds, edges, window, cursors = collect_seed_inputs_from_store(store)
+
+    assert [seed["ref"] for seed in seeds] == [
+        "crystallized:cry_nat_a", "crystallized:cry_nat_b",
+    ]
+    assert edges == natural_row["edges"]
+    assert window == {"start": "2026-07-15T00:00:00Z", "end": "2026-07-16T00:00:00Z"}
+    assert cursors == {"memory_sources": {"offset_start": 10, "offset_end": 20}}
+
+
+def test_collect_seed_inputs_manual_or_legacy_only_rows_yield_no_seed_inputs(tmp_path):
+    """Counterfactual (P1 #7, empty path): a daily file containing only valid
+    manual and legacy (pre-trigger_class) rows must never feed wandering —
+    resolvable crystallized targets notwithstanding."""
+    store = _store(tmp_path)
+    store.append_crystallized_record("seeds.md", {"id": "cry_man_a"}, "Manual seed A")
+    manual_row = {
+        "valid": True,
+        "trigger_class": "manual",
+        "created_at": "2026-07-17T09:00:00Z",
+        "edges": [{"from": "crystallized:cry_man_a", "to": "crystallized:cry_man_a"}],
+        "source_window": {"start": "2026-07-16T00:00:00Z", "end": "2026-07-17T00:00:00Z"},
+        "source_offset_start": 20,
+        "source_offset_end": 30,
+    }
+    legacy_row = {
+        # No trigger_class field: rows written before the field existed must
+        # be excluded too (same rule as the activation snapshot gate).
+        "valid": True,
+        "created_at": "2026-07-17T10:00:00Z",
+        "edges": [{"from": "crystallized:cry_man_a", "to": "crystallized:cry_man_a"}],
+        "source_window": {"start": "2026-07-16T00:00:00Z", "end": "2026-07-17T00:00:00Z"},
+        "source_offset_start": 30,
+        "source_offset_end": 40,
+    }
+    _write_daily_rows(store, [manual_row, legacy_row])
+
+    assert collect_seed_inputs_from_store(store) == ([], [], {}, {})

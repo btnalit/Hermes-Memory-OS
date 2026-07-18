@@ -2025,6 +2025,7 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
 
     stale_open_count = 0
     stale_open_evaluation_status = "ok"
+    stale_open_evaluation_error_code = ""
     try:
         from plugins.memory.memory_os.crystallized import (
             CrystallizedMemoryService,
@@ -2045,8 +2046,12 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
                 != str(state.get("content_hash") or "")
             ):
                 stale_open_count += 1
-    except Exception:
+    except Exception as exc:
+        # No Silent Failures: record the failure class so the monitor can
+        # surface that stale_open_proposal_count above is an un-evaluated
+        # zero (evaluation never ran), not a verified-clean zero.
         stale_open_evaluation_status = "unavailable"
+        stale_open_evaluation_error_code = type(exc).__name__
 
     latest_recovery: dict[str, Any] = {}
     for event in _events(root / "system" / "execution_gate_envelopes.jsonl"):
@@ -2059,13 +2064,13 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
             latest_recovery = summary
     recovered_events = [event for event in proposal_events if event.get("recovered") is True]
     recovery_success_count = int(
-        latest_recovery.get("decision_recovery_success_count")
+        (latest_recovery.get("decision_recovery_success_count") or 0)
         if latest_recovery
         else len(recovered_events)
     )
     recovery_failure_count = int(latest_recovery.get("decision_recovery_failure_count") or 0)
     recovery_attempt_count = int(
-        latest_recovery.get("decision_recovery_attempt_count")
+        (latest_recovery.get("decision_recovery_attempt_count") or 0)
         if latest_recovery
         else recovery_success_count + recovery_failure_count
     )
@@ -2093,6 +2098,7 @@ def read_permanent_promotion_ledger_counts(memory_os_root: Path) -> dict[str, An
         "decision_recovery_failure_count": recovery_failure_count,
         "stale_open_proposal_count": stale_open_count,
         "stale_open_evaluation_status": stale_open_evaluation_status,
+        "stale_open_evaluation_error_code": stale_open_evaluation_error_code,
         "target_retired_close_count": sum(
             1 for event in proposal_events
             if event.get("status") == "expired" and event.get("reason") == "target_retired"

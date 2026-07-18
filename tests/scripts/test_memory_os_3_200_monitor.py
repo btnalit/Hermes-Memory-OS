@@ -254,6 +254,119 @@ def test_clean_host_living_memory_ledger_collection_failure_stays_classified_war
     )
 
 
+def test_production_living_memory_stale_open_evaluation_unavailable_escalates_to_fail():
+    """Counterfactual (P1 #4): a collected ledger whose stale-open evaluation
+    failed inside read_permanent_promotion_ledger_counts previously had no
+    consumer anywhere — stale_open_proposal_count stayed 0 and the section
+    still reported collected, so real stale proposals were silently
+    under-reported as a verified-clean zero. The unavailable status must WARN
+    and, being registered fail_if_production, escalate to FAIL on production
+    (via the BD.1 end-of-function classification loop)."""
+    snapshot = _healthy_snapshot()
+    snapshot["living_memory_promotion"] = monitor.summarize_living_memory_promotion(
+        ledger_counts={
+            "stale_open_proposal_count": 0,
+            "stale_open_evaluation_status": "unavailable",
+            "stale_open_evaluation_error_code": "OSError",
+        },
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "living_memory_stale_open_evaluation_unavailable"
+        and item["value"] == "OSError"
+        for item in classification["warn"]
+    )
+    assert any(
+        item["code"] == "living_memory_stale_open_evaluation_unavailable_in_production"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["fail"]
+    )
+    assert classification["status"] == "FAIL"
+
+
+def test_clean_host_living_memory_stale_open_evaluation_unavailable_stays_classified_warn():
+    """Clean-host counterpart: a clean host may not have a warmed
+    crystallized-record store yet, so the same evaluation failure stays an
+    expected_clean_host WARN (no escalation, no clean_host_warn_unclassified
+    FAIL)."""
+    snapshot = _healthy_snapshot()
+    snapshot["monitor_profile"] = "clean_host"
+    snapshot["living_memory_promotion"] = monitor.summarize_living_memory_promotion(
+        ledger_counts={
+            "stale_open_proposal_count": 0,
+            "stale_open_evaluation_status": "unavailable",
+            "stale_open_evaluation_error_code": "OSError",
+        },
+    )
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(
+        item["code"] == "living_memory_stale_open_evaluation_unavailable"
+        for item in classification["warn"]
+    )
+    assert not any(item["code"] == "clean_host_warn_unclassified" for item in classification["fail"])
+    assert not any(
+        item["code"] == "living_memory_stale_open_evaluation_unavailable_in_production"
+        for item in classification["fail"]
+    )
+    assert any(
+        item["code"] == "living_memory_stale_open_evaluation_unavailable"
+        and item["classification"] == "expected_clean_host"
+        and item["production_behavior"] == "fail_if_production"
+        for item in classification["clean_host_warn_classification"]
+    )
+
+
+def test_summarize_collected_counts_missing_stale_open_evaluation_status_never_reads_ok():
+    """Counterfactual (P1 #4, version-skew guard): a remote probe can report
+    ok=True with a counts dict from an older deployed plugin that predates
+    stale_open_evaluation_status. On a collected section the missing key must
+    be deliberately marked unavailable — indistinguishable from a failed
+    evaluation, never from a healthy one."""
+    section = monitor.summarize_living_memory_promotion(ledger_counts={})
+
+    assert section["ledger_state_collection_status"] == "collected"
+    assert section["stale_open_evaluation_status"] == "unavailable"
+    assert section["stale_open_evaluation_error_code"] == "missing_from_collected_counts"
+
+    snapshot = _healthy_snapshot()
+    snapshot["living_memory_promotion"] = section
+    classification = classify_snapshot(snapshot)
+    assert any(
+        item["code"] == "living_memory_stale_open_evaluation_unavailable"
+        and item["value"] == "missing_from_collected_counts"
+        for item in classification["warn"]
+    )
+
+
+def test_summarize_living_memory_promotion_local_ledger_read_failure_does_not_crash(tmp_path):
+    """Counterfactual (P1 #5): a corrupted / non-UTF-8 local ledger file used
+    to raise out of read_permanent_promotion_ledger_counts and crash the whole
+    local monitor run, while the remote path for the same scenario degrades to
+    a WARN. The local branch must degrade to the same explicit
+    unavailable+error_code shape, consumed by the BD.1 escalation channel."""
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    (system / "permanent_promotion_proposals.jsonl").write_bytes(b"\xff\xfe not utf-8 \xff")
+
+    section = monitor.summarize_living_memory_promotion(memory_os_root=tmp_path / "memory-os")
+
+    assert section["ledger_state_collection_status"] == "unavailable"
+    assert section["ledger_state_collection_error_code"] == "UnicodeDecodeError"
+
+    snapshot = _healthy_snapshot()
+    snapshot["living_memory_promotion"] = section
+    classification = classify_snapshot(snapshot)
+    assert any(
+        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
+        and item["value"] == "UnicodeDecodeError"
+        for item in classification["warn"]
+    )
+
+
 def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:
