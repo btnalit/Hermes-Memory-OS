@@ -493,6 +493,27 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BI — 路线图 v2.1 纳入 Gap Note（2026-07-19，文档变更）
+
+- **背景**：Owner 确认 GBrain 可吸收的最高价值内核是 Gap Note——系统不仅返回它知道的，也要
+  对本次召回直接相关的未解决冲突、过期状态和证据边界作一行诚实提示；独立 explain/debug
+  渲染项明确不纳入路线图。
+- **源码核对**：当前 `a5c1c04` 已有按 `claim_key` 生成的 conflict、`stale_task_revision`、
+  session injection ledger 和 Exposure attribution gap，但成熟度不同：Owner-level conflict 与
+  stale task 可直接作为 candidate；session duplicate 不具备长期时长；普通 freshness 尚缺完整
+  producer 赋值；Exposure gap 是全局聚合而非当前 selected-object 事实。
+- **更新**：路线图升至 v2.1；R1.2 增加 metadata-only Gap Note shadow candidate 和零误报/零正文
+  持久化门；R5.2.1 定义结构化数据流、第一阶段信号、延期信号、预算/文案/相关性边界与反事实
+  测试；近期顺序和最终成功标准同步纳入。
+- **治理边界**：shadow/off 保持 output-neutral；只有 Recall `apply_canary` 可渲染；不从“没有找到
+  更新”推导“现实没有变化”；全局 Monitor attribution gap 不机械附加到答案；不新增热路径 LLM、
+  采集面、canonical 写入或独立 `--explain` 路线。
+- **验证范围**：仅修改两个公共 Markdown 文档，不修改代码、生产配置、账本、cron、runtime、
+  plugin 或 Gateway。按文档变更发布门执行 `git diff --check`、契约/引用扫描、mount-isolated 全量、
+  静态治理门和提交后 fresh-clone 全量。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -532,3 +553,7 @@ P2×3（BF）、P3×5（BG）。当前无遗留待办。
   Continuity/Relevance/Restraint/Review/Warmth 五维伙伴主线。仅文档变更，无运行时行为修改。
 - `7e4e2ea..95e51f1`：路线图 v2 状态枚举澄清为仅约束 checklist 条目本身，R1–R6 聚合标题允许
   组合式描述性标签；为 R1.1 的 V2-A/B/C/D 代号补一行指向真实源码定义处。仅文档变更。
+- `a5c1c04..（Gap Note roadmap v2.1 文档变更）`：将有界不确定性披露纳入 R1.2/R5.2；先以
+  metadata-only shadow candidate 观察 Owner-level conflict 与 stale task，随 Recall apply-canary
+  才允许一行预算内渲染；全局 attribution gap、无对象级 freshness 和长期重复时长不冒充答案盲区；
+  明确不引入独立 explain/debug 路线。仅文档变更。

@@ -1,10 +1,12 @@
 # Hermes-Memory-OS 优化路线图 v2
 
-> **版本**：v2.0
+> **版本**：v2.1
 >
 > **更新日期**：2026-07-19
 >
-> **基线提交**：`520f1becc46e1e26a57e154b4ea5ae22a6dba9c1`
+> **运行时基线提交**：`520f1becc46e1e26a57e154b4ea5ae22a6dba9c1`
+>
+> **本次文档更新起点**：`a5c1c0481f886e586bf6f6f3f38997c6a6843086`
 >
 > **定位**：Memory-OS 不只是记忆存储或检索工具，而是整个 Hermes 系统中负责记忆、连续性、分寸感与长期协作的动态伙伴。
 
@@ -44,7 +46,8 @@ v1 是 BC 修复周期结束后的代码加固清单，重点是 Monitor、JSONL
 
 | 项目 | 当前证据 |
 |---|---|
-| Git HEAD / `origin/main` | `520f1becc46e1e26a57e154b4ea5ae22a6dba9c1` |
+| 生产运行时代码基线 | `520f1becc46e1e26a57e154b4ea5ae22a6dba9c1` |
+| 路线图 v2.1 文档更新起点 | `a5c1c0481f886e586bf6f6f3f38997c6a6843086` |
 | 完整隔离测试 | `2620 passed / 6 skipped / 4 warnings` |
 | fresh-clone 完整测试 | `2620 passed / 6 skipped / 4 warnings` |
 | Write Surface | `unclassified_count=0` |
@@ -164,7 +167,10 @@ observation_days >= configured_gate
 - [ ] 建立 must-recall golden set 和 critical-omission 检测，不以“selected 数量更多”作为质量指标。
 - [ ] 验证 forced-current-source、重复抑制、旧正文 revalidation、cooldown escape、短 ID、CJK、mixed-script 和 adversarial approval identity。
 - [ ] shadow 全路径保持 `retrieve_called=true`、`format_called=false`、live bytes 与关闭 facade 时完全一致。
-- [ ] 达到零关键遗漏、权威/新鲜度无越权、自然样本充分后，才提出 bounded apply canary。
+- [ ] 在 shadow 中生成 Gap Note candidate，但只记录 metadata-only `reason_codes/counts/would_render`，不保存提示正文、不改变 live bytes。
+- [ ] Gap Note 第一阶段只消费本次 Recall Plan 中的 `owner_conflict_requires_clarification` 与 `stale_task_revision`；已被权威排序解决的 lower-authority conflict 不提示。
+- [ ] 普通 freshness、repeat-without-revision 时长和 attribution gap 只有在当前 selected object 具备对象级来源/revision/时间证据后才可进入 Gap Note；全局 Exposure gap 保持 Monitor-only。
+- [ ] 达到零关键遗漏、权威/新鲜度无越权、自然样本充分后，才提出 bounded apply canary；Gap Note 随同该 canary 开放，不另开全局输出 Phase。
 
 **apply canary 最低门**：
 
@@ -174,6 +180,9 @@ untrusted_authority_escape_count = 0
 stale_body_selection_count = 0
 shadow_output_mutation_count = 0
 observation_window_reset_required = false
+false_gap_note_count = 0
+resolved_conflict_gap_note_count = 0
+gap_note_body_persisted_count = 0
 ```
 
 ### R1.3 V3 Seed / Wandering 自然准入
@@ -378,6 +387,54 @@ CollectedSnapshot
 - [ ] bounded apply canary 只对明确 route/profile 生效，具备即时回滚。
 - [ ] canary 期间比较任务完成度、Owner 重解释次数、错误唤起和重复注入，而不是只比较召回率。
 
+#### R5.2.1 Gap Note：有界的不确定性披露
+
+**状态**：`planned`；依附 R1.2 Recall conflict/freshness shadow → apply-canary，不新增独立 Phase。
+
+目标：系统不仅带回它知道的内容，也对与当前召回直接相关的冲突、过期和证据边界作出一行诚实说明，避免“上下文看起来完整，实际已经陈旧或互相矛盾”。
+
+**第一阶段可直接使用的信号**：
+
+- `owner_conflict_requires_clarification`：同一 `claim_key` 下最高权威记忆仍互相冲突；
+- `stale_task_revision`：State Overlay task revision 落后于当前 effective task；
+- session duplicate 只可表达“本次会话没有找到更新 revision”，不得据此声称现实长期没有变化。
+
+**暂不进入用户提示的信号**：
+
+- 普通 `freshness` 在 retriever producer 尚未完整提供对象级时间/来源前，只能用于 shadow 观测；
+- Exposure attribution gap 当前是全局/窗口聚合指标，不代表本次 selected object 缺来源，继续保持 Monitor-only；
+- “六周无新数据”等持续时长结论必须有对象级 `source_updated_at`、revision 与稳定实体绑定，不能从 session injection ledger 推断。
+
+**建议数据流**：
+
+```text
+Recall Plan
+→ build_recall_gap_note_candidate(plan)
+→ structured reason_codes/counts/would_render
+→ shadow metadata-only observation
+→ apply-canary bounded renderer
+→ 最多一行自然提示
+```
+
+**约束与验收**：
+
+- [ ] Shadow 只记录 reason code、计数和 would-render；不持久化 claim/query/source body 或最终提示正文。
+- [ ] 只有 `apply_canary` 可以渲染；shadow/off 均保持 live prefetch 字节不变。
+- [ ] Gap Note 计入 Recall Facade 总预算，最多一行、最多一个合并提示，不在预算外追加。
+- [ ] 不暴露 `claim_key`、`shadow_finding`、`trigger_class` 等内部机制词汇。
+- [ ] 严格区分“系统没有找到近期更新”和“现实没有更新”；禁止从证据缺失推导现实事实。
+- [ ] 只提示当前 query/selected set 直接相关的 gap；不得把全局 Monitor 告警机械附加到每个答案。
+- [ ] lower-authority conflict 已由仲裁解决，不产生 Gap Note；只有未解决的 Owner-level conflict 才提示澄清。
+- [ ] 示例文案使用确定性模板，不调用热路径 LLM、不新增采集面、不写 canonical memory。
+- [ ] 不新增独立 `--explain` 开关或 shadow-finding 人类可读渲染路线；现有结构化 findings 继续作为内部审查证据。
+- [ ] 覆盖无 gap、单 conflict、stale task、多 gap 合并、预算不足、shadow output-neutral、metadata-only 和 facade fail-open 反事实测试。
+
+示例语义：
+
+> 关于这项状态，我找到的记录可能已经过期，近期变化可能尚未进入记忆。
+
+> 关于这一点，现有高权威记忆仍有冲突，建议以当前来源再确认一次。
+
 ### R5.3 Restraint：克制和分寸
 
 - [x] Low-clue recall 与 bounded judge availability。
@@ -472,7 +529,7 @@ CollectedSnapshot
 ### 现在执行
 
 1. 保持 P0–P2 当前部署不变，积累 V2、V3 和 Recall 自然证据。
-2. 建立 Recall must-recall golden set 和 route-by-route shadow coverage。
+2. 建立 Recall must-recall golden set、route-by-route shadow coverage 和 Gap Note metadata-only shadow candidate。
 3. 落地 GitHub Actions、mount-isolated full test 和分类化 skip/warning 门。
 4. 让公共 closure matrix 不再因内部文档缺失而 skipped。
 5. 清理两个项目自有 warning：ambient roots fallback 和 deprecated knob 迁移。
@@ -499,6 +556,7 @@ Memory-OS v2 路线图完成时，不以“代码更多”作为成功，而以�
 
 - Hermes 能稳定接续当前任务，极少复活旧任务或要求 Owner 重复解释；
 - Recall 在不越权、不漏关键记忆的前提下减少重复和无关上下文；
+- Gap Note 能在当前记忆过期或高权威结论冲突时作出一行有界提示，同时不把“没有找到更新”误说成“现实没有变化”；
 - Review Surface 让 Owner 看到更少但更有效的项目；
 - Monitor、Dashboard、status 和 scheduler 对运行事实没有互相矛盾的说法；
 - V2/V3 的每次毕业都由自然证据和 Owner 边界驱动，不由手工回填或模型自评驱动；
