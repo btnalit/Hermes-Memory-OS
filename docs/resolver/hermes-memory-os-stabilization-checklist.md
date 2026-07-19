@@ -392,12 +392,83 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## P0–P2 观测/看板闭环收尾（2026-07-19，提交 `520f1be`）
+
+- **背景**：`5128316` 起草的优化路线图 v1 标出 P0–P2 三档缺口——Recall Facade shadow 未真正
+  output-neutral、State Overlay 同摘要跨会话/候选重复、Dashboard `fullMonitor` 新鲜度阈值与实际
+  每日 02:30 刷新节奏脱节、Lane Status 未把 state-overlay-refresh/entity-index-refresh/
+  full-monitor-refresh 计入核心契约。实施计划见 `docs/plans/2026-07-19-p0-p2-cognitive-partner-closure.md`
+  （其中 Task 1 MemorySources 配置开关、Task 3 调度器清理、Task 6 Review Agenda canary 为生产
+  配置/cron 状态操作，本仓库无对应源码 diff，不在本节验证范围内——本节只覆盖有源码变更、
+  可用测试锁定的部分）。
+
+- **P0/P2 · Recall Facade shadow 并非真正 output-neutral**：`_build_prefetch_sections()` 原逻辑在
+  非 `apply_canary` 模式下仍会用 STATE_OVERLAY/INDEXED_FTS 子集结果调用 `facade.format_context()`，
+  非空时把结果追加进**实时** prefetch 的 "Recall Facade (unified)" section——shadow 模式因此并未
+  保持输出中立，会悄悄改变实时输出字节。修复：只有 `apply_canary` 才格式化并追加实时 section；
+  其余模式下 `facade.retrieve()` 仍执行（写入 metadata-only Recall Plan 观测），但绝不进入实时
+  prefetch。
+  - **反事实**：还原旧分支 → `test_shadow_facade_observes_without_adding_live_prefetch_section` FAIL
+    （shadow 输出与 baseline 不再字节相等）；恢复 → 该测试与新增的
+    `test_context_router_apply_still_runs_shadow_facade_without_changing_live_bytes`、
+    `test_apply_canary_facade_may_add_live_prefetch_section` 三个测试全过。
+
+- **P1 · State Overlay 跨会话/候选重复开放线索**：`build_state_overlay()` 逐会话/候选追加
+  `open_threads` 时不去重，同一 `foreground_summary`（或候选 summary）在多个 last_session 之间、
+  或与 `candidates.jsonl` 重叠时会重复入表。修复：加 `open_thread_keys` casefold 集合，同键只保留
+  首次遇到的一条（会话已按新→旧排列，"首次遇到"即最新一条）。
+  - **反事实**：删除去重集合 → 新增的
+    `test_build_overlay_deduplicates_identical_open_threads_across_sessions`、
+    `test_build_overlay_deduplicates_session_and_candidate_open_thread` 两个测试 FAIL（重复条目）；
+    恢复 → 过。
+
+- **P1 · Dashboard `fullMonitor` 新鲜度阈值与真实节奏脱节**：新增
+  `scripts/memory_os_full_monitor_refresh.py`——用临时文件 + `_validated_payload()` 校验
+  classification 后原子 `os.replace()` 发布 monitor 快照，保留最近 `keep_artifacts` 份；
+  monitor 子进程返回码 0/2 都视为成功（2 = 治理观测门 FAIL，是有效证据而非执行失败），其余
+  返回码才 raise。`cron_registry.py` 注册 `full_monitor_refresh` 规格（`no_agent=True`，
+  `deliver_role=owner`）；`memory_os_monitor_dashboard_snapshot.py` 的
+  `FULL_MONITOR_STALE_SECONDS` 从写死 3600 改为 `30 * 3600`——对齐每日 02:30 刷新加调度抖动余量，
+  1 小时阈值会让仪表盘一天里大半时间显示假 stale。
+  - **反事实**：`test_full_monitor_daily_artifact_stays_fresh_within_cadence_grace`（25h 新鲜）
+    在旧 3600s 阈值下会 FAIL；`test_full_monitor_stale_artifact_flags_stale` 改为 31h 过期用例
+    验证阈值仍能正确触发。`test_refresh_publishes_valid_fail_classification_without_alerting`、
+    `test_refresh_fails_loudly_when_monitor_does_not_create_valid_artifact` 锁定新脚本的
+    fail-open/fail-loud 边界；`test_full_monitor_refresh_is_registered_as_read_only_self_wrapper`
+    锁定 cron spec 形状。
+
+- **P2 · Lane Status 缺三项 cron 且 no_agent 误判为 agent 工作**：`CORE_MEMORY_OS_CRON` 补入
+  state-overlay-refresh/entity-index-refresh/full-monitor-refresh，`OPTIONAL_MEMORY_OS_CRON` 收纳
+  已停用功能对应的 expression-feedback-request（继续算核心会造成假 WARN）。`_cron_job_snapshot()`
+  原先只要 `agent_value is None` 就用 `deliver not in {"local","none",""}` 推断，`no_agent=True` 但
+  走 discord/telegram 投递的自包含 wrapper 会被误判成"agent 工作"——修复为先查 `no_agent` 字段。
+  - **反事实**：新增的 `test_no_agent_origin_job_is_not_misclassified_as_agent_work`、
+    `test_state_overlay_and_entity_index_are_part_of_core_monitor_contract`、
+    `test_expression_feedback_is_optional_when_expression_is_disabled` 三个测试锁定新契约；
+    既有 `test_dashboard_snapshot_maps_read_only_evidence_without_writing_reports` 的核心/可选
+    计数断言从 7/1 同步改为 9/2（既有测试更新，非新增）。
+
+### P0–P2 验证结论
+
+- 全量测试：**2613 passed, 13 skipped**（BG 基线 2601 + 12 新测试：Recall shadow×3、State
+  Overlay 去重×2、full_monitor_refresh 脚本×2、cron 注册×1、Dashboard Lane Status×4；skipped
+  数不变）。本会话亲跑复核（Windows 本地检出），非仅子智能体自述。
+- 静态门：import cycle pass（146 modules / 0 cycles）/ write surface `unclassified_count=0`
+  （146/146 已分类）/ static hygiene pass（closure matrix、compileall、diff_check、
+  host boundary、provider-agnostic、public checkout probe 均 pass）/ `git diff --check` 干净。
+- 证据级别：`local_pass`。下方 BH 节记录的 fresh-clone 隔离检出点数字
+  （`2620 passed / 6 skipped / 4 warnings`）属独立证据类别（mount-isolated 全新检出环境），
+  与本节本地数字口径不同，互不矛盾。生产侧 Task 1/3/6（MemorySources 配置开关、cron 状态、
+  Review Agenda canary）为生产操作，未随本次源码验证覆盖。
+
+---
+
 ## BH — 优化路线图升级为 v2（2026-07-19，文档变更）
 
 - **背景**：原 `hermes-memory-os-optimization-roadmap.md` 仍停留在 BC 修复收尾时点，基线为
   `eaf718c / 2601 passed / 13 skipped`，默认完整部署到历史远程主机，且主要覆盖代码加固，
   未纳入 P0–P2 已落地的 MemorySources、State Overlay、Recall Plan、Review Agenda、Lane Status
-  和认知伙伴演进主线。
+  和认知伙伴演进主线（P0–P2 源码修复周期见上一节，提交 `520f1be`）。
 - **更新**：路线图升级为 v2，基线更新至 `520f1be`；新增六阶段证据模型、自然观察/晋级门、
   targeted production deployment、mount namespace 测试隔离、分类化 skip/warning 门、公共
   closure matrix、认知伙伴五维演进和近期执行顺序。
@@ -406,6 +477,19 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 - **验证**：本次仅修改公共 Markdown 文档和本稳定化清单，不改变代码、生产配置、账本、cron
   或 Gateway。验证以 `git diff --check`、旧基线/必要章节扫描和文档交叉引用检查为准；代码
   基线沿用提交 `520f1be` 已完成的源码及 fresh-clone 全量 `2620 passed / 6 skipped / 4 warnings`。
+
+---
+
+## BH.1 — 路线图状态枚举澄清（2026-07-19，提交 `95e51f1`，文档变更）
+
+- **背景**：BH 引入的路线图 v2 在 Section 4 定义了封闭的 8 值状态枚举，但 R2（部分实现）与
+  R5（基础已部署）两个聚合标题用了枚举外的标签，构成自相矛盾。
+- **更新**：明确该枚举只约束 checklist **条目**本身；R1–R6 是聚合小结标题，允许用枚举术语
+  组合而成的描述性标签。同时为 R1.1 引用的 V2-A/B/C/D 代号补一行指向真实定义处
+  （`exposure_rollup.py`/`crystallized.py`/`knob_overrides.py`/`contested_pairs.py`，代号本身
+  不在路线图文档中重复定义）。
+- **验证**：仅修改 `hermes-memory-os-optimization-roadmap.md` 4 行；不改变代码、生产配置、
+  账本、cron 或 Gateway，`git diff --check` 干净。
 
 ---
 
@@ -438,6 +522,13 @@ P2×3（BF）、P3×5（BG）。当前无遗留待办。
   建 id→record 索引去 O(P×F)；探针消费抽 _consume_remote_probe() 统一 fallback；
   dashboard latest 行改 natural_cron-only。BC 评审 15 项全部关闭。2601 passed /
   13 skipped，静态门全过。
-- `520f1be..（roadmap v2 文档变更）`：将优化路线图从 BC 代码加固清单升级为生产闭环与认知伙伴
+- `eaf718c..520f1be`：P0–P2 观测/看板闭环收尾——Recall Facade shadow 改为真正 output-neutral
+  （仅 apply_canary 才追加实时 section）；State Overlay 跨会话/候选开放线索去重；新增
+  `memory_os_full_monitor_refresh.py` 原子发布每日 Monitor 快照，Dashboard `fullMonitor` 新鲜度
+  阈值对齐每日 02:30 节奏（3600s→30*3600s）；Lane Status 核心/可选 cron 契约补齐三项并修
+  no_agent 误判为 agent 工作。2613 passed / 13 skipped（本地），静态门全过。
+- `520f1be..7e4e2ea`：将优化路线图从 BC 代码加固清单升级为生产闭环与认知伙伴
   演进路线图 v2；更新当前基线、证据成熟度、targeted deploy、隔离 CI、语义/状态机收敛和
   Continuity/Relevance/Restraint/Review/Warmth 五维伙伴主线。仅文档变更，无运行时行为修改。
+- `7e4e2ea..95e51f1`：路线图 v2 状态枚举澄清为仅约束 checklist 条目本身，R1–R6 聚合标题允许
+  组合式描述性标签；为 R1.1 的 V2-A/B/C/D 代号补一行指向真实源码定义处。仅文档变更。
