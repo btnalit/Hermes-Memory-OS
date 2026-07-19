@@ -109,6 +109,8 @@ code_complete
 | `graduated` | 通过 Owner/治理门并进入目标模式 |
 | `retired` | 已停用，历史只作为审计证据 |
 
+**适用范围**：上述 8 值枚举约束的是每个具体条目（下文 R1–R6 中每条 `- [ ]`/`- [x]` 清单项及其子小节），不是 R1–R6 顶层小节标题。顶层标题的“状态”是对该阶段内多个条目的聚合概述，允许使用描述性组合标签（如 `partially_implemented` 表示阶段内部分条目已 `deployed`/`observing`、其余仍 `planned`；`foundation_deployed` 表示基础子项已 `deployed` 并进入自然观察、更高阶子项仍 `planned`）。聚合标签不得替代具体条目自身的枚举状态——排查某阶段真实进度时，以条目状态为准，顶层标签仅作导航摘要。
+
 每项还必须写明：
 
 ```text
@@ -129,7 +131,7 @@ falsifier:
 
 ### R1.1 V2 Exposure 自然观察
 
-**现状**：metadata-only MemorySources 已恢复，但 V2 仍未满足自然周期、观察天数和连续压力门。
+**现状**：metadata-only MemorySources 已恢复，但 V2 仍未满足自然周期、观察天数和连续压力门。（V2-A/B/C/D 为 `exposure_rollup.py`/`crystallized.py`/`knob_overrides.py`/`contested_pairs.py` 中已定义的 V2 exposure 分级代号，此处沿用，不在本文重新定义。）
 
 **继续执行**：
 
