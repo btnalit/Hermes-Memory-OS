@@ -38,12 +38,15 @@ def test_installer_copies_monitor_dashboard_snapshot_operational_helper(tmp_path
     target_home = tmp_path / "home"
     scripts_root = Path(__file__).resolve().parents[2] / "scripts"
     source = scripts_root / "memory_os_monitor_dashboard_snapshot.py"
+    refresh_source = scripts_root / "memory_os_full_monitor_refresh.py"
     retirement_source = scripts_root / "memory_os_retire_legacy_right_brain.py"
     _write_operational_helper_scripts(target_home, dry_run=False)
     installed = target_home / "scripts" / source.name
+    refresh_installed = target_home / "scripts" / refresh_source.name
     retirement_installed = target_home / "scripts" / retirement_source.name
 
     assert installed.read_bytes() == source.read_bytes()
+    assert refresh_installed.read_bytes() == refresh_source.read_bytes()
     assert retirement_installed.read_bytes() == retirement_source.read_bytes()
 
 
@@ -443,7 +446,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
     assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 18
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 19
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -456,6 +459,7 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
         "memory-os-fact-judge",
         "memory-os-event-stats-refresh",
         "memory-os-exposure-rollup",
+        "memory-os-full-monitor-refresh",
         "memory-os-v3-seed-evidence",
         "memory-os-v3-wandering",
         "memory-os-v3-journal-sweep",
@@ -512,7 +516,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 20
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 21
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     assert {job["name"] for job in jobs} == {
@@ -528,6 +532,7 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
         "memory-os-l3-probe-verification",
         "memory-os-event-stats-refresh",
         "memory-os-exposure-rollup",
+        "memory-os-full-monitor-refresh",
         "memory-os-v3-seed-evidence",
         "memory-os-v3-wandering",
         "memory-os-v3-journal-sweep",

@@ -56,6 +56,11 @@ from plugins.memory.memory_os.legacy_right_brain_retirement import (
 
 SCHEMA_VERSION = "memory-os.monitor_dashboard_snapshot.v0"
 DEFAULT_PROFILE = "default"
+# The canonical full Monitor is refreshed daily at 02:30. Allow one daily
+# cadence plus six hours of scheduler/runtime jitter before declaring the
+# artifact stale; a one-hour threshold makes the dashboard stale for most of
+# every healthy day and recreates a second, misleading status truth.
+FULL_MONITOR_STALE_SECONDS = 30 * 3600
 CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-owner-review-digest",
     "memory-os-proposal-followups-opsgate",
@@ -68,12 +73,15 @@ CORE_MEMORY_OS_CRON = frozenset({
     "memory-os-v3-seed-evidence",
     "memory-os-v3-wandering",
     "memory-os-v3-journal-sweep",
-    "memory-os-expression-feedback-request",
+    "memory-os-state-overlay-refresh",
+    "memory-os-entity-index-refresh",
+    "memory-os-full-monitor-refresh",
     "memory-os-memory-sources-feedback-request",
 })
 OPTIONAL_MEMORY_OS_CRON = frozenset({
     "memory-os-module-cadence-report",
     "memory-os-l3-probe-verification",
+    "memory-os-expression-feedback-request",
 })
 # Keep legacy tuple for backward-compatible reference; health now uses the
 # frozensets above so paused optional jobs don't contribute to WARN.
@@ -430,7 +438,9 @@ def _cron_job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
     enabled = bool(job.get("enabled", True))
     deliver = str(job.get("deliver") or job.get("delivery") or "local")
     agent_value = job.get("agent")
-    if agent_value is None:
+    if bool(job.get("no_agent", False)):
+        agent_value = False
+    elif agent_value is None:
         agent_value = deliver not in {"local", "none", ""}
     schedule = job.get("schedule") or ""
     if isinstance(schedule, dict):
@@ -1125,7 +1135,7 @@ def _full_monitor_snapshot(memory_root: Path) -> dict[str, Any]:
         "generated_at": str(data.get("generated_at") or "") if isinstance(data, dict) else None,
         "artifact_path": str(artifact),
         "artifact_age_seconds": max(age, 0),
-        "stale": age > 3600,
+        "stale": age > FULL_MONITOR_STALE_SECONDS,
     }
 
 

@@ -2269,6 +2269,104 @@ class TestPrefetchFacadeIntegration:
         # No "Recall Facade" section when facade is None
         assert not any("Recall Facade" in title for title, _ in sections)
 
+    def test_shadow_facade_observes_without_adding_live_prefetch_section(self, tmp_path):
+        store = _store(tmp_path)
+
+        class ShadowFacade:
+            last_recall_plan = {"mode": "shadow"}
+
+            def __init__(self):
+                self.retrieve_called = False
+                self.format_called = False
+
+            def retrieve(self, *args, **kwargs):
+                self.retrieve_called = True
+                return {"indexed_fts": []}
+
+            def format_context(self, *args, **kwargs):
+                self.format_called = True
+                return "shadow content must not enter live prefetch"
+
+        facade = ShadowFacade()
+        baseline, _ = _build_prefetch_sections(
+            "test query", store=store, recall_facade=None,
+        )
+        shadow, _ = _build_prefetch_sections(
+            "test query", store=store, recall_facade=facade,
+        )
+
+        assert facade.retrieve_called is True
+        assert facade.format_called is False
+        assert shadow == baseline
+        assert not any("Recall Facade" in title for title, _ in shadow)
+
+    def test_context_router_apply_still_runs_shadow_facade_without_changing_live_bytes(self, tmp_path):
+        store = _store(tmp_path)
+
+        class ShadowFacade:
+            last_recall_plan = {"mode": "shadow"}
+
+            def __init__(self):
+                self.retrieve_called = False
+                self.format_called = False
+
+            def retrieve(self, *args, **kwargs):
+                self.retrieve_called = True
+                return {"indexed_fts": []}
+
+            def format_context(self, *args, **kwargs):
+                self.format_called = True
+                return "shadow content must not enter routed live prefetch"
+
+        router_config = {
+            "enabled": True,
+            "mode": "apply",
+            "apply_routes": ["all"],
+            "dry_run_routes": [],
+            "llm_judge_mode": "disabled",
+        }
+        baseline = build_prefetch(
+            "continue p0 closure",
+            budget_chars=20000,
+            store=store,
+            context_router_config=router_config,
+            recall_facade=None,
+        )
+        facade = ShadowFacade()
+        shadow = build_prefetch(
+            "continue p0 closure",
+            budget_chars=20000,
+            store=store,
+            context_router_config=router_config,
+            recall_facade=facade,
+        )
+
+        assert facade.retrieve_called is True
+        assert facade.format_called is False
+        assert shadow == baseline
+        assert "Recall Facade (unified)" not in shadow
+
+    def test_apply_canary_facade_may_add_live_prefetch_section(self, tmp_path):
+        store = _store(tmp_path)
+
+        class ApplyCanaryFacade:
+            last_recall_plan = {"mode": "apply_canary"}
+
+            def retrieve(self, *args, **kwargs):
+                return {"indexed_fts": []}
+
+            def format_context(self, *args, **kwargs):
+                return "bounded canary recall"
+
+        sections, _ = _build_prefetch_sections(
+            "test query", store=store, recall_facade=ApplyCanaryFacade(),
+        )
+
+        assert any(
+            title == "Recall Facade (unified)" and lines == ["bounded canary recall"]
+            for title, lines in sections
+        )
+
     def test_facade_failure_does_not_block_prefetch(self, tmp_path, monkeypatch):
         """Facade exception → fail-open, prefetch does not raise."""
         store = _store(tmp_path)

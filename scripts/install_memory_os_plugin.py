@@ -50,6 +50,7 @@ SOURCE_L3_PROBE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 SOURCE_EVENT_STATS_REFRESH = REPO_ROOT / "scripts" / "memory_os_event_stats_refresh.py"
 SOURCE_EXPOSURE_ROLLUP = REPO_ROOT / "scripts" / "memory_os_exposure_rollup.py"
 SOURCE_MONITOR_DASHBOARD_SNAPSHOT = REPO_ROOT / "scripts" / "memory_os_monitor_dashboard_snapshot.py"
+SOURCE_FULL_MONITOR_REFRESH = REPO_ROOT / "scripts" / "memory_os_full_monitor_refresh.py"
 SOURCE_LEGACY_RIGHT_BRAIN_RETIREMENT = REPO_ROOT / "scripts" / "memory_os_retire_legacy_right_brain.py"
 SOURCE_V3_SEED_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_v3_seed_evidence.py"
 SOURCE_V3_SEED_EVIDENCE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_seed_evidence_gate.py"
@@ -1149,6 +1150,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "event_stats_refresh": SOURCE_EVENT_STATS_REFRESH,
         "exposure_rollup": SOURCE_EXPOSURE_ROLLUP,
         "monitor_dashboard_snapshot": SOURCE_MONITOR_DASHBOARD_SNAPSHOT,
+        "full_monitor_refresh": SOURCE_FULL_MONITOR_REFRESH,
         "legacy_right_brain_retirement": SOURCE_LEGACY_RIGHT_BRAIN_RETIREMENT,
         "v3_seed_evidence": SOURCE_V3_SEED_EVIDENCE,
         "v3_seed_evidence_gate": SOURCE_V3_SEED_EVIDENCE_GATE,

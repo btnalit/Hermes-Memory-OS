@@ -150,6 +150,62 @@ class TestBuildStateOverlay:
         assert len(overlay["open_threads"]["data"]) >= 1
         assert overlay["open_threads"]["status"] == "ok"
 
+    def test_build_overlay_deduplicates_identical_open_threads_across_sessions(self, tmp_path):
+        roots = _make_roots(tmp_path)
+        shared = "Implement the daily almanac workflow"
+        _write_last_session_anchor(
+            roots,
+            session_id="sess-older",
+            foreground=shared,
+            ended_at="2026-07-06T09:00:00+00:00",
+        )
+        _write_last_session_anchor(
+            roots,
+            session_id="sess-newer",
+            foreground=shared,
+            ended_at="2026-07-06T10:00:00+00:00",
+        )
+        store = _make_store(roots)
+
+        overlay = build_state_overlay(store, roots)
+        matching = [
+            entry for entry in overlay["open_threads"]["data"]
+            if entry["text"] == shared
+        ]
+
+        assert len(matching) == 1
+        assert matching[0]["source"] == "last_session:sess-newer"
+
+    def test_build_overlay_deduplicates_session_and_candidate_open_thread(self, tmp_path):
+        roots = _make_roots(tmp_path)
+        shared = "Implement vector decoupling for embedder"
+        _write_last_session_anchor(
+            roots,
+            session_id="sess-newer",
+            foreground=shared,
+            ended_at="2026-07-06T10:00:00+00:00",
+        )
+        now_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        (roots.crystallized_root / "candidates.jsonl").write_text(
+            json.dumps({
+                "candidate_id": "cand-duplicate",
+                "canonical_state": "owner_eligible",
+                "summary": shared,
+                "last_updated": now_ts,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        store = _make_store(roots)
+
+        overlay = build_state_overlay(store, roots)
+        matching = [
+            entry for entry in overlay["open_threads"]["data"]
+            if entry["text"] == shared
+        ]
+
+        assert len(matching) == 1
+        assert matching[0]["source_kind"] == "last_session"
+
     def test_build_overlay_with_preference_crystallized(self, tmp_path):
         roots = _make_roots(tmp_path)
         _write_crystallized_preference(roots, "Prefer concise responses", "pref-001")

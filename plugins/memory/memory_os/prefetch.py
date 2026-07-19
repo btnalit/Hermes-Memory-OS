@@ -281,6 +281,7 @@ def build_prefetch(
             context_router_config=router_config,
             low_clue_recall_config=low_clue_config,
             substrate_recall_report=substrate_recall_report,
+            recall_facade=recall_facade,
         )
         if routed is not None:
             _record_memory_sources(
@@ -474,6 +475,7 @@ def _build_context_router_apply_prefetch(
     context_router_config: dict[str, Any],
     low_clue_recall_config: dict[str, Any] | None = None,
     substrate_recall_report: dict[str, Any] | None = None,
+    recall_facade: object | None = None,
 ) -> dict[str, Any] | None:
     candidates = build_prefetch_section_candidates(
         query,
@@ -485,6 +487,7 @@ def _build_context_router_apply_prefetch(
         current_task_anchor=current_task_anchor,
         low_clue_recall_config=low_clue_recall_config,
         substrate_recall_report=substrate_recall_report,
+        recall_facade=recall_facade,
     )
     report = route_context_sections(
         query,
@@ -611,17 +614,13 @@ def _build_prefetch_sections(
     _first_anchors = _collect_anchor_ids(query, index)
     _append_section(sections, "Related Memory", _graph_layer_shadow_lines(store, _first_anchors, index=index, seen=seen))
 
-    # ── Phase 3: Retriever Facade supplementary recall lane ──────────────
-    # When the facade is available, add a composite recall section that
-    # aggregates State Overlay + Indexed FTS results through the unified
-    # facade interface. This is an ADDITION (not replacement) in Phase 3
-    # so the existing sections remain as the fallback baseline.
-    # TODO(Phase 3.1): when facade is enabled and healthy, conditionally
-    #   skip "Memory State Overlay" and "Indexed Recall" sections to avoid
-    #   duplicate content in prefetch context (code-review finding G-1).
+    # ── Phase 3: Retriever Facade observation/apply lane ───────────────
+    # Shadow mode must be output-neutral: retrieve() builds and persists the
+    # metadata-only Recall Plan, but only apply_canary may add formatted
+    # facade content to the live prefetch. Existing sections remain the
+    # fail-open baseline in every mode.
     if recall_facade is not None:
         try:
-            from .recall_types import RecallType
             from .task_state import read_effective_current_task
 
             facade: Any = recall_facade
@@ -635,16 +634,9 @@ def _build_prefetch_sections(
             )
             plan = getattr(facade, "last_recall_plan", {})
             if isinstance(plan, dict) and plan.get("mode") == "apply_canary":
-                live_results = results
-            else:
-                live_results = {
-                    key: value
-                    for key, value in results.items()
-                    if key in {RecallType.STATE_OVERLAY.value, RecallType.INDEXED_FTS.value}
-                }
-            facade_text = facade.format_context(live_results, budget=800)
-            if facade_text.strip():
-                sections.append(("Recall Facade (unified)", [facade_text]))
+                facade_text = facade.format_context(results, budget=800)
+                if facade_text.strip():
+                    sections.append(("Recall Facade (unified)", [facade_text]))
         except Exception as exc:
             # fail-open: facade failure must not block prefetch,
             # but record bounded error for monitor visibility

@@ -104,6 +104,7 @@ def build_state_overlay(
         lsa_path, limit=max_recent_sessions, exclude_session_id=session_id,
     )
 
+    open_thread_keys: set[str] = set()
     for i, session in enumerate(last_sessions):
         foreground = _clean_overlay_text(session.get("foreground_summary", ""))
         session_id = str(session.get("session_id", ""))[:12]
@@ -117,14 +118,17 @@ def build_state_overlay(
                         source_kind="last_session",
                     )
                 )
-            # All recent sessions → open threads
-            overlay.open_threads.data.append(
-                OverlayEntry(
-                    text=foreground[:200],
-                    source=f"last_session:{session_id}",
-                    source_kind="last_session",
+            # All recent sessions → open threads, newest duplicate wins.
+            thread_key = foreground[:200].casefold()
+            if thread_key not in open_thread_keys:
+                overlay.open_threads.data.append(
+                    OverlayEntry(
+                        text=foreground[:200],
+                        source=f"last_session:{session_id}",
+                        source_kind="last_session",
+                    )
                 )
-            )
+                open_thread_keys.add(thread_key)
 
     # ── open_threads: also from candidates.jsonl (owner-eligible, recent) ─
     candidate_threads = _read_open_threads_from_candidates(
@@ -134,6 +138,9 @@ def build_state_overlay(
         cleaned = _clean_overlay_text(summary)
         if not cleaned:
             continue
+        thread_key = cleaned[:200].casefold()
+        if thread_key in open_thread_keys:
+            continue
         overlay.open_threads.data.append(
             OverlayEntry(
                 text=cleaned[:200],
@@ -141,6 +148,7 @@ def build_state_overlay(
                 source_kind="candidate",
             )
         )
+        open_thread_keys.add(thread_key)
 
     if overlay.open_threads.data:
         overlay.open_threads.status = "ok"

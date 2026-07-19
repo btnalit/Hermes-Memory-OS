@@ -173,6 +173,7 @@ def _home_with_helpers(
         "memory_os_cron_event_stats_refresh_gate.py",
         "memory_os_exposure_rollup.py",
         "memory_os_cron_exposure_rollup_gate.py",
+        "memory_os_full_monitor_refresh.py",
         "memory_os_v3_seed_evidence.py",
         "memory_os_cron_v3_seed_evidence_gate.py",
         "memory_os_v3_journal_sweep.py",
@@ -240,7 +241,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 18
+    assert len(report["operational_cron_jobs"]) == 19
     assert {job["name"] for job in report["operational_cron_jobs"]} == {
         "memory-os-owner-review-digest",
         "memory-os-proposal-followups-opsgate",
@@ -251,6 +252,7 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
         "memory-os-fact-judge",
         "memory-os-event-stats-refresh",
         "memory-os-exposure-rollup",
+        "memory-os-full-monitor-refresh",
         "memory-os-v3-seed-evidence",
         "memory-os-v3-wandering",
         "memory-os-v3-journal-sweep",
@@ -272,6 +274,12 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert exposure_rollup["raw_script"] == "memory_os_exposure_rollup.py"
     assert exposure_rollup["deliver"] == "local"
     assert exposure_rollup["no_agent"] is True
+    full_monitor = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-full-monitor-refresh"][0]
+    assert full_monitor["schedule"] == "30 2 * * *"
+    assert full_monitor["script"] == "memory_os_full_monitor_refresh.py"
+    assert full_monitor["raw_script"] == "memory_os_full_monitor_refresh.py"
+    assert full_monitor["deliver"] == "discord"
+    assert full_monitor["no_agent"] is True
     hindsight = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-hindsight-advisory-digest"][0]
     assert hindsight["schedule"] == "20 2 * * 0"
     assert hindsight["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
@@ -368,7 +376,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 20
+    assert len(report["operational_cron_jobs"]) == 21
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == {
@@ -382,6 +390,7 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
         "memory-os-index-sync",
         "memory-os-event-stats-refresh",
         "memory-os-exposure-rollup",
+        "memory-os-full-monitor-refresh",
         "memory-os-v3-seed-evidence",
         "memory-os-v3-wandering",
         "memory-os-v3-journal-sweep",

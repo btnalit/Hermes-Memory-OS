@@ -115,10 +115,13 @@ def _write_jobs(home: Path) -> None:
         "memory-os-index-sync",
         "memory-os-candidate-aggregation",
         "memory-os-fact-judge",
-        "memory-os-expression-feedback-request",
+        "memory-os-state-overlay-refresh",
+        "memory-os-entity-index-refresh",
+        "memory-os-full-monitor-refresh",
         "memory-os-memory-sources-feedback-request",
     ]
     optional_names = [
+        "memory-os-expression-feedback-request",
         "memory-os-right-brain-expression",
         "memory-os-module-cadence-report",
         "memory-os-right-brain-expression-outcome",
@@ -245,9 +248,9 @@ def test_dashboard_snapshot_maps_read_only_evidence_without_writing_reports(tmp_
     serialized = json.dumps(snapshot, ensure_ascii=False)
 
     assert snapshot["schema_version"] == "memory-os.monitor_dashboard_snapshot.v0"
-    assert snapshot["cron"]["enabled"] == 7  # 7 core cron jobs enabled
-    assert snapshot["cron"]["core_total"] == 7
-    assert snapshot["cron"]["optional_total"] == 1
+    assert snapshot["cron"]["enabled"] == 9  # 9 core cron jobs enabled
+    assert snapshot["cron"]["core_total"] == 9
+    assert snapshot["cron"]["optional_total"] == 2
     assert {item["key"]: item["unit"] for item in snapshot["kpis"]}["cron_ok"] == "enabled jobs"
     assert snapshot["ownerReview"]["counts"]["action_required_shown"] == 1
     assert snapshot["ownerReview"]["counts"]["action_required"] >= 0  # real backlog
@@ -540,14 +543,27 @@ def test_full_monitor_missing_artifact_returns_unknown(tmp_path):
     assert fm["stale"] is True
 
 
-def test_full_monitor_stale_artifact_flags_stale(tmp_path):
-    """artifact older than 1h → stale=true, dashboard elevates to WARN when clean."""
+def test_full_monitor_daily_artifact_stays_fresh_within_cadence_grace(tmp_path):
+    """The daily 02:30 refresh contract keeps an artifact fresh for 30h."""
     module = _load_module()
     home = tmp_path / "hermes"
     _write_jobs(home)
     _write_memory_files(home)
     _write_dashboard_evidence(home)
-    _write_monitor_artifact(home / "memory-os", "PASS", age_seconds=4000)  # > 3600s
+    _write_monitor_artifact(home / "memory-os", "PASS", age_seconds=25 * 3600)
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    assert snapshot["fullMonitor"]["stale"] is False
+
+
+def test_full_monitor_stale_artifact_flags_stale(tmp_path):
+    """Artifact older than the daily 30h grace is stale."""
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "PASS", age_seconds=31 * 3600)
 
     snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
     fm = snapshot["fullMonitor"]
@@ -637,6 +653,34 @@ def test_v3_crons_are_part_of_core_monitor_contract():
         "memory-os-v3-wandering",
         "memory-os-v3-journal-sweep",
     }.issubset(module.CORE_MEMORY_OS_CRON)
+
+
+def test_no_agent_origin_job_is_not_misclassified_as_agent_work():
+    module = _load_module()
+    item = module._cron_job_snapshot(
+        {
+            "name": "memory-os-full-monitor-refresh",
+            "deliver": "origin",
+            "no_agent": True,
+            "enabled": True,
+        }
+    )
+    assert item["agent"] is False
+
+
+def test_state_overlay_and_entity_index_are_part_of_core_monitor_contract():
+    module = _load_module()
+    assert {
+        "memory-os-state-overlay-refresh",
+        "memory-os-entity-index-refresh",
+        "memory-os-full-monitor-refresh",
+    }.issubset(module.CORE_MEMORY_OS_CRON)
+
+
+def test_expression_feedback_is_optional_when_expression_is_disabled():
+    module = _load_module()
+    assert "memory-os-expression-feedback-request" not in module.CORE_MEMORY_OS_CRON
+    assert "memory-os-expression-feedback-request" in module.OPTIONAL_MEMORY_OS_CRON
 
 
 def test_retired_right_brain_is_removed_from_active_cron_surface(tmp_path):
