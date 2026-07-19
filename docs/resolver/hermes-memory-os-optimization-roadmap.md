@@ -1,133 +1,504 @@
-# Hermes-Memory-OS 后续优化路线图（收敛 / 加固 / 统一状态机）
+# Hermes-Memory-OS 优化路线图 v2
 
-> 编写背景（2026-07-19）：BC 代码评审 15 项（P0×3 / P1×4 / P2×3 / P3×5）已全部关闭
-> （见稳定化清单 BD/BE/BF/BG 节，最终基线 2601 passed / 13 skipped，HEAD `eaf718c`）。
-> 本文档是修复周期的收官交接：把四轮修复中暴露出的**系统性模式**整理成后续优化方向，
-> 按优先级分阶段，每阶段给出可机检的验收门。执行时沿用 Section W 五规则与
-> "主会话验证收尾、子智能体按模型匹配并行修复"的调度规范。
+> **版本**：v2.0
+>
+> **更新日期**：2026-07-19
+>
+> **基线提交**：`520f1becc46e1e26a57e154b4ea5ae22a6dba9c1`
+>
+> **定位**：Memory-OS 不只是记忆存储或检索工具，而是整个 Hermes 系统中负责记忆、连续性、分寸感与长期协作的动态伙伴。
 
 ---
 
-## R1 — 生产证据闭环（最高优先级，先于一切重构）
+## 1. 路线图目标
 
-**动机**：BD→BG 四轮共 31 个新测试全部是 `local_pass` 证据级别。其中多项修复
-（BD.1 升级循环顺序、BE.1/BE.2 账本采集降级、BF.2 无来源标记、BG.4 探针 fallback）
-的**存在意义就是生产远端行为**，本地测试只能证明逻辑、不能证明部署形态。
+Memory-OS 的长期目标不是“保存更多内容”，而是让 Hermes 在长期运行中具备四种能力：
 
-- [ ] 部署当前 main（`eaf718c`+）到 hermes-media（10.20.3.200），走
-      `deploy_memory_os.py` 完整 phased 流程（plan→preflight→dry-run→apply→postcheck→report）。
-- [ ] 跑 `memory_os_3_200_monitor.py --host hermes-media --monitor-profile live --output summary`，
-      验收：`live_monitor_pass`，且 living_memory_promotion section 报
-      `ledger_state_collection_status == "collected"`（证明 BC.1/BE 链路真实采集）。
-- [ ] 跑 hermes-feiniu clean-host profile，验收：所有 WARN 均落在
-      `CLEAN_HOST_WARN_CLASSIFICATIONS` 注册表内（无 `clean_host_warn_unclassified`）。
-- [ ] 故障注入一次：远端临时改坏一个账本文件 → live monitor 必须产出
-      `living_memory_promotion_ledger_state_collection_failed_in_production` FAIL 而非崩溃
-      （BD.1+BE.2 的生产反事实）。恢复后复跑 PASS。
-- [ ] 在稳定化清单补一节记录以上证据（评级从 local_pass 升为 live_monitor_pass）。
+1. **连续跟随**：知道当前任务、未完事项、历史决策和系统能力演进，不把已结束任务重新激活。
+2. **懂得轻重**：从多条候选记忆中选择当下真正有用的少数信息，抑制重复、过期和低权威内容。
+3. **克制主动**：能够在合适时机提醒、澄清或表达，但沉默也必须是健康结果；不为证明“有主动性”而制造输出。
+4. **可信成长**：通过自然运行证据和 Owner 反馈逐步升级，不把候选、推测、沉默或一次性情绪误写为永久事实。
 
-**禁止的完成信号**：fast_probe PASS、本地 pytest 通过、部署脚本 exit 0。
+工程底座仍遵守以下原则：文件优先、索引可重建、自动写入受 ExecutionGate 和 StructuralWriteGate 约束、永久记忆与身份/关系写入永久受 OwnerGate 控制。
 
-## R2 — 加固（防回归基建）
+---
 
-**动机**：本周期暴露了三类"环境性脆弱"：目录清空丢提交、测试日期腐化（BE.5）、
-本机 skip 口径漂移（8→13，BE 验证结论）。
+## 2. v1 → v2 的主要变化
 
-- [ ] **CI**：GitHub Actions 跑全量 pytest + 四项静态门（import cycle / write surface /
-      hygiene / public checkout probe --strict），push 与 PR 均触发。验收：badge 绿；
-      故意提交一个坏行 CI 变红。CI 同时固化"公共检出"的 skip 口径基线（13 skipped），
-      漂移即可见。
-- [ ] **日期腐化清扫**（Section W 规则 5 的全仓应用）：grep 所有测试 fixture 中的硬编码
-      历史日期（`datetime(202`），凡与真实时钟 aging/TTL 逻辑相交的（BE.5 同类），改锚
-      `datetime.now()` 或注入时钟。验收：把系统时间假想快进 90 天（`freezegun` 或
-      env 注入）全量仍绿。
-- [ ] **jsonl 读取模糊测试**：对 `jsonl_io.read_jsonl_result` 与其消费者
-      （BG.1 后的 ledger 读取、seed evidence、session mirror）补 property-based 坏输入
-      测试（截断行、混合编码、超长行、BOM、非对象 JSON）。验收：任何输入不崩溃，
-      error_records 有界。
-- [ ] **gitignored 资产备份纪律**：`docs/internal-memory-os/` 等仍是"目录清空即永久丢失"。
-      建立私有备份 remote 或定期 `git bundle`+异机存放；稳定化清单已入库（BD 周期教训），
-      内部文档同样处理或明示可丢。
-- [ ] **已知告警清零**：crystallized.py:772 `auto_promote_enabled` → `permanent_proposal_enabled`
-      迁移收尾；knob_overrides.py:472 ambient roots fallback 警告消除。验收：全量测试
-      0 warnings。
+v1 是 BC 修复周期结束后的代码加固清单，重点是 Monitor、JSONL、状态机和重复逻辑。v2 保留这些正确方向，但作出以下升级：
 
-## R3 — 收敛（去重复，防漂移）
+- 用当前生产基线替换 `eaf718c / 2601 passed / 13 skipped` 的历史快照；
+- 区分“代码完成、已部署、运行时采用、自然观察、证据成熟、允许晋级”六个阶段；
+- 将生产部署从默认完整覆盖改为“变更清单备份 + 定向同步 + 哈希验证”；
+- 将 MemorySources、State Overlay、Recall Plan、Review Agenda、Lane Status 纳入一条认知伙伴主线；
+- 将 V2/V3/Recall 自然证据成熟度置于任何 apply/promotion 之前；
+- 用分类化 skip/warning 门替代易腐化的固定数量基线；
+- 将 closure matrix 公共检出覆盖从“长线择机”提升为防回归基础设施；
+- 保留时间解析、natural row、错误码与状态机收敛任务，但增加迁移兼容和行为等价要求。
 
-**动机**：BG.2（trigger_class 判定）证明了"逐字重复的语义代码必然漂移"。同类重复仍存：
+---
 
-- [ ] **时间戳解析统一**：全仓至少有 `parse_timestamp`（permanent_promotion）、
-      `_parse_datetime`（v3_seed_evidence）、`_parse_dt`（owner_actions）等多份同语义
-      ISO 解析器（BF.3 清扫时逐一确认过语义）。抽到 `jsonl_io` 或新的 `timeutil` 单点，
-      各模块改引用；BG.2 式同对象防漂移测试。
-- [ ] **natural_cron 视图统一**：目前"只认 natural 行"的语义散在三处独立实现——
-      快照 `natural_by_date` 独立 LWW（BD.3+BF.3）、wandering 种子行过滤（BE.4）、
-      dashboard latest 行选取（BG.5）。抽共享的 `natural_rows(daily_rows)` /
-      `latest_natural_row(daily_rows)` 视图函数进 v3_seed_evidence，三个消费者共用。
-      验收：三处只剩一份过滤逻辑 + 防漂移测试。
-- [ ] **错误码注册表**：`remote_probe_field_missing` / `ledger_state_not_supplied` /
-      `missing_from_collected_counts` / `*_collection_failed` / `*_unavailable` 等错误码
-      现在是散落的字符串字面量。收敛为模块级常量 + 一份错误码语义清单（何时出现、
-      谁消费、生产行为），monitor 分类表引用常量而非裸字符串。验收：grep 裸字符串
-      错误码为零；写错常量名变成 ImportError 而非静默新码。
-- [ ] **monitor summarize_* 模式收敛**：不拆文件（CLAUDE.md 红线），但各 section 的
-      "占位 dict → 采集 → 状态标记"模式可以共享一个小骨架（见 R4 的 SectionStatus），
-      消除 BF.2 类"分支链漏路径"再次出现的土壤。
+## 3. 当前生产基线
+
+### 3.1 源码与测试
+
+| 项目 | 当前证据 |
+|---|---|
+| Git HEAD / `origin/main` | `520f1becc46e1e26a57e154b4ea5ae22a6dba9c1` |
+| 完整隔离测试 | `2620 passed / 6 skipped / 4 warnings` |
+| fresh-clone 完整测试 | `2620 passed / 6 skipped / 4 warnings` |
+| Write Surface | `unclassified_count=0` |
+| Import Cycle | `cycle_count=0` |
+| Static Hygiene | PASS |
+| Closure Matrix | 因公共检出缺内部 matrix/roadmap 而 skipped，仍需修复 |
+
+完整测试必须在私有 mount namespace 中把临时目录 bind mount 到 `/root/.hermes`。仅设置临时 `HERMES_HOME` 不足以隔离生产状态。
+
+### 3.2 生产运行状态
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| Memory-OS Provider | **active** | canonical store 为 `/root/.hermes/memory-os` |
+| Index | **healthy** | SQLite 仅为可重建索引，不是权威源 |
+| MemorySources | **自然观察中** | `enabled=true`、`metadata_only`、不记录 query/prompt/正文 |
+| State Overlay | **已部署** | open thread 去重、latest-effective task 已修复 |
+| Recall Plan | **shadow** | 已产生自然 observation；不改变 live prefetch 输出 |
+| Review Agenda v2 | **apply_canary** | 仍受精确 revision/token/target 门约束 |
+| Lane Status | **最小收敛完成** | Monitor/Dashboard/cron contract 已统一 |
+| Full Monitor artifact | **自动刷新** | daily no-agent 原子刷新，Dashboard 使用同一 artifact |
+| V2 | **观察中/未解冻** | `v2_exposure_schema_era_unhealthy` 仍是当前唯一 Monitor FAIL |
+| V3 | **准入阻塞** | Seed/Wandering 继续等待自然证据；synthesis/outlet/expression 关闭 |
+
+### 3.3 已完成的 P0–P2 闭环
+
+- P0：恢复 metadata-only MemorySources 自然观察；不回填历史、不记录正文。
+- P1：修复 State Overlay 重复 open thread 和 latest-effective task；清理测试/孤儿 cron。
+- P1：增加 canonical full-Monitor artifact 原子刷新，消除 Dashboard 使用 stale 历史快照形成的多真相。
+- P2：Recall facade 已穿透 Context Router apply 路径；shadow 可检索和记观察账本，但不 format、不注入 live section。
+- P2：Review Agenda 进入 bounded canary；Lane Status 最小权威视图进入 Monitor/Dashboard。
+- 发布证据：生产定向部署、Gateway 重载、自然记录、完整测试、fresh clone、commit、push 已完成。
+
+上述完成项不等于 V2/V3/Recall 已毕业；自然观察窗口仍需继续积累。
+
+---
+
+## 4. 状态与证据模型
+
+每个路线图条目必须分别记录以下状态，不得用一个“完成”覆盖全部阶段：
+
+```text
+code_complete
+→ tests_green
+→ deployed
+→ runtime_adopted
+→ naturally_observed
+→ evidence_mature
+→ promotion_allowed
+```
+
+推荐状态值：
+
+| 状态 | 含义 |
+|---|---|
+| `planned` | 只有方案，没有代码 |
+| `implemented` | 代码完成，尚未部署 |
+| `deployed` | 文件已同步，运行进程不一定采用 |
+| `observing` | 运行时已采用，正在积累自然证据 |
+| `ready_for_owner_review` | 证据门满足，等待 Owner 决策 |
+| `blocked` | 被依赖、证据或治理边界阻塞 |
+| `graduated` | 通过 Owner/治理门并进入目标模式 |
+| `retired` | 已停用，历史只作为审计证据 |
+
+每项还必须写明：
+
+```text
+dependency:
+owner_boundary:
+rollback:
+monitor_fields:
+falsifier:
+```
+
+**禁止的完成信号**：本地 pytest 通过、部署脚本退出码为 0、手工补写证据、一次 fast probe PASS、配置文件中开关为 true。
+
+---
+
+## R1 — 自然证据与毕业门（当前最高优先级）
+
+**状态**：`observing`
+
+### R1.1 V2 Exposure 自然观察
+
+**现状**：metadata-only MemorySources 已恢复，但 V2 仍未满足自然周期、观察天数和连续压力门。
+
+**继续执行**：
+
+- [ ] 只让 `memory-os-exposure-rollup` 在计划时间自然运行；手工运行和 legacy unmarked 行永不计入 natural credit。
+- [ ] 从恢复观察后的第一条非 skipped、最终版本 `natural_cron` rollup 起算新的有效窗口。
+- [ ] 观察 schema-era classified ratio、attribution gaps、rollup lag、conservation failures 和连续预算压力。
+- [ ] V2-A 达到自然周期门后，仅提交“是否进入 bounded canary”的 Owner review，不自动解冻 V2-C/D。
+- [ ] 30 日观察门和 7 日压力门独立成立，禁止以一个门替代另一个门。
+
+**验收**：
+
+```text
+manual_credit_count = 0
+legacy_credit_count = 0
+conservation_failure_count = 0
+natural_cycle_count >= configured_gate
+observation_days >= configured_gate
+```
+
+**Owner 边界**：任何 unfreeze/promotion 只能形成可撤销提案；不得由 cron、Monitor 或模型自行执行。
+
+### R1.2 Recall Plan shadow 观察
+
+**现状**：有效 master mode 为 `shadow`，已经产生 metadata-only observation；当前计划会改变 live recall，因此不能提前 apply。
+
+**继续执行**：
+
+- [ ] 按 route 分层观察 active-task、casual-continuity、diagnostic、foreground-control 和 low-clue 路径。
+- [ ] 每条观察记录 matrix version/digest/window ID；authority/freshness 权重变化时重置窗口。
+- [ ] 建立 must-recall golden set 和 critical-omission 检测，不以“selected 数量更多”作为质量指标。
+- [ ] 验证 forced-current-source、重复抑制、旧正文 revalidation、cooldown escape、短 ID、CJK、mixed-script 和 adversarial approval identity。
+- [ ] shadow 全路径保持 `retrieve_called=true`、`format_called=false`、live bytes 与关闭 facade 时完全一致。
+- [ ] 达到零关键遗漏、权威/新鲜度无越权、自然样本充分后，才提出 bounded apply canary。
+
+**apply canary 最低门**：
+
+```text
+critical_omission_count = 0
+untrusted_authority_escape_count = 0
+stale_body_selection_count = 0
+shadow_output_mutation_count = 0
+observation_window_reset_required = false
+```
+
+### R1.3 V3 Seed / Wandering 自然准入
+
+**现状**：准入阻塞是健康状态。Seed evidence 未成熟前，不调用 wandering inference；synthesis/outlet/expression 继续关闭。
+
+- [ ] 每天只认最终版本 `natural_cron` Seed 行。
+- [ ] manual/backfill 不覆盖已经获得的 natural day，也不创造自然成熟度。
+- [ ] Seed ready 前验证 `model_input_transmitted=false`、`external_action_executed=false`、`owner_delivery_attempted=false`。
+- [ ] Seed ready 后允许自然 opportunity；`entries=[]` 和长期零输出均视为合法结果。
+- [ ] 只有出现自然样本并获得 Owner 真实反馈后，才提出下一阶段表达/分享能力。
+
+---
+
+## R2 — 生产真相、部署与防回归基础设施
+
+**状态**：`partially_implemented`
+
+### R2.1 单一运行真相
+
+已完成：canonical full-Monitor artifact、daily refresh、Dashboard freshness contract、core/optional/no-agent cron 分类。
+
+后续：
+
+- [ ] Monitor、Dashboard、status tool 和 Lane Status 使用同一 typed read model；保留 desired-vs-observed 两平面，禁止新增第三个权威账本。
+- [ ] full Monitor artifact 携带明确 `generated_at`、source HEAD/runtime digest、monitor version 和 producer receipt。
+- [ ] artifact 超 freshness contract 时 Dashboard 明确 stale，不回退到更旧但“看起来更绿”的快照。
+- [ ] full Monitor runtime 从当前超目标状态降到目标内，不能通过跳过检查或读取 stale cache 达标。
+
+### R2.2 生产部署双 Profile
+
+**默认生产路径：targeted deployment**
+
+```text
+inspect
+→ exact change manifest
+→ backup affected files
+→ targeted sync repo → runtime + plugin + scripts
+→ production import/hash verification
+→ separate Gateway reload boundary
+→ natural live verification
+→ commit
+→ fresh-clone full suite
+→ push last
+```
+
+**clean-host/full installer qualification** 只用于新主机或明确的兼容性验收：
+
+- [ ] `deploy_memory_os.py plan → preflight → dry-run → apply → postcheck → report` 在 clean-host fixture/host 验证。
+- [ ] 不把 clean-host WARN 描述为 production PASS。
+- [ ] 不在有宿主定制的生产主机默认运行 full installer。
+- [ ] 故障注入必须使用可回滚 fixture 或专用验证主机；不得临时破坏当前 canonical production ledger。
+
+### R2.3 CI 与隔离
+
+当前仓库没有 `.github/`，CI 尚未落地。
+
+- [ ] GitHub Actions 在 push/PR 跑 mount-isolated full pytest。
+- [ ] 同时运行 import cycle、write surface、static hygiene、public checkout probe `--strict`、`git diff --check`。
+- [ ] 加 clean checkout/fresh clone job，禁止读取开发机真实 `/root/.hermes`。
+- [ ] 用稳定 skip ID/reason allowlist 替代固定 skip 数；门禁为 `unknown_skip_count=0`。
+- [ ] 新增未知 warning 失败；项目自有 warning 必须为 0；第三方 warning 只允许有界 allowlist。
+
+### R2.4 Closure Matrix 公共检出
+
+- [ ] 提供最小公开 fixture 或 public contract，使基础 closure matrix 在 GitHub checkout 中真实运行。
+- [ ] 私有 matrix 只能增加覆盖，不能决定公共基础门是否执行。
+- [ ] `internal_docs_missing` 可以作为信息，但不得继续让核心 gate 永久 skipped。
+
+### R2.5 Gitignored/私有资产备份
+
+- [ ] 明确 `docs/internal-memory-os/` 每类文件是“必须备份”还是“可重建/可丢弃”。
+- [ ] 必须保留的内容进入私有 remote、加密异机备份或定期 bundle。
+- [ ] 公共行为契约不得只存在于 gitignored 私有文档。
+
+---
+
+## R3 — 语义收敛与防漂移
+
+**状态**：`planned`
+
+### R3.1 时间戳语义统一
+
+当前仍存在多份 `parse_timestamp` / `_parse_datetime` / `_parse_dt`。
+
+先建立语义矩阵，再抽公共 helper：
+
+| 维度 | 必须明确 |
+|---|---|
+| `Z` 后缀 | 接受并归一 UTC |
+| naive datetime | fail-closed 或明确补 timezone，不得模块间不同 |
+| 空值/非法值 | 返回 None 或 error record，按调用域定义 |
+| date-only | 是否允许 |
+| 微秒省略 | 排序语义一致 |
+| timezone offset | 归一化后比较 |
+
+- [ ] 公共实现放入 `plugins/memory/memory_os/timeutil.py` 或与 JSONL 契约一致的共享模块。
+- [ ] 每个迁移模块先补等价 fixture，再替换调用。
+- [ ] 旧格式生产行必须继续可读。
+- [ ] TTL/aging 测试优先注入 clock，禁止用裸 `datetime.now()` 掩盖日期腐化。
+
+### R3.2 natural row 视图统一
+
+当前 natural 过滤仍分散在：
+
+- `plugins/memory/memory_os/exposure_rollup.py`
+- `plugins/memory/memory_os/v3_seed_evidence.py`
+- `plugins/memory/memory_os/v3_wandering.py`
+- `scripts/memory_os_monitor_dashboard_snapshot.py`
+
+- [ ] 提供共享 `is_natural(row)`、`natural_rows(rows)`、`latest_natural_row(rows)` 和按日期 independent-LWW 视图。
+- [ ] manual、legacy、natural 三值语义用常量/类型封闭。
+- [ ] 生产者、准入门、Monitor 和 Dashboard 共用相同实现或版本化等价契约。
+- [ ] 增加 natural→manual、manual→natural、legacy→natural、同日重复和迟到行反事实测试。
+
+### R3.3 错误码注册表
+
+- [ ] 将裸字符串错误码迁移为模块级常量和版本化语义注册表。
+- [ ] 每个错误码记录 producer、consumer、production severity、clean-host severity 和 recoverability。
+- [ ] hygiene 使用 AST/registry 检测生产裸字符串，不要求测试 fixture 和文档中的合法字面量为零。
+- [ ] 未注册码进入 bounded `unknown_error_code`，不能静默成为新语义。
+
+### R3.4 JSONL 鲁棒性与错误预算
+
+- [ ] 对 `jsonl_io.read_jsonl_result` 及关键消费者增加 property-based/fuzz fixtures：截断行、BOM、混合编码、非对象 JSON、超长行。
+- [ ] 任何输入不得导致主循环崩溃；error records 必须有界。
+- [ ] 不允许“捕获异常后硬零”伪装为 collected。
+- [ ] 对旧生产账本做只读兼容探针。
+
+---
 
 ## R4 — 统一状态机（消除整类缺陷）
 
-**动机**：BE.1（缺 status 键读成健康）、BF.2（隐式第四路径）、BG.4（error_code=None
-静默）是**同一类缺陷的三次出现**：状态用零散字符串+可缺失的键表达，无统一契约。
-逐个修是打地鼠，统一状态机是拆机器。
+**状态**：`planned`
 
-- [ ] **SectionStatus 契约**：定义单一采集状态机并应用到 monitor 每个 section：
-      `collected | unavailable`，且不变量为——status 键**永远存在**；
-      `unavailable` 时 `*_error_code` **永远非空**；`collected` 时各计数字段**永远齐全**
-      （缺键即降级 unavailable，BE.1 的 setdefault 防御推广为通例）。
-      用一个 `make_section(placeholder, collector)` 骨架函数承载，分支链消失。
-      验收：结构性测试遍历快照所有 section 断言不变量；BF.2 类缺陷在骨架层面不可能写出。
-- [ ] **分类流水线固化**：BD.1 把升级循环移到函数末尾靠的是"位置纪律"。固化为显式
-      四阶段流水线 `collect → warn/fail 归集 → clean-host/production 升级 → status 定级`，
-      并加结构性守卫测试：断言 `classify_snapshot` 源码中升级循环之后没有任何
-      `warn.append` / `fail.append`（AST 或行序检查），让 BD.1 类回归在测试层被锁死。
-- [ ] **提案/令牌状态机显式化**：`open/deciding/approved/rejected/deferred/revoked/expired`
-      与 token `open/consumed/revoked/expired` 的合法迁移目前隐含在 owner_actions 各处理
-      分支里。写出显式迁移表（dict[状态, set[后继]]）+ 校验 helper，owner_actions 写入前
-      校验，配迁移矩阵测试（合法全过、非法全拒）。验收：任何非法迁移落 error_record
-      而非静默写入。
-- [ ] **trigger_class 三值封闭**：`natural_cron | manual | 缺失(legacy)` 的三值语义现在
-      靠注释维系。在 resolve_trigger_class 旁定义常量与 `is_natural(row)` 判定，禁止新代码
-      直接比对字符串字面量（hygiene check 可加 grep 规则）。
+### R4.1 SectionStatus 契约
 
-## R5 — 长线（择机）
+定义统一采集状态：
 
-- [ ] **seed evidence 增量化**：`run_v3_seed_evidence_cycle` 每日全量
-      `read_memory_source_records(limit=1_000_000)` 再窗口过滤。改按 offset 游标增量读
-      （daily_record 已存 source_offset_start/end，基建现成）。验收：等价性测试 +
-      大账本（10万行）耗时对比。
-- [ ] **closure-matrix 公共检出覆盖**：5 个因 `docs/internal-memory-os/` 缺失而 skip 的
-      测试，评估是否可用最小 fixture 副本在公共检出跑起来，缩小 8/13 口径差。
-- [ ] **稳定化清单自动化**：每周期的"测试数 delta / 静态门结果"由脚本生成追加，减少
-      手写口径错误（BD 节的 2579/8 与后来实测 2570+1F/13 的口径混乱不再发生）。
-- [ ] **监控看板一致性巡检**：dashboard 各字段与 monitor 分类口径的一致性（BG.5 修了
-      seed evidence 一处；用同一份 natural 视图后可写一个"看板字段 ↔ 门控口径"映射表
-      做巡检测试）。
+```text
+collected | unavailable
+```
+
+不变量：
+
+- status 永远存在；
+- unavailable 时 error_code 永远非空；
+- collected 时计数字段齐全；
+- 缺键/错误类型必须降级 unavailable，不能读成健康零；
+- suppressed errors 必须进入 Monitor 可见计数。
+
+优先使用 typed phase API，而不是通过 AST 检查源码中 `warn.append` 的行序：
+
+```text
+CollectedSnapshot
+→ ClassifiedSnapshot
+→ EnvironmentEscalatedSnapshot
+→ FinalMonitorSnapshot
+```
+
+后阶段 API 不允许重新写入前阶段状态。
+
+### R4.2 Proposal / Token 状态机
+
+- [ ] 先从生产旧行和当前代码盘点真实状态集合，不按文档猜测状态名。
+- [ ] 定义 proposal 与 token 独立迁移表、terminal states 和 revoke/expire cascade。
+- [ ] action-time 校验绑定 Owner 实际看到的 exact revision/content hash。
+- [ ] 非法迁移记录 error record，不写新状态。
+- [ ] 旧状态行具备明确迁移/兼容规则。
+
+### R4.3 Trigger provenance 状态机
+
+- [ ] 类型封闭：`natural_cron | manual | legacy_unmarked`。
+- [ ] legacy 仅可观察，不能获得 natural credit。
+- [ ] manual 不能通过调用参数伪造 natural envelope。
+- [ ] trigger provenance 进入 Monitor、Dashboard 和 graduation evidence 的同一 typed view。
 
 ---
 
-## 执行原则（沿用既定规范）
+## R5 — 认知伙伴演进主线
 
-1. 顺序：R1 必须最先（生产证据），R2 其次（防回归基建），R3/R4 可并行拆包
-   （文件不重叠 + 可独立验证才拆；模型匹配 haiku/sonnet；主会话统一复核全量+静态门+提交）。
-2. 每项改动走 Section W 五规则；行为改变配反事实测试（revert→fail→restore→pass 实证），
-   纯重构配等价性+防漂移测试。
-3. 每完成一个 R 阶段，在稳定化清单加节记录（BH、BI、……），"一句话"追加提交区间。
-4. R4 动 owner_actions 时记住红线：最小定向修改，不拆大文件，不加治理模块交叉 import，
-   OwnerGate 权限边界不放宽。
+**状态**：`foundation_deployed`
 
-## 当前基线快照（交接时点）
+### R5.1 Continuity：持续跟随
 
-- HEAD：`eaf718c`（fix 链）/ `c156bd1`（含清单）；远端 GitHub main 同步。
-- 全量：2601 passed / 13 skipped / 2 warnings（本机公共检出口径）。
-- 静态门：四项全绿；write surface unclassified_count=0。
-- 证据级别：全部 local_pass —— R1 是下一步的全部理由。
+目标：系统知道“我们现在一起在做什么”，而不只是检索历史文本。
+
+- [x] State Overlay open-thread 去重。
+- [x] latest-effective current task，避免 completed/cancelled/superseded 任务复活。
+- [ ] 为 current task、open thread、recent decision 定义 freshness 和 stale degradation。
+- [ ] 跨压缩、跨重启、跨 session 验证“安全恢复标记”不被后续 updater 重写成错误继续指令。
+- [ ] capability map 和 material index 从空占位演进为可重建 read model；不得成为新权威源。
+
+### R5.2 Relevance：懂得轻重
+
+目标：记忆价值来自选择质量，而不是注入数量。
+
+- [x] Recall Plan shadow 和 metadata-only observation。
+- [x] authority/freshness matrix、重复和 conflict telemetry。
+- [ ] must-recall golden set 与日常 omission detector。
+- [ ] 评估 selected/suppressed 的对象级原因，不只看聚合计数。
+- [ ] bounded apply canary 只对明确 route/profile 生效，具备即时回滚。
+- [ ] canary 期间比较任务完成度、Owner 重解释次数、错误唤起和重复注入，而不是只比较召回率。
+
+### R5.3 Restraint：克制和分寸
+
+- [x] Low-clue recall 与 bounded judge availability。
+- [x] metadata-only MemorySources，不复制原话或私密正文。
+- [ ] 模糊线索优先给方向或最小澄清，不强行选一个答案。
+- [ ] Owner 连续否定后停止猜测；不把反复猜测当主动性。
+- [ ] 不把 candidate、provisional、模型置信度或沉默当 Owner approval。
+- [ ] 当前对话明确要求优先于历史 task anchor、proposal、digest 或 reflection。
+
+### R5.4 Review Partnership：替 Owner 收敛，而不是制造 backlog
+
+- [x] Review Agenda bounded canary。
+- [x] raw → latest-effective → agenda → shown identity 对齐检查。
+- [ ] 持续验证 terminal target、stale token、empty cluster、duplicate revision 不进入展示。
+- [ ] 记录 Owner 对 digest 的 useful/irrelevant/too-frequent 等真实反馈。
+- [ ] 减负只能通过抑制噪音，不能通过自动决定 Owner-required action。
+
+### R5.5 Warmth & Proactivity：温度与主动性
+
+目标：主动性来自长期理解和合适时机，不来自固定人设或强制输出。
+
+- [ ] V3 Seed 自然证据成熟前保持 inference/output 关闭。
+- [ ] Wandering 准入后允许 `entries=[]`；零想法、零表达是健康结果。
+- [ ] 区分模型 requested intent 与系统 realized fate：只有真实 delivery receipt 才能记为 shared。
+- [ ] 主动表达必须有 privacy boundary、frequency cap、quiet window、Owner feedback 和一键 mute/revoke。
+- [ ] expression/outlet/synthesis 分阶段开放，不能因 Seed ready 一次性全部开启。
+- [ ] 用 Owner 的真实感受评估“有帮助、太机械、不像我、太频繁、越过私密边界”，不让模型自评温度。
+
+**毕业原则**：先成为可靠、安静、懂轻重的伙伴，再逐步获得主动表达能力。
+
+---
+
+## R6 — 性能与长期维护
+
+**状态**：`planned`
+
+### R6.1 Seed Evidence 增量化
+
+- [ ] `run_v3_seed_evidence_cycle` 从全量百万行读取迁移到 offset/cursor 增量读取。
+- [ ] 利用现有 `source_offset_start/end`，保留重建和回放路径。
+- [ ] 用 10 万行 fixture 对比全量/增量结果完全等价，并记录耗时、峰值内存和 fallback。
+
+### R6.2 Monitor 性能
+
+- [ ] 为每个 section 记录 runtime budget 和 cache/read path。
+- [ ] valid fresh cache 必须允许昂贵 reader 被 monkeypatch 为 raise 后仍成功；0 是合法 cached value。
+- [ ] cache 与 live computation 增加 deterministic parity 测试。
+- [ ] 不能通过减少检查范围、吞错误或延长 stale 窗口伪装性能改善。
+
+### R6.3 稳定化证据自动生成
+
+- [ ] 自动生成测试 delta、skip reason、warning classification、静态门和 staged diff digest。
+- [ ] 稳定化清单只记录经工具验证的输出，避免手写基线漂移。
+- [ ] 生成器不得修改 canonical memory、Owner state 或生产账本。
+
+---
+
+## 阶段验收矩阵
+
+| 阶段 | 进入条件 | 退出条件 | 禁止动作 |
+|---|---|---|---|
+| R1 自然证据 | 运行时已采用配置/代码 | 自然窗口满足且 falsifier 未命中 | 手工补证、回填成熟度 |
+| R2 运行真相 | canonical artifact 已存在 | Dashboard/Monitor/status 同源且 CI 真运行 | 新建平行权威账本 |
+| R3 语义收敛 | 等价 fixture 完整 | 单一实现、旧数据兼容、消费者一致 | 机械合并不同语义 helper |
+| R4 状态机 | 当前状态盘点完成 | 非法状态结构上不可写、旧行可读 | 直接重写历史账本 |
+| R5 认知伙伴 | 基础 shadow/canary 已部署 | Owner 反馈与自然质量门满足 | 自动身份/关系写入、强制主动表达 |
+| R6 性能 | 行为基线可复现 | 等价且资源改善有实测证据 | 用 stale cache/少检查伪装加速 |
+
+---
+
+## 每个实施包的强制执行流程
+
+1. 读取完整函数、所有 return/默认参数路径和调用链。
+2. 搜索测试、消费者、Monitor、Dashboard、schema registry、installer/onboarding 和生产副本。
+3. 先保存 pre-fix 反事实证据。
+4. 写 RED test，证明无修复时失败。
+5. 实现最小、可回滚修改。
+6. 跑 targeted test，并实际验证 revert→fail→restore→pass。
+7. 在 mount namespace 隔离真实 `/root/.hermes` 后跑完整测试。
+8. 跑 write surface、static hygiene、import cycle、public checkout 和 closure matrix。
+9. 冻结 staged diff digest，做 BLOCKER/HIGH 独立审查；任何修复都使旧审查失效。
+10. 生产变更清单备份并定向部署，验证 repo/runtime/plugin/script 哈希。
+11. Gateway 重载是独立 Owner 边界；重载后验证运行时采用和自然证据。
+12. commit 后从 fresh clone 再跑完整测试；生产证据和远端状态一致后 push，push 永远最后。
+
+涉及 OwnerGate、身份/关系、永久记忆、外部发送、执行或不可逆迁移时，必须停在提案/确认边界。
+
+---
+
+## 近期执行顺序
+
+### 现在执行
+
+1. 保持 P0–P2 当前部署不变，积累 V2、V3 和 Recall 自然证据。
+2. 建立 Recall must-recall golden set 和 route-by-route shadow coverage。
+3. 落地 GitHub Actions、mount-isolated full test 和分类化 skip/warning 门。
+4. 让公共 closure matrix 不再因内部文档缺失而 skipped。
+5. 清理两个项目自有 warning：ambient roots fallback 和 deprecated knob 迁移。
+
+### 自然门满足后
+
+6. 提交 Recall bounded apply-canary 提案；不得直接全局 apply。
+7. 评估 Review Agenda canary 的 Owner 减负和错误抑制质量。
+8. 评估 V3 Seed admission；仍不自动开放 synthesis/outlet/expression。
+
+### 后续独立工作包
+
+9. 时间戳语义矩阵与分模块迁移。
+10. natural row typed view 收敛。
+11. SectionStatus 与 Monitor typed pipeline。
+12. Proposal/token 显式状态机。
+13. Seed Evidence 增量化与 Monitor 性能优化。
+
+---
+
+## 最终成功标准
+
+Memory-OS v2 路线图完成时，不以“代码更多”作为成功，而以以下结果衡量：
+
+- Hermes 能稳定接续当前任务，极少复活旧任务或要求 Owner 重复解释；
+- Recall 在不越权、不漏关键记忆的前提下减少重复和无关上下文；
+- Review Surface 让 Owner 看到更少但更有效的项目；
+- Monitor、Dashboard、status 和 scheduler 对运行事实没有互相矛盾的说法；
+- V2/V3 的每次毕业都由自然证据和 Owner 边界驱动，不由手工回填或模型自评驱动；
+- 系统可以主动，但也能长期保持安静；温度来自长期理解和真实反馈，而不是固定话术；
+- Memory-OS 成为整个 Hermes 系统中负责记忆、连续性和分寸感的伙伴，而不是一个独立的记忆工具。

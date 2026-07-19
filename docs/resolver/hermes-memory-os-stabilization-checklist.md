@@ -392,6 +392,23 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BH — 优化路线图升级为 v2（2026-07-19，文档变更）
+
+- **背景**：原 `hermes-memory-os-optimization-roadmap.md` 仍停留在 BC 修复收尾时点，基线为
+  `eaf718c / 2601 passed / 13 skipped`，默认完整部署到历史远程主机，且主要覆盖代码加固，
+  未纳入 P0–P2 已落地的 MemorySources、State Overlay、Recall Plan、Review Agenda、Lane Status
+  和认知伙伴演进主线。
+- **更新**：路线图升级为 v2，基线更新至 `520f1be`；新增六阶段证据模型、自然观察/晋级门、
+  targeted production deployment、mount namespace 测试隔离、分类化 skip/warning 门、公共
+  closure matrix、认知伙伴五维演进和近期执行顺序。
+- **治理边界**：文档明确手工/legacy 证据不计自然成熟度；Recall 保持 shadow；V3 Seed ready
+  前不调用 wandering inference；永久记忆、身份/关系、外部发送和执行仍受 OwnerGate 控制。
+- **验证**：本次仅修改公共 Markdown 文档和本稳定化清单，不改变代码、生产配置、账本、cron
+  或 Gateway。验证以 `git diff --check`、旧基线/必要章节扫描和文档交叉引用检查为准；代码
+  基线沿用提交 `520f1be` 已完成的源码及 fresh-clone 全量 `2620 passed / 6 skipped / 4 warnings`。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -421,3 +438,6 @@ P2×3（BF）、P3×5（BG）。当前无遗留待办。
   建 id→record 索引去 O(P×F)；探针消费抽 _consume_remote_probe() 统一 fallback；
   dashboard latest 行改 natural_cron-only。BC 评审 15 项全部关闭。2601 passed /
   13 skipped，静态门全过。
+- `520f1be..（roadmap v2 文档变更）`：将优化路线图从 BC 代码加固清单升级为生产闭环与认知伙伴
+  演进路线图 v2；更新当前基线、证据成熟度、targeted deploy、隔离 CI、语义/状态机收敛和
+  Continuity/Relevance/Restraint/Review/Warmth 五维伙伴主线。仅文档变更，无运行时行为修改。
