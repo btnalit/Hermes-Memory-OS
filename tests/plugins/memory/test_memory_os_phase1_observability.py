@@ -200,7 +200,7 @@ def test_candidate_cluster_defer_is_a_cooldown_not_permanent_closure():
         "deferred_until": until,
     }
     assert _defer_action_is_active(active, now=now) is True
-    assert "candidate_cluster:cluster-1" in _closed_targets([active])
+    assert "candidate_cluster:cluster-1" in _closed_targets([active], now=now)
 
     expired = dict(active, deferred_until="2026-07-14T12:00:00Z")
     assert _defer_action_is_active(expired, now=now) is False

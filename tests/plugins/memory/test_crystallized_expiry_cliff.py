@@ -271,7 +271,7 @@ def test_thundering_herd_top_n(tmp_path):
 
     # 模拟 digest top-N（默认 10）
     from plugins.memory.memory_os.knob_overrides import resolve_knob
-    max_n = resolve_knob("max_expiring_in_digest", default=10)
+    max_n = resolve_knob("max_expiring_in_digest", default=10, roots=store.roots)
     top_n = near[:max_n]
     assert len(top_n) == 10
     assert len(near) > len(top_n)  # 2 条留给下次

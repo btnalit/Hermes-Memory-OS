@@ -632,7 +632,8 @@ class TestAutoPromoteProvisionalRecords:
         service = CrystallizedMemoryService(store)
         service.write_approved_record(candidate, decision, file_name="owner_approved.md")
 
-        result = service.auto_promote_provisional_records(now=now, _store_root=tmp_path)
+        with pytest.warns(DeprecationWarning, match="auto_promote_enabled"):
+            result = service.auto_promote_provisional_records(now=now, _store_root=tmp_path)
         assert result["status"] == "disabled"
         assert result["promoted_count"] == 0
 

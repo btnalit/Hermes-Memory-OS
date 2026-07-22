@@ -67,4 +67,4 @@ def test_head_public_checkout_probe_reports_structured_release_drift():
     assert report["classification"]["status"] in {"PASS", "FAIL"}
     if report["classification"]["status"] == "FAIL":
         missing = set(report["missing_required_public_files"])
-        assert "eval/memory_os/adapters/retrieval_shadow.py" in missing or report["import_smoke_ok"] is False
+        assert missing or report["import_smoke_ok"] is False

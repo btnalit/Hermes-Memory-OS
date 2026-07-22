@@ -1,0 +1,239 @@
+{
+  "schema_version": "memory-os.closure_matrix_contract.v1",
+  "source_of_truth": "plugins/memory/memory_os/cli.py::_module_definitions",
+  "scope": "public_live_module_baseline",
+  "modules": [
+    {
+      "module": "Cron / Session / State Mirrors",
+      "live_modules": ["cron_mirror", "session_mirror", "state_source_mirror", "shadow_journal"],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "CLI module status; mirror scan/ingest paths"
+    },
+    {
+      "module": "DeepReflection",
+      "live_modules": ["deep_reflection"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI modules run deep_reflection --dry-run"
+    },
+    {
+      "module": "Governance Feedback",
+      "live_modules": ["governance_feedback"],
+      "delivery_class": "none",
+      "state_change_class": "feedback_ledger",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "CLI modules run governance_feedback --dry-run"
+    },
+    {
+      "module": "Left-Brain Pipeline Check",
+      "live_modules": ["left_brain_pipeline_check"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "monitor_poll",
+      "current_action_path": "CLI modules run left_brain_pipeline_check --dry-run"
+    },
+    {
+      "module": "Confidence Router",
+      "live_modules": ["confidence_router"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; explicit reviewed apply only"
+    },
+    {
+      "module": "Ground Truth Miner",
+      "live_modules": ["ground_truth_miner"],
+      "delivery_class": "none",
+      "state_change_class": "feedback_ledger",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; owner-audit input required"
+    },
+    {
+      "module": "Crystallized Revalidator",
+      "live_modules": ["crystallized_revalidator"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; explicit reviewed apply only"
+    },
+    {
+      "module": "Judge Calibration / Canary",
+      "live_modules": ["judge_calibration"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "monitor_poll",
+      "current_action_path": "CLI module status; advisory consistency evidence"
+    },
+    {
+      "module": "FeaturePreRouter / CandidateReview",
+      "live_modules": ["candidate_review"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; report-only review surface"
+    },
+    {
+      "module": "Shadow Recall",
+      "live_modules": ["shadow_recall"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "cycle_each",
+      "current_action_path": "CLI module status; shadow records only"
+    },
+    {
+      "module": "Provisional Tier",
+      "live_modules": ["provisional"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; owner-reviewed promotion"
+    },
+    {
+      "module": "Cascade Routing Policy",
+      "live_modules": ["cascade_routing_policy"],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; guarded policy proposal"
+    },
+    {
+      "module": "Migration Controller",
+      "live_modules": ["migration_controller"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "monitor_poll",
+      "current_action_path": "CLI module status; regime signals only"
+    },
+    {
+      "module": "Symbolic Offloader",
+      "live_modules": ["symbolic_offloader"],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; task-local offload"
+    },
+    {
+      "module": "Abstraction Distillation",
+      "live_modules": ["abstraction_distillation"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; candidate-only summaries"
+    },
+    {
+      "module": "Digest Consolidation",
+      "live_modules": ["digest_consolidation"],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "daily_once/weekly_once",
+      "current_action_path": "CLI module status; dedicated daily/weekly commands"
+    },
+    {
+      "module": "Heartbeat / Inner Drive",
+      "live_modules": ["inner_drive"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "cycle_each",
+      "current_action_path": "CLI module status; dedicated governed runtime"
+    },
+    {
+      "module": "Mailbox",
+      "live_modules": ["mailbox"],
+      "delivery_class": "hermes_mailbox_internal",
+      "state_change_class": "monitor_only",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "CLI module status; no-send mailbox module"
+    },
+    {
+      "module": "Household Digest",
+      "live_modules": ["household_digest"],
+      "delivery_class": "internal_local",
+      "state_change_class": "context_projection",
+      "cadence_class": "daily_once",
+      "current_action_path": "CLI module status; bounded digest artifact"
+    },
+    {
+      "module": "Wandering Mind",
+      "live_modules": ["wandering_mind"],
+      "delivery_class": "internal_local",
+      "state_change_class": "expression_feedback",
+      "cadence_class": "cycle_each",
+      "current_action_path": "CLI module status; would-send artifacts"
+    },
+    {
+      "module": "Imagination Loop",
+      "live_modules": ["imagination_loop"],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "cycle_each",
+      "current_action_path": "CLI module status; live-shadow simulation"
+    },
+    {
+      "module": "Evidence Scoring",
+      "live_modules": ["evidence_scoring"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; evidence artifact scoring"
+    },
+    {
+      "module": "Confabulation Detector",
+      "live_modules": ["confabulation_detector"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; live-shadow flags"
+    },
+    {
+      "module": "Ops Gate",
+      "live_modules": ["ops_gate"],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; proposed-action gate"
+    },
+    {
+      "module": "Proposal Queue",
+      "live_modules": ["proposal_queue"],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; dedicated mutation commands"
+    },
+    {
+      "module": "Self-Evolution",
+      "live_modules": ["self_evolution"],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; ops/evidence/review dependencies"
+    },
+    {
+      "module": "Speak Gate",
+      "live_modules": ["speak_gate"],
+      "delivery_class": "internal_local",
+      "state_change_class": "expression_feedback+speak_permission",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "CLI module status; outbound payload input required"
+    },
+    {
+      "module": "Expression Draft",
+      "live_modules": ["expression_draft"],
+      "delivery_class": "none",
+      "state_change_class": "candidate_review",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; bounded draft creation"
+    },
+    {
+      "module": "Grounded Expression Judge",
+      "live_modules": ["grounded_expression_judge"],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "on_demand",
+      "current_action_path": "CLI module status; advisory-only judgment"
+    }
+  ]
+}

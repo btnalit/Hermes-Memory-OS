@@ -24,9 +24,8 @@ def under_speak_limit(
         deliveries: List of delivery records from speak_gate deliveries.jsonl.
                     Each record must have 'decision' (str) and 'ts' (ISO str).
         now: Current time for the window cutoff. Uses UTC now if omitted.
-        max_per_hour: Override limit. If None, resolves via resolve_knob
-                      (sentinel pattern — never default param with side effects),
-                      falling back to MAX_PER_HOUR.
+        max_per_hour: Explicit limit supplied by the stateful caller. If None,
+                      uses the pure deterministic MAX_PER_HOUR fallback.
 
     Returns:
         True if a new spontaneous expression may be delivered (under limit).
@@ -40,8 +39,7 @@ def under_speak_limit(
         and _parse_ts(d.get("ts", "")) > cutoff
     ]
     if max_per_hour is None:
-        from plugins.memory.memory_os.knob_overrides import resolve_knob
-        max_per_hour = resolve_knob("max_speak_per_hour", default=MAX_PER_HOUR)
+        max_per_hour = MAX_PER_HOUR
     return len(recent) < max_per_hour
 
 

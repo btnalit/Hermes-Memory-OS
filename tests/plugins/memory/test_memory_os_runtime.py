@@ -55,6 +55,7 @@ def test_runtime_heartbeat_processes_new_events_into_working_and_candidates(tmp_
     status = build_status_report(store)
     assert status["counts"]["working_items"] == 2
     assert status["counts"]["crystallized_candidates"] == 2
+    assert status["operational_truth"]["schema_version"] == "memory-os.operational_truth_snapshot.v1"
 
 
 def test_runtime_heartbeat_is_idempotent_for_processed_events(tmp_path):

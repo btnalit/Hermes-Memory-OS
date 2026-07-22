@@ -157,6 +157,11 @@ def build_embedder(roots, *, batch: bool = False) -> LocalEmbedder | None:
     This is the single entry point for all embedder instantiation —
     replaces ad-hoc ``LocalEmbedder()`` calls across the codebase.
     """
+    if roots is None:
+        # No injected store means there is no governed knob context. The
+        # vector lane is disabled by default; never consult ambient ~/.hermes.
+        return None
+
     from .knob_overrides import resolve_knob
 
     enabled = resolve_knob("vector_retrieval_enabled", default=False, roots=roots)

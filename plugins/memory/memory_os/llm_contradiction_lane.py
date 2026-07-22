@@ -122,6 +122,7 @@ def _find_contradiction_candidates(
     """
     from .knob_overrides import resolve_knob
 
+    roots = roots or getattr(store, "roots", None)
     source = resolve_knob(
         "llm_contradiction_candidate_source", default="cosine", roots=roots,
     )
@@ -156,6 +157,7 @@ def _find_cosine_candidates(
     from .knob_overrides import resolve_knob
     from .vector_edge_proposer import _cosine_similarity
 
+    roots = roots or getattr(store, "roots", None)
     _errs = error_records or []
     index_path = getattr(store.roots, "index_path", None)
     if index_path is None:
@@ -258,6 +260,7 @@ def _find_entity_candidates(
     from .jsonl_io import build_error_record as _build_error_record
     from .vector_edge_proposer import _cosine_similarity
 
+    roots = roots or getattr(store, "roots", None)
     _errs = error_records or []
     index_path = getattr(store.roots, "index_path", None)
     if index_path is None:
@@ -398,6 +401,7 @@ def _find_clearance_candidates(
     from .knob_overrides import resolve_knob
     from .vector_edge_proposer import _cosine_similarity
 
+    roots = roots or getattr(store, "roots", None)
     _errs = error_records or []
     index_path = getattr(store.roots, "index_path", None)
     if index_path is None:
@@ -588,6 +592,7 @@ def run_contradiction_lane(
 
     start_time = datetime.now(timezone.utc)
     error_records: list[dict[str, Any]] = []
+    roots = roots or getattr(store, "roots", None)
 
     # ── Guard: lane disabled ─────────────────────────────────────────
     enabled = resolve_knob("llm_contradiction_lane_enabled", default=False, roots=roots)

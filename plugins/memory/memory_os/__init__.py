@@ -28,6 +28,7 @@ from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
 from .low_clue_recall import low_clue_judge_availability
+from .operational_truth import read_operational_truth_snapshot
 from .owner_actions import (
     ALLOWED_FEEDBACK_RATINGS,
     EXPRESSION_FEEDBACK_ACTION_TYPES,
@@ -179,6 +180,12 @@ class MemoryOSProvider(MemoryProvider):
         """
         if self._recall_facade_initialized:
             return self._recall_facade
+        if self._roots is None:
+            # A provider that has not been opened has no injected store context.
+            # Keep the optional facade disabled instead of reading ambient ~/.hermes.
+            self._recall_facade_initialized = True
+            self._recall_facade = None
+            return None
 
         from .knob_overrides import resolve_knob as _resolve_knob
 
@@ -924,6 +931,23 @@ class MemoryOSProvider(MemoryProvider):
         }
         # A3: resolve knob for status report
         from .knob_overrides import resolve_knob as _resolve_knob_status
+        operational_truth = read_operational_truth_snapshot(
+            memory_root=self._roots.memory_os_root,
+            now=datetime.now(timezone.utc),
+            stale_after_seconds=30 * 3600,
+            runtime_count_observations={
+                "events": {"status_tool.event_count": event_count},
+                "working_items": {"status_tool.working_item_count": working_count},
+                "crystallized_candidates": {
+                    "status_tool.crystallized_candidate_count": candidate_count
+                },
+                "crystallized_records": {
+                    "status_tool.index_counts.crystallized_records": index_counts.get(
+                        "crystallized_records"
+                    )
+                },
+            },
+        ).to_dict()
         return {
             "schema_version": "memory-os.tool_status.v0",
             "provider": "memory_os",
@@ -940,6 +964,7 @@ class MemoryOSProvider(MemoryProvider):
                 "consistency": "eventual_until_next_heartbeat",
             },
             "event_count": event_count,
+            "operational_truth": operational_truth,
             "event_sources": dict(event_sources),
             "event_kinds": dict(event_kinds),
             "latest_event_ts": latest_event_ts,

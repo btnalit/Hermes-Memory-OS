@@ -103,6 +103,24 @@ def _run_ab_eval(tmp_path, store):
 
 # ── A2.2: Auto-confirm ─────────────────────────────────────────────────
 
+def test_run_once_uses_injected_store_roots_without_ambient_fallback(tmp_path, monkeypatch):
+    import warnings
+
+    from plugins.memory.memory_os import knob_overrides
+    from plugins.modules.governance.knob_ab_eval import KnobABEvalModule
+
+    store = _make_store(tmp_path)
+    monkeypatch.setattr(knob_overrides, "_ambient_fallback_warned", False)
+    module = KnobABEvalModule(tmp_path, profile="test")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = module.run_once(store=store, _now=datetime.now(timezone.utc))
+
+    assert result["ab_confirmed_count"] == 0
+    assert result["ab_reverted_count"] == 0
+
+
 class TestA2AutoConfirm:
     """A2.2: tighten where discarded layer has significantly lower confirm rate."""
 
@@ -558,13 +576,13 @@ class TestKnobABEdgeCases:
             "min_cluster_size", 3, prior=2,  # HAS ab_metric
             proposed_by="test", approved_via="resolver",
             expires_at=(now + timedelta(days=7)).isoformat(),
-            _now=now, _store_root=tmp_path,
+            _now=now, roots=store.roots,
         )
         register_override(
             "max_speak_per_hour", 3, prior=5,  # NO ab_metric
             proposed_by="test", approved_via="resolver",
             expires_at=(now + timedelta(days=7)).isoformat(),
-            _now=now, _store_root=tmp_path,
+            _now=now, roots=store.roots,
         )
 
         from plugins.modules.governance.knob_ab_eval import KnobABEvalModule

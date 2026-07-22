@@ -402,6 +402,7 @@ def test_memory_os_status_tool_reports_local_store_not_hindsight(tmp_path):
     assert report["schema_version"] == "memory-os.tool_status.v0"
     assert report["provider"] == "memory_os"
     assert report["status"] == "active"
+    assert report["operational_truth"]["schema_version"] == "memory-os.operational_truth_snapshot.v1"
     assert report["storage_model"] == "local_filesystem_jsonl_markdown"
     assert report["canonical_store"] == str(tmp_path / "memory-os")
     assert report["event_count"] == 1

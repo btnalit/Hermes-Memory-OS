@@ -68,7 +68,14 @@ class ProvisionalSweepModule:
         # Resolve max_provisional at call time (C3 / sentinel pattern)
         from plugins.memory.memory_os.knob_overrides import resolve_knob
         from plugins.memory.memory_os.jsonl_io import append_jsonl_locked, build_error_record, write_json_atomic
-        max_provisional = resolve_knob("max_provisional", default=30, _store_root=_store_root)
+        if _store_root is not None:
+            max_provisional = resolve_knob(
+                "max_provisional", default=30, _store_root=_store_root
+            )
+        else:
+            max_provisional = resolve_knob(
+                "max_provisional", default=30, roots=store.roots
+            )
 
         error_records: list[dict[str, Any]] = []
 
@@ -190,12 +197,13 @@ class ProvisionalSweepModule:
 
     def doctor(self) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
-        service = CrystallizedMemoryService(
-            _make_store(self.hermes_home, self.profile)
-        )
+        store = _make_store(self.hermes_home, self.profile)
+        service = CrystallizedMemoryService(store)
         records = service.list_provisional_records()
         from plugins.memory.memory_os.knob_overrides import resolve_knob
-        max_provisional = resolve_knob("max_provisional", default=30)
+        max_provisional = resolve_knob(
+            "max_provisional", default=30, roots=store.roots
+        )
         if len(records) > max_provisional:
             findings.append(
                 {

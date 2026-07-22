@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import importlib
 import inspect
+import io
 import json
 import os
 import sqlite3
 import sys
 import types
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -83,6 +85,7 @@ from .memory_sources import (
     render_last_injection_explanation,
 )
 from .metadata_retention import MetadataRetentionPolicy, metadata_retention_plan
+from .operational_truth import read_operational_truth_snapshot
 from .migrator import (
     export_shadow_bundle,
     import_shadow_bundle,
@@ -138,8 +141,8 @@ def _check_vector_available() -> bool:
     Avoids loading the full ~420MB SentenceTransformer model.
     """
     try:
-        import importlib
-        importlib.import_module("sentence_transformers")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            importlib.import_module("sentence_transformers")
         return True
     except ImportError:
         return False
@@ -180,11 +183,22 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
     index_counts = MemoryOSIndex(store.roots).counts()
     prefetch_mode = _prefetch_mode(store)
     config = load_config(store.roots.hermes_home)
+    operational_truth = read_operational_truth_snapshot(
+        memory_root=store.roots.memory_os_root,
+        now=datetime.now(timezone.utc),
+        stale_after_seconds=30 * 3600,
+        runtime_count_observations={
+            field: {f"status.counts.{field}": value}
+            for field, value in store_counts.items()
+            if field in {"events", "working_items", "crystallized_candidates", "crystallized_records"}
+        },
+    ).to_dict()
     return {
         "schema_version": "memory-os.status.v0",
         "root": str(store.roots.memory_os_root),
         "profile": store.roots.profile,
         "counts": store_counts,
+        "operational_truth": operational_truth,
         "index_counts": index_counts,
         "index_health": _index_health_summary(store, store_counts, index_counts),
         "prefetch_mode": prefetch_mode,
@@ -2678,10 +2692,22 @@ def _modules_status_report(store: MemoryOSStore) -> dict[str, Any]:
         entry = _module_status_entry(store, definition)
         entry.pop("_instance", None)
         modules.append(entry)
+    index_counts = MemoryOSIndex(store.roots).counts()
+    operational_truth = read_operational_truth_snapshot(
+        memory_root=store.roots.memory_os_root,
+        now=datetime.now(timezone.utc),
+        stale_after_seconds=30 * 3600,
+        runtime_count_observations={
+            field: {f"lane_status.index_counts.{field}": value}
+            for field, value in index_counts.items()
+            if field in {"events", "working_items", "crystallized_candidates", "crystallized_records"}
+        },
+    ).to_dict()
     return {
         "schema_version": "memory-os.modules_status.v0",
         "profile": store.roots.profile or "default",
         "root": str(store.roots.memory_os_root),
+        "operational_truth": operational_truth,
         "module_count": len(modules),
         "modules": modules,
     }

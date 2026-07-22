@@ -22,6 +22,9 @@ from .audit import append_audit
 # ── Thresholds (defaults — overridable via knobs) ────────────────────────────
 
 _MAX_PAIRS = 500
+_REFINES_THRESHOLD = 0.75
+_CO_OCCURS_THRESHOLD = 0.65
+_CONTRADICTS_THRESHOLD = 0.35
 # At most ~32 records can participate in 500 pairs (n*(n-1)/2 ≤ 500).
 # Add a small margin so we don't truncate early on sparse-embedding datasets.
 _RECORD_LIMIT = int((2 * _MAX_PAIRS) ** 0.5) + 2
@@ -56,7 +59,7 @@ def _detect_relation_from_similarity(
     kind_a: str,
     kind_b: str,
     *,
-    roots: object | None = None,
+    roots: Any | None = None,
 ) -> str | None:
     """Map cosine similarity + kind match/mismatch → edge relation_type.
 
@@ -66,11 +69,24 @@ def _detect_relation_from_similarity(
     Returns None if no edge should be proposed (similarity in the
     ambiguous mid-range).
     """
-    from .knob_overrides import resolve_knob
+    if roots is None:
+        _refines = _REFINES_THRESHOLD
+        _co_occurs = _CO_OCCURS_THRESHOLD
+        _contradicts = _CONTRADICTS_THRESHOLD
+    else:
+        from .knob_overrides import resolve_knob
 
-    _refines = resolve_knob("vector_edge_refines_threshold", default=0.75, roots=roots)
-    _co_occurs = resolve_knob("vector_edge_co_occurs_threshold", default=0.65, roots=roots)
-    _contradicts = resolve_knob("vector_edge_contradicts_threshold", default=0.35, roots=roots)
+        _refines = resolve_knob(
+            "vector_edge_refines_threshold", default=_REFINES_THRESHOLD, roots=roots
+        )
+        _co_occurs = resolve_knob(
+            "vector_edge_co_occurs_threshold", default=_CO_OCCURS_THRESHOLD, roots=roots
+        )
+        _contradicts = resolve_knob(
+            "vector_edge_contradicts_threshold",
+            default=_CONTRADICTS_THRESHOLD,
+            roots=roots,
+        )
 
     if sim >= _refines:
         if kind_a == kind_b:
@@ -97,7 +113,7 @@ def run_vector_proposer(
     embedder: object | None = None,
     audit_path: str | None = None,
     max_pairs: int = _MAX_PAIRS,
-    roots: object | None = None,
+    roots: Any | None = None,
 ) -> dict[str, Any]:
     """Run the vector edge proposer across all crystallized record pairs.
 
@@ -115,6 +131,7 @@ def run_vector_proposer(
     Returns a summary dict.
     """
     start_time = datetime.now(timezone.utc)
+    roots = roots or getattr(index, "roots", None)
 
     # ── Guard: embedder not available ────────────────────────────────────
     if embedder is None or not getattr(embedder, "is_available", lambda: False)():

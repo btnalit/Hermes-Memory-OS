@@ -237,11 +237,18 @@ class TestClaimsContradict:
 class TestContradictionLane:
     """Integration tests for run_contradiction_lane() guard gates."""
 
-    def test_lane_disabled(self, tmp_path: Path) -> None:
+    def test_lane_disabled(self, tmp_path: Path, monkeypatch) -> None:
         """Default knob is False → lane skipped with lane_disabled."""
+        import warnings
+
+        from plugins.memory.memory_os import knob_overrides
+
         roots = FakeRoots(tmp_path)
         store = FakeStore(roots)
-        result = run_contradiction_lane(store)
+        monkeypatch.setattr(knob_overrides, "_ambient_fallback_warned", False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result = run_contradiction_lane(store)
         assert result["status"] == "skipped"
         assert result["reason"] == "lane_disabled"
         assert result["contradictions_found"] == 0

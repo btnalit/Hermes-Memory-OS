@@ -646,6 +646,74 @@ def test_full_monitor_fallback_to_legacy_results_key(tmp_path):
     assert "something_warned" in fm["warn_codes"]
 
 
+def test_dashboard_exposes_shared_artifact_identity_and_count_conflict(tmp_path):
+    module = _load_module()
+    home = tmp_path / "hermes"
+    _write_jobs(home)
+    _write_memory_files(home)
+    _write_dashboard_evidence(home)
+    index_path = home / "memory-os" / "index" / "memory_os.db"
+    with sqlite3.connect(index_path) as conn:
+        conn.execute("create table crystallized_records(id text primary key)")
+        conn.executemany(
+            "insert into crystallized_records(id) values (?)",
+            [(f"cm_{index}",) for index in range(31)],
+        )
+    generated_at = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    artifact_path = home / "memory-os" / "system" / "monitor_artifacts" / "monitor_enveloped.json"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(
+        json.dumps({
+            "schema_version": "memory-os.full_monitor_artifact.v1",
+            "generated_at": generated_at,
+            "source_head": "abc123",
+            "runtime_digest": "sha256:runtime",
+            "monitor_version": "memory-os.monitor.v0",
+            "producer_receipt": {"receipt_id": "fmpr_1", "monitor_exit_code": 0},
+            "classification": {"status": "PASS", "fail": [], "warn": []},
+            "memory_status": {"counts": {
+                "working_items": 999,
+                "crystallized_candidates": 998,
+                "crystallized_records": 13,
+            }},
+        }),
+        encoding="utf-8",
+    )
+
+    snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
+    full_monitor = snapshot["fullMonitor"]
+
+    assert full_monitor["artifact_identity"]["source_head"] == "abc123"
+    assert full_monitor["artifact_identity"]["producer_receipt_id"] == "fmpr_1"
+    assert full_monitor["freshness"]["state"] == "fresh"
+    observed = full_monitor["runtime_fields"]["crystallized_records"]
+    assert observed["observed"] == {
+        "dashboard.index.crystallized_records": 31,
+        "full_monitor.memory_status.counts": 13,
+    }
+    assert observed["conflict"] is True
+    assert observed["value"] is None
+    for field in ("working_items", "crystallized_candidates", "crystallized_records"):
+        assert full_monitor["runtime_fields"][field]["conflict"] is True
+        assert snapshot["memory"]["display_counts"][field]["display"] == "conflict"
+        assert snapshot["memory"]["display_counts"][field]["value"] is None
+    kpis = {item["key"]: item for item in snapshot["kpis"]}
+    assert kpis["working"]["display"] == "conflict"
+    assert kpis["working"]["value"] is None
+    assert kpis["crystallized"]["display"] == "conflict"
+    assert kpis["crystallized"]["value"] is None
+    assert kpis["candidates"]["display"] == "conflict"
+    assert kpis["candidates"]["value"] is None
+    dashboard_js = (Path(__file__).resolve().parents[2] / "monitor_dashboard" / "assets" / "dashboard.js").read_text()
+    assert "k.display || fmt(k.value)" in dashboard_js
+    assert "displayCount(data, \"working_items\"" in dashboard_js
+    assert "hasCountConflict(data, \"working_items\")" in dashboard_js
+    assert "hasCountConflict(data, \"crystallized_records\")" in dashboard_js
+    assert "source conflict · raw trend hidden" in dashboard_js
+
+
 def test_v3_crons_are_part_of_core_monitor_contract():
     module = _load_module()
     assert {

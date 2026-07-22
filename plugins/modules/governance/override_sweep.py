@@ -65,7 +65,14 @@ class OverrideSweepModule:
     ) -> dict[str, Any]:
         """Run one tick: TTL expiry -> cap eviction -> kill-switch revert."""
         now = _now or datetime.now(timezone.utc)
-        active = list_active_overrides(_store_root=_store_root, _now=now)
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = (
+            MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+            if _store_root is None
+            else None
+        )
+        active = list_active_overrides(roots=roots, _store_root=_store_root, _now=now)
 
         expired = 0
         evicted = 0
@@ -79,6 +86,7 @@ class OverrideSweepModule:
                     revert_override(
                         override["id"],
                         reason="kill_switch_engaged",
+                        roots=roots,
                         _store_root=_store_root,
                     )
                     kill_reverted += 1
@@ -111,6 +119,7 @@ class OverrideSweepModule:
                         revert_override(
                             override["id"],
                             reason="resolver_ttl_expired",
+                            roots=roots,
                             _store_root=_store_root,
                         )
                         expired += 1
@@ -127,7 +136,9 @@ class OverrideSweepModule:
                         )
 
             # Re-read after TTL invalidations
-            active_after_ttl = list_active_overrides(_store_root=_store_root, _now=now)
+            active_after_ttl = list_active_overrides(
+                roots=roots, _store_root=_store_root, _now=now
+            )
 
             # 3. Cap eviction (oldest first, keep MAX_OVERRIDES)
             if len(active_after_ttl) > MAX_OVERRIDES:
@@ -141,6 +152,7 @@ class OverrideSweepModule:
                         revert_override(
                             override["id"],
                             reason="resolver_cap_evicted",
+                            roots=roots,
                             _store_root=_store_root,
                         )
                         evicted += 1
@@ -196,7 +208,10 @@ class OverrideSweepModule:
         return result
 
     def status(self) -> dict[str, Any]:
-        active = list_active_overrides()
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        active = list_active_overrides(roots=roots)
         return {
             "schema_version": "hermes.override_sweep_status.v0",
             "module": "override_sweep",
@@ -209,8 +224,11 @@ class OverrideSweepModule:
         }
 
     def doctor(self) -> dict[str, Any]:
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
         findings: list[dict[str, Any]] = []
-        active = list_active_overrides()
+        roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+        active = list_active_overrides(roots=roots)
         if len(active) > MAX_OVERRIDES:
             findings.append({
                 "severity": "warning",

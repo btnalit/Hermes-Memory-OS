@@ -313,7 +313,11 @@ def test_no_embeddings_found_skips(tmp_path):
     assert result["status"] == "skipped"
 
 
-def test_two_similar_records_propose_refines(tmp_path):
+def test_two_similar_records_propose_refines(tmp_path, monkeypatch):
+    import warnings
+
+    from plugins.memory.memory_os import knob_overrides
+
     embedder = MockEmbedder()
     store, index = _store_with_records(
         tmp_path,
@@ -323,11 +327,14 @@ def test_two_similar_records_propose_refines(tmp_path):
         ],
         embedder=embedder,
     )
-    result = run_vector_proposer(
-        str(store.roots.index_path),
-        index=index,
-        embedder=embedder,
-    )
+    monkeypatch.setattr(knob_overrides, "_ambient_fallback_warned", False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        result = run_vector_proposer(
+            str(store.roots.index_path),
+            index=index,
+            embedder=embedder,
+        )
     assert result["status"] == "ok"
     assert result["proposed_count"] >= 1
     assert result["record_count"] == 2

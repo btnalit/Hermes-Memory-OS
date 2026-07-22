@@ -7,11 +7,14 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 
 SCHEMA_VERSION = "memory-os.closure_matrix_check.v1"
+PUBLIC_CONTRACT_SCHEMA_VERSION = "memory-os.closure_matrix_contract.v1"
+PUBLIC_CONTRACT_PATH = ("docs", "contracts", "memory-os-closure-matrix.v1.json")
 
 VALID_DELIVERY_CLASSES = {
     "none",
@@ -121,10 +124,11 @@ def main(argv: list[str] | None = None) -> int:
         print(render_summary(report))
     else:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0 if report["status"] in {"ok", "skipped"} else 1
+    return 0 if report["status"] == "ok" else 1
 
 
 def build_report(repo_root: Path) -> dict[str, Any]:
+    public_contract_path = repo_root.joinpath(*PUBLIC_CONTRACT_PATH)
     matrix_path = find_doc_path(
         repo_root,
         MATRIX_PATH_CANDIDATES,
@@ -133,21 +137,133 @@ def build_report(repo_root: Path) -> dict[str, Any]:
         repo_root,
         ROADMAP_PATH_CANDIDATES,
     )
-    if matrix_path is None or roadmap_path is None:
-        return skipped_internal_docs_report(repo_root, matrix_path, roadmap_path)
-
-    matrix_text = matrix_path.read_text(encoding="utf-8")
-    rows = parse_classification_overlay(matrix_text)
-    row_by_module = {row["module"]: row for row in rows}
-    active_work_mappings = parse_active_work_closure_mapping(matrix_text)
-    mapping_by_item = {mapping["work_item"]: mapping for mapping in active_work_mappings}
-
-    active_work_items = parse_active_work_items(roadmap_path.read_text(encoding="utf-8"))
+    missing_internal_docs = []
+    if matrix_path is None:
+        missing_internal_docs.append("closure_matrix")
+    if roadmap_path is None:
+        missing_internal_docs.append("active_roadmap")
 
     live_modules = load_live_module_definitions(repo_root)
-    unknown_live_modules = sorted(
-        module for module in live_modules if module not in LIVE_MODULE_TO_CLOSURE_LABEL
+    if not public_contract_path.exists():
+        return missing_public_contract_report(
+            public_contract_path,
+            matrix_path,
+            roadmap_path,
+            live_modules,
+            missing_internal_docs,
+        )
+
+    try:
+        public_contract = json.loads(public_contract_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return invalid_public_contract_report(
+            public_contract_path,
+            matrix_path,
+            roadmap_path,
+            live_modules,
+            missing_internal_docs,
+            "json_decode",
+        )
+    if not isinstance(public_contract, dict):
+        return invalid_public_contract_report(
+            public_contract_path,
+            matrix_path,
+            roadmap_path,
+            live_modules,
+            missing_internal_docs,
+            "root_object",
+        )
+    if public_contract.get("schema_version") != PUBLIC_CONTRACT_SCHEMA_VERSION:
+        return invalid_public_contract_report(
+            public_contract_path,
+            matrix_path,
+            roadmap_path,
+            live_modules,
+            missing_internal_docs,
+            "schema_version",
+        )
+    public_rows = public_contract.get("modules")
+    if not isinstance(public_rows, list) or not all(isinstance(row, dict) for row in public_rows):
+        return invalid_public_contract_report(
+            public_contract_path,
+            matrix_path,
+            roadmap_path,
+            live_modules,
+            missing_internal_docs,
+            "modules",
+        )
+    for index, row in enumerate(public_rows):
+        aliases = row.get("live_modules")
+        if not isinstance(aliases, list) or not all(isinstance(module, str) for module in aliases):
+            return invalid_public_contract_report(
+                public_contract_path,
+                matrix_path,
+                roadmap_path,
+                live_modules,
+                missing_internal_docs,
+                f"modules[{index}].live_modules",
+            )
+
+    private_extension_enabled = matrix_path is not None and roadmap_path is not None
+    matrix_text = matrix_path.read_text(encoding="utf-8") if private_extension_enabled else ""
+    private_rows = parse_classification_overlay(matrix_text)
+    public_module_counts = Counter(str(row.get("module", "")) for row in public_rows)
+    private_module_counts = Counter(str(row.get("module", "")) for row in private_rows)
+    duplicate_public_modules = sorted(
+        module for module, count in public_module_counts.items() if module and count > 1
     )
+    duplicate_private_modules = sorted(
+        module for module, count in private_module_counts.items() if module and count > 1
+    )
+    public_by_label: dict[str, dict[str, Any]] = {}
+    for row in public_rows:
+        public_by_label.setdefault(str(row.get("module", "")), row)
+    classification_fields = (
+        "delivery_class",
+        "state_change_class",
+        "cadence_class",
+        "current_action_path",
+    )
+    private_conflicts: list[dict[str, Any]] = []
+    private_extension_rows: list[dict[str, Any]] = []
+    seen_private_extension_labels: set[str] = set()
+    for row in private_rows:
+        label = str(row.get("module", ""))
+        public_row = public_by_label.get(label)
+        if public_row is not None:
+            differing_fields = [
+                field for field in classification_fields if row.get(field) != public_row.get(field)
+            ]
+            if differing_fields:
+                private_conflicts.append(
+                    {"module": label, "differing_fields": differing_fields}
+                )
+            continue
+        if label not in seen_private_extension_labels:
+            private_extension_rows.append(row)
+            seen_private_extension_labels.add(label)
+    rows = [*public_rows, *private_extension_rows]
+    row_by_module = {str(row.get("module", "")): row for row in rows}
+    active_work_mappings = parse_active_work_closure_mapping(matrix_text) if private_extension_enabled else []
+    mapping_by_item = {mapping["work_item"]: mapping for mapping in active_work_mappings}
+
+    active_work_items = (
+        parse_active_work_items(roadmap_path.read_text(encoding="utf-8"))
+        if roadmap_path is not None and private_extension_enabled
+        else []
+    )
+
+    public_contract_live_modules = sorted(
+        str(module)
+        for row in public_rows
+        for module in row.get("live_modules", [])
+        if isinstance(module, str)
+    )
+    public_alias_counts = Counter(public_contract_live_modules)
+    duplicate_contract_live_modules = sorted(
+        module for module, count in public_alias_counts.items() if count > 1
+    )
+    unknown_live_modules = sorted(set(live_modules) - set(public_contract_live_modules))
     missing_live_modules = sorted(
         {
             LIVE_MODULE_TO_CLOSURE_LABEL[module]
@@ -156,8 +272,13 @@ def build_report(repo_root: Path) -> dict[str, Any]:
             and LIVE_MODULE_TO_CLOSURE_LABEL[module] not in row_by_module
         }
     )
-    missing_contract_labels = sorted(label for label in REQUIRED_CONTRACT_LABELS if label not in row_by_module)
-    invalid_rows = [row for row in rows if row_classification_errors(row)]
+    unknown_contract_live_modules = sorted(set(public_contract_live_modules) - set(live_modules))
+    missing_contract_labels = (
+        sorted(label for label in REQUIRED_CONTRACT_LABELS if label not in row_by_module)
+        if private_extension_enabled
+        else []
+    )
+    invalid_rows = [row for row in [*public_rows, *private_rows] if row_classification_errors(row)]
     missing_active_work_items = sorted(item for item in active_work_items if item not in mapping_by_item)
     stale_active_work_mappings = sorted(
         mapping["work_item"]
@@ -171,6 +292,30 @@ def build_report(repo_root: Path) -> dict[str, Any]:
     ]
 
     findings: list[dict[str, Any]] = []
+    for module in duplicate_public_modules:
+        findings.append(
+            {
+                "code": "contract_module_duplicate",
+                "severity": "error",
+                "module": module,
+            }
+        )
+    for module in duplicate_private_modules:
+        findings.append(
+            {
+                "code": "private_extension_module_duplicate",
+                "severity": "error",
+                "module": module,
+            }
+        )
+    for conflict in private_conflicts:
+        findings.append(
+            {
+                "code": "private_extension_conflicts_public_contract",
+                "severity": "error",
+                **conflict,
+            }
+        )
     for module in unknown_live_modules:
         findings.append(
             {
@@ -187,6 +332,22 @@ def build_report(repo_root: Path) -> dict[str, Any]:
                 "module": label,
             }
         )
+    for module in unknown_contract_live_modules:
+        findings.append(
+            {
+                "code": "contract_live_module_unknown",
+                "severity": "error",
+                "module": module,
+            }
+        )
+    for module in duplicate_contract_live_modules:
+        findings.append(
+            {
+                "code": "contract_live_module_duplicate",
+                "severity": "error",
+                "module": module,
+            }
+        )
     for label in missing_contract_labels:
         findings.append(
             {
@@ -200,7 +361,7 @@ def build_report(repo_root: Path) -> dict[str, Any]:
             {
                 "code": "invalid_closure_classification",
                 "severity": "error",
-                "module": row["module"],
+                "module": str(row.get("module") or ""),
                 "errors": row_classification_errors(row),
             }
         )
@@ -230,11 +391,25 @@ def build_report(repo_root: Path) -> dict[str, Any]:
             }
         )
 
+    if missing_internal_docs:
+        findings.append(
+            {
+                "code": "internal_docs_missing",
+                "severity": "info",
+                "missing_internal_docs": missing_internal_docs,
+            }
+        )
+
+    has_errors = any(finding["severity"] == "error" for finding in findings)
     return {
         "schema_version": SCHEMA_VERSION,
-        "status": "ok" if not findings else "fail",
-        "matrix_path": str(matrix_path),
-        "roadmap_path": str(roadmap_path),
+        "status": "fail" if has_errors else "ok",
+        "public_contract_path": str(public_contract_path),
+        "matrix_path": str(matrix_path or public_contract_path),
+        "private_matrix_path": str(matrix_path) if matrix_path else "",
+        "roadmap_path": str(roadmap_path) if roadmap_path else "",
+        "missing_internal_docs": missing_internal_docs,
+        "private_extension_enabled": private_extension_enabled,
         "live_module_count": len(live_modules),
         "matrix_module_count": len(rows),
         "active_work_item_count": len(active_work_items),
@@ -244,6 +419,7 @@ def build_report(repo_root: Path) -> dict[str, Any]:
         "missing_live_modules": missing_live_modules,
         "missing_contract_labels": missing_contract_labels,
         "unknown_live_modules": unknown_live_modules,
+        "unknown_contract_live_modules": unknown_contract_live_modules,
         "invalid_row_count": len(invalid_rows),
         "missing_active_work_items": missing_active_work_items,
         "stale_active_work_mappings": stale_active_work_mappings,
@@ -252,39 +428,82 @@ def build_report(repo_root: Path) -> dict[str, Any]:
     }
 
 
-def skipped_internal_docs_report(repo_root: Path, matrix_path: Path | None, roadmap_path: Path | None) -> dict[str, Any]:
-    missing = []
-    if matrix_path is None:
-        missing.append("closure_matrix")
-    if roadmap_path is None:
-        missing.append("active_roadmap")
+def missing_public_contract_report(
+    public_contract_path: Path,
+    matrix_path: Path | None,
+    roadmap_path: Path | None,
+    live_modules: list[str],
+    missing_internal_docs: list[str],
+) -> dict[str, Any]:
+    return invalid_contract_base_report(
+        public_contract_path,
+        matrix_path,
+        roadmap_path,
+        live_modules,
+        missing_internal_docs,
+        {"code": "public_contract_missing", "severity": "error"},
+    )
+
+
+def invalid_public_contract_report(
+    public_contract_path: Path,
+    matrix_path: Path | None,
+    roadmap_path: Path | None,
+    live_modules: list[str],
+    missing_internal_docs: list[str],
+    field: str,
+) -> dict[str, Any]:
+    return invalid_contract_base_report(
+        public_contract_path,
+        matrix_path,
+        roadmap_path,
+        live_modules,
+        missing_internal_docs,
+        {"code": "public_contract_invalid", "severity": "error", "field": field},
+    )
+
+
+def invalid_contract_base_report(
+    public_contract_path: Path,
+    matrix_path: Path | None,
+    roadmap_path: Path | None,
+    live_modules: list[str],
+    missing_internal_docs: list[str],
+    finding: dict[str, Any],
+) -> dict[str, Any]:
+    findings = [finding]
+    if missing_internal_docs:
+        findings.append(
+            {
+                "code": "internal_docs_missing",
+                "severity": "info",
+                "missing_internal_docs": missing_internal_docs,
+            }
+        )
     return {
         "schema_version": SCHEMA_VERSION,
-        "status": "skipped",
-        "skip_reason": "internal-docs-missing",
-        "missing_internal_docs": missing,
+        "status": "fail",
+        "public_contract_path": str(public_contract_path),
         "matrix_path": str(matrix_path) if matrix_path else "",
+        "private_matrix_path": str(matrix_path) if matrix_path else "",
         "roadmap_path": str(roadmap_path) if roadmap_path else "",
-        "live_module_count": 0,
+        "missing_internal_docs": missing_internal_docs,
+        "private_extension_enabled": False,
+        "live_module_count": len(live_modules),
         "matrix_module_count": 0,
         "active_work_item_count": 0,
         "active_work_mapping_count": 0,
-        "live_modules": [],
+        "live_modules": live_modules,
         "active_work_items": [],
         "missing_live_modules": [],
         "missing_contract_labels": [],
         "unknown_live_modules": [],
+        "unknown_contract_live_modules": [],
         "invalid_row_count": 0,
         "missing_active_work_items": [],
         "stale_active_work_mappings": [],
         "invalid_active_work_mapping_count": 0,
-        "findings": [
-            {
-                "code": "internal_docs_missing",
-                "severity": "info",
-                "missing_internal_docs": missing,
-            }
-        ],
+        "findings": findings,
     }
 
 
@@ -383,14 +602,22 @@ def load_live_module_definitions(repo_root: Path) -> list[str]:
     return sorted(str(item["module"]) for item in _module_definitions())
 
 
-def row_classification_errors(row: dict[str, str]) -> list[str]:
+def row_classification_errors(row: dict[str, Any]) -> list[str]:
     errors: list[str] = []
-    if not _classes_are_valid(row["delivery_class"], VALID_DELIVERY_CLASSES):
+    if not str(row.get("module") or "").strip():
+        errors.append("module")
+    delivery_class = row.get("delivery_class")
+    if not isinstance(delivery_class, str) or not _classes_are_valid(delivery_class, VALID_DELIVERY_CLASSES):
         errors.append("delivery_class")
-    if not _classes_are_valid(row["state_change_class"], VALID_STATE_CHANGE_CLASSES):
+    state_change_class = row.get("state_change_class")
+    if not isinstance(state_change_class, str) or not _classes_are_valid(state_change_class, VALID_STATE_CHANGE_CLASSES):
         errors.append("state_change_class")
-    if not _classes_are_valid(row["cadence_class"], VALID_CADENCE_CLASSES):
+    cadence_class = row.get("cadence_class")
+    if not isinstance(cadence_class, str) or not _classes_are_valid(cadence_class, VALID_CADENCE_CLASSES):
         errors.append("cadence_class")
+    current_action_path = row.get("current_action_path")
+    if not isinstance(current_action_path, str) or not current_action_path.strip():
+        errors.append("current_action_path")
     return errors
 
 

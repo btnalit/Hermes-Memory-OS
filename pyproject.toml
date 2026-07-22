@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "hermes-memory-os"
 version = "0.1.0"
@@ -9,11 +13,21 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
   "pytest>=8",
+  "PyYAML>=6",
+  "numpy>=1.24",
 ]
 llm = [
   "openai>=1.0",
   "anthropic>=0.30",
 ]
+
+[tool.setuptools.packages.find]
+include = ["plugins*", "memory_os_agent*"]
+
+[tool.setuptools.package-data]
+"plugins.memory.memory_os" = ["plugin.yaml"]
+"plugins.memory-os-agent-os" = ["plugin.yaml"]
+"plugins.seam.ragflow_evidence" = ["config.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

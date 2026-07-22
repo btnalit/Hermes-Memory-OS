@@ -246,7 +246,7 @@ def test_threshold_knob_record_stores_bounds_not_allowed(store_root):
 
 # ── A3.6: Runtime gate integration ────────────────────────────────────────
 
-def test_resolve_knob_injects_into_prefetch_config():
+def test_resolve_knob_injects_into_prefetch_config(store_root):
     """A3.6: resolve_knob result injected into low_clue_recall_config before build_prefetch.
 
     Verifies the injection pattern: read config default → resolve knob →
@@ -267,7 +267,11 @@ def test_resolve_knob_injects_into_prefetch_config():
 
     # Pattern A: config default is False, no override → remains False
     cfg_enabled_a = bool(config.get("enabled"))
-    resolved_a = resolve_knob("lane_low_clue_recall_enabled", default=cfg_enabled_a)
+    resolved_a = resolve_knob(
+        "lane_low_clue_recall_enabled",
+        default=cfg_enabled_a,
+        _store_root=store_root,
+    )
     config_a = dict(config)
     config_a["enabled"] = resolved_a
     assert config_a["enabled"] is False  # default preserved
@@ -275,7 +279,11 @@ def test_resolve_knob_injects_into_prefetch_config():
     # Pattern B: config default is True, no override → remains True
     config2 = {"enabled": True, "candidate_limit": 4}
     cfg_enabled_b = bool(config2.get("enabled"))
-    resolved_b = resolve_knob("lane_low_clue_recall_enabled", default=cfg_enabled_b)
+    resolved_b = resolve_knob(
+        "lane_low_clue_recall_enabled",
+        default=cfg_enabled_b,
+        _store_root=store_root,
+    )
     config2["enabled"] = resolved_b
     assert config2["enabled"] is True  # config default preserved
 
@@ -394,7 +402,7 @@ def test_register_override_rejects_value_not_in_allowed_non_bool(store_root):
 
 # ── A3.10: graph_layer_injection_enabled knob ──────────────────────────────
 
-def test_graph_layer_injection_enabled_is_registered_lane_switch():
+def test_graph_layer_injection_enabled_is_registered_lane_switch(store_root):
     """graph_layer_injection_enabled should be a lane_switch knob, default False."""
     from plugins.memory.memory_os.knob_overrides import OVERRIDABLE_KNOBS, resolve_knob
 
@@ -406,7 +414,11 @@ def test_graph_layer_injection_enabled_is_registered_lane_switch():
     assert spec.get("meta") is False
 
     # Verify resolve_knob returns default when no override exists
-    result = resolve_knob("graph_layer_injection_enabled", default=False)
+    result = resolve_knob(
+        "graph_layer_injection_enabled",
+        default=False,
+        _store_root=store_root,
+    )
     assert result is False
 
 

@@ -51,6 +51,10 @@ def test_refresh_publishes_valid_fail_classification_without_alerting(tmp_path):
             str(monitor),
             "--timeout-seconds",
             "10",
+            "--source-head",
+            "abc123",
+            "--runtime-digest",
+            "sha256:runtime-test",
         ],
         capture_output=True,
         text=True,
@@ -62,6 +66,13 @@ def test_refresh_publishes_valid_fail_classification_without_alerting(tmp_path):
     artifacts = list((home / "memory-os" / "system" / "monitor_artifacts").glob("monitor_*.json"))
     assert len(artifacts) == 1
     payload = json.loads(artifacts[0].read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "memory-os.full_monitor_artifact.v1"
+    assert payload["source_head"] == "abc123"
+    assert payload["runtime_digest"] == "sha256:runtime-test"
+    assert payload["monitor_version"] == "memory-os.monitor.v0"
+    assert payload["generated_at"].endswith("Z")
+    assert payload["producer_receipt"]["monitor_exit_code"] == 2
+    assert payload["producer_receipt"]["receipt_id"].startswith("fmpr_")
     assert payload["classification"]["status"] == "FAIL"
     assert not list(artifacts[0].parent.glob("*.tmp"))
 
@@ -81,6 +92,10 @@ def test_refresh_fails_loudly_when_monitor_does_not_create_valid_artifact(tmp_pa
             str(monitor),
             "--timeout-seconds",
             "10",
+            "--source-head",
+            "abc123",
+            "--runtime-digest",
+            "sha256:runtime-test",
         ],
         capture_output=True,
         text=True,

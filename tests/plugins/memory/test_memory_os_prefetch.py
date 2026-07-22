@@ -2241,13 +2241,19 @@ def test_qx_counterfactual_remove_append_loses_last_session(monkeypatch, tmp_pat
 class TestPrefetchFacadeIntegration:
     """Phase 3: Retriever Facade → prefetch integration (knob-gated)."""
 
-    def test_facade_initialized_once_and_cached(self, tmp_path):
+    def test_facade_initialized_once_and_cached(self, tmp_path, monkeypatch):
         """Facade is initialized only once per provider (constraint 1: no repeated init)."""
-        from plugins.memory.memory_os import MemoryOSProvider
+        import warnings
 
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os import knob_overrides
+
+        monkeypatch.setattr(knob_overrides, "_ambient_fallback_warned", False)
         provider = MemoryOSProvider()
-        f1 = provider._ensure_recall_facade()
-        f2 = provider._ensure_recall_facade()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            f1 = provider._ensure_recall_facade()
+            f2 = provider._ensure_recall_facade()
         # Same object reference — cached at provider level
         assert f1 is f2, "Facade must be cached (provider-level), not rebuilt"
 

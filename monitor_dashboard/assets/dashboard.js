@@ -29,6 +29,19 @@
     return num(value).toLocaleString();
   }
 
+  function displayCount(data, field, fallback) {
+    const memory = data.memory || {};
+    const counts = memory.display_counts || {};
+    const observation = counts[field] || {};
+    return observation.display || fmt(observation.value != null ? observation.value : fallback);
+  }
+
+  function hasCountConflict(data, field) {
+    const memory = data.memory || {};
+    const counts = memory.display_counts || {};
+    return (counts[field] || {}).state === "conflict";
+  }
+
   function pct(value) {
     return `${Math.round(num(value) * 100)}%`;
   }
@@ -327,7 +340,7 @@
                 <span class="kpi-label">${esc(k.label)}</span>
                 <span class="kpi-delta delta-${dirTone}">${esc(k.delta)}</span>
               </div>
-              <div class="kpi-val">${fmt(k.value)}<span class="kpi-unit">${esc(k.unit)}</span></div>
+              <div class="kpi-val">${k.display || fmt(k.value)}<span class="kpi-unit">${esc(k.unit)}</span></div>
               <div class="kpi-spark">${sparkline(k.spark)}</div>
             </div>`;
         }).join("")}
@@ -461,6 +474,9 @@
   function memoryPanel(data) {
     const m = data.memory || {};
     const classes = m.classes || [];
+    const workingConflict = hasCountConflict(data, "working_items");
+    const crystallizedConflict = hasCountConflict(data, "crystallized_records");
+    const candidatesConflict = hasCountConflict(data, "crystallized_candidates");
     const max = Math.max(...classes.map((c) => num(c.value)), 1);
     return panel({
       kicker: "canonical memory",
@@ -470,20 +486,21 @@
       right: pill(`index ${m.index_fresh ? "fresh" : "stale"}`, m.index_fresh ? "good" : "warn"),
       body: `
         <div class="mem-stats">
-          <div class="mem-stat"><b>${fmt(m.working)}</b><span>working items</span>${m.working_files != null && m.working_files !== m.working ? `<small> (${fmt(m.working_files)} files)</small>` : ""}</div>
-          <div class="mem-stat"><b>${fmt(m.crystallized)}</b><span>approved records</span>${m.crystallized_raw_segments != null && m.crystallized_raw_segments !== m.crystallized ? `<small> / ${fmt(m.crystallized_raw_segments)} raw segments</small>` : ""}</div>
-          <div class="mem-stat"><b>${fmt(m.candidates)}</b><span>candidates</span>${m.candidates_raw_rows != null ? `<small> (${fmt(m.candidates_raw_rows)} raw rows)</small>` : ""}</div>
+          <div class="mem-stat"><b>${displayCount(data, "working_items", m.working)}</b><span>working items</span>${!workingConflict && m.working_files != null && m.working_files !== m.working ? `<small> (${fmt(m.working_files)} files)</small>` : ""}</div>
+          <div class="mem-stat"><b>${displayCount(data, "crystallized_records", m.crystallized)}</b><span>approved records</span>${!crystallizedConflict && m.crystallized_raw_segments != null && m.crystallized_raw_segments !== m.crystallized ? `<small> / ${fmt(m.crystallized_raw_segments)} raw segments</small>` : ""}</div>
+          <div class="mem-stat"><b>${displayCount(data, "crystallized_candidates", m.candidates)}</b><span>candidates</span>${!candidatesConflict && m.candidates_raw_rows != null ? `<small> (${fmt(m.candidates_raw_rows)} raw rows)</small>` : ""}</div>
           <div class="mem-stat"><b>${fmt(m.canonical_files)}</b><span>canonical files</span></div>
           <div class="mem-stat"><b>${num(m.index_mb).toFixed(1)}<i>MB</i></b><span>sqlite index</span></div>
           <div class="mem-stat"><b>${fmt(m.fts_rows)}</b><span>fts rows</span></div>
         </div>
         <div class="mem-charts">
           <div class="mem-chart">
-            <div class="chart-cap"><span>working memory · 21d</span><span class="mono dim">${fmt(m.working)}</span></div>
-            ${areaLine(m.working_trend, "var(--accent)", "var(--accent-soft)", 92)}
+            <div class="chart-cap"><span>working memory · 21d</span><span class="mono dim">${workingConflict ? "conflict" : fmt(m.working)}</span></div>
+            ${workingConflict ? pill("source conflict · raw trend hidden", "warn") : areaLine(m.working_trend, "var(--accent)", "var(--accent-soft)", 92)}
           </div>
           <div class="mem-chart">
             <div class="chart-cap"><span>crystallized by class</span></div>
+            ${crystallizedConflict ? pill("source conflict · raw class counts hidden", "warn") : `
             <div class="classbars">
               ${classes.map((c, i) => `
                 <div class="classbar">
@@ -491,7 +508,7 @@
                   <span class="cb-track"><span class="cb-fill" style="width:${Math.min(100, (num(c.value) / max) * 100)}%;background:var(--accent-${i})"></span></span>
                   <span class="cb-val mono">${fmt(c.value)}</span>
                 </div>`).join("")}
-            </div>
+            </div>`}
           </div>
         </div>`,
     });

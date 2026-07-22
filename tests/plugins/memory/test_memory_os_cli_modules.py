@@ -4,7 +4,20 @@ import importlib
 from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
-from plugins.memory.memory_os.cli import _ensure_system_module_runtime_path
+from plugins.memory.memory_os.cli import _check_vector_available, _ensure_system_module_runtime_path
+
+
+def test_vector_availability_probe_never_contaminates_structured_stdout(monkeypatch, capsys):
+    def noisy_optional_import(_name):
+        print("optional dependency import noise")
+        raise ImportError("broken optional dependency")
+
+    monkeypatch.setattr(importlib, "import_module", noisy_optional_import)
+
+    assert _check_vector_available() is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 from plugins.memory.memory_os.__main__ import main as memory_os_module_main
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
@@ -21,6 +34,7 @@ def test_modules_status_reports_commandized_and_uncommandized_modules(tmp_path, 
     modules = {item["module"]: item for item in output["modules"]}
     assert output["schema_version"] == "memory-os.modules_status.v0"
     assert output["profile"] == "default"
+    assert output["operational_truth"]["schema_version"] == "memory-os.operational_truth_snapshot.v1"
     assert modules["cron_mirror"]["commandized"] is True
     assert modules["deep_reflection"]["commandized"] is True
     assert modules["inner_drive"]["commandized"] is False

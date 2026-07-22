@@ -14,6 +14,24 @@ from plugins.modules.governance.override_sweep import OverrideSweepModule
 
 
 class TestOverrideSweep:
+    def test_run_once_uses_module_roots_without_ambient_fallback(self, tmp_path, monkeypatch):
+        import warnings
+
+        from plugins.memory.memory_os import knob_overrides
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")
+        MemoryOSStore(roots).initialize()
+        monkeypatch.setattr(knob_overrides, "_ambient_fallback_warned", False)
+        module = OverrideSweepModule(str(tmp_path), profile="test")
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result = module.run_once(_now=datetime.now(timezone.utc))
+
+        assert result["active_total"] == 0
+
     def test_V3_7_ttl_expired_reverts_to_prior(self, tmp_path):
         """V3.7: provisional override past expires_at → reverted, prior restored."""
         now = datetime.now(timezone.utc)

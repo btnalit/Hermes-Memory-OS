@@ -46,6 +46,7 @@ from plugins.memory.memory_os.audit import read_audit_records
 from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness
 from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
 from plugins.memory.memory_os.owner_actions import owner_review_queue_report
+from plugins.memory.memory_os.operational_truth import read_operational_truth_snapshot
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.legacy_right_brain_retirement import (
@@ -162,8 +163,26 @@ def build_dashboard_snapshot(*, hermes_home: Path, profile: str = DEFAULT_PROFIL
     feedback = _feedback_snapshot(memory_root)
     boundary = _boundary_snapshot(cadence_report, status_report, hindsight)
     audit = _audit_snapshot(memory_root)
-    full_monitor = _full_monitor_snapshot(memory_root)
-    rh26 = _rh26_snapshot(memory_root)
+    full_monitor = _full_monitor_snapshot(
+        memory_root,
+        now=now,
+        dashboard_runtime_counts={
+            "working_items": (
+                memory.get("working_source"),
+                memory.get("working"),
+            ),
+            "crystallized_candidates": (
+                "dashboard.candidate_queue.rows",
+                memory.get("candidates"),
+            ),
+            "crystallized_records": (
+                memory.get("crystallized_source"),
+                memory.get("crystallized"),
+            ),
+        },
+    )
+    memory["display_counts"] = _runtime_count_displays(full_monitor, memory)
+    rh26 = _rh26_snapshot(memory_root, now=now)
     execution_gate = _execution_gate_snapshot(memory_root)
     owner_aging = _owner_aging_snapshot(memory_root, profile=profile)
     session_mirror = _session_mirror_snapshot(hermes_home)
@@ -357,6 +376,38 @@ def _monitor_snapshot(
     }
 
 
+def _runtime_count_displays(
+    full_monitor: dict[str, Any],
+    memory: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    fallbacks = {
+        "working_items": memory.get("working"),
+        "crystallized_candidates": memory.get("candidates"),
+        "crystallized_records": memory.get("crystallized"),
+    }
+    raw_fields = full_monitor.get("runtime_fields")
+    fields: dict[str, Any] = raw_fields if isinstance(raw_fields, dict) else {}
+    displays: dict[str, dict[str, Any]] = {}
+    for field, fallback in fallbacks.items():
+        raw_observation = fields.get(field)
+        observation: dict[str, Any] = raw_observation if isinstance(raw_observation, dict) else {}
+        if observation.get("conflict") is True or observation.get("invalid_sources"):
+            displays[field] = {"value": None, "display": "conflict", "state": "conflict"}
+        elif observation.get("value") is not None:
+            displays[field] = {
+                "value": int(observation["value"]),
+                "display": "",
+                "state": "consistent",
+            }
+        else:
+            displays[field] = {
+                "value": _safe_int(fallback),
+                "display": "",
+                "state": "unobserved",
+            }
+    return displays
+
+
 def _kpis_snapshot(
     memory: dict[str, Any],
     owner: dict[str, Any],
@@ -366,9 +417,30 @@ def _kpis_snapshot(
 ) -> list[dict[str, Any]]:
     enabled_cron = len([job for job in cron_jobs if job.get("enabled", True)])
     modules = int(cadence_report.get("module_count") or 0)
+    raw_displays = memory.get("display_counts")
+    displays: dict[str, Any] = raw_displays if isinstance(raw_displays, dict) else {}
+    raw_working = displays.get("working_items")
+    working: dict[str, Any] = raw_working if isinstance(raw_working, dict) else {}
+    raw_crystallized = displays.get("crystallized_records")
+    crystallized: dict[str, Any] = raw_crystallized if isinstance(raw_crystallized, dict) else {}
+    raw_candidates = displays.get("crystallized_candidates")
+    candidates: dict[str, Any] = raw_candidates if isinstance(raw_candidates, dict) else {}
     return [
-        _kpi("working", "Working memory", "items", memory.get("working"), "+0", "flat"),
-        _kpi("crystallized", "Crystallized", "approved", memory.get("crystallized"), "+0", "flat"),
+        _kpi(
+            "working", "Working memory", "items",
+            working.get("value", memory.get("working")), "+0", "flat",
+            display=str(working.get("display") or ""),
+        ),
+        _kpi(
+            "crystallized", "Crystallized", "approved",
+            crystallized.get("value", memory.get("crystallized")), "+0", "flat",
+            display=str(crystallized.get("display") or ""),
+        ),
+        _kpi(
+            "candidates", "Crystallized candidates", "review queue",
+            candidates.get("value", memory.get("candidates")), "+0", "flat",
+            display=str(candidates.get("display") or ""),
+        ),
         _kpi(
             "pending",
             "待 owner 审批",
@@ -393,16 +465,20 @@ def _kpi(
     direction: str,
     *,
     good: str | None = None,
+    display: str = "",
 ) -> dict[str, Any]:
+    numeric_value = None if value is None else _safe_int(value)
     item = {
         "key": key,
         "label": label,
         "unit": unit,
-        "value": _safe_int(value),
+        "value": numeric_value,
         "delta": delta,
         "dir": direction,
-        "spark": _flat_series(_safe_int(value), 21),
+        "spark": [] if numeric_value is None else _flat_series(numeric_value, 21),
     }
+    if display:
+        item["display"] = display
     if good:
         item["good"] = good
     return item
@@ -572,15 +648,19 @@ def _owner_queue_item(item: dict[str, Any], severity: str) -> dict[str, Any]:
 
 def _memory_snapshot(memory_root: Path) -> dict[str, Any]:
     index_path = memory_root / "index" / "memory_os.db"
-    working_records = _working_item_count(memory_root, index_path)
+    working_records, working_source = _working_item_observation(memory_root, index_path)
     candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
-    crystallized_records = _crystallized_record_count(memory_root, index_path, candidates)
+    crystallized_records, crystallized_source = _crystallized_record_observation(
+        memory_root, index_path, candidates
+    )
     crystallized_raw, classes = _crystallized_counts(memory_root / "crystallized")
     fts_rows = _sqlite_count(index_path, "fts_entries") or _sqlite_count(index_path, "events")
     return {
         "working": working_records,
+        "working_source": working_source,
         "working_files": _count_files(memory_root / "working", "*.json"),
         "crystallized": crystallized_records,
+        "crystallized_source": crystallized_source,
         "crystallized_raw_segments": crystallized_raw,
         "crystallized_markdown_files": _count_files(memory_root / "crystallized", "*.md"),
         "candidates": len(candidates),
@@ -597,24 +677,41 @@ def _memory_snapshot(memory_root: Path) -> dict[str, Any]:
 
 
 def _working_item_count(memory_root: Path, index_path: Path) -> int:
-    """Return working-item count, preferring the SQLite index."""
+    """Backward-compatible count-only view of the source-aware observation."""
+    return _working_item_observation(memory_root, index_path)[0]
+
+
+def _working_item_observation(memory_root: Path, index_path: Path) -> tuple[int, str]:
+    """Return working-item count with its exact observation source."""
     count = _sqlite_count(index_path, "working_items")
     if count > 0:
-        return count
+        return count, "dashboard.index.working_items"
     current = _read_json(memory_root / "working" / "current.json")
     if isinstance(current, dict) and isinstance(current.get("items"), list):
-        return len(current["items"])
-    return _count_files(memory_root / "working", "*.json")
+        return len(current["items"]), "dashboard.working.current.items"
+    return _count_files(memory_root / "working", "*.json"), "dashboard.working.files"
 
 
 def _crystallized_record_count(memory_root: Path, index_path: Path, candidates: list[dict[str, Any]] | None = None) -> int:
     """Return approved crystallized record count, preferring the SQLite index."""
+    return _crystallized_record_observation(memory_root, index_path, candidates)[0]
+
+
+def _crystallized_record_observation(
+    memory_root: Path,
+    index_path: Path,
+    candidates: list[dict[str, Any]] | None = None,
+) -> tuple[int, str]:
+    """Return the count and exact observation source without asserting authority."""
     count = _sqlite_count(index_path, "crystallized_records")
     if count > 0:
-        return count
+        return count, "dashboard.index.crystallized_records"
     if candidates is None:
         candidates = _read_jsonl(memory_root / "crystallized" / "candidates.jsonl")
-    return sum(1 for c in candidates if c.get("canonical_state") == "crystallized")
+    return (
+        sum(1 for c in candidates if c.get("canonical_state") == "crystallized"),
+        "dashboard.candidate_projection.canonical_state",
+    )
 
 
 def _render_last_status(*, raw_status: str | None, cadence_class: str) -> str:
@@ -816,28 +913,19 @@ def _audit_snapshot(memory_root: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _rh26_snapshot(memory_root: Path) -> dict[str, Any]:
-    """Read the most recent RH-26 probe artifact for heading anomaly status.
-
-    Uses the same two-location search as ``_full_monitor_snapshot``.
-    """
-    artifact = _find_monitor_artifact(memory_root)
-    if artifact is None:
-        return {"status": "unknown", "fail_codes": [], "warn_codes": []}
-    data = _read_json(artifact)
-    # Production artifacts use "classification" (memory_os_3_200_monitor.py);
-    # fall back to "results" for older / test artifact shapes.
-    results: dict[str, Any] = {}
-    if isinstance(data, dict):
-        results = (
-            data.get("classification")
-            if isinstance(data.get("classification"), dict)
-            else data.get("results")
-            if isinstance(data.get("results"), dict)
-            else {}
-        )
-        if not isinstance(results, dict):
-            results = {}
+def _rh26_snapshot(memory_root: Path, *, now: datetime) -> dict[str, Any]:
+    """Read RH-26 findings from the shared full-monitor truth projection."""
+    truth = read_operational_truth_snapshot(
+        memory_root=memory_root,
+        now=now,
+        stale_after_seconds=FULL_MONITOR_STALE_SECONDS,
+    ).full_monitor
+    data = truth.payload
+    results: dict[str, Any] = (
+        data["classification"] if isinstance(data.get("classification"), dict) else {}
+    )
+    if not results and isinstance(data.get("results"), dict):
+        results = data["results"]
     rh26 = {}
     for entry in results.get("fail", []):
         if isinstance(entry, dict) and "rh26" in str(entry.get("code", "")):
@@ -849,9 +937,9 @@ def _rh26_snapshot(memory_root: Path) -> dict[str, Any]:
                 rh26 = entry
                 break
     return {
-        "status": results.get("status", "unknown"),
-        "fail_codes": [str(e.get("code") or "") for e in (results.get("fail") or []) if isinstance(e, dict)],
-        "warn_codes": [str(e.get("code") or "") for e in (results.get("warn") or []) if isinstance(e, dict)],
+        "status": truth.classification.status,
+        "fail_codes": list(truth.classification.fail_codes),
+        "warn_codes": list(truth.classification.warn_codes),
         "rh26_detail": rh26,
     }
 
@@ -1063,80 +1151,27 @@ def _fill_audit_from_monitor_if_empty(snapshot: dict[str, Any]) -> None:
     ]
 
 
-def _find_monitor_artifact(memory_root: Path) -> Path | None:
-    """Return the most recent monitor JSON artifact, or None.
-
-    Searches two locations in priority order:
-
-    1. ``system/monitor_artifacts/*.json`` — dedicated monitor output directory
-    2. ``system/monitor_*.json`` — monitor output written directly to system/
-    """
-    # Primary: dedicated artifacts directory
-    artifacts_dir = memory_root / "system" / "monitor_artifacts"
-    if artifacts_dir.exists():
-        candidates = sorted(artifacts_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            return candidates[0]
-    # Secondary: monitor_*.json written directly to system/
-    system_dir = memory_root / "system"
-    if system_dir.exists():
-        candidates = sorted(system_dir.glob("monitor_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            return candidates[0]
-    return None
-
-
-def _full_monitor_snapshot(memory_root: Path) -> dict[str, Any]:
-    """Read the most recent full-monitor JSON artifact (read-only).
-
-    Returns structured status with fail/warn codes, artifact age, and a
-    ``stale`` flag so the dashboard can surface artifact freshness
-    independently.  If no artifact is found the result is
-    ``status: "unknown"`` with ``stale: true`` — the dashboard treats
-    this as a WARN (the monitor pipeline may not be configured to persist
-    artifacts to disk).
-    """
-    unknown: dict[str, Any] = {
-        "status": "unknown",
-        "stale": True,
-        "fail_codes": [],
-        "warn_codes": [],
-        "generated_at": None,
-        "artifact_path": None,
-        "artifact_age_seconds": -1,
+def _full_monitor_snapshot(
+    memory_root: Path,
+    *,
+    now: datetime,
+    dashboard_runtime_counts: dict[str, tuple[Any, Any]] | None = None,
+) -> dict[str, Any]:
+    """Project full-monitor identity, freshness, verdict, and shared runtime fields."""
+    runtime_observations = {
+        field: {str(source or "dashboard.unknown_source"): value}
+        for field, (source, value) in (dashboard_runtime_counts or {}).items()
     }
-
-    artifact = _find_monitor_artifact(memory_root)
-    if artifact is None:
-        return unknown
-    data = _read_json(artifact)
-    age = int(time.time() - artifact.stat().st_mtime)
-    results: dict[str, Any] = {}
-    if isinstance(data, dict):
-        # Production artifacts use "classification" (memory_os_3_200_monitor.py);
-        # fall back to "results" for older / test artifact shapes.
-        results = (
-            data.get("classification")
-            if isinstance(data.get("classification"), dict)
-            else data.get("results")
-            if isinstance(data.get("results"), dict)
-            else {}
-        )
-        if not isinstance(results, dict):
-            results = {}
-    fail_entries = results.get("fail") if isinstance(results.get("fail"), list) else []
-    warn_entries = results.get("warn") if isinstance(results.get("warn"), list) else []
-    fail_codes = [str(r.get("code") or "") for r in fail_entries if isinstance(r, dict)]
-    warn_codes = [str(r.get("code") or "") for r in warn_entries if isinstance(r, dict)]
-    return {
-        "status": str(results.get("status") or "unknown"),
-        "fail_codes": fail_codes,
-        "warn_codes": warn_codes,
-        "generated_at": str(data.get("generated_at") or "") if isinstance(data, dict) else None,
-        "artifact_path": str(artifact),
-        "artifact_age_seconds": max(age, 0),
-        "stale": age > FULL_MONITOR_STALE_SECONDS,
-    }
+    projection = read_operational_truth_snapshot(
+        memory_root=memory_root,
+        now=now,
+        stale_after_seconds=FULL_MONITOR_STALE_SECONDS,
+        runtime_count_observations=runtime_observations,
+    ).to_dict()
+    full_monitor = dict(projection["full_monitor"])
+    full_monitor["runtime_fields"] = projection["runtime_fields"]
+    full_monitor["operational_truth_schema_version"] = projection["schema_version"]
+    return full_monitor
 
 
 def _safe_status_report(hermes_home: Path, memory_root: Path, profile: str) -> dict[str, Any]:

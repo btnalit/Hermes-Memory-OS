@@ -798,7 +798,9 @@ class CognitiveLoopRunner:
             store=self.store,
         )
         deliveries = gate.read_delivery_records()
-        max_speak = resolve_knob("max_speak_per_hour", default=5)
+        max_speak = resolve_knob(
+            "max_speak_per_hour", default=5, roots=self.store.roots
+        )
         if not under_speak_limit(deliveries, max_per_hour=max_speak):
             return {
                 "status": "blocked",

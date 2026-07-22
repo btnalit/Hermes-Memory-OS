@@ -3869,7 +3869,10 @@ def _validate_action_target(
         if target_type != "knob_override":
             return "invalid_knob_override_target"
         from plugins.memory.memory_os.knob_overrides import list_active_overrides
-        found = any(o.get("id") == target_id for o in list_active_overrides())
+        found = any(
+            o.get("id") == target_id
+            for o in list_active_overrides(roots=store.roots)
+        )
         if not found:
             return "knob_override_not_found_or_not_active"
     if action_type in {"approve_edge", "reject_edge"}:
@@ -8532,7 +8535,11 @@ def _owner_review_surface_needs_clarification(
     }
 
 
-def _closed_targets(actions: list[dict[str, Any]]) -> set[str]:
+def _closed_targets(
+    actions: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> set[str]:
     closed: set[str] = set()
     for action in actions:
         if action.get("result") not in {"applied", "duplicate_ignored"}:
@@ -8541,7 +8548,7 @@ def _closed_targets(actions: list[dict[str, Any]]) -> set[str]:
         action_type = str(action.get("action_type", ""))
         if action_type not in TERMINAL_ACTIONS_BY_TARGET_TYPE.get(target_type, set()):
             continue
-        if action_type == "defer_candidate_cluster" and not _defer_action_is_active(action):
+        if action_type == "defer_candidate_cluster" and not _defer_action_is_active(action, now=now):
             continue
         closed.add(f"{target_type}:{action.get('target_id', '')}")
     return closed

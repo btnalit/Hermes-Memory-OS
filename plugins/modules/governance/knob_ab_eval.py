@@ -85,7 +85,16 @@ class KnobABEvalModule:
         from plugins.memory.memory_os.jsonl_io import build_error_record
 
         now = _now or datetime.now(timezone.utc)
-        active = list_active_overrides(_store_root=_store_root, _now=now)
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = None
+        if _store_root is None:
+            roots = getattr(store, "roots", None) or MemoryOSRoots.from_hermes_home(
+                self.hermes_home, profile=self.profile
+            )
+        active = list_active_overrides(
+            roots=roots, _store_root=_store_root, _now=now
+        )
 
         confirmed = 0
         reverted = 0
@@ -162,6 +171,7 @@ class KnobABEvalModule:
                     confirm_override(
                         override["id"],
                         reason=f"ab_confirmed_diff_{diff:.2f}",
+                        roots=roots,
                         _store_root=_store_root,
                     )
                     confirmed += 1
@@ -182,6 +192,7 @@ class KnobABEvalModule:
                     revert_override(
                         override["id"],
                         reason="ab_reverted",
+                        roots=roots,
                         _store_root=_store_root,
                     )
                     reverted += 1
@@ -230,7 +241,10 @@ class KnobABEvalModule:
                 OVERRIDABLE_KNOBS,
                 list_active_overrides,
             )
-            active = list_active_overrides(_store_root=self.hermes_home)
+            from plugins.memory.memory_os.roots import MemoryOSRoots
+
+            roots = MemoryOSRoots.from_hermes_home(self.hermes_home, profile=self.profile)
+            active = list_active_overrides(roots=roots)
             active_count = len([
                 o for o in active
                 if OVERRIDABLE_KNOBS.get(str(o.get("knob") or ""), {}).get("ab_metric")
