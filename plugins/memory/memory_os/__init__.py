@@ -40,6 +40,7 @@ from .recall_facade import RetrieverFacade
 from .recall_types import RecallType
 from .roots import MemoryOSRoots
 from .schema import EVENT_SCHEMA_VERSION, IDENTITY_MANIFEST_SCHEMA_VERSION, EventEnvelope
+from .session_approval import build_session_review_block, build_session_feedback_block
 from .status_tool_contract import (
     MEMORY_OS_REVIEW_REPLY_TOOL_DESCRIPTION,
     MEMORY_OS_REVIEW_SURFACE_TOOL_DESCRIPTION,
@@ -475,6 +476,16 @@ class MemoryOSProvider(MemoryProvider):
             lines.extend(["", _owner_review_reply_system_instruction(self._last_owner_review_reply_result)])
         if self._current_task_anchor:
             lines.extend(["", self._current_task_anchor])
+
+        # ── Inject session review block for pending approval items ──────
+        if self._store is not None:
+            review_block = build_session_review_block(self._store)
+            if review_block:
+                lines.append(review_block)
+            feedback_block = build_session_feedback_block(self._store)
+            if feedback_block:
+                lines.append(feedback_block)
+
         return "\n".join(lines)
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
