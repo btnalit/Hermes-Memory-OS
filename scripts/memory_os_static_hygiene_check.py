@@ -211,7 +211,7 @@ def default_runner(argv: list[str], cwd: Path) -> dict[str, Any]:
 def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> dict[str, Any]:
     root = Path(repo_root).resolve()
     checks = {
-        "compileall": [sys.executable, "-m", "compileall", "-q", "plugins", "scripts", "tests"],
+        "compileall": [sys.executable, "-m", "compileall", "plugins", "scripts", "tests"],
         "diff_check": ["git", "diff", "--check"],
         "closure_matrix": [
             sys.executable,
@@ -261,10 +261,14 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
     }
     for name, argv in checks.items():
         raw = runner(argv, root)
-        results[name] = {
+        result_entry = {
             "status": "pass" if int(raw.get("exit_code") or 0) == 0 else "fail",
             "exit_code": int(raw.get("exit_code") or 0),
         }
+        # Capture stderr for compileall to aid debugging
+        if name == "compileall" and result_entry["status"] == "fail":
+            result_entry["stderr"] = raw.get("stderr", "")
+        results[name] = result_entry
     status = "pass" if all(item["status"] == "pass" for item in results.values()) else "fail"
     return {
         "schema_version": "memory-os.static_hygiene.v0",
