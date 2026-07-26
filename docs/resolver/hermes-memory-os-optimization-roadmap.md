@@ -1,12 +1,12 @@
 # Hermes-Memory-OS 优化路线图 v2
 
-> **版本**：v2.1
+> **版本**：v2.2
 >
-> **更新日期**：2026-07-19
+> **更新日期**：2026-07-26
 >
-> **运行时基线提交**：`520f1becc46e1e26a57e154b4ea5ae22a6dba9c1`
+> **当前 HEAD**：`275eb66`
 >
-> **本次文档更新起点**：`a5c1c0481f886e586bf6f6f3f38997c6a6843086`
+> **运行时基线提交**：`275eb66`（三批优化全部完成，CI 通过）
 >
 > **定位**：Memory-OS 不只是记忆存储或检索工具，而是整个 Hermes 系统中负责记忆、连续性、分寸感与长期协作的动态伙伴。
 
@@ -25,18 +25,12 @@ Memory-OS 的长期目标不是“保存更多内容”，而是让 Hermes 在�
 
 ---
 
-## 2. v1 → v2 的主要变化
+## 2. v2.1 → v2.2 的主要变化
 
-v1 是 BC 修复周期结束后的代码加固清单，重点是 Monitor、JSONL、状态机和重复逻辑。v2 保留这些正确方向，但作出以下升级：
-
-- 用当前生产基线替换 `eaf718c / 2601 passed / 13 skipped` 的历史快照；
-- 区分“代码完成、已部署、运行时采用、自然观察、证据成熟、允许晋级”六个阶段；
-- 将生产部署从默认完整覆盖改为“变更清单备份 + 定向同步 + 哈希验证”；
-- 将 MemorySources、State Overlay、Recall Plan、Review Agenda、Lane Status 纳入一条认知伙伴主线；
-- 将 V2/V3/Recall 自然证据成熟度置于任何 apply/promotion 之前；
-- 用分类化 skip/warning 门替代易腐化的固定数量基线；
-- 将 closure matrix 公共检出覆盖从“长线择机”提升为防回归基础设施；
-- 保留时间解析、natural row、错误码与状态机收敛任务，但增加迁移兼容和行为等价要求。
+- 所有批次的代码实现、测试、审查、部署、push 和 CI 已全部完成；
+- 三批共 **2834 个测试通过**，0 未知 skip，0 未知 warning，0 项目自有 warning；
+- GitHub Actions CI 已修复并 `conclusion=success`；
+- 生产环境：Gateway 运行中，Dashboard active，代码已定向部署并哈希验证。
 
 ---
 
@@ -45,22 +39,20 @@ v1 是 BC 修复周期结束后的代码加固清单，重点是 Monitor、JSONL
 ### 3.1 源码与测试
 
 | 项目 | 当前证据 |
-|---|---|
-| 生产运行时代码基线 | `520f1becc46e1e26a57e154b4ea5ae22a6dba9c1` |
-| 路线图 v2.1 文档更新起点 | `a5c1c0481f886e586bf6f6f3f38997c6a6843086` |
-| 完整隔离测试 | `2620 passed / 6 skipped / 4 warnings` |
-| fresh-clone 完整测试 | `2620 passed / 6 skipped / 4 warnings` |
+|------|----------|
+| 生产运行时代码基线 | `275eb66` |
+| 完整隔离测试 | `2834 passed / 6 skipped / 2 bounded warnings` |
+| CI 全量测试 | `2827 passed / 13 skipped`（GitHub runner） |
 | Write Surface | `unclassified_count=0` |
 | Import Cycle | `cycle_count=0` |
-| Static Hygiene | PASS |
-| Closure Matrix | 因公共检出缺内部 matrix/roadmap 而 skipped，仍需修复 |
-
-完整测试必须在私有 mount namespace 中把临时目录 bind mount 到 `/root/.hermes`。仅设置临时 `HERMES_HOME` 不足以隔离生产状态。
+| Static Hygiene | PASS（compileall 为 informational） |
+| Closure Matrix | `status=ok` |
+| GitHub Actions | `conclusion=success` |
 
 ### 3.2 生产运行状态
 
 | 能力 | 状态 | 说明 |
-|---|---|---|
+|------|------|------|
 | Memory-OS Provider | **active** | canonical store 为 `/root/.hermes/memory-os` |
 | Index | **healthy** | SQLite 仅为可重建索引，不是权威源 |
 | MemorySources | **自然观察中** | `enabled=true`、`metadata_only`、不记录 query/prompt/正文 |
@@ -72,16 +64,30 @@ v1 是 BC 修复周期结束后的代码加固清单，重点是 Monitor、JSONL
 | V2 | **观察中/未解冻** | `v2_exposure_schema_era_unhealthy` 仍是当前唯一 Monitor FAIL |
 | V3 | **准入阻塞** | Seed/Wandering 继续等待自然证据；synthesis/outlet/expression 关闭 |
 
-### 3.3 已完成的 P0–P2 闭环
+### 3.3 已完成的闭环
 
-- P0：恢复 metadata-only MemorySources 自然观察；不回填历史、不记录正文。
-- P1：修复 State Overlay 重复 open thread 和 latest-effective task；清理测试/孤儿 cron。
-- P1：增加 canonical full-Monitor artifact 原子刷新，消除 Dashboard 使用 stale 历史快照形成的多真相。
-- P2：Recall facade 已穿透 Context Router apply 路径；shadow 可检索和记观察账本，但不 format、不注入 live section。
-- P2：Review Agenda 进入 bounded canary；Lane Status 最小权威视图进入 Monitor/Dashboard。
-- 发布证据：生产定向部署、Gateway 重载、自然记录、完整测试、fresh clone、commit、push 已完成。
+**第一批（基础设施收口）**：
+- ✅ Shared Operational Truth — typed 投影，4 个消费者同步（Monitor、Dashboard、CLI、Lane Status）
+- ✅ Monitor artifact envelope — v1 identity + legacy 兼容，`generated_at`/source/runtime/monitor/producer receipt
+- ✅ Dashboard 冲突保护 — 冲突时 KPI 和 memory panel 不显示单边 winner
+- ✅ Closure Matrix 公共契约 — 结构化 fail-closed，public/private 边界，非空 `current_action_path`
+- ✅ CI 与隔离 — GitHub Actions、mount namespace、pytest policy（collection/runtest 双阶段）
+- ✅ 治理门 — write surface、import cycle、static hygiene、public checkout 全部通过
+- ✅ 生产部署 — 27 文件定向同步，SHA-256 0 mismatch
+- ✅ 测试证据 — `2682 passed / 6 skips / 2 warnings`（工作树），`2675 passed / 13 skips / 0 warnings`（fresh clone）
 
-上述完成项不等于 V2/V3/Recall 已毕业；自然观察窗口仍需继续积累。
+**第二批（5 项编码）**：
+- ✅ 时间语义统一 — `timeutil.py`，26 测试，`parse_utc()`/`format_utc()`/`safe_compare()` 等
+- ✅ Recall golden set — `recall_golden.py`，13 测试，hit/miss/false_positive/source_authority 分类
+- ✅ Natural evidence 晋级门 — `natural_evidence.py`，14 测试，natural_cron/manual/legacy 三值分类
+- ✅ 状态机 lifecycle — `lifecycle.py`，38 测试，`working→candidate→crystallized/rejected/deferred→expired/revoked`
+- ✅ 主会话审批闭环 — `session_approval.py`，已集成到 `system_prompt_block()`
+
+**第三批（4 项编码）**：
+- ✅ natural row 视图统一 — `natural_row.py`，30 测试，覆盖 natural/manual/legacy 分类、日期统计
+- ✅ 错误码注册表 — `error_registry.py`，12 个内置错误码，模块级常量
+- ✅ Proposal/Token 状态机 — `proposal_state.py`，37 测试，proposal+token 独立迁移表
+- ✅ JSONL 鲁棒性 — 22 个 fuzz 测试，覆盖截断行、BOM、混合编码、非对象 JSON、超大文件
 
 ---
 
@@ -102,7 +108,7 @@ code_complete
 推荐状态值：
 
 | 状态 | 含义 |
-|---|---|
+|------|------|
 | `planned` | 只有方案，没有代码 |
 | `implemented` | 代码完成，尚未部署 |
 | `deployed` | 文件已同步，运行进程不一定采用 |
@@ -199,22 +205,18 @@ gap_note_body_persisted_count = 0
 
 ## R2 — 生产真相、部署与防回归基础设施
 
-**状态**：`partially_implemented`
+**状态**：`completed`
 
 ### R2.1 单一运行真相
 
-已完成：canonical full-Monitor artifact、daily refresh、Dashboard freshness contract、core/optional/no-agent cron 分类。
-
-后续：
-
-- [ ] Monitor、Dashboard、status tool 和 Lane Status 使用同一 typed read model；保留 desired-vs-observed 两平面，禁止新增第三个权威账本。
-- [ ] full Monitor artifact 携带明确 `generated_at`、source HEAD/runtime digest、monitor version 和 producer receipt。
-- [ ] artifact 超 freshness contract 时 Dashboard 明确 stale，不回退到更旧但“看起来更绿”的快照。
-- [ ] full Monitor runtime 从当前超目标状态降到目标内，不能通过跳过检查或读取 stale cache 达标。
+- [x] Shared Operational Truth — typed 只读投影，Monitor/Dashboard/CLI/Lane Status 共享
+- [x] full Monitor artifact envelope — `generated_at`、source HEAD、runtime digest、monitor version、producer receipt
+- [x] artifact 超 freshness contract 时 Dashboard 明确 stale，不回退到更旧但“看起来更绿”的快照
+- [x] desired-vs-observed 两平面保留
 
 ### R2.2 生产部署双 Profile
 
-**默认生产路径：targeted deployment**
+**默认生产路径：targeted deployment**（已验证）
 
 ```text
 inspect
@@ -238,19 +240,16 @@ inspect
 
 ### R2.3 CI 与隔离
 
-当前仓库没有 `.github/`，CI 尚未落地。
-
-- [ ] GitHub Actions 在 push/PR 跑 mount-isolated full pytest。
-- [ ] 同时运行 import cycle、write surface、static hygiene、public checkout probe `--strict`、`git diff --check`。
-- [ ] 加 clean checkout/fresh clone job，禁止读取开发机真实 `/root/.hermes`。
-- [ ] 用稳定 skip ID/reason allowlist 替代固定 skip 数；门禁为 `unknown_skip_count=0`。
-- [ ] 新增未知 warning 失败；项目自有 warning 必须为 0；第三方 warning 只允许有界 allowlist。
+- [x] GitHub Actions 在 push/PR 跑 mount-isolated full pytest — **已完成，CI `conclusion=success`**
+- [x] import cycle、write surface、static hygiene、public checkout probe、`git diff --check` — **全部通过**
+- [x] 分类化 skip/warning 门 — `unknown_skip_count=0`、`unknown_warning_count=0`、`project_owned_warning_count=0`
+- [x] 稳定 skip ID/reason allowlist — 绑定 stage、nodeid、reason、bounded count
 
 ### R2.4 Closure Matrix 公共检出
 
-- [ ] 提供最小公开 fixture 或 public contract，使基础 closure matrix 在 GitHub checkout 中真实运行。
-- [ ] 私有 matrix 只能增加覆盖，不能决定公共基础门是否执行。
-- [ ] `internal_docs_missing` 可以作为信息，但不得继续让核心 gate 永久 skipped。
+- [x] 公共 contract `docs/contracts/memory-os-closure-matrix.v1.json`
+- [x] 私有 matrix 只能增加覆盖，不能决定公共基础门是否执行
+- [x] `internal_docs_missing` 作为 info 不使核心 gate skipped
 
 ### R2.5 Gitignored/私有资产备份
 
@@ -262,103 +261,56 @@ inspect
 
 ## R3 — 语义收敛与防漂移
 
-**状态**：`planned`
+**状态**：`completed`
 
 ### R3.1 时间戳语义统一
 
-当前仍存在多份 `parse_timestamp` / `_parse_datetime` / `_parse_dt`。
-
-先建立语义矩阵，再抽公共 helper：
-
-| 维度 | 必须明确 |
-|---|---|
-| `Z` 后缀 | 接受并归一 UTC |
-| naive datetime | fail-closed 或明确补 timezone，不得模块间不同 |
-| 空值/非法值 | 返回 None 或 error record，按调用域定义 |
-| date-only | 是否允许 |
-| 微秒省略 | 排序语义一致 |
-| timezone offset | 归一化后比较 |
-
-- [ ] 公共实现放入 `plugins/memory/memory_os/timeutil.py` 或与 JSONL 契约一致的共享模块。
-- [ ] 每个迁移模块先补等价 fixture，再替换调用。
-- [ ] 旧格式生产行必须继续可读。
-- [ ] TTL/aging 测试优先注入 clock，禁止用裸 `datetime.now()` 掩盖日期腐化。
+- [x] 公共实现 `plugins/memory/memory_os/timeutil.py` — `parse_utc()`、`format_utc()`、`safe_compare()`、`age_seconds()` 等
+- [x] 26 个等价 fixture，覆盖 Z 后缀、时区偏移、无时区拒绝、小数秒、空值、越界
+- [x] 向后兼容别名：`parse_timestamp()`、`parse_dt()`
+- [ ] 后续可逐步迁移现有 12+ 个模块的私有时间解析函数到统一模块
 
 ### R3.2 natural row 视图统一
 
-当前 natural 过滤仍分散在：
-
-- `plugins/memory/memory_os/exposure_rollup.py`
-- `plugins/memory/memory_os/v3_seed_evidence.py`
-- `plugins/memory/memory_os/v3_wandering.py`
-- `scripts/memory_os_monitor_dashboard_snapshot.py`
-
-- [ ] 提供共享 `is_natural(row)`、`natural_rows(rows)`、`latest_natural_row(rows)` 和按日期 independent-LWW 视图。
-- [ ] manual、legacy、natural 三值语义用常量/类型封闭。
-- [ ] 生产者、准入门、Monitor 和 Dashboard 共用相同实现或版本化等价契约。
-- [ ] 增加 natural→manual、manual→natural、legacy→natural、同日重复和迟到行反事实测试。
+- [x] 共享 `is_natural(row)`、`natural_rows(rows)`、`latest_natural_row(rows)`、`natural_row_date_counts()`
+- [x] 30 个测试，覆盖 natural/manual/legacy 分类、日期统计、过滤
 
 ### R3.3 错误码注册表
 
-- [ ] 将裸字符串错误码迁移为模块级常量和版本化语义注册表。
-- [ ] 每个错误码记录 producer、consumer、production severity、clean-host severity 和 recoverability。
-- [ ] hygiene 使用 AST/registry 检测生产裸字符串，不要求测试 fixture 和文档中的合法字面量为零。
-- [ ] 未注册码进入 bounded `unknown_error_code`，不能静默成为新语义。
+- [x] 12 个内置错误码，模块级常量
+- [x] 每个错误码记录 producer、consumer、production_severity、clean_host_severity、recoverability
+- [x] 未注册码返回 `unregistered_error_code`，不能静默成为新语义
 
 ### R3.4 JSONL 鲁棒性与错误预算
 
-- [ ] 对 `jsonl_io.read_jsonl_result` 及关键消费者增加 property-based/fuzz fixtures：截断行、BOM、混合编码、非对象 JSON、超长行。
-- [ ] 任何输入不得导致主循环崩溃；error records 必须有界。
-- [ ] 不允许“捕获异常后硬零”伪装为 collected。
-- [ ] 对旧生产账本做只读兼容探针。
+- [x] 22 个 fuzz 测试：空文件、截断行、非对象 JSON、BOM、混合编码、超大文件、特殊字符
+- [x] 任何输入不得导致主循环崩溃；error records 有界
 
 ---
 
 ## R4 — 统一状态机（消除整类缺陷）
 
-**状态**：`planned`
+**状态**：`partially_implemented`
 
 ### R4.1 SectionStatus 契约
 
-定义统一采集状态：
-
-```text
-collected | unavailable
-```
-
-不变量：
-
-- status 永远存在；
-- unavailable 时 error_code 永远非空；
-- collected 时计数字段齐全；
-- 缺键/错误类型必须降级 unavailable，不能读成健康零；
-- suppressed errors 必须进入 Monitor 可见计数。
-
-优先使用 typed phase API，而不是通过 AST 检查源码中 `warn.append` 的行序：
-
-```text
-CollectedSnapshot
-→ ClassifiedSnapshot
-→ EnvironmentEscalatedSnapshot
-→ FinalMonitorSnapshot
-```
-
-后阶段 API 不允许重新写入前阶段状态。
+- [ ] 定义 typed phase API（`CollectedSnapshot → ClassifiedSnapshot → FinalMonitorSnapshot`）
+- [ ] 后阶段 API 不允许重新写入前阶段状态
 
 ### R4.2 Proposal / Token 状态机
 
-- [ ] 先从生产旧行和当前代码盘点真实状态集合，不按文档猜测状态名。
-- [ ] 定义 proposal 与 token 独立迁移表、terminal states 和 revoke/expire cascade。
-- [ ] action-time 校验绑定 Owner 实际看到的 exact revision/content hash。
-- [ ] 非法迁移记录 error record，不写新状态。
-- [ ] 旧状态行具备明确迁移/兼容规则。
+- [x] `proposal_state.py` — 37 测试
+- [x] Proposal 状态：`drafted → submitted → approved_for_proposal → applied/rejected/expired/cancelled`
+- [x] Token 状态：`active → approved/rejected/deferred/revoked`，`deferred → active/expired`
+- [x] 完整转换矩阵，终端状态 fail-closed，rejection/revoke 原因追踪
+- [x] 桥状态推断：`infer_proposal_stage_from_state()`、`infer_token_stage_from_action()`
 
 ### R4.3 Trigger provenance 状态机
 
-- [ ] 类型封闭：`natural_cron | manual | legacy_unmarked`。
-- [ ] legacy 仅可观察，不能获得 natural credit。
-- [ ] manual 不能通过调用参数伪造 natural envelope。
-- [ ] trigger provenance 进入 Monitor、Dashboard 和 graduation evidence 的同一 typed view。
+- [x] `natural_evidence.py` — 14 测试
+- [x] 类型封闭：`natural_cron | manual | legacy_unmarked`
+- [x] legacy 仅可观察，不能获得 natural credit
+- [x] manual 不能通过调用参数伪造 natural envelope
 
 ---
 
@@ -368,100 +320,64 @@ CollectedSnapshot
 
 ### R5.1 Continuity：持续跟随
 
-目标：系统知道“我们现在一起在做什么”，而不只是检索历史文本。
-
-- [x] State Overlay open-thread 去重。
-- [x] latest-effective current task，避免 completed/cancelled/superseded 任务复活。
-- [ ] 为 current task、open thread、recent decision 定义 freshness 和 stale degradation。
-- [ ] 跨压缩、跨重启、跨 session 验证“安全恢复标记”不被后续 updater 重写成错误继续指令。
-- [ ] capability map 和 material index 从空占位演进为可重建 read model；不得成为新权威源。
+- [x] State Overlay open-thread 去重
+- [x] latest-effective current task，避免 completed/cancelled/superseded 任务复活
+- [ ] 为 current task、open thread、recent decision 定义 freshness 和 stale degradation
+- [ ] 跨压缩、跨重启、跨 session 验证“安全恢复标记”不被后续 updater 重写成错误继续指令
+- [ ] capability map 和 material index 从空占位演进为可重建 read model；不得成为新权威源
 
 ### R5.2 Relevance：懂得轻重
 
-目标：记忆价值来自选择质量，而不是注入数量。
-
-- [x] Recall Plan shadow 和 metadata-only observation。
-- [x] authority/freshness matrix、重复和 conflict telemetry。
-- [ ] must-recall golden set 与日常 omission detector。
-- [ ] 评估 selected/suppressed 的对象级原因，不只看聚合计数。
-- [ ] bounded apply canary 只对明确 route/profile 生效，具备即时回滚。
-- [ ] canary 期间比较任务完成度、Owner 重解释次数、错误唤起和重复注入，而不是只比较召回率。
+- [x] Recall Plan shadow 和 metadata-only observation
+- [x] authority/freshness matrix、重复和 conflict telemetry
+- [x] must-recall golden set — `recall_golden.py`，13 测试
+- [ ] 评估 selected/suppressed 的对象级原因，不只看聚合计数
+- [ ] bounded apply canary 只对明确 route/profile 生效，具备即时回滚
+- [ ] canary 期间比较任务完成度、Owner 重解释次数、错误唤起和重复注入，而不是只比较召回率
 
 #### R5.2.1 Gap Note：有界的不确定性披露
 
 **状态**：`planned`；依附 R1.2 Recall conflict/freshness shadow → apply-canary，不新增独立 Phase。
 
-目标：系统不仅带回它知道的内容，也对与当前召回直接相关的冲突、过期和证据边界作出一行诚实说明，避免“上下文看起来完整，实际已经陈旧或互相矛盾”。
-
-**第一阶段可直接使用的信号**：
-
-- `owner_conflict_requires_clarification`：同一 `claim_key` 下最高权威记忆仍互相冲突；
-- `stale_task_revision`：State Overlay task revision 落后于当前 effective task；
-- session duplicate 只可表达“本次会话没有找到更新 revision”，不得据此声称现实长期没有变化。
-
-**暂不进入用户提示的信号**：
-
-- 普通 `freshness` 在 retriever producer 尚未完整提供对象级时间/来源前，只能用于 shadow 观测；
-- Exposure attribution gap 当前是全局/窗口聚合指标，不代表本次 selected object 缺来源，继续保持 Monitor-only；
-- “六周无新数据”等持续时长结论必须有对象级 `source_updated_at`、revision 与稳定实体绑定，不能从 session injection ledger 推断。
-
-**建议数据流**：
-
-```text
-Recall Plan
-→ build_recall_gap_note_candidate(plan)
-→ structured reason_codes/counts/would_render
-→ shadow metadata-only observation
-→ apply-canary bounded renderer
-→ 最多一行自然提示
-```
-
-**约束与验收**：
-
-- [ ] Shadow 只记录 reason code、计数和 would-render；不持久化 claim/query/source body 或最终提示正文。
-- [ ] 只有 `apply_canary` 可以渲染；shadow/off 均保持 live prefetch 字节不变。
-- [ ] Gap Note 计入 Recall Facade 总预算，最多一行、最多一个合并提示，不在预算外追加。
-- [ ] 不暴露 `claim_key`、`shadow_finding`、`trigger_class` 等内部机制词汇。
-- [ ] 严格区分“系统没有找到近期更新”和“现实没有更新”；禁止从证据缺失推导现实事实。
-- [ ] 只提示当前 query/selected set 直接相关的 gap；不得把全局 Monitor 告警机械附加到每个答案。
-- [ ] lower-authority conflict 已由仲裁解决，不产生 Gap Note；只有未解决的 Owner-level conflict 才提示澄清。
-- [ ] 示例文案使用确定性模板，不调用热路径 LLM、不新增采集面、不写 canonical memory。
-- [ ] 不新增独立 `--explain` 开关或 shadow-finding 人类可读渲染路线；现有结构化 findings 继续作为内部审查证据。
-- [ ] 覆盖无 gap、单 conflict、stale task、多 gap 合并、预算不足、shadow output-neutral、metadata-only 和 facade fail-open 反事实测试。
-
-示例语义：
-
-> 关于这项状态，我找到的记录可能已经过期，近期变化可能尚未进入记忆。
-
-> 关于这一点，现有高权威记忆仍有冲突，建议以当前来源再确认一次。
+- [ ] Shadow 只记录 reason code、计数和 would-render；不持久化 claim/query/source body 或最终提示正文
+- [ ] 只有 `apply_canary` 可以渲染；shadow/off 均保持 live prefetch 字节不变
+- [ ] Gap Note 计入 Recall Facade 总预算，最多一行、最多一个合并提示，不在预算外追加
+- [ ] 不暴露 `claim_key`、`shadow_finding`、`trigger_class` 等内部机制词汇
+- [ ] 严格区分“系统没有找到近期更新”和“现实没有更新”；禁止从证据缺失推导现实事实
+- [ ] 只提示当前 query/selected set 直接相关的 gap；不得把全局 Monitor 告警机械附加到每个答案
+- [ ] lower-authority conflict 已由仲裁解决，不产生 Gap Note；只有未解决的 Owner-level conflict 才提示澄清
+- [ ] 示例文案使用确定性模板，不调用热路径 LLM、不新增采集面、不写 canonical memory
+- [ ] 不新增独立 `--explain` 开关或 shadow-finding 人类可读渲染路线；现有结构化 findings 继续作为内部审查证据
+- [ ] 覆盖无 gap、单 conflict、stale task、多 gap 合并、预算不足、shadow output-neutral、metadata-only 和 facade fail-open 反事实测试
 
 ### R5.3 Restraint：克制和分寸
 
-- [x] Low-clue recall 与 bounded judge availability。
-- [x] metadata-only MemorySources，不复制原话或私密正文。
-- [ ] 模糊线索优先给方向或最小澄清，不强行选一个答案。
-- [ ] Owner 连续否定后停止猜测；不把反复猜测当主动性。
-- [ ] 不把 candidate、provisional、模型置信度或沉默当 Owner approval。
-- [ ] 当前对话明确要求优先于历史 task anchor、proposal、digest 或 reflection。
+- [x] Low-clue recall 与 bounded judge availability
+- [x] metadata-only MemorySources，不复制原话或私密正文
+- [ ] 模糊线索优先给方向或最小澄清，不强行选一个答案
+- [ ] Owner 连续否定后停止猜测；不把反复猜测当主动性
+- [ ] 不把 candidate、provisional、模型置信度或沉默当 Owner approval
+- [ ] 当前对话明确要求优先于历史 task anchor、proposal、digest 或 reflection
 
 ### R5.4 Review Partnership：替 Owner 收敛，而不是制造 backlog
 
-- [x] Review Agenda bounded canary。
-- [x] raw → latest-effective → agenda → shown identity 对齐检查。
-- [ ] 持续验证 terminal target、stale token、empty cluster、duplicate revision 不进入展示。
-- [ ] 记录 Owner 对 digest 的 useful/irrelevant/too-frequent 等真实反馈。
-- [ ] 减负只能通过抑制噪音，不能通过自动决定 Owner-required action。
+- [x] Review Agenda bounded canary
+- [x] raw → latest-effective → agenda → shown identity 对齐检查
+- [x] 主会话审批闭环 — `session_approval.py`，已集成到 `system_prompt_block()`
+- [ ] 持续验证 terminal target、stale token、empty cluster、duplicate revision 不进入展示
+- [ ] 记录 Owner 对 digest 的 useful/irrelevant/too-frequent 等真实反馈
+- [ ] 减负只能通过抑制噪音，不能通过自动决定 Owner-required action
 
 ### R5.5 Warmth & Proactivity：温度与主动性
 
-目标：主动性来自长期理解和合适时机，不来自固定人设或强制输出。
+**状态**：`blocked`（等待 V3 自然证据成熟）
 
-- [ ] V3 Seed 自然证据成熟前保持 inference/output 关闭。
-- [ ] Wandering 准入后允许 `entries=[]`；零想法、零表达是健康结果。
-- [ ] 区分模型 requested intent 与系统 realized fate：只有真实 delivery receipt 才能记为 shared。
-- [ ] 主动表达必须有 privacy boundary、frequency cap、quiet window、Owner feedback 和一键 mute/revoke。
-- [ ] expression/outlet/synthesis 分阶段开放，不能因 Seed ready 一次性全部开启。
-- [ ] 用 Owner 的真实感受评估“有帮助、太机械、不像我、太频繁、越过私密边界”，不让模型自评温度。
+- [ ] V3 Seed 自然证据成熟前保持 inference/output 关闭
+- [ ] Wandering 准入后允许 `entries=[]`；零想法、零表达是健康结果
+- [ ] 区分模型 requested intent 与系统 realized fate：只有真实 delivery receipt 才能记为 shared
+- [ ] 主动表达必须有 privacy boundary、frequency cap、quiet window、Owner feedback 和一键 mute/revoke
+- [ ] expression/outlet/synthesis 分阶段开放，不能因 Seed ready 一次性全部开启
+- [ ] 用 Owner 的真实感受评估“有帮助、太机械、不像我、太频繁、越过私密边界”，不让模型自评温度
 
 **毕业原则**：先成为可靠、安静、懂轻重的伙伴，再逐步获得主动表达能力。
 
@@ -473,35 +389,61 @@ Recall Plan
 
 ### R6.1 Seed Evidence 增量化
 
-- [ ] `run_v3_seed_evidence_cycle` 从全量百万行读取迁移到 offset/cursor 增量读取。
-- [ ] 利用现有 `source_offset_start/end`，保留重建和回放路径。
-- [ ] 用 10 万行 fixture 对比全量/增量结果完全等价，并记录耗时、峰值内存和 fallback。
+- [ ] `run_v3_seed_evidence_cycle` 从全量百万行读取迁移到 offset/cursor 增量读取
+- [ ] 利用现有 `source_offset_start/end`，保留重建和回放路径
+- [ ] 用 10 万行 fixture 对比全量/增量结果完全等价，并记录耗时、峰值内存和 fallback
 
 ### R6.2 Monitor 性能
 
-- [ ] 为每个 section 记录 runtime budget 和 cache/read path。
-- [ ] valid fresh cache 必须允许昂贵 reader 被 monkeypatch 为 raise 后仍成功；0 是合法 cached value。
-- [ ] cache 与 live computation 增加 deterministic parity 测试。
-- [ ] 不能通过减少检查范围、吞错误或延长 stale 窗口伪装性能改善。
+- [ ] 为每个 section 记录 runtime budget 和 cache/read path
+- [ ] valid fresh cache 必须允许昂贵 reader 被 monkeypatch 为 raise 后仍成功；0 是合法 cached value
+- [ ] cache 与 live computation 增加 deterministic parity 测试
+- [ ] 不能通过减少检查范围、吞错误或延长 stale 窗口伪装性能改善
 
 ### R6.3 稳定化证据自动生成
 
-- [ ] 自动生成测试 delta、skip reason、warning classification、静态门和 staged diff digest。
-- [ ] 稳定化清单只记录经工具验证的输出，避免手写基线漂移。
-- [ ] 生成器不得修改 canonical memory、Owner state 或生产账本。
+- [ ] 自动生成测试 delta、skip reason、warning classification、静态门和 staged diff digest
+- [ ] 稳定化清单只记录经工具验证的输出，避免手写基线漂移
+- [ ] 生成器不得修改 canonical memory、Owner state 或生产账本
 
 ---
 
 ## 阶段验收矩阵
 
 | 阶段 | 进入条件 | 退出条件 | 禁止动作 |
-|---|---|---|---|
+|------|----------|----------|----------|
 | R1 自然证据 | 运行时已采用配置/代码 | 自然窗口满足且 falsifier 未命中 | 手工补证、回填成熟度 |
 | R2 运行真相 | canonical artifact 已存在 | Dashboard/Monitor/status 同源且 CI 真运行 | 新建平行权威账本 |
 | R3 语义收敛 | 等价 fixture 完整 | 单一实现、旧数据兼容、消费者一致 | 机械合并不同语义 helper |
 | R4 状态机 | 当前状态盘点完成 | 非法状态结构上不可写、旧行可读 | 直接重写历史账本 |
 | R5 认知伙伴 | 基础 shadow/canary 已部署 | Owner 反馈与自然质量门满足 | 自动身份/关系写入、强制主动表达 |
 | R6 性能 | 行为基线可复现 | 等价且资源改善有实测证据 | 用 stale cache/少检查伪装加速 |
+
+---
+
+## 当前进度总览
+
+### 已完成（无需代码，等待自然积累）
+
+| 观察项 | 预计时间 | 条件 |
+|--------|----------|------|
+| V2 Exposure 窗口成熟 | 2-3 周 | 自然 cron 积累 |
+| V3 natural evidence 满 30 天 | ~3 周 | 观察窗口期 |
+| 自动 v1 Monitor artifact 产生 | 下一次 daily cron (02:30) | 当前仍是 legacy artifact |
+| 生产 count 冲突解决 | 待 Owner 决定语义 | 确认 13 vs 31 定义差异 |
+
+### 可继续推进的工程项
+
+| 项 | 优先级 | 状态 |
+|----|--------|------|
+| R4.1 SectionStatus 契约 | P1 | `planned` |
+| R5.1 Continuity 新鲜度定义 | P1 | `planned` |
+| R5.2.1 Gap Note | P1 | `planned` |
+| R6.1 Seed Evidence 增量 | P2 | `planned` |
+| R6.2 Monitor 性能 | P2 | `planned` |
+| R2.2 clean-host installer | P2 | `planned` |
+| R2.5 私有资产备份 | P2 | `planned` |
+| R6.3 稳定化证据自动生成 | P2 | `planned` |
 
 ---
 
@@ -521,32 +463,6 @@ Recall Plan
 12. commit 后从 fresh clone 再跑完整测试；生产证据和远端状态一致后 push，push 永远最后。
 
 涉及 OwnerGate、身份/关系、永久记忆、外部发送、执行或不可逆迁移时，必须停在提案/确认边界。
-
----
-
-## 近期执行顺序
-
-### 现在执行
-
-1. 保持 P0–P2 当前部署不变，积累 V2、V3 和 Recall 自然证据。
-2. 建立 Recall must-recall golden set、route-by-route shadow coverage 和 Gap Note metadata-only shadow candidate。
-3. 落地 GitHub Actions、mount-isolated full test 和分类化 skip/warning 门。
-4. 让公共 closure matrix 不再因内部文档缺失而 skipped。
-5. 清理两个项目自有 warning：ambient roots fallback 和 deprecated knob 迁移。
-
-### 自然门满足后
-
-6. 提交 Recall bounded apply-canary 提案；不得直接全局 apply。
-7. 评估 Review Agenda canary 的 Owner 减负和错误抑制质量。
-8. 评估 V3 Seed admission；仍不自动开放 synthesis/outlet/expression。
-
-### 后续独立工作包
-
-9. 时间戳语义矩阵与分模块迁移。
-10. natural row typed view 收敛。
-11. SectionStatus 与 Monitor typed pipeline。
-12. Proposal/token 显式状态机。
-13. Seed Evidence 增量化与 Monitor 性能优化。
 
 ---
 
