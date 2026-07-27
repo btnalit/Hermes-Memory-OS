@@ -22,12 +22,13 @@ _SECTION_LABELS: dict[str, str] = {
     "open_threads": "Open threads",
     "recent_events": "Recent",
     "owner_preferences": "Preferences",
+    "community_snapshot": "Community",
     "capability_map": "Capabilities",
     "material_index": "Materials",
 }
 
 # Sections rendered in the short (casual-chat) version.
-_SHORT_SECTIONS = {"active_projects", "open_threads", "owner_preferences"}
+_SHORT_SECTIONS = {"active_projects", "open_threads", "owner_preferences", "community_snapshot"}
 
 
 def render_state_overlay_md(

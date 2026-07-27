@@ -68,6 +68,7 @@ SOURCE_CLEARANCE_CYCLE_HELPER = REPO_ROOT / "scripts" / "memory_os_clearance_cyc
 SOURCE_CLEARANCE_CYCLE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_clearance_cycle_gate.py"
 SOURCE_RAGFLOW_READONLY_PROBE = REPO_ROOT / "scripts" / "memory_os_ragflow_readonly_probe.py"
 SOURCE_EXTERNAL_EVIDENCE_RAGFLOW_WRAPPER = REPO_ROOT / "scripts" / "external_evidence_ragflow_readonly_probe.sh"
+SOURCE_COMMUNITY_DEPLOY = REPO_ROOT / "scripts" / "deploy_community.py"
 AGENT_OS_SHELL_PLUGIN_NAME = "memory-os-agent-os"
 MEMORY_PROVIDER_PLUGIN_NAME = "memory_os"
 
@@ -410,6 +411,7 @@ def install_plugin(
         hermes_home,
         dry_run=dry_run,
     )
+    community_layout_report = _initialize_community_layout(hermes_home, dry_run=dry_run)
     v3_backup_exclusions_path = _write_v3_backup_exclusions(hermes_home, dry_run=dry_run)
     expired_cleanup_report = _run_expired_working_migration(
         hermes_home,
@@ -677,6 +679,7 @@ def install_plugin(
         "hindsight_mode": hindsight_mode,
         "hindsight_adoption": hindsight_adoption,
         "config_defaults": config_defaults_report,
+        "community_layout": community_layout_report,
         "v3_backup_exclusions_path": str(v3_backup_exclusions_path),
         "expired_working_cleanup": expired_cleanup_report,
         "smoke_test": {
@@ -1132,6 +1135,44 @@ def _write_module_cadence_report_script(hermes_home: Path, *, dry_run: bool) -> 
     return target
 
 
+def _initialize_community_layout(hermes_home: Path, *, dry_run: bool) -> dict[str, Any]:
+    """Create the portable community data layout without replacing owner data."""
+
+    community_root = Path(hermes_home) / "memory-os" / "community"
+    directories = [
+        community_root,
+        community_root / "charters",
+        community_root / "shared",
+        community_root / "partners",
+        community_root / "system",
+    ]
+    roster = community_root / "roster.jsonl"
+    budget = community_root / "budget.yaml"
+    if dry_run:
+        return {
+            "status": "planned",
+            "root": str(community_root),
+            "budget_action": "preserve" if budget.exists() else "create",
+        }
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
+    roster.touch(exist_ok=True)
+    budget_action = "preserve"
+    if not budget.exists():
+        budget.write_text(
+            "global:\n"
+            "  max_active_partners: 1\n"
+            "  weekly_token_budget: 500000\n"
+            "per_partner_default:\n"
+            "  weekly_token_budget: 200000\n"
+            "  max_unsolicited_messages_per_day: 3\n"
+            "enforcement: fail-closed\n",
+            encoding="utf-8",
+        )
+        budget_action = "created"
+    return {"status": "ok", "root": str(community_root), "budget_action": budget_action}
+
+
 def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
     sources = {
         "module_cadence_report_cron": SOURCE_MODULE_CADENCE_REPORT_CRON,
@@ -1168,6 +1209,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "clearance_cycle_gate": SOURCE_CLEARANCE_CYCLE_GATE,
         "ragflow_readonly_probe": SOURCE_RAGFLOW_READONLY_PROBE,
         "external_evidence_ragflow_wrapper": SOURCE_EXTERNAL_EVIDENCE_RAGFLOW_WRAPPER,
+        "community_deploy": SOURCE_COMMUNITY_DEPLOY,
     }
     targets: dict[str, Path] = {}
     for key, source in sources.items():

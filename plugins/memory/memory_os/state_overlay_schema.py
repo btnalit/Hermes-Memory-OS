@@ -75,6 +75,9 @@ class StateOverlay:
     owner_preferences: OverlaySection = field(default_factory=lambda: OverlaySection(
         source="crystallized (kind=preference)",
     ))
+    community_snapshot: OverlaySection = field(default_factory=lambda: OverlaySection(
+        source="community/roster.jsonl + community/shared/*.jsonl",
+    ))
     capability_map: OverlaySection = field(default_factory=lambda: OverlaySection(
         source="not_wired: provider interface defined but no data source connected — known architectural placeholder, not a runtime failure",
     ))
@@ -102,6 +105,7 @@ class StateOverlay:
             "open_threads": self.open_threads.to_dict(),
             "recent_events": self.recent_events.to_dict(),
             "owner_preferences": self.owner_preferences.to_dict(),
+            "community_snapshot": self.community_snapshot.to_dict(),
             "capability_map": self.capability_map.to_dict(),
             "material_index": self.material_index.to_dict(),
             "risk_notes": list(self.risk_notes),

@@ -214,6 +214,17 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
 
     assert parser.parse_args(["status"]).agent_os_command == "status"
     assert parser.parse_args(["doctor"]).agent_os_command == "doctor"
+    community_status_args = parser.parse_args(["community", "status"])
+    assert community_status_args.agent_os_command == "community"
+    assert community_status_args.community_command == "status"
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "community", "create-partner",
+            "--name", "Aran",
+            "--personality", "curious",
+            "--backend", "deepseek-v4-flash",
+            "--actor", "sannai",
+        ])
     hindsight_status_args = parser.parse_args(["hindsight", "status"])
     assert hindsight_status_args.agent_os_command == "hindsight"
     assert hindsight_status_args.hindsight_command == "status"

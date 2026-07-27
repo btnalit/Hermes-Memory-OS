@@ -17,21 +17,21 @@ from plugins.memory.memory_os.community_snapshot import build_community_snapshot
 
 class TestSharedMemory:
     def test_write_and_read(self, tmp_path: Path) -> None:
-        entry = write_shared_memory(tmp_path, "test-01", "聊了关于记忆系统的话题")
+        entry = write_shared_memory(tmp_path, "test-01", "聊了关于记忆系统的话题", actor="sannai")
         assert entry.summary == "聊了关于记忆系统的话题"
         entries = read_shared_memory(tmp_path, "test-01")
         assert len(entries) == 1
         assert entries[0].summary == "聊了关于记忆系统的话题"
 
     def test_open_threads(self, tmp_path: Path) -> None:
-        write_shared_memory(tmp_path, "test-01", "话题1", thread="open")
-        write_shared_memory(tmp_path, "test-01", "话题2", thread="closed")
+        write_shared_memory(tmp_path, "test-01", "话题1", actor="sannai", thread="open")
+        write_shared_memory(tmp_path, "test-01", "话题2", actor="sannai", thread="closed")
         open_threads = get_open_threads(tmp_path, "test-01")
         assert len(open_threads) == 1
         assert open_threads[0].summary == "话题1"
 
     def test_newspaper(self, tmp_path: Path) -> None:
-        write_newspaper_entry(tmp_path, "今日新闻：AI 新突破")
+        write_newspaper_entry(tmp_path, "今日新闻：AI 新突破", actor="info_collect")
         entries = get_community_newspaper(tmp_path)
         assert len(entries) == 1
         assert "AI 新突破" in entries[0].summary
@@ -69,14 +69,14 @@ class TestTriggers:
 
     def test_shared_followup(self, tmp_path: Path):
         from plugins.memory.memory_os.community_shared import write_shared_memory
-        write_shared_memory(tmp_path, "test-01", "在修一个 bug", thread="open", sannai_feeling="好奇")
+        write_shared_memory(tmp_path, "test-01", "在修一个 bug", actor="sannai", thread="open", sannai_feeling="好奇")
         state = PartnerState(partner_id="test-01", name="测试")
         result = check_shared_followup_trigger(state, tmp_path)
         assert result.should_trigger
 
     def test_newspaper_trigger(self, tmp_path: Path):
         from plugins.memory.memory_os.community_shared import write_newspaper_entry
-        write_newspaper_entry(tmp_path, "新文章：关于记忆系统")
+        write_newspaper_entry(tmp_path, "新文章：关于记忆系统", actor="info_collect")
         state = PartnerState(partner_id="test-01", name="测试")
         result = check_newspaper_trigger(state, tmp_path)
         assert result.should_trigger

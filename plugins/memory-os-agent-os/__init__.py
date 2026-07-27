@@ -36,6 +36,7 @@ _ALLOWED_ALIASES = {
     "projection",
     "left-brain",
     "index",
+    "community",
 }
 _PLUGIN_NAME = "memory-os-agent-os"
 _LOGGER = logging.getLogger(__name__)
@@ -195,6 +196,9 @@ def register_cli(subparser: argparse.ArgumentParser) -> None:
     subs = subparser.add_subparsers(dest="agent_os_command")
     subs.add_parser("status")
     subs.add_parser("doctor")
+    community_parser = subs.add_parser("community")
+    community_subs = community_parser.add_subparsers(dest="community_command", required=True)
+    community_subs.add_parser("status")
     hindsight_parser = subs.add_parser("hindsight")
     hindsight_subs = hindsight_parser.add_subparsers(dest="hindsight_command", required=True)
     hindsight_subs.add_parser("status")
@@ -468,9 +472,38 @@ def _memory_os_agent_os_exit_code(args: argparse.Namespace) -> int:
         return _host_owner_review_channel_command(args)
     if command == "host-probe":
         return _host_capability_probe_command()
+    if command == "community":
+        return _community_command(args)
     delegated_args = argparse.Namespace(**vars(args))
     delegated_args.memory_os_command = command
     return _delegate_to_memory_os_cli(delegated_args)
+
+
+def _community_command(args: argparse.Namespace) -> int:
+    """Expose read-only community status to the active Hermes profile."""
+
+    hermes_home = _resolve_hermes_home()
+    if hermes_home is None:
+        print(json.dumps({"status": "fail", "errors": ["hermes_home_unavailable"]}))
+        return 1
+    _ensure_memory_os_runtime_path()
+    from plugins.memory.memory_os.community import get_roster, validate_roster
+
+    root = hermes_home / "memory-os"
+    roster = root / "community" / "roster.jsonl"
+    subcommand = str(getattr(args, "community_command", "") or "")
+    if subcommand == "status":
+        entries = get_roster(roster)
+        payload = {
+            "schema_version": "memory-os.community.status.v1",
+            "status": "ok" if not validate_roster(roster) else "warning",
+            "profile": _resolve_profile(),
+            "members": [entry.to_dict() for entry in entries],
+            "validation_errors": validate_roster(roster),
+        }
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0
+    return 2
 
 
 def _host_owner_review_channel_command(args: argparse.Namespace) -> int:

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import pytest
 
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
+from plugins.memory.memory_os.community import RosterEntry, add_to_roster
+from plugins.memory.memory_os.community_shared import write_shared_memory
 from plugins.memory.memory_os.cognitive_loop import CognitiveLoopRunner
 from plugins.memory.memory_os.legacy_right_brain_retirement import retire_legacy_right_brain
 from plugins.memory.memory_os.roots import MemoryOSRoots
@@ -21,6 +23,36 @@ def test_cognitive_loop_rejects_apply_without_test_host(tmp_path):
     assert result["code"] == "test_host_required"
     assert result["boundaries"]["actual_send"] is False
     assert result["boundaries"]["actual_execute"] is False
+
+
+def test_community_cycle_deduplicates_persisted_candidate_reports(tmp_path):
+    store = _init_store(tmp_path)
+    community_root = tmp_path / "memory-os" / "community"
+    assert add_to_roster(
+        community_root / "roster.jsonl",
+        RosterEntry(id="partner-01", name="Partner"),
+    ) == []
+    state_path = community_root / "partners" / "partner-01" / "memory" / "state.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(json.dumps({"last_shared_ts": "", "pending_thoughts": []}), encoding="utf-8")
+    write_shared_memory(
+        community_root,
+        "partner-01",
+        "same thread",
+        sannai_feeling="curious",
+        actor="sannai",
+    )
+    runner = CognitiveLoopRunner(store)
+
+    first = runner._community_cycle({}, apply=True)
+    second = CognitiveLoopRunner(store)._community_cycle({})
+
+    assert first["candidate_count"] == 1
+    assert first["cursor_persisted"] is True
+    assert "suggested_message" not in first["candidates"][0]
+    assert second["candidate_count"] == 0
+    assert second["deduplicated_count"] == 1
+    assert second["actual_send"] is False
 
 
 def test_cognitive_loop_default_disables_legacy_right_brain_without_writes(tmp_path):
@@ -96,6 +128,7 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
         "working_decay",
         "household_digest",
         "digest_consolidation",
+        "community_cycle",
         "wandering_mind",
         "ops_gate",
         "evidence_scoring",
@@ -201,6 +234,8 @@ def test_cognitive_loop_runs_full_no_send_cycle_and_writes_report(tmp_path):
     assert steps["crystallized_revalidator"]["result"]["demotion_live_applied"] is False
     assert steps["migration_controller"]["result"]["migration_live_applied"] is False
     assert steps["abstraction_distillation"]["result"]["distillation_live_applied"] is False
+    assert steps["community_cycle"]["result"]["actual_send"] is False
+    assert steps["community_cycle"]["result"]["runtime_wired"] is True
     assert steps["grounded_expression_judge"]["result"]["policy_live_applied"] is False
     assert steps["memory_projection"]["result"]["execution_gate_resolution"]["status"] == "valid"
     assert steps["left_brain_advisor"]["result"]["execution_gate_resolution"]["status"] == "valid"

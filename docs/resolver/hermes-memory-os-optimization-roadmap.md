@@ -386,7 +386,7 @@ gap_note_body_persisted_count = 0
 
 ## R7 — Hermes Community（伙伴社区生态）
 
-**状态**：`implemented`（v0.3 设计文档已完成，代码已实现并部署）
+**状态**：`implemented + tested + deployed; live blocked`。基础设施、标准部署、overlay 与 no-send cognitive consumer 已接入源码；本机和 2.88 文件部署/postcheck/幂等已通过。异构伙伴 `alanlive` 曾运行并完成真实 mailbox transport + pairing handshake，但因 2.88 资源压力已停用并转为 `dormant`；伙伴模型回复、fresh-session overlay、scheduler 行为和自然观察尚未完成，不能标为 `live`。
 
 ### R7.1 背景与目标
 
@@ -408,6 +408,28 @@ gap_note_body_persisted_count = 0
 **异构底模强制**：伙伴与 Sannai 不同底模，防回音室退化。
 
 **事件驱动触发**（替代定时心跳）：伙伴来信 / 环境事件 / 内部联想 → RH-26 router 判定是否值得开口。保留 24h 兜底心跳。
+
+**2026-07-27 修复证据**：
+
+- partner ID containment、损坏 roster、重复 ID、append-only lifecycle、异构 backend 与 budget fail-closed 已有 adversarial tests；
+- shared writer 限定为 Sannai，newspaper writer 限定为可信 ingress；
+- trigger 增加 max-age 与 cursor，避免旧 shared/newspaper 无限重放；
+- `community_snapshot` 已进入 DynamicStateOverlay schema/renderer/builder；
+- `community_cycle` 已进入现有 cognitive loop，但维持 `actual_send=false`；
+- `deploy_community.py` 支持 dry-run/apply/postcheck；12 个模块写入双 runtime，shell/helper 写入各自 canonical path，共 14 个部署源项；并包含目标 runtime import、备份、完整回滚、保留 owner budget 与哈希验证；
+- `memory-os-agent-os community` 只提供只读 status；伙伴 mutation 不暴露可伪造 actor 的公共 CLI；
+- write-surface gate 已登记 shared/newspaper 写入面。
+
+**最终验证证据（2026-07-27）**：
+
+- focused community/deploy/runtime：`173 passed`；
+- mount-isolated 当前工作树与 fresh patched clone：均为 `2993 passed / 6 skipped / 2 bounded third-party warnings`；
+- write-surface：`155 surfaces / 0 unclassified`；
+- 本机与 2.88：apply/postcheck/第二次幂等通过，目标 runtime fresh-process import 通过；
+- 真实 mailbox：Sannai→alanlive delivery/handled receipt、alanlive→Sannai pairing response、官方 pairing approval 均已验证；
+- 资源边界：伙伴 gateway 增加后，2.88 可选依赖安装被 SIGKILL，主机随后于 17:40:48 重启。为保护核心服务，`alanlive` service 已 disable/stop，roster lifecycle 已转为 `dormant`。因此这不是 autonomous-live 证据。
+
+以上证明 bounded infrastructure、部署完整性、真实双向 transport 和认证握手；伙伴推理回复、长期在线和自然关系样本仍必须由后续生产 receipt 证明。
 
 ### R7.3 P0 一周计划（一个朋友）
 
@@ -485,7 +507,7 @@ gap_note_body_persisted_count = 0
 
 | 里程碑 | 优先级 | 状态 |
 |--------|--------|------|
-| P0：一个朋友的完整闭环 | P1 | ✅ `implemented` — 阿澜已注册，Hermes 大总管已就位 |
+| P0：一个朋友的完整闭环 | P1 | `blocked` — 源码、部署、异构 profile、双向 transport 与 pairing 已验证；2.88 资源不足，伙伴已 dormant。自主模型回复、shared 自然写入和观察出口尚待 receipt |
 | P1：多伙伴配额内自治 | P2 | `planned` |
 | P2：生态化与社区周报 | P3 | `planned` |
 

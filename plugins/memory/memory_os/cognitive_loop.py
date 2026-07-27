@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import date, datetime, timezone
 from time import perf_counter
 from typing import Any, Callable
@@ -224,6 +225,7 @@ class CognitiveLoopRunner:
             ("working_decay", self._working_decay),
             ("household_digest", self._household_digest),
             ("digest_consolidation", self._digest_consolidation),
+            ("community_cycle", lambda context: self._community_cycle(context, apply=apply)),
             *([("wandering_mind", self._wandering_mind)] if legacy_right_brain_enabled else []),
             ("ops_gate", self._ops_gate),
             ("evidence_scoring", self._evidence_scoring),
@@ -278,6 +280,97 @@ class CognitiveLoopRunner:
 
         config = load_config(self.hermes_home).get("right_brain_expression", {})
         return isinstance(config, dict) and config.get("legacy_cognitive_loop_enabled") is True
+
+    def _community_cycle(self, context: dict[str, Any], *, apply: bool = False) -> dict[str, Any]:
+        """Evaluate triggers and persist only hashed scheduler dedup state."""
+
+        from plugins.memory.memory_os.community import get_active_roster
+        from plugins.memory.memory_os.community_triggers import PartnerState, evaluate_all_triggers
+        from plugins.memory.memory_os.jsonl_io import write_json_atomic
+
+        community_root = self.store.roots.memory_os_root / "community"
+        roster_path = community_root / "roster.jsonl"
+        members = get_active_roster(roster_path)
+        candidates: list[dict[str, Any]] = []
+        state_errors: list[dict[str, str]] = []
+        cursor_path = community_root / "system" / "trigger_cursors.json"
+        seen_candidate_keys: set[str] = set()
+        try:
+            cursor_payload = json.loads(cursor_path.read_text(encoding="utf-8"))
+            if isinstance(cursor_payload, dict) and isinstance(cursor_payload.get("candidate_keys"), list):
+                seen_candidate_keys = {
+                    str(value) for value in cursor_payload["candidate_keys"] if str(value).strip()
+                }
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            seen_candidate_keys = set()
+        new_candidate_keys: list[str] = []
+        deduplicated_count = 0
+        for member in members:
+            state_path = community_root / "partners" / member.id / "memory" / "state.json"
+            try:
+                raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+                if not isinstance(raw_state, dict):
+                    raise ValueError("partner state must be an object")
+                state = PartnerState(
+                    partner_id=member.id,
+                    name=member.name,
+                    last_interaction=str(raw_state.get("last_interaction") or ""),
+                    pending_thoughts=[
+                        str(value) for value in raw_state.get("pending_thoughts", [])
+                        if str(value).strip()
+                    ] if isinstance(raw_state.get("pending_thoughts", []), list) else [],
+                    last_newspaper_ts=str(raw_state.get("last_newspaper_ts") or ""),
+                    last_shared_ts=str(raw_state.get("last_shared_ts") or ""),
+                )
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                state_errors.append({"partner_id": member.id, "error": type(exc).__name__})
+                continue
+            for trigger in evaluate_all_triggers(state, community_root):
+                key = hashlib.sha256(
+                    f"{member.id}\0{trigger.trigger_reason}\0{trigger.source_ts}".encode("utf-8")
+                ).hexdigest()
+                if key in seen_candidate_keys:
+                    deduplicated_count += 1
+                    continue
+                new_candidate_keys.append(key)
+                candidates.append(
+                    {
+                        "partner_id": member.id,
+                        "trigger_reason": trigger.trigger_reason,
+                        "priority": trigger.priority,
+                        "suggested_message_sha256": hashlib.sha256(
+                            trigger.suggested_message.encode("utf-8")
+                        ).hexdigest(),
+                        "source_ts": trigger.source_ts,
+                    }
+                )
+        if apply and new_candidate_keys:
+            write_json_atomic(
+                cursor_path,
+                {
+                    "schema_version": "memory-os.community_trigger_cursors.v1",
+                    "candidate_keys": [*sorted(seen_candidate_keys), *new_candidate_keys][-1000:],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        return {
+            "schema_version": "memory-os.community_cycle.v1",
+            "status": "ok",
+            "runtime_wired": True,
+            "active_partner_count": len(members),
+            "state_error_count": len(state_errors),
+            "state_errors": state_errors[:20],
+            "candidate_count": len(candidates),
+            "deduplicated_count": deduplicated_count,
+            "cursor_persisted": bool(apply and new_candidate_keys),
+            "candidates": candidates[:20],
+            "actual_send": False,
+            "actual_execute": False,
+            "actual_identity_write": False,
+            "actual_relationship_write": False,
+            "actual_crystallized_approval": False,
+            "hindsight_exported": False,
+        }
 
     def _legacy_right_brain_retired(self) -> bool:
         from plugins.memory.memory_os.legacy_right_brain_retirement import legacy_right_brain_is_retired

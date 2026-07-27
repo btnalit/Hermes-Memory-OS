@@ -183,6 +183,15 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/session_mirror.py::_append_jsonl::append_jsonl_locked_call::path": "session_mirror_private_writer",
     "plugins/memory/memory_os/state_overlay.py::write_state_overlay::atomic_json_replace_call::out_path": "state_overlay_projection_write",
     "plugins/memory/memory_os/state_overlay.py::_write_overlay_quality::atomic_json_replace_call::out_dir / 'quality.json'": "state_overlay_quality_report",
+    "plugins/memory/memory_os/community_shared.py::write_shared_memory::append_jsonl_locked_call::target": "community_shared_projection_sannai_only",
+    "plugins/memory/memory_os/community_shared.py::write_newspaper_entry::append_jsonl_locked_call::target": "community_newspaper_trusted_ingress",
+    "plugins/memory/memory_os/cognitive_loop.py::CognitiveLoopRunner._community_cycle::atomic_json_replace_call::cursor_path": "community_trigger_dedup_projection_state",
+    "plugins/memory/memory_os/execution_gate.py::_write_gate_index::atomic_json_replace_call::_gate_index_path(roots)": "execution_gate_projection_index",
+    "plugins/memory/memory_os/partner_create.py::create_partner::atomic_json_replace_call::memory_dir / 'state.json'": "community_partner_private_runtime_state",
+    "plugins/memory/memory_os/runtime.py::MemoryOSRuntime._write_state::atomic_json_replace_call::self._state_path": "memory_os_runtime_projection_state",
+    "plugins/memory/memory_os/runtime.py::MemoryOSRuntime._write_heartbeat_error_fallback::atomic_json_replace_call::self.store.roots.memory_os_root / 'runtime' / 'heartbeat_error_fallback.json'": "runtime_error_fallback_projection",
+    "plugins/memory/memory_os/session_mirror.py::SessionMirror._write_state::atomic_json_replace_call::self.state_path": "session_mirror_projection_state",
+    "plugins/modules/governance/provisional_sweep.py::ProvisionalSweepModule.run_once::atomic_json_replace_call::p": "provisional_sweep_projection_report",
     "plugins/memory/memory_os/store.py::MemoryOSStore.append_event::append_jsonl_locked_call::path": "canonical_event_store",
     "plugins/memory/memory_os/store.py::MemoryOSStore.write_working_document::atomic_json_replace_call::path": "working_document_store",
     "plugins/memory/memory_os/store.py::MemoryOSStore._quarantine_malformed_event::append_jsonl_locked_call::quarantine_path": "quarantine_only",
@@ -321,10 +330,9 @@ class _WriteSurfaceVisitor(ast.NodeVisitor):
             # it appears.
             kind = "append_jsonl_locked_call"
             target = ast.unparse(node.args[0]) if node.args else ""
-        elif isinstance(node.func, ast.Name) and node.func.id == "_atomic_write_json":
-            # Generalized project-wide for the same reason — each file that
-            # defines its own private `_atomic_write_json` helper still needs
-            # its call sites classified, not just the two V3 files.
+        elif isinstance(node.func, ast.Name) and node.func.id in {"_atomic_write_json", "write_json_atomic"}:
+            # Every atomic JSON projection/state write must be explicitly
+            # classified, including callers of the shared jsonl_io primitive.
             kind = "atomic_json_replace_call"
             target = ast.unparse(node.args[0]) if node.args else ""
         elif self.rel_path in {

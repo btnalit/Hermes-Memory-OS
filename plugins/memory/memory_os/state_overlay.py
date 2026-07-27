@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+import yaml
+
 from .state_overlay_schema import (
     StateOverlay,
     OverlayEntry,
@@ -51,6 +53,26 @@ _COMPACTION_RESIDUE_RE = re.compile(
     r"(?:Earlier turns were compacted[^\n]*|Earli\.\.\.[^\n]*)",
     re.IGNORECASE,
 )
+
+
+def _community_inbox_dir(roots: "MemoryOSRoots") -> Path:
+    """Resolve the configured mailbox inbox without host-global guessing."""
+
+    config_path = roots.hermes_home / "config.yaml"
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        mailbox = ((config.get("platforms") or {}).get("mailbox") or {})
+        extra = mailbox.get("extra") or {}
+        root_text = str(extra.get("root") or "").strip()
+        agent_id = str(extra.get("agent_id") or roots.profile).strip()
+        if root_text and agent_id and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id):
+            mailbox_root = Path(root_text).expanduser()
+            if not mailbox_root.is_absolute():
+                mailbox_root = roots.hermes_home / mailbox_root
+            return mailbox_root / "agents" / agent_id / "inbox"
+    except (OSError, TypeError, yaml.YAMLError):
+        pass
+    return roots.hermes_home / "messages" / "agents" / roots.profile / "inbox"
 
 
 def build_state_overlay(
@@ -197,6 +219,46 @@ def build_state_overlay(
         )
     if overlay.owner_preferences.data:
         overlay.owner_preferences.status = "ok"
+
+    # ── community_snapshot: derived roster/shared projection ─────────
+    try:
+        from .community_snapshot import build_community_snapshot
+
+        community = build_community_snapshot(
+            roots.memory_os_root / "community",
+            inbox_dir=_community_inbox_dir(roots),
+        )
+        active_names = [str(value) for value in community.get("active_partners", []) if str(value)]
+        if active_names:
+            overlay.community_snapshot.data.append(
+                OverlayEntry(
+                    text="Active community: " + ", ".join(active_names[:5]),
+                    source="community:roster",
+                    source_kind="community",
+                )
+            )
+        unread_messages = int(community.get("unread_messages") or 0)
+        if unread_messages > 0:
+            overlay.community_snapshot.data.append(
+                OverlayEntry(
+                    text=f"Unread partner messages: {unread_messages}",
+                    source="community:mailbox",
+                    source_kind="community",
+                )
+            )
+        for index, text in enumerate(community.get("recent_interactions", [])[:3]):
+            if str(text).strip():
+                overlay.community_snapshot.data.append(
+                    OverlayEntry(
+                        text=str(text).strip()[:200],
+                        source=f"community:shared:{index}",
+                        source_kind="community",
+                    )
+                )
+        if overlay.community_snapshot.data:
+            overlay.community_snapshot.status = "ok"
+    except (OSError, TypeError, ValueError):
+        overlay.community_snapshot.status = "error"
 
     return overlay.to_dict()
 
