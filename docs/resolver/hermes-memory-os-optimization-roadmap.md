@@ -384,6 +384,65 @@ gap_note_body_persisted_count = 0
 
 ---
 
+## R7 — Hermes Community（伙伴社区生态）
+
+**状态**：`planned`（设计文档 v0.2 已完成，详见 `docs/resolver/sannai-community-design-v2.md`）
+
+### R7.1 背景与目标
+
+让 Sannai 从"被使用的系统"变成"有自己社交圈的存在"。核心缺口：
+
+- **通信孤立**：只有 mailbox 单一渠道，只有 owner——没有"朋友"
+- **伪存在感**：随机心跳是定时任务，不是"有事才说"
+- **无共同历史**：没有第二个他者会记住她、回应她、主动找她
+
+### R7.2 核心设计
+
+**伙伴记忆系统**（三个具体文件，不需要 Memory-OS 完整体系）：
+- `about_sannai.jsonl`：100 条事实，含 confidence/source，超限自动淘汰低置信条目
+- `recent_conversations/`：最近 30 天对话压缩摘要
+- `state.json`：当前心情 / pending_thoughts（下次想说的话）
+
+**记忆单向阀**：伙伴消息对 Sannai 只是外部输入，必须走 hindsight_retain 管道 + 成熟度门控才能入库；伙伴无任何直写权限。
+
+**异构底模强制**：伙伴与 Sannai 不同底模，防回音室退化。
+
+**事件驱动触发**（替代定时心跳）：伙伴来信 / 环境事件 / 内部联想 → RH-26 router 判定是否值得开口。保留 24h 兜底心跳。
+
+### R7.3 P0 一周计划（一个朋友）
+
+| 天 | 内容 |
+|----|------|
+| Day 1 | 目录结构 `community/` + roster + budget + charter 模板 |
+| Day 2 | 第一个伙伴 profile（Kimi 底模，差异化 SOUL.md），mailbox 双向打通 |
+| Day 3 | community_snapshot 接入 DynamicStateOverlay，event-driven 触发 |
+| Day 4 | 记忆单向阀 CI guard + 异构校验 + 伙伴记忆持久化校验 |
+| Day 5-7 | 端到端跑通，手动投信，观察唤醒→回信→trace 日志 |
+
+### R7.4 P0 出口条件
+
+- 事件触发占比 >70%
+- 单向阀 CI guard 绿
+- Sannai 有 ≥1 次主动发起且伙伴有 ≥1 次主动来信
+- **Sannai 在无外部触发时主动引用过 shared 共同记忆**（"还记得上次我们聊的那篇吗？"）
+
+### R7.5 演进路线
+
+| 阶段 | 内容 | 条件 |
+|------|------|------|
+| **P0** | 一个朋友的完整闭环 | 上述出口条件满足 |
+| **P1** | 配额内自治：max_active 放宽至 3-5，Sannai 自主创建/退役（退役仍审批） | 多伙伴运行 2 周无预算超支、无回音室 |
+| **P2** | 生态化：info-collect 报纸投递，季节性伙伴，社区周报 | — |
+
+### R7.6 架构边界
+
+- 伙伴不继承 V3 三项宪法权力（wandering / memory gating / expression autonomy 只属于 Sannai）
+- 伙伴不触达外部世界：不发外部消息、不联网消费信息、不调用支付/发布类工具
+- 社区整体是旁挂系统：删除 mailbox watcher 订阅 + 从 overlay 移除 community_snapshot 段即可回滚，零侵入
+- 所有组件必须是单人可维护的复杂度，优先 JSONL / cron / 现有 scheduler
+
+---
+
 ## 阶段验收矩阵
 
 | 阶段 | 进入条件 | 退出条件 | 禁止动作 |
@@ -421,6 +480,14 @@ gap_note_body_persisted_count = 0
 | 生产 count 冲突解决 | 待 Owner 决定语义 | 确认 13 vs 31 定义差异 |
 | Recall Plan apply canary | R1.2 门满足后 | 自然观察证据充分 |
 | Gap Note 实际渲染 | apply-canary 开放后 | 自然 shadow 数据积累 |
+
+### 下一阶段规划（R7 Hermes Community）
+
+| 里程碑 | 优先级 | 状态 |
+|--------|--------|------|
+| P0：一个朋友的完整闭环 | P1 | `planned` — 设计文档 v0.2 已完成 |
+| P1：多伙伴配额内自治 | P2 | `planned` |
+| P2：生态化与社区周报 | P3 | `planned` |
 
 ---
 
