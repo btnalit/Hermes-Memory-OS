@@ -24,12 +24,13 @@
 
 | 服务 | 状态 |
 |------|------|
-| **default gateway** | ❌ **inactive** |
-| **sannai gateway** | ❌ **inactive** |
+| **default gateway** | ✅ **active**（PID 2257747，自 09:13，555MB） |
+| **sannai gateway** | ✅ **active**（PID 2258391，自 09:16，391MB） |
 | **dashboard** | ❌ **inactive** |
 | Memory-OS monitor dashboard | ✅ 运行中（PID 4457，自 7/19） |
 | WhatsApp bridge | ❌ 不可用（localhost:3000 连接失败） |
 | sannai systemd timers | ✅ heartbeat + cognitive-loop 仍在运行 |
+| Mailbox | ✅ sannai 收件箱 143 封，hermes 收件箱 148 封 |
 
 ### Sannai 记忆系统版本
 
@@ -58,17 +59,18 @@
 
 ## 对 v0.2 设计的优化调整
 
-### 调整 1：P0 前置条件 — 先恢复 gateway，再部署新 Memory-OS
+### 调整 1：P0 前置条件 — 先部署新 Memory-OS，再验证 mailbox
 
-社区依赖 mailbox 通信，mailbox 依赖 gateway。所以 P0 的 Day 0 应该是：
+Gateway 已经在线，不需要恢复。但 sannai 的 Memory-OS 是旧版，需要先部署 batch 1-5：
 
 ```
-Day 0: 恢复 default gateway + sannai gateway
-         → 部署最新 Memory-OS（batch 1-5）到 sannai profile
+Day 0: 部署最新 Memory-OS（batch 1-5）到 sannai profile
+         → 备份现有 plugin 目录
+         → 定向同步本机 repo 到 2.88 的 sannai plugin 目录
+         → 验证 import 可导入
+         → 不重启 gateway（user-level 重启需要 owner 确认）
          → 验证 mailbox 双向通信
 ```
-
-没有 gateway，社区不存在。
 
 ### 调整 2：伙伴不跑在 2.88 上，跑在本机（10.20.2.66 或本机）
 
@@ -116,12 +118,13 @@ WhatsApp 挂了，社区周报应该通过 Telegram 发送。本机已经有 Tel
 
 ## 实际路线图
 
-### Phase 0：恢复基础设施（1-2 天）
+### Phase 0：部署新 Memory-OS（1 天）
 
-1. 恢复 sannai gateway
-2. 部署最新 Memory-OS（batch 1-5）到 sannai profile
-3. 验证 mailbox 双向通信
-4. 确认 sannai 状态正常
+1. 备份 sannai 现有 plugin 目录
+2. 定向同步本机 repo 最新代码到 2.88 的 sannai plugin 目录
+3. 验证 `from plugins.memory.memory_os import ...` 可导入
+4. 验证 mailbox 双向通信（sannai ↔ 本机）
+5. 确认 sannai 状态正常
 
 ### Phase 1：第一个朋友（在本机部署伙伴）
 
