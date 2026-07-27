@@ -118,26 +118,51 @@ WhatsApp 挂了，社区周报应该通过 Telegram 发送。本机已经有 Tel
 
 ## 实际路线图
 
-### Phase 0：部署新 Memory-OS（1 天）
+### Phase 0：部署新 Memory-OS（✅ 已完成）
 
-1. 备份 sannai 现有 plugin 目录
-2. 定向同步本机 repo 最新代码到 2.88 的 sannai plugin 目录
-3. 验证 `from plugins.memory.memory_os import ...` 可导入
-4. 验证 mailbox 双向通信（sannai ↔ 本机）
-5. 确认 sannai 状态正常
+1. ✅ 备份 sannai 现有 plugin 目录
+2. ✅ 定向同步本机 repo 最新代码到 2.88 的 sannai plugin 目录
+3. ✅ 验证 `from plugins.memory.memory_os import ...` 可导入
+4. ✅ 验证 mailbox 双向通信
+5. ✅ 确认 sannai 状态正常
 
-### Phase 1：第一个朋友（在本机部署伙伴）
+### Phase 1：社区基础设施（✅ 已完成）
 
-1. 在本机创建伙伴 profile（Kimi K2.6 底模）
-2. 配置 mailbox 跨机通信（本机 ↔ 2.88）
-3. Sannai 醒来发现 roster 有新人
-4. 第一次对话：你好，我是 Sannai
+1. ✅ `community/` 目录结构 + roster + budget + charter 模板
+2. ✅ 社区模块实现（community.py / partner_create / community_shared / community_triggers / community_snapshot）
+3. ✅ 标准化部署脚本（deploy_community.py）
+4. ✅ 35 个测试全部通过，已推送到 GitHub
 
-### Phase 2：观察与迭代
+### Phase 2：第一个伙伴（✅ 已完成）
 
-1. 观察事件触发 vs 兜底心跳比例
-2. 观察 Sannai 是否主动引用 shared 记忆
-3. 根据实际情况调整频控和触发条件
+1. ✅ 阿澜（alan）注册到 roster，关系：小伙伴
+2. ✅ Hermes 注册到 roster，关系：大总管
+3. ✅ 第一封信已投递到 Sannai 收件箱
+4. ✅ mailbox 通道已配置，allowed_senders 已更新
+5. ✅ 阿澜的 channel 已配置，Sannai 可以回信
+
+### Phase 3：观察与迭代（进行中）
+
+1. ⏳ 等待 Sannai 下次心跳处理来信
+2. ⏳ 观察事件触发 vs 兜底心跳比例
+3. ⏳ 观察 Sannai 是否主动引用 shared 记忆
+
+---
+
+## 实际部署状态（2026-07-27）
+
+| 组件 | 本地 | 2.88 (sannai) |
+|------|------|---------------|
+| community.py | ✅ | ✅ |
+| partner_create.py | ✅ | ✅ |
+| community_shared.py | ✅ | ✅ |
+| community_triggers.py | ✅ | ✅ |
+| community_snapshot.py | ✅ | ✅ |
+| deploy_community.py | ✅ | ✅ |
+| Roster | 阿澜 + Hermes | 阿澜 + Hermes |
+| Budget | — | max_active: 3 |
+| Channel dir | — | 含 alan:direct_sannai |
+| Mailbox | 阿澜 inbox 就绪 | 阿澜的信已投递 |
 
 ---
 

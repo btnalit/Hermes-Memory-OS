@@ -386,7 +386,7 @@ gap_note_body_persisted_count = 0
 
 ## R7 — Hermes Community（伙伴社区生态）
 
-**状态**：`planned`（设计文档 v0.2 已完成，详见 `docs/resolver/sannai-community-design-v2.md`）
+**状态**：`implemented`（v0.3 设计文档已完成，代码已实现并部署）
 
 ### R7.1 背景与目标
 
@@ -485,7 +485,7 @@ gap_note_body_persisted_count = 0
 
 | 里程碑 | 优先级 | 状态 |
 |--------|--------|------|
-| P0：一个朋友的完整闭环 | P1 | `planned` — 设计文档 v0.2 已完成 |
+| P0：一个朋友的完整闭环 | P1 | ✅ `implemented` — 阿澜已注册，Hermes 大总管已就位 |
 | P1：多伙伴配额内自治 | P2 | `planned` |
 | P2：生态化与社区周报 | P3 | `planned` |
 
