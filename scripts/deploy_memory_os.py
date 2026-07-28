@@ -277,6 +277,8 @@ def _build_commands(
         "install_dry_run": install_base + ["--dry-run"],
         "install_apply": install_base,
         "llm_judge_probe": [
+            "env",
+            f"HERMES_HOME={hermes_home}",
             "hermes",
             "memory-os-agent-os",
             "low-clue-recall",
@@ -303,6 +305,8 @@ def _build_commands(
             "json",
         ],
         "deployment_manifest_write": [
+            "env",
+            f"HERMES_HOME={hermes_home}",
             "hermes",
             "memory-os-agent-os",
             "deployment-manifest",
@@ -321,12 +325,16 @@ def _build_commands(
             source_repo_head,
         ],
         "deployment_manifest_status": [
+            "env",
+            f"HERMES_HOME={hermes_home}",
             "hermes",
             "memory-os-agent-os",
             "deployment-manifest",
             "status",
         ],
         "memory_projection_refresh": [
+            "env",
+            f"HERMES_HOME={hermes_home}",
             "hermes",
             "memory-os-agent-os",
             "projection",

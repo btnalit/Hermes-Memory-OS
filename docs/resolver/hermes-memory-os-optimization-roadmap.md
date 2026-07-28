@@ -110,6 +110,7 @@ designed
 - cron adapter probe 的 installed-layout import shadow；
 - clean-copy runner 对已删除 tracked 文档的 pathspec 处理；
 - deployer 没有把外层 timeout 传给 compatibility 子进程；
+- deployer 的 Hermes CLI 子命令没有显式绑定目标 `HERMES_HOME`，导致 multi-profile 部署可能把 manifest/projection 写到 default home；
 - 低资源主机 Full Monitor 的 shell alias probes 无单命令 timeout 且 22 个命令串行执行。
 
 当前候选树已完成：
@@ -134,7 +135,7 @@ designed
 
 - RAM 约 3.6 GiB；检查时 available 约 1.3 GiB，swap 使用约 1.5/1.8 GiB。
 - `/` 约 77% 使用，`/vol1` 约 19% 使用。
-- default 与 sannai 已从同一 `/vol1/Hermes-Memory-OS` source checkout 完成 production-safe apply/postcheck；manifest 均绑定 `7c23d1c2bd5f8b1fe6dc522c4a803aa7fbdf61e4`。
+- default 与 sannai 已从同一 `/vol1/Hermes-Memory-OS` source checkout 完成 production-safe apply/postcheck；multi-profile manifest scoping 缺陷已在当前 release 修复，最终验收要求两个 home 的 manifest/artifact/closure evidence 分别绑定同一 final SHA。
 - default gateway：user-level service，已授权重启并恢复 active。
 - sannai gateway：user-level service，已授权重启并恢复 active。
 - alanlive gateway：failed 且 disabled；必须继续 dormant，不得自动启动。
@@ -203,42 +204,47 @@ designed
    - `/opt/Hermes-Memory-OS` 与 `/vol1/Hermes-Memory-OS` 指向不同旧 commit。
    - 当前：已选择 `/vol1/Hermes-Memory-OS` 为唯一 deploy source，两个 profile 已备份并绑定同一 manifest/source head；旧 `/opt` checkout 仅保留为历史事实，不参与部署。
 
+3. **multi-profile Hermes CLI 写入目标漂移**
+   - 现象：Sannai installer、hash 和 postcheck 成功，但 deployment manifest 仍保留旧 SHA；同一轮 default manifest 被重复更新。
+   - 根因：deployer 只把 `--hermes-home` 传给 installer/probes，`deployment-manifest`、`projection` 和 LLM judge 等 Hermes CLI 子命令继承了 shell default home。
+   - 当前：所有 Hermes CLI 子命令显式使用 `env HERMES_HOME=<target>`；已增加 Sannai plan 反事实和定向测试。最终关闭条件是 default/sannai 两个 home 的 manifest、artifact 和 closure evidence 均绑定 final SHA。
+
 ### P1 — 生产治理健康
 
-3. **V2 exposure schema era unhealthy**
+4. **V2 exposure schema era unhealthy**
    - 当前 Full Monitor 真实 FAIL：`v2_exposure_schema_era_unhealthy`。
    - 这是自然观察/历史数据时代健康问题，不是文件同步失败。
    - 必须继续观察 classified ratio、attribution gaps、rollup lag、conservation failures；不得手工回填自然 credit。
 
-4. **Full Monitor 运行时超过目标**
+5. **Full Monitor 运行时超过目标**
    - 本机 artifact 有 `full_monitor_runtime_over_target` WARN；2.88 default 在低内存、swap 接近耗尽时分别超过 600 秒和 1200 秒，未发布半成品 artifact。
    - 根因之一是 22 个 shell alias probes 串行且没有 per-command timeout；生产 trace 显示停留在 owner-review probe，而不是 refresh/envelope 损坏。
    - 当前源码已改为有界并发与 fail-closed timeout，定向和统一测试通过；仍需在 2.88 default/sannai 生成 fresh artifact 后才能关闭该问题。
    - 禁止用空 context-manager、删除 probe 或 stale cache 冒充优化。
 
-5. **ExecutionGate helper receipt 不完整**
+6. **ExecutionGate helper receipt 不完整**
    - 当前可见 WARN 包括 helper completion missing / boundary unobserved。
    - 必须区分：job 成功但 envelope 账务未对齐、job 未到期、job disabled、真实执行失败。
    - 不得用伪造 completion row 消除告警。
 
-6. **Dashboard service 未形成独立部署事实**
+7. **Dashboard service 未形成独立部署事实**
    - Dashboard snapshot producer 已部署和验证；本机未确认独立 dashboard systemd unit。
    - “snapshot 可生成”不等于“Dashboard server 正在对外提供页面”。是否需要常驻服务必须作为独立运维决定。
 
 ### P1 — 社区 live 阻塞
 
-7. **alanlive 资源边界**
+8. **alanlive 资源边界**
    - 2.88 曾在第三 gateway/可选依赖安装期间出现 SIGKILL 和主机重启。
    - alanlive 当前 failed/disabled，保持 dormant 是安全状态。
    - 在容量评估、低资源配置和独立 rollback 方案完成前，不得自动启动。
 
-8. **transport 不等于 autonomous relationship**
+9. **transport 不等于 autonomous relationship**
    - 已有 Sannai↔alanlive mailbox transport、handled receipt 与 pairing handshake。
    - 尚无伙伴模型正文回复、稳定 scheduler 行为、fresh-session overlay、自然 shared write 或主动引用共同历史的证据。
 
 ### P2 — helper-only adoption debt
 
-9. 以下能力仍不得标为 wired/live：
+10. 以下能力仍不得标为 wired/live：
    - `timeutil` 的剩余 ad-hoc parser 迁移；
    - `recall_golden` 正式召回 consumer；
    - `lifecycle` 正式 runtime caller；

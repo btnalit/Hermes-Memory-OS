@@ -107,6 +107,29 @@ def test_deploy_plan_propagates_timeout_to_compat_subprocess():
     assert compat[compat.index("--timeout") + 1] == "180"
 
 
+def test_deploy_plan_scopes_all_hermes_commands_to_target_home():
+    repo_root = Path(__file__).resolve().parents[2]
+    target_home = "/vol1/.hermes/profiles/sannai"
+
+    report = deploy_memory_os(
+        repo_root=repo_root,
+        hermes_home=target_home,
+        mode="production-safe",
+        hindsight_mode="auto",
+        phase="plan",
+        profile="upgrade",
+    )
+
+    for name in (
+        "llm_judge_probe",
+        "deployment_manifest_write",
+        "deployment_manifest_status",
+        "memory_projection_refresh",
+    ):
+        command = report["commands"][name]
+        assert command[:3] == ["env", f"HERMES_HOME={target_home}", "hermes"]
+
+
 def _llm_judge_probe_result():
     return {
         "exit_code": 0,
