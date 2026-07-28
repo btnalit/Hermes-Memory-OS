@@ -102,17 +102,25 @@ def initialize_clean_git(repo_root: Path, source_root: Path) -> None:
     }
     for command in (["git", "init", "-q"], ["git", "add", "-A"]):
         subprocess.run(command, cwd=repo_root, env=env, check=True, capture_output=True, text=True)
-    tracked = subprocess.run(
+    tracked_result = subprocess.run(
         ["git", "ls-files", "-z"], cwd=source_root, check=True, capture_output=True
     ).stdout
-    subprocess.run(
-        ["git", "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"],
-        cwd=repo_root,
-        env=env,
-        input=tracked,
-        check=True,
-        capture_output=True,
-    )
+    tracked_paths = [path for path in tracked_result.split(b"\0") if path]
+    existing_tracked = [
+        path
+        for path in tracked_paths
+        if (source_root / os.fsdecode(path)).exists()
+    ]
+    tracked = b"\0".join(existing_tracked) + (b"\0" if existing_tracked else b"")
+    if tracked:
+        subprocess.run(
+            ["git", "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            cwd=repo_root,
+            env=env,
+            input=tracked,
+            check=True,
+            capture_output=True,
+        )
     subprocess.run(
         ["git", "commit", "-q", "-m", "verification candidate"],
         cwd=repo_root,

@@ -11,6 +11,11 @@ import scripts.memory_os_cron_adapter_probe as cron_probe
 def _copy_installed_cron_seam(home: Path) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins"
+    runtime_plugins.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(repo_root / "plugins" / "__init__.py", runtime_plugins / "__init__.py")
+    memory_target = runtime_plugins / "memory"
+    memory_target.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(repo_root / "plugins" / "memory" / "__init__.py", memory_target / "__init__.py")
     seam_target = runtime_plugins / "seam"
     seam_target.mkdir(parents=True, exist_ok=True)
     shutil.copy2(repo_root / "plugins" / "seam" / "__init__.py", seam_target / "__init__.py")
@@ -333,6 +338,9 @@ def test_installed_copy_with_hermes_home_flag_no_env(tmp_path):
     runtime_plugins = home / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
     runtime_plugins.mkdir(parents=True)
     _copy_installed_cron_seam(home)
+    shadow_plugins = home / "plugins"
+    shadow_plugins.mkdir(parents=True)
+    (shadow_plugins / "__init__.py").write_text("# incompatible legacy plugin root\n", encoding="utf-8")
     (runtime_plugins / "__init__.py").write_text(
         '"""Installed Memory-OS provider."""\n__version__ = "installed"\n',
         encoding="utf-8",
@@ -352,8 +360,10 @@ def test_installed_copy_with_hermes_home_flag_no_env(tmp_path):
         fake_hermes.write_text(f'#!/bin/sh\nexec "{sys.executable}" -c "import sys; print(sys.argv)" "$@"\n')
         fake_hermes.chmod(0o755)
 
-    # Strip HERMES_HOME from the environment
+    # Strip HERMES_HOME from the environment while preserving the production
+    # case where the runtime is already inherited through PYTHONPATH.
     env = {k: v for k, v in os.environ.items() if k != "HERMES_HOME"}
+    env["PYTHONPATH"] = str(home / "memory-os" / "runtime" / "python")
 
     result = subprocess.run(
         [

@@ -82,10 +82,13 @@ if not _is_repo_checkout:
             _path_candidates.append(_inferred)
 
 # Apply: reversed + insert(0) so _path_candidates[0] ends up at sys.path[0].
+# Reposition existing entries as well: inherited PYTHONPATH may already contain
+# the runtime below HERMES_HOME, where a legacy ``plugins`` package shadows it.
 for _base in reversed(_path_candidates):
     _base_str = str(_base)
-    if _base_str not in sys.path:
-        sys.path.insert(0, _base_str)
+    while _base_str in sys.path:
+        sys.path.remove(_base_str)
+    sys.path.insert(0, _base_str)
 
 from plugins.memory.memory_os.cron_registry import specs_from_snapshot
 from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
