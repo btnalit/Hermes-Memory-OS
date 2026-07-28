@@ -6712,3 +6712,11 @@ def test_remote_probe_audit_action_stats_imports_read_audit_records():
         for node in ast.walk(func)
     )
     assert imports_read_audit, "audit_action_stats must import read_audit_records in-scope"
+
+
+def test_remote_probe_bounds_missing_system_commands():
+    from scripts.memory_os_3_200_monitor import _remote_probe_script
+
+    script = _remote_probe_script("/tmp/nonexistent-hermes-home")
+    assert "except OSError as exc:" in script
+    assert '"code": 127' in script

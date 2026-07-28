@@ -5193,6 +5193,8 @@ def run(cmd, env=None):
         return {"ok": True, "out": out.strip(), "code": 0}
     except subprocess.CalledProcessError as exc:
         return {"ok": False, "out": (exc.output or "").strip(), "code": exc.returncode}
+    except OSError as exc:
+        return {"ok": False, "out": str(exc), "code": 127}
 
 def system_show(unit):
     r = run(["systemctl", "--user", "show", unit, "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "--no-pager"])
