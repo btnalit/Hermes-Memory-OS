@@ -90,6 +90,23 @@ def test_deploy_script_plan_bootstraps_repo_import_path(tmp_path):
     assert json.loads(result.stdout)["schema_version"] == "memory-os.deploy.v0"
 
 
+def test_deploy_plan_propagates_timeout_to_compat_subprocess():
+    repo_root = Path(__file__).resolve().parents[2]
+
+    report = deploy_memory_os(
+        repo_root=repo_root,
+        hermes_home="/tmp/hermes-home",
+        mode="production-safe",
+        hindsight_mode="auto",
+        phase="plan",
+        profile="upgrade",
+        timeout=180,
+    )
+
+    compat = report["commands"]["compat"]
+    assert compat[compat.index("--timeout") + 1] == "180"
+
+
 def _llm_judge_probe_result():
     return {
         "exit_code": 0,

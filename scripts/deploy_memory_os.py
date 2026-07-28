@@ -79,6 +79,7 @@ def deploy_memory_os(
         source_repo_head=source_repo_head,
         host=host,
         python_bin=effective_python_bin,
+        timeout=timeout,
         allow_restart=allow_restart,
         restart_command=restart_command,
     )
@@ -243,6 +244,7 @@ def _build_commands(
     source_repo_head: str,
     host: str,
     python_bin: str,
+    timeout: int,
     allow_restart: bool,
     restart_command: str,
 ) -> dict[str, list[str]]:
@@ -265,6 +267,8 @@ def _build_commands(
         f"{repo}/scripts/memory_os_upgrade_compat_check.py",
         "--hermes-home",
         hermes_home,
+        "--timeout",
+        str(max(1, int(timeout))),
         "--output",
         "json",
     ]
