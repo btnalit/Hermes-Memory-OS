@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -210,8 +212,18 @@ def default_runner(argv: list[str], cwd: Path) -> dict[str, Any]:
 
 def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> dict[str, Any]:
     root = Path(repo_root).resolve()
+    pycache_root = Path(tempfile.mkdtemp(prefix="memory-os-compileall-"))
     checks = {
-        "compileall": [sys.executable, "-m", "compileall", "plugins", "scripts", "tests"],
+        "compileall": [
+            sys.executable,
+            "-X",
+            f"pycache_prefix={pycache_root}",
+            "-m",
+            "compileall",
+            "plugins",
+            "scripts",
+            "tests",
+        ],
         "diff_check": ["git", "diff", "--check"],
         "closure_matrix": [
             sys.executable,
@@ -259,16 +271,19 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
         "violations": unapproved_boundary_violations,
         "declared_legacy_debt": declared_legacy_boundary_debt,
     }
-    for name, argv in checks.items():
-        raw = runner(argv, root)
-        result_entry = {
-            "status": "pass" if int(raw.get("exit_code") or 0) == 0 else "fail",
-            "exit_code": int(raw.get("exit_code") or 0),
-        }
-        # Capture stderr for compileall to aid debugging
-        if name == "compileall" and result_entry["status"] == "fail":
-            result_entry["stderr"] = raw.get("stderr", "")
-        results[name] = result_entry
+    try:
+        for name, argv in checks.items():
+            raw = runner(argv, root)
+            result_entry = {
+                "status": "pass" if int(raw.get("exit_code") or 0) == 0 else "fail",
+                "exit_code": int(raw.get("exit_code") or 0),
+            }
+            if name == "compileall" and result_entry["status"] == "fail":
+                result_entry["stdout"] = raw.get("stdout", "")
+                result_entry["stderr"] = raw.get("stderr", "")
+            results[name] = result_entry
+    finally:
+        shutil.rmtree(pycache_root, ignore_errors=True)
     status = "pass" if all(item["status"] == "pass" for item in results.values()) else "fail"
     return {
         "schema_version": "memory-os.static_hygiene.v0",

@@ -26,6 +26,9 @@ def test_static_hygiene_reports_repo_native_pass_without_ruff(tmp_path):
     }
     assert all(item["status"] == "pass" for item in report["checks"].values())
     assert len(calls) == 5
+    compile_argv = next(argv for argv, _cwd in calls if "compileall" in argv)
+    assert "-X" in compile_argv
+    assert any(part.startswith("pycache_prefix=") for part in compile_argv)
 
 
 def test_static_hygiene_fails_when_any_repo_native_check_fails(tmp_path):
