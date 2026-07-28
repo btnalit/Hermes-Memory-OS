@@ -3,6 +3,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import scripts.memory_os_3_200_monitor as monitor
 from scripts.memory_os_3_200_monitor import (
@@ -94,6 +95,19 @@ def test_embedded_shell_alias_commands_use_bounded_parallel_collection(tmp_path)
     assert 'MEMORY_OS_MONITOR_COMMAND_WORKERS", "4"' in script
     assert 'MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "20"' in script
     assert '"review_reply": ["hermes", "memory-os-agent-os", "review", "reply"' in script
+
+
+def test_embedded_cron_fallback_recognizes_retired_jobs_when_adapter_is_unavailable():
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+
+    known_specs: Any = namespace["_memory_os_known_cron_specs"]
+    assert callable(known_specs)
+    specs = known_specs()
+    retired = {item["name"]: item for item in specs if item.get("retired") is True}
+
+    assert retired["memory-os-right-brain-expression"]["wrapper_script"] == "memory_os_cron_right_brain_expression_gate.py"
+    assert retired["memory-os-right-brain-expression-outcome"]["wrapper_script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
 
 
 def test_collect_snapshot_remote_populates_v2_exposure_from_successful_probe(monkeypatch):

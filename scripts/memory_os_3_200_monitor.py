@@ -7211,9 +7211,12 @@ def _memory_os_cron_specs_from_snapshot():
 
 def _memory_os_known_cron_specs():
     try:
-        from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+        from plugins.memory.memory_os.cron_registry import (
+            RETIRED_MEMORY_OS_CRON_SCRIPTS,
+            memory_os_cron_specs,
+        )
 
-        return [
+        active = [
             {
                 "key": item.key,
                 "name": item.name,
@@ -7222,6 +7225,17 @@ def _memory_os_known_cron_specs():
             }
             for item in memory_os_cron_specs()
         ]
+        retired = [
+            {
+                "key": "retired:" + name,
+                "name": name,
+                "raw_script": script,
+                "wrapper_script": script,
+                "retired": True,
+            }
+            for name, script in sorted(RETIRED_MEMORY_OS_CRON_SCRIPTS.items())
+        ]
+        return active + retired
     except Exception:
         return []
 
