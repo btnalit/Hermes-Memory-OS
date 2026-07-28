@@ -39,14 +39,20 @@ def test_installer_copies_monitor_dashboard_snapshot_operational_helper(tmp_path
     scripts_root = Path(__file__).resolve().parents[2] / "scripts"
     source = scripts_root / "memory_os_monitor_dashboard_snapshot.py"
     refresh_source = scripts_root / "memory_os_full_monitor_refresh.py"
+    full_monitor_source = scripts_root / "memory_os_3_200_monitor.py"
+    closure_evidence_source = scripts_root / "memory_os_closure_runtime_evidence.py"
     retirement_source = scripts_root / "memory_os_retire_legacy_right_brain.py"
     _write_operational_helper_scripts(target_home, dry_run=False)
     installed = target_home / "scripts" / source.name
     refresh_installed = target_home / "scripts" / refresh_source.name
+    full_monitor_installed = target_home / "scripts" / full_monitor_source.name
+    closure_evidence_installed = target_home / "scripts" / closure_evidence_source.name
     retirement_installed = target_home / "scripts" / retirement_source.name
 
     assert installed.read_bytes() == source.read_bytes()
     assert refresh_installed.read_bytes() == refresh_source.read_bytes()
+    assert full_monitor_installed.read_bytes() == full_monitor_source.read_bytes()
+    assert closure_evidence_installed.read_bytes() == closure_evidence_source.read_bytes()
     assert retirement_installed.read_bytes() == retirement_source.read_bytes()
 
 
