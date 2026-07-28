@@ -5189,9 +5189,9 @@ for _path in (
 
 def _command_timeout_seconds():
     try:
-        return max(1, min(int(os.environ.get("MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "30")), 300))
+        return max(1, min(int(os.environ.get("MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "20")), 300))
     except (TypeError, ValueError):
-        return 30
+        return 20
 
 
 def run(cmd, env=None):
@@ -7407,9 +7407,9 @@ def shell_alias_no_env():
       ],
     }
     try:
-        workers = max(1, min(int(os.environ.get("MEMORY_OS_MONITOR_COMMAND_WORKERS", "3")), 8))
+        workers = max(1, min(int(os.environ.get("MEMORY_OS_MONITOR_COMMAND_WORKERS", "4")), 8))
     except (TypeError, ValueError):
-        workers = 3
+        workers = 4
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {name: executor.submit(load_json_cmd, command) for name, command in commands.items()}
         results = {}

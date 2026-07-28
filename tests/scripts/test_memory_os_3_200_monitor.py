@@ -84,8 +84,8 @@ def test_embedded_shell_alias_commands_use_bounded_parallel_collection(tmp_path)
     script = monitor._remote_probe_script(str(tmp_path))
 
     assert "ThreadPoolExecutor(max_workers=workers)" in script
-    assert 'MEMORY_OS_MONITOR_COMMAND_WORKERS", "3"' in script
-    assert 'MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "30"' in script
+    assert 'MEMORY_OS_MONITOR_COMMAND_WORKERS", "4"' in script
+    assert 'MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "20"' in script
     assert '"review_reply": ["hermes", "memory-os-agent-os", "review", "reply"' in script
 
 
