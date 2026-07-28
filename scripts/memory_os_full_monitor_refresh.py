@@ -173,12 +173,15 @@ def _deployment_source_head(hermes_home: Path) -> str:
 
 def _monitor_environment(hermes_home: Path, monitor_script: Path) -> dict[str, str]:
     """Give nested monitor probes an explicit import root without relying on cwd."""
-    source_root = monitor_script.expanduser().resolve().parent.parent
+    resolved_script = monitor_script.expanduser().resolve()
+    scripts_root = resolved_script.parent
+    source_root = scripts_root.parent
     runtime_root = hermes_home.expanduser().resolve() / "memory-os" / "runtime" / "python"
     import_root = source_root if (source_root / "plugins" / "memory" / "memory_os").exists() else runtime_root
     env = dict(os.environ)
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = str(import_root) + (os.pathsep + existing if existing else "")
+    paths = [str(scripts_root), str(import_root)]
+    paths.extend(part for part in env.get("PYTHONPATH", "").split(os.pathsep) if part)
+    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
     return env
 
 

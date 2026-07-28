@@ -2,17 +2,29 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from plugins.memory.memory_os.operational_truth import read_operational_truth_snapshot
+from scripts.memory_os_full_monitor_refresh import _monitor_environment
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_full_monitor_refresh.py"
 REAL_MONITOR = SCRIPT.with_name("memory_os_3_200_monitor.py")
 DASHBOARD = SCRIPT.with_name("memory_os_monitor_dashboard_snapshot.py")
+
+
+def test_monitor_environment_includes_installed_scripts_and_runtime(tmp_path):
+    home = tmp_path / "home"
+    script = home / "scripts" / "memory_os_3_200_monitor.py"
+    env = _monitor_environment(home, script)
+
+    paths = env["PYTHONPATH"].split(os.pathsep)
+    assert str(script.parent) in paths
+    assert str(home / "memory-os" / "runtime" / "python") in paths
 
 
 def _write_fake_monitor(path: Path, *, write_snapshot: bool, exit_code: int) -> None:
