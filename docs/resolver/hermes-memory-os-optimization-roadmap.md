@@ -103,16 +103,23 @@ designed
 - 完整 v1 Full Monitor artifact；
 - Dashboard canonical snapshot。
 
-### 3.2 本轮未提交工作树
+### 3.2 本轮 release candidate
 
-本轮真实生产运行发现 cron adapter probe 的 installed-layout import shadow 问题后，源码工作树产生了新的修复与测试：
+本轮生产验证先后发现并修复：
 
-- `scripts/memory_os_cron_adapter_probe.py`
-- `tests/scripts/test_memory_os_cron_adapter_probe.py`
+- cron adapter probe 的 installed-layout import shadow；
+- clean-copy runner 对已删除 tracked 文档的 pathspec 处理；
+- deployer 没有把外层 timeout 传给 compatibility 子进程；
+- 低资源主机 Full Monitor 的 shell alias probes 无单命令 timeout 且 22 个命令串行执行。
 
-已完成的最小回归：`8 passed`。
+当前候选树已完成：
 
-在完成最终统一测试、release 和重新部署前，这些改动只能标为 `implemented + targeted_tested`，不能写成已发布或已部署。
+- cron/deploy/monitor 定向回归：通过；
+- Monitor + refresh 定向回归：`208 passed`；
+- 统一 runner：12/12 steps 通过；
+- mount-isolated 与 clean-copy：通过。
+
+最后一项低资源 Full Monitor 修复采用 fail-closed bounded collection：单命令默认 30 秒、默认 3 workers；超时记录 code 124 并保持可见，不允许整个 artifact producer 无限挂起。完成最终部署和 runtime artifact 验证前，该项仍是 `tested / deployment_pending`。
 
 ### 3.3 环境事实
 
@@ -123,15 +130,17 @@ designed
 - Full Monitor v1 artifact：fresh、envelope complete、source head 绑定已部署 commit。
 - Dashboard 已正确保留 canonical Full Monitor 的 `FAIL`；不再弱化为 `WARN/0 fail`。
 
-**10.20.2.88（YC-NAS，2026-07-28 只读检查）：**
+**10.20.2.88（YC-NAS，2026-07-28 部署检查）：**
 
 - RAM 约 3.6 GiB；检查时 available 约 1.3 GiB，swap 使用约 1.5/1.8 GiB。
 - `/` 约 77% 使用，`/vol1` 约 19% 使用。
-- default gateway：user-level service，active。
-- sannai gateway：user-level service，active。
+- default 与 sannai 已从同一 `/vol1/Hermes-Memory-OS` source checkout 完成 production-safe apply/postcheck；manifest 均绑定 `7c23d1c2bd5f8b1fe6dc522c4a803aa7fbdf61e4`。
+- default gateway：user-level service，已授权重启并恢复 active。
+- sannai gateway：user-level service，已授权重启并恢复 active。
 - alanlive gateway：failed 且 disabled；必须继续 dormant，不得自动启动。
-- `/opt/Hermes-Memory-OS` 与 `/vol1/Hermes-Memory-OS` 均落后于当前可信 release；正式部署前必须选择单一 source checkout 并绑定最终 commit。
+- 两个旧 checkout 的部署歧义已收敛：正式部署只使用 `/vol1/Hermes-Memory-OS`；`/opt/Hermes-Memory-OS` 不再作为本轮 deploy source。
 - Sannai profile canonical home：`/vol1/.hermes/profiles/sannai`。
+- 部署前备份：`/vol1/.hermes/backups/memory-os-v25-20260728T110952Z`，约 342 MiB。
 
 ---
 
@@ -187,12 +196,12 @@ designed
 1. **cron adapter installed-layout import shadow**
    - 现象：Full Monitor 内嵌 cron adapter probe 返回 error；随后旧 fallback 把两个 disabled retired right-brain jobs 误报为 unregistered。
    - 根因：installed probe 同时继承 runtime `PYTHONPATH` 并插入 Hermes home；`$HERMES_HOME/plugins` 的 regular package 可遮蔽 runtime `plugins.memory`。
-   - 当前：源码修复与 fixture 已迭代，最小回归 8 passed；最终统一验证、提交、部署待完成。
+   - 当前：源码、fixture、统一验证、本机和 2.88 default/sannai 部署均已完成；真实 probe 为 `status=ok / unregistered=0 / retired=2`。
    - 禁止做法：把 disabled retired jobs 删除来隐藏误报，或在 Monitor 中直接忽略 adapter failure。
 
 2. **2.88 source checkout 漂移**
    - `/opt/Hermes-Memory-OS` 与 `/vol1/Hermes-Memory-OS` 指向不同旧 commit。
-   - 部署必须选定单一 source、备份 Sannai profile、验证 manifest/source head，不得混用两个 checkout。
+   - 当前：已选择 `/vol1/Hermes-Memory-OS` 为唯一 deploy source，两个 profile 已备份并绑定同一 manifest/source head；旧 `/opt` checkout 仅保留为历史事实，不参与部署。
 
 ### P1 — 生产治理健康
 
@@ -202,8 +211,10 @@ designed
    - 必须继续观察 classified ratio、attribution gaps、rollup lag、conservation failures；不得手工回填自然 credit。
 
 4. **Full Monitor 运行时超过目标**
-   - 当前 artifact 有 `full_monitor_runtime_over_target` WARN。
-   - 需要用真实运行路径测量与分段，不能用空 context-manager 或缓存命中冒充优化。
+   - 本机 artifact 有 `full_monitor_runtime_over_target` WARN；2.88 default 在低内存、swap 接近耗尽时分别超过 600 秒和 1200 秒，未发布半成品 artifact。
+   - 根因之一是 22 个 shell alias probes 串行且没有 per-command timeout；生产 trace 显示停留在 owner-review probe，而不是 refresh/envelope 损坏。
+   - 当前源码已改为有界并发与 fail-closed timeout，定向和统一测试通过；仍需在 2.88 default/sannai 生成 fresh artifact 后才能关闭该问题。
+   - 禁止用空 context-manager、删除 probe 或 stale cache 冒充优化。
 
 5. **ExecutionGate helper receipt 不完整**
    - 当前可见 WARN 包括 helper completion missing / boundary unobserved。
@@ -527,9 +538,9 @@ active|dormant -> retired
 
 ## 14. 当前优先级
 
-1. 完成 cron adapter installed-layout 修复的统一验证与 release。
-2. 用单一 final commit 更新本机、2.88 default 和 Sannai profile；生成每个 home 的独立 manifest/hash/fresh-import evidence。
-3. 重新运行 Full Monitor，确认 retired cron 误报消失；保留 V2 schema-era 等真实治理问题。
+1. 发布并部署低资源 Full Monitor bounded collection；在 2.88 default/sannai 分别生成 fresh v1 artifact。
+2. 为本机、2.88 default 和 Sannai 生成独立 manifest/hash/fresh-import/closure runtime evidence；本机若需要 Gateway restart，先通知 Owner。
+3. 验证 retired cron 误报保持消失；保留 V2 schema-era 等真实治理问题。
 4. 对 `v2_exposure_schema_era_unhealthy` 建立自然观察计划，不手工改绿。
 5. 维持 alanlive dormant；先做资源预算与低内存运行设计，再决定是否重新进入 P0 live 验证。
 6. 只在正式 caller 明确时迁移 helper-only 模块；无安全调用点则保持 implemented/tested。

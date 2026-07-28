@@ -5174,7 +5174,7 @@ def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str,
 def _remote_probe_script(hermes_home: str = "/root/.hermes") -> str:
     _hh = json.dumps(str(hermes_home))
     return r'''
-import hashlib, json, os, re, subprocess, sys
+import concurrent.futures, hashlib, json, os, re, subprocess, sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -5187,10 +5187,31 @@ for _path in (
     if os.path.isdir(_path) and _path not in sys.path:
         sys.path.insert(0, _path)
 
+def _command_timeout_seconds():
+    try:
+        return max(1, min(int(os.environ.get("MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "30")), 300))
+    except (TypeError, ValueError):
+        return 30
+
+
 def run(cmd, env=None):
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True, env=env, stdin=subprocess.DEVNULL)
+        out = subprocess.check_output(
+            cmd,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=_command_timeout_seconds(),
+        )
         return {"ok": True, "out": out.strip(), "code": 0}
+    except subprocess.TimeoutExpired as exc:
+        output = exc.output or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        detail = str(output).strip()
+        suffix = "command_timeout_seconds=" + str(_command_timeout_seconds())
+        return {"ok": False, "out": (detail + "\n" + suffix).strip(), "code": 124}
     except subprocess.CalledProcessError as exc:
         return {"ok": False, "out": (exc.output or "").strip(), "code": exc.returncode}
     except OSError as exc:
@@ -7358,39 +7379,67 @@ def _cron_schedule_interval(schedule):
     return timedelta(hours=1)
 
 def shell_alias_no_env():
-    status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
-    doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
-    memory_sources = load_json_cmd(["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"])
-    metadata_retention = load_json_cmd(["hermes", "memory-os-agent-os", "metadata-retention"])
-    low_clue = load_json_cmd(["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"])
-    modules = load_json_cmd(["hermes", "memory-os-agent-os", "modules", "status"])
-    eval_report = load_json_cmd(["hermes", "memory-os-agent-os", "eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"])
-    review = load_json_cmd(["hermes", "memory-os-agent-os", "review", "status"])
-    review_aging = load_json_cmd(["hermes", "memory-os-agent-os", "review", "aging-report"])
-    review_channel = load_json_cmd(["hermes", "memory-os-agent-os", "review", "channel"])
-    review_cron_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "cron-status"])
-    review_delivery_status = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-status"])
-    review_delivery_gate = load_json_cmd(["hermes", "memory-os-agent-os", "review", "delivery-gate"])
-    review_followups = load_json_cmd(["hermes", "memory-os-agent-os", "review", "proposal-followups"])
-    review_digest = load_json_cmd(["hermes", "memory-os-agent-os", "review", "preview-digest"])
-    review_render = load_json_cmd(["hermes", "memory-os-agent-os", "review", "render-digest"])
-    review_reply = load_json_cmd(["hermes", "memory-os-agent-os", "review", "reply", "memory", "approve", "oa_deadbeef"])
-    host_probe = load_json_cmd(["hermes", "memory-os-agent-os", "host-probe", "--json"])
-    signal_sources = load_json_cmd(["hermes", "memory-os-agent-os", "signal-sources", "--json"])
-    memory_projection = load_json_cmd(["hermes", "memory-os-agent-os", "projection", "status"])
-    left_brain = load_json_cmd(["hermes", "memory-os-agent-os", "left-brain", "status"])
-    review_surface = load_json_cmd([
-        "hermes",
-        "memory-os-agent-os",
-        "review",
-        "surface",
-        "--operation",
-        "next_page",
-        "--section",
-        "action_required",
-        "--limit",
-        "1",
-    ])
+    commands = {
+      "status": ["hermes", "memory-os-agent-os", "status"],
+      "doctor": ["hermes", "memory-os-agent-os", "doctor"],
+      "memory_sources": ["hermes", "memory-os-agent-os", "memory-sources", "stats", "--hours", "24"],
+      "metadata_retention": ["hermes", "memory-os-agent-os", "metadata-retention"],
+      "low_clue": ["hermes", "memory-os-agent-os", "low-clue-recall", "dry-run", "--query", "继续昨天那个。", "--llm-judge", "none"],
+      "modules": ["hermes", "memory-os-agent-os", "modules", "status"],
+      "eval_report": ["hermes", "memory-os-agent-os", "eval", "rh31", "run", "--fixture", "synthetic", "--adapter", "all", "--no-write-report"],
+      "review": ["hermes", "memory-os-agent-os", "review", "status"],
+      "review_aging": ["hermes", "memory-os-agent-os", "review", "aging-report"],
+      "review_channel": ["hermes", "memory-os-agent-os", "review", "channel"],
+      "review_cron_status": ["hermes", "memory-os-agent-os", "review", "cron-status"],
+      "review_delivery_status": ["hermes", "memory-os-agent-os", "review", "delivery-status"],
+      "review_delivery_gate": ["hermes", "memory-os-agent-os", "review", "delivery-gate"],
+      "review_followups": ["hermes", "memory-os-agent-os", "review", "proposal-followups"],
+      "review_digest": ["hermes", "memory-os-agent-os", "review", "preview-digest"],
+      "review_render": ["hermes", "memory-os-agent-os", "review", "render-digest"],
+      "review_reply": ["hermes", "memory-os-agent-os", "review", "reply", "memory", "approve", "oa_deadbeef"],
+      "host_probe": ["hermes", "memory-os-agent-os", "host-probe", "--json"],
+      "signal_sources": ["hermes", "memory-os-agent-os", "signal-sources", "--json"],
+      "memory_projection": ["hermes", "memory-os-agent-os", "projection", "status"],
+      "left_brain": ["hermes", "memory-os-agent-os", "left-brain", "status"],
+      "review_surface": [
+        "hermes", "memory-os-agent-os", "review", "surface",
+        "--operation", "next_page", "--section", "action_required", "--limit", "1",
+      ],
+    }
+    try:
+        workers = max(1, min(int(os.environ.get("MEMORY_OS_MONITOR_COMMAND_WORKERS", "3")), 8))
+    except (TypeError, ValueError):
+        workers = 3
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {name: executor.submit(load_json_cmd, command) for name, command in commands.items()}
+        results = {}
+        for name, future in futures.items():
+            try:
+                results[name] = future.result()
+            except Exception as exc:
+                results[name] = {"_error": "probe_exception:" + str(exc), "_code": 1}
+    status = results["status"]
+    doctor = results["doctor"]
+    memory_sources = results["memory_sources"]
+    metadata_retention = results["metadata_retention"]
+    low_clue = results["low_clue"]
+    modules = results["modules"]
+    eval_report = results["eval_report"]
+    review = results["review"]
+    review_aging = results["review_aging"]
+    review_channel = results["review_channel"]
+    review_cron_status = results["review_cron_status"]
+    review_delivery_status = results["review_delivery_status"]
+    review_delivery_gate = results["review_delivery_gate"]
+    review_followups = results["review_followups"]
+    review_digest = results["review_digest"]
+    review_render = results["review_render"]
+    review_reply = results["review_reply"]
+    host_probe = results["host_probe"]
+    signal_sources = results["signal_sources"]
+    memory_projection = results["memory_projection"]
+    left_brain = results["left_brain"]
+    review_surface = results["review_surface"]
     return {
       "status_ok": isinstance(status, dict) and status.get("schema_version") == "memory-os.status.v0",
       "doctor_ok": isinstance(doctor, dict) and doctor.get("schema_version") == "memory-os.doctor.v0" and doctor.get("status") == "ok",

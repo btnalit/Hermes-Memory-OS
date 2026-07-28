@@ -59,6 +59,36 @@ def test_run_probe_with_stdin_script_does_not_conflict_with_devnull():
     assert result == {"ok": True, "probe": "stdin"}
 
 
+def test_embedded_remote_command_timeout_is_bounded_and_fail_closed(tmp_path, monkeypatch):
+    script = monitor._remote_probe_script(str(tmp_path))
+    prefix = script.split("def system_show", 1)[0]
+    namespace = {}
+    exec(prefix, namespace)
+
+    monkeypatch.setenv("MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "1")
+
+    def fake_check_output(command, **kwargs):
+        assert kwargs["timeout"] == 1
+        raise subprocess.TimeoutExpired(command, timeout=1, output=b"partial")
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+    result = namespace["run"](["slow-command"])
+
+    assert result["ok"] is False
+    assert result["code"] == 124
+    assert "partial" in result["out"]
+    assert "command_timeout_seconds=1" in result["out"]
+
+
+def test_embedded_shell_alias_commands_use_bounded_parallel_collection(tmp_path):
+    script = monitor._remote_probe_script(str(tmp_path))
+
+    assert "ThreadPoolExecutor(max_workers=workers)" in script
+    assert 'MEMORY_OS_MONITOR_COMMAND_WORKERS", "3"' in script
+    assert 'MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "30"' in script
+    assert '"review_reply": ["hermes", "memory-os-agent-os", "review", "reply"' in script
+
+
 def test_collect_snapshot_remote_populates_v2_exposure_from_successful_probe(monkeypatch):
     """Fix 1: a successful v2_exposure_and_clearance_probe result from the
     remote SSH probe is consumed directly, instead of leaving
@@ -476,8 +506,8 @@ def _exec_remote_probe_prefix(namespace: dict[str, object]) -> None:
     original_sys_path = list(sys.path)
     try:
         exec(
-            monitor._remote_probe_script().split(
-                '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            monitor._remote_probe_script("/nonexistent/memory-os-monitor-test-home").split(
+                "\ndef shell_alias_no_env():",
                 1,
             )[0],
             namespace,
