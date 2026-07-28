@@ -67,9 +67,11 @@ def test_embedded_remote_command_timeout_is_bounded_and_fail_closed(tmp_path, mo
 
     monkeypatch.setenv("MEMORY_OS_MONITOR_COMMAND_TIMEOUT_SECONDS", "1")
 
+    observed_timeouts = []
+
     def fake_check_output(command, **kwargs):
-        assert kwargs["timeout"] == 1
-        raise subprocess.TimeoutExpired(command, timeout=1, output=b"partial")
+        observed_timeouts.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, timeout=kwargs["timeout"], output=b"partial")
 
     monkeypatch.setattr(subprocess, "check_output", fake_check_output)
     result = namespace["run"](["slow-command"])
@@ -78,6 +80,11 @@ def test_embedded_remote_command_timeout_is_bounded_and_fail_closed(tmp_path, mo
     assert result["code"] == 124
     assert "partial" in result["out"]
     assert "command_timeout_seconds=1" in result["out"]
+
+    critical_result = namespace["run"](["critical-command"], timeout_seconds=60)
+    assert critical_result["code"] == 124
+    assert "command_timeout_seconds=60" in critical_result["out"]
+    assert observed_timeouts == [1, 60]
 
 
 def test_embedded_shell_alias_commands_use_bounded_parallel_collection(tmp_path):

@@ -5194,7 +5194,8 @@ def _command_timeout_seconds():
         return 20
 
 
-def run(cmd, env=None):
+def run(cmd, env=None, timeout_seconds=None):
+    effective_timeout = _command_timeout_seconds() if timeout_seconds is None else max(1, min(int(timeout_seconds), 300))
     try:
         out = subprocess.check_output(
             cmd,
@@ -5202,7 +5203,7 @@ def run(cmd, env=None):
             text=True,
             env=env,
             stdin=subprocess.DEVNULL,
-            timeout=_command_timeout_seconds(),
+            timeout=effective_timeout,
         )
         return {"ok": True, "out": out.strip(), "code": 0}
     except subprocess.TimeoutExpired as exc:
@@ -5210,7 +5211,7 @@ def run(cmd, env=None):
         if isinstance(output, bytes):
             output = output.decode("utf-8", errors="replace")
         detail = str(output).strip()
-        suffix = "command_timeout_seconds=" + str(_command_timeout_seconds())
+        suffix = "command_timeout_seconds=" + str(effective_timeout)
         return {"ok": False, "out": (detail + "\n" + suffix).strip(), "code": 124}
     except subprocess.CalledProcessError as exc:
         return {"ok": False, "out": (exc.output or "").strip(), "code": exc.returncode}
@@ -7187,6 +7188,7 @@ def _execution_gate_cron_adapter_probe_summary():
     result = run(
         ["python3", str(script), "--hermes-home", hermes_home, "--output", "json"],
         env={**os.environ, "HERMES_HOME": hermes_home},
+        timeout_seconds=60,
     )
     if not result.get("ok"):
         return {"status": "error", "reason": "probe_command_failed", "code": result.get("code")}

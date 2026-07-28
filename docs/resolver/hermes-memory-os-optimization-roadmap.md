@@ -120,7 +120,7 @@ designed
 - 统一 runner：12/12 steps 通过；
 - mount-isolated 与 clean-copy：通过。
 
-最后一项低资源 Full Monitor 修复采用 fail-closed bounded collection：单命令默认 20 秒、默认 4 workers；超时记录 code 124 并保持可见，不允许整个 artifact producer 无限挂起。完成最终部署和 runtime artifact 验证前，该项仍是 `tested / deployment_pending`。
+最后一项低资源 Full Monitor 修复采用 fail-closed bounded collection：普通命令默认 20 秒、默认 4 workers；cron adapter 等关键聚合 probe 使用显式 60 秒预算。超时记录 code 124 并保持可见，不允许整个 artifact producer 无限挂起。完成最终部署和 runtime artifact 验证前，该项仍是 `tested / deployment_pending`。
 
 ### 3.3 环境事实
 
