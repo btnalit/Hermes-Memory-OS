@@ -20,13 +20,15 @@ def _write_fake_monitor(path: Path, *, write_snapshot: bool, exit_code: int) -> 
         "\n".join(
             [
                 "from __future__ import annotations",
-                "import argparse, json",
+                "import argparse, json, sys",
                 "from pathlib import Path",
                 "p = argparse.ArgumentParser()",
                 "p.add_argument('--hermes-home')",
+                "p.add_argument('--python-bin', required=True)",
                 "p.add_argument('--snapshot-out', type=Path, required=True)",
                 "p.add_argument('--output')",
                 "a = p.parse_args()",
+                "assert a.python_bin == sys.executable",
                 (
                     "a.snapshot_out.write_text(json.dumps({"
                     "'schema_version': 'memory-os.monitor.v1', "
@@ -120,13 +122,15 @@ def test_refresh_rejects_monitor_payload_without_schema_version(tmp_path):
     monitor.write_text(
         "\n".join(
             [
-                "import argparse, json",
+                "import argparse, json, sys",
                 "from pathlib import Path",
                 "p=argparse.ArgumentParser()",
                 "p.add_argument('--hermes-home')",
+                "p.add_argument('--python-bin', required=True)",
                 "p.add_argument('--snapshot-out', type=Path, required=True)",
                 "p.add_argument('--output')",
                 "a=p.parse_args()",
+                "assert a.python_bin == sys.executable",
                 "a.snapshot_out.write_text(json.dumps({'classification': {'status': 'PASS'}}))",
             ]
         ),

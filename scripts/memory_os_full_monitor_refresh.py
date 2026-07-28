@@ -95,6 +95,8 @@ def refresh(
                 str(monitor_script),
                 "--hermes-home",
                 str(hermes_home),
+                "--python-bin",
+                sys.executable,
                 "--snapshot-out",
                 str(temp_path),
                 "--output",
