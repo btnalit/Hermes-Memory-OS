@@ -44,6 +44,7 @@ def _write_fake_monitor(path: Path, *, write_snapshot: bool, exit_code: int) -> 
                 (
                     "a.snapshot_out.write_text(json.dumps({"
                     "'schema_version': 'memory-os.monitor.v1', "
+                    "'probe_cwd': str(Path.cwd()), "
                     "'classification': {'status': 'FAIL', 'fail_codes': ['expected_observation_gate']}"
                     "}), encoding='utf-8')"
                     if write_snapshot
@@ -95,6 +96,8 @@ def test_refresh_publishes_valid_fail_classification_without_alerting(tmp_path):
     assert payload["producer_receipt"]["monitor_exit_code"] == 2
     assert payload["producer_receipt"]["receipt_id"].startswith("fmpr_")
     assert payload["classification"]["status"] == "FAIL"
+    assert Path(payload["probe_cwd"]).parent == artifacts[0].parent
+    assert not Path(payload["probe_cwd"]).exists()
     assert not list(artifacts[0].parent.glob("*.tmp"))
 
 

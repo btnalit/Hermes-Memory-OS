@@ -104,15 +104,16 @@ def refresh(
             ]
         if monitor_profile:
             monitor_command.extend(["--monitor-profile", monitor_profile])
-        completed = subprocess.run(
-            monitor_command,
-            cwd=hermes_home,
-            env=_monitor_environment(hermes_home, monitor_script),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=max(int(timeout_seconds), 1),
-        )
+        with tempfile.TemporaryDirectory(prefix=".monitor-cwd-", dir=artifact_dir) as monitor_cwd:
+            completed = subprocess.run(
+                monitor_command,
+                cwd=monitor_cwd,
+                env=_monitor_environment(hermes_home, monitor_script),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=max(int(timeout_seconds), 1),
+            )
         if completed.returncode not in {0, 2}:
             detail = (completed.stderr or completed.stdout or "no monitor output").strip()[-500:]
             raise RuntimeError(f"monitor process exited {completed.returncode}: {detail}")
