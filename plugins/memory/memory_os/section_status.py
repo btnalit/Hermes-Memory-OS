@@ -109,10 +109,15 @@ class ClassifiedSnapshot:
         errors: list[str] = []
         if self.status == SectionStatus.UNAVAILABLE and not self.error_code:
             errors.append(f"{self.section_key}: classified unavailable without error_code")
+        counts = (self.pass_count, self.fail_count, self.warn_count, self.skip_count)
+        if any(type(value) is not int or value < 0 for value in counts):
+            errors.append(f"{self.section_key}: classified counts must be non-negative ints")
+        if collected is not None and not collected.is_collected() and self.is_collected():
+            errors.append(f"{self.section_key}: classified collected from unavailable input")
         if collected is not None and collected.is_collected():
-            if self.total_classified() > collected.count:
+            if self.total_classified() != collected.count:
                 errors.append(
-                    f"{self.section_key}: classified count {self.total_classified()} > "
+                    f"{self.section_key}: classified count {self.total_classified()} != "
                     f"collected count {collected.count}"
                 )
         return errors
@@ -158,6 +163,8 @@ class FinalMonitorSnapshot:
         errors: list[str] = []
         if self.status == SectionStatus.UNAVAILABLE and not self.error_code:
             errors.append(f"{self.section_key}: final unavailable without error_code")
+        if classified is not None and not classified.is_collected() and self.is_collected():
+            errors.append(f"{self.section_key}: final collected from unavailable input")
         if classified is not None and classified.is_collected():
             if self.final_classification not in ("pass", "fail", "warn", "unknown"):
                 errors.append(f"{self.section_key}: invalid final_classification")
@@ -194,8 +201,18 @@ def build_collected_snapshot(
     ts = (now or datetime.now(timezone.utc)).isoformat()
     try:
         data = collector()
-        count = data.get("count", 0)
-        if not isinstance(count, int) or count < 0:
+        if not isinstance(data, dict):
+            raise TypeError("collector result must be an object")
+        if "count" not in data:
+            return CollectedSnapshot(
+                section_key=section_key,
+                status=SectionStatus.UNAVAILABLE,
+                error_code="missing_count",
+                error_message="collector result omitted required count",
+                collected_at=ts,
+            )
+        count = data["count"]
+        if type(count) is not int or count < 0:
             return CollectedSnapshot(
                 section_key=section_key,
                 status=SectionStatus.UNAVAILABLE,
@@ -203,12 +220,21 @@ def build_collected_snapshot(
                 error_message=f"count must be non-negative int, got {type(count).__name__}",
                 collected_at=ts,
             )
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            return CollectedSnapshot(
+                section_key=section_key,
+                status=SectionStatus.UNAVAILABLE,
+                error_code="invalid_items_type",
+                error_message=f"items must be a list, got {type(items).__name__}",
+                collected_at=ts,
+            )
         return CollectedSnapshot(
             section_key=section_key,
             status=SectionStatus.COLLECTED,
             collected_at=ts,
             count=count,
-            items=data.get("items", []),
+            items=items,
             raw_data=data,
         )
     except Exception as exc:
@@ -238,16 +264,42 @@ def classify_snapshot(
         )
     try:
         data = classifier(collected)
-        return ClassifiedSnapshot(
+        required = ("pass_count", "fail_count", "warn_count", "skip_count", "classifications")
+        if not isinstance(data, dict) or any(key not in data for key in required):
+            return ClassifiedSnapshot(
+                section_key=collected.section_key,
+                status=SectionStatus.UNAVAILABLE,
+                error_code="classifier_contract_invalid",
+                collected_at=ts,
+            )
+        counts = [data[key] for key in required[:4]]
+        if any(type(value) is not int or value < 0 for value in counts) or not isinstance(
+            data["classifications"], dict
+        ):
+            return ClassifiedSnapshot(
+                section_key=collected.section_key,
+                status=SectionStatus.UNAVAILABLE,
+                error_code="classifier_contract_invalid",
+                collected_at=ts,
+            )
+        snapshot = ClassifiedSnapshot(
             section_key=collected.section_key,
             status=SectionStatus.COLLECTED,
             collected_at=ts,
-            pass_count=data.get("pass_count", 0),
-            fail_count=data.get("fail_count", 0),
-            warn_count=data.get("warn_count", 0),
-            skip_count=data.get("skip_count", 0),
-            classifications=data.get("classifications", {}),
+            pass_count=data["pass_count"],
+            fail_count=data["fail_count"],
+            warn_count=data["warn_count"],
+            skip_count=data["skip_count"],
+            classifications=data["classifications"],
         )
+        if snapshot.validate(collected):
+            return ClassifiedSnapshot(
+                section_key=collected.section_key,
+                status=SectionStatus.UNAVAILABLE,
+                error_code="classification_count_mismatch",
+                collected_at=ts,
+            )
+        return snapshot
     except Exception as exc:
         return ClassifiedSnapshot(
             section_key=collected.section_key,
@@ -277,6 +329,15 @@ def finalize_snapshot(
         )
     try:
         data = finalizer(classified)
+        if not isinstance(data, dict) or data.get("final_classification") not in {
+            "pass", "fail", "warn"
+        }:
+            return FinalMonitorSnapshot(
+                section_key=classified.section_key,
+                status=SectionStatus.UNAVAILABLE,
+                error_code="finalizer_contract_invalid",
+                collected_at=ts,
+            )
         return FinalMonitorSnapshot(
             section_key=classified.section_key,
             status=SectionStatus.COLLECTED,

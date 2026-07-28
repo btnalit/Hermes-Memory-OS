@@ -367,6 +367,7 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
     from datetime import timedelta, timezone as _tz
 
     from .memory_sources import read_memory_source_records
+    from .natural_row import is_natural
 
     current = (now or datetime.now(_tz.utc)).astimezone(_tz.utc)
     snapshot = exposure_rollup_snapshot(store)
@@ -379,12 +380,7 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
             lag_hours = max(0.0, (current - end_dt).total_seconds() / 3600.0)
 
     ms_records = read_memory_source_records(store.roots, limit=1_000_000)
-    natural_records = [
-        record
-        for record in ms_records
-        if record.get("natural_production") is True
-        and str(record.get("traffic_class") or "") == "production"
-    ]
+    natural_records = [record for record in ms_records if is_natural(record)]
     rolling_cutoff = current - timedelta(days=7)
     rolling_records = [
         record for record in natural_records
@@ -433,7 +429,7 @@ def exposure_monitor_stats(store: Any, *, now: datetime | None = None) -> dict[s
 
     daily: dict[str, dict[str, int | bool]] = {}
     for record in schema_rollups:
-        if record.get("trigger_class") != "natural_cron":
+        if not is_natural(record):
             # Fix 3: manual runs and legacy (unmarked) rollups must never
             # inflate the natural-cycle cadence/pressure-streak gate.
             continue

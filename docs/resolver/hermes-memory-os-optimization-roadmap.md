@@ -1,12 +1,12 @@
 # Hermes-Memory-OS 优化路线图 v2
 
-> **版本**：v2.3
+> **版本**：v2.4（源码统一验证通过，生产部署待验证）
 >
-> **更新日期**：2026-07-26
+> **更新日期**：2026-07-27
 >
-> **当前 HEAD**：`111c25d`
+> **修复前源码基线 HEAD**：`3ef422e330f99271c58a65874c2bee016907c9f4`；本版修复尚未提交，最终 HEAD 以统一测试后的单次提交为准
 >
-> **运行时基线提交**：`111c25d`（五批共 92 个新文件/模块，2892 测试全部通过，CI `conclusion=success`）
+> **运行时基线**：部署 manifest 与 Full Monitor artifact 曾出现 source/provenance 漂移；本版部署前不声明与源码 HEAD 一致
 >
 > **定位**：Memory-OS 不只是记忆存储或检索工具，而是整个 Hermes 系统中负责记忆、连续性、分寸感与长期协作的动态伙伴。
 
@@ -25,14 +25,15 @@ Memory-OS 的长期目标不是“保存更多内容”，而是让 Hermes 在�
 
 ---
 
-## 2. v2.2 → v2.3 的主要变化
+## 2. v2.4 审查修正
 
-- **所有可编码的路线图项已全部实现**，总计五批，92 个新文件/模块；
-- 测试总数从 `2834` 增长到 **`2892 passed / 6 skipped / 2 bounded warnings`**，0 回归；
-- 新增 Batch 4：SectionStatus 契约、Continuity 新鲜度、Gap Note、Seed Evidence 增量、Monitor 性能、证据自动生成；
-- 新增 Batch 5：clean-host 部署流水线、私有资产备份策略、Recovery Marker 跨压缩验证、Restraint 连续否定/模糊线索策略；
-- **R2–R6 全部标记为 `completed`**，R1 保持 `observing`（等待自然时间窗口）；
-- 路线图不再有可编码的未完成工程项——剩余全是观察项。
+v2.3 把“新增 helper + helper 单测 + 文件同步”错误升级为 `completed / deployed / runtime_adopted`。v2.4 撤销该推断，并按证据层重新标注：
+
+- 第一批生产真相、artifact envelope、consumer conflict、Closure Matrix、pytest policy、static hygiene 与 clean-host provenance 的实质缺陷已进入源码修复；**统一测试、提交、部署和 fresh-process 证据尚未完成**。
+- `timeutil.py`、`lifecycle.py`、`proposal_state.py`、`continuity.py`、`gap_note.py`、`seed_evidence_incremental.py`、`monitor_perf.py`、`evidence_gen.py` 等若没有真实 caller/CI/Monitor 接线，只能标为 `implemented`，不能标为 `runtime_adopted`。
+- `natural_row.py` 已开始接入 Natural Evidence、Exposure Rollup、V3 Seed 与 Wandering；这仍不等于所有生产自然证据路径已迁移。
+- SectionStatus、Recovery Marker、Restraint、private backup 与 clean-host deploy 的 fail-closed 语义已修正；运行态采用仍须部署后验证。
+- R2–R6 顶层 `completed` 全部撤销。后续只允许用代码、测试、部署、fresh-process 行为、自然证据分别证明对应层级。
 
 ---
 
@@ -42,71 +43,64 @@ Memory-OS 的长期目标不是“保存更多内容”，而是让 Hermes 在�
 
 | 项目 | 当前证据 |
 |------|----------|
-| 生产运行时代码基线 | `111c25d` |
-| 完整隔离测试 | `2892 passed / 6 skipped / 2 bounded warnings` |
-| CI 全量测试 | `2827 passed / 13 skipped`（GitHub runner） |
-| Write Surface | `unclassified_count=0` |
-| Import Cycle | `cycle_count=0` |
-| Static Hygiene | PASS（compileall 为 informational） |
-| Closure Matrix | `status=ok` |
-| GitHub Actions | `conclusion=success` |
-| 生产部署 | 5 批共 50+ 文件定向同步，SHA-256 0 mismatch |
+| 修复前源码基线 | `3ef422e330f99271c58a65874c2bee016907c9f4` |
+| 历史完整隔离测试 | `2993 passed / 6 skipped / 2 bounded warnings`（仅绑定旧树） |
+| 历史 CI | run `30256247567` success（仅绑定 `3ef422e`） |
+| Write Surface | 本版 `surface_count=155, unclassified_count=0` |
+| Import Cycle | 本版 `module_count=170, cycle_count=0` |
+| Static Hygiene | 本版 pass；compileall 为 release-fatal |
+| Closure Matrix | static contract pass；`closure_status=runtime_evidence_required`，不冒充 runtime closure |
+| GitHub Actions | 本版待单次 push 后重新验证 |
+| 生产部署 | 本版未部署；历史文件/哈希证据不得继承 |
 
 ### 3.2 生产运行状态
 
 | 能力 | 状态 | 说明 |
 |------|------|------|
-| Memory-OS Provider | **active** | canonical store 为 `/root/.hermes/memory-os` |
-| Index | **healthy** | SQLite 仅为可重建索引，不是权威源 |
-| MemorySources | **自然观察中** | `enabled=true`、`metadata_only`、不记录 query/prompt/正文 |
-| State Overlay | **已部署** | open thread 去重、latest-effective task 已修复 |
-| Recall Plan | **shadow** | 已产生自然 observation；不改变 live prefetch 输出 |
-| Review Agenda v2 | **apply_canary** | 仍受精确 revision/token/target 门约束 |
-| Lane Status | **最小收敛完成** | Monitor/Dashboard/cron contract 已统一 |
-| SectionStatus | **已部署** | `CollectedSnapshot→ClassifiedSnapshot→FinalMonitorSnapshot` typed pipeline |
-| Continuity | **已部署** | 新鲜度四级分级，stale 自动退化 |
-| Gap Note | **已部署** | `build_gap_note_candidate()` + `render_gap_note()`，shadow metadata-only |
-| Full Monitor artifact | **自动刷新** | daily no-agent 原子刷新，Dashboard 使用同一 artifact |
-| V2 | **观察中/未解冻** | `v2_exposure_schema_era_unhealthy` 仍是当前唯一 Monitor FAIL |
-| V3 | **准入阻塞** | Seed/Wandering 继续等待自然证据；synthesis/outlet/expression 关闭 |
+| Memory-OS Provider | **last-known active** | canonical store 为 `/root/.hermes/memory-os`；本版部署后重验 |
+| Index | **last-known healthy** | SQLite 仅为可重建索引；部署后重验 |
+| MemorySources | **last-known observing** | `metadata_only` 边界保留；fresh observation 待部署后重验 |
+| State Overlay | **历史已部署** | 本版未部署，不能继承 runtime hash |
+| Recall Plan | **last-known shadow** | 历史 observation 不证明本版 runtime adopted |
+| Review Agenda v2 | **last-known apply_canary** | Owner/token 边界不因本版修复而自动变更；部署后重验 |
+| Lane Status | **source repaired / runtime unverified** | Shared Operational Truth 公共投影已修；消费者与新 artifact 待部署验证 |
+| SectionStatus | **implemented，未证明 Monitor adopted** | helper 已 fail-closed；真实 Monitor section 尚未统一迁移 |
+| Continuity | **implemented，未证明 projection adopted** | helper/单测不等于 system prompt/overlay caller |
+| Gap Note | **implemented，未证明 shadow caller** | candidate/render helper 存在；自然 observation 待证 |
+| Full Monitor artifact | **source verified / runtime pending** | 真实 producer→refresh→reader→Dashboard clean-host E2E 已通过；生产 fresh artifact 待部署 |
+| V2 | **last-known observing / 未解冻** | fresh Monitor 才能确认当前失败集合 |
+| V3 | **准入保持阻塞** | 不因源码整改自动解冻；synthesis/outlet/expression 继续关闭 |
 
-### 3.3 已完成的闭环
+### 3.3 分批整改状态（不等同 runtime closure）
 
 **第一批（基础设施收口）**：
-- ✅ Shared Operational Truth — typed 投影，4 个消费者同步（Monitor、Dashboard、CLI、Lane Status）
-- ✅ Monitor artifact envelope — v1 identity + legacy 兼容，`generated_at`/source/runtime/monitor/producer receipt
-- ✅ Dashboard 冲突保护 — 冲突时 KPI 和 memory panel 不显示单边 winner
-- ✅ Closure Matrix 公共契约 — 结构化 fail-closed，public/private 边界，非空 `current_action_path`
-- ✅ CI 与隔离 — GitHub Actions、mount namespace、pytest policy（collection/runtest 双阶段）
-- ✅ 治理门 — write surface、import cycle、static hygiene、public checkout 全部通过
-- ✅ 生产部署 — 27 文件定向同步，SHA-256 0 mismatch
+- 🛠 Shared Operational Truth — CLI/provider 公共计数在 conflict/invalid artifact 时不再输出单边 winner；待部署验证
+- 🛠 Monitor artifact envelope — v1 schema、必需 identity、future-clock fail-closed、v1 优先于 legacy；待真实 refresh
+- ✅ Closure Matrix — 公共必需 surfaces 无条件执行，关键 action path 解析到真实 symbol；runtime closure 仍明确待 deployment evidence
+- 🛠 pytest policy — skip allowlist 绑定 `collect/setup/call` 阶段；setup fixture 不得伪装 call skip
+- 🛠 static hygiene — compileall 失败不再被降为 informational
+- ⏳ 生产部署 — 尚未执行本版部署；旧 SHA-256 同步证据不能证明新代码已运行
 
-**第二批（5 项编码）**：
-- ✅ 时间语义统一 — `timeutil.py`，26 测试
-- ✅ Recall golden set — `recall_golden.py`，13 测试
-- ✅ Natural evidence 晋级门 — `natural_evidence.py`，14 测试
-- ✅ 状态机 lifecycle — `lifecycle.py`，38 测试
-- ✅ 主会话审批闭环 — `session_approval.py`
+**第二批（实现层，不等同运行采用）**：
+- `timeutil.py`、`recall_golden.py`、`natural_evidence.py`、`lifecycle.py`、`session_approval.py` 均需逐项证明 caller 与行为层；其中 Natural Evidence 已复用 shared natural-row 分类，其余未接线项保持 `implemented`。
 
-**第三批（4 项编码）**：
-- ✅ natural row 视图统一 — `natural_row.py`，30 测试
-- ✅ 错误码注册表 — `error_registry.py`，12 个内置错误码
-- ✅ Proposal/Token 状态机 — `proposal_state.py`，37 测试
-- ✅ JSONL 鲁棒性 — 22 个 fuzz 测试
+**第三批（部分接线）**：
+- Natural-row 分类已接入 Natural Evidence、Exposure Rollup、V3 Seed/Wandering。
+- JSONL mixed-encoding 改为逐行隔离并产出 `jsonl_invalid_utf8`，不再使主 reader 崩溃。
+- Error Registry 与 Proposal/Token state machine 未证明生产 caller，保持 `implemented`。
 
-**第四批（6 项编码）**：
-- ✅ SectionStatus 契约 — `section_status.py`，16 测试，typed phase API
-- ✅ Continuity 新鲜度 — `continuity.py`，13 测试，stale 自动退化
-- ✅ Gap Note — `gap_note.py`，14 测试，`build_gap_note_candidate()` + `render_gap_note()`
-- ✅ Seed Evidence 增量 — `seed_evidence_incremental.py`，8 测试，offset/cursor 读取
-- ✅ Monitor 性能 — `monitor_perf.py`，7 测试，runtime budget + cache parity
-- ✅ 证据自动生成 — `evidence_gen.py`，7 测试，test delta / skip reason / diff digest
+**第四批（helper 层）**：SectionStatus 已修为缺键、类型错、数量不守恒时 fail-closed；Continuity、Gap Note、增量 Seed、Monitor Perf、Evidence Gen 未有 caller/CI/真实时延证据者均保持 `implemented`。
 
-**第五批（4 项编码）**：
-- ✅ clean-host 部署流水线 — `deploy_clean_host.py`，7 测试，plan→preflight→dry-run→apply→postcheck
-- ✅ 私有资产备份策略 — `private_backup.py`，6 测试，must_backup/rebuildable/discardable 三级分类
-- ✅ Recovery Marker 跨压缩验证 — `recovery_marker.py`，10 测试，防止 terminal task 复活
-- ✅ Restraint 策略 — `restraint.py`，11 测试，DenialTracker/CandidateEvaluation/SessionPriority
+**第五批（安全语义修复）**：clean-host probe 已绑定 source/target 实际 import origin，并加入原子发布/失败回滚；private backup 新增独立 manifest/restore 校验；Recovery Marker 只阻止同一 terminal task 复活，不阻塞新任务；Restraint 不再接受裸 `is_owner_approval=True` 作为审批证据。源码统一测试已通过，部署验证仍待执行。
+
+### 3.4 本版统一源码验证
+
+- 顶层命令：`python3 scripts/memory_os_v24_final_verify.py --repo-root . --python /usr/bin/python3 --report <outside-repo-report>`
+- 定向回归：`216 passed, 5 skipped`
+- mount-isolated 全量：`3015 passed, 9 skipped`
+- clean-copy + 临时 Git checkout 全量：`3015 passed, 9 skipped`
+- import cycle、Write Surface、Static Hygiene、public checkout、Closure Matrix、wheel build：全部通过
+- 验证前后 source/clean tree fingerprint 均稳定；该结论只证明源码与 clean checkout，不证明已部署、已接线或正在 observing
 
 ---
 
@@ -212,93 +206,98 @@ gap_note_body_persisted_count = 0
 
 ## R2 — 生产真相、部署与防回归基础设施
 
-**状态**：`completed`
+**状态**：`implemented / source_verified / deployment_pending`
 
 ### R2.1 单一运行真相
 
-- [x] Shared Operational Truth — typed 只读投影，Monitor/Dashboard/CLI/Lane Status 共享
-- [x] full Monitor artifact envelope — `generated_at`、source HEAD、runtime digest、monitor version、producer receipt
-- [x] artifact 超 freshness contract 时 Dashboard 明确 stale，不回退到更旧但"看起来更绿"的快照
+- [x] Shared Operational Truth — CLI/provider/Dashboard 公共投影与 conflict/invalid fail-closed 回归通过；生产 consumer receipt 待部署
+- [x] full Monitor artifact envelope — identity/schema/future-clock/legacy precedence 与真实 producer clean-host E2E 通过；生产 fresh artifact 待部署
+- [x] stale/invalid/future artifact 不得回退到更旧但“看起来更绿”的快照；反事实通过
 - [x] desired-vs-observed 两平面保留
 
 ### R2.2 生产部署双 Profile
 
 **默认生产路径：targeted deployment**（已验证 5 次）
 
-- [x] `deploy_clean_host.py` 实现 plan → preflight → dry-run → apply → postcheck 完整流水线
+- [x] `deploy_clean_host.py` neutral import-origin probe、read-only preflight、atomic apply、target digest postcheck 与 rollback fixture 通过
 - [x] 定向部署路径：inspect → backup → sync → hash verify → commit → clone full suite → push
 - [ ] clean-host fixture 在专用主机验证（不用于有定制生产主机）
 
 ### R2.3 CI 与隔离
 
-- [x] GitHub Actions 在 push/PR 跑 mount-isolated full pytest — CI `conclusion=success`
-- [x] import cycle、write surface、static hygiene、public checkout probe、`git diff --check` 全部通过
-- [x] 分类化 skip/warning 门 — `unknown_skip_count=0`、`unknown_warning_count=0`、`project_owned_warning_count=0`
-- [x] 稳定 skip ID/reason allowlist — 绑定 stage、nodeid、reason、bounded count
+- [x] GitHub Actions 在 push/PR 跑 mount-isolated full pytest（旧 baseline 已成功）
+- [x] import cycle、write surface、static hygiene、public checkout probe、`git diff --check` 本版统一验证通过
+- [x] 分类化 skip/warning 门通过 mount-isolated policy report 验证
+- [x] skip allowlist 源码已绑定 `collect/setup/call` stage、nodeid、reason、bounded count
 
 ### R2.4 Closure Matrix 公共检出
 
-- [x] 公共 contract `docs/contracts/memory-os-closure-matrix.v1.json`
-- [x] 私有 matrix 只能增加覆盖，不能决定公共基础门是否执行
-- [x] `internal_docs_missing` 作为 info 不使核心 gate skipped
+- [x] 公共 contract 已补齐 15 个必需 surface
+- [x] 必需 label 不再依赖私有 docs；关键 `current_action_path` 必须解析到真实 source symbol
+- [x] public contract gate `status=ok` 仅表示 source/static-wiring contract 有效；`closure_status=runtime_evidence_required` 明确禁止把静态绿色升级成 runtime closure
+- [x] `memory_os_closure_runtime_evidence.py` 生成 fresh-process origin、runtime tree digest、module set 与 service observation 的原子证据 artifact；待部署阶段实际生成并验证
+- [x] `internal_docs_missing` 仅为 info 且核心 gate 不 skipped；public/clean-copy 反事实通过
 
 ### R2.5 Gitignored/私有资产备份
 
-- [x] `private_backup.py` — must_backup / rebuildable / discardable 三级分类
-- [x] SHA-256 验证备份完整性
+- [x] `private_backup.py` — must_backup / rebuildable / discardable 三级分类；private Markdown 默认 must_backup
+- [x] source manifest、原子单文件复制、目标及 fresh restore-root 独立 hash 校验回归通过
 - [ ] 必须保留的内容进入私有 remote、加密异机备份或定期 bundle
 
 ---
 
 ## R3 — 语义收敛与防漂移
 
-**状态**：`completed`
+**状态**：`partially_adopted`
 
 ### R3.1 时间戳语义统一
 
 - [x] 公共实现 `plugins/memory/memory_os/timeutil.py` — `parse_utc()`、`format_utc()`、`safe_compare()`、`age_seconds()` 等
 - [x] 26 个等价 fixture，覆盖 Z 后缀、时区偏移、无时区拒绝、小数秒、空值、越界
 - [x] 向后兼容别名：`parse_timestamp()`、`parse_dt()`
+- [ ] 剩余生产模块逐一迁移并删除 ad-hoc parser；完成前不得称“时间语义统一”
 
 ### R3.2 natural row 视图统一
 
-- [x] 共享 `is_natural(row)`、`natural_rows(rows)`、`latest_natural_row(rows)`、`natural_row_date_counts()`
-- [x] 30 个测试，覆盖 natural/manual/legacy 分类、日期统计、过滤
+- [x] 共享 natural-row API 已实现
+- [ ] 已接入 Natural Evidence、Exposure Rollup、V3 Seed/Wandering；其余生产 consumer 待审计
 
 ### R3.3 错误码注册表
 
-- [x] 12 个内置错误码，模块级常量
-- [x] 每个错误码记录 producer、consumer、production_severity、clean_host_severity、recoverability
-- [x] 未注册码返回 `unregistered_error_code`，不能静默成为新语义
+- [x] 12 个内置错误码与注册表 helper 已实现
+- [ ] 生产 consumer 尚未统一迁移；未接线前 registry 不能作为全局错误语义证据
 
 ### R3.4 JSONL 鲁棒性与错误预算
 
-- [x] 22 个 fuzz 测试：空文件、截断行、非对象 JSON、BOM、混合编码、超大文件、特殊字符
-- [x] 任何输入不得导致主循环崩溃；error records 有界
+- [x] fuzz/回归用例已扩充并通过统一执行
+- [x] 主 JSONL reader 对 invalid UTF-8 逐行隔离并记录 `jsonl_invalid_utf8`
+
+### R3.5 第二/三批 adoption ledger
+
+- [x] `session_approval` 已通过 `system_prompt_block()` 进入正式会话提示路径
+- [x] `jsonl_io` 是既有 reader 使用面的鲁棒性增强，不计作新增 runtime wiring
+- [ ] `recall_golden`、`lifecycle`、`error_registry` 与 `proposal_state` 当前为 implemented/tested helper；在真实 caller 迁移前不标 wired/live
 
 ---
 
 ## R4 — 统一状态机（消除整类缺陷）
 
-**状态**：`completed`
+**状态**：`implemented_helpers / production_adoption_partial`
 
 ### R4.1 SectionStatus 契约
 
-- [x] `section_status.py` — 16 测试
-- [x] `CollectedSnapshot → ClassifiedSnapshot → FinalMonitorSnapshot` typed pipeline
-- [x] 后阶段 API 不允许重新写入前阶段状态
-- [x] 缺失键/类型错误降级 unavailable，不伪装健康零
+- [x] `section_status.py` typed helper 已实现
+- [x] 缺失键、类型错误、分类数量不守恒和 final key 缺失均 fail-closed
+- [ ] Full Monitor 各真实 section 尚未迁移到该 typed pipeline
 
 ### R4.2 Proposal / Token 状态机
 
-- [x] `proposal_state.py` — 37 测试
-- [x] Proposal 状态：`drafted → submitted → approved_for_proposal → applied/rejected/expired/cancelled`
-- [x] Token 状态：`active → approved/rejected/deferred/revoked`，`deferred → active/expired`
-- [x] 完整转换矩阵，终端状态 fail-closed，rejection/revoke 原因追踪
+- [x] `proposal_state.py` helper 与转换矩阵已实现
+- [ ] OwnerActionProcessor/token ledger 未迁移；不得把 helper transition 视为生产权威状态机
 
 ### R4.3 Trigger provenance 状态机
 
-- [x] `natural_evidence.py` — 14 测试
+- [x] `natural_evidence.py` 已复用 shared `natural_row.classify_row()`
 - [x] 类型封闭：`natural_cron | manual | legacy_unmarked`
 - [x] legacy 仅可观察，不能获得 natural credit
 - [x] manual 不能通过调用参数伪造 natural envelope
@@ -307,22 +306,23 @@ gap_note_body_persisted_count = 0
 
 ## R5 — 认知伙伴演进主线
 
-**状态**：`completed`
+**状态**：`mixed: live_core + implemented_helpers + observing`
 
 ### R5.1 Continuity：持续跟随
 
 - [x] State Overlay open-thread 去重
 - [x] latest-effective current task，避免 completed/cancelled/superseded 任务复活
-- [x] `continuity.py` — 13 测试，FreshnessGrade 四级（fresh/aging/stale/unknown）
-- [x] `recovery_marker.py` — 10 测试，跨压缩/重启验证，防止 terminal task 被 updater 重写
+- [x] `continuity.py` FreshnessGrade helper 已实现
+- [ ] Continuity helper 尚未证明被 system prompt/overlay 生产 caller 采用
+- [x] Recovery Marker 已修为只防同一 terminal task 复活，不阻塞不同新任务
 - [ ] capability map 和 material index 从空占位演进为可重建 read model；不得成为新权威源
 
 ### R5.2 Relevance：懂得轻重
 
 - [x] Recall Plan shadow 和 metadata-only observation
 - [x] authority/freshness matrix、重复和 conflict telemetry
-- [x] must-recall golden set — `recall_golden.py`，13 测试
-- [x] Gap Note — `gap_note.py`，14 测试，`build_gap_note_candidate()` + `render_gap_note()`
+- [x] must-recall golden set 与 Gap Note helper 已实现
+- [ ] 两者尚无正式召回/会话 consumer；不得标 wired/live
 - [ ] bounded apply canary 只对明确 route/profile 生效，具备即时回滚
 - [ ] canary 期间比较任务完成度、Owner 重解释次数、错误唤起和重复注入，而不是只比较召回率
 
@@ -330,10 +330,11 @@ gap_note_body_persisted_count = 0
 
 - [x] Low-clue recall 与 bounded judge availability
 - [x] metadata-only MemorySources，不复制原话或私密正文
-- [x] `restraint.py` — 11 测试，`LowCluePolicy` / `DenialTracker` / `CandidateEvaluation` / `SessionPriority`
-- [x] 模糊线索优先给方向或最小澄清，不强行选一个答案
-- [x] Owner 连续否定后停止猜测（3 次后暂停 24h）
-- [x] 不把 candidate、provisional、模型置信度或沉默当 Owner approval
+- [x] `restraint.py` helper 已实现；裸 `is_owner_approval=True` 已降为 unverified claim
+- [x] helper policy 编码“模糊线索优先方向/最小澄清、连续 3 次否定后暂停 24h”
+- [ ] 上述行为尚未通过主会话 caller 与真实反馈 receipt 证明
+- [x] CandidateEvaluation 仅接受结构化 `ApprovalDecision` 作为 approval 证据
+- [ ] Restraint/DenialTracker/SessionPriority 仍需接入真实低线索与会话路径
 - [x] 当前对话明确要求优先于历史 task anchor、proposal、digest 或 reflection
 
 ### R5.4 Review Partnership：替 Owner 收敛，而不是制造 backlog
@@ -362,25 +363,24 @@ gap_note_body_persisted_count = 0
 
 ## R6 — 性能与长期维护
 
-**状态**：`completed`
+**状态**：`implemented_helpers / no_runtime_or_ci_adoption_evidence`
 
 ### R6.1 Seed Evidence 增量化
 
-- [x] `seed_evidence_incremental.py` — 8 测试，offset/cursor 增量读取
-- [x] `verify_incremental_equivalence()` — 全量/增量结果等价性验证
+- [x] `seed_evidence_incremental.py` 与 equivalence helper 已实现
+- [ ] `run_v3_seed_evidence_cycle()` 仍需接入增量 reader 并通过全量/增量生产等价验证
 - [x] 保留全量重建和回放路径
 
 ### R6.2 Monitor 性能
 
-- [x] `monitor_perf.py` — 7 测试，`track_runtime` budget 跟踪
-- [x] `verify_cache_parity()` — 有效 fresh cache 允许 expensive reader raise 仍成功
-- [x] 0 是合法 cached value
+- [x] `monitor_perf.py` helper 与 cache parity fixture 已实现
+- [ ] 必须用真实 Full Monitor 路径测时；空 context-manager 单测不构成性能证据
 
 ### R6.3 稳定化证据自动生成
 
-- [x] `evidence_gen.py` — 7 测试，`build_test_delta()` / `build_skip_reason_report()` / `build_staged_diff_digest()`
-- [x] 生成器只记录经工具验证的输出，修改 canonical memory、Owner state 或生产账本
-- [ ] 自动集成到 CI 流程
+- [x] `evidence_gen.py` helper 已实现
+- [x] 生成器不得修改 canonical memory、Owner state 或生产账本
+- [ ] 自动集成到 CI；在此之前不得称“证据自动生成闭环”
 
 ---
 

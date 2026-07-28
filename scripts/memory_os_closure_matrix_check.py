@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 import sys
@@ -143,7 +144,7 @@ def build_report(repo_root: Path) -> dict[str, Any]:
     if roadmap_path is None:
         missing_internal_docs.append("active_roadmap")
 
-    live_modules = load_live_module_definitions(repo_root)
+    live_modules: list[str] = []
     if not public_contract_path.exists():
         return missing_public_contract_report(
             public_contract_path,
@@ -182,6 +183,22 @@ def build_report(repo_root: Path) -> dict[str, Any]:
             missing_internal_docs,
             "schema_version",
         )
+    evidence_contract = {
+        "contract_scope": "source_and_static_wiring_only",
+        "runtime_evidence_required": True,
+        "runtime_evidence_schema": "memory-os.closure_runtime_evidence.v1",
+        "runtime_evidence_path": "memory-os/system/closure_runtime_evidence.v1.json",
+    }
+    for field, expected in evidence_contract.items():
+        if public_contract.get(field) != expected:
+            return invalid_public_contract_report(
+                public_contract_path,
+                matrix_path,
+                roadmap_path,
+                live_modules,
+                missing_internal_docs,
+                field,
+            )
     public_rows = public_contract.get("modules")
     if not isinstance(public_rows, list) or not all(isinstance(row, dict) for row in public_rows):
         return invalid_public_contract_report(
@@ -203,6 +220,8 @@ def build_report(repo_root: Path) -> dict[str, Any]:
                 missing_internal_docs,
                 f"modules[{index}].live_modules",
             )
+
+    live_modules = load_live_module_definitions(repo_root)
 
     private_extension_enabled = matrix_path is not None and roadmap_path is not None
     matrix_text = matrix_path.read_text(encoding="utf-8") if private_extension_enabled else ""
@@ -273,12 +292,12 @@ def build_report(repo_root: Path) -> dict[str, Any]:
         }
     )
     unknown_contract_live_modules = sorted(set(public_contract_live_modules) - set(live_modules))
-    missing_contract_labels = (
-        sorted(label for label in REQUIRED_CONTRACT_LABELS if label not in row_by_module)
-        if private_extension_enabled
-        else []
+    missing_contract_labels = sorted(
+        label for label in REQUIRED_CONTRACT_LABELS if label not in row_by_module
     )
-    invalid_rows = [row for row in [*public_rows, *private_rows] if row_classification_errors(row)]
+    invalid_rows = [
+        row for row in [*public_rows, *private_rows] if row_classification_errors(row, repo_root)
+    ]
     missing_active_work_items = sorted(item for item in active_work_items if item not in mapping_by_item)
     stale_active_work_mappings = sorted(
         mapping["work_item"]
@@ -362,7 +381,7 @@ def build_report(repo_root: Path) -> dict[str, Any]:
                 "code": "invalid_closure_classification",
                 "severity": "error",
                 "module": str(row.get("module") or ""),
-                "errors": row_classification_errors(row),
+                "errors": row_classification_errors(row, repo_root),
             }
         )
     for item in missing_active_work_items:
@@ -404,6 +423,11 @@ def build_report(repo_root: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "fail" if has_errors else "ok",
+        "closure_status": "contract_invalid" if has_errors else "runtime_evidence_required",
+        "contract_scope": public_contract["contract_scope"],
+        "runtime_evidence_required": True,
+        "runtime_evidence_schema": public_contract["runtime_evidence_schema"],
+        "runtime_evidence_path": public_contract["runtime_evidence_path"],
         "public_contract_path": str(public_contract_path),
         "matrix_path": str(matrix_path or public_contract_path),
         "private_matrix_path": str(matrix_path) if matrix_path else "",
@@ -595,14 +619,41 @@ def parse_active_work_items(text: str) -> list[str]:
 
 
 def load_live_module_definitions(repo_root: Path) -> list[str]:
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    from plugins.memory.memory_os.cli import _module_definitions
+    """Read the CLI registry from its source AST without importing ambient packages."""
+    cli_path = (repo_root / "plugins" / "memory" / "memory_os" / "cli.py").resolve()
+    cli_path.relative_to(repo_root.resolve())
+    tree = ast.parse(cli_path.read_text(encoding="utf-8"), filename=str(cli_path))
+    registry = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "_module_definitions"
+        ),
+        None,
+    )
+    if registry is None:
+        raise RuntimeError("live module registry symbol missing: _module_definitions")
+    return_node = next((node for node in ast.walk(registry) if isinstance(node, ast.Return)), None)
+    if return_node is None or not isinstance(return_node.value, (ast.List, ast.Tuple)):
+        raise RuntimeError("live module registry must return a literal list")
+    modules: list[str] = []
+    for item in return_node.value.elts:
+        if not isinstance(item, ast.Dict):
+            raise RuntimeError("live module registry entries must be literal dicts")
+        module_value: str | None = None
+        for key, value in zip(item.keys, item.values, strict=True):
+            if isinstance(key, ast.Constant) and key.value == "module":
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    module_value = value.value
+                break
+        if not module_value:
+            raise RuntimeError("live module registry entry missing literal module id")
+        modules.append(module_value)
+    return sorted(modules)
 
-    return sorted(str(item["module"]) for item in _module_definitions())
 
-
-def row_classification_errors(row: dict[str, Any]) -> list[str]:
+def row_classification_errors(row: dict[str, Any], repo_root: Path | None = None) -> list[str]:
     errors: list[str] = []
     if not str(row.get("module") or "").strip():
         errors.append("module")
@@ -618,7 +669,46 @@ def row_classification_errors(row: dict[str, Any]) -> list[str]:
     current_action_path = row.get("current_action_path")
     if not isinstance(current_action_path, str) or not current_action_path.strip():
         errors.append("current_action_path")
+    elif repo_root is not None:
+        reference_error = _action_reference_error(current_action_path, repo_root)
+        if reference_error:
+            errors.append("current_action_path:" + reference_error)
     return errors
+
+
+def _action_reference_error(reference: str, repo_root: Path) -> str:
+    """Require a portable, existing ``relative/path.py::symbol`` action reference."""
+    if "::" not in reference:
+        return "unstructured"
+    relative_text, symbol = (part.strip() for part in reference.split("::", 1))
+    relative = Path(relative_text)
+    if not relative_text or relative.is_absolute() or ".." in relative.parts:
+        return "unsafe_path"
+    if not symbol:
+        return "missing_symbol"
+    target = (repo_root / relative).resolve()
+    try:
+        target.relative_to(repo_root.resolve())
+    except ValueError:
+        return "outside_repo"
+    if not target.is_file():
+        return "missing_file"
+    try:
+        source = target.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return "unreadable_file"
+    try:
+        tree = ast.parse(source, filename=str(target))
+    except SyntaxError:
+        return "invalid_source"
+    definitions = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    if symbol not in definitions:
+        return "missing_symbol"
+    return ""
 
 
 def active_work_mapping_errors(
@@ -657,6 +747,7 @@ def _classes_are_valid(value: str, allowed: set[str]) -> bool:
 def render_summary(report: dict[str, Any]) -> str:
     lines = [
         f"status={report['status']}",
+        f"closure_status={report.get('closure_status', 'contract_invalid')}",
         *([f"skip_reason={report['skip_reason']}"] if report.get("skip_reason") else []),
         f"live_module_count={report['live_module_count']}",
         f"matrix_module_count={report['matrix_module_count']}",

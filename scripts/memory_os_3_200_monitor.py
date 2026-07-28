@@ -1462,13 +1462,16 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     _classify_left_brain_signal_weaving(snapshot, passed, warn, fail, clean_host=clean_host)
 
-    memory_status = snapshot.get("memory_status", {})
+    memory_status_raw = snapshot.get("memory_status")
+    memory_status = memory_status_raw if isinstance(memory_status_raw, dict) else {}
+    index_health_raw = memory_status.get("index_health")
+    index_health = index_health_raw if isinstance(index_health_raw, dict) else {}
     catchup_contract = (
         snapshot.get("index_catchup_contract")
         if isinstance(snapshot.get("index_catchup_contract"), dict)
         else index_catchup_contract(snapshot)
     )
-    if memory_status.get("index_health", {}).get("state") == "healthy":
+    if index_health.get("state") == "healthy":
         passed.append({"code": "index_healthy"})
     elif catchup_contract.get("within_catchup_window") is True:
         warn.append({"code": "index_catchup_pending", "value": catchup_contract})
@@ -1476,7 +1479,9 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         warn.append({"code": "index_not_healthy", "value": catchup_contract})
     if memory_status.get("prefetch_mode") != "indexed":
         warn.append({"code": "prefetch_not_indexed", "value": memory_status.get("prefetch_mode")})
-    crystallized_record_count = int(memory_status.get("counts", {}).get("crystallized_records", 0))
+    counts_raw = memory_status.get("counts")
+    counts = counts_raw if isinstance(counts_raw, dict) else {}
+    crystallized_record_count = int(counts.get("crystallized_records", 0) or 0)
     if crystallized_record_count > 0:
         passed.append(
             {
@@ -1486,7 +1491,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         )
     _classify_hindsight_substrate(snapshot, passed, fail)
 
-    doctor = snapshot.get("doctor", {})
+    doctor_raw = snapshot.get("doctor")
+    doctor = doctor_raw if isinstance(doctor_raw, dict) else {}
     if doctor.get("status") == "ok":
         passed.append({"code": "doctor_ok"})
     else:
@@ -3384,6 +3390,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     "code": "living_memory_promotion_ledger_state_collection_failed",
                     "value": living_memory_promotion.get("ledger_state_collection_error_code"),
                 })
+            suppressed_ledger_errors = int(
+                living_memory_promotion.get("ledger_read_suppressed_error_count") or 0
+            )
+            if suppressed_ledger_errors > 0:
+                fail.append({
+                    "code": "living_memory_promotion_ledger_partial_read",
+                    "value": suppressed_ledger_errors,
+                })
             if living_memory_promotion.get("stale_open_evaluation_status") == "unavailable":
                 # The stale-open evaluation inside
                 # read_permanent_promotion_ledger_counts failed (its broad
@@ -4171,16 +4185,25 @@ def _is_monitor_probe_error_record(record: dict[str, Any]) -> bool:
 
 def render_chinese_summary(snapshot: dict[str, Any]) -> str:
     classification = snapshot.get("classification") or classify_snapshot(snapshot)
-    memory_status = snapshot.get("memory_status", {})
+    memory_status_raw = snapshot.get("memory_status")
+    memory_status = memory_status_raw if isinstance(memory_status_raw, dict) else {}
     catchup_contract = (
         snapshot.get("index_catchup_contract")
         if isinstance(snapshot.get("index_catchup_contract"), dict)
         else index_catchup_contract(snapshot)
     )
-    counts = memory_status.get("counts", {})
-    router = snapshot.get("context_router", {})
-    deltas = snapshot.get("deltas", {})
-    counts_delta = deltas.get("counts_delta", {})
+    counts_raw = memory_status.get("counts")
+    counts = counts_raw if isinstance(counts_raw, dict) else {}
+    router_raw = snapshot.get("context_router")
+    router = router_raw if isinstance(router_raw, dict) else {}
+    deltas_raw = snapshot.get("deltas")
+    deltas = deltas_raw if isinstance(deltas_raw, dict) else {}
+    counts_delta_raw = deltas.get("counts_delta")
+    counts_delta = counts_delta_raw if isinstance(counts_delta_raw, dict) else {}
+    gateway_raw = snapshot.get("gateway")
+    gateway = gateway_raw if isinstance(gateway_raw, dict) else {}
+    doctor_raw = snapshot.get("doctor")
+    doctor = doctor_raw if isinstance(doctor_raw, dict) else {}
     hermes_status = snapshot.get("hermes_status") if isinstance(snapshot.get("hermes_status"), dict) else {}
     lines = [
         f"监控结果: {classification['status']}",
@@ -4188,8 +4211,8 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
         f"- host={snapshot.get('hostname')} profile={snapshot.get('monitor_profile', 'live')} time={snapshot.get('date_utc')}",
         f"- evidence_labels={classification.get('evidence_labels') or []}",
         (
-            f"- gateway={snapshot.get('gateway', {}).get('ActiveState')} "
-            f"pid={snapshot.get('gateway', {}).get('MainPID')} "
+            f"- gateway={gateway.get('ActiveState')} "
+            f"pid={gateway.get('MainPID')} "
             f"hermes_gateway_running={hermes_status.get('gateway_running')} "
             f"manager={hermes_status.get('gateway_manager')} "
             f"pids={hermes_status.get('gateway_pids')}"
@@ -4226,7 +4249,7 @@ def render_chinese_summary(snapshot: dict[str, Any]) -> str:
             f"prefetch_mode={memory_status.get('prefetch_mode')} "
             f"index_catchup={_index_catchup_summary(catchup_contract)}"
         ),
-        f"- doctor={snapshot.get('doctor', {}).get('status')} findings={snapshot.get('doctor', {}).get('findings')}",
+        f"- doctor={doctor.get('status')} findings={doctor.get('findings')}",
         f"- shell_alias_no_env={snapshot.get('shell_alias_no_env')}",
         (
             f"- context_router={router.get('mode')} apply_routes={router.get('apply_routes')} "
@@ -4474,6 +4497,7 @@ def collect_snapshot(
             _lm_kwargs["ledger_counts"] = _lm_payload.get("counts") or {}
         else:
             _lm_kwargs["ledger_collection_error"] = _lm_error_code
+    raw["schema_version"] = "memory-os.monitor.v1"
     raw["living_memory_promotion"] = summarize_living_memory_promotion(**_lm_kwargs)
     raw["classification"] = classify_snapshot(raw)
     return raw

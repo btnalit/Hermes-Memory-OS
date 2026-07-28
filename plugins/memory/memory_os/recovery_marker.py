@@ -101,7 +101,7 @@ def verify_recovery_marker(
         result.error = "invalid_marker_allow_proceed"
         return result
 
-    if marker.is_terminal():
+    if marker.is_terminal() and marker.task_id == updater_task_id:
         result.verified = False
         result.error = "terminal_task_resurrected"
         return result

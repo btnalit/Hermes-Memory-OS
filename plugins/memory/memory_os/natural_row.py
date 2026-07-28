@@ -26,10 +26,16 @@ def is_natural(row: dict[str, Any]) -> bool:
 
     Checks trigger_class, provenance, and natural_production fields.
     """
-    trigger = str(row.get("trigger_class") or row.get("provenance") or "").strip().lower()
+    trigger = str(
+        row.get("trigger_class") or row.get("trigger") or row.get("provenance") or ""
+    ).strip().lower()
     if trigger in NATURAL_CRON_MARKERS:
         return True
-    # Also check the natural_production flag used by memory_sources
+    if trigger:
+        # Explicit provenance always outranks compatibility flags.  Conflicting
+        # rows fail closed rather than receiving natural credit.
+        return False
+    # Compatibility path for MemorySources rows that predate trigger_class.
     if row.get("natural_production") is True:
         traffic = str(row.get("traffic_class") or "").strip().lower()
         if traffic == "production":
@@ -39,13 +45,17 @@ def is_natural(row: dict[str, Any]) -> bool:
 
 def is_manual(row: dict[str, Any]) -> bool:
     """Return True if the row was produced by manual invocation."""
-    trigger = str(row.get("trigger_class") or row.get("provenance") or "").strip().lower()
+    trigger = str(
+        row.get("trigger_class") or row.get("trigger") or row.get("provenance") or ""
+    ).strip().lower()
     return trigger in MANUAL_MARKERS
 
 
 def is_legacy_unmarked(row: dict[str, Any]) -> bool:
     """Return True if the row has no trigger provenance marker."""
-    trigger = str(row.get("trigger_class") or row.get("provenance") or "").strip().lower()
+    trigger = str(
+        row.get("trigger_class") or row.get("trigger") or row.get("provenance") or ""
+    ).strip().lower()
     return not trigger or trigger in ("", "unknown", "none", "legacy")
 
 

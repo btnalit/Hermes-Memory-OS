@@ -102,7 +102,7 @@ def read_jsonl_result(
     records: list[dict[str, Any]] = []
     error_records: list[dict[str, Any]] = []
     try:
-        lines = target.read_text(encoding="utf-8").splitlines()
+        raw_lines = target.read_bytes().splitlines()
     except OSError as exc:
         return JsonlReadResult(
             records=[],
@@ -118,7 +118,22 @@ def read_jsonl_result(
                 )
             ],
         )
-    for line_number, line in enumerate(lines, start=1):
+    for line_number, raw_line in enumerate(raw_lines, start=1):
+        try:
+            line = raw_line.decode("utf-8-sig" if line_number == 1 else "utf-8")
+        except UnicodeDecodeError:
+            error_records.append(
+                build_error_record(
+                    component=component,
+                    operation=operation,
+                    error_code="jsonl_invalid_utf8",
+                    severity="warning",
+                    recoverable=True,
+                    path=target,
+                    line_number=line_number,
+                )
+            )
+            continue
         if not line.strip():
             continue
         try:
@@ -171,7 +186,7 @@ def read_json_state_result(
         return JsonStateReadResult(data={}, error_records=[])
     try:
         parsed = json.loads(target.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return JsonStateReadResult(
             data={},
             error_records=[

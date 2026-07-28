@@ -85,7 +85,7 @@ from .memory_sources import (
     render_last_injection_explanation,
 )
 from .metadata_retention import MetadataRetentionPolicy, metadata_retention_plan
-from .operational_truth import read_operational_truth_snapshot
+from .operational_truth import project_public_counts, read_operational_truth_snapshot
 from .migrator import (
     export_shadow_bundle,
     import_shadow_bundle,
@@ -188,18 +188,22 @@ def build_status_report(store: MemoryOSStore) -> dict[str, Any]:
         now=datetime.now(timezone.utc),
         stale_after_seconds=30 * 3600,
         runtime_count_observations={
-            field: {f"status.counts.{field}": value}
-            for field, value in store_counts.items()
-            if field in {"events", "working_items", "crystallized_candidates", "crystallized_records"}
+            field: {
+                f"status.counts.{field}": store_counts.get(field),
+                f"status.index_counts.{field}": index_counts.get(field),
+            }
+            for field in {"events", "working_items", "crystallized_candidates", "crystallized_records"}
         },
     ).to_dict()
+    public_counts = project_public_counts(store_counts, operational_truth)
+    public_index_counts = project_public_counts(index_counts, operational_truth)
     return {
         "schema_version": "memory-os.status.v0",
         "root": str(store.roots.memory_os_root),
         "profile": store.roots.profile,
-        "counts": store_counts,
+        "counts": public_counts,
         "operational_truth": operational_truth,
-        "index_counts": index_counts,
+        "index_counts": public_index_counts,
         "index_health": _index_health_summary(store, store_counts, index_counts),
         "prefetch_mode": prefetch_mode,
         "vector_available": _check_vector_available(),  # import-only check (no model load); provider's tool_status reports full embedder readiness
@@ -838,8 +842,9 @@ def build_doctor_result(store: MemoryOSStore) -> dict[str, Any]:
 def meta_audit(store: MemoryOSStore) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     status = build_status_report(store)
-    store_counts = status["counts"]
-    index_counts = status["index_counts"]
+    raw_events = store.read_events()
+    store_counts = _store_counts(store, event_count=len(raw_events))
+    index_counts = MemoryOSIndex(store.roots).counts()
     continuity_selector = status["continuity_selector"]
     if not store.roots.index_path.exists():
         findings.append(_finding("index_missing", "warning", "SQLite index is missing; rebuild is available."))

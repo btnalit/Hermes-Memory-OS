@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from plugins.memory.memory_os.restraint import (
     LowCluePolicy, DenialTracker, CandidateEvaluation, SessionPriority
 )
+from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
 
 
 class TestDenialTracker:
@@ -47,8 +48,18 @@ class TestDenialTracker:
 
 
 class TestCandidateEvaluation:
-    def test_owner_approval(self):
+    def test_unverified_owner_boolean_is_not_approval(self):
         eval = CandidateEvaluation(source="owner", is_owner_approval=True)
+        assert eval.evaluate() == "unverified_owner_claim_not_approval"
+
+    def test_structured_approval_decision_is_required(self):
+        decision = ApprovalDecision(
+            candidate_id="candidate-1",
+            purpose=ApprovalPurpose.APPROVE_FOR_WORKING,
+            reviewer="owner",
+            reviewed_at="2026-07-27T00:00:00+00:00",
+        )
+        eval = CandidateEvaluation(source="owner", approval_decision=decision)
         assert eval.evaluate() == "valid_owner_approval"
 
     def test_provisional_not_approval(self):

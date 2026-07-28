@@ -28,7 +28,7 @@ from .ids import new_event_id
 from .index import MemoryOSIndex
 from .ingress import classify_ingress
 from .low_clue_recall import low_clue_judge_availability
-from .operational_truth import read_operational_truth_snapshot
+from .operational_truth import project_public_counts, read_operational_truth_snapshot
 from .owner_actions import (
     ALLOWED_FEEDBACK_RATINGS,
     EXPRESSION_FEEDBACK_ACTION_TYPES,
@@ -959,6 +959,16 @@ class MemoryOSProvider(MemoryProvider):
                 },
             },
         ).to_dict()
+        public_counts = project_public_counts(
+            {
+                "events": event_count,
+                "working_items": working_count,
+                "crystallized_candidates": candidate_count,
+                "crystallized_records": index_counts.get("crystallized_records"),
+            },
+            operational_truth,
+        )
+        public_index_counts = project_public_counts(index_counts, operational_truth)
         return {
             "schema_version": "memory-os.tool_status.v0",
             "provider": "memory_os",
@@ -974,15 +984,15 @@ class MemoryOSProvider(MemoryProvider):
                 "total_event_count": stats.total_event_count if stats is not None else 0,
                 "consistency": "eventual_until_next_heartbeat",
             },
-            "event_count": event_count,
+            "event_count": public_counts["events"],
             "operational_truth": operational_truth,
             "event_sources": dict(event_sources),
             "event_kinds": dict(event_kinds),
             "latest_event_ts": latest_event_ts,
-            "working_item_count": working_count,
-            "working_items": working_count,
-            "crystallized_candidate_count": candidate_count,
-            "crystallized_candidates": candidate_count,
+            "working_item_count": public_counts["working_items"],
+            "working_items": public_counts["working_items"],
+            "crystallized_candidate_count": public_counts["crystallized_candidates"],
+            "crystallized_candidates": public_counts["crystallized_candidates"],
             "effective_owner_eligible_candidate_count": sum(
                 1 for view in candidate_views if view.owner_review_eligible
             ),
@@ -990,10 +1000,10 @@ class MemoryOSProvider(MemoryProvider):
             "recall_plan": recall_plan_status,
             "recall_observation_window": recall_observation_window,
             "crystallized_candidates_label": "review candidates only; not approved crystallized memory",
-            "crystallized_records": int(index_counts.get("crystallized_records", 0)),
+            "crystallized_records": public_counts["crystallized_records"],
             "crystallized_records_label": "approved crystallized memory records",
             "audit_entries": len(read_audit_entries(self._roots.audit_path)),
-            "index_counts": index_counts,
+            "index_counts": public_index_counts,
             "index_health": _tool_index_health(self._roots, event_count, index_counts),
             "prefetch_mode": "indexed" if self._roots.index_path.exists() else "degraded_filesystem",
             "vector_available": bool(

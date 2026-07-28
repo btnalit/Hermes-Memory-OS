@@ -204,8 +204,13 @@ def read_operational_truth_snapshot(
     monitor_counts = monitor_counts if isinstance(monitor_counts, dict) else {}
     projected: dict[str, RuntimeCountObservation] = {}
     for field, surface_observations in (runtime_count_observations or {}).items():
+        monitor_value: Any = monitor_counts.get(field)
+        if field in monitor_counts and (
+            truth.read_error or truth.freshness.state in {"invalid_clock", "invalid_envelope"}
+        ):
+            monitor_value = {"invalid_artifact": truth.read_error or truth.freshness.state}
         observations = {
-            "full_monitor.memory_status.counts": monitor_counts.get(field),
+            "full_monitor.memory_status.counts": monitor_value,
             **dict(surface_observations),
         }
         projected[str(field)] = runtime_count_observation(
@@ -228,7 +233,7 @@ def read_full_monitor_truth(
         return _unknown_truth(stale_after_seconds=stale_after_seconds)
     try:
         loaded = json.loads(selected.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return _invalid_truth(
             selected,
             now=now,
@@ -303,6 +308,9 @@ def read_full_monitor_truth(
             observed_from=read_error,
         )
         classification = MonitorClassification(UNKNOWN_STATUS, (), ())
+    elif freshness.state == "invalid_clock":
+        read_error = "generated_at_future_clock"
+        classification = MonitorClassification(UNKNOWN_STATUS, (), ())
     return FullMonitorTruth(
         artifact=identity,
         freshness=freshness,
@@ -322,29 +330,91 @@ def build_full_monitor_envelope(
     producer_receipt: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Add the standard envelope while preserving monitor-domain payloads."""
+    if generated_at.tzinfo is None or generated_at.utcoffset() is None:
+        raise ValueError("full-monitor generated_at must be timezone-aware")
+    source_head = _identity_text(source_head)
+    runtime_digest = _identity_text(runtime_digest)
+    monitor_version = _identity_text(monitor_version)
+    receipt = dict(producer_receipt)
+    receipt_id = _identity_text(receipt.get("receipt_id"))
+    missing = [
+        name
+        for name, value in (
+            ("source_head", source_head),
+            ("runtime_digest", runtime_digest),
+            ("monitor_version", monitor_version),
+            ("producer_receipt.receipt_id", receipt_id),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError("incomplete full-monitor envelope identity: " + ", ".join(missing))
     envelope = dict(payload)
     envelope.update(
         {
             "schema_version": FULL_MONITOR_ARTIFACT_SCHEMA_VERSION,
             "generated_at": _utc_text(generated_at),
-            "source_head": str(source_head or "unknown"),
-            "runtime_digest": str(runtime_digest or "unknown"),
-            "monitor_version": str(monitor_version or "unknown"),
-            "producer_receipt": dict(producer_receipt),
+            "source_head": source_head,
+            "runtime_digest": runtime_digest,
+            "monitor_version": monitor_version,
+            "producer_receipt": receipt,
         }
     )
     return envelope
 
 
 def _latest_artifact(memory_root: Path) -> Path | None:
-    candidates = [
-        *list((memory_root / "system" / "monitor_artifacts").glob("*.json")),
-        *list((memory_root / "system").glob("monitor_*.json")),
+    current = [
+        path
+        for path in (memory_root / "system" / "monitor_artifacts").glob("*.json")
+        if path.is_file()
     ]
-    existing = [path for path in candidates if path.is_file()]
-    if not existing:
+    if current:
+        return max(current, key=_artifact_generation_key)
+    legacy = [
+        path
+        for path in (memory_root / "system").glob("monitor_*.json")
+        if path.is_file()
+    ]
+    if not legacy:
         return None
-    return max(existing, key=lambda path: (path.stat().st_mtime_ns, path.name))
+    return max(legacy, key=lambda path: (path.stat().st_mtime_ns, path.name))
+
+
+def _artifact_generation_key(path: Path) -> tuple[float, int, str]:
+    """Order authoritative artifacts by semantic generation, not mutable mtime alone."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        payload = {}
+    if isinstance(payload, dict):
+        generated = _parse_utc(payload.get("generated_at"))
+        if generated is not None:
+            return (generated.timestamp(), 2, path.name)
+    match = re.fullmatch(r"monitor_(\d{8}T\d{12}Z)\.json", path.name)
+    if match:
+        try:
+            generated = datetime.strptime(match.group(1), "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            generated = None
+        if generated is not None:
+            return (generated.timestamp(), 1, path.name)
+    return (path.stat().st_mtime_ns / 1_000_000_000, 0, path.name)
+
+
+def project_public_counts(
+    raw_counts: Mapping[str, Any], operational_truth: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Render public count fields from the typed projection, hiding conflicted winners."""
+    projected = dict(raw_counts)
+    runtime_fields = operational_truth.get("runtime_fields")
+    if not isinstance(runtime_fields, Mapping):
+        return projected
+    for field, observation in runtime_fields.items():
+        if field not in projected or not isinstance(observation, Mapping):
+            continue
+        projected[str(field)] = observation.get("value")
+    return projected
 
 
 def _freshness(
@@ -392,13 +462,19 @@ def _unknown_truth(*, stale_after_seconds: int) -> FullMonitorTruth:
 def _invalid_truth(
     path: Path, *, now: datetime, stale_after_seconds: int, read_error: str
 ) -> FullMonitorTruth:
+    observed = _freshness(
+        path,
+        generated_at=None,
+        now=now,
+        stale_after_seconds=stale_after_seconds,
+    )
     return FullMonitorTruth(
         artifact=ArtifactIdentity(path, "", None, "", "", "", "", False),
-        freshness=_freshness(
-            path,
-            generated_at=None,
-            now=now,
-            stale_after_seconds=stale_after_seconds,
+        freshness=ArtifactFreshness(
+            state="invalid_envelope",
+            age_seconds=observed.age_seconds,
+            stale_after_seconds=observed.stale_after_seconds,
+            observed_from=read_error,
         ),
         classification=MonitorClassification(UNKNOWN_STATUS, (), ()),
         payload={},
@@ -431,6 +507,8 @@ def _parse_utc(value: str | None) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return _as_utc(parsed)
 

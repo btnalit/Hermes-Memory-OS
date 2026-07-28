@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .crystallized import CrystallizedMemoryService
 from .jsonl_io import append_jsonl_locked, read_jsonl
+from .natural_row import is_natural
 from .store import MemoryOSStore
 from .v3_body_packet import (
     build_body_state_packet,
@@ -207,7 +208,7 @@ def collect_seed_inputs_from_store(
     rows = [
         item
         for item in (read_jsonl(daily_path) or [])
-        if item.get("valid") is True and item.get("trigger_class") == "natural_cron"
+        if item.get("valid") is True and is_natural(item)
     ]
     if not rows:
         return [], [], {}, {}

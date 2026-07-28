@@ -2,6 +2,10 @@
   "schema_version": "memory-os.closure_matrix_contract.v1",
   "source_of_truth": "plugins/memory/memory_os/cli.py::_module_definitions",
   "scope": "public_live_module_baseline",
+  "contract_scope": "source_and_static_wiring_only",
+  "runtime_evidence_required": true,
+  "runtime_evidence_schema": "memory-os.closure_runtime_evidence.v1",
+  "runtime_evidence_path": "memory-os/system/closure_runtime_evidence.v1.json",
   "modules": [
     {
       "module": "Cron / Session / State Mirrors",
@@ -9,7 +13,7 @@
       "delivery_class": "none",
       "state_change_class": "context_projection",
       "cadence_class": "event_driven_fast",
-      "current_action_path": "CLI module status; mirror scan/ingest paths"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "DeepReflection",
@@ -17,7 +21,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI modules run deep_reflection --dry-run"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Governance Feedback",
@@ -25,7 +29,7 @@
       "delivery_class": "none",
       "state_change_class": "feedback_ledger",
       "cadence_class": "event_driven_fast",
-      "current_action_path": "CLI modules run governance_feedback --dry-run"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Left-Brain Pipeline Check",
@@ -33,7 +37,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "monitor_poll",
-      "current_action_path": "CLI modules run left_brain_pipeline_check --dry-run"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Confidence Router",
@@ -41,7 +45,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; explicit reviewed apply only"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Ground Truth Miner",
@@ -49,7 +53,7 @@
       "delivery_class": "none",
       "state_change_class": "feedback_ledger",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; owner-audit input required"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Crystallized Revalidator",
@@ -57,7 +61,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; explicit reviewed apply only"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Judge Calibration / Canary",
@@ -65,7 +69,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "monitor_poll",
-      "current_action_path": "CLI module status; advisory consistency evidence"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "FeaturePreRouter / CandidateReview",
@@ -73,7 +77,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; report-only review surface"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Shadow Recall",
@@ -81,7 +85,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "cycle_each",
-      "current_action_path": "CLI module status; shadow records only"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Provisional Tier",
@@ -89,7 +93,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; owner-reviewed promotion"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Cascade Routing Policy",
@@ -97,7 +101,7 @@
       "delivery_class": "none",
       "state_change_class": "proposal_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; guarded policy proposal"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Migration Controller",
@@ -105,7 +109,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "monitor_poll",
-      "current_action_path": "CLI module status; regime signals only"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Symbolic Offloader",
@@ -113,7 +117,7 @@
       "delivery_class": "none",
       "state_change_class": "context_projection",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; task-local offload"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Abstraction Distillation",
@@ -121,7 +125,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; candidate-only summaries"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Digest Consolidation",
@@ -129,7 +133,7 @@
       "delivery_class": "none",
       "state_change_class": "context_projection",
       "cadence_class": "daily_once/weekly_once",
-      "current_action_path": "CLI module status; dedicated daily/weekly commands"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Heartbeat / Inner Drive",
@@ -137,7 +141,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "cycle_each",
-      "current_action_path": "CLI module status; dedicated governed runtime"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Mailbox",
@@ -145,7 +149,7 @@
       "delivery_class": "hermes_mailbox_internal",
       "state_change_class": "monitor_only",
       "cadence_class": "event_driven_fast",
-      "current_action_path": "CLI module status; no-send mailbox module"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Household Digest",
@@ -153,7 +157,7 @@
       "delivery_class": "internal_local",
       "state_change_class": "context_projection",
       "cadence_class": "daily_once",
-      "current_action_path": "CLI module status; bounded digest artifact"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Wandering Mind",
@@ -161,7 +165,7 @@
       "delivery_class": "internal_local",
       "state_change_class": "expression_feedback",
       "cadence_class": "cycle_each",
-      "current_action_path": "CLI module status; would-send artifacts"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Imagination Loop",
@@ -169,7 +173,7 @@
       "delivery_class": "none",
       "state_change_class": "proposal_review",
       "cadence_class": "cycle_each",
-      "current_action_path": "CLI module status; live-shadow simulation"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Evidence Scoring",
@@ -177,7 +181,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; evidence artifact scoring"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Confabulation Detector",
@@ -185,7 +189,7 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; live-shadow flags"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Ops Gate",
@@ -193,7 +197,7 @@
       "delivery_class": "none",
       "state_change_class": "proposal_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; proposed-action gate"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Proposal Queue",
@@ -201,7 +205,7 @@
       "delivery_class": "none",
       "state_change_class": "proposal_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; dedicated mutation commands"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Self-Evolution",
@@ -209,7 +213,7 @@
       "delivery_class": "none",
       "state_change_class": "proposal_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; ops/evidence/review dependencies"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Speak Gate",
@@ -217,7 +221,7 @@
       "delivery_class": "internal_local",
       "state_change_class": "expression_feedback+speak_permission",
       "cadence_class": "event_driven_fast",
-      "current_action_path": "CLI module status; outbound payload input required"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Expression Draft",
@@ -225,7 +229,7 @@
       "delivery_class": "none",
       "state_change_class": "candidate_review",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; bounded draft creation"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
     },
     {
       "module": "Grounded Expression Judge",
@@ -233,7 +237,127 @@
       "delivery_class": "none",
       "state_change_class": "monitor_only",
       "cadence_class": "on_demand",
-      "current_action_path": "CLI module status; advisory-only judgment"
+      "current_action_path": "plugins/memory/memory_os/cli.py::_module_definitions"
+    },
+    {
+      "module": "Conversation Carryover",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/__init__.py::_refresh_current_task_anchor_from_query"
+    },
+    {
+      "module": "Context Router / Low-Clue Recall",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/context_router.py::route_context_sections"
+    },
+    {
+      "module": "MemorySources Attribution",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "feedback_ledger",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/memory_sources.py::build_memory_source_record"
+    },
+    {
+      "module": "RH-31 Eval Harness",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "on_demand",
+      "current_action_path": "eval/memory_os/runner/run.py::run_rh31_eval"
+    },
+    {
+      "module": "Metadata Retention",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "retention_metadata",
+      "cadence_class": "on_demand",
+      "current_action_path": "plugins/memory/memory_os/metadata_retention.py::metadata_retention_plan"
+    },
+    {
+      "module": "Owner Review Queue / Aging",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "owner_daily",
+      "current_action_path": "plugins/memory/memory_os/owner_actions.py::owner_review_aging_report"
+    },
+    {
+      "module": "Review Digest Renderer",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "owner_daily",
+      "current_action_path": "plugins/memory/memory_os/owner_actions.py::render_owner_review_digest"
+    },
+    {
+      "module": "Agent / Memory-OS Collaboration Contract",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/__init__.py::system_prompt_block"
+    },
+    {
+      "module": "Right-Brain Expression Closure Contract",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "expression_feedback",
+      "cadence_class": "on_demand",
+      "current_action_path": "plugins/memory/memory_os/legacy_right_brain_retirement.py::legacy_right_brain_read_lock"
+    },
+    {
+      "module": "Left-Brain Governance Quality Contract",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "monitor_only",
+      "cadence_class": "cycle_each",
+      "current_action_path": "plugins/memory/memory_os/left_brain_advisor.py::run_left_brain_advisor"
+    },
+    {
+      "module": "Agent-Mediated Review Surface",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/session_approval.py::build_session_review_block"
+    },
+    {
+      "module": "Agent-Mediated Owner Reply Tool",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/owner_actions.py::apply_owner_action"
+    },
+    {
+      "module": "Owner Reply Parser",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/owner_actions.py::parse_owner_review_reply"
+    },
+    {
+      "module": "OwnerActionProcessor",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "proposal_review",
+      "cadence_class": "event_driven_fast",
+      "current_action_path": "plugins/memory/memory_os/owner_actions.py::apply_owner_action"
+    },
+    {
+      "module": "Owner Review Hermes Cron Helper",
+      "live_modules": [],
+      "delivery_class": "none",
+      "state_change_class": "context_projection",
+      "cadence_class": "owner_daily",
+      "current_action_path": "scripts/memory_os_owner_review_digest.py::main"
     }
   ]
 }

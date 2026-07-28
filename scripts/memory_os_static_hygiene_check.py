@@ -270,11 +270,6 @@ def run_static_hygiene(repo_root: Path, *, runner: Runner = default_runner) -> d
             result_entry["stderr"] = raw.get("stderr", "")
         results[name] = result_entry
     status = "pass" if all(item["status"] == "pass" for item in results.values()) else "fail"
-    # compileall is informational only — pytest collection already validates syntax
-    if results.get("compileall", {}).get("status") == "fail" and all(
-        item["status"] == "pass" for name, item in results.items() if name != "compileall"
-    ):
-        status = "pass"
     return {
         "schema_version": "memory-os.static_hygiene.v0",
         "status": status,

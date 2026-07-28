@@ -40,6 +40,18 @@ def test_static_hygiene_fails_when_any_repo_native_check_fails(tmp_path):
     assert report["checks"]["diff_check"]["status"] == "fail"
 
 
+def test_static_hygiene_compile_failure_is_release_fatal(tmp_path):
+    def fake_runner(argv, cwd):
+        if "compileall" in argv:
+            return {"exit_code": 1, "stdout": "", "stderr": "SyntaxError"}
+        return {"exit_code": 0, "stdout": "", "stderr": ""}
+
+    report = run_static_hygiene(tmp_path, runner=fake_runner)
+
+    assert report["status"] == "fail"
+    assert report["checks"]["compileall"]["status"] == "fail"
+
+
 # ── N2: host-boundary static guard (memory_os must not import transport /
 # channel-resolution / scheduling from the Hermes host or onboarding seam) ──
 

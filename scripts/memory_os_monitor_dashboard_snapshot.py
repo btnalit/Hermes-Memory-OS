@@ -346,14 +346,16 @@ def _monitor_snapshot(
     # Merge full-monitor status — the definitive health signal overrides
     # the dashboard's own section-based heuristic when the two disagree.
     if full_monitor:
+        checks_total += 1
         full_status = str(full_monitor.get("status") or "").upper()
-        if full_status == "FAIL":
+        full_invalid = bool(full_monitor.get("read_error")) or full_status not in {"PASS", "WARN", "FAIL"}
+        if full_invalid or full_monitor.get("stale"):
+            status = "UNKNOWN"
+            fail += 1
+        elif full_status == "FAIL":
             status = "FAIL"
             fail += 1
         elif full_status == "WARN" and status != "FAIL":
-            status = "WARN"
-            warn += 1
-        elif full_monitor.get("stale") and status == "PASS":
             status = "WARN"
             warn += 1
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from plugins.memory.memory_os.operational_truth import (
+    project_public_counts,
     read_full_monitor_truth,
     read_operational_truth_snapshot,
     runtime_count_observation,
@@ -61,10 +62,10 @@ def test_typed_truth_keeps_artifact_freshness_separate_from_monitor_classificati
 def test_reader_never_falls_back_from_latest_stale_failure_to_older_green_artifact(tmp_path):
     artifacts = tmp_path / "system" / "monitor_artifacts"
     _write(
-        artifacts / "monitor_old_green.json",
+        artifacts / "monitor_20260721T040000000000Z.json",
         {
             "schema_version": "memory-os.full_monitor_artifact.v1",
-            "generated_at": (NOW - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+            "generated_at": (NOW - timedelta(hours=32)).isoformat().replace("+00:00", "Z"),
             "source_head": "old",
             "runtime_digest": "sha256:old",
             "monitor_version": "memory-os.monitor.v0",
@@ -74,7 +75,7 @@ def test_reader_never_falls_back_from_latest_stale_failure_to_older_green_artifa
         mtime=NOW - timedelta(minutes=1),
     )
     newest = _write(
-        artifacts / "monitor_latest_red.json",
+        artifacts / "monitor_20260721T050000000000Z.json",
         {
             "schema_version": "memory-os.full_monitor_artifact.v1",
             "generated_at": (NOW - timedelta(hours=31)).isoformat().replace("+00:00", "Z"),
@@ -123,38 +124,33 @@ def test_legacy_artifact_uses_results_and_mtime_without_requiring_new_envelope(t
     assert truth.classification.warn_codes == ("legacy_warn",)
 
 
-def test_reader_chooses_newest_artifact_across_primary_and_legacy_locations(tmp_path):
-    _write(
-        tmp_path / "system" / "monitor_artifacts" / "monitor_old_green.json",
+def test_current_v1_generation_always_outranks_newer_legacy_mtime(tmp_path):
+    current = _write(
+        tmp_path / "system" / "monitor_artifacts" / "monitor_current_green.json",
         {
             "schema_version": "memory-os.full_monitor_artifact.v1",
             "generated_at": (NOW - timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
-            "source_head": "old",
-            "runtime_digest": "sha256:old",
-            "monitor_version": "memory-os.monitor.v0",
-            "producer_receipt": {"receipt_id": "fmpr_old"},
+            "source_head": "current",
+            "runtime_digest": "sha256:current",
+            "monitor_version": "memory-os.monitor.v1",
+            "producer_receipt": {"receipt_id": "fmpr_current"},
             "classification": {"status": "PASS", "fail": [], "warn": []},
         },
         mtime=NOW - timedelta(minutes=2),
     )
-    newest = _write(
-        tmp_path / "system" / "monitor_new_red.json",
+    _write(
+        tmp_path / "system" / "monitor_legacy_red.json",
         {
-            "schema_version": "memory-os.full_monitor_artifact.v1",
-            "generated_at": (NOW - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
-            "source_head": "new",
-            "runtime_digest": "sha256:new",
-            "monitor_version": "memory-os.monitor.v0",
-            "producer_receipt": {"receipt_id": "fmpr_new"},
-            "classification": {"status": "FAIL", "fail": [{"code": "new_red"}], "warn": []},
+            "schema_version": "memory-os.monitor.v0",
+            "results": {"status": "FAIL", "fail": [{"code": "legacy_red"}], "warn": []},
         },
         mtime=NOW,
     )
 
     truth = read_full_monitor_truth(memory_root=tmp_path, now=NOW, stale_after_seconds=3600)
 
-    assert truth.artifact.path == newest
-    assert truth.classification.fail_codes == ("new_red",)
+    assert truth.artifact.path == current
+    assert truth.classification.status == "PASS"
 
 
 def test_unknown_source_metadata_does_not_claim_complete_envelope(tmp_path):
@@ -217,6 +213,8 @@ def test_future_generated_at_is_invalid_clock_not_fresh(tmp_path):
     assert truth.freshness.state == "invalid_clock"
     assert truth.freshness.stale is True
     assert truth.freshness.observed_from == "generated_at_future_clock"
+    assert truth.classification.status == "unknown"
+    assert truth.read_error == "generated_at_future_clock"
 
 
 def test_shared_operational_truth_snapshot_preserves_all_count_sources(tmp_path):
@@ -392,3 +390,74 @@ def test_v1_identity_fields_require_nonempty_strings(tmp_path, field, invalid_va
     assert truth.freshness.state == "invalid_envelope"
     assert truth.classification.status == "unknown"
     assert truth.read_error == "v1_envelope_incomplete"
+
+
+def test_public_counts_use_projection_and_never_expose_unilateral_conflict_winner():
+    projected = project_public_counts(
+        {"events": 12, "working_items": 7, "other": 3},
+        {
+            "runtime_fields": {
+                "events": {"conflict": True, "value": None},
+                "working_items": {"conflict": False, "value": 7},
+            }
+        },
+    )
+
+    assert projected == {"events": None, "working_items": 7, "other": 3}
+
+
+def test_invalid_monitor_envelope_is_preserved_as_invalid_count_source(tmp_path):
+    _write(
+        tmp_path / "system" / "monitor_artifacts" / "monitor_invalid.json",
+        {
+            "schema_version": "memory-os.full_monitor_artifact.v1",
+            "generated_at": NOW.isoformat().replace("+00:00", "Z"),
+            "source_head": "unknown",
+            "runtime_digest": "sha256:runtime",
+            "monitor_version": "memory-os.monitor.v1",
+            "producer_receipt": {"receipt_id": "fmpr_invalid"},
+            "classification": {"status": "PASS"},
+            "memory_status": {"counts": {"events": 999}},
+        },
+        mtime=NOW,
+    )
+
+    snapshot = read_operational_truth_snapshot(
+        memory_root=tmp_path,
+        now=NOW,
+        stale_after_seconds=3600,
+        runtime_count_observations={"events": {"status.events": 12}},
+    ).to_dict()
+
+    observation = snapshot["runtime_fields"]["events"]
+    assert observation["conflict"] is True
+    assert observation["value"] is None
+    assert observation["invalid_sources"] == ["full_monitor.memory_status.counts"]
+    assert observation["observed"]["full_monitor.memory_status.counts"] == {
+        "invalid_artifact": "v1_envelope_incomplete"
+    }
+
+
+def test_newer_corrupt_primary_generation_cannot_fallback_to_older_green(tmp_path):
+    _write(
+        tmp_path / "system" / "monitor_artifacts" / "monitor_20260727T010000000000Z.json",
+        {
+            "schema_version": "memory-os.full_monitor_artifact.v1",
+            "generated_at": "2026-07-27T01:00:00Z",
+            "source_head": "head",
+            "runtime_digest": "sha256:runtime",
+            "monitor_version": "memory-os.monitor.v1",
+            "producer_receipt": {"receipt_id": "receipt"},
+            "classification": {"status": "PASS"},
+        },
+        mtime=datetime(2026, 7, 27, 1, tzinfo=timezone.utc),
+    )
+    corrupt = tmp_path / "system" / "monitor_artifacts" / "monitor_20260727T020000000000Z.json"
+    corrupt.write_bytes(b"{not-json")
+
+    truth = read_full_monitor_truth(memory_root=tmp_path, now=NOW, stale_after_seconds=3600)
+
+    assert truth.artifact.path == corrupt
+    assert truth.classification.status == "unknown"
+    assert truth.freshness.state == "invalid_envelope"
+    assert truth.read_error == "JSONDecodeError"

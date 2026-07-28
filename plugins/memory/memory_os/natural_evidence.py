@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
+from .natural_row import classify_row
 from .timeutil import parse_utc, now_utc, age_seconds
 
 NATURAL_EVIDENCE_SCHEMA_VERSION = "memory-os.natural_evidence.v1"
@@ -101,12 +102,14 @@ def classify_trigger_provenance(
     - MANUAL if its trigger field is explicitly "manual"
     - LEGACY_UNMARKED if it has no trigger provenance marker
     """
-    markers = natural_cron_markers or {"natural_cron", "cron"}
-    trigger = str(row.get("trigger", "") or row.get("provenance", "") or "")
-    trigger_lower = trigger.strip().lower()
-    if trigger_lower in markers:
+    if natural_cron_markers is not None:
+        trigger = str(row.get("trigger", "") or row.get("trigger_class", "") or row.get("provenance", ""))
+        if trigger.strip().lower() in natural_cron_markers:
+            return TriggerProvenance.NATURAL_CRON
+    classification = classify_row(row)
+    if classification == "natural_cron":
         return TriggerProvenance.NATURAL_CRON
-    if trigger_lower == "manual":
+    if classification == "manual":
         return TriggerProvenance.MANUAL
     return TriggerProvenance.LEGACY_UNMARKED
 

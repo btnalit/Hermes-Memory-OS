@@ -26,6 +26,39 @@ def _copy_public_contract(repo_root: Path, shadow_repo: Path) -> Path:
     target = shadow_repo / PUBLIC_CONTRACT_RELATIVE_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(repo_root / PUBLIC_CONTRACT_RELATIVE_PATH, target)
+    contract = json.loads(target.read_text(encoding="utf-8"))
+    shutil.copytree(
+        repo_root / "plugins" / "memory" / "memory_os",
+        shadow_repo / "plugins" / "memory" / "memory_os",
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shutil.copy2(
+        repo_root / "plugins" / "memory" / "__init__.py",
+        shadow_repo / "plugins" / "memory" / "__init__.py",
+    )
+    shutil.copytree(
+        repo_root / "memory_os_agent",
+        shadow_repo / "memory_os_agent",
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    required_labels = {
+        "Conversation Carryover", "Context Router / Low-Clue Recall", "MemorySources Attribution",
+        "RH-31 Eval Harness", "Metadata Retention", "Owner Review Queue / Aging",
+        "Review Digest Renderer", "Agent / Memory-OS Collaboration Contract",
+        "Right-Brain Expression Closure Contract", "Left-Brain Governance Quality Contract",
+        "Agent-Mediated Review Surface", "Agent-Mediated Owner Reply Tool", "Owner Reply Parser",
+        "OwnerActionProcessor", "Owner Review Hermes Cron Helper",
+    }
+    for row in contract["modules"]:
+        if row["module"] not in required_labels:
+            continue
+        reference = str(row.get("current_action_path") or "")
+        relative = Path(reference.split("::", 1)[0])
+        copied = shadow_repo / relative
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(repo_root / relative, copied)
     return target
 
 
@@ -38,11 +71,14 @@ def test_closure_matrix_check_runs_when_internal_docs_are_missing(tmp_path: Path
 
     assert report["schema_version"] == "memory-os.closure_matrix_check.v1"
     assert report["status"] == "ok"
+    assert report["closure_status"] == "runtime_evidence_required"
+    assert report["runtime_evidence_required"] is True
     assert set(report["missing_internal_docs"]) == {"closure_matrix", "active_roadmap"}
     assert report["live_module_count"] == 32
-    assert report["matrix_module_count"] == 29
+    assert report["matrix_module_count"] == 44
     assert report["unknown_live_modules"] == []
     assert report["missing_live_modules"] == []
+    assert report["missing_contract_labels"] == []
     assert report["invalid_row_count"] == 0
     assert report["findings"] == [
         {
@@ -56,6 +92,38 @@ def test_closure_matrix_check_runs_when_internal_docs_are_missing(tmp_path: Path
     output = capsys.readouterr().out
     assert "status=ok" in output
     assert "skip_reason=" not in output
+
+
+def test_required_contract_surfaces_are_enforced_without_private_docs(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    shadow_repo = tmp_path / "repo"
+    contract_path = _copy_public_contract(repo_root, shadow_repo)
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    contract["modules"] = [
+        row for row in contract["modules"] if row["module"] != "OwnerActionProcessor"
+    ]
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+    report = build_report(shadow_repo)
+
+    assert report["status"] == "fail"
+    assert report["missing_contract_labels"] == ["OwnerActionProcessor"]
+
+
+def test_required_contract_action_reference_must_resolve_to_real_symbol(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    shadow_repo = tmp_path / "repo"
+    contract_path = _copy_public_contract(repo_root, shadow_repo)
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    row = next(item for item in contract["modules"] if item["module"] == "Conversation Carryover")
+    row["current_action_path"] = "plugins/memory/memory_os/__init__.py::fictional_symbol"
+    contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+    report = build_report(shadow_repo)
+
+    assert report["status"] == "fail"
+    finding = next(item for item in report["findings"] if item["module"] == "Conversation Carryover")
+    assert "current_action_path:missing_symbol" in finding["errors"]
 
 
 def test_cli_rejects_legacy_skipped_status(monkeypatch: pytest.MonkeyPatch) -> None:

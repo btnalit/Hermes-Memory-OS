@@ -423,27 +423,23 @@ def test_summarize_collected_counts_missing_stale_open_evaluation_status_never_r
 
 
 def test_summarize_living_memory_promotion_local_ledger_read_failure_does_not_crash(tmp_path):
-    """Counterfactual (P1 #5): a corrupted / non-UTF-8 local ledger file used
-    to raise out of read_permanent_promotion_ledger_counts and crash the whole
-    local monitor run, while the remote path for the same scenario degrades to
-    a WARN. The local branch must degrade to the same explicit
-    unavailable+error_code shape, consumed by the BD.1 escalation channel."""
+    """A non-UTF-8 line is isolated, counted, and remains fail-visible."""
     system = tmp_path / "memory-os" / "system"
     system.mkdir(parents=True)
     (system / "permanent_promotion_proposals.jsonl").write_bytes(b"\xff\xfe not utf-8 \xff")
 
     section = monitor.summarize_living_memory_promotion(memory_os_root=tmp_path / "memory-os")
 
-    assert section["ledger_state_collection_status"] == "unavailable"
-    assert section["ledger_state_collection_error_code"] == "UnicodeDecodeError"
+    assert section["ledger_state_collection_status"] == "collected"
+    assert section["ledger_read_suppressed_error_count"] == 1
 
     snapshot = _healthy_snapshot()
     snapshot["living_memory_promotion"] = section
     classification = classify_snapshot(snapshot)
     assert any(
-        item["code"] == "living_memory_promotion_ledger_state_collection_failed"
-        and item["value"] == "UnicodeDecodeError"
-        for item in classification["warn"]
+        item["code"] == "living_memory_promotion_ledger_partial_read"
+        and item["value"] == 1
+        for item in classification["fail"]
     )
 
 

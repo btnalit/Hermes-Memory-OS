@@ -49,7 +49,7 @@ class TestClassifiedSnapshot:
         snap = ClassifiedSnapshot(section_key="test", status=SectionStatus.COLLECTED, pass_count=5)
         errors = snap.validate(collected)
         assert len(errors) == 1
-        assert "classified count 5 > collected count 3" in errors[0]
+        assert "classified count 5 != collected count 3" in errors[0]
 
 
 class TestBuildCollectedSnapshot:
@@ -70,13 +70,21 @@ class TestBuildCollectedSnapshot:
         assert snap.is_unavailable()
         assert snap.error_code == "invalid_count_type"
 
+    def test_missing_count_is_unavailable_not_healthy_zero(self):
+        snap = build_collected_snapshot("test", lambda: {})
+        assert snap.is_unavailable()
+        assert snap.error_code == "missing_count"
+
 
 class TestPipeline:
     def test_full_pipeline(self):
         collected, classified, final = run_pipeline(
             "test",
             collector=lambda: {"count": 3, "items": [{"id": "1"}]},
-            classifier=lambda c: {"pass_count": 2, "fail_count": 1},
+            classifier=lambda c: {
+                "pass_count": 2, "fail_count": 1, "warn_count": 0, "skip_count": 0,
+                "classifications": {},
+            },
             finalizer=lambda c: {"final_classification": "pass", "summary": "all good"},
         )
         assert collected.is_collected()
@@ -93,4 +101,16 @@ class TestPipeline:
         )
         assert collected.is_unavailable()
         assert classified.is_unavailable()
+        assert final.is_unavailable()
+
+    def test_empty_classifier_and_finalizer_fail_closed(self):
+        collected, classified, final = run_pipeline(
+            "test",
+            collector=lambda: {"count": 0, "items": []},
+            classifier=lambda c: {},
+            finalizer=lambda c: {},
+        )
+        assert collected.is_collected()
+        assert classified.is_unavailable()
+        assert classified.error_code == "classifier_contract_invalid"
         assert final.is_unavailable()

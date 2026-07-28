@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-artifacts", type=int, default=14)
     parser.add_argument("--source-head", default="")
     parser.add_argument("--runtime-digest", default="")
+    parser.add_argument("--monitor-profile", choices=["live", "clean-host"], default="")
     return parser
 
 
@@ -77,7 +78,10 @@ def refresh(
     now: datetime,
     source_head: str,
     runtime_digest: str,
+    monitor_profile: str = "",
 ) -> Path:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("refresh now must be timezone-aware")
     artifact_dir = hermes_home / "memory-os" / "system" / "monitor_artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(
@@ -86,15 +90,22 @@ def refresh(
     os.close(fd)
     temp_path = Path(temp_name)
     try:
-        completed = subprocess.run(
-            [
+        monitor_command = [
                 sys.executable,
                 str(monitor_script),
                 "--hermes-home",
                 str(hermes_home),
                 "--snapshot-out",
                 str(temp_path),
-            ],
+                "--output",
+                "json",
+            ]
+        if monitor_profile:
+            monitor_command.extend(["--monitor-profile", monitor_profile])
+        completed = subprocess.run(
+            monitor_command,
+            cwd=hermes_home,
+            env=_monitor_environment(hermes_home, monitor_script),
             capture_output=True,
             text=True,
             check=False,
@@ -104,7 +115,9 @@ def refresh(
             detail = (completed.stderr or completed.stdout or "no monitor output").strip()[-500:]
             raise RuntimeError(f"monitor process exited {completed.returncode}: {detail}")
         payload = _validated_payload(temp_path)
-        monitor_version = str(payload.get("schema_version") or "unknown")
+        monitor_version = str(payload.get("schema_version") or "")
+        if not monitor_version or monitor_version.lower() == "unknown":
+            raise ValueError("monitor payload must declare a non-unknown schema_version")
         generated_at = now.astimezone(timezone.utc)
         receipt_seed = ":".join(
             (
@@ -122,6 +135,7 @@ def refresh(
             "monitor_exit_code": completed.returncode,
             "completed_at": generated_at.isoformat().replace("+00:00", "Z"),
             "publication": "validated_atomic_replace",
+            "monitor_script_digest": _file_digest(monitor_script),
         }
         envelope = build_full_monitor_envelope(
             payload,
@@ -155,12 +169,46 @@ def _deployment_source_head(hermes_home: Path) -> str:
     return str(manifest.get("deployed_head") or manifest.get("source_repo_head") or "unknown")
 
 
+def _monitor_environment(hermes_home: Path, monitor_script: Path) -> dict[str, str]:
+    """Give nested monitor probes an explicit import root without relying on cwd."""
+    source_root = monitor_script.expanduser().resolve().parent.parent
+    runtime_root = hermes_home.expanduser().resolve() / "memory-os" / "runtime" / "python"
+    import_root = source_root if (source_root / "plugins" / "memory" / "memory_os").exists() else runtime_root
+    env = dict(os.environ)
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(import_root) + (os.pathsep + existing if existing else "")
+    return env
+
+
 def _file_digest(path: Path) -> str:
     try:
         content = path.expanduser().resolve().read_bytes()
     except OSError:
         return "unknown"
     return "sha256:" + hashlib.sha256(content).hexdigest()
+
+
+def _runtime_tree_digest(hermes_home: Path) -> str:
+    runtime_root = (
+        hermes_home.expanduser().resolve()
+        / "memory-os" / "runtime" / "python" / "plugins" / "memory" / "memory_os"
+    )
+    files = sorted(
+        path for path in runtime_root.rglob("*.py")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
+    if not files:
+        return "unknown"
+    digest = hashlib.sha256()
+    try:
+        for path in files:
+            digest.update(path.relative_to(runtime_root).as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+    except OSError:
+        return "unknown"
+    return "sha256:" + digest.hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
             keep_artifacts=args.keep_artifacts,
             now=datetime.now(timezone.utc),
             source_head=args.source_head or _deployment_source_head(hermes_home),
-            runtime_digest=args.runtime_digest or _file_digest(script),
+            runtime_digest=args.runtime_digest or _runtime_tree_digest(hermes_home),
+            monitor_profile=args.monitor_profile,
         )
     except Exception as exc:
         print(f"Full monitor refresh failed: {exc}", file=sys.stderr)

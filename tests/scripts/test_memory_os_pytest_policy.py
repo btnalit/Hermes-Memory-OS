@@ -163,6 +163,42 @@ def test_policy_rejects_spoofed_runtest_nodeid_with_allowlisted_reason(tmp_path:
     assert report["unknown_skip_count"] == 1
 
 
+def test_policy_rejects_allowlisted_test_hidden_by_setup_fixture(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    test_root = tmp_path / "tests" / "plugins" / "memory"
+    test_root.mkdir(parents=True)
+    test_file = test_root / "test_memory_os_embedder.py"
+    report_path = tmp_path / "policy.json"
+    test_file.write_text(
+        "import pytest\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def hide(): pytest.skip('sentence-transformers not installed')\n"
+        "class TestLocalEmbedderEmbed:\n"
+        "    def test_embed_returns_bytes(self): assert False\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_root)
+    completed = subprocess.run(
+        [
+            sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
+            "-p", "scripts.memory_os_pytest_policy",
+            "--memory-os-policy-report", str(report_path), str(test_file), "-q",
+        ],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert completed.returncode != 0
+    assert report["status"] == "fail"
+    assert report["unknown_skip_count"] == 1
+    assert report["skips"][0]["stage"] == "setup"
+
+
 def test_dependency_warning_allowlist_binds_category_and_source(tmp_path: Path) -> None:
     message = "builtin type SwigPyPacked has no __module__ attribute"
     wrong_category = evaluate_policy(

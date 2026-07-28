@@ -44,6 +44,11 @@ class TestVerifyRecoveryMarker:
         result = verify_recovery_marker(marker, "task-2", 1)
         assert result.verified
 
+    def test_terminal_marker_does_not_block_a_genuinely_new_task(self):
+        marker = RecoveryMarker(task_id="task-1", task_revision=5, task_status="completed")
+        result = verify_recovery_marker(marker, "task-2", 1)
+        assert result.verified
+
     def test_invalid_marker_allow(self):
         marker = RecoveryMarker()
         result = verify_recovery_marker(marker, "task-1", 1)
@@ -68,3 +73,11 @@ class TestValidateChain:
         ]
         results = validate_recovery_chain(markers)
         assert not results[0].verified  # terminal resurrected
+
+    def test_chain_may_advance_from_terminal_task_to_new_task(self):
+        markers = [
+            RecoveryMarker(task_id="task-1", task_revision=3, task_status="completed"),
+            RecoveryMarker(task_id="task-2", task_revision=1, task_status="active"),
+        ]
+        results = validate_recovery_chain(markers)
+        assert results[0].verified

@@ -24,6 +24,7 @@ from .execution_gate import (
 )
 from .jsonl_io import append_jsonl_locked, read_jsonl
 from .memory_sources import read_memory_source_records
+from .natural_row import is_natural
 from .source_ids import SYNTHETIC_GUARD_IDS, filter_safe_source_id_values
 
 DAILY_SCHEMA_VERSION = "memory-os.v3_seed_edges_daily.v0"
@@ -75,8 +76,7 @@ def run_v3_seed_evidence_cycle(
     unclassified_traffic_count = 0
     for record in input_records:
         traffic_class = str(record.get("traffic_class") or "").strip()
-        is_natural = record.get("natural_production") is True
-        if traffic_class == "production" and is_natural:
+        if traffic_class == "production" and is_natural(record):
             production_records.append(record)
             continue
         excluded_traffic_count += 1
@@ -298,7 +298,7 @@ def build_v3_seed_evidence_snapshot(
     # legacy_unmarked_day_count below.
     natural_by_date: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if row.get("trigger_class") != "natural_cron":
+        if not is_natural(row):
             continue
         natural_date = str(row.get("natural_date") or "")
         if not natural_date:

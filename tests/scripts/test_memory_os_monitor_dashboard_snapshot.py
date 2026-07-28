@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from plugins.memory.memory_os.legacy_right_brain_retirement import retire_legacy_right_brain
@@ -24,6 +25,43 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
         "\n".join(json.dumps(record, ensure_ascii=False, sort_keys=True) for record in records) + "\n",
         encoding="utf-8",
     )
+
+
+def _minimal_monitor_snapshot(module, full_monitor: dict):
+    return module._monitor_snapshot(
+        now=datetime.now(timezone.utc),
+        profile="default",
+        duration_ms=1,
+        status_report={},
+        cadence_report={},
+        cron_jobs=[],
+        owner={"counts": {}},
+        memory={"index_fresh": True},
+        expression={"drafts": 0, "sent": 0},
+        hindsight={"mode": "disabled"},
+        boundary=[],
+        full_monitor=full_monitor,
+    )
+
+
+def test_invalid_full_monitor_is_fail_closed_not_weakened_to_warn():
+    module = _load_module()
+    snapshot = _minimal_monitor_snapshot(
+        module,
+        {"status": "unknown", "stale": True, "read_error": "v1_envelope_incomplete"},
+    )
+    assert snapshot["status"] == "UNKNOWN"
+    assert snapshot["fail"] >= 1
+
+
+def test_full_monitor_fail_remains_dashboard_fail():
+    module = _load_module()
+    snapshot = _minimal_monitor_snapshot(
+        module,
+        {"status": "FAIL", "stale": False, "read_error": None},
+    )
+    assert snapshot["status"] == "FAIL"
+    assert snapshot["fail"] >= 1
 
 
 def test_owner_backlog_failure_is_fail_visible_without_raw_candidate_fallback(tmp_path, monkeypatch):
@@ -370,6 +408,7 @@ def test_dashboard_status_not_fail_when_current_window_error_count_is_zero(tmp_p
     _write_jobs(home)
     _write_memory_files(home)
     _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "PASS")
 
     # Build snapshot — all evidence shows ok status, so current_window
     # should be 0 and the overall status should not be FAIL.
@@ -400,6 +439,7 @@ def test_dashboard_status_shows_fail_when_current_window_has_errors(tmp_path):
     _write_jobs(home)
     _write_memory_files(home)
     _write_dashboard_evidence(home)
+    _write_monitor_artifact(home / "memory-os", "PASS")
 
     # Inject a cadence report with a step that has last_status="error"
     # This is how the cadence report detects current-window errors:
@@ -568,8 +608,9 @@ def test_full_monitor_stale_artifact_flags_stale(tmp_path):
     snapshot = module.build_dashboard_snapshot(hermes_home=home, profile="default")
     fm = snapshot["fullMonitor"]
     assert fm["stale"] is True
-    # stale artifact + clean dashboard → full monitor stale triggers WARN
-    assert snapshot["monitor"]["status"] in ("WARN", "PASS"), f"Unexpected status: {snapshot['monitor']['status']}"
+    # A stale canonical artifact is not current truth and must fail closed.
+    assert snapshot["monitor"]["status"] == "UNKNOWN"
+    assert snapshot["monitor"]["fail"] >= 1
 
 
 def test_full_monitor_pass_does_not_break_existing_pass(tmp_path):

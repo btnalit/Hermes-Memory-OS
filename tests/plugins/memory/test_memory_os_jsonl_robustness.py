@@ -87,9 +87,9 @@ class TestReadJsonl:
         p = tmp_path / "test.jsonl"
         # Write a mix of valid UTF-8 and Latin-1 bytes
         p.write_bytes(b'{"id": "1", "text": "valid"}\n{"id": "2", "text": "\xe9\xe0\xf0"}\n')
-        # UTF-8 reader should reject invalid continuation bytes
-        with pytest.raises(UnicodeDecodeError):
-            read_jsonl(p)
+        result = read_jsonl_result(p)
+        assert result.records == [{"id": "1", "text": "valid"}]
+        assert result.recent_error_codes == ["jsonl_invalid_utf8"]
 
     def test_nonexistent_file(self, tmp_path: Path) -> None:
         p = tmp_path / "nonexistent.jsonl"

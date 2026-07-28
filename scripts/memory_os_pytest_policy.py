@@ -29,6 +29,7 @@ class ReasonRule:
     nodeid_pattern: re.Pattern[str] | None = None
     warning_category: str | None = None
     filename_pattern: re.Pattern[str] | None = None
+    allowed_stages: tuple[str, ...] = ("call",)
 
 SKIP_RULES = (
     ReasonRule(
@@ -43,6 +44,7 @@ SKIP_RULES = (
             r"test_closure_matrix_check_accepts_expression_feedback_class|"
             r"test_closure_matrix_check_fails_when_active_work_mapping_is_missing)$"
         ),
+        allowed_stages=("setup", "call"),
     ),
     ReasonRule(
         "sentence_transformers_absent",
@@ -122,12 +124,14 @@ def _matching_rule(
     rules: tuple[ReasonRule, ...],
     *,
     nodeid: str | None = None,
+    stage: str = "call",
 ) -> ReasonRule | None:
     return next(
         (
             rule
             for rule in rules
             if rule.pattern.fullmatch(value)
+            and stage in rule.allowed_stages
             and (
                 rule.nodeid_pattern is None
                 or (nodeid is not None and rule.nodeid_pattern.search(nodeid))
@@ -178,11 +182,11 @@ def evaluate_policy(
     for item in skips:
         reason = normalize_skip_reason(str(item.get("reason") or ""))
         nodeid = str(item.get("nodeid") or "")
-        stage = str(item.get("stage") or "runtest")
+        stage = str(item.get("stage") or "call")
         rule = (
             None
             if stage == "collect"
-            else _matching_rule(reason, SKIP_RULES, nodeid=nodeid)
+            else _matching_rule(reason, SKIP_RULES, nodeid=nodeid, stage=stage)
         )
         record = {
             **item,
@@ -347,7 +351,7 @@ def pytest_collectreport(report: Any) -> None:
 
 def pytest_runtest_logreport(report: Any) -> None:
     if _ACTIVE_COLLECTOR is not None and report.skipped:
-        _ACTIVE_COLLECTOR.add_skip(report, stage="runtest")
+        _ACTIVE_COLLECTOR.add_skip(report, stage=str(report.when))
 
 
 def pytest_warning_recorded(

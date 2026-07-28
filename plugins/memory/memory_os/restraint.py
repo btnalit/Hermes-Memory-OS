@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .approval import ApprovalDecision, ApprovalPurpose
+
 RESTRAINT_SCHEMA_VERSION = "memory-os.restraint.v1"
 
 
@@ -86,6 +88,7 @@ class CandidateEvaluation:
     source: str = ""
     confidence: float = 0.0
     is_owner_approval: bool = False
+    approval_decision: ApprovalDecision | None = None
     is_provisional: bool = False
     is_candidate: bool = False
     has_evidence: bool = False
@@ -93,8 +96,18 @@ class CandidateEvaluation:
 
     def evaluate(self) -> str:
         """Determine whether the signal qualifies as a valid action."""
+        if self.approval_decision is not None:
+            decision = self.approval_decision
+            approved_purposes = {
+                ApprovalPurpose.APPROVE_FOR_VISIBILITY,
+                ApprovalPurpose.APPROVE_FOR_WORKING,
+                ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            }
+            if decision.purpose in approved_purposes and decision.reviewer and decision.reviewed_at:
+                self.verdict = "valid_owner_approval"
+                return self.verdict
         if self.is_owner_approval:
-            self.verdict = "valid_owner_approval"
+            self.verdict = "unverified_owner_claim_not_approval"
             return self.verdict
         if self.is_provisional:
             self.verdict = "provisional_not_approval"
@@ -114,6 +127,7 @@ class CandidateEvaluation:
             "source": self.source,
             "confidence": self.confidence,
             "is_owner_approval": self.is_owner_approval,
+            "approval_decision_present": self.approval_decision is not None,
             "is_provisional": self.is_provisional,
             "is_candidate": self.is_candidate,
             "has_evidence": self.has_evidence,
