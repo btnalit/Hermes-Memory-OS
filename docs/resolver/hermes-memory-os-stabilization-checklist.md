@@ -967,3 +967,9 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   9 skipped / 0 failed**，治理静态门全过。通过 drift gate 与备份后 targeted-sync 4 个既有生产目标，
   fresh import/哈希/反事实通过；Full Monitor 实跑为 97 pass / 4 warn / 1 fail，唯一 FAIL 仍是
   `v2_exposure_schema_era_unhealthy`。未 full deploy、未改 manifest、未重启 Gateway、未触碰 canonical data。
+- `3361dcc..（本节）`：路线图升 v2.8——对 Sannai 的 11.10 小院子设计做工程审查，新增 11.11 节：
+  8 项边界修正（partner 回复移出 shared/ 保持单 writer、轻量不豁免异构三判、soul.md 为 Owner
+  边界、伙伴可见面收窄为 sannai_says+自身目录、回复仅 exposure、lightfriend 入 roster、Track A
+  证据不折算 11.7、允许安静不回复）；修正后数据布局与交互流、复用地图（唯一净新增模块
+  `community_partner_runtime.py`）、6 步实施计划（每步含反事实测试要求）与独立 Track A 出口
+  条件；第 14 节优先级追加第 7 项。11.10 原文保持 Sannai 原貌不改。仅文档变更，无运行时行为修改。
