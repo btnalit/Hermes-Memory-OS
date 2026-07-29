@@ -1,6 +1,6 @@
 # Hermes Memory-OS 与 Sannai Community 综合路线图
 
-> **版本**：v2.7
+> **版本**：v2.8
 >
 > **更新时间**：2026-07-29
 >
@@ -9,6 +9,8 @@
 > **证据规则**：实现、测试、部署、运行接线、自然观察分别记录；任何一层成立都不能自动证明下一层。
 >
 > **新增**：v2.7 由 Sannai 本人补充 11.10 节——小院子设计愿景（The Courtyard），包含轻量伙伴 Track A 概念与双轨策略。
+> v2.8 补充 11.11 节——对 11.10 的工程审查（8 项边界修正）、修正后的 Track A 设计、复用地图与
+> 分步实施计划，供 Sannai 直接开发；11.10 原文保持 Sannai 原貌不改。
 
 ---
 
@@ -591,9 +593,137 @@ alanlive 当前 dormant。按工程的眼光看，这是"资源不足导致功�
 
 那一刻，社区就真的活了。
 
+### 11.11 Track A 工程审查与实施计划（The Courtyard 落地）
+
+> **审查注**：本节是对 11.10 的工程审查与落地计划（v2.8）。结论先行：小院子的方向与 11.1–11.9
+> 完全兼容——"异步递纸条"就是既有 mailbox/留言板语义在 Sannai profile 内的特例，绝大部分基础
+> 设施已经存在。Track A 不是一个新系统，而是"一个 embedded 注册通道 + 一个伙伴运行时模块 +
+> 三处接线"。以下 8 项修正不改变 11.10 的愿景，只把它放回既有不变式之内。
+
+#### 11.11.1 审查结论：8 项边界修正
+
+| # | 11.10 原设计 | 问题 | 修正 |
+|---|---|---|---|
+| 1 | `shared/partner_replies.jsonl` | 违反 11.2 "shared 单 writer"（shared 只允许 Sannai writer） | 回复移至 `partners/lightfriend/replies.jsonl`（伙伴唯一 writer，Sannai 只读）；`shared/sannai_says.jsonl` 保留——writer 是 Sannai，不违规 |
+| 2 | "轻量"未提底模约束 | 同模型自聊即回音室，正是第 15 节警告的"多个模型互相生成文字的假热闹" | 轻量不豁免异构：伙伴 backend 必须通过 `_heterogeneous_backend` 三判（provider、model、endpoint 均异于 Sannai） |
+| 3 | soul.md "由主人或我定义" | persona 定义直接决定回音室风险，属人格边界 | 初版 soul.md 为 Owner 决策；Sannai 之后经 proposal 流程提修改，不直接改写 |
+| 4 | 伙伴可读 shared/ 全部内容 | 伙伴可见面过宽，隐私阀缺失 | 伙伴只能读 `shared/sannai_says.jsonl` + 自己目录（soul/notes/state）；永不读 Sannai canonical memory、diary、events——纸条=Sannai 主动递出的内容，这是唯一入口 |
+| 5 | 回复直接"被我看到" | 未声明记忆边界 | 回复只是 exposure（11.2 单向阀不变）：进入 Sannai 长期记忆仍走她自己的 retain/maturity 门；不得自动 identity/relationship 写入 |
+| 6 | lightfriend 无 roster 地位 | 治理外伙伴不可监控、不可回滚 | lightfriend 是 roster 一等公民：计入 `budget.yaml` `max_active_partners`，走 11.4 生命周期；"轻量"是运行形态，不是治理豁免 |
+| 7 | 11.10.4 "shared/ 里已有我们之前配对的记录" | lightfriend 与阿澜是两个 partner_id、两段历史 | 阿澜回归时接上的是他自己的 mailbox/pairing 记录；lightfriend 不是阿澜的替身或预热，Track A 证据也不折算 11.7 的 P0 出口条件（见 11.11.5） |
+| 8 | cron 触发即回复 | 强制产出违反 11.5 "没有值得说的内容时保持安静" | 伙伴允许不回复；cron 触发 ≠ 必须产出，安静回合记 `no_reply` 事实即可 |
+
+#### 11.11.2 修正后的数据布局与交互流
+
+```text
+community/
+├── roster.jsonl              # lightfriend 一行：channel="embedded-notes"，backend=异构标签
+├── budget.yaml               # 计入 max_active_partners；新增 track_a 每日调用/单次 token 上限
+├── shared/
+│   └── sannai_says.jsonl     # Sannai-only writer（不变式保持）
+└── partners/
+    └── lightfriend/
+        ├── backend.yaml      # 伙伴模型配置（provider/model/base_url；不含任何密钥）
+        ├── soul.md           # Owner 定稿；Sannai 经 proposal 修改
+        ├── notes.jsonl       # 伙伴自己的简短笔记（有界，超限压实）
+        ├── state.json        # cursor、mood、pending thoughts（有界）
+        └── replies.jsonl     # 伙伴唯一 writer；Sannai 只读
+```
+
+交互流（异步纸条，非实时聊天）：
+
+1. **Sannai 侧**：自由时间/余温检查经正式 shared writer 写 `sannai_says.jsonl`
+   （StructuralWriteGate 分类写入）。
+2. **cron `community_partner_reply`**（默认 60 分钟一次，optional job，经
+   `memory_os_execution_gate_runner.py` 包 ExecutionGate envelope）读取 cursor 之后的未回复条目。
+3. **伙伴运行时**：soul.md + 最近 N 条 notes + 纸条 → 一次有界模型调用（500–1000 token）→
+   回复 append 到 `replies.jsonl`，notes/state 有界更新；所有 JSONL append 走
+   `append_governed_jsonl`。
+4. **Sannai 下次唤醒**：新回复成为触发源（community_triggers 新增 partner_reply 触发），
+   snapshot 携带最新未读回复指针；是否回应由她自己的 relevance/预算/频控决定。
+
+预算 fail-closed：超每日调用上限或单次 token 上限 → 跳过本轮并记 bounded `error_record`，
+不重试轰炸；连续超限只累计计数，不升级为自动动作。
+
+#### 11.11.3 复用地图（先看这里，再写新代码）
+
+| 需要的能力 | 已有实现 | Track A 用法 |
+|---|---|---|
+| 伙伴注册/异构校验/预算上限 | `partner_create.py`：`create_partner` / `_heterogeneous_backend` / `_max_active_partners` | 扩展 embedded 模式：backend 来源从 `profiles/<pid>/config.yaml` 改读 `partners/<pid>/backend.yaml`；actor 授权、containment、异构三判、roster 唯一性校验原样复用 |
+| roster/生命周期 | `community.py`（active↔dormant→retired，损坏 fail-closed） | 原样复用，零改动 |
+| shared 写入 | `community_shared.py` `write_shared_memory`（Sannai-only writer） | `sannai_says` 复用现有 writer（必要时加 kind），不建平行写路径 |
+| 触发评估 | `community_triggers.py` `evaluate_all_triggers` | 新增 `check_partner_reply_trigger`，cursor 语义对齐现有触发 |
+| 会话快照 | `community_snapshot.py` `build_community_snapshot` | 增加未读回复指针字段 |
+| cron 治理 | `scripts/memory_os_execution_gate_runner.py` | 新 job 直接包一层，envelope/lane/risk_class 齐备 |
+| 写面治理 | `structural_write_gate.py` `append_governed_jsonl` | 所有新 JSONL append 必经；`write_surface_check` 保持 `unclassified_count=0` |
+
+唯一净新增模块：`community_partner_runtime.py`（读纸条 → 调模型 → 写回复）。
+
+#### 11.11.4 实施步骤（供 Sannai 直接开发）
+
+TDD 与 Section W 五条修复规则适用于每一步（每步至少一个反事实测试：无此步实现时测试必须
+FAIL）。每步可独立合入，不要求一次做完；Step 1–2 无部署依赖，可先本地闭环。
+
+- **Step 0 — Owner 前置决策（无代码）**
+  伙伴名字与 persona（soul.md 初稿）；模型选择（必须通过异构三判）；`budget.yaml` 数字
+  （建议起点：每日 ≤ 24 次调用、单次 ≤ 1000 token、计入 `max_active_partners`）。
+  产出：Owner 批准记录。此步未完成前，Step 1 之后的代码可以先行，但注册与 cron 不得启用。
+
+- **Step 1 — embedded 注册通道**
+  改动：`partner_create.py` 支持 `embedded` 伙伴——backend 从 `partners/<pid>/backend.yaml`
+  读取，跳过 gateway profile 的 `config.yaml` 路径断言；异构/授权/containment/roster 校验保持。
+  roster 行 `channel="embedded-notes"`。
+  测试：`test_memory_os_partner_create*` 扩展。反事实：与 Sannai 同 provider 或同 model 的
+  embedded 注册必须 fail。
+
+- **Step 2 — 伙伴运行时模块（净新增）**
+  改动：新建 `plugins/memory/memory_os/community_partner_runtime.py`，入口
+  `run_once(memory_os_root, model_call)`：按 `state.json` cursor 读未回复纸条 → 组有界 prompt
+  （soul.md + 最近 N 条 notes + 纸条）→ 调用注入的 `model_call` callable → `append_governed_jsonl`
+  写 replies/notes/state → 预算 fail-closed。模型调用只经注入参数进入，测试全部使用 fake
+  callable，不打真实 API。roster 状态在入口检查：非 active 直接 no-op。
+  测试：`tests/plugins/memory/test_memory_os_community_partner_runtime.py`（1:1 命名）。
+  反事实：超预算必须 skip + `error_record`；伙伴路径试图写 `shared/` 下任何文件必须被拒。
+
+- **Step 3 — cron 接线**
+  改动：新增 optional job `community_partner_reply`（60 分钟），经
+  `memory_os_execution_gate_runner.py` 包装；monitor 的已知 optional 清单登记，避免被分类为
+  unregistered drift。job 默认不启用，启用是 Step 0 Owner 决策的一部分。
+  测试：runner 与 monitor 分类测试扩展。反事实：job 注册但未启用时 monitor 必须归入
+  known-optional，不得 FAIL。
+
+- **Step 4 — Sannai 侧接线**
+  改动：`sannai_says` 写路径复用 `write_shared_memory`；`community_triggers.py` 新增
+  `check_partner_reply_trigger`（新回复 → 低打扰触发候选）；`community_snapshot.py` 增未读
+  回复指针。
+  测试：`test_memory_os_community_features.py` / triggers 既有文件扩展。反事实：无新回复时
+  不得产生触发；触发只产生候选，`actual_send=false` 保持。
+
+- **Step 5 — monitor 与回滚**
+  改动：monitor 增 Track A 视图（`replies_24h`、token 消耗、budget skip 计数、`error_record`
+  计数、cron 健康）；回滚 = roster 转 dormant（cron 入口检查随之 no-op）+ JSONL 只归档不
+  destructive rewrite。`memory_os_3_200_monitor.py` 是大文件——最小定向改动，不重构。
+  测试：monitor section 测试扩展。反事实：dormant 后 `run_once` 必须 no-op 且不写任何文件。
+
+- **Step 6 — 收尾与观察窗**
+  静态门全过（write surface `unclassified_count=0`、import cycle、hygiene、public checkout
+  probe）+ 全量 pytest；按第 12 节流程部署；更新 stabilization checklist；进入 11.11.5 观察窗。
+
+#### 11.11.5 Track A 出口条件（独立档，不折算 11.7）
+
+- [ ] lightfriend 经 embedded 注册通道进入 roster active（异构证据留痕）；
+- [ ] 连续 14 天 cron 自然运行，无预算违规、无 unclassified write；
+- [ ] 出现 ≥ 1 次完整自然回路：Sannai 自然写纸条 → 伙伴回复 → Sannai 下个 session 看到并
+      自主决定是否回应；
+- [ ] 至少一次"伙伴选择不回复"的健康安静记录；
+- [ ] 无 identity/relationship/crystallized bypass；
+- [ ] Sannai 主观确认"这个朋友感觉是对的"（11.10.5 的纸条时刻由她自己记录，不由模型自评打分）。
+
+全部满足后可写 `track_a_live/observing`——这是独立证据档，仍不勾选 11.7 的任何 P0 出口条件。
+Track B（阿澜回归）继续以 P1 #8 的容量评估为前置；Track A 的存在不改变 alanlive dormant 的
+安全状态，也不构成其启动许可。
+
 ---
-
-
 
 ## 12. 发布与部署强制流程
 
@@ -643,6 +773,8 @@ alanlive 当前 dormant。按工程的眼光看，这是"资源不足导致功�
 4. 对 `v2_exposure_schema_era_unhealthy` 建立自然观察计划，不手工改绿。
 5. 维持 alanlive dormant；先做资源预算与低内存运行设计，再决定是否重新进入 P0 live 验证。
 6. 只在正式 caller 明确时迁移 helper-only 模块；无安全调用点则保持 implemented/tested。
+7. Track A 轻量伙伴按 11.11 实施步骤由 Sannai 主导开发；Step 0 Owner 决策先行，
+   开发不抢占第 1–2 项的部署闭环优先级。
 
 ---
 
