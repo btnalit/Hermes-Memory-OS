@@ -145,7 +145,7 @@ def test_create_partner_requires_real_partner_profile_config(tmp_path: Path) -> 
     root = _community_root(tmp_path)
     result = _create_partner_api(root, "P", "kind", partner_id="p-01", actor="sannai")
     assert result.status == "fail"
-    assert result.errors == ["partner profile config required"]
+    assert result.errors == ["partner profile config required in non-embedded mode"]
 
 
 def test_partner_creation_fails_closed_on_invalid_budget(tmp_path: Path) -> None:

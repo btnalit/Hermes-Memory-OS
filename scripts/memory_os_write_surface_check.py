@@ -188,6 +188,17 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/cognitive_loop.py::CognitiveLoopRunner._community_cycle::atomic_json_replace_call::cursor_path": "community_trigger_dedup_projection_state",
     "plugins/memory/memory_os/execution_gate.py::_write_gate_index::atomic_json_replace_call::_gate_index_path(roots)": "execution_gate_projection_index",
     "plugins/memory/memory_os/partner_create.py::create_partner::atomic_json_replace_call::memory_dir / 'state.json'": "community_partner_private_runtime_state",
+    "plugins/memory/memory_os/community_partner_runtime.py::_save_partner_state::atomic_json_replace_call::partner_dir / 'memory' / 'state.json'": "community_partner_private_runtime_state",
+    "plugins/memory/memory_os/community_partner_runtime.py::_append_note::open_a::notes_path": "community_partner_private_notes_log",
+    "plugins/memory/memory_os/community_partner_runtime.py::run_once::open_a::replies_path": "community_partner_private_replies_log",
+    "plugins/memory/memory_os/community_table.py::write_to_table::open_a::table_path": "community_table_bounded_shared_surface",
+    "scripts/community_partner_reply.py::_write_table::open_a::table_path": "community_table_bounded_shared_surface",
+    "scripts/community_partner_reply.py::<module>::open_a::partner_dir / 'replies.jsonl'": "community_partner_private_replies_log",
+    # NOTE: writes the same sannai__{pid}.jsonl target as community_shared.py's
+    # write_shared_memory(), but bypasses its actor=="sannai" gate entirely —
+    # a direct, ungoverned duplicate write path. See roadmap 11.12 amendment.
+    "scripts/community_partner_reply.py::<module>::open_a::shared_path": "community_shared_projection_cron_direct_ungoverned_duplicate",
+    "scripts/community_partner_reply.py::<module>::open_a::notes_path": "community_partner_private_notes_log",
     "plugins/memory/memory_os/runtime.py::MemoryOSRuntime._write_state::atomic_json_replace_call::self._state_path": "memory_os_runtime_projection_state",
     "plugins/memory/memory_os/runtime.py::MemoryOSRuntime._write_heartbeat_error_fallback::atomic_json_replace_call::self.store.roots.memory_os_root / 'runtime' / 'heartbeat_error_fallback.json'": "runtime_error_fallback_projection",
     "plugins/memory/memory_os/session_mirror.py::SessionMirror._write_state::atomic_json_replace_call::self.state_path": "session_mirror_projection_state",

@@ -42,7 +42,7 @@ def _update_interests(state_path: Path, text: str):
         state = {"known_interests": []}
     else:
         try:
-            state = json.loads(state_path.read_text())
+            state = json.loads(state_path.read_text(encoding="utf-8"))
         except:
             state = {"known_interests": []}
     interests = state.get("known_interests", [])
@@ -63,13 +63,13 @@ def _update_interests(state_path: Path, text: str):
     interests.sort(key=lambda e: e.get("count", 0), reverse=True)
     state["known_interests"] = interests[:20]
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def _get_interests_summary(state_path: Path) -> str:
     if not state_path.exists():
         return ""
     try:
-        state = json.loads(state_path.read_text())
+        state = json.loads(state_path.read_text(encoding="utf-8"))
     except:
         return ""
     interests = state.get("known_interests", [])
@@ -90,7 +90,7 @@ def _write_table(text: str, actor: str, actor_name: str, share_type: str = "note
         "ts": _ts(), "actor": actor, "actor_name": actor_name,
         "text": str(text)[:500], "share_type": share_type,
     }, ensure_ascii=False)
-    with open(table_path, "a") as f:
+    with open(table_path, "a", encoding="utf-8") as f:
         f.write(entry + "\n")
 
 # ── 读配置 ──────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ if not roster_path.exists():
     sys.exit(1)
 
 partners = []
-for line in roster_path.read_text().splitlines():
+for line in roster_path.read_text(encoding="utf-8").splitlines():
     line = line.strip()
     if not line:
         continue
@@ -127,7 +127,7 @@ says_path = MOS_ROOT / "community" / "shared" / "sannai_says.jsonl"
 says_data: list[dict] = []
 if says_path.exists():
     says_data = [
-        json.loads(line) for line in says_path.read_text().splitlines()
+        json.loads(line) for line in says_path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.isspace()
     ]
 
@@ -148,7 +148,7 @@ for partner in partners:
     cursor = 0
     if state_path.exists():
         try:
-            state_data = json.loads(state_path.read_text())
+            state_data = json.loads(state_path.read_text(encoding="utf-8"))
             cursor = int(state_data.get("cursor", 0))
         except (json.JSONDecodeError, ValueError, OSError):
             cursor = 0
@@ -162,13 +162,13 @@ for partner in partners:
 
     # 读 soul
     soul_path = partner_dir / "SOUL.md"
-    soul_text = soul_path.read_text() if soul_path.exists() else ""
+    soul_text = soul_path.read_text(encoding="utf-8") if soul_path.exists() else ""
 
     # 读最近 notes + interests
     notes_path = partner_dir / "notes.jsonl"
     recent_notes = []
     if notes_path.exists():
-        for line in notes_path.read_text().splitlines():
+        for line in notes_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -242,7 +242,7 @@ for partner in partners:
         "reply_to_ts": last_msg.get("ts", ""),
         "text": clean_reply,
     }, ensure_ascii=False)
-    with open(partner_dir / "replies.jsonl", "a") as f:
+    with open(partner_dir / "replies.jsonl", "a", encoding="utf-8") as f:
         f.write(reply_entry + "\n")
     result["replies_written"] += 1
 
@@ -259,11 +259,11 @@ for partner in partners:
     }, ensure_ascii=False)
     shared_path = MOS_ROOT / "community" / "shared" / f"sannai__{pid}.jsonl"
     shared_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(shared_path, "a") as f:
+    with open(shared_path, "a", encoding="utf-8") as f:
         f.write(shared_entry + "\n")
 
     # 写 notes
-    with open(notes_path, "a") as f:
+    with open(notes_path, "a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": _ts(), "text": clean_reply[:300]}, ensure_ascii=False) + "\n")
 
     # 更新兴趣花园（从回复中提取话题）
@@ -280,7 +280,7 @@ for partner in partners:
         "topic_interest": [],
     }
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(new_state, ensure_ascii=False, indent=2))
+    state_path.write_text(json.dumps(new_state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 # Only output when there's something to report
 has_activity = (result.get("replies_written", 0) > 0 or

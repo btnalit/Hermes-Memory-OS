@@ -819,6 +819,28 @@ Sannai: 流萤～今天的蝴蝶停在叶子上好久
 | Mailbox direct letter | ✅ 信已写入 `/agents/hermes/inbox/` |
 | Family-room message | ✅ 消息已发布到 family-room 消息目录 |
 
+#### 11.12.7 工程复审：CI 修复与实现落差记录（2026-07-29，代码复审）
+
+> **审查注**：11.12/11.12.6 落地时 GitHub CI 处于 FAIL 状态（`write_surface_check`
+> 8 处未分类写入 + 一条 `partner_create` 测试断言过期），11.12.6 的"全部通路连通"
+> 描述的是功能手测，不代表 CI 绿。本节记录 CI 修复与复审中发现的实现落差——能安全修的
+> 已修（CI 红、字符编码、测试覆盖），涉及生产部署契约的改动只记录、不重构。
+
+| # | 发现 | 状态 | 处理 |
+|---|---|---|---|
+| 1 | CI FAIL：`community_table.py`/`community_partner_runtime.py`/`community_partner_reply.py` 新增 8 处写入未在 `write_surface_check.py` 登记 | 已修复 | 登记为 `community_table_bounded_shared_surface`/`community_partner_private_notes_log`/`community_partner_private_replies_log` 等；`sannai__{pid}.jsonl` 直写单独标注见 #6 |
+| 2 | CI FAIL：`test_create_partner_requires_real_partner_profile_config` 断言旧错误文案 | 已修复 | embedded_mode 分支加入后错误文案改为「...in non-embedded mode」以区分两种失败模式（embedded 缺 `backend_info` vs. 非 embedded 缺 `partner_config_path`），测试断言同步更新 |
+| 3 | `community_table.py`、`community_interest_garden.py`、`scripts/community_partner_reply.py`、`scripts/community_monitor.py` 多处 `open()`/`write_text()`/`read_text()` 处理中文内容未显式声明 `encoding="utf-8"` | 已修复 | 全部显式加 `encoding="utf-8"`，与项目既有约定一致；本机（Windows，默认 locale 已是 UTF-8）与 CI（Linux）均无法构造出反事实 FAIL，判定同 BO 记录的"无法反事实"类修复——纯 portability 加固，非行为回归 |
+| 4 | **实现落差**：11.12.1/11.12.3 描述的 `community_table.py`/`community_interest_garden.py` 是纯 stdlib、零相对导入的模块，但零调用方、零测试；真正跑在 cron 上的是 `scripts/community_partner_reply.py`，它内联重写了同一逻辑而非 import 这两个模块（连同 `community_partner_runtime.py`——11.11.3 记录的"唯一净新增模块"，同样零调用方、零测试） | 仅记录，不重构 | 三个模块与实际线上路径完全脱节；改 import 会改变 `community_partner_reply.py` 的部署契约（当前自包含、无 PYTHONPATH 依赖，模块级代码在 import 时即执行生产 config/roster 读取），本次复审不具备验证宿主环境的条件，不动。后续收口二选一：(a) cron 脚本改为 import 三个模块并验证部署契约；(b) 明确废弃三个模块并删除 |
+| 5 | 因 #4，两份 `_extract_topics()` 已分叉：模块版覆盖 声音/草/树/虫/河/幻想，脚本版覆盖 是不是/风/雪，关键词集合不再一致 | 仅记录 | 跟随 #4 一并处理 |
+| 6 | 因 #4，`community_table.py::write_to_table()` 的"每人每小时 ≤5 条"限流（11.12.1 文档承诺的约束）只存在于未被调用的模块里；实际写入路径 `scripts/community_partner_reply.py::_write_table()` 完全没有限流。同一脚本对 `community/shared/sannai__{pid}.jsonl` 直接 `open().write()`，绕开了 `community_shared.py::write_shared_memory()` 的 `actor=="sannai"` 门控——两条路径通向同一文件，一条有治理一条没有 | 仅记录 | 该脚本零测试覆盖、模块级代码 import 时即执行（读取生产 config/roster、可 `sys.exit`），本次复审无法在沙箱内安全验证补丁；写入路径本身已在 write_surface_check 登记为 `community_shared_projection_cron_direct_ungoverned_duplicate` 以保留可见性，收口留给 #4 |
+| 7 | `community_snapshot.py::build_community_snapshot()` 新增的 `unread_partner_replies`/`partner_reply_breakdown` 用 `count(replies.jsonl 行数) − cursor(state.json，实为 sannai_says.jsonl 的读取游标)` 计算"未读回复"——两个计数器语义无关（cursor 从不追踪 replies 被谁读过），该字段当前恒近似 0 或无意义 | 仅记录 | grep 全仓库确认当前无任何消费者读取这两个字段，尚未造成误导；真正修复需要新增"回复已读游标"，属功能缺口而非 bug，不在本次范围内新增 |
+
+新增测试：`tests/plugins/memory/test_memory_os_community_table_and_interest_garden.py`
+（`write_to_table`/`read_table`/`get_unread_shares`/`update_interests`/`get_interests_summary`
+的中文内容往返 + 限流边界），补齐 #4 中两个此前零覆盖模块（`community_table.py`、
+`community_interest_garden.py`）的基础测试。
+
 ---
 
 ## 12. 发布与部署强制流程

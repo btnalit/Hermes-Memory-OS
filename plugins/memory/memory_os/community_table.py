@@ -132,7 +132,7 @@ def write_to_table(
     if share_url:
         entry["share_url"] = str(share_url)[:1000]
 
-    with open(table_path, "a") as f:
+    with open(table_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     return entry

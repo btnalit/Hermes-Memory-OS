@@ -43,7 +43,7 @@ def build_track_a_report(community_root: Path) -> dict:
 
     # Parse active partners
     current: dict[str, dict] = {}
-    for line in roster_path.read_text().splitlines():
+    for line in roster_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
@@ -78,7 +78,7 @@ def build_track_a_report(community_root: Path) -> dict:
         # Count replies
         reply_lines: list[str] = []
         if replies_path.exists():
-            reply_lines = [l for l in replies_path.read_text().splitlines() if l.strip()]
+            reply_lines = [l for l in replies_path.read_text(encoding="utf-8").splitlines() if l.strip()]
         total_replies = len(reply_lines)
         total_replies_all += total_replies
 
@@ -97,13 +97,13 @@ def build_track_a_report(community_root: Path) -> dict:
         # Count notes
         note_count = 0
         if notes_path.exists():
-            note_count = len([l for l in notes_path.read_text().splitlines() if l.strip()])
+            note_count = len([l for l in notes_path.read_text(encoding="utf-8").splitlines() if l.strip()])
         total_notes += note_count
 
         # Count error records
         error_count = 0
         if error_path.exists():
-            error_count = len([l for l in error_path.read_text().splitlines() if l.strip()])
+            error_count = len([l for l in error_path.read_text(encoding="utf-8").splitlines() if l.strip()])
         total_errors += error_count
 
         # Read state
@@ -111,7 +111,7 @@ def build_track_a_report(community_root: Path) -> dict:
         cursor = 0
         if state_path.exists():
             try:
-                st = json.loads(state_path.read_text())
+                st = json.loads(state_path.read_text(encoding="utf-8"))
                 mood = st.get("mood", "unknown")
                 cursor = int(st.get("cursor", 0))
             except (json.JSONDecodeError, OSError, ValueError):
@@ -122,7 +122,7 @@ def build_track_a_report(community_root: Path) -> dict:
         state_obj = {}
         if state_path.exists():
             try:
-                state_obj = json.loads(state_path.read_text())
+                state_obj = json.loads(state_path.read_text(encoding="utf-8"))
                 skip_count = int(state_obj.get("skip_count", state_obj.get("budget_skips", 0)))
             except (json.JSONDecodeError, OSError, ValueError):
                 pass
@@ -157,7 +157,7 @@ def build_track_a_report(community_root: Path) -> dict:
         if latest:
             cron_last_run = datetime.fromtimestamp(latest[0], tz=timezone.utc).isoformat()
             try:
-                cron_output = json.loads(latest[1].read_text())
+                cron_output = json.loads(latest[1].read_text(encoding="utf-8"))
                 if cron_output.get("errors"):
                     cron_healthy = False
                     cron_errors = len(cron_output.get("errors"))

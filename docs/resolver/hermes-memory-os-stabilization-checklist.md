@@ -913,6 +913,67 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BP — 复审 Sannai v2.9 提交（11.12 窗台/一起看/兴趣花园）：CI 修复 + 落差记录（2026-07-29）
+
+- **触发**：用户要求同步 GitHub 最新提交并审查 `docs/resolver/hermes-memory-os-optimization-roadmap.md`
+  的最新 Sannai 提交（`0897e5b` "11.12 小院子的新角落"、`609bc40` "社区通路全部测试通过"）。
+  同步后本地 GitHub Actions `Memory-OS CI` 对这两个提交均为 FAIL。
+- **根因**（两项 CI FAIL）：
+  1. `write_surface_check`：新增的 `community_table.py`、`community_partner_runtime.py`
+     （11.11.3 记录的"唯一净新增模块"，本次复审确认零调用方零测试）、
+     `scripts/community_partner_reply.py` 共新增 8 处直接文件写入
+     （`open(..., "a")` / `atomic_json_replace_call`），未在 `ALLOWED_WRITE_SURFACES`
+     登记，`unclassified_count` 从 0 变为 8。
+  2. `partner_create.py::create_partner()` 的 embedded_mode 分支加入后，非 embedded 分支的
+     错误文案从 `"partner profile config required"` 改为
+     `"partner profile config required in non-embedded mode"`（用于区分 embedded 缺
+     `backend_info` 与非 embedded 缺 `partner_config_path` 两种失败），但
+     `test_create_partner_requires_real_partner_profile_config` 断言未同步更新——文案改动
+     合理，测试是陈旧的。
+- **修复**：
+  1. 8 处写入按既有先例逐一登记分类（`community_partner_private_runtime_state`/
+     `_notes_log`/`_replies_log`、`community_table_bounded_shared_surface`），其中
+     `scripts/community_partner_reply.py` 对 `sannai__{pid}.jsonl` 的直写单独标注为
+     `community_shared_projection_cron_direct_ungoverned_duplicate`（见下方落差 #4/#6）。
+  2. 测试断言同步为新文案。
+  3. 顺带修复：`community_table.py`、`community_interest_garden.py`、
+     `scripts/community_partner_reply.py`、`scripts/community_monitor.py` 中处理中文内容的
+     `open()`/`write_text()`/`read_text()` 调用普遍缺失显式 `encoding="utf-8"`（依赖 locale
+     默认编码），与项目既有约定不一致，全部补齐。
+- **反事实覆盖**：CI 修复两项均有直接反事实——revert 8 处分类登记 → `write_surface_check`
+  确定性 FAIL（`unclassified_count=8`）；revert 测试文案 → 确定性 FAIL（旧文案 assertion）；
+  均已用 `git stash` 实测验证 revert→FAIL、restore→PASS。`encoding="utf-8"` 修复本身
+  **无法**构造反事实——本机（Windows）与 CI（Linux）的 `locale.getpreferredencoding(False)`
+  均已是 UTF-8，revert 后新增的往返测试仍然 PASS（已用 `git stash` 实测确认），判定同 BO
+  记录的"无法反事实"类修复，纯 portability 加固，非行为回归。
+- **实现落差记录**（仅记录，未改动，详见路线图 11.12.7）：`community_table.py`/
+  `community_interest_garden.py`/`community_partner_runtime.py` 三个模块零调用方、零测试，
+  实际跑在 cron 上的 `scripts/community_partner_reply.py` 是内联重写的独立副本——
+  `_extract_topics()` 关键词集合已分叉；11.12.1 文档承诺的"每人每小时 ≤5 条"限流只存在于
+  未被调用的 `community_table.py` 里，脚本的 `_write_table()` 无限流；脚本对
+  `sannai__{pid}.jsonl` 的直写绕开了 `community_shared.write_shared_memory()` 的
+  `actor=="sannai"` 门控。三处均未改动——`scripts/community_partner_reply.py` 是零测试覆盖、
+  模块级代码 import 时即执行生产 config/roster 读取的自包含 cron 脚本，本次复审不具备验证
+  该部署契约改动的宿主环境条件，属于"不动，只记录"。另确认 `community_snapshot.py` 新增的
+  `unread_partner_replies`/`partner_reply_breakdown` 用两个语义无关的计数器相减（回复行数 −
+  sannai_says.jsonl 读取游标），当前无消费者读取，尚未造成误导，未修——真正修复需要新增
+  "回复已读游标"，属功能缺口而非 bug。
+- **测试数量变化**：新增 5 个测试（`tests/plugins/memory/test_memory_os_community_table_and_interest_garden.py`，
+  覆盖此前零测试的 `community_table.py`/`community_interest_garden.py` 往返 + 限流边界）。
+  全量本地（Windows）**3039 passed / 3 failed / 13 skipped**——3 个 FAIL 均为既有环境伪影：
+  2 个是 BK/BM 记录的 `test_memory_os_pytest_policy.py` skip-count 断言（经 stash 对照验证
+  revert 后同样失败，与本次改动无关）；1 个是
+  `test_execution_gate_runner_serializes_parallel_sidecar_updates`，全量套件下因并发资源
+  争用（复审期间本机同时在跑 Edit 工具调用）偶发 FAIL，单独重跑与 stash 对照均 100% PASS，
+  非本次改动引入的回归。import cycle（173 modules / 0 cycle）、write surface
+  （163/163，`unclassified_count=0`）、static hygiene、public checkout probe（PASS）、
+  `git diff --check` 全过。
+- **结论**：两项 CI FAIL 已修复；顺带加固字符编码一致性并为两个此前零覆盖模块补测试；
+  三处实现落差（模块脱节、限流缺失、治理门控被绕开）与一处语义存疑指标已如实记入路线图
+  11.12.7，留待后续按记录中的两个方案之一收口，本次不重构生产部署契约。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -929,6 +990,14 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
    残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
+4. BP 记录的 Track A 实现落差——`community_partner_runtime.py`/`community_table.py`/
+   `community_interest_garden.py` 与实际线上路径（`scripts/community_partner_reply.py`）
+   脱节，导致限流约束缺失、shared 写入门控被绕开、`_extract_topics` 关键词分叉；收口需二选一
+   （改脚本 import 模块并验证部署契约 / 明确废弃模块并删除），本次未做判断，留给下次接触
+   Track A 代码时处理（路线图 11.12.7 记录）。
+5. BP 记录的 `community_snapshot.py::unread_partner_replies`/`partner_reply_breakdown`
+   语义缺口——用两个无关计数器相减，当前无消费者读取，未修；若未来有 UI/digest 要消费这两个
+   字段，须先补"回复已读游标"再接入，不能直接信任现有数值。
 
 ---
 
@@ -1016,3 +1085,15 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   并把 `slo_checks` 附在断言消息里；未改 `DEFAULT_SLO`/`run_benchmark()` 生产语义。
   无新增/删除测试，全量 3035 passed / 2 failed（同 BK/BM 既有 Windows `%TEMP%` 环境伪影，
   经 stash 对照验证与本次改动无关）/ 13 skipped，静态门全过。
+- `609bc40..（BP，本节）`：复审 Sannai v2.9 提交（11.12 窗台/一起看/兴趣花园）——修复两项
+  GitHub CI FAIL（`write_surface_check` 新增 8 处写入未登记；`partner_create` 测试断言旧
+  错误文案）；顺带补齐 4 个文件缺失的 `encoding="utf-8"`（无法反事实，纯 portability）；
+  新增 5 个测试覆盖此前零测试的 `community_table.py`/`community_interest_garden.py`；
+  记录（不重构）3 处实现落差——`community_partner_runtime.py`/`community_table.py`/
+  `community_interest_garden.py` 零调用方、实际 cron 路径是内联重写副本，导致限流约束缺失、
+  shared 写入门控被绕开、`_extract_topics` 关键词分叉——写入路线图 11.12.7；另确认
+  `community_snapshot.py` 新增的 `unread_partner_replies` 字段计算语义无关的两个计数器，
+  当前无消费者，未修。全量本地（Windows）3032→**3039 passed** / 3 failed（2 个同 BK/BM
+  既有 skip-count 环境伪影 + 1 个全量套件下资源争用偶发 FAIL、隔离重跑 100% PASS，均经
+  stash 对照验证与本次改动无关）/ 13 skipped，静态门全过（import cycle 173/0、write
+  surface 163/163、static hygiene、public checkout probe、git diff --check）。
