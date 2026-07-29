@@ -2,6 +2,19 @@
 from __future__ import annotations
 
 
+def test_remote_probe_script_invocation_sentinel_is_unique():
+    """The def/invocation split marker used by the exec() tests below must
+    be a deliberate, single-occurrence anchor, not a coincidental variable
+    name that happens to match once. If a future edit duplicates or removes
+    the marker, this fails loudly instead of the exec() tests silently
+    falling back to splitting on nothing (running the entire probe script,
+    including real subprocess/file-system invocations, inside a unit test)."""
+    from scripts import memory_os_3_200_monitor as monitor
+
+    script = monitor._remote_probe_script()
+    assert script.count("\n# ---begin-probe-invocations---") == 1
+
+
 def test_context_router_does_not_mutate_candidate_metadata():
     from plugins.memory.memory_os.context_router import ContextSection, route_context_sections
 
@@ -29,7 +42,7 @@ def test_execution_gate_reconcile_requires_fresh_cron_evidence(tmp_path, monkeyp
     namespace = {"__name__": "remote_probe_test"}
     original_sys_path = list(sys.path)
     try:
-        exec(monitor._remote_probe_script().split('\nstatus = load_json_cmd', 1)[0], namespace)
+        exec(monitor._remote_probe_script().split('\n# ---begin-probe-invocations---', 1)[0], namespace)
     finally:
         sys.path[:] = original_sys_path
     namespace["_hermes_home"] = str(tmp_path)
@@ -49,7 +62,7 @@ def test_execution_gate_fresh_reconcile_is_degraded_and_accounted(tmp_path, monk
     namespace = {"__name__": "remote_probe_test"}
     original_sys_path = list(sys.path)
     try:
-        exec(monitor._remote_probe_script().split('\nstatus = load_json_cmd', 1)[0], namespace)
+        exec(monitor._remote_probe_script().split('\n# ---begin-probe-invocations---', 1)[0], namespace)
     finally:
         sys.path[:] = original_sys_path
     namespace["_hermes_home"] = str(tmp_path)
@@ -76,7 +89,7 @@ def test_execution_gate_disabled_job_is_not_reported_as_missing(tmp_path):
     namespace = {"__name__": "remote_probe_test"}
     original_sys_path = list(sys.path)
     try:
-        exec(monitor._remote_probe_script().split('\nstatus = load_json_cmd', 1)[0], namespace)
+        exec(monitor._remote_probe_script().split('\n# ---begin-probe-invocations---', 1)[0], namespace)
     finally:
         sys.path[:] = original_sys_path
     namespace["_hermes_home"] = str(tmp_path)
@@ -104,7 +117,7 @@ def test_execution_gate_disabled_job_with_no_last_status_is_still_disabled_not_m
     namespace = {"__name__": "remote_probe_test"}
     original_sys_path = list(sys.path)
     try:
-        exec(monitor._remote_probe_script().split('\nstatus = load_json_cmd', 1)[0], namespace)
+        exec(monitor._remote_probe_script().split('\n# ---begin-probe-invocations---', 1)[0], namespace)
     finally:
         sys.path[:] = original_sys_path
     namespace["_hermes_home"] = str(tmp_path)
@@ -114,6 +127,62 @@ def test_execution_gate_disabled_job_with_no_last_status_is_still_disabled_not_m
     )
     assert summary["helper_completion_disabled_lanes"] == ["lane"]
     assert summary["helper_completion_missing_lanes"] == []
+
+
+def test_execution_gate_disabled_job_does_not_drop_recorded_boundary_violation(tmp_path):
+    """A job disabled AFTER it already recorded a real governance-boundary
+    violation (postcheck_boundary_true=True) must still count that evidence
+    — the 'disabled' early-continue must not read as 'nothing to see here'.
+    Without the fix, the disabled check ran before the completion record was
+    even looked up, so this evidence was silently dropped and
+    helper_boundary_true_count stayed 0."""
+    from scripts import memory_os_3_200_monitor as monitor
+
+    import json
+    import sys
+
+    system_dir = tmp_path / "memory-os" / "system"
+    system_dir.mkdir(parents=True)
+    system_dir.joinpath("execution_gate_envelopes.jsonl").write_text(
+        json.dumps(
+            {
+                "stage": "completion",
+                "lane_id": "lane",
+                "execution_status": "ok",
+                "postcheck": {"returncode": 0},
+                "postcheck_boundary_true": True,
+                "created_at": "2020-01-01T00:00:00Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    namespace = {"__name__": "remote_probe_test"}
+    original_sys_path = list(sys.path)
+    try:
+        exec(monitor._remote_probe_script().split('\n# ---begin-probe-invocations---', 1)[0], namespace)
+    finally:
+        sys.path[:] = original_sys_path
+    namespace["_hermes_home"] = str(tmp_path)
+
+    summary = namespace["_execution_gate_helper_completion_summary"](
+        {"lane": {"name": "job"}},
+        {"job": {"enabled": False}},
+    )
+
+    assert summary["helper_completion_disabled_lanes"] == ["lane"]
+    assert summary["helper_completion_disabled_count"] == 1
+    assert summary["helper_boundary_true_count"] == 1
+    # The lane must not also be double-counted as completed/missing.
+    assert summary["helper_completion_completed_lanes"] == []
+    assert summary["helper_completion_missing_lanes"] == []
+    assert summary["helper_completion_expected_count"] == (
+        summary["helper_completion_completed_count"]
+        + summary["helper_completion_missing_count"]
+        + summary["helper_completion_reconciled_count"]
+        + summary["helper_completion_disabled_count"]
+    )
 
 
 def test_ragflow_disabled_is_cron_success_through_host_wrapper(tmp_path):

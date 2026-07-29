@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -272,13 +273,19 @@ def _build_commands(
         "--output",
         "json",
     ]
+    # The leading ["env", "HERMES_HOME=..."] pair is not a literal `env`
+    # invocation — _run_command() (the local, non-SSH runner) recognizes
+    # this exact prefix and translates it into a subprocess env= kwarg
+    # instead of requiring a real `env` binary on PATH. Over SSH, _ssh_wrap()
+    # joins it into a shell command line where the remote host's real `env`
+    # does run it, which is also correct. Keep both ends in sync if this
+    # prefix shape ever changes.
+    env_prefix = ["env", f"HERMES_HOME={hermes_home}"]
     commands: dict[str, list[str]] = {
         "compat": compat,
         "install_dry_run": install_base + ["--dry-run"],
         "install_apply": install_base,
-        "llm_judge_probe": [
-            "env",
-            f"HERMES_HOME={hermes_home}",
+        "llm_judge_probe": env_prefix + [
             "hermes",
             "memory-os-agent-os",
             "low-clue-recall",
@@ -304,9 +311,7 @@ def _build_commands(
             "--output",
             "json",
         ],
-        "deployment_manifest_write": [
-            "env",
-            f"HERMES_HOME={hermes_home}",
+        "deployment_manifest_write": env_prefix + [
             "hermes",
             "memory-os-agent-os",
             "deployment-manifest",
@@ -324,17 +329,13 @@ def _build_commands(
             "--source-repo-head",
             source_repo_head,
         ],
-        "deployment_manifest_status": [
-            "env",
-            f"HERMES_HOME={hermes_home}",
+        "deployment_manifest_status": env_prefix + [
             "hermes",
             "memory-os-agent-os",
             "deployment-manifest",
             "status",
         ],
-        "memory_projection_refresh": [
-            "env",
-            f"HERMES_HOME={hermes_home}",
+        "memory_projection_refresh": env_prefix + [
             "hermes",
             "memory-os-agent-os",
             "projection",
@@ -370,7 +371,32 @@ def _run_json(
 
 def _run_command(argv: list[str], *, host: str | None = None, timeout: int = 60) -> dict[str, Any]:
     del host
-    completed = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+    # _build_commands() prefixes some argv lists with ["env", "KEY=VALUE", ...]
+    # so HERMES_HOME is scoped per-command even when several commands run in
+    # the same process. That prefix is meant for a shell (it works as-is once
+    # _ssh_wrap() joins it into a remote shell command line), but this is the
+    # local, non-SSH path — subprocess.run(argv) with no shell=True requires
+    # an actual `env` executable on PATH, which many local dev/CI hosts don't
+    # have. Interpret the prefix ourselves instead of depending on that binary.
+    env = None
+    if argv and argv[0] == "env":
+        env = os.environ.copy()
+        idx = 1
+        while idx < len(argv) and "=" in argv[idx]:
+            key, _, value = argv[idx].partition("=")
+            env[key] = value
+            idx += 1
+        argv = argv[idx:]
+    try:
+        completed = subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False, env=env)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+        stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
+        return {
+            "exit_code": 124,
+            "stdout": stdout,
+            "stderr": stderr + f"\ncommand timed out after {timeout}s",
+        }
     return {"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
 
 

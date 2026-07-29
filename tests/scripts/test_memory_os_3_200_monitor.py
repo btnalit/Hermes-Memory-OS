@@ -60,6 +60,42 @@ def test_run_probe_with_stdin_script_does_not_conflict_with_devnull():
     assert result == {"ok": True, "probe": "stdin"}
 
 
+def test_run_probe_timeout_returns_bounded_dict_instead_of_raising(monkeypatch):
+    """_run_probe()'s own subprocess.run call had no timeout at all — a hung
+    SSH connection or child process could block the whole monitor
+    indefinitely, even though every individual command inside the generated
+    script is now bounded. TimeoutExpired must be caught and turned into a
+    bounded dict, not propagate out of collect_snapshot()/main()."""
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = monitor._run_probe("", "print('unused')", python_bin=sys.executable, timeout_seconds=5)
+
+    assert result == {"_probe_timeout": True, "_probe_timeout_seconds": 5}
+
+
+def test_collect_snapshot_probe_timeout_short_circuits_to_fail_without_crash(monkeypatch):
+    """When _run_probe() reports a timeout, collect_snapshot() must not feed
+    the near-empty dict through the summarize_*/classify_snapshot chain (an
+    unverified assumption) — it short-circuits to an explicit FAIL with a
+    named code, and main()'s exit-code contract (0 vs 2) still works."""
+    def fake_run_probe(host, script, python_bin="python3"):
+        return {"_probe_timeout": True, "_probe_timeout_seconds": 300}
+
+    monkeypatch.setattr(monitor, "_run_probe", fake_run_probe)
+
+    snapshot = monitor.collect_snapshot(
+        host="fake-host", hermes_home="/root/.hermes", python_bin="python3", previous=None, monitor_profile="live",
+    )
+
+    assert snapshot["classification"]["status"] == "FAIL"
+    assert any(item["code"] == "probe_script_timeout" for item in snapshot["classification"]["fail"])
+    # render_chinese_summary must also tolerate the near-empty snapshot.
+    assert "监控结果: FAIL" in render_chinese_summary(snapshot)
+
+
 def test_embedded_remote_command_timeout_is_bounded_and_fail_closed(tmp_path, monkeypatch):
     script = monitor._remote_probe_script(str(tmp_path))
     prefix = script.split("def system_show", 1)[0]
@@ -108,6 +144,73 @@ def test_embedded_cron_fallback_recognizes_retired_jobs_when_adapter_is_unavaila
 
     assert retired["memory-os-right-brain-expression"]["wrapper_script"] == "memory_os_cron_right_brain_expression_gate.py"
     assert retired["memory-os-right-brain-expression-outcome"]["wrapper_script"] == "memory_os_cron_right_brain_expression_outcome_gate.py"
+
+
+def test_embedded_cron_fallback_also_recognizes_legacy_pre_wrapper_raw_names():
+    """RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES covers two legacy pre-wrapper raw
+    script names that RETIRED_MEMORY_OS_CRON_SCRIPTS (keyed by wrapper name)
+    doesn't. A host whose jobs.json still carries one of those raw names
+    must resolve via known_specs_by_raw, not fall through to
+    unregistered_like. The synthetic entry's "name" must not be "" (which
+    would collide with any job that has a blank name in known_specs_by_name)."""
+    from plugins.memory.memory_os.cron_registry import (
+        RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
+        RETIRED_MEMORY_OS_CRON_SCRIPTS,
+    )
+
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    known_specs: Any = namespace["_memory_os_known_cron_specs"]()
+    by_raw = {str(item.get("raw_script") or ""): item for item in known_specs}
+
+    legacy_only = RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES - set(RETIRED_MEMORY_OS_CRON_SCRIPTS.values())
+    assert legacy_only, "fixture assumption: at least one legacy-only raw name exists"
+    for script in legacy_only:
+        assert script in by_raw
+        assert by_raw[script]["retired"] is True
+        assert by_raw[script]["name"] != ""
+
+
+def test_execution_gate_cron_summary_classifies_legacy_raw_job_as_known_optional(tmp_path):
+    """End-to-end: a jobs.json entry using a legacy pre-wrapper raw script
+    name must be classified known_optional (matched via known_specs_by_raw),
+    not memory_os_like_unregistered — reproducing (and closing) the exact
+    unregistered_like FAIL this diff's retired-job fix targeted, for a host
+    that hasn't migrated the job entry to its wrapper name yet."""
+    from plugins.memory.memory_os.cron_registry import RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES, RETIRED_MEMORY_OS_CRON_SCRIPTS
+
+    legacy_only = sorted(RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES - set(RETIRED_MEMORY_OS_CRON_SCRIPTS.values()))
+    legacy_script = legacy_only[0]
+
+    cron_dir = tmp_path / "cron"
+    cron_dir.mkdir(parents=True)
+    cron_dir.joinpath("jobs.json").write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {"name": "memory-os-legacy-right-brain", "script": legacy_script, "enabled": False},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    namespace: dict[str, object] = {}
+    original_sys_path = list(sys.path)
+    try:
+        exec(
+            monitor._remote_probe_script(str(tmp_path)).split("\n# ---begin-probe-invocations---", 1)[0],
+            namespace,
+        )
+    finally:
+        sys.path[:] = original_sys_path
+    namespace["_hermes_home"] = str(tmp_path)
+
+    summary: Any = namespace["execution_gate_cron_summary"]()
+
+    assert summary["memory_os_like_unregistered_count"] == 0
+    known_optional_scripts = {job["script"] for job in summary["known_optional_jobs"]}
+    assert legacy_script in known_optional_scripts
 
 
 def test_collect_snapshot_remote_populates_v2_exposure_from_successful_probe(monkeypatch):
@@ -745,6 +848,53 @@ def test_rh26_degradation_suffix_does_not_mask_real_missing():
     assert anomalies[0]["code"] == "rh26_missing_expected_heading"
     # "Crystallized Memory" matched via suffix strip, only "Crystallized Review Candidates" missing
     assert anomalies[0]["missing"] == ["Crystallized Review Candidates"]
+
+
+def test_rh26_probe_failure_is_explicit_fail_not_silent_pass():
+    """rh26_probe() reports a subprocess failure as a single-element list
+    ([{"_error": ..., "_code": ...}]), not a bare dict. classify_snapshot
+    must surface that as an explicit FAIL rather than silently finding zero
+    anomalies (find_rh26_heading_anomalies skips any entry with no matching
+    EXPECTED_RH26_HEADINGS id) and reporting nothing wrong at all."""
+    snapshot = {"rh26_apply_probe": [{"_error": "boom", "_code": 124}]}
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "rh26_probe_unavailable" for item in classification["fail"])
+    assert classification["status"] == "FAIL"
+
+
+def test_rh26_probe_non_list_value_does_not_crash_classify_snapshot():
+    """Defense at the classify_snapshot boundary: even if rh26_apply_probe
+    were ever a bare dict again (the old, pre-fix rh26_probe() error shape),
+    classify_snapshot must not crash iterating it as a list."""
+    snapshot = {"rh26_apply_probe": {"_error": "boom", "_code": 124}}
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] in {"PASS", "WARN", "FAIL"}
+
+
+def test_low_clue_ingress_matrix_probe_failure_is_explicit_fail_not_silent_pass():
+    """Same failure class as rh26: low_clue_ingress_matrix() wraps a
+    subprocess failure in a single-element list. Each ingress item is
+    already isinstance-guarded (non-dict entries are skipped), which used to
+    let a probe failure degrade to zero findings — silently. It must now
+    surface an explicit FAIL."""
+    snapshot = {"low_clue_ingress_matrix": [{"_error": "boom", "_code": 124}]}
+
+    classification = classify_snapshot(snapshot)
+
+    assert any(item["code"] == "low_clue_ingress_matrix_unavailable" for item in classification["fail"])
+    assert classification["status"] == "FAIL"
+
+
+def test_low_clue_ingress_matrix_non_list_value_does_not_crash_classify_snapshot():
+    snapshot = {"low_clue_ingress_matrix": {"_error": "boom", "_code": 124}}
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] in {"PASS", "WARN", "FAIL"}
 
 
 def test_compute_deltas_tracks_count_growth_and_audit_ratios():
@@ -4035,7 +4185,7 @@ def test_memory_os_cron_specs_missing_snapshot_does_not_use_private_fallback(tmp
     original_sys_path = list(sys.path)
     try:
         script_prefix = monitor._remote_probe_script(str(tmp_path)).split(
-            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            '\n# ---begin-probe-invocations---',
             1,
         )[0]
         namespace: dict[str, object] = {}
@@ -4055,7 +4205,7 @@ def test_memory_os_cron_specs_missing_snapshot_does_not_use_private_fallback(tmp
     )
     try:
         script_prefix2 = monitor._remote_probe_script(str(tmp_path)).split(
-            '\nstatus = load_json_cmd(["hermes", "memory-os-agent-os", "status"])',
+            '\n# ---begin-probe-invocations---',
             1,
         )[0]
         namespace2: dict[str, object] = {}

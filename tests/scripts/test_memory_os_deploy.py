@@ -9,11 +9,84 @@ from scripts.deploy_memory_os import (
     _classify_boundary_runtime_probe,
     _classify_cron_adapter_probe,
     _classify_llm_judge_probe,
+    _run_command,
     _run_memory_projection_refresh,
     classify_deploy_report,
     deploy_memory_os,
     render_deploy_plan,
 )
+
+
+def test_run_command_local_env_prefix_does_not_require_real_env_binary(monkeypatch):
+    """_build_commands() prefixes some local (non-SSH) argv lists with
+    ["env", "HERMES_HOME=...", "hermes", ...] so HERMES_HOME is scoped per
+    command. subprocess.run(argv) with no shell=True needs a real `env`
+    executable on PATH to interpret that prefix — many local/CI/Windows
+    hosts don't have one. _run_command() must interpret the prefix itself
+    instead of shelling out to a real `env` binary."""
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env")
+
+        class _Completed:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_command(["env", "HERMES_HOME=/vol1/.hermes/profiles/sannai", "hermes", "status"])
+
+    # The literal "env" binary must never be invoked — the prefix is
+    # stripped and interpreted in-process.
+    assert captured["argv"] == ["hermes", "status"]
+    assert captured["env"]["HERMES_HOME"] == "/vol1/.hermes/profiles/sannai"
+
+
+def test_run_command_without_env_prefix_is_unaffected(monkeypatch):
+    """A plain argv (no leading "env" token) must run exactly as before —
+    env=None, letting subprocess.run() inherit the parent environment."""
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env")
+
+        class _Completed:
+            returncode = 0
+            stdout = "{}"
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    _run_command(["python3", "-c", "print(1)"])
+
+    assert captured["argv"] == ["python3", "-c", "print(1)"]
+    assert captured["env"] is None
+
+
+def test_run_command_timeout_returns_bounded_dict_instead_of_raising(monkeypatch):
+    """The compat subprocess's own internal --timeout budget and the outer
+    subprocess.run(argv, timeout=timeout) kill-timer can both legitimately
+    fire close together; an uncaught TimeoutExpired would crash
+    deploy_memory_os() with a raw traceback instead of the classified
+    postcheck-fail result the rest of the pipeline expects."""
+
+    def fake_run(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = _run_command(["python3", "-c", "import time; time.sleep(99)"], timeout=1)
+
+    assert result["exit_code"] == 124
+    assert "timed out" in result["stderr"]
 
 
 def test_projection_refresh_rejects_nonzero_command_even_with_valid_json():

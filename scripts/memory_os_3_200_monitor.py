@@ -3112,8 +3112,18 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     else:
         warn.append({"code": "low_clue_recall_probe_unavailable", "value": low_clue})
 
-    low_clue_ingress = list(snapshot.get("low_clue_ingress_matrix") or [])
-    if clean_host and low_clue_ingress:
+    low_clue_ingress_raw = snapshot.get("low_clue_ingress_matrix")
+    low_clue_ingress = low_clue_ingress_raw if isinstance(low_clue_ingress_raw, list) else []
+    low_clue_ingress_error = next(
+        (item for item in low_clue_ingress if isinstance(item, dict) and "_error" in item),
+        None,
+    )
+    if low_clue_ingress_error is not None:
+        # Same rationale as the rh26 probe: surface the probe failure as an
+        # explicit FAIL instead of silently skipping every non-dict/error
+        # entry and reporting no anomalies at all.
+        fail.append({"code": "low_clue_ingress_matrix_unavailable", "value": low_clue_ingress_error})
+    elif clean_host and low_clue_ingress:
         passed.append({"code": "clean_host_low_clue_ingress_contract_not_required"})
     else:
         for item in low_clue_ingress:
@@ -3154,8 +3164,19 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
 
-    rh26_probes = list(snapshot.get("rh26_apply_probe") or [])
-    if clean_host and rh26_probes:
+    rh26_raw = snapshot.get("rh26_apply_probe")
+    rh26_probes = rh26_raw if isinstance(rh26_raw, list) else []
+    rh26_probe_error = next(
+        (item for item in rh26_probes if isinstance(item, dict) and "_error" in item),
+        None,
+    )
+    if rh26_probe_error is not None:
+        # The probe subprocess failed (e.g. timed out) — surface that
+        # explicitly rather than silently falling through to the anomaly
+        # detector, which would find nothing to flag on a single error
+        # placeholder and report a false PASS.
+        fail.append({"code": "rh26_probe_unavailable", "value": rh26_probe_error})
+    elif clean_host and rh26_probes:
         passed.append({"code": "clean_host_rh26_probe_contract_not_required"})
     else:
         rh26_anomalies = find_rh26_heading_anomalies(rh26_probes)
@@ -4443,6 +4464,25 @@ def collect_snapshot(
     monitor_profile: str = "live",
 ) -> dict[str, Any]:
     raw = _run_probe(host, _remote_probe_script(hermes_home), python_bin=python_bin)
+    if raw.get("_probe_timeout"):
+        # The whole probe script hung/timed out before producing any JSON.
+        # Short-circuit with an explicit FAIL rather than feeding a
+        # near-empty dict through the summarize_*/classify_snapshot chain,
+        # which assumes a fully-shaped snapshot.
+        raw["schema_version"] = "memory-os.monitor.v1"
+        raw["monitor_profile"] = _normalize_monitor_profile(monitor_profile)
+        raw["classification"] = {
+            "status": "FAIL",
+            "pass": [],
+            "warn": [],
+            "fail": [{"code": "probe_script_timeout", "value": raw.get("_probe_timeout_seconds")}],
+            "info": [],
+            "clean_host_warn_classification": {},
+            "evidence_labels": _monitor_evidence_labels(
+                monitor_profile=_normalize_monitor_profile(monitor_profile), status="FAIL"
+            ),
+        }
+        return raw
     raw["monitor_profile"] = _normalize_monitor_profile(monitor_profile)
     raw["rh31_eval"] = compact_rh31_eval_summary(raw.get("rh31_eval") or {})
     raw["deltas"] = compute_deltas(raw, previous)
@@ -5156,28 +5196,32 @@ def _top_dict(data: dict[str, Any], limit: int) -> dict[str, Any]:
     return dict(sorted(items, key=lambda item: (-item[1], item[0]))[:limit])
 
 
-def _run_probe(host: str, script: str, python_bin: str = "python3") -> dict[str, Any]:
+def _run_probe(
+    host: str,
+    script: str,
+    python_bin: str = "python3",
+    timeout_seconds: int = FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     """Run a probe script locally or via SSH.
 
     When *host* is empty, the script runs in a local subprocess.
-    Otherwise it is sent to the named SSH host via stdin.
+    Otherwise it is sent to the named SSH host via stdin. Bounded by
+    *timeout_seconds* — the per-command timeouts inside the generated
+    script only bound individual commands, not this outer SSH/subprocess
+    call, so a hung connection could otherwise block indefinitely.
     """
-    if host:
+    argv = ["ssh", host, f"{python_bin} -"] if host else [python_bin, "-"]
+    try:
         completed = subprocess.run(
-            ["ssh", host, f"{python_bin} -"],
+            argv,
             input=script,
             text=True,
             capture_output=True,
             check=True,
+            timeout=timeout_seconds,
         )
-    else:
-        completed = subprocess.run(
-            [python_bin, "-"],
-            input=script,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
+    except subprocess.TimeoutExpired:
+        return {"_probe_timeout": True, "_probe_timeout_seconds": timeout_seconds}
     return json.loads(completed.stdout)
 
 
@@ -5347,14 +5391,27 @@ def living_memory_promotion_probe():
         return {"ok": False, "error_code": type(exc).__name__, "error_detail": str(exc)[:200]}
 
 def compaction_stats():
-    r = run(["journalctl", "--user", "-u", "hermes-gateway.service", "--since", "6 hours ago", "--no-pager", "-o", "cat"])
+    # journalctl over a 6-hour window on a busy gateway can exceed the
+    # shared default command timeout; an undersized timeout here would
+    # silently report recent_count=0 instead of a real WARN/FAIL, so this
+    # gets the same explicit bump as the other slow probes.
+    r = run(
+        ["journalctl", "--user", "-u", "hermes-gateway.service", "--since", "6 hours ago", "--no-pager", "-o", "cat"],
+        timeout_seconds=60,
+    )
     text = r["out"] if r["ok"] else ""
     starts = len(re.findall(r"context compression started|Compacting context|Preflight compression", text))
     focus_none = len(re.findall(r"focus=None", text))
     return {"recent_count": starts, "focus_none_count": focus_none}
 
 def hook_marker_counts():
-    r = run(["grep", "-R", '"action": "agent_os_shell_session_', os.path.join(_hermes_home, "memory-os/audit")])
+    # See compaction_stats() above: a recursive grep over the full audit
+    # tree can legitimately exceed the shared default timeout on a large
+    # production install.
+    r = run(
+        ["grep", "-R", '"action": "agent_os_shell_session_', os.path.join(_hermes_home, "memory-os/audit")],
+        timeout_seconds=60,
+    )
     text = r["out"] if r["ok"] else ""
     started = text.count("agent_os_shell_session_started")
     reset = text.count("agent_os_shell_session_reset")
@@ -5628,7 +5685,7 @@ print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     env = dict(os.environ)
     env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python"
     r = run(["python3", "-c", code], env=env)
-    return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
+    return json.loads(r["out"]) if r["ok"] else [{"_error": r["out"], "_code": r["code"]}]
 
 def low_clue_ingress_matrix():
     code = r"""
@@ -5671,7 +5728,7 @@ print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     env = dict(os.environ)
     env["PYTHONPATH"] = _hermes_home + "/memory-os/runtime/python"
     r = run(["python3", "-c", code], env=env)
-    return json.loads(r["out"]) if r["ok"] else {"_error": r["out"], "_code": r["code"]}
+    return json.loads(r["out"]) if r["ok"] else [{"_error": r["out"], "_code": r["code"]}]
 
 def deep_reflection_status():
     code = r"""
@@ -7222,6 +7279,7 @@ def _memory_os_cron_specs_from_snapshot():
 def _memory_os_known_cron_specs():
     try:
         from plugins.memory.memory_os.cron_registry import (
+            RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
             RETIRED_MEMORY_OS_CRON_SCRIPTS,
             memory_os_cron_specs,
         )
@@ -7245,7 +7303,26 @@ def _memory_os_known_cron_specs():
             }
             for name, script in sorted(RETIRED_MEMORY_OS_CRON_SCRIPTS.items())
         ]
-        return active + retired
+        # RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES also covers legacy pre-wrapper
+        # raw script names that never had a wrapper-name entry above (see
+        # legacy_right_brain_retirement.py). A host whose jobs.json still
+        # carries one of those raw names must not fall through to
+        # unregistered_like. These have no real cron job display name, so
+        # "name" is set to the script filename itself (never a valid
+        # "memory-os-*" job name) to avoid colliding with known_specs_by_name
+        # lookups for real (possibly blank-named) jobs.
+        covered_scripts = set(RETIRED_MEMORY_OS_CRON_SCRIPTS.values())
+        retired_legacy = [
+            {
+                "key": "retired-legacy:" + script,
+                "name": script,
+                "raw_script": script,
+                "wrapper_script": script,
+                "retired": True,
+            }
+            for script in sorted(RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES - covered_scripts)
+        ]
+        return active + retired + retired_legacy
     except Exception:
         return []
 
@@ -7295,10 +7372,25 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
         job_name = str(spec.get("name") or "")
         cron_job = jobs_by_name.get(job_name) if isinstance(jobs_by_name, dict) else {}
+        record = completions.get(lane)
         if isinstance(cron_job, dict) and cron_job.get("enabled") is False:
             disabled.append(lane)
+            if record:
+                # A disabled job isn't expected to produce FRESH evidence,
+                # but if a completion record already exists, any recorded
+                # governance-boundary violation or execution error must
+                # still count — disabling a job must never erase evidence
+                # that was already captured before it was disabled.
+                postcheck = record.get("postcheck") if isinstance(record.get("postcheck"), dict) else {}
+                try:
+                    returncode = int(postcheck.get("returncode") or 0)
+                except Exception:
+                    returncode = 0
+                if str(record.get("execution_status") or "") != "ok" or returncode != 0:
+                    error.append(lane)
+                if record.get("postcheck_boundary_true") is True:
+                    boundary_true += 1
             continue
-        record = completions.get(lane)
         if not record:
             # ── Cross-reference with cron job status ──────────────────
             if isinstance(cron_job, dict) and str(cron_job.get("last_status") or "") == "ok":
@@ -8024,6 +8116,10 @@ print(json.dumps(probe(), ensure_ascii=False, sort_keys=True))
         }
     return report
 
+# ---begin-probe-invocations--- (explicit split marker: tests that need only
+# the function/constant definitions above split the generated script text on
+# this exact literal rather than guessing at incidental variable names, which
+# drift silently when functions above are refactored.)
 status = load_json_cmd(["hermes", "memory-os-agent-os", "status"])
 doctor = load_json_cmd(["hermes", "memory-os-agent-os", "doctor"])
 contract = memory_os_cli(["conversation-regression", "status-tool-contract"])

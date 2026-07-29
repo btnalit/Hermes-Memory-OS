@@ -106,10 +106,15 @@ def initialize_clean_git(repo_root: Path, source_root: Path) -> None:
         ["git", "ls-files", "-z"], cwd=source_root, check=True, capture_output=True
     ).stdout
     tracked_paths = [path for path in tracked_result.split(b"\0") if path]
+    # `git add -f` below runs with cwd=repo_root (the copy_clean_tree-filtered
+    # copy), not source_root — a tracked path that copy_clean_tree excluded
+    # (anything under an IGNORED_COPY_PARTS directory) exists in source_root
+    # but not in repo_root, so the existence check must test repo_root or
+    # the pathspec includes a path git can't find and `git add -f` fails.
     existing_tracked = [
         path
         for path in tracked_paths
-        if (source_root / os.fsdecode(path)).exists()
+        if (repo_root / os.fsdecode(path)).exists()
     ]
     tracked = b"\0".join(existing_tracked) + (b"\0" if existing_tracked else b"")
     if tracked:

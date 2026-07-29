@@ -733,6 +733,114 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BM — 落地代码复审：monitor/deploy/v24_final_verify 14 项发现修复（2026-07-29）
+
+- **背景**：对已落地的 roadmap v2.6 代码（`523b895` 之后的 monitor.py/deploy_memory_os.py 等）
+  跑 `/code-review`，产出 14 项发现（2 项 CRITICAL）。先用 advisor 核实修复方案（发现原计划的
+  rh26 修复会把"崩溃"换成"静默 PASS"，同类缺陷，且 `#5` 的猜测范围过大——advisor 建议先枚举
+  哪些 snapshot 字段真的有 `None` 触发路径，再决定要不要补防护），再逐项落地。
+- **P0（CRITICAL，均已修复）**：
+  1. `rh26_probe()`/`low_clue_ingress_matrix()` 探针失败时返回裸 dict（`{"_error":...}`），
+     `classify_snapshot` 对应两处消费点用 `list(...)`/逐项 `.get()` 处理，取到 dict 的 keys
+     后逐项 `AttributeError` 崩溃整个 classify_snapshot。修复：两个探针函数改为返回单元素
+     list；`classify_snapshot` 两处消费点加 `isinstance(x, list)` 防护 **并**显式识别
+     `_error` 条目产出 `rh26_probe_unavailable`/`low_clue_ingress_matrix_unavailable` FAIL 码
+     ——只加 isinstance 防护会把"崩溃"换成"零异常、零 FAIL 的静默 PASS"（advisor 指出的同类
+     缺陷，等价于 #8）。反事实：临时还原两处均实测崩溃/静默通过，恢复后 FAIL。
+  2. `_execution_gate_helper_completion_summary()` 的 disabled-job 分支在读取 completion
+     record **之前** 就 `continue`，导致一个先记录了 `postcheck_boundary_true=True` 或
+     `execution_status!=ok` 、后被禁用的 cron job，其证据被静默丢弃（`classify_snapshot` 对
+     这两个计数器是无条件硬 FAIL，行为从"抓真实治理边界违规"退化为"永远不会触发"）。修复：
+     record 提到 disabled 判断之前读取；disabled 分支若有 record，只吸收 `error`/
+     `boundary_true` 两项证据，不计入 `completed`/`stale`/`not_due`，不动
+     `boundary_observed`/`unobserved`/`not_required`（守恒公式 `expected = completed +
+     missing + reconciled + disabled` 不受影响）。反事实：还原后 `helper_boundary_true_count`
+     从预期 1 变 0，恢复后回到 1。
+- **P1（高优先级，均已修复）**：
+  3. `_memory_os_known_cron_specs()` 只覆盖 `RETIRED_MEMORY_OS_CRON_SCRIPTS`（wrapper 名），
+     未覆盖 `cron_registry.py` 的 `RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES` 里另外两个 legacy
+     raw 脚本名，未迁移到 wrapper 名的主机会重新触发 `unregistered_like` FAIL（本次 P0
+     "分类 retired cron fallback" 修复本要解决的确切问题）。修复：补 legacy raw 名对应的
+     `retired-legacy:` 条目；`"name"` 字段用脚本文件名本身（而非空字符串），避免与
+     `known_specs_by_name` 里可能存在的空 name job 碰撞（advisor 指出的坑）。端到端测试：
+     写入带 legacy raw 脚本名的 `jobs.json`，验证 `execution_gate_cron_summary()` 分类为
+     `known_optional`、`memory_os_like_unregistered_count == 0`。
+  4. `deploy_memory_os.py` 的 `_build_commands()` 给 4 个本地 hermes CLI 调用加
+     `["env", "HERMES_HOME=...", ...]` argv 前缀期望有真实 `env` 可执行文件，本地
+     （非 SSH）路径下 `subprocess.run(argv)` 无 shell，本机（含本仓库 Windows 开发机）无
+     `env` 时会 `FileNotFoundError`。修复：`_run_command()` 识别该前缀自行解析为
+     `env=os.environ.copy()` + 剥离前缀后的 argv，不依赖真实 `env` 二进制；SSH 路径
+     （`_ssh_wrap` 拼成远端 shell 命令行）不受影响，仍由远端主机真实 `env` 执行。同时把
+     4 处重复的前缀字面量合并成 `env_prefix` 局部变量。反事实：还原后本地路径捕获到未剥离
+     的 `["env", "HERMES_HOME=...", "hermes", ...]`（会尝试执行不存在的 "env"）。
+  5. 同一 `_run_command()` 的 `subprocess.run(argv, timeout=timeout)` 无 `try/except`，若外层
+     timeout 早于 compat 脚本内部 `--timeout` 预算触发，`TimeoutExpired` 会未捕获地崩溃
+     `deploy_memory_os()`，而不是走既有的、分类后的 postcheck-fail 结果。修复：捕获
+     `TimeoutExpired` 返回 `exit_code=124` 的结构化 dict（与 monitor.py 的 `run()` helper
+     同款约定）。反事实：还原后复现 `subprocess.TimeoutExpired` 未捕获崩溃。
+  6. `_run_probe()`（把整份探针脚本经 SSH/本地子进程执行的顶层驱动）本身没有 timeout——
+     生成脚本内部的逐命令 timeout 只界定单条命令，SSH 连接本身挂起时仍可无限阻塞，与本次
+     "逐命令加 timeout" 的 fail-closed 主张矛盾。修复：加 `timeout_seconds` 参数（默认复用
+     既有的 `FULL_MONITOR_MIN_CALLER_TIMEOUT_SECONDS=300`），捕获 `TimeoutExpired` 返回
+     `{"_probe_timeout": True, ...}`；`collect_snapshot()` 检测到该标记后**显式短路**为
+     `FAIL` + `probe_script_timeout` 码，不把近乎空的 dict 送进未经验证的
+     `summarize_*`/`classify_snapshot` 调用链（advisor：这个假设必须用测试验证，不能只靠
+     分析）——测试证实 `render_chinese_summary()` 对该短路结果也能正常渲染，不崩溃。
+- **P2（已修复/已确认无需修复，逐项列出）**：
+  7. `compaction_stats()`/`hook_marker_counts()` 沿用共享默认 20s timeout（本次 roadmap
+     为 22 条 shell_alias 命令引入），在大型生产 `memory-os/audit` 树上可能超时，静默把
+     `recent_count`/`total` 报成 0 而不产出任何 WARN/FAIL。修复：仅这两处显式传
+     `timeout_seconds=60`（与已有的 `_execution_gate_cron_adapter_probe_summary` 60s 先例
+     一致），不改动共享默认值本身（其余调用点的超时预算不在本次问题范围内）。
+  8. `find_rh26_heading_anomalies`/`_probe_summary` 等消费点 `classify_snapshot()` 里约 45
+     处 `snapshot.get("x", {})` 无 isinstance 防护——**逐一排查后确认**：整份生成脚本最终
+     JSON 组装处（`scripts/memory_os_3_200_monitor.py` 尾部 `print(json.dumps({...}))`）只有
+     `status_tool_contract` 一处会产出显式 `None`（`contract.get("validation")` 缺 key 时），
+     其余字段要么直接来自恒返回 dict 的函数（`shell_alias_no_env()` 等），要么是嵌套 dict
+     字面量的子字段（已有独立防护）。`classify_snapshot` 也仅被本文件的 `collect_snapshot()`
+     和测试直接调用，从未对磁盘 JSON（`--snapshot-out`/`--previous-json`）重新分类。
+     `status_tool_contract` 已在 BK 修复。**结论：无需补充改动**——为不存在触发路径的字段
+     补 isinstance 防护属于"不为不会发生的场景加防御代码"应避免的范畴；记录以备将来该组装
+     逻辑改动时复核。
+  9. `test_memory_os_audit_arbitration.py` 4 处（原报告误写"行 454"，实际在 32/52/79/107 行）
+     与 `test_memory_os_3_200_monitor.py` 3 处，用 `.split('\nstatus = load_json_cmd', 1)`
+     切出探针脚本的"仅函数定义"前缀。实测：该字面量确实不再匹配 `shell_alias_no_env()` 内部
+     （本次 roadmap 改造为 dict+ThreadPoolExecutor 后，序列赋值形式已消失），而是巧合匹配到
+     脚本尾部约 32KB 之外一处无关的顶层调用赋值——该赋值恰好仍是"所有函数定义结束/所有顶层
+     调用开始"的正确分界点，只是全靠字面量巧合而非显式标记，未来重构任一函数都可能使其失配，
+     届时 `.split(...)[0]` 会退化为返回整份脚本，`exec()` 在单测里跑出真实 subprocess 调用。
+     修复：在 `_remote_probe_script()` 该分界点前插入显式哨兵注释
+     `# ---begin-probe-invocations---`，7 处测试改用该哨兵切分；新增测试断言哨兵在生成脚本
+     中只出现一次。
+  10. `memory_os_v24_final_verify.py` 的 `initialize_clean_git()` 用
+      `(source_root / path).exists()` 过滤 `git ls-files` 结果，但随后的 `git add -f` 以
+      `cwd=repo_root`（`copy_clean_tree()` 过滤后的副本）运行——一个被
+      `IGNORED_COPY_PARTS`（如 `build/`）排除出副本、但仍是 git 已跟踪文件的路径，会通过
+      `source_root` 存在性检查却在 `repo_root` 里找不到，`git add -f` 报 "pathspec did not
+      match any files" 崩溃。当前仓库 `git ls-files` 确认无实际触发（advisor：仍应直接修，
+      这是谓词用错了对象而非投机式加固）。修复：谓词改测 `repo_root`。反事实：还原后新增
+      测试实测复现 `CalledProcessError: ... 'git' 'add' '-f' ... returned non-zero exit
+      status 128`，恢复后通过。
+  11. `review reply memory approve oa_deadbeef`（`shell_alias_no_env()` 22 条并行 CLI 探针之
+      一，本次 roadmap 由串行改 `ThreadPoolExecutor` 并行）用的是不存在的假 token。跟踪
+      `owner_actions.py` 确认：未匹配到任何 token 时在到达任何状态变更代码前就以
+      `action_token_not_found_in_recorded_digest` 早返回，不写 ledger、不产生副作用——这条
+      特定探针命令本身是安全的只读探针。22 条命令并发对同一 `HERMES_HOME` 文件/SQLite 状态
+      的一般性并发风险（无实测复现、无并发单测覆盖）记录为已知残留风险，不在本轮修复范围。
+- **验证**：
+  - 定向：`test_memory_os_3_200_monitor.py` + `test_memory_os_audit_arbitration.py` +
+    `test_memory_os_deploy.py` + `test_memory_os_v24_final_verify.py` 全部通过（含新增 14
+    个反事实测试，其中 5 个用 revert→fail→restore→pass 实测验证：rh26 静默 PASS、rh26 崩溃、
+    disabled-job 证据丢失、deploy env 前缀、deploy TimeoutExpired、v24 pathspec 崩溃）。
+  - 全量：**3035 passed / 2 failed / 13 skipped**（BK 基线 3021 passed + 本轮新增 14 项测试；
+    2 failed 精确对应 BK 记录的 pytest_policy skip-count 环境伪影，与本次改动无关）。
+  - 静态门：import cycle pass（170 modules / 0 cycles）/ write surface
+    `unclassified_count=0`（155/155）/ static hygiene pass / public checkout probe
+    `--strict` PASS / `git diff --check` 干净。
+  - 证据级别：`local_pass`（Windows 本地）。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -746,6 +854,9 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
    接入 cron onboarding 决定是否需要，BJ 记录）。
 2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
    `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
+3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
+   `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
+   残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
 
 ---
 
@@ -806,3 +917,13 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   `timeutil` 债务量化为 10 处具体 ad-hoc parser；natural-row 生产实现位置纠偏；另记录 codegraph
   过期依赖边须经 grep 复核的工具经验。仅文档变更。BL.1 补充：CI 新分支空树 fallback 暴露 5 个
   历史文件的尾随空白/EOF 空行，纯空白清债（52 passed / compile ok / 空树全树 diff --check 干净）。
+- `523b895..（BM，本节）`：`/code-review` 复审已落地的 roadmap v2.6 代码，14 项发现（2 CRITICAL）
+  经 advisor 核实修复方案后全部处理——rh26/low_clue_ingress 探针失败改显式 FAIL（而非只加
+  isinstance 防护换成静默 PASS）；disabled cron job 不再丢失已记录的 boundary_true/error 证据；
+  retired cron fallback 补齐 legacy raw 脚本名（非空 name 防碰撞）；deploy 本地 env 前缀不再依赖
+  真实 `env` 二进制；deploy/`_run_probe` 补 TimeoutExpired 捕获与显式短路 FAIL；
+  compaction_stats/hook_marker_counts 显式加长 timeout；探针脚本 def/调用分界点补显式哨兵注释
+  （4+3 处测试改用哨兵切分）；`memory_os_v24_final_verify.py` pathspec 存在性谓词改测正确的树。
+  另确认 2 项无需改动（classify_snapshot 其余 ~45 处 `.get()` 无真实 None 触发路径；
+  `review_reply` 假 token 探针本身安全）。5 项用 revert→fail→restore→pass 实测验证。全量
+  3021→**3035 passed** / 2 failed（同 BK 环境伪影）/ 13 skipped，静态门全过。
