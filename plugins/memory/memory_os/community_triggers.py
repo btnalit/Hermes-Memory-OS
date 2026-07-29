@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ class PartnerState:
     last_interaction: str = ""
     last_shared_ts: str = ""
     last_newspaper_ts: str = ""
+    last_reply_ts: str = ""  # cursor for newest reply seen from this partner
     pending_thoughts: list[str] = field(default_factory=list)
     topic_interest: list[str] = field(default_factory=list)
     mood: str = "平静"
@@ -149,6 +151,48 @@ def check_newspaper_trigger(
     )
 
 
+def check_partner_reply_trigger(
+    state: PartnerState,
+    community_root: Path,
+    *,
+    now: datetime | None = None,
+) -> TriggerEvaluation:
+    """Detect if partner has written new replies since last check.
+
+    Reads replies.jsonl for the partner and checks the most recent entry
+    timestamp against state.last_reply_ts. Returns a low-priority trigger
+    if new replies are found.
+    """
+    if not state.partner_id:
+        return TriggerEvaluation()
+    replies_path = Path(community_root) / "partners" / state.partner_id / "replies.jsonl"
+    if not replies_path.exists():
+        return TriggerEvaluation()
+    try:
+        lines = [line for line in replies_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return TriggerEvaluation()
+    if not lines:
+        return TriggerEvaluation()
+    try:
+        last = json.loads(lines[-1])
+    except (json.JSONDecodeError, IndexError):
+        return TriggerEvaluation()
+    latest_ts = str(last.get("ts") or last.get("created_at") or "")
+    if not latest_ts:
+        return TriggerEvaluation()
+    if not _is_newer(latest_ts, state.last_reply_ts):
+        return TriggerEvaluation()
+    reply_preview = str(last.get("text") or "")[:80]
+    return TriggerEvaluation(
+        should_trigger=True,
+        trigger_reason=f"new_reply_from_{state.partner_id}",
+        suggested_message=f"{state.name or '伙伴'}回复了你：「{reply_preview}」",
+        priority="low",
+        source_ts=latest_ts,
+    )
+
+
 def evaluate_all_triggers(
     state: PartnerState,
     community_root: Path,
@@ -161,6 +205,7 @@ def evaluate_all_triggers(
         check_pending_thoughts_trigger(state),
         check_shared_followup_trigger(state, community_root, now=now),
         check_newspaper_trigger(state, community_root, now=now),
+        check_partner_reply_trigger(state, community_root, now=now),
         check_silence_trigger(state, now=now),
     ]
     priority = {"high": 0, "medium": 1, "low": 2}

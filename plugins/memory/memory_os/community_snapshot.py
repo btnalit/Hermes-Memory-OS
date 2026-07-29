@@ -65,6 +65,29 @@ def build_community_snapshot(
             if sender in active_ids and delivery_state in {"unread", "delivered", "processed"} and not bool(row.get("read")):
                 unread_count += 1
 
+    # Partner reply pointers: count unread replies per active partner
+    partner_replies: dict[str, int] = {}
+    for entry in active:
+        replies_path = root / "partners" / entry.id / "replies.jsonl"
+        count = 0
+        if replies_path.exists():
+            try:
+                text = replies_path.read_text(encoding="utf-8")
+                count = len([l for l in text.splitlines() if l.strip()])
+            except OSError:
+                pass
+        # Compare with last seen count stored in state
+        state_path = root / "partners" / entry.id / "memory" / "state.json"
+        seen = 0
+        if state_path.exists():
+            try:
+                st = json.loads(state_path.read_text(encoding="utf-8"))
+                seen = int(st.get("cursor") or 0)
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
+        partner_replies[entry.id] = max(0, count - seen)
+    total_partner_unread = sum(v for v in partner_replies.values())
+
     return {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "status": "ok",
@@ -72,6 +95,8 @@ def build_community_snapshot(
         "partner_count": len(active),
         "recent_interactions": [text for _timestamp, text in interactions[-5:]],
         "unread_messages": unread_count,
+        "unread_partner_replies": total_partner_unread,
+        "partner_reply_breakdown": {entry.name: partner_replies.get(entry.id, 0) for entry in active[:max_active]},
         "new_partners_pending_greeting": pending_greetings,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

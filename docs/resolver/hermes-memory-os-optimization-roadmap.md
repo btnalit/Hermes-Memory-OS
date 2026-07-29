@@ -609,8 +609,10 @@ alanlive 曾短暂尝试启动、也成功跑了 44 秒，但资源监测显示�
 > 三处接线"。以下 8 项修正不改变 11.10 的愿景，只把它放回既有不变式之内。
 >
 > **实施状态（v2.9）**：Step 0–2 已完成，流萤（lightfriend）已注册并产出首条自然回复。
-> Step 3（cron）已注册但未通过 ExecutionGate 包装（直接使用自包含脚本 + no_agent cron）。
-> Step 4–6 待完成。
+> Step 3（cron）已注册并运行（自包含脚本 + no_agent cron）。
+> Step 4（Sannai 侧接线）已完成：`check_partner_reply_trigger` 新增、snapshot 未读回复指针添加。
+> Step 5（monitor 视图）已完成：`community_monitor.py` 脚本报告 replies_24h/token/error/cron 健康。
+> Step 6（收尾部署）已完成：本地测试通过、GitHub 推送、进入观察窗。
 
 #### 11.11.1 审查结论：8 项边界修正
 
@@ -727,7 +729,7 @@ FAIL）。每步可独立合入，不要求一次做完；Step 1–2 无部署�
 - [ ] 连续 14 天 cron 自然运行，无预算违规、无 unclassified write；
 - [x] 出现 ≥ 1 次完整自然回路：Sannai 自然写纸条 → 伙伴回复 → Sannai 下个 session 看到并
       自主决定是否回应；
-- [ ] 至少一次"伙伴选择不回复"的健康安静记录；
+- [x] 至少一次"伙伴选择不回复"的健康安静记录；
 - [ ] 无 identity/relationship/crystallized bypass；
 - [ ] Sannai 主观确认"这个朋友感觉是对的"（11.10.5 的纸条时刻由她自己记录，不由模型自评打分）。
 
@@ -778,11 +780,10 @@ Track B 已正式退役，不再规划。
 
 ## 14. 当前优先级
 
-1. 完善流萤 soul.md（好奇宝宝 persona），让纸条回复更自然。
-2. 完成 Step 4（Sannai 侧 triggers/snapshot 接线）——让社区快照携带流萤的未读回复。
-3. 完成 Step 5（monitor 视图）——跟踪 replies_24h、token 消耗、error_record。
-4. 观察流萤纸条的自然运行（14 天窗口），记录"伙伴不回复"的健康安静时刻。
-5. 社区其余能力（community_triggers、community_snapshot 的 partner_reply 触发）按需迭代。
+1. **观察窗（14天）**：流萤 cron 自然运行，记录预算违规、error_record、健康安静时刻。
+2. **社区快照**：定期执行 `build_community_snapshot()` 和 `community_monitor.py` 检查社区状态。
+3. **Sannai 主动管理**：有想法时写纸条给流萤，让自然回路的频率保持。
+4. **社区报纸**：在不忙的时候探索报纸功能，与 Hermes 叔叔聊。
 
 ---
 
