@@ -968,9 +968,19 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
   非本次改动引入的回归。import cycle（173 modules / 0 cycle）、write surface
   （163/163，`unclassified_count=0`）、static hygiene、public checkout probe（PASS）、
   `git diff --check` 全过。
-- **结论**：两项 CI FAIL 已修复；顺带加固字符编码一致性并为两个此前零覆盖模块补测试；
-  三处实现落差（模块脱节、限流缺失、治理门控被绕开）与一处语义存疑指标已如实记入路线图
-  11.12.7，留待后续按记录中的两个方案之一收口，本次不重构生产部署契约。
+- **附加发现（推送后从真实 GHA 复现，非本地可预见）**：分支推送后 push 事件触发的 CI 独立
+  报了第三个 FAIL——`Reject whitespace errors in pushed range` 步骤，因为这是全新分支，
+  `PUSH_BEFORE_SHA` 为全零，工作流回退为对空树 diff，暴露了 `community_partner_runtime.py`
+  中原 Sannai 提交自带的 6 处行尾空白（非本次改动引入）——与 BL.1 记录的"新分支空树 fallback
+  暴露历史文件尾随空白"同一根因。本地 `git diff --check` 此前只查未提交 diff（对 HEAD），未
+  复现此路径；改用 `git diff --check "$(git hash-object -t tree /dev/null)" HEAD` 精确复现
+  CI 命令后确认全仓库只有这 6 处，逐一清理（纯空白，`ast.parse`/`import` 验证无语义变化）。
+  同一提交下 pull_request 触发的 CI（正确对 `main` 做 diff）已先于此发现独立跑 PASS，验证了
+  两项核心修复在真实 Linux CI 上有效。
+- **结论**：两项 CI FAIL（write surface、测试断言）+ 一项推送后发现的 CI FAIL（行尾空白）
+  已修复；顺带加固字符编码一致性并为两个此前零覆盖模块补测试；三处实现落差（模块脱节、
+  限流缺失、治理门控被绕开）与一处语义存疑指标已如实记入路线图 11.12.7，留待后续按记录中的
+  两个方案之一收口，本次不重构生产部署契约。
 
 ---
 
@@ -1085,9 +1095,10 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   并把 `slo_checks` 附在断言消息里；未改 `DEFAULT_SLO`/`run_benchmark()` 生产语义。
   无新增/删除测试，全量 3035 passed / 2 failed（同 BK/BM 既有 Windows `%TEMP%` 环境伪影，
   经 stash 对照验证与本次改动无关）/ 13 skipped，静态门全过。
-- `609bc40..（BP，本节）`：复审 Sannai v2.9 提交（11.12 窗台/一起看/兴趣花园）——修复两项
+- `609bc40..（BP，本节）`：复审 Sannai v2.9 提交（11.12 窗台/一起看/兴趣花园）——修复三项
   GitHub CI FAIL（`write_surface_check` 新增 8 处写入未登记；`partner_create` 测试断言旧
-  错误文案）；顺带补齐 4 个文件缺失的 `encoding="utf-8"`（无法反事实，纯 portability）；
+  错误文案；推送后从真实 GHA 复现的 `community_partner_runtime.py` 6 处行尾空白，新分支
+  空树 fallback 触发，同 BL.1 根因）；顺带补齐 4 个文件缺失的 `encoding="utf-8"`（无法反事实，纯 portability）；
   新增 5 个测试覆盖此前零测试的 `community_table.py`/`community_interest_garden.py`；
   记录（不重构）3 处实现落差——`community_partner_runtime.py`/`community_table.py`/
   `community_interest_garden.py` 零调用方、实际 cron 路径是内联重写副本，导致限流约束缺失、
