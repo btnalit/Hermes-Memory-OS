@@ -841,6 +841,42 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BN — 本机对齐 `origin/main`、targeted deployment 与生产验证（2026-07-29）
+
+- **源码对齐**：`/opt/Hermes-Memory-OS` 从 `b52173b` fast-forward 5 个提交到
+  `2b235370b26dc3640b9e3e3f0b38ca24e0191a05`；结束时 `HEAD == origin/main`。
+- **源码门禁**：命令级隔离 `HERMES_HOME` 的 Linux 全量为 **3041 passed / 9 skipped / 0 failed**
+  （446.78s）；write surface `155/155`、`unclassified_count=0`；import cycle `170 modules / 0 cycle`；
+  static hygiene/public checkout/diff check 全过；Closure Matrix 为 `status=ok`、
+  `closure_status=runtime_evidence_required`。
+- **部署类别**：遵守默认 GitHub 更新的 targeted-update 边界，没有运行 full deployer apply、没有
+  刷新 full-deploy manifest、没有重启 Gateway。覆盖前逐目标要求生产文件与 `b52173b` 对应 source
+  baseline 字节一致；备份目录为
+  `/root/.hermes/backups/memory-os-targeted-20260729T113016Z`。
+- **实际同步**：
+  - `deploy_clean_host.py` → flat production plugin 与 internal runtime 两棵独立树；
+  - `memory_os_3_200_monitor.py`、`memory_os_candidate_backfill_409.py` → `/root/.hermes/scripts/`；
+  - 同步后 4 个目标 SHA-256 均与 `2b23537` source 相等并清理相关 `__pycache__`。
+- **明确保留/未扩展**：`/root/.hermes/scripts/install_memory_os_plugin.py` 在 drift gate 中确认含既有
+  production-local 差异，且本轮 upstream 只改该文件尾随空白，因此未覆盖；
+  `scripts/deploy_memory_os.py` 与 `scripts/memory_os_v24_final_verify.py` 在当前 runtime installer map
+  中没有对应目标，未额外创建文件。`embedder.py`、`index.py`、`vector_edge_proposer.py` 两棵生产树
+  hash 保持相同，未触碰 canonical data、cron、timer、配置或 Gateway。
+- **部署后行为验证**：
+  - internal runtime fresh import origin 指向
+    `/root/.hermes/memory-os/runtime/python/plugins/memory/memory_os/deploy_clean_host.py`；
+    `plan_deployment()` probe 通过；
+  - installed Monitor `--help`、py_compile、timeout→结构化 marker、rh26/low-clue probe error→显式 FAIL
+    的反事实均通过；candidate backfill 只运行 `--help`，未进入任何写路径；
+  - 生产 Full Monitor 直接实跑输出有效 `memory-os.monitor.v1`，退出码 2、分类
+    **FAIL（97 pass / 4 warn / 1 fail）**。唯一 FAIL 为既有
+    `v2_exposure_schema_era_unhealthy`；WARN 为 suppressed prefetch error、一个 owner-disabled
+    expression-feedback helper、两个 helper boundary 未观察及 low-clue LLM judge empty response。
+- **结论**：targeted deployment integrity 通过；production governance closure 仍不绿色。不得把后者
+  误判为文件同步/导入失败，也不得手工补写自然证据改绿。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -927,3 +963,7 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   另确认 2 项无需改动（classify_snapshot 其余 ~45 处 `.get()` 无真实 None 触发路径；
   `review_reply` 假 token 探针本身安全）。5 项用 revert→fail→restore→pass 实测验证。全量
   3021→**3035 passed** / 2 failed（同 BK 环境伪影）/ 13 skipped，静态门全过。
+- `2b23537..（BN，本节）`：本机 checkout 对齐 `origin/main`；Linux 隔离全量 **3041 passed /
+  9 skipped / 0 failed**，治理静态门全过。通过 drift gate 与备份后 targeted-sync 4 个既有生产目标，
+  fresh import/哈希/反事实通过；Full Monitor 实跑为 97 pass / 4 warn / 1 fail，唯一 FAIL 仍是
+  `v2_exposure_schema_era_unhealthy`。未 full deploy、未改 manifest、未重启 Gateway、未触碰 canonical data。

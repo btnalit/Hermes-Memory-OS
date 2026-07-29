@@ -86,21 +86,21 @@ designed
 
 ### 3.1 已验证的 release 基线
 
-**最新已合并源码基线（CI 已验证，尚未部署）：**
+**最新已合并源码基线（本机已对齐并验证）：**
 
-- commit：`004a16b55fa03a7bafd0d0b0bb8c2509d4bdcf3e`（`origin/main`，fast-forward 合并，无 merge commit）
-- GitHub Actions：分支 run #27/#28 与 main run #29 均 `success`（mount-isolated full suite + policy gate + 全部静态门 + closure matrix 在 CI 内运行）
-- 本地（Windows 检出，非隔离）全量：`3021 passed / 2 failed / 13 skipped`——2 项失败经最小复现确认为本机 pytest 收集重复伪影（详见稳定化清单 BK 节），非项目代码缺陷
-- Write Surface：`155 / 0 unclassified`；import cycle：`170 modules / 0 cycle`；static hygiene / public checkout `--strict` / `git diff --check`：全过
-- 相对上一基线新增修复：ExecutionGate helper completion `disabled` 分档、`classify_snapshot` 对 `status_tool_contract=None` fail-closed、clean-host `plan_deployment` manifest 路径口径统一（`.as_posix()`，修复 Windows 上 postcheck 文件集合比对全量误报）
+- commit：`2b235370b26dc3640b9e3e3f0b38ca24e0191a05`（`HEAD == origin/main`，由 `b52173b` fast-forward 5 个提交，无本地源码漂移）
+- 本机 Linux 隔离 `HERMES_HOME` 全量：`3041 passed / 9 skipped`，耗时 `446.78s`；0 failure。
+- Write Surface：`155 / 0 unclassified`；import cycle：`170 modules / 0 cycle`；static hygiene / public checkout probe / `git diff --check`：全过；Closure Matrix 为 `status=ok / closure_status=runtime_evidence_required`，符合静态门只证明 source/static wiring 的边界。
+- `004a16b..2b23537` 继续合入路线图 v2.6 文档、历史空白清理，以及 BM 节记录的 monitor/deploy/v24 final verify 14 项复审修复；本机部署验证见稳定化清单 BN 节。
 
 **最近已部署基线（本机 production-safe full deployment）：**
 
 - commit：`f62a069423c17bd35e807c73fe0840b716e93065`（GitHub Actions run `30346974131`，`success`；当时 mount-isolated 与 clean-copy 均为 `3016 passed / 9 skipped`）
 - 部署证据：fresh-process runtime import evidence；32 个 live module 集合匹配；runtime tree digest；完整 v1 Full Monitor artifact；Dashboard canonical snapshot。
-- `f62a069..004a16b` 之间的提交（含低资源 bounded collection 与上列三项修复）尚未部署到任何主机；按第 12 节流程部署后才可更新"已部署基线"。
+- 该条仍是最近一次**完整部署**基线。2026-07-29 已把 `2b23537` 中存在既有生产对应物且通过 drift gate 的 4 个目标做本机 targeted deployment：`deploy_clean_host.py` 同步到 flat plugin/runtime 两棵独立树，`memory_os_3_200_monitor.py` 与 `memory_os_candidate_backfill_409.py` 同步到 `/root/.hermes/scripts/`；备份为 `/root/.hermes/backups/memory-os-targeted-20260729T113016Z`。这不更新 full-deploy manifest，也不冒充 production-safe full deployment。
+- targeted deployment 后 source/target SHA-256、fresh runtime import、`plan_deployment()`、Monitor timeout/error fail-closed 反事实与 installed-script `--help` 均通过；未重启 Gateway。生产 Full Monitor 实跑发布 `memory-os.monitor.v1`，分类为 `FAIL`（97 pass / 4 warn / 1 fail），唯一 FAIL 仍是 `v2_exposure_schema_era_unhealthy`，属于生产治理健康而非传输/导入失败。
 
-### 3.2 已随 `004a16b` 合并发布的修复（部署仍待执行）
+### 3.2 已随 `2b23537` 合并发布的修复（本机 targeted deployment 已完成，完整部署仍待执行）
 
 本轮（`f62a069..004a16b`）先后发现并修复：
 
@@ -115,7 +115,7 @@ designed
 
 低资源 Full Monitor 修复采用 fail-closed bounded collection：普通命令默认 20 秒、默认 4 workers；cron adapter 等关键聚合 probe 使用显式 60 秒预算。超时记录 code 124 并保持可见，不允许整个 artifact producer 无限挂起。
 
-上述全部修复已合并进 `origin/main`（CI run #29 success），状态为 `released / deployment_pending`：在 2.88 default/sannai 与本机完成第 12 节流程部署并生成 fresh runtime artifact 之前，不得标记 `deployed`。
+上述修复及 BM 复审修复已合并进 `origin/main`。本机 targeted deployment 已验证，但未执行 full deployer apply/postcheck、未刷新 full-deploy manifest、未重启 Gateway，因此完整状态仍为 `released / full_deployment_pending`；2.88 default/sannai 也仍需按第 12 节独立部署并生成 fresh runtime artifact。
 
 ### 3.3 环境事实
 
@@ -559,8 +559,8 @@ active|dormant -> retired
 
 ## 14. 当前优先级
 
-1. 低资源 Full Monitor bounded collection 已随 `004a16b` 合并发布（CI 已过）；仍需按第 12 节流程部署到本机与 2.88 default/sannai，并分别生成 fresh v1 artifact。
-2. 为本机、2.88 default 和 Sannai 生成独立 manifest/hash/fresh-import/closure runtime evidence；本机若需要 Gateway restart，先通知 Owner。
+1. 本机 `2b23537` targeted deployment 与 fresh Full Monitor 实跑已完成；仍需按第 12 节完成本机 full deployer apply/postcheck，以及 2.88 default/sannai 的独立完整部署。
+2. 为本机、2.88 default 和 Sannai 生成各自绑定 `2b23537`（或后续最终 SHA）的 manifest/hash/fresh-import/closure runtime evidence；任何 Gateway restart 继续保持独立 Owner 授权边界。
 3. 验证 retired cron 误报保持消失；保留 V2 schema-era 等真实治理问题。
 4. 对 `v2_exposure_schema_era_unhealthy` 建立自然观察计划，不手工改绿。
 5. 维持 alanlive dormant；先做资源预算与低内存运行设计，再决定是否重新进入 P0 live 验证。
