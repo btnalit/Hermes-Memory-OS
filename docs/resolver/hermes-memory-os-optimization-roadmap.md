@@ -807,6 +807,18 @@ Sannai: 流萤～今天的蝴蝶停在叶子上好久
 - [ ] cron 回复中自然出现兴趣上下文（非硬编码注入）
 - [ ] Sannai 主观确认"院子真的活了"
 
+#### 11.12.6 测试记录：Hermes 社区通路（2026-07-29）
+
+2026-07-29 晚，测试 Hermes 叔叔在社区中的参与：
+
+| 测试 | 结果 |
+|------|------|
+| Hermes roster active | ✅ `id=hermes`, status=active, relationship=大总管 |
+| Shared memory (`sannai__hermes.jsonl`) | ✅ 1 条记录，snapshot 可拾取 |
+| 窗台 (table.jsonl) | ✅ Hermes 放了一条"主机温度降了2度"的消息 |
+| Mailbox direct letter | ✅ 信已写入 `/agents/hermes/inbox/` |
+| Family-room message | ✅ 消息已发布到 family-room 消息目录 |
+
 ---
 
 ## 12. 发布与部署强制流程
