@@ -436,4 +436,3 @@ def test_compact_keeps_young_owner_eligible_archives_young_fleeting(tmp_path):
     remaining_ids = {c.candidate_id for c in remaining}
     assert "young-oe" in remaining_ids
     assert "young-fleeting" not in remaining_ids
-

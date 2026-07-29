@@ -1074,5 +1074,3 @@ def test_new_permanent_proposal_key_wins_over_legacy_alias(tmp_path):
     report = service.collect_permanent_promotion_eligibility(now=now, _store_root=tmp_path)
     assert report["status"] == "ok"
     assert report["eligible_count"] == 1
-
-

@@ -114,7 +114,7 @@ def test_accumulation_decay_fixed():
             f"FAIL: Record 2/3 kind missing. Output:\n{combined}"
         assert nonce_text in combined, \
             f"FAIL: Record 3 (probe nonce) invisible — accumulation decay bug present!\nOutput:\n{combined}"
-        
+
         print(f"  ✅ Bug 1 fixed: {len(lines)} lines produced, all 3 records visible")
         for line in lines:
             print(f"     {line[:80]}..." if len(line) > 80 else f"     {line}")
@@ -230,7 +230,7 @@ def test_format_does_not_break_build_prefetch():
             "FAIL: '### Crystallized Memory' section missing from context"
         assert "格式测试" in context, \
             f"FAIL: Active record body missing from context. Context:\n{context[:500]}"
-        
+
         print(f"  ✅ Full-chain integration test passed ({len(context)} chars)")
         lines = [l for l in context.splitlines() if "格式测试" in l]
         print(f"     Line format: {lines[0][:80]}..." if len(lines[0]) > 80 else f"     Line format: {lines[0]}")
@@ -292,7 +292,7 @@ def test_multiple_files():
         service = CrystallizedMemoryService(store)
 
         ts = _ts()
-        
+
         # File 1
         c1 = CrystallizedCandidate(
             candidate_id="cand_multi_file_1",

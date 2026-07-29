@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             triage_ids.add(cid)
 
     pending = [c for c in candidates if c.candidate_id not in triage_ids]
-    
+
     # Dedup against crystallized: skip candidates whose candidate_id already
     # exists in owner_approved.md (or any crystallized .md file).
     crystallized_service = CrystallizedMemoryService(store)

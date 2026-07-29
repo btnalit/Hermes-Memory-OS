@@ -1906,17 +1906,17 @@ def _ensure_config_defaults(
         return {"status": "no_config", "reason": "config.json not found"}
     cfg = load_config(hermes_home)
     changed: list[str] = []
-    
+
     if cfg.get("prefetch_char_budget", 0) < 5500:
         cfg["prefetch_char_budget"] = 5500
         changed.append("prefetch_char_budget: 2200 → 5500")
-    
+
     if not changed:
         return {"status": "already_current", "changes": changed}
-    
+
     if not dry_run:
         save_config(cfg, hermes_home)
-    
+
     return {
         "status": "updated" if not dry_run else "would_update",
         "changes": changed,
@@ -1933,16 +1933,16 @@ def _run_expired_working_migration(
     working_path = hermes_home / "memory-os" / "working" / "lingering.json"
     if not working_path.exists():
         return {"status": "no_working_file", "reason": "lingering.json not found"}
-    
+
     import json
     doc = json.loads(working_path.read_text(encoding="utf-8"))
     items = doc.get("items", [])
     now = datetime.now(timezone.utc)
-    
+
     before = len(items)
     surviving = []
     removed = 0
-    
+
     for item in items:
         if item.get("status") != "expired":
             surviving.append(item)
@@ -1961,14 +1961,14 @@ def _run_expired_working_migration(
             removed += 1
             continue
         surviving.append(item)
-    
+
     if removed == 0:
         return {"status": "no_expired_old", "before": before, "after": before}
-    
+
     if not dry_run:
         doc["items"] = surviving
         working_path.write_text(json.dumps(doc, indent=2, ensure_ascii=False), encoding="utf-8")
-    
+
     return {
         "status": "cleaned" if not dry_run else "would_clean",
         "before": before,

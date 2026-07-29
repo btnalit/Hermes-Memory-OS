@@ -716,6 +716,21 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 - **验证**：仅修改两个公共 Markdown 文档；不改代码、生产配置、账本、cron 或 Gateway。
   `git diff --check` 干净；代码基线沿用 `004a16b`（CI run #29 success；本地全量与静态门见 BK）。
 
+### BL.1 — 全树历史尾随空白清理（CI 新分支全树检查暴露）
+
+- **背景**：`docs-roadmap-v2-6` 作为**新分支**首次 push 时，CI 的 whitespace 步骤因
+  `github.event.before` 为全零而走空树 fallback——对**整棵 HEAD 树**执行 `git diff --check`，
+  翻出 5 个历史遗留文件的尾随空白/EOF 空行（`install_memory_os_plugin.py` ×10 行、
+  `memory_os_candidate_backfill_409.py` ×1、`test_verify_crystallized_lines_fix.py` ×3、
+  `test_candidate_compact_atomic.py` 与 `test_memory_os_crystallized.py` EOF 空行）。这些文件
+  本轮文档提交并未触碰；此前所有 push 都有 before-SHA，只查推送区间，因此债务从未暴露。
+- **修复**：纯空白清理（全部违规行都是仅含空白的缩进行或 EOF 空行，无字符串内空白风险）；
+  修后本地空树全树 `git diff --check` exit 0——今后任何新分支首次 push 不再因此失败。
+  选择清债而非改 workflow：全树无空白错误本就是仓库既有标准（第 12 节发布门），fallback
+  行为在树干净的前提下是合理防线。
+- **验证**：`py_compile` 两个脚本通过；三个被触碰测试文件全量 52 passed；空树 vs 工作树
+  `git diff --check` exit 0。
+
 ---
 
 ## 待办
@@ -789,4 +804,5 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 - `004a16b..（BL，本节）`：路线图升 v2.6——基线刷新到已合并的 `004a16b`（release ≠ deployed 两层
   分述）；P2 helper 债务清单以 caller 证据逐项核实并补入 `natural_evidence`、`restraint` 两项漏记；
   `timeutil` 债务量化为 10 处具体 ad-hoc parser；natural-row 生产实现位置纠偏；另记录 codegraph
-  过期依赖边须经 grep 复核的工具经验。仅文档变更。
+  过期依赖边须经 grep 复核的工具经验。仅文档变更。BL.1 补充：CI 新分支空树 fallback 暴露 5 个
+  历史文件的尾随空白/EOF 空行，纯空白清债（52 passed / compile ok / 空树全树 diff --check 干净）。
