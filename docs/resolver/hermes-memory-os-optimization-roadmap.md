@@ -1,8 +1,8 @@
 # Hermes Memory-OS 与 Sannai Community 综合路线图
 
-> **版本**：v2.5
+> **版本**：v2.6
 >
-> **更新时间**：2026-07-28
+> **更新时间**：2026-07-29
 >
 > **文档地位**：唯一现行路线图与社区设计；替代旧版 `sannai-community-design-v2.md`、`sannai-community-design-v3.md`
 >
@@ -86,41 +86,36 @@ designed
 
 ### 3.1 已验证的 release 基线
 
-截至本轮文档合并前，最近已推送且有明确 GitHub CI 成功证据的源码为：
+**最新已合并源码基线（CI 已验证，尚未部署）：**
 
-- commit：`f62a069423c17bd35e807c73fe0840b716e93065`
-- GitHub Actions：run `30346974131`，`success`
-- 本地统一验证：12/12 steps 通过；mount-isolated 与 clean-copy 均为 `3016 passed / 9 skipped`
-- Write Surface：`155 / 0 unclassified`
-- import cycle：0 cycle
-- Closure Matrix：source/static contract 通过；runtime closure 需独立部署证据
+- commit：`004a16b55fa03a7bafd0d0b0bb8c2509d4bdcf3e`（`origin/main`，fast-forward 合并，无 merge commit）
+- GitHub Actions：分支 run #27/#28 与 main run #29 均 `success`（mount-isolated full suite + policy gate + 全部静态门 + closure matrix 在 CI 内运行）
+- 本地（Windows 检出，非隔离）全量：`3021 passed / 2 failed / 13 skipped`——2 项失败经最小复现确认为本机 pytest 收集重复伪影（详见稳定化清单 BK 节），非项目代码缺陷
+- Write Surface：`155 / 0 unclassified`；import cycle：`170 modules / 0 cycle`；static hygiene / public checkout `--strict` / `git diff --check`：全过
+- 相对上一基线新增修复：ExecutionGate helper completion `disabled` 分档、`classify_snapshot` 对 `status_tool_contract=None` fail-closed、clean-host `plan_deployment` manifest 路径口径统一（`.as_posix()`，修复 Windows 上 postcheck 文件集合比对全量误报）
 
-该 commit 已在本机执行 production-safe full deployment，并生成：
+**最近已部署基线（本机 production-safe full deployment）：**
 
-- fresh-process runtime import evidence；
-- 32 个 live module 集合匹配；
-- runtime tree digest；
-- 完整 v1 Full Monitor artifact；
-- Dashboard canonical snapshot。
+- commit：`f62a069423c17bd35e807c73fe0840b716e93065`（GitHub Actions run `30346974131`，`success`；当时 mount-isolated 与 clean-copy 均为 `3016 passed / 9 skipped`）
+- 部署证据：fresh-process runtime import evidence；32 个 live module 集合匹配；runtime tree digest；完整 v1 Full Monitor artifact；Dashboard canonical snapshot。
+- `f62a069..004a16b` 之间的提交（含低资源 bounded collection 与上列三项修复）尚未部署到任何主机；按第 12 节流程部署后才可更新"已部署基线"。
 
-### 3.2 本轮 release candidate
+### 3.2 已随 `004a16b` 合并发布的修复（部署仍待执行）
 
-本轮生产验证先后发现并修复：
+本轮（`f62a069..004a16b`）先后发现并修复：
 
 - cron adapter probe 的 installed-layout import shadow；
 - clean-copy runner 对已删除 tracked 文档的 pathspec 处理；
 - deployer 没有把外层 timeout 传给 compatibility 子进程；
 - deployer 的 Hermes CLI 子命令没有显式绑定目标 `HERMES_HOME`，导致 multi-profile 部署可能把 manifest/projection 写到 default home；
-- 低资源主机 Full Monitor 的 shell alias probes 无单命令 timeout 且 22 个命令串行执行。
+- 低资源主机 Full Monitor 的 shell alias probes 无单命令 timeout 且 22 个命令串行执行；
+- ExecutionGate helper completion 把被 owner 禁用（`enabled=false`）的 cron lane 误报为 missing（现独立 `disabled` 分档 + 专属 WARN 码，守恒公式同步）；
+- `classify_snapshot` 对 `status_tool_contract=None` 直接 `AttributeError`，导致整个 Full Monitor 采集崩溃而非单 section FAIL（现与 `doctor` 同款 `isinstance` fail-closed）；
+- clean-host `plan_deployment` manifest 记录本机分隔符路径，与 `_deployed_file_paths()` 的 POSIX 口径不一致，Windows 上 postcheck 文件集合比对全量误报（现统一 `.as_posix()`）。
 
-当前候选树已完成：
+低资源 Full Monitor 修复采用 fail-closed bounded collection：普通命令默认 20 秒、默认 4 workers；cron adapter 等关键聚合 probe 使用显式 60 秒预算。超时记录 code 124 并保持可见，不允许整个 artifact producer 无限挂起。
 
-- cron/deploy/monitor 定向回归：通过；
-- Monitor + refresh 定向回归：`208 passed`；
-- 统一 runner：12/12 steps 通过；
-- mount-isolated 与 clean-copy：通过。
-
-最后一项低资源 Full Monitor 修复采用 fail-closed bounded collection：普通命令默认 20 秒、默认 4 workers；cron adapter 等关键聚合 probe 使用显式 60 秒预算。超时记录 code 124 并保持可见，不允许整个 artifact producer 无限挂起。完成最终部署和 runtime artifact 验证前，该项仍是 `tested / deployment_pending`。
+上述全部修复已合并进 `origin/main`（CI run #29 success），状态为 `released / deployment_pending`：在 2.88 default/sannai 与本机完成第 12 节流程部署并生成 fresh runtime artifact 之前，不得标记 `deployed`。
 
 ### 3.3 环境事实
 
@@ -186,7 +181,7 @@ designed
 - Recovery Marker 只阻止同一 terminal task 复活。
 - Restraint 不接受裸 `is_owner_approval=true` 作为审批证据。
 - private backup 限定 restore root；private Markdown 默认 must-backup。
-- natural-row 分类已接入 Natural Evidence、Exposure Rollup、V3 Seed 和 Wandering。
+- natural-row 生产门控由 `execution_gate.resolve_trigger_class()`（Exposure Rollup、V3 Seed 两条 cron 周期实际调用）与 Wandering / Dashboard 的内联 `natural_cron` 过滤承担；`natural_evidence.py` typed helper（TriggerProvenance / 观察窗 / 毕业门）本身仍无生产 consumer（见 P2）。
 
 ---
 
@@ -251,8 +246,20 @@ designed
 
 ### P2 — helper-only adoption debt
 
-10. 以下能力仍不得标为 wired/live：
-   - `timeutil` 的剩余 ad-hoc parser 迁移；
+10. 以下能力仍不得标为 wired/live（2026-07-29 依据 `004a16b` 逐一以 import/caller 证据核实，
+    除注明外全部仅被自身测试引用）：
+   - `timeutil` 的剩余 ad-hoc parser 迁移——生产/脚本代码仍有 10 处独立时间解析实现：
+     `cleanup.py`、`owner_actions.py`、`permanent_promotion.py`、`structural_edge_proposer.py`、
+     `v3_retention.py`、`v3_seed_evidence.py`、`community_triggers.py`、
+     `memory_os_monitor_dashboard_snapshot.py`、`memory_os_right_brain_expression_outcome.py`、
+     `speak_rate_limit.py`（另：monitor 远端探针脚本内自包含 `_parse_monitor_timestamp` 属有意
+     例外，生成式独立脚本不 import 仓库模块）；`timeutil` 当前唯一生产采用路径为
+     `__init__ → session_approval`，其余 5 个消费方（continuity/lifecycle/proposal_state/
+     natural_evidence/restraint）自身均为 helper-only；
+   - `natural_evidence` typed provenance/观察窗/毕业门 helper（生产 natural-row 门控见 4.4，
+     不经过此模块）；
+   - `restraint`（DenialTracker / SessionPriority / CandidateEvaluation，与 9.3 一致，缺主会话
+     真实 caller）；
    - `recall_golden` 正式召回 consumer；
    - `lifecycle` 正式 runtime caller；
    - `error_registry` 全局 consumer；
@@ -261,7 +268,7 @@ designed
    - `gap_note` 正式 session/recall renderer；
    - `seed_evidence_incremental` 生产调用；
    - `monitor_perf` 真实 monitor 集成；
-   - `evidence_gen` CI 集成。
+   - `evidence_gen` CI 集成（`.github/workflows/ci.yml` 已核实未调用）。
 
 ---
 
@@ -305,7 +312,7 @@ observation_days >= configured_gate
 
 ## 7. R2 — 单一运行真相与发布基础设施
 
-**状态**：`source/release verified; local deployed; 2.88 deployment pending final release`
+**状态**：`source/release verified (004a16b); local+2.88 deployment pending for f62a069..004a16b delta`
 
 - Operational Truth、artifact envelope、public consumer fail-closed：源码和本机 runtime 已证明。
 - mount-isolated、clean-copy、public checkout、write surface、static hygiene、import cycle：已进入统一 runner。
@@ -319,8 +326,9 @@ observation_days >= configured_gate
 
 **状态**：`partial adoption`
 
-- natural-row：已接入四条生产相关路径，继续审计剩余 consumer。
-- timeutil：公共 helper 与 fixture 完成；逐模块迁移剩余 parser。
+- natural-row：生产门控经 `resolve_trigger_class()` + 内联过滤运行（见 4.4）；`natural_evidence`
+  typed helper 未采用，继续审计剩余 consumer。
+- timeutil：公共 helper 与 fixture 完成；剩余 10 处 ad-hoc parser 待逐模块迁移（清单见 P2 #10）。
 - error registry：保持 helper/tested，直至生产 consumer 迁移。
 - SectionStatus：helper/tested；Full Monitor section 尚未统一迁移。
 - Proposal/Token state：helper/tested；OwnerActionProcessor/token ledger 尚未迁移。
@@ -551,7 +559,7 @@ active|dormant -> retired
 
 ## 14. 当前优先级
 
-1. 发布并部署低资源 Full Monitor bounded collection；在 2.88 default/sannai 分别生成 fresh v1 artifact。
+1. 低资源 Full Monitor bounded collection 已随 `004a16b` 合并发布（CI 已过）；仍需按第 12 节流程部署到本机与 2.88 default/sannai，并分别生成 fresh v1 artifact。
 2. 为本机、2.88 default 和 Sannai 生成独立 manifest/hash/fresh-import/closure runtime evidence；本机若需要 Gateway restart，先通知 Owner。
 3. 验证 retired cron 误报保持消失；保留 V2 schema-era 等真实治理问题。
 4. 对 `v2_exposure_schema_era_unhealthy` 建立自然观察计划，不手工改绿。

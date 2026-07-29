@@ -685,6 +685,39 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BL — 路线图 v2.6：基线刷新 + P2 债务清单以 caller 证据核实（2026-07-29，文档变更）
+
+- **背景**：`004a16b` 经 Owner 亲手 fast-forward 合并进 `origin/main`（CI run #29 success），
+  远端工作分支已删除。Owner 要求审查路线图文档并用 codegraph 对照实际代码。
+- **方法**：codegraph（主检出索引，先把主检出从 `a5c1c04` fast-forward 到 `004a16b` 使索引对齐）
+  文件级 dependents + `codegraph_callers`，每个影响结论的边再用 grep import 语句复核。
+- **发现与修订**（均已写入路线图 v2.6）：
+  - §3.1/3.2 基线过期：最新 CI 验证源码已是 `004a16b`（本地 Windows 全量 3021/2 env/13，
+    CI run #27/#28/#29 全绿），且相对 `f62a069` 新增三项修复（BJ/BK）未列入。改为"最新已合并
+    基线（未部署）"与"最近已部署基线 `f62a069`"两层分述，保持 release ≠ deployed 边界；
+    低资源 bounded collection 状态 `tested/deployment_pending` → `released/deployment_pending`。
+  - §5 P2 #10 helper 债务清单逐项以 import/caller 证据核实：原 10 项全部属实（仅测试引用），
+    但清单漏了两个同类债务——`natural_evidence`（typed provenance/观察窗/毕业门 helper，仅测试
+    引用；生产 natural-row 门控实际由 `execution_gate.resolve_trigger_class()` 在 exposure_rollup/
+    v3_seed_evidence 两条 cron 周期中承担 + wandering/dashboard 内联过滤）与 `restraint`
+    （DenialTracker/SessionPriority，仅测试引用）。两项已补入。
+  - `timeutil` 债务量化：生产/脚本代码剩余 10 处 ad-hoc 时间解析实现（cleanup、owner_actions、
+    permanent_promotion、structural_edge_proposer、v3_retention、v3_seed_evidence、
+    community_triggers、monitor_dashboard_snapshot、right_brain_expression_outcome、
+    speak_rate_limit；远端探针自包含 `_parse_monitor_timestamp` 属有意例外）；`timeutil` 唯一
+    生产采用路径为 `__init__ → session_approval`。原文"当前仍存在多份"改为可证伪的具体清单。
+  - §4.4/§8 "natural-row 分类已接入 Natural Evidence、…"措辞失真（natural_evidence helper 并无
+    生产 consumer），改为指明真实生产实现位置。
+  - §14 优先级 1 更新：发布已完成，仅剩部署。
+- **工具经验（并入 Section W 精神）**：codegraph 索引在主检出大幅落后又快进后会残留过期依赖边
+  ——本次三条 "used by" 边（restraint←cognitive_loop、monitor_perf←deploy_clean_host/
+  deploy_community、continuity←natural_evidence 的生产侧）经 grep 证伪。任何影响结论的
+  codegraph 边必须用 grep/Read 复核后才能写入文档或据此改代码。
+- **验证**：仅修改两个公共 Markdown 文档；不改代码、生产配置、账本、cron 或 Gateway。
+  `git diff --check` 干净；代码基线沿用 `004a16b`（CI run #29 success；本地全量与静态门见 BK）。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -753,3 +786,7 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   `/usr/bin/python3` 改 `sys.executable`。剩余 2 项（pytest_policy skip-count）诊断为本机
   `%TEMP%`/Documents-and-Settings-junction 触发的 vanilla pytest 收集重复，非项目代码缺陷，
   记录不修复。全量 3021 passed / 2 failed（精确为上述两项环境伪影）/ 13 skipped，静态门全过。
+- `004a16b..（BL，本节）`：路线图升 v2.6——基线刷新到已合并的 `004a16b`（release ≠ deployed 两层
+  分述）；P2 helper 债务清单以 caller 证据逐项核实并补入 `natural_evidence`、`restraint` 两项漏记；
+  `timeutil` 债务量化为 10 处具体 ad-hoc parser；natural-row 生产实现位置纠偏；另记录 codegraph
+  过期依赖边须经 grep 复核的工具经验。仅文档变更。
