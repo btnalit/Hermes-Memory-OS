@@ -114,7 +114,7 @@ def _append_note(partner_dir: Path, text: str) -> None:
     if not text.strip():
         return
     text = text.strip()[:_MAX_NOTE_CHARS]
-    
+
     # Read existing notes to check total size
     notes_path = partner_dir / "notes.jsonl"
     existing_lines: list[str] = []
@@ -130,14 +130,14 @@ def _append_note(partner_dir: Path, text: str) -> None:
         except OSError:
             existing_lines = []
             total_chars = 0
-    
+
     # Trim from front if over limit
     while total_chars + len(text) > _MAX_NOTE_TOTAL and existing_lines:
         removed = existing_lines.pop(0)
         total_chars -= len(removed)
     if total_chars + len(text) > _MAX_NOTE_TOTAL:
         return  # note too large even after trim; discard
-    
+
     entry = json.dumps(
         {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -161,7 +161,7 @@ def _build_prompt(
     notes_section = ""
     if recent_notes:
         notes_section = "\n你最近的笔记（回忆）：\n" + "\n".join(f"- {n}" for n in recent_notes[-5:])
-    
+
     prompt = f"""{soul_md}
 
 {notes_section}
@@ -181,13 +181,13 @@ def run_once(
     model_call: Callable[[str], str] | None = None,
 ) -> dict[str, Any]:
     """Run one tick of the partner runtime for all embedded partners.
-    
+
     Args:
         memory_os_root: Path to Memory-OS root directory.
         model_call: Callable that takes a prompt string and returns the
             model's response text.  If None, no model call is made
             (dry-run / test mode).
-    
+
     Returns:
         A dict with keys:
             - "partners_checked": int
