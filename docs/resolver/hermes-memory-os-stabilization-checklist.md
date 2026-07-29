@@ -583,13 +583,121 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BK — 9 项 Windows 本地 pre-existing 测试失败诊断与修复（2026-07-29）
+
+- **背景**：BJ 节记录的全量测试留下 9 项 Windows 本地失败，Owner 选择将其作为下一周期目标。
+  逐项复现并追根因，而不是批量假设"环境问题"或批量跳过。
+
+### 真实代码缺陷（已修复，4 项）
+
+- **`plan_deployment()` 相对路径分隔符与 `_deployed_file_paths()` 不一致**
+  （`plugins/memory/memory_os/deploy_clean_host.py`）：`plan_deployment()` 用
+  `str(relative)` 记录 `files_to_copy`/`files_to_skip`，Windows 下产出反斜杠路径；同文件的
+  `_deployed_file_paths()`（`postcheck_deploy()` 用于比较"应部署"与"实际部署"文件集合）已用
+  `.as_posix()`。两者口径不一致意味着 `postcheck_deploy()` 在 Windows 上对**任何**文件都会同时
+  误报"target missing deployed file"和"target contains stale file"——不是测试断言口径问题，是
+  跨主机 manifest/postcheck 比对的真实缺陷。修复：`plan_deployment()` 改用 `.as_posix()`，与
+  `_deployed_file_paths()` 对齐。
+  - **反事实**：`git stash` 暂存仅此文件改动 → `TestPlanDeployment::test_plan_with_files`、
+    `TestFullPipeline::test_pipeline`、`TestFullPipeline::test_postcheck_detects_target_hash_drift`
+    三个测试 FAIL（`assert ['plugins\\a.py'] == ['plugins/a.py']` 等）；恢复 → 10 passed。
+
+- **`classify_snapshot()` 对 `status_tool_contract` 为 `None` 时崩溃**
+  （`scripts/memory_os_3_200_monitor.py`）：`contract = snapshot.get("status_tool_contract", {})`
+  的 `{}` 默认值只在键缺失时生效；`collect_snapshot()` 中该字段由
+  `contract.get("validation") if isinstance(contract, dict) else contract` 构造，探针返回
+  `{"_error": ...}`（无 "validation" 键）时该字段被显式写入 `None`——键存在但值为 `None`，默认值
+  从未触发。随后 `contract.get("status")` 对 `None` 调用 `.get()` 抛 `AttributeError`，导致
+  `collect_snapshot()` 整体崩溃（`e2e` 测试实测："monitor process exited 1"，不是任何一个 section
+  的孤立 FAIL，而是整个 Full Monitor 采集中断）。同一函数 12 行前的 `doctor` 字段已用
+  `doctor_raw = snapshot.get("doctor"); doctor = doctor_raw if isinstance(doctor_raw, dict) else {}`
+  正确处理同类风险——`status_tool_contract` 是唯一没跟上这个防护模式的兄弟字段。修复：`contract`
+  改用与 `doctor` 完全一致的 `isinstance` 防护。
+  - **规则 5 同类扫查**：对 `classify_snapshot()` 内其余 33 处 `snapshot.get(key, {})` 站点逐一核查
+    是否存在同一"键存在值为 None"风险——除 `status_tool_contract` 外，其余站点的来源要么是恒返回
+    dict 的辅助函数（如 `system_show()`、`compaction_stats()`、`expression_artifact_summary()`
+    等专用 summary 函数)，要么消费方用 truthy 检查（`if x:`，`None` 天然为假，不会崩溃）或显式
+    `isinstance` 守护——非假设性结论，逐个函数定义核实后确认无第二例。
+  - **反事实**：`git stash` 暂存仅此文件改动 → 新增
+    `test_classify_snapshot_treats_null_status_tool_contract_as_failed_not_a_crash` FAIL
+    （`AttributeError: 'NoneType' object has no attribute 'get'`，与生产实际崩溃报错完全一致）；
+    恢复 → PASS；`tests/scripts/test_memory_os_full_monitor_refresh.py::
+    test_real_monitor_refresh_reader_and_dashboard_contract_end_to_end`（原始失败用例，调用真实
+    monitor 子进程）随之由 FAIL 转 PASS。
+
+- **`test_deploy_community.py` 用正斜杠字面量匹配 `str(Path)`**：
+  `test_apply_rolls_back_every_changed_file_on_copy_failure` 的 `flaky_copy` monkeypatch 用
+  `"runtime/python" in str(target_path)` 判断注入失败时机，Windows 下 `str(target_path)` 是反斜杠，
+  条件永不成立，注入的复制失败从未触发，测试断言"回滚"实际验证的是从未失败的正常路径。修复：改用
+  `target_path.as_posix()`。纯测试修复，不涉及 `scripts/deploy_community.py` 生产逻辑。
+  - **反事实**：原始失败即为此断言（`assert 'applied' == 'fail'`）；改用 `.as_posix()` 后
+    11 passed。
+
+- **`test_memory_os_mount_isolated_pytest.py` 用 `Path` 构造目标主机（Linux `unshare` 命名空间）
+  侧的解释器路径**：3 处测试用 `Path("/venv/bin/python")` 构造 `build_namespace_command()` 的
+  `python` 入参；`build_namespace_command()` 的执行目标永远是 Linux `unshare`/`mount --bind`
+  命名空间（生产/CI 主机），与运行 pytest 的宿主机 OS 无关，因此该入参代表的是目标端路径而非本机
+  路径。用平台相关的 `pathlib.Path` 构造它，在 Windows 宿主机上会被错误规范化为反斜杠。修复：改用
+  `pathlib.PurePosixPath`——不依赖宿主机平台，永远保持正斜杠，与函数实际语义对齐。纯测试修复。
+  - **反事实**：原始失败为 `test_command_uses_explicit_paths_not_ambient_configuration` 的
+    `assert [...] == [...]`（`\venv\bin\python` != `/venv/bin/python`）；改用 `PurePosixPath` 后
+    4 passed。
+
+### 环境伪影（已诊断，未修复；非项目代码缺陷）
+
+- **`test_memory_os_pytest_policy.py` 两项 skip-count 断言（`assert 2 == 1`）**：追根因发现是
+  本机 pytest 在 `%TEMP%`（`C:\Users\btnal\AppData\Local\Temp`）路径下对同一测试文件重复收集两次，
+  分别产出 `C:\Users\...` 和 `C:\Documents and Settings\...`（Windows 遗留兼容 junction，
+  `os.path.realpath()` 证实两者指向同一物理路径）两种字符串形式的 nodeid——用**不引入 memory-os
+  任何代码**的最小复现（裸 `python -m pytest --collect-only -q <file>`，指向 `%TEMP%` 下的临时文件）
+  证实该重复收集在 vanilla pytest 层面即可复现；同一文件放在 `D:\` 盘下则只收集一次。这是本机
+  pytest 版本（8.4.2）/ Python 3.13.7 与本机 `%TEMP%` 路径别名交互产生的环境伪影，不是
+  `memory_os_pytest_policy.py` 的计数逻辑缺陷，也未在其他任何测试路径中观察到。未做修复：
+  1) 修复方式若是"按 nodeid/reason 去重计数"，等于假设"同一 skip 事件可能被重复报告"为正常情况，
+     可能掩盖未来真实的重复执行缺陷；2) 该缺陷的根因完全在项目代码之外（pytest 内部 rootdir/nodeid
+     计算 + 本机临时目录别名），修复应落在环境或 pytest 版本层面，不应为了讨好本机而改动生产测试
+     契约。这两个测试本身正确；只在本机这一特定环境下才会失败。
+
+### 记录但不修复的同类模式（规则 5 扫查产物）
+
+- `scripts/install_memory_os_plugin.py` 的 `copied_files`/`agent_os_shell_files`/
+  `system_module_files`/`agent_runtime_files`/`eval_runtime_files`（5 处）与本节修复的
+  `plan_deployment()` 用的是同一 `str(path.relative_to(...))` 模式，理论上在 Windows 上也会产出
+  反斜杠。当前没有测试以分隔符敏感方式断言这些字段（现有断言都是 `"__pycache__" in path` 式子串
+  检查，分隔符无关），且该安装脚本的实际执行环境始终是生产 Linux 主机——不存在当前会触发的失败，
+  按"不为不会发生的场景添加防御代码"原则暂不改动，此处仅记录以备将来该脚本获得 Windows 执行路径时
+  参考。
+
+### BK 验证结论
+
+- 定向：`test_memory_os_deploy_clean_host.py`（10 passed）+ `test_deploy_community.py`
+  （11 passed）+ `test_memory_os_full_monitor_refresh.py`（原失败用例转 passed）+
+  `test_memory_os_mount_isolated_pytest.py`（4 passed）+ `test_memory_os_3_200_monitor.py` +
+  `test_memory_os_audit_arbitration.py` 全部通过；`test_memory_os_pytest_policy.py` 两项按上述
+  结论保持环境相关失败（未修复，已诊断记录）。
+- 全量：**3021 passed / 2 failed / 13 skipped**（BJ 基线 3013 passed/9 failed + 8 新增/改动测试；
+  2 failed 精确对应上述"环境伪影"结论的两个 pytest_policy 用例，其余 7 项此前失败的用例全部转
+  passed，与逐项定向验证结果一致）。
+- 静态门：import cycle pass（170 modules / 0 cycles）/ write surface `unclassified_count=0`
+  （155/155）/ static hygiene pass / public checkout probe `--strict` PASS /
+  `git diff --check` 干净。
+- 证据级别：`local_pass`（Windows 本地，非 mount-isolated）。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
 P2×3（BF）、P3×5（BG）。
 
-BJ 新增待办：9 项 Windows 本地 pre-existing 测试失败诊断；四个 helper-completion 兄弟 WARN 码
-的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否接入 cron onboarding 决定是否需要）。
+BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完成：7/9 为真实代码/测试缺陷，
+已修复；2/9（pytest_policy skip-count）诊断为本机环境伪影，非项目代码缺陷，不修复。
+
+当前遗留：
+1. 四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否
+   接入 cron onboarding 决定是否需要，BJ 记录）。
+2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
+   `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
 
 ---
 
@@ -635,3 +743,13 @@ BJ 新增待办：9 项 Windows 本地 pre-existing 测试失败诊断；四个 
   更新；`_execution_gate_helper_completion_summary()` 首次获得直接单测。定向 218 passed；全量
   3013 passed / 9 failed（Windows 本地 pre-existing，经 stash 验证与本次改动无关）/ 13 skipped，
   静态门全过。另记录：本文件自 `f99062c` 起数十个提交未追加稳定化记录的历史流程缺口。
+- `4c43f05..（BK，本节）`：诊断并修复 BJ 记录的 9 项 Windows 本地测试失败中的 7 项——
+  `plan_deployment()` 相对路径改 `.as_posix()`（与 `_deployed_file_paths()` 对齐，修复
+  `postcheck_deploy()` 跨主机文件集合比对失真）；`classify_snapshot()` 的 `status_tool_contract`
+  补齐 `doctor` 同款 `isinstance` 防护，修复 `None` 触发的 `collect_snapshot()` 整体崩溃（e2e 测试
+  验证由崩溃转 PASS）；两处测试用正斜杠字面量匹配 Windows 原生分隔符字符串的假设修正
+  （`test_deploy_community.py` 用 `.as_posix()`、`test_memory_os_mount_isolated_pytest.py` 用
+  `PurePosixPath` 构造目标端路径）；`test_memory_os_deploy_clean_host.py` 三处硬编码
+  `/usr/bin/python3` 改 `sys.executable`。剩余 2 项（pytest_policy skip-count）诊断为本机
+  `%TEMP%`/Documents-and-Settings-junction 触发的 vanilla pytest 收集重复，非项目代码缺陷，
+  记录不修复。全量 3021 passed / 2 failed（精确为上述两项环境伪影）/ 13 skipped，静态门全过。

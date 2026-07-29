@@ -128,7 +128,7 @@ def test_apply_rolls_back_every_changed_file_on_copy_failure(tmp_path: Path, mon
     def flaky_copy(source, target, *args, **kwargs):
         nonlocal failed
         target_path = Path(target)
-        if not failed and target_path.name == "partner_create.py" and "runtime/python" in str(target_path):
+        if not failed and target_path.name == "partner_create.py" and "runtime/python" in target_path.as_posix():
             failed = True
             raise OSError("injected")
         return original_copy2(source, target, *args, **kwargs)

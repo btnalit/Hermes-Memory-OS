@@ -3989,6 +3989,17 @@ def test_classify_snapshot_warns_on_memory_os_cron_helper_disabled_completion():
     assert not any(item["code"] == "execution_gate_memory_os_cron_helper_completion_missing" for item in classification["warn"])
 
 
+def test_classify_snapshot_treats_null_status_tool_contract_as_failed_not_a_crash():
+    snapshot = _healthy_snapshot()
+    snapshot["status_tool_contract"] = None
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "FAIL"
+    failed = next(item for item in classification["fail"] if item["code"] == "status_tool_contract_failed")
+    assert failed["value"] == {}
+
+
 def test_classify_snapshot_fails_memory_os_cron_helper_error_completion():
     snapshot = _healthy_snapshot()
     snapshot["execution_gate_cron"] = {

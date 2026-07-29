@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from scripts.memory_os_mount_isolated_pytest import (
     absolute_without_resolving,
@@ -23,7 +23,7 @@ def test_root_command_bind_mounts_empty_home_over_real_root(tmp_path: Path) -> N
     repo_root = tmp_path / "repo"
     isolated_home = tmp_path / "isolated-home"
     report = tmp_path / "policy.json"
-    python = Path("/venv/bin/python")
+    python = PurePosixPath("/venv/bin/python")
 
     command = build_namespace_command(
         repo_root=repo_root,
@@ -49,7 +49,7 @@ def test_non_root_command_uses_user_namespace_mapping(tmp_path: Path) -> None:
     command = build_namespace_command(
         repo_root=tmp_path / "repo",
         isolated_home=tmp_path / "isolated-home",
-        python=Path("/venv/bin/python"),
+        python=PurePosixPath("/venv/bin/python"),
         report_path=tmp_path / "policy.json",
         effective_uid=1000,
     )
@@ -67,7 +67,7 @@ def test_command_uses_explicit_paths_not_ambient_configuration(tmp_path: Path) -
     command = build_namespace_command(
         repo_root=tmp_path / "repo",
         isolated_home=tmp_path / "isolated-home",
-        python=Path("/venv/bin/python"),
+        python=PurePosixPath("/venv/bin/python"),
         report_path=tmp_path / "policy.json",
         effective_uid=0,
     )

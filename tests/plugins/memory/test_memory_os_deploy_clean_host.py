@@ -1,5 +1,7 @@
 """Tests for clean-host deployment."""
 
+import sys
+
 import pytest
 from pathlib import Path
 from plugins.memory.memory_os.deploy_clean_host import (
@@ -81,7 +83,7 @@ class TestFullPipeline:
         (src / "plugins" / "memory" / "memory_os").mkdir(parents=True)
         (src / "plugins" / "memory" / "memory_os" / "__init__.py").write_text("")
         tgt = tmp_path / "tgt"
-        result = run_deploy_pipeline(src, tgt, python_executable="/usr/bin/python3")
+        result = run_deploy_pipeline(src, tgt, python_executable=sys.executable)
         assert result["status"] == "ok"
 
     def test_pipeline_never_imports_ambient_repo_instead_of_target(self, tmp_path: Path) -> None:
@@ -90,7 +92,7 @@ class TestFullPipeline:
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("raise RuntimeError('target package imported')\n")
 
-        result = run_deploy_pipeline(src, tmp_path / "tgt", python_executable="/usr/bin/python3")
+        result = run_deploy_pipeline(src, tmp_path / "tgt", python_executable=sys.executable)
 
         assert result["status"] != "ok"
         assert result["preflight"]["status"] == "fail"
@@ -107,7 +109,7 @@ class TestFullPipeline:
 
         report = postcheck_deploy(
             tgt,
-            python_executable="/usr/bin/python3",
+            python_executable=sys.executable,
             source_root=src,
             plan=plan,
         )

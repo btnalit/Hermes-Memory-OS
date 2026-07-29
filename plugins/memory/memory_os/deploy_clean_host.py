@@ -98,7 +98,7 @@ def plan_deployment(
             child = base / dirname
             relative = child.relative_to(source_root)
             if dirname in EXCLUDED_SOURCE_PARTS or child.is_symlink():
-                plan.files_to_skip.append(str(relative) + "/")
+                plan.files_to_skip.append(relative.as_posix() + "/")
             else:
                 retained_dirs.append(dirname)
         dirnames[:] = retained_dirs
@@ -106,9 +106,9 @@ def plan_deployment(
             f = base / filename
             relative = f.relative_to(source_root)
             if f.is_symlink() or f.suffix == ".pyc":
-                plan.files_to_skip.append(str(relative))
+                plan.files_to_skip.append(relative.as_posix())
                 continue
-            plan.files_to_copy.append(str(relative))
+            plan.files_to_copy.append(relative.as_posix())
             plan.total_bytes += f.stat().st_size
             plan.file_count += 1
 

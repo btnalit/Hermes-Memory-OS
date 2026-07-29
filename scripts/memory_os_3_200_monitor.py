@@ -1505,7 +1505,8 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             warn.append({"code": "doctor_warning_finding", "finding": code})
 
-    contract = snapshot.get("status_tool_contract", {})
+    contract_raw = snapshot.get("status_tool_contract")
+    contract = contract_raw if isinstance(contract_raw, dict) else {}
     if contract.get("status") == "ok":
         passed.append({"code": "status_tool_contract_ok"})
     else:
