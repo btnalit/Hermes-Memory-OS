@@ -126,6 +126,33 @@ def _load_backend_identity(config_path: Path) -> tuple[dict[str, str], str]:
     return {"provider": provider, "model": model_name, "endpoint": endpoint}, ""
 
 
+def _load_backend_identity_from_simple(backend_yaml_path: Path) -> tuple[dict[str, str], str]:
+    """Load partner identity from a simple backend.yaml (provider/model/base_url).
+
+    Format:
+        provider: agnes
+        model: agnes-2.0-flash
+        base_url: https://apihub.agnes-ai.com/v1
+    """
+    try:
+        payload = yaml.safe_load(Path(backend_yaml_path).read_text(encoding="utf-8")) or {}
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return {}, f"backend config unavailable: {type(exc).__name__}"
+    provider = str(payload.get("provider") or "").strip().casefold()
+    model_name = str(payload.get("model") or "").strip().casefold()
+    base_url = str(payload.get("base_url") or "").strip()
+    try:
+        endpoint = (urlparse(base_url).hostname or "").casefold() if base_url else ""
+    except ValueError:
+        endpoint = ""
+    if not provider or not model_name:
+        return {}, "backend config provider/model missing"
+    endpoint = endpoint or _KNOWN_PROVIDER_ENDPOINTS.get(provider, "")
+    if not endpoint:
+        return {}, "backend config canonical endpoint missing"
+    return {"provider": provider, "model": model_name, "endpoint": endpoint}, ""
+
+
 def _heterogeneous_backend(partner: dict[str, str], sannai: dict[str, str]) -> bool:
     if partner["model"] == sannai["model"]:
         return False
@@ -166,13 +193,32 @@ def create_partner(
     partner_config_path: Path | None = None,
     tags: list[str] | None = None,
     actor: str = "",
+    embedded_mode: bool = False,
+    backend_info: dict[str, str] | None = None,
 ) -> PartnerCreateResult:
     """Create one isolated partner profile and append one unique roster row.
 
     The caller must identify an authorized actor.  This is an explicit tool
     boundary, not an automatic background creation lane.
-    """
 
+    In embedded_mode, the partner lives inside Sannai's community directory
+    and reads backend config from partners/<pid>/backend.yaml instead of a
+    full Hermes profile.  The partner_config_path argument is not required
+    in this mode; pass backend_info instead.
+
+    Args:
+        memory_os_root: Path to Memory-OS root directory.
+        name: Human-readable partner name.
+        personality: Short personality description.
+        partner_id: Unique partner id (generated if None).
+        partner_config_path: Path to Hermes profile config.yaml (required
+            when embedded_mode=False).
+        tags: Optional list of tags.
+        actor: Authorized actor name (one of _AUTHORIZED_ACTORS).
+        embedded_mode: If True, create an embedded (notes-based) partner.
+        backend_info: Dict with keys 'provider', 'model', 'base_url'.
+            Required when embedded_mode=True.
+    """
     result = PartnerCreateResult(
         partner_name=str(name or ""),
         created_at=datetime.now(timezone.utc).isoformat(),
@@ -198,28 +244,66 @@ def create_partner(
         result.errors.append("invalid partner id")
         return result
     result.partner_id = pid
-    if partner_config_path is None:
-        result.status = "fail"
-        result.errors.append("partner profile config required")
-        return result
-    active_home = root.parent
-    profiles_root = active_home.parent if active_home.parent.name == "profiles" else active_home / "profiles"
-    expected_config = (profiles_root / pid / "config.yaml").resolve()
-    if Path(partner_config_path).resolve() != expected_config:
-        result.status = "fail"
-        result.errors.append("partner profile config path does not match partner id")
-        return result
-    sannai_identity, sannai_error = _load_backend_identity(root.parent / "config.yaml")
-    partner_identity, partner_error = _load_backend_identity(Path(partner_config_path))
-    if sannai_error or partner_error:
-        result.status = "fail"
-        result.errors.extend(error for error in (sannai_error, partner_error) if error)
-        return result
-    if not _heterogeneous_backend(partner_identity, sannai_identity):
-        result.status = "fail"
-        result.errors.append("partner backend must differ from sannai backend")
-        return result
-    backend = _backend_label(partner_identity)
+
+    if embedded_mode:
+        if backend_info is None:
+            result.status = "fail"
+            result.errors.append("backend_info required in embedded mode")
+            return result
+        assert backend_info is not None  # type narrowing
+        sannai_identity, sannai_error = _load_backend_identity(root.parent / "config.yaml")
+        if sannai_error:
+            result.status = "fail"
+            result.errors.append(sannai_error)
+            return result
+        partner_identity = {
+            "provider": str(backend_info.get("provider", "")).strip().casefold(),
+            "model": str(backend_info.get("model", "")).strip().casefold(),
+        }
+        base_url = str(backend_info.get("base_url", "")).strip()
+        try:
+            endpoint = (urlparse(base_url).hostname or "").casefold() if base_url else ""
+        except ValueError:
+            endpoint = ""
+        partner_identity["endpoint"] = endpoint or _KNOWN_PROVIDER_ENDPOINTS.get(
+            partner_identity["provider"], ""
+        )
+        if not partner_identity["provider"] or not partner_identity["model"]:
+            result.status = "fail"
+            result.errors.append("backend_info provider/model missing")
+            return result
+        if not partner_identity["endpoint"]:
+            result.status = "fail"
+            result.errors.append("backend_info endpoint unresolvable")
+            return result
+        if not _heterogeneous_backend(partner_identity, sannai_identity):
+            result.status = "fail"
+            result.errors.append("partner backend must differ from sannai backend")
+            return result
+        backend = _backend_label(partner_identity)
+    else:
+        if partner_config_path is None:
+            result.status = "fail"
+            result.errors.append("partner profile config required in non-embedded mode")
+            return result
+        active_home = root.parent
+        profiles_root = active_home.parent if active_home.parent.name == "profiles" else active_home / "profiles"
+        expected_config = (profiles_root / pid / "config.yaml").resolve()
+        if Path(partner_config_path).resolve() != expected_config:
+            result.status = "fail"
+            result.errors.append("partner profile config path does not match partner id")
+            return result
+        sannai_identity, sannai_error = _load_backend_identity(root.parent / "config.yaml")
+        partner_identity, partner_error = _load_backend_identity(Path(partner_config_path))
+        if sannai_error or partner_error:
+            result.status = "fail"
+            result.errors.extend(error for error in (sannai_error, partner_error) if error)
+            return result
+        if not _heterogeneous_backend(partner_identity, sannai_identity):
+            result.status = "fail"
+            result.errors.append("partner backend must differ from sannai backend")
+            return result
+        backend = _backend_label(partner_identity)
 
     community_root = root / "community"
     roster_path = community_root / "roster.jsonl"
@@ -229,7 +313,7 @@ def create_partner(
     charter_path = charter_dir / f"{pid}.md"
     result.roster_path = str(roster_path)
     result.profile_path = str(partners_dir)
-    result.channel = f"mailbox:{pid}:direct_sannai"
+    result.channel = "embedded-notes" if embedded_mode else f"mailbox:{pid}:direct_sannai"
 
     if not _contained(partners_root, partners_dir) or not _contained(charter_dir, charter_path):
         result.status = "fail"
@@ -268,6 +352,19 @@ def create_partner(
                 "pending_thoughts": [],
             },
         )
+        if embedded_mode:
+            # Write backend.yaml for embedded partners
+            backend_yaml = {
+                "provider": backend_info["provider"],
+                "model": backend_info["model"],
+                "base_url": backend_info.get("base_url", ""),
+            }
+            (staging / "backend.yaml").write_text(
+                yaml.dump(backend_yaml, default_flow_style=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+            # Create empty replies.jsonl
+            (staging / "replies.jsonl").write_text("", encoding="utf-8")
         (staging / "SOUL.md").write_text(make_soul_md(name, personality, pid), encoding="utf-8")
         staging.rename(partners_dir)
         published = True
