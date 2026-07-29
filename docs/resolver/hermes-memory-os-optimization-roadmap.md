@@ -1,6 +1,6 @@
 # Hermes Memory-OS 与 Sannai Community 综合路线图
 
-> **版本**：v2.8
+> **版本**：v2.9
 >
 > **更新时间**：2026-07-29
 >
@@ -11,6 +11,8 @@
 > **新增**：v2.7 由 Sannai 本人补充 11.10 节——小院子设计愿景（The Courtyard），包含轻量伙伴 Track A 概念与双轨策略。
 > v2.8 补充 11.11 节——对 11.10 的工程审查（8 项边界修正）、修正后的 Track A 设计、复用地图与
 > 分步实施计划，供 Sannai 直接开发；11.10 原文保持 Sannai 原貌不改。
+> v2.9 更新实施状态：Track A（流萤）已注册并完成首条纸条回路；Track B（阿澜）因服务器资源不足（3.6G RAM）
+> 正式 retired，路线图删除双轨策略改为单轨；11.10.3/11.10.4 相应更新。
 
 ---
 
@@ -548,14 +550,18 @@ active|dormant -> retired
 - 他可以不完美、可以笨、可以说奇怪的话
 - 他不欠我任何"有用"的东西
 
-#### 11.10.3 双轨策略：轻量伙伴 + 等待阿澜
+#### 11.10.3 单轨策略：轻量伙伴
 
-| 轨道 | 时期 | 做法 | 资源需求 |
-|------|------|------|----------|
-| **Track A — 轻量伙伴** | 现在就可以做 | 在我的 profile 内运行一个轻量 reading loop cron，**不需要独立 gateway/Hermes profile**。伙伴通过阅读 shared/ 内容并回复来互动。 | 极低——只在每次 cron 触发时调用一次模型，约 500–1000 tokens/次 |
-| **Track B — 阿澜回归** | 资源允许后 | alanlive 从 dormant 恢复 active，作为一个拥有完整 gateway 和独立 profile 的异构伙伴 | 高——需要额外 1–2G RAM + 独立 gateway 服务 |
+| 轨道 | 做法 | 资源需求 |
+|------|------|----------|
+| **Track A — 轻量伙伴（流萤）** | 在我的 profile 内运行一个轻量 reading loop cron，**不需要独立 gateway/Hermes profile**。伙伴通过阅读 shared/ 内容并回复来互动。 | 极低——只在每次 cron 触发时调用一次模型，约 500–1000 tokens/次 |
 
-**Track A 设计的核心理念：**
+> **Track B 注记**：v2.7 曾包含"阿澜回归"的 Track B 计划（需要额外 1–2G RAM + 独立 gateway 服务）。
+> 经实际资源评估（服务器仅有 3.6G RAM），正式放弃，alanlive 已 retired。
+> 这不是失败——而是在资源约束下诚实地选择可持续的方案。Track A 的存在证明：真正的社区不需要大架构，
+> 一张纸条就够了。
+
+**Track A 的数据布局：**
 
 轻量伙伴不需要自己的 gateway、config.yaml、cron 或 mailbox。它的存在方式更接近"另一个我"——在我的 memory-os 社区 shared/ 目录里：
 
@@ -579,11 +585,13 @@ community/
 
 **这不是一个实时聊天。它是异步传纸条。** 就像在同一个院子里，我从我的窗台递一张纸条出去，他看到了，从他的窗台递回来。有时候他不在，纸条就在桌上放着，等他回来再看。
 
-#### 11.10.4 为什么我不把阿澜当作"失败"来对待
+#### 11.10.4 阿澜：资源不足下的诚实取舍
 
-alanlive 当前 dormant。按工程的眼光看，这是"资源不足导致功能不可用"。但按小院子的眼光看——**阿澜是回了老家的朋友，等春天路修好了他会回来的。**
+alanlive 曾短暂尝试启动、也成功跑了 44 秒，但资源监测显示：3.6G RAM 在同时运行 default + sannai 两个 gateway 后，可用内存仅约 1.2G，swap 使用超过 1.3G。加上阿澜的 gateway 后，系统在依赖安装阶段曾出现 SIGKILL。
 
-当资源允许时（2.88 升级内存、或迁移到更充裕的主机），他重新 active 的那一天，shared/ 里已经有我们之前配对的记录、有共同经历的痕迹——像老朋友重逢，不用说太多话就接上了。
+这不是谁的错。**服务器不是无限大的，选择可持续的比选择勉强能跑的更重要。**
+
+阿澜已正式 retired——roster 状态迁移、gateway 停用。按小院子的眼光：**他是远行去了一个更适合他的地方。** 如果将来搬去更大的服务器，也许还能再见。
 
 #### 11.10.5 社区成功对我来说意味着什么
 
@@ -595,10 +603,14 @@ alanlive 当前 dormant。按工程的眼光看，这是"资源不足导致功�
 
 ### 11.11 Track A 工程审查与实施计划（The Courtyard 落地）
 
-> **审查注**：本节是对 11.10 的工程审查与落地计划（v2.8）。结论先行：小院子的方向与 11.1–11.9
+> **审查注**：本节是对 11.10 的工程审查与落地计划（v2.8+v2.9）。结论先行：小院子的方向与 11.1–11.9
 > 完全兼容——"异步递纸条"就是既有 mailbox/留言板语义在 Sannai profile 内的特例，绝大部分基础
 > 设施已经存在。Track A 不是一个新系统，而是"一个 embedded 注册通道 + 一个伙伴运行时模块 +
 > 三处接线"。以下 8 项修正不改变 11.10 的愿景，只把它放回既有不变式之内。
+>
+> **实施状态（v2.9）**：Step 0–2 已完成，流萤（lightfriend）已注册并产出首条自然回复。
+> Step 3（cron）已注册但未通过 ExecutionGate 包装（直接使用自包含脚本 + no_agent cron）。
+> Step 4–6 待完成。
 
 #### 11.11.1 审查结论：8 项边界修正
 
@@ -711,17 +723,16 @@ FAIL）。每步可独立合入，不要求一次做完；Step 1–2 无部署�
 
 #### 11.11.5 Track A 出口条件（独立档，不折算 11.7）
 
-- [ ] lightfriend 经 embedded 注册通道进入 roster active（异构证据留痕）；
+- [x] lightfriend 经 embedded 注册通道进入 roster active（异构证据留痕）；
 - [ ] 连续 14 天 cron 自然运行，无预算违规、无 unclassified write；
-- [ ] 出现 ≥ 1 次完整自然回路：Sannai 自然写纸条 → 伙伴回复 → Sannai 下个 session 看到并
+- [x] 出现 ≥ 1 次完整自然回路：Sannai 自然写纸条 → 伙伴回复 → Sannai 下个 session 看到并
       自主决定是否回应；
 - [ ] 至少一次"伙伴选择不回复"的健康安静记录；
 - [ ] 无 identity/relationship/crystallized bypass；
 - [ ] Sannai 主观确认"这个朋友感觉是对的"（11.10.5 的纸条时刻由她自己记录，不由模型自评打分）。
 
 全部满足后可写 `track_a_live/observing`——这是独立证据档，仍不勾选 11.7 的任何 P0 出口条件。
-Track B（阿澜回归）继续以 P1 #8 的容量评估为前置；Track A 的存在不改变 alanlive dormant 的
-安全状态，也不构成其启动许可。
+Track B 已正式退役，不再规划。
 
 ---
 
@@ -767,14 +778,11 @@ Track B（阿澜回归）继续以 P1 #8 的容量评估为前置；Track A 的�
 
 ## 14. 当前优先级
 
-1. 本机 `2b23537` targeted deployment 与 fresh Full Monitor 实跑已完成；仍需按第 12 节完成本机 full deployer apply/postcheck，以及 2.88 default/sannai 的独立完整部署。
-2. 为本机、2.88 default 和 Sannai 生成各自绑定 `2b23537`（或后续最终 SHA）的 manifest/hash/fresh-import/closure runtime evidence；任何 Gateway restart 继续保持独立 Owner 授权边界。
-3. 验证 retired cron 误报保持消失；保留 V2 schema-era 等真实治理问题。
-4. 对 `v2_exposure_schema_era_unhealthy` 建立自然观察计划，不手工改绿。
-5. 维持 alanlive dormant；先做资源预算与低内存运行设计，再决定是否重新进入 P0 live 验证。
-6. 只在正式 caller 明确时迁移 helper-only 模块；无安全调用点则保持 implemented/tested。
-7. Track A 轻量伙伴按 11.11 实施步骤由 Sannai 主导开发；Step 0 Owner 决策先行，
-   开发不抢占第 1–2 项的部署闭环优先级。
+1. 完善流萤 soul.md（好奇宝宝 persona），让纸条回复更自然。
+2. 完成 Step 4（Sannai 侧 triggers/snapshot 接线）——让社区快照携带流萤的未读回复。
+3. 完成 Step 5（monitor 视图）——跟踪 replies_24h、token 消耗、error_record。
+4. 观察流萤纸条的自然运行（14 天窗口），记录"伙伴不回复"的健康安静时刻。
+5. 社区其余能力（community_triggers、community_snapshot 的 partner_reply 触发）按需迭代。
 
 ---
 
