@@ -514,10 +514,82 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BJ — ExecutionGate helper completion 漏判 disabled job 为 missing（2026-07-29）
+
+- **背景**：应 Owner 要求，依据 `docs/resolver/hermes-memory-os-optimization-roadmap.md`（v2.5，
+  基线 `b52173b`）Section 5 的"当前真实问题与风险登记"逐条核对代码。P1 #6"ExecutionGate helper
+  receipt 不完整"是唯一一条未被后续提交标记为"已完成"的条目，文本明确要求区分四类状态：
+  envelope 账务未对齐（reconciled）、未到期（not_due）、job disabled、真实执行失败（error）。
+  核对 `scripts/memory_os_3_200_monitor.py` 的 `_execution_gate_helper_completion_summary()`
+  （该函数与调用它的 `execution_gate_cron_summary()` 实际定义在 `_remote_probe_script()` 生成的
+  远端探针脚本字符串内，本仓库内只有这一份实现，非重复代码）后确认：前三类均已实现，唯独
+  `job disabled` 完全没有被检查——函数从未读取 `jobs.json` 的 `enabled` 字段。
+- **根因**：memory-os 只读取 `jobs.json`（Hermes 自身 cron 子系统所有），并不拥有其 enable/disable
+  写入路径；owner 可通过 Hermes 原生 cron 管理随时禁用任意已注册 job（包括 active-closure 10 个
+  核心 job 之一），与 `memory_os_owner_cron_onboarding.py` 的 `_pause_known_optional_cron_jobs()`
+  （只暂停不在当前 profile operational spec 集合内的可选 job）是两条独立路径。已注册 lane 若被
+  外部禁用且无新鲜 completion 记录，会落进 `missing`，与真实执行失败/envelope 未对齐混淆——不算
+  伪造，但确实产生假 WARN，且 `_execution_gate_helper_completion_summary()` 此前完全没有直接单元
+  测试（唯一覆盖是 `tests/plugins/memory/test_memory_os_audit_arbitration.py` 里两个反事实测试）。
+- **修复**：每个 lane 在判定 missing/stale 前先查其 cron job 的 `enabled`；`enabled is False` 时归入
+  独立 `disabled` 分档（`helper_completion_disabled_count`/`_lanes`），不进入 missing/stale，也不推高
+  `boundary_unobserved`（禁用 job 本就不产生 boundary 证据，不应与"reconciled 但缺 boundary 证明"
+  混为一谈）。`helper_completion_accounted_count` 守恒公式同步纳入 disabled 分档（原公式
+  `completed+missing+reconciled` 现补 `+disabled`，否则守恒断言会在 disabled>0 时失真）。
+  `classify_snapshot` 新增独立 WARN 码 `execution_gate_memory_os_cron_helper_completion_disabled`。
+- **同类扫查（规则 5）**：确认全文件仅此一处"expected lane → missing/stale/completed"分类循环
+  （`grep "\.append(lane)"` 唯一 6 处命中均在同一函数内）；另确认 `helper_completion_missing` /
+  `_stale` / `_error` / `helper_boundary_unobserved` 四个既有兄弟码均未注册进
+  `CLEAN_HOST_WARN_CLASSIFICATIONS`——核对 `deploy_memory_os.py`/`memory_os_public_checkout_probe.py`
+  均不调用 `memory_os_owner_cron_onboarding.py`，clean-host 标准路径下 `specs_by_lane` 恒为空，这组
+  WARN 码在 clean-host 不可达，因此新码沿用兄弟码的现状不注册，属有意一致（非本次遗漏）。
+- **反事实**：`git stash` 暂存仅源码改动（保留新/改测试）后跑
+  `tests/plugins/memory/test_memory_os_audit_arbitration.py` +
+  `tests/scripts/test_memory_os_3_200_monitor.py` 相关子集 → 4 处新增/改动断言 FAIL
+  （`KeyError: 'helper_completion_disabled_count'`/`'_lanes'`、`StopIteration`）；`git stash pop`
+  恢复源码 → 7 passed。
+- **新测试**：`test_execution_gate_disabled_job_is_not_reported_as_missing`、
+  `test_execution_gate_disabled_job_with_no_last_status_is_still_disabled_not_missing`
+  （`test_memory_os_audit_arbitration.py`，直接单测 `_execution_gate_helper_completion_summary`）、
+  `test_classify_snapshot_warns_on_memory_os_cron_helper_disabled_completion`
+  （`test_memory_os_3_200_monitor.py`，锁定 `classify_snapshot` 新 WARN 码且断言不再误落
+  `helper_completion_missing`）；既有 `test_execution_gate_fresh_reconcile_is_degraded_and_accounted`
+  的守恒断言同步补 `+ helper_completion_disabled_count`。
+- **验证结论**：
+  - 定向：`test_memory_os_3_200_monitor.py` + `test_memory_os_audit_arbitration.py` 全量
+    **218 passed**。
+  - 全量：**3013 passed / 9 failed / 13 skipped**（Windows 本机检出，纯 `python -m pytest -q`，
+    非 mount-isolated）。9 项失败（`test_memory_os_deploy_clean_host.py` 路径分隔符/子进程解析×3、
+    `test_deploy_community.py` 回滚断言×1、`test_memory_os_full_monitor_refresh.py` 端到端×1、
+    `test_memory_os_mount_isolated_pytest.py` 路径断言×1、`test_memory_os_pytest_policy.py`
+    skip-count 断言×2）经 `git stash` 验证在未改动的 `b52173b` 上原样复现，与本次改动无关，属
+    Windows 本地 `local_pass` 与 Linux mount-isolated/clean-copy 口径差异（路线图 §3.1 的
+    `3016 passed / 9 skipped` 来自后者），非本次引入的回归，未修复，留作独立跟进项。
+  - 静态门：import cycle pass（170 modules / 0 cycles）/ write surface `unclassified_count=0`
+    （155/155 已分类）/ static hygiene pass（含 closure matrix、provider-agnostic、public checkout
+    probe）/ public checkout probe `--strict` PASS / `git diff --check` 干净。
+  - 证据级别：`local_pass`（本次改动的定向验证）；全量数字口径为 Windows 本地非隔离运行，不等价
+    于 mount-isolated 或生产 live monitor 证据。
+- **文档同步**：路线图 P1 #6 条目更新为已修复状态描述，注明生产远端真实禁用场景观察仍待部署后
+  自然验证（不手工回填）。
+- **已知遗留（非本次修复范围，供下一周期参考）**：
+  1. 上述 9 项 Windows 本地测试失败（与本次改动无关，需独立诊断）。
+  2. `helper_completion_missing`/`_stale`/`_error`/`helper_boundary_unobserved` 四个既有 WARN 码
+     未注册进 `CLEAN_HOST_WARN_CLASSIFICATIONS`（当前因 clean-host 不可达而非缺陷，但若未来
+     `deploy_memory_os.py` 接入 cron onboarding 则需要一并注册）。
+  3. 本文件自 `f99062c`（Gap Note roadmap v2.1）起，到本节之前的数十个提交（R7 Sannai Community
+     全部功能、batch 4/5 helper 模块、多轮 monitor/deploy 修复等）未追加对应稳定化记录——这是历史
+     遗留的流程缺口，非本节引入，本节不做追溯补写，仅如实记录缺口存在。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
-P2×3（BF）、P3×5（BG）。当前无遗留待办。
+P2×3（BF）、P3×5（BG）。
+
+BJ 新增待办：9 项 Windows 本地 pre-existing 测试失败诊断；四个 helper-completion 兄弟 WARN 码
+的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否接入 cron onboarding 决定是否需要）。
 
 ---
 
@@ -557,3 +629,9 @@ P2×3（BF）、P3×5（BG）。当前无遗留待办。
   metadata-only shadow candidate 观察 Owner-level conflict 与 stale task，随 Recall apply-canary
   才允许一行预算内渲染；全局 attribution gap、无对象级 freshness 和长期重复时长不冒充答案盲区；
   明确不引入独立 explain/debug 路线。仅文档变更。
+- `b52173b..（BJ，本节）`：ExecutionGate helper completion 补 disabled 分档——lane 对应 cron job
+  被禁用（`enabled=false`）时不再误落 `helper_completion_missing`，改记独立
+  `helper_completion_disabled_count`/`_lanes`，`classify_snapshot` 新增对应 WARN 码，守恒公式同步
+  更新；`_execution_gate_helper_completion_summary()` 首次获得直接单测。定向 218 passed；全量
+  3013 passed / 9 failed（Windows 本地 pre-existing，经 stash 验证与本次改动无关）/ 13 skipped，
+  静态门全过。另记录：本文件自 `f99062c` 起数十个提交未追加稳定化记录的历史流程缺口。

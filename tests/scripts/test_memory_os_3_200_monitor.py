@@ -3960,6 +3960,35 @@ def test_classify_snapshot_warns_on_memory_os_cron_helper_stale_completion():
     assert any(item["code"] == "execution_gate_memory_os_cron_helper_completion_stale" for item in classification["warn"])
 
 
+def test_classify_snapshot_warns_on_memory_os_cron_helper_disabled_completion():
+    snapshot = _healthy_snapshot()
+    snapshot["execution_gate_cron"] = {
+        "schema_version": "memory-os.execution_gate_cron_summary.v0",
+        "memory_os_owned_expected_count": 7,
+        "memory_os_owned_wrapped_count": 7,
+        "memory_os_owned_naked_count": 0,
+        "memory_os_like_unregistered_count": 0,
+        "unclassified_count": 0,
+        "helper_completion_expected_count": 7,
+        "helper_completion_completed_count": 6,
+        "helper_completion_missing_count": 0,
+        "helper_completion_disabled_count": 1,
+        "helper_completion_disabled_lanes": ["module_cadence_report"],
+        "helper_boundary_true_count": 0,
+        "helper_boundary_unobserved_count": 0,
+    }
+
+    classification = classify_snapshot(snapshot)
+
+    assert classification["status"] == "WARN"
+    disabled_warn = next(
+        item for item in classification["warn"] if item["code"] == "execution_gate_memory_os_cron_helper_completion_disabled"
+    )
+    assert disabled_warn["count"] == 1
+    assert disabled_warn["lanes"] == ["module_cadence_report"]
+    assert not any(item["code"] == "execution_gate_memory_os_cron_helper_completion_missing" for item in classification["warn"])
+
+
 def test_classify_snapshot_fails_memory_os_cron_helper_error_completion():
     snapshot = _healthy_snapshot()
     snapshot["execution_gate_cron"] = {

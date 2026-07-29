@@ -223,8 +223,15 @@ designed
    - 禁止用空 context-manager、删除 probe 或 stale cache 冒充优化。
 
 6. **ExecutionGate helper receipt 不完整**
-   - 当前可见 WARN 包括 helper completion missing / boundary unobserved。
-   - 必须区分：job 成功但 envelope 账务未对齐、job 未到期、job disabled、真实执行失败。
+   - 现象：`_execution_gate_helper_completion_summary` 原本只区分 completed/missing/stale/error/
+     envelope-reconciled 四类，未识别 lane 对应 cron job 被 owner/操作员通过 Hermes 自身 cron 管理
+     直接禁用（`jobs.json` 中 `enabled=false`）的情况——已注册 lane 一旦被禁用且无新鲜 completion
+     记录，会落入 `missing`，与真实执行失败/envelope 未对齐混淆，触发误报 WARN。
+   - 当前：已修复为独立 `disabled` 分档（`helper_completion_disabled_count`/`_lanes`），禁用 lane 不
+     再计入 missing/stale 或推高 boundary_unobserved；`classify_snapshot` 新增独立
+     `execution_gate_memory_os_cron_helper_completion_disabled` WARN 码；`helper_completion_accounted_count`
+     守恒公式同步纳入 disabled 分档。定向反事实（revert→FAIL、restore→PASS）与全量测试已过；生产远端
+     的真实禁用场景观察仍待部署后自然验证。
    - 不得用伪造 completion row 消除告警。
 
 7. **Dashboard service 未形成独立部署事实**

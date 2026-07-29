@@ -2332,6 +2332,7 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
             helper_missing = int(execution_gate_cron.get("helper_completion_missing_count") or 0)
             helper_stale = int(execution_gate_cron.get("helper_completion_stale_count") or 0)
             helper_error = int(execution_gate_cron.get("helper_completion_error_count") or 0)
+            helper_disabled = int(execution_gate_cron.get("helper_completion_disabled_count") or 0)
             if str(execution_gate_cron.get("registry_snapshot_status") or "ok") != "ok":
                 fail.append(
                     {
@@ -2359,6 +2360,14 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
                     {
                         "code": "execution_gate_memory_os_cron_helper_completion_missing",
                         "count": helper_missing,
+                    }
+                )
+            if helper_disabled > 0:
+                warn.append(
+                    {
+                        "code": "execution_gate_memory_os_cron_helper_completion_disabled",
+                        "count": helper_disabled,
+                        "lanes": execution_gate_cron.get("helper_completion_disabled_lanes") or [],
                     }
                 )
             if helper_stale > 0:
@@ -7266,6 +7275,11 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     stale = []
     not_due = []
     error = []
+    # Job intentionally disabled (owner/operator action via Hermes cron
+    # management, independent of the memory-os registry snapshot).  A
+    # disabled job is not expected to produce fresh completion evidence and
+    # must not be reported as missing/failed execution.
+    disabled: list[str] = []
     # Envelope accounting gaps: cron job last_status=ok but no completion
     # record exists.  This is an envelope bookkeeping issue, not an
     # execution failure — the job ran successfully.
@@ -7277,12 +7291,15 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     now = datetime.now(timezone.utc)
     jobs_by_name = jobs_by_name or {}
     for lane in sorted(expected_lanes):
+        spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
+        job_name = str(spec.get("name") or "")
+        cron_job = jobs_by_name.get(job_name) if isinstance(jobs_by_name, dict) else {}
+        if isinstance(cron_job, dict) and cron_job.get("enabled") is False:
+            disabled.append(lane)
+            continue
         record = completions.get(lane)
         if not record:
             # ── Cross-reference with cron job status ──────────────────
-            spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
-            job_name = str(spec.get("name") or "")
-            cron_job = jobs_by_name.get(job_name) if isinstance(jobs_by_name, dict) else {}
             if isinstance(cron_job, dict) and str(cron_job.get("last_status") or "") == "ok":
                 schedule = _cron_schedule_display(cron_job)
                 last_run = _parse_monitor_timestamp(str(cron_job.get("last_run_at") or ""))
@@ -7296,11 +7313,7 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
             missing.append(lane)
             continue
         completed.append(lane)
-        spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
-        schedule = ""
-        job = jobs_by_name.get(str(spec.get("name") or "")) if isinstance(jobs_by_name, dict) else {}
-        if isinstance(job, dict):
-            schedule = _cron_schedule_display(job)
+        schedule = _cron_schedule_display(cron_job) if isinstance(cron_job, dict) else ""
         record_time = _parse_monitor_timestamp(str(record.get("created_at") or ""))
         freshness = _helper_completion_freshness_window(schedule)
         if record_time and now - record_time > freshness:
@@ -7327,6 +7340,7 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         "helper_completion_completed_count": len(completed),
         "helper_completion_missing_count": len(missing),
         "helper_completion_reconciled_count": len(reconciled_via_cron_status),
+        "helper_completion_disabled_count": len(disabled),
         "helper_completion_stale_count": len(stale),
         "helper_completion_error_count": len(error),
         "helper_completion_not_due_count": len(not_due),
@@ -7334,8 +7348,9 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         "helper_completion_completed_lanes": completed,
         "helper_completion_missing_lanes": missing,
         "helper_completion_reconciled_lanes": reconciled_via_cron_status,
+        "helper_completion_disabled_lanes": disabled,
         "helper_completion_reconciliation_status": "degraded" if reconciled_via_cron_status else "not_used",
-        "helper_completion_accounted_count": len(completed) + len(missing) + len(reconciled_via_cron_status),
+        "helper_completion_accounted_count": len(completed) + len(missing) + len(reconciled_via_cron_status) + len(disabled),
         "helper_completion_stale_lanes": stale,
         "helper_completion_error_lanes": error,
         "helper_completion_not_due_lanes": not_due,

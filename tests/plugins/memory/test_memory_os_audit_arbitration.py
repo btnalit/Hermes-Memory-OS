@@ -65,7 +65,55 @@ def test_execution_gate_fresh_reconcile_is_degraded_and_accounted(tmp_path, monk
         summary["helper_completion_completed_count"]
         + summary["helper_completion_missing_count"]
         + summary["helper_completion_reconciled_count"]
+        + summary["helper_completion_disabled_count"]
     )
+
+
+def test_execution_gate_disabled_job_is_not_reported_as_missing(tmp_path):
+    from scripts import memory_os_3_200_monitor as monitor
+
+    import sys
+    namespace = {"__name__": "remote_probe_test"}
+    original_sys_path = list(sys.path)
+    try:
+        exec(monitor._remote_probe_script().split('\nstatus = load_json_cmd', 1)[0], namespace)
+    finally:
+        sys.path[:] = original_sys_path
+    namespace["_hermes_home"] = str(tmp_path)
+    summary = namespace["_execution_gate_helper_completion_summary"](
+        {"lane": {"name": "job"}},
+        {"job": {"enabled": False, "last_status": "ok", "last_run_at": "2020-01-01T00:00:00Z", "schedule": "* * * * *"}},
+    )
+    assert summary["helper_completion_disabled_lanes"] == ["lane"]
+    assert summary["helper_completion_disabled_count"] == 1
+    assert summary["helper_completion_missing_lanes"] == []
+    assert summary["helper_completion_missing_count"] == 0
+    assert summary["helper_boundary_unobserved_count"] == 0
+    assert summary["helper_completion_expected_count"] == (
+        summary["helper_completion_completed_count"]
+        + summary["helper_completion_missing_count"]
+        + summary["helper_completion_reconciled_count"]
+        + summary["helper_completion_disabled_count"]
+    )
+
+
+def test_execution_gate_disabled_job_with_no_last_status_is_still_disabled_not_missing(tmp_path):
+    from scripts import memory_os_3_200_monitor as monitor
+
+    import sys
+    namespace = {"__name__": "remote_probe_test"}
+    original_sys_path = list(sys.path)
+    try:
+        exec(monitor._remote_probe_script().split('\nstatus = load_json_cmd', 1)[0], namespace)
+    finally:
+        sys.path[:] = original_sys_path
+    namespace["_hermes_home"] = str(tmp_path)
+    summary = namespace["_execution_gate_helper_completion_summary"](
+        {"lane": {"name": "job"}},
+        {"job": {"enabled": False}},
+    )
+    assert summary["helper_completion_disabled_lanes"] == ["lane"]
+    assert summary["helper_completion_missing_lanes"] == []
 
 
 def test_ragflow_disabled_is_cron_success_through_host_wrapper(tmp_path):
