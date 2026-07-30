@@ -356,6 +356,101 @@ def test_spontaneous_expression_completes_execution_gate_envelope_on_delivery_er
     assert records[-1]["result_summary"]["error_type"] == "RuntimeError"
 
 
+def _lane_envelope_records(tmp_path, lane_id: str) -> list[dict]:
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "memory-os" / "system" / "execution_gate_envelopes.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    return [record for record in records if record.get("lane_id") == lane_id]
+
+
+def test_ground_truth_miner_completes_execution_gate_envelope_on_error(tmp_path, monkeypatch):
+    # Counterfactual: GroundTruthMinerModule.run_once() only calls
+    # complete_execution_gate_envelope() on its own happy-path line (mine() at
+    # ground_truth_miner.py). _ground_truth_miner() opened the permit and handed
+    # off with zero exception safety, so a raise inside run_once() orphaned the
+    # permit. Without the try/except fix, this test fails because lane_records
+    # has length 1 (permit only).
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    def fail_run_once(self, **kwargs):
+        raise RuntimeError("synthetic ground truth miner failure")
+
+    monkeypatch.setattr(
+        "plugins.modules.governance.ground_truth_miner.GroundTruthMinerModule.run_once",
+        fail_run_once,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic ground truth miner failure"):
+        runner._ground_truth_miner({})
+
+    lane_records = _lane_envelope_records(tmp_path, "reversible_labels")
+    assert [record["stage"] for record in lane_records] == ["permit", "completion"]
+    assert lane_records[0]["execution_gate_envelope_id"] == lane_records[1]["execution_gate_envelope_id"]
+    assert lane_records[-1]["execution_status"] == "error"
+    assert lane_records[-1]["result_summary"]["error_type"] == "RuntimeError"
+
+
+def test_memory_projection_completes_execution_gate_envelope_on_error(tmp_path, monkeypatch):
+    # Counterfactual: collect_and_project_signals() only calls
+    # complete_execution_gate_envelope() on its own happy-path line. The
+    # _memory_projection() lane opened the permit and delegated with zero
+    # exception safety, so a raise inside the collector orphaned the permit.
+    # Without the try/except fix, this test fails because lane_records has
+    # length 1 (permit only).
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    def fail_collect(*args, **kwargs):
+        raise RuntimeError("synthetic projection failure")
+
+    monkeypatch.setattr(
+        "plugins.memory.memory_os.memory_projection.collect_and_project_signals",
+        fail_collect,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic projection failure"):
+        runner._memory_projection({"host_capability_probe_result": {}})
+
+    lane_records = _lane_envelope_records(tmp_path, "memory_projection_collect")
+    assert [record["stage"] for record in lane_records] == ["permit", "completion"]
+    assert lane_records[0]["execution_gate_envelope_id"] == lane_records[1]["execution_gate_envelope_id"]
+    assert lane_records[-1]["execution_status"] == "error"
+    assert lane_records[-1]["result_summary"]["error_type"] == "RuntimeError"
+
+
+def test_left_brain_advisor_completes_execution_gate_envelope_on_error(tmp_path, monkeypatch):
+    # Counterfactual: run_left_brain_advisor() only calls
+    # complete_execution_gate_envelope() on its own happy-path line. The
+    # _left_brain_advisor() lane opened the permit and delegated with zero
+    # exception safety, so a raise inside the advisor orphaned the permit.
+    # Without the try/except fix, this test fails because lane_records has
+    # length 1 (permit only).
+    store = _init_store(tmp_path)
+    runner = CognitiveLoopRunner(store)
+
+    def fail_advisor(*args, **kwargs):
+        raise RuntimeError("synthetic advisor failure")
+
+    monkeypatch.setattr(
+        "plugins.memory.memory_os.left_brain_advisor.run_left_brain_advisor",
+        fail_advisor,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic advisor failure"):
+        runner._left_brain_advisor({})
+
+    lane_records = _lane_envelope_records(tmp_path, "left_brain_advisor_report")
+    assert [record["stage"] for record in lane_records] == ["permit", "completion"]
+    assert lane_records[0]["execution_gate_envelope_id"] == lane_records[1]["execution_gate_envelope_id"]
+    assert lane_records[-1]["execution_status"] == "error"
+    assert lane_records[-1]["result_summary"]["error_type"] == "RuntimeError"
+
+
 def test_cognitive_loop_continues_after_step_failure(tmp_path, monkeypatch):
     store = _init_store(tmp_path)
     _write_deep_reflection_test_host_config(tmp_path)

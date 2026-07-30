@@ -11,6 +11,7 @@ from .recall_policy import (
     AUTHORITY_FRESHNESS_MATRIX_DIGEST,
     AUTHORITY_FRESHNESS_MATRIX_VERSION,
     OBSERVATION_WINDOW_ID,
+    resolve_authority_rank,
 )
 from .recall_types import RecallObject, RecallType
 
@@ -48,6 +49,7 @@ def build_recall_plan(
     candidates: list[dict[str, Any]] = []
     suppressed: list[dict[str, Any]] = []
     shadow_findings: list[dict[str, Any]] = []
+    unknown_authority_classes: set[str] = set()
     for index, obj in enumerate(objects):
         fingerprint = content_fingerprint(obj.content)
         authority = obj.authority_class or str(obj.metadata.get("authority_class") or "") or _DEFAULT_AUTHORITY.get(obj.recall_type, "")
@@ -56,12 +58,24 @@ def build_recall_plan(
         metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
         source_rev = str(metadata.get("source_updated_at") or "")
         cooldown_escape_reason = _cooldown_escape_reason(obj, current_query=current_query)
+        # Defect-2 fix: `authority` may carry either this module's native
+        # arbitration vocabulary OR a raw substrates-layer vocabulary
+        # string (see recall_policy.resolve_authority_rank). A plain
+        # `_AUTHORITY_RANK.get(authority, 0)` would silently rank an
+        # unrecognized-but-genuinely-authoritative string (e.g.
+        # "local_canonical") at 0 -- the same tier as an intentionally
+        # empty value, and BELOW Hindsight's own "external_unverified"
+        # (rank 1). `resolve_authority_rank` maps known substrates values
+        # explicitly and flags anything recognized by neither vocabulary.
+        authority_rank, authority_recognized = resolve_authority_rank(authority)
+        if not authority_recognized:
+            unknown_authority_classes.add(authority)
         entry = {
             "index": index,
             "object": obj,
             "fingerprint": fingerprint,
             "authority_class": authority,
-            "authority_rank": _AUTHORITY_RANK.get(authority, 0),
+            "authority_rank": authority_rank,
             "freshness": max(0.0, min(1.0, float(obj.freshness))),
             "task_revision": task_revision,
             "source_rev": source_rev,
@@ -221,6 +235,7 @@ def build_recall_plan(
         "near_duplicate_count": near_duplicate_count,
         "ambiguous_pair_count": ambiguous_pair_count,
         "conflict_count": len(conflicts),
+        "unknown_authority_classes": sorted(unknown_authority_classes),
         "used_budget_chars": used_chars,
         "budget_chars": max(0, int(budget_chars)),
         "selected": selected,

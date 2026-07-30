@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -14,6 +15,20 @@ def _repo_root() -> Path:
 
 def _script_path() -> Path:
     return _repo_root() / "scripts" / "memory_os_state_overlay_refresh.py"
+
+
+def _load_refresh_module():
+    """Load memory_os_state_overlay_refresh.py directly (same importlib
+    pattern used by other tests under tests/scripts/), so a test can
+    monkeypatch its module globals in-process instead of only exercising it
+    as an opaque subprocess.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "memory_os_state_overlay_refresh_direct", _script_path(),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class TestStateOverlayRefreshScript:
@@ -170,6 +185,68 @@ class TestStateOverlayRefreshScript:
 
         assert overlay["task_record_id"] == "ata_counterfactualtest01"
         assert "task_source_watermark" not in overlay
+
+
+class TestStateOverlaySectionCounterSingleSourceOfTruth:
+    """Counterfactual for the six-site registry-duplication drift bug: this
+    script's ``section_count`` loop must derive the set of sections from
+    ``state_overlay_schema.OVERLAY_SECTION_FIELDS`` (the single source of
+    truth), not a private hardcoded tuple. A previously hardcoded copy here
+    silently excluded a since-removed section (community_snapshot) from the
+    refresh cron's reported section_count for its entire lifetime.
+    """
+
+    def test_section_count_reflects_a_newly_added_derived_section(self, tmp_path, monkeypatch):
+        module = _load_refresh_module()
+
+        home = tmp_path / ".hermes"
+        (home / "memory-os" / "crystallized").mkdir(parents=True)
+        (home / "memory-os" / "system").mkdir(parents=True)
+
+        # Simulate a future StateOverlay section that isn't among today's
+        # real 8 sections, by extending the derived constant the script
+        # actually imports and injecting it into the built overlay. Without
+        # the fix (a hardcoded tuple in this script), this section would
+        # never be counted no matter what OVERLAY_SECTION_FIELDS says.
+        monkeypatch.setattr(
+            module, "OVERLAY_SECTION_FIELDS",
+            (*module.OVERLAY_SECTION_FIELDS, "future_section"),
+        )
+        original_build = module.build_state_overlay
+
+        def _patched_build(*args, **kwargs):
+            overlay = original_build(*args, **kwargs)
+            overlay["future_section"] = {
+                "data": [{"text": "x", "source": "s", "source_kind": "k"}],
+                "source": "s",
+                "status": "ok",
+            }
+            return overlay
+
+        monkeypatch.setattr(module, "build_state_overlay", _patched_build)
+
+        rc = module.main([
+            "--hermes-home", str(home),
+            "--output", "json",
+        ])
+        assert rc == 0
+
+        json_path = home / "memory-os" / "system" / "state_overlay" / "current.json"
+        overlay = json.loads(json_path.read_text(encoding="utf-8"))
+        assert overlay["future_section"]["status"] == "ok"
+
+        runs_path = home / "memory-os" / "system" / "state_overlay" / "runs.jsonl"
+        last_run = json.loads(runs_path.read_text(encoding="utf-8").strip().splitlines()[-1])
+        # No real data was written (empty home), so only future_section is
+        # "ok" — the count must be exactly 1, proving the injected section
+        # was picked up by the counting loop.
+        assert last_run["sections"] == 1
+
+    def test_no_hand_maintained_section_tuple_remains_in_source(self):
+        """Static guard: the historical hardcoded 8-tuple must not reappear."""
+        source = _script_path().read_text(encoding="utf-8")
+        assert "OVERLAY_SECTION_FIELDS" in source
+        assert '"identity_snapshot", "relationship_snapshot", "active_projects",' not in source
 
 
 class TestStateOverlayCronRegistration:

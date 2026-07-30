@@ -173,6 +173,14 @@ ALLOWED_WRITE_SURFACES: dict[str, str] = {
     "plugins/memory/memory_os/index.py::_write_edge_canonical::append_jsonl_locked_call::edges_path": "graph_edge_canonical",
     "plugins/memory/memory_os/left_brain_advisor.py::_append_jsonl::append_jsonl_locked_call::path": "left_brain_advisor_private_manual_writer",
     "plugins/memory/memory_os/legacy_right_brain_retirement.py::_retire_legacy_right_brain_locked::atomic_json_replace_call::manifest_path": "legacy_right_brain_retirement_manifest",
+    # Community retirement mirrors the legacy_right_brain_retirement precedent
+    # above: an explicitly-invoked, owner-driven host cleanup — never an
+    # automatic lane write, never reached from heartbeat, cognitive loop, or
+    # any cron spec. Both manifest writes are the two phases of one
+    # crash-safe commit (pending -> retired) taken under the retirement write
+    # lock, plus a recovery path that finishes an interrupted run.
+    "scripts/memory_os_community_retirement.py::_retire_community_locked::atomic_json_replace_call::manifest_path": "community_retirement_manifest",
+    "scripts/memory_os_community_retirement.py::_recover_pending_retirement::atomic_json_replace_call::manifest_path": "community_retirement_manifest_recovery",
     "plugins/memory/memory_os/memory_projection.py::_append_jsonl::append_jsonl_locked_call::path": "memory_projection_private_manual_writer",
     "plugins/memory/memory_os/memory_sources.py::append_memory_source_record::append_jsonl_locked_call::path": "memory_sources_existing_surface",
     "plugins/memory/memory_os/owner_actions.py::_append_jsonl::append_jsonl_locked_call::path": "owner_actions_private_writer",

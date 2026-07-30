@@ -937,13 +937,19 @@ def _append_section(sections: list[tuple[str, list[str]]], title: str, lines: li
         sections.append((title, lines))
 
 
-def _overlay_has_data(overlay: dict[str, Any]) -> bool:
-    """Return True if at least one overlay section has actual data."""
-    for key in (
-        "identity_snapshot", "relationship_snapshot", "active_projects",
-        "open_threads", "recent_events", "owner_preferences",
-        "capability_map", "material_index",
-    ):
+def _overlay_has_data(overlay: dict[str, Any], section_keys: tuple[str, ...]) -> bool:
+    """Return True if at least one overlay section has actual data.
+
+    *section_keys* must be the full set of StateOverlay section fields
+    (``state_overlay_schema.OVERLAY_SECTION_FIELDS``) — the caller passes it
+    in rather than this function importing/hardcoding it at module level, so
+    this module keeps its fail-open behavior when the state_overlay feature
+    isn't deployed on a given host (see the guarded import in
+    ``_state_overlay_lines`` below). A previously hardcoded copy of this
+    section list silently excluded a since-removed section (community_snapshot)
+    for its entire lifetime because it was never kept in sync with the schema.
+    """
+    for key in section_keys:
         section = overlay.get(key)
         if isinstance(section, dict) and section.get("status") == "ok":
             return True
@@ -967,6 +973,7 @@ def _state_overlay_lines(
     try:
         from .state_overlay import build_state_overlay as _build
         from .state_overlay_renderer import render_state_overlay_md as _render
+        from .state_overlay_schema import OVERLAY_SECTION_FIELDS
     except ImportError:
         return []
 
@@ -994,7 +1001,7 @@ def _state_overlay_lines(
 
     # Suppress overlay when no section has any data — an empty overlay
     # must not consume prefetch budget or pollute context.
-    if not _overlay_has_data(overlay):
+    if not _overlay_has_data(overlay, OVERLAY_SECTION_FIELDS):
         return []
     try:
         md = _render(overlay)

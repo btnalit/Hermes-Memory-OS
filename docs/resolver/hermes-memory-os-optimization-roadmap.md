@@ -448,16 +448,20 @@ observation_days >= configured_gate
 | R4 状态机 | 非法状态结构上不可写、旧行可读 | 重写 append-only 历史 |
 | R5 认知伙伴 | Owner 反馈与自然质量门满足 | 自动身份/关系写入、强制表达 |
 | R6 性能 | 行为等价且真实资源改善 | 少跑检查、stale cache 伪装加速 |
-| R7 社区 | 伙伴持续运行、真实回复、自然 shared/overlay/scheduler evidence | 用 transport/pairing 冒充关系 live |
+| R7 社区（已迁出，见 §11） | 伙伴持续运行、真实回复、自然 shared/overlay/scheduler evidence | 用 transport/pairing 冒充关系 live |
 
 ---
 
 ## 14. 当前优先级
 
-1. **观察窗（14天）**：流萤 cron 自然运行，记录预算违规、error_record、健康安静时刻。
-2. **社区快照**：定期执行 `build_community_snapshot()` 和 `community_monitor.py` 检查社区状态。
-3. **Sannai 主动管理**：有想法时写纸条给流萤，让自然回路的频率保持。
-4. **社区报纸**：在不忙的时候探索报纸功能，与 Hermes 叔叔聊。
+> **原 1–4 项已迁出（2026-07-29）**：以下四项均属于 Sannai Community（流萤 Track A）功能，
+> 已随 §11 记录的 `community.py` 等模块与 `scripts/community_monitor.py`、
+> `scripts/community_partner_reply.py`、`scripts/deploy_community.py` 一并迁出本仓库，独立为
+> [sannai-community](https://github.com/btnalit/sannai-community)：原「观察窗（14天）：流萤
+> cron 自然运行，记录预算违规、error_record、健康安静时刻」、原「社区快照：定期执行
+> `build_community_snapshot()` 和 `community_monitor.py` 检查社区状态」（两函数均已随迁出删除，
+> 本仓库不再提供）、原「Sannai 主动管理：有想法时写纸条给流萤」、原「社区报纸：探索报纸功能」。
+> 本仓库当前没有可执行的社区相关优先级；后续社区侧当前优先级请见该仓库。
 
 ---
 

@@ -577,6 +577,39 @@ def test_shell_cli_exposes_status_and_doctor_aliases():
     assert left_brain_args.no_write is True
 
 
+def test_shell_cli_rejects_removed_community_alias():
+    """Counterfactual for the "sannai community" CLI alias extraction (commit
+    47bbc13 removed the community feature; the only test asserting the
+    "community" alias parsed and that "community create-partner" raised
+    SystemExit was deleted along with it, and nothing was added asserting
+    the alias is now genuinely rejected).
+
+    If "community" were ever re-registered as a subparser here -- or a stale
+    host copy of this shell plugin still exposed it -- parse_args would
+    silently accept it instead of raising SystemExit on the unknown choice.
+    """
+    module = load_shell_module()
+    parser = argparse.ArgumentParser()
+    module.register_cli(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["community", "status"])
+
+
+def test_shell_exit_code_rejects_community_command_via_allowed_aliases_guard():
+    """_ALLOWED_ALIASES is the only guard in _memory_os_agent_os_exit_code
+    (per plugins/memory-os-agent-os/__init__.py). "community" must not be a
+    member, and passing it through must return exit code 2 like any other
+    unknown command -- never fall through to _delegate_to_memory_os_cli."""
+    module = load_shell_module()
+
+    assert "community" not in module._ALLOWED_ALIASES
+
+    result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="community"))
+
+    assert result == 2
+
+
 def test_shell_status_alias_delegates_to_existing_memory_os_cli(monkeypatch, capsys):
     module = load_shell_module()
     calls: list[argparse.Namespace] = []

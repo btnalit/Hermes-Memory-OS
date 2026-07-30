@@ -58,6 +58,7 @@ from plugins.memory.memory_os.state_overlay import (
     append_overlay_run,
 )
 from plugins.memory.memory_os.state_overlay_renderer import render_state_overlay_md
+from plugins.memory.memory_os.state_overlay_schema import OVERLAY_SECTION_FIELDS
 from plugins.memory.memory_os.task_state import read_effective_current_task
 
 
@@ -108,12 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         # anchor record's own record_id instead, which is real and stable.
         overlay["task_record_id"] = str((effective_task or {}).get("record_id") or "")
 
-        # Count populated sections
-        for key in (
-            "identity_snapshot", "relationship_snapshot", "active_projects",
-            "open_threads", "recent_events", "owner_preferences",
-            "capability_map", "material_index",
-        ):
+        # Count populated sections — derived from OVERLAY_SECTION_FIELDS
+        # (state_overlay_schema.py), the single source of truth for the set
+        # of StateOverlay sections. Do not hand-maintain a separate tuple
+        # here: a previously hardcoded copy silently excluded a since-removed
+        # section for its entire lifetime because it was never kept in sync.
+        for key in OVERLAY_SECTION_FIELDS:
             section = overlay.get(key)
             if isinstance(section, dict) and section.get("status") == "ok":
                 section_count += 1

@@ -97,153 +97,185 @@ class MemoryOSRuntime:
             },
             precheck={"already_processed_event_count": len(already_processed_ids)},
         )
-        session_mirror_auto_apply = auto_apply_graduated_session_mirror(self.store)
-        events = sorted(self.store.read_events(), key=lambda event: event.ts)
-        # Write event_stats cache for O(1) status/monitor reads
-        try:
-            event_dicts = [e.to_dict() for e in events]
-            stats = build_event_stats(event_dicts)
-            stats.events_root = str(self.store.roots.events_root)
-            write_event_stats(self.store.roots, stats)
-        except Exception as _stats_exc:
-            # stats are best-effort; never fail heartbeat for stats
-            _stats_error = build_error_record(
-                component="runtime",
-                operation="heartbeat_write_event_stats",
-                error_code="event_stats_write_failed",
-                severity="warning",
-                recoverable=True,
-                path=event_stats_path(self.store.roots),
-                details={
-                    "error_type": type(_stats_exc).__name__,
-                    "message": str(_stats_exc)[:200],
-                },
-            )
-            try:
-                _snap_state = self._read_state()
-                _snap_state["suppressed_error_count"] = int(_snap_state.get("suppressed_error_count") or 0) + 1
-                _recent = [
-                    str(c) for c in (
-                        _snap_state.get("recent_error_codes")
-                        if isinstance(_snap_state.get("recent_error_codes"), list)
-                        else []
-                    ) if str(c)
-                ]
-                _recent.append("event_stats_write_failed")
-                _snap_state["recent_error_codes"] = _recent[-5:]
-                _snap_state["last_error_record"] = _stats_error
-                self._write_state(_snap_state)
-            except Exception:
-                pass  # state write itself failed — nothing more we can do
-        pending, cap_deferred = select_events_for_inner_drive(
-            events,
-            processed_ids,
-            max_events=max_events,
-            max_events_per_source_class=max_events_per_source_class,
-        )
-        # Secondary dedup: events that slid out of the 2000-ID window may
-        # already have candidates — check the candidate queue to avoid
-        # re-processing them (duplicate WorkingItems + CrystallizedCandidates).
-        _existing_candidate_event_ids: set[str] = set()
-        for _existing in read_candidate_queue(self.store):
-            for _seid in _existing.source_event_ids:
-                _existing_candidate_event_ids.add(_seid)
-        engine = InnerDriveEngine(self.store)
+        envelope_id = str(runtime_gate.get("execution_gate_envelope_id") or "")
+        # Safe defaults for the error-path postcheck below: if an exception is
+        # raised before these are (re)assigned inside the try block, the except
+        # clause must still be able to report accurate (not fabricated) partial
+        # progress instead of raising UnboundLocalError while handling the error.
+        session_mirror_auto_apply: dict[str, Any] = {}
         processed_now: list[str] = []
-        policy_skipped_now: list[str] = []
-        source_class_counts: dict[str, int] = {}
-        candidate_created_count = 0
         working_created_count = 0
-        newly_processed_count = 0
-        for event in pending:
-            # Skip events that already have a candidate (window-overflow dedup);
-            # still track in processed_now for ID windowing but do NOT count
-            # toward cumulative processed_event_count_total (already counted).
-            if event.id in _existing_candidate_event_ids:
+        candidate_created_count = 0
+        try:
+            session_mirror_auto_apply = auto_apply_graduated_session_mirror(self.store)
+            events = sorted(self.store.read_events(), key=lambda event: event.ts)
+            # Write event_stats cache for O(1) status/monitor reads
+            try:
+                event_dicts = [e.to_dict() for e in events]
+                stats = build_event_stats(event_dicts)
+                stats.events_root = str(self.store.roots.events_root)
+                write_event_stats(self.store.roots, stats)
+            except Exception as _stats_exc:
+                # stats are best-effort; never fail heartbeat for stats
+                _stats_error = build_error_record(
+                    component="runtime",
+                    operation="heartbeat_write_event_stats",
+                    error_code="event_stats_write_failed",
+                    severity="warning",
+                    recoverable=True,
+                    path=event_stats_path(self.store.roots),
+                    details={
+                        "error_type": type(_stats_exc).__name__,
+                        "message": str(_stats_exc)[:200],
+                    },
+                )
+                try:
+                    _snap_state = self._read_state()
+                    _snap_state["suppressed_error_count"] = int(_snap_state.get("suppressed_error_count") or 0) + 1
+                    _recent = [
+                        str(c) for c in (
+                            _snap_state.get("recent_error_codes")
+                            if isinstance(_snap_state.get("recent_error_codes"), list)
+                            else []
+                        ) if str(c)
+                    ]
+                    _recent.append("event_stats_write_failed")
+                    _snap_state["recent_error_codes"] = _recent[-5:]
+                    _snap_state["last_error_record"] = _stats_error
+                    self._write_state(_snap_state)
+                except Exception:
+                    pass  # state write itself failed — nothing more we can do
+            pending, cap_deferred = select_events_for_inner_drive(
+                events,
+                processed_ids,
+                max_events=max_events,
+                max_events_per_source_class=max_events_per_source_class,
+            )
+            # Secondary dedup: events that slid out of the 2000-ID window may
+            # already have candidates — check the candidate queue to avoid
+            # re-processing them (duplicate WorkingItems + CrystallizedCandidates).
+            _existing_candidate_event_ids: set[str] = set()
+            for _existing in read_candidate_queue(self.store):
+                for _seid in _existing.source_event_ids:
+                    _existing_candidate_event_ids.add(_seid)
+            engine = InnerDriveEngine(self.store)
+            policy_skipped_now: list[str] = []
+            source_class_counts: dict[str, int] = {}
+            newly_processed_count = 0
+            for event in pending:
+                # Skip events that already have a candidate (window-overflow dedup);
+                # still track in processed_now for ID windowing but do NOT count
+                # toward cumulative processed_event_count_total (already counted).
+                if event.id in _existing_candidate_event_ids:
+                    processed_ids.add(event.id)
+                    processed_now.append(event.id)
+                    continue
+                result = engine.process_event(event)
+                source_class = result.decision.source_class
+                source_class_counts[source_class] = source_class_counts.get(source_class, 0) + 1
+                if result.working_item is not None:
+                    working_created_count += 1
+                if result.candidate is not None:
+                    append_candidate_queue(self.store, result.candidate)
+                    candidate_created_count += 1
+                if result.working_item is None and result.candidate is None:
+                    policy_skipped_now.append(event.id)
                 processed_ids.add(event.id)
                 processed_now.append(event.id)
-                continue
-            result = engine.process_event(event)
-            source_class = result.decision.source_class
-            source_class_counts[source_class] = source_class_counts.get(source_class, 0) + 1
-            if result.working_item is not None:
-                working_created_count += 1
-            if result.candidate is not None:
-                append_candidate_queue(self.store, result.candidate)
-                candidate_created_count += 1
-            if result.working_item is None and result.candidate is None:
-                policy_skipped_now.append(event.id)
-            processed_ids.add(event.id)
-            processed_now.append(event.id)
-            newly_processed_count += 1
+                newly_processed_count += 1
 
-        working = WorkingMemoryService(self.store)
-        decayed_documents: list[str] = []
-        pruned_total = 0
-        for kind in sorted(ALLOWED_WORKING_KINDS):
-            before = working.read_document(kind)
-            if before.get("items"):
-                working.decay_items(kind, now=current, audit_write=False)
-                pruned_total += working.prune_expired_items(kind, now=current, audit_write=False)
-                decayed_documents.append(kind)
+            working = WorkingMemoryService(self.store)
+            decayed_documents: list[str] = []
+            pruned_total = 0
+            for kind in sorted(ALLOWED_WORKING_KINDS):
+                before = working.read_document(kind)
+                if before.get("items"):
+                    working.decay_items(kind, now=current, audit_write=False)
+                    pruned_total += working.prune_expired_items(kind, now=current, audit_write=False)
+                    decayed_documents.append(kind)
 
-        latest_processed_event_id = processed_now[-1] if processed_now else str(state.get("last_processed_event_id") or "")
-        current_ts = current.isoformat()
-        # Maintain full processed ledger for dedup (primary) + recent window (shadow/observability).
-        # Full ledger is restored until EventCursor apply takes over dedup.
-        prev_full = list(state.get("processed_event_ids") or state.get("recent_processed_event_ids", []))
-        full_processed_ids = _dedupe_preserve_order(prev_full + processed_now)
-        recent_processed_ids = full_processed_ids[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
-        self._write_state(
-            {
-                "schema_version": "memory-os.runtime_state.v0",
-                "last_attempt_at": current_ts,
-                "last_heartbeat_at": current_ts,
-                "processed_event_count": state.get("processed_event_count_total", 0) + newly_processed_count,
-                "processed_event_count_total": state.get("processed_event_count_total", 0) + newly_processed_count,
-                "last_processed_event_id": latest_processed_event_id,
-                "last_processed_event_ts": current_ts,
-                "processed_event_ids": full_processed_ids,
-                "recent_processed_event_ids": recent_processed_ids,
-                "recent_processed_event_ids_limit": RECENT_PROCESSED_EVENT_IDS_LIMIT,
-                "processed_event_ids_compacted": False,
+            latest_processed_event_id = processed_now[-1] if processed_now else str(state.get("last_processed_event_id") or "")
+            current_ts = current.isoformat()
+            # Maintain full processed ledger for dedup (primary) + recent window (shadow/observability).
+            # Full ledger is restored until EventCursor apply takes over dedup.
+            prev_full = list(state.get("processed_event_ids") or state.get("recent_processed_event_ids", []))
+            full_processed_ids = _dedupe_preserve_order(prev_full + processed_now)
+            recent_processed_ids = full_processed_ids[-RECENT_PROCESSED_EVENT_IDS_LIMIT:]
+            self._write_state(
+                {
+                    "schema_version": "memory-os.runtime_state.v0",
+                    "last_attempt_at": current_ts,
+                    "last_heartbeat_at": current_ts,
+                    "processed_event_count": state.get("processed_event_count_total", 0) + newly_processed_count,
+                    "processed_event_count_total": state.get("processed_event_count_total", 0) + newly_processed_count,
+                    "last_processed_event_id": latest_processed_event_id,
+                    "last_processed_event_ts": current_ts,
+                    "processed_event_ids": full_processed_ids,
+                    "recent_processed_event_ids": recent_processed_ids,
+                    "recent_processed_event_ids_limit": RECENT_PROCESSED_EVENT_IDS_LIMIT,
+                    "processed_event_ids_compacted": False,
+                }
+            )
+            index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
+            approved_crystallized_record_count = int(index_counts.get("crystallized_records", 0) or 0)
+            report = {
+                "schema_version": "memory-os.heartbeat.v0",
+                "processed_event_count": len(processed_now),
+                "processed_event_ids": processed_now,
+                "policy_skipped_event_count": len(policy_skipped_now),
+                "policy_skipped_event_ids": policy_skipped_now,
+                "cap_deferred_event_count": len(cap_deferred),
+                "cap_deferred_event_ids": [event.id for event in cap_deferred],
+                "source_class_counts": source_class_counts,
+                "working_created_count": working_created_count,
+                "candidate_created_count": candidate_created_count,
+                "already_processed_event_count": len([event for event in events if event.id in already_processed_ids]),
+                "total_event_count": len(events),
+                "working_item_count": _working_item_count(self.store),
+                "candidate_count": len(read_candidate_queue(self.store.roots)),
+                "crystallized_record_count": approved_crystallized_record_count,
+                "approved_crystallized_record_count": approved_crystallized_record_count,
+                "legacy_markdown_record_block_count": _legacy_markdown_record_block_count(self.store),
+                "index_counts": index_counts,
+                "decayed_documents": decayed_documents,
+                "pruned_working_items": pruned_total,
+                "runtime_state_path": str(self._state_path),
+                "session_mirror_auto_apply": _bounded_session_mirror_auto_apply(session_mirror_auto_apply),
+                "session_mirror_auto_apply_written_event_ids_count": int(
+                    session_mirror_auto_apply.get("written_event_ids_count") or 0
+                ),
+                "runtime_heartbeat_core_execution_gate_envelope_id": envelope_id,
             }
-        )
-        index_counts = MemoryOSIndex(self.store.roots).sync_from_store(self.store)
-        approved_crystallized_record_count = int(index_counts.get("crystallized_records", 0) or 0)
-        report = {
-            "schema_version": "memory-os.heartbeat.v0",
-            "processed_event_count": len(processed_now),
-            "processed_event_ids": processed_now,
-            "policy_skipped_event_count": len(policy_skipped_now),
-            "policy_skipped_event_ids": policy_skipped_now,
-            "cap_deferred_event_count": len(cap_deferred),
-            "cap_deferred_event_ids": [event.id for event in cap_deferred],
-            "source_class_counts": source_class_counts,
-            "working_created_count": working_created_count,
-            "candidate_created_count": candidate_created_count,
-            "already_processed_event_count": len([event for event in events if event.id in already_processed_ids]),
-            "total_event_count": len(events),
-            "working_item_count": _working_item_count(self.store),
-            "candidate_count": len(read_candidate_queue(self.store.roots)),
-            "crystallized_record_count": approved_crystallized_record_count,
-            "approved_crystallized_record_count": approved_crystallized_record_count,
-            "legacy_markdown_record_block_count": _legacy_markdown_record_block_count(self.store),
-            "index_counts": index_counts,
-            "decayed_documents": decayed_documents,
-            "pruned_working_items": pruned_total,
-            "runtime_state_path": str(self._state_path),
-            "session_mirror_auto_apply": _bounded_session_mirror_auto_apply(session_mirror_auto_apply),
-            "session_mirror_auto_apply_written_event_ids_count": int(
-                session_mirror_auto_apply.get("written_event_ids_count") or 0
-            ),
-            "runtime_heartbeat_core_execution_gate_envelope_id": str(
-                runtime_gate.get("execution_gate_envelope_id") or ""
-            ),
-        }
+        except Exception as exc:
+            complete_execution_gate_envelope(
+                self.store,
+                envelope_id=envelope_id,
+                lane_id="runtime_heartbeat_core",
+                execution_status="error",
+                postcheck={
+                    "processed_event_count": len(processed_now),
+                    "working_created_count": working_created_count,
+                    "candidate_created_count": candidate_created_count,
+                    "boundary": {
+                        "actual_send": False,
+                        "actual_execute": False,
+                        "actual_identity_write": False,
+                        "actual_unapproved_crystallized_approval": False,
+                    },
+                },
+                result_summary={
+                    "error_type": type(exc).__name__,
+                    "message": str(exc)[:200],
+                    "processed_event_count": len(processed_now),
+                    "session_mirror_auto_apply_written_event_ids_count": int(
+                        session_mirror_auto_apply.get("written_event_ids_count") or 0
+                    ),
+                },
+            )
+            raise
         complete_execution_gate_envelope(
             self.store,
-            envelope_id=str(runtime_gate.get("execution_gate_envelope_id") or ""),
+            envelope_id=envelope_id,
             lane_id="runtime_heartbeat_core",
             execution_status="ok",
             postcheck={

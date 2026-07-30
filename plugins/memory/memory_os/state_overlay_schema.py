@@ -8,9 +8,9 @@ with ``status="insufficient_data"`` rather than fabricated.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, get_type_hints
 
 STATE_OVERLAY_SCHEMA_VERSION = "memory-os.state_overlay.v1"
 
@@ -92,18 +92,41 @@ class StateOverlay:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "schema_version": self.schema_version,
             "generated_at": self.generated_at,
             "profile": self.profile,
-            "identity_snapshot": self.identity_snapshot.to_dict(),
-            "relationship_snapshot": self.relationship_snapshot.to_dict(),
-            "active_projects": self.active_projects.to_dict(),
-            "open_threads": self.open_threads.to_dict(),
-            "recent_events": self.recent_events.to_dict(),
-            "owner_preferences": self.owner_preferences.to_dict(),
-            "capability_map": self.capability_map.to_dict(),
-            "material_index": self.material_index.to_dict(),
-            "risk_notes": list(self.risk_notes),
-            "evidence_refs": list(self.evidence_refs),
         }
+        for name in OVERLAY_SECTION_FIELDS:
+            result[name] = getattr(self, name).to_dict()
+        result["risk_notes"] = list(self.risk_notes)
+        result["evidence_refs"] = list(self.evidence_refs)
+        return result
+
+
+def _compute_overlay_section_fields() -> tuple[str, ...]:
+    """Derive the ordered list of ``StateOverlay`` fields typed ``OverlaySection``.
+
+    This is the single source of truth for "what overlay sections exist".
+    Every other site that needs to enumerate sections — the renderer's
+    labels/short-list, prefetch's has-data check, the refresh script's
+    section counter, and the retriever's section tuple — must derive from
+    this constant instead of hand-maintaining its own copy.
+
+    That hand-maintenance is exactly what caused a real drift bug: when
+    ``community_snapshot`` was removed from this dataclass, several other
+    hardcoded copies elsewhere in the codebase were never updated, and the
+    section silently vanished from those consumers for its entire lifetime
+    without anyone noticing.
+
+    Order matches declaration order in :class:`StateOverlay`, which matches
+    the historical explicit key order used by ``to_dict()``.
+    """
+    hints = get_type_hints(StateOverlay)
+    return tuple(
+        f.name for f in fields(StateOverlay)
+        if hints.get(f.name) is OverlaySection
+    )
+
+
+OVERLAY_SECTION_FIELDS: tuple[str, ...] = _compute_overlay_section_fields()

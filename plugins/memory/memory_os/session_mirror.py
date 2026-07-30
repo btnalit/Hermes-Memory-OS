@@ -291,6 +291,11 @@ class SessionMirror:
 
     def __init__(self, store: MemoryOSStore) -> None:
         self.store = store
+        # Bounded error records for session files that could not be read or
+        # parsed during the most recent _read_session_json_files() pass.
+        # A dropped session file must never be indistinguishable from one
+        # that never existed — `doctor()` surfaces these as findings.
+        self._session_read_error_records: list[dict[str, Any]] = []
 
     @property
     def state_db_path(self) -> Path:
@@ -338,6 +343,20 @@ class SessionMirror:
                 findings.append(_finding("session_state_db_unreadable", "error", "state.db cannot be read in read-only mode", {"error": str(exc)}))
         if self.sessions_root.exists() and not self.sessions_root.is_dir():
             findings.append(_finding("sessions_root_not_directory", "error", "sessions root exists but is not a directory"))
+        if self.sessions_root.is_dir():
+            # Surface session files that were skipped during discovery. Without
+            # this, a dropped session is indistinguishable from one that never
+            # existed: it silently never reaches the auto-apply candidate list.
+            self._read_session_json_files()
+            for error_record in self._session_read_error_records:
+                findings.append(
+                    _finding(
+                        str(error_record.get("error_code") or "session_json_unreadable"),
+                        "warning",
+                        "A session file was skipped and excluded from the SessionMirror candidate list.",
+                        {"error_record": error_record},
+                    )
+                )
         status = "error" if any(finding["severity"] == "error" for finding in findings) else "ok"
         return {
             "schema_version": "memory-os.session_mirror_doctor.v0",
@@ -551,12 +570,38 @@ class SessionMirror:
         if not self.sessions_root.exists():
             return []
         sessions: list[dict[str, Any]] = []
+        self._session_read_error_records = []
         for path in sorted(self.sessions_root.glob("session_*.json")):
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                # A truncated / non-UTF8 / unreadable session file used to be
+                # skipped silently, so it simply vanished from the auto-apply
+                # candidate list with no operator-visible signal.
+                self._session_read_error_records.append(
+                    build_error_record(
+                        component="session_mirror",
+                        operation="read_session_json_files",
+                        error_code="session_json_unreadable",
+                        severity="warning",
+                        recoverable=True,
+                        path=path,
+                        details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+                    )
+                )
                 continue
             if not isinstance(data, dict):
+                self._session_read_error_records.append(
+                    build_error_record(
+                        component="session_mirror",
+                        operation="read_session_json_files",
+                        error_code="session_json_not_an_object",
+                        severity="warning",
+                        recoverable=True,
+                        path=path,
+                        details={"parsed_type": type(data).__name__},
+                    )
+                )
                 continue
             session_id = str(data.get("id") or data.get("session_id") or path.stem)
             platform = str(data.get("platform") or data.get("source") or data.get("channel") or "unknown")

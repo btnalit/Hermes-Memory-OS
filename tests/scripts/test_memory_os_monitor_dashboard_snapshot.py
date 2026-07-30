@@ -7,6 +7,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
 from plugins.memory.memory_os.legacy_right_brain_retirement import retire_legacy_right_brain
 
 
@@ -790,6 +791,45 @@ def test_expression_feedback_is_optional_when_expression_is_disabled():
     module = _load_module()
     assert "memory-os-expression-feedback-request" not in module.CORE_MEMORY_OS_CRON
     assert "memory-os-expression-feedback-request" in module.OPTIONAL_MEMORY_OS_CRON
+
+
+def test_core_and_optional_cron_sets_exhaustively_cover_the_registry():
+    """Counterfactual for registry drift in the dashboard's cron health
+    classification. CORE_MEMORY_OS_CRON and OPTIONAL_MEMORY_OS_CRON must
+    together cover every name in memory_os_cron_specs() -- a name that
+    falls into neither set silently lands in the "other" bucket
+    (_cron_snapshot's other_jobs / classifications["other"]) and never
+    increments missing_core or optional_paused, so the monitor never WARNs
+    if that job is disabled or deleted on a host.
+
+    Before this fix, memory-os-hindsight-advisory-digest,
+    memory-os-hindsight-health-probe, and memory-os-clearance-cycle were
+    all real registered, active-closure-installed cron jobs missing from
+    both hand-typed sets. This test fails without the fix (both sets were
+    static, hand-typed frozensets that predated those specs) and passes
+    once CORE/OPTIONAL are derived from the registry.
+    """
+    module = _load_module()
+    all_names = {spec.name for spec in memory_os_cron_specs()}
+
+    assert module.CORE_MEMORY_OS_CRON.isdisjoint(module.OPTIONAL_MEMORY_OS_CRON)
+    assert module.CORE_MEMORY_OS_CRON | module.OPTIONAL_MEMORY_OS_CRON == all_names
+
+
+def test_hindsight_and_clearance_cron_are_not_left_unclassified():
+    """Direct counterfactual for the three specific jobs identified as
+    missing from the dashboard's hand-typed CORE/OPTIONAL sets. All three
+    are unconditionally onboarded on active-closure hosts (none has a
+    documented reason to tolerate being paused), so all three belong in
+    CORE, not OPTIONAL and not unclassified."""
+    module = _load_module()
+    for name in (
+        "memory-os-hindsight-advisory-digest",
+        "memory-os-hindsight-health-probe",
+        "memory-os-clearance-cycle",
+    ):
+        assert name in module.CORE_MEMORY_OS_CRON, name
+        assert name not in module.OPTIONAL_MEMORY_OS_CRON, name
 
 
 def test_retired_right_brain_is_removed_from_active_cron_surface(tmp_path):

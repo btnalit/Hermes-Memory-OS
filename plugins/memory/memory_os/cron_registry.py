@@ -17,6 +17,17 @@ RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES = frozenset(
         *RETIRED_MEMORY_OS_CRON_SCRIPTS.values(),
         "memory_os_right_brain_expression.py",
         "memory_os_right_brain_expression_outcome_cron.py",
+        # Commit 47bbc13 extracted the "sannai community" feature (see
+        # docs/resolver/hermes-memory-os-optimization-roadmap.md section 11)
+        # out of the repo, but these self-contained community cron scripts
+        # (no ExecutionGate wrapper ever existed for them) can still be
+        # running on already-deployed hosts. Neither their job "name" nor
+        # "script" starts with "memory-os-"/"memory_os_", so without a raw
+        # script-name entry here they fall through to external_unmanaged
+        # (invisible drift) in classify_hermes_cron_jobs instead of the
+        # retired_legacy bucket.
+        "community_monitor.py",
+        "community_partner_reply.py",
     }
 )
 

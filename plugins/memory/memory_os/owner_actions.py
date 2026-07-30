@@ -158,6 +158,28 @@ PERMANENT_PROMOTION_ACTION_TYPES = {
     "defer_permanent_promotion",
 }
 
+# `_surface_action_token_map` recomputes stable `oa_` tokens from CURRENT live
+# state, so a surface-token match is not proof that a digest was ever rendered,
+# delivered, or recorded. When a caller demands a recorded digest binding (the
+# Hermes reply ingress always does), only these actions may be resolved from a
+# surface token — each one is surfaced to the owner by its own bounded review
+# surface and none is on the permanent OwnerGate boundary:
+#   * mark_feedback / expression feedback — report-only rating writes.
+#   * apply_proposal — already owner-approved, OpsGate would_allow, bounded
+#     proposal kinds only, and published with an explicit apply affordance by
+#     `_attach_proposal_followup_apply_actions`.
+# Everything else defaults to refused, which today means the OwnerGate-class
+# crystallized revoke/demote pair from `_crystallized_revoke_action_token_map`
+# (never rendered into any digest or owner surface, so a surface match there is
+# only ever an offline-computed token) and any surface map added later.
+DIGEST_OPTIONAL_SURFACE_ACTION_TYPES = frozenset(
+    {"mark_feedback", "apply_proposal", *EXPRESSION_FEEDBACK_ACTION_TYPES}
+)
+
+DIGEST_OPTIONAL_SURFACE_TARGET_TYPES = frozenset(
+    {"memory_source", "expression", "proposal"}
+)
+
 ACTION_TYPES = {
     "approve_candidate",
     "reject_candidate",
@@ -370,13 +392,34 @@ def _candidate_aggregation_status_block(store: MemoryOSStore) -> dict[str, Any]:
                     component="owner_actions._candidate_aggregation_status_block",
                     operation="candidate_aggregation_status_read",
                     error_code="candidate_aggregation_status_read_failed",
-                    severity="warn",
+                    severity="warning",
                     recoverable=True,
                     details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
                 ),
             )
-        except Exception:
-            pass
+        except Exception as record_exc:
+            try:
+                append_audit(
+                    store.roots.audit_path,
+                    action="owner_digest_error_record_failed",
+                    status="warning",
+                    target=str(store.roots.memory_os_root / "system" / "error_records.jsonl"),
+                    details={
+                        "component": "owner_actions._candidate_aggregation_status_block",
+                        "operation": "candidate_aggregation_status_read",
+                        "original_error_type": type(exc).__name__,
+                        "original_error_message": str(exc)[:200],
+                        "error_record_write_error_type": type(record_exc).__name__,
+                        "error_record_write_error_message": str(record_exc)[:200],
+                    },
+                )
+            except Exception as audit_exc:
+                print(
+                    "Memory-OS owner digest candidate aggregation error reporting failed: "
+                    f"record={type(record_exc).__name__}:{str(record_exc)[:120]} "
+                    f"audit={type(audit_exc).__name__}:{str(audit_exc)[:120]}",
+                    file=sys.stderr,
+                )
         latest = None
     if not latest:
         return {
@@ -2095,6 +2138,16 @@ def parse_owner_review_reply(
         max_fyi=max_fyi,
     )
     surface_token_match = _surface_action_token_map(store.roots).get(action_token) if action_token else None
+    if surface_token_match is not None and require_recorded_digest:
+        # OwnerGate boundary: surface token maps are derived from live state, so
+        # they can never substitute for proof that a digest was recorded. Drop
+        # high-risk surface matches here so the token must be found in the
+        # resolved recorded digest below. Reuses the existing not-found reason
+        # codes on purpose — the reply ingress retries its other candidate
+        # channels for exactly those reasons, and a legitimate token recorded on
+        # another channel must still resolve.
+        if not _surface_token_allowed_without_recorded_digest(surface_token_match):
+            surface_token_match = None
     if binding == "digest_not_found" and not surface_token_match:
         return _reply_result(
             status="needs_clarification",
@@ -2122,7 +2175,11 @@ def parse_owner_review_reply(
     if action_token:
         token_match = _rendered_action_token_map(rendered).get(action_token)
         if not token_match:
-            token_match = surface_token_match or _surface_action_token_map(store.roots).get(action_token)
+            # Deliberately reuse the single surface lookup resolved above: a
+            # second `_surface_action_token_map` call would recompute the same
+            # live-state map and re-admit high-risk tokens that the
+            # recorded-digest guard just refused.
+            token_match = surface_token_match
         if token_match:
             item = token_match["item"]
             action_type = str(token_match.get("action_type") or "")
@@ -5834,6 +5891,24 @@ def _review_action(verb: str, action_type: str, target_type: str, target_id: str
 
 
 def _action_token(*, action_type: str, target_type: str, target_id: str) -> str:
+    """Stable, PUBLIC owner-action identity — never a secret, never an authority.
+
+    The digest is a keyless SHA256 over public-format strings, so anyone who
+    learns an action type plus a target id (both of which appear in prefetch
+    context, digests, and `safe_source_ids`) can recompute the token offline.
+    Contrast `permanent_promotion.issue_token`, which mints `ppmt_` tokens from
+    `secrets.token_urlsafe(32)` and is a real bearer secret — that is why
+    `_redact_permanent_action_tokens` redacts `ppmt_` but leaves `oa_` in place.
+
+    Consequences for every caller:
+      * An `oa_` token proves owner INTENT only in combination with a recorded
+        digest binding, or with a low-risk surface allowlisted by
+        `_surface_token_allowed_without_recorded_digest`. It is never on its own
+        proof that the owner saw or approved anything.
+      * Do not add a new `_surface_action_token_map` contributor for any
+        OwnerGate-class action expecting the token itself to gate it.
+    """
+
     payload = "|".join([str(action_type), str(target_type), str(target_id)])
     return "oa_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:14]
 
@@ -5954,7 +6029,7 @@ def _rendered_digest_text(
                         component="owner_actions._rendered_digest_text",
                         operation="edge_digest_query",
                         error_code="edge_digest_query_failed",
-                        severity="warn",
+                        severity="warning",
                         recoverable=True,
                         details={"error_type": type(exc).__name__, "message": str(exc)[:200]},
                     ),
@@ -6159,6 +6234,28 @@ MEMORY_SOURCE_FEEDBACK_CONTEXT_RATINGS = (
     "clarification_selected",
     "clarification_rejected",
 )
+
+
+def _surface_token_allowed_without_recorded_digest(token_match: dict[str, Any] | None) -> bool:
+    """Only low-risk feedback surface tokens may act without a recorded digest.
+
+    Surface token maps are recomputed from current live state, so matching one
+    proves nothing about digest delivery. Callers that require a recorded digest
+    binding must not let a surface match stand in for that proof on any
+    OwnerGate-class action (crystallized revoke/demote, proposal apply, speak
+    permission, session-mirror graduation, provisional confirm, permanent
+    promotion). Both the action type and the target type must be low risk, so a
+    future surface map cannot widen the hole by reusing a feedback action type
+    against a governed target.
+    """
+
+    if not isinstance(token_match, dict):
+        return False
+    action_type = str(token_match.get("action_type") or "")
+    target_type = str(token_match.get("target_type") or "")
+    if action_type not in DIGEST_OPTIONAL_SURFACE_ACTION_TYPES:
+        return False
+    return target_type in DIGEST_OPTIONAL_SURFACE_TARGET_TYPES
 
 
 def _surface_action_token_map(roots: MemoryOSRoots) -> dict[str, dict[str, Any]]:

@@ -13,6 +13,7 @@ from plugins.memory.memory_os.state_overlay_schema import (
     OverlayEntry,
     OverlaySection,
     STATE_OVERLAY_SCHEMA_VERSION,
+    OVERLAY_SECTION_FIELDS,
 )
 from plugins.memory.memory_os.state_overlay import (
     build_state_overlay,
@@ -101,19 +102,39 @@ class TestStateOverlaySchema:
         assert overlay.schema_version == STATE_OVERLAY_SCHEMA_VERSION
 
     def test_state_overlay_to_dict_has_all_sections(self):
+        """Expectation is derived from OVERLAY_SECTION_FIELDS (the dataclass's
+        own fields typed OverlaySection) rather than a hand-typed list. A
+        hand-typed list here was itself part of a real drift bug: it was kept
+        in sync with to_dict() only, so it never caught that four other
+        consumers had silently dropped a removed section.
+        """
         overlay = StateOverlay.create(profile="test")
         d = overlay.to_dict()
         assert d["schema_version"] == STATE_OVERLAY_SCHEMA_VERSION
-        for key in (
-            "identity_snapshot", "relationship_snapshot", "active_projects",
-            "open_threads", "recent_events", "owner_preferences",
-            "capability_map", "material_index",
-        ):
+        # Sanity: the derivation actually found the sections (guards against
+        # a no-op that would make every assertion below vacuously true).
+        assert len(OVERLAY_SECTION_FIELDS) == 8
+        for key in OVERLAY_SECTION_FIELDS:
             assert key in d
             assert isinstance(d[key], dict)
             assert "status" in d[key]
             assert "source" in d[key]
             assert "data" in d[key]
+
+    def test_state_overlay_to_dict_key_order_matches_declaration_order(self):
+        """Byte-identical serialization guarantee (constraint 4): to_dict()'s
+        key order must still be schema_version, generated_at, profile, each
+        section in declaration order, risk_notes, evidence_refs — unchanged
+        by the refactor to derive sections from OVERLAY_SECTION_FIELDS.
+        """
+        d = StateOverlay.create(profile="test").to_dict()
+        assert list(d.keys()) == [
+            "schema_version", "generated_at", "profile",
+            "identity_snapshot", "relationship_snapshot", "active_projects",
+            "open_threads", "recent_events", "owner_preferences",
+            "capability_map", "material_index",
+            "risk_notes", "evidence_refs",
+        ]
 
 
 # ── Builder tests ────────────────────────────────────────────────────
@@ -640,3 +661,121 @@ class TestPrefetchStateOverlayIntegration:
         assert lines
         assert lines[0] != "### Memory State Overlay"
         assert all(line != "### Memory State Overlay" for line in lines)
+
+
+# ── Registry single-source-of-truth tests ────────────────────────────
+#
+# These guard against the confirmed drift bug: the set of StateOverlay
+# sections used to be hand-duplicated across six independent sites with no
+# shared source of truth. When `community_snapshot` was removed from the
+# dataclass, three of those sites were never updated and the section quietly
+# vanished from `_overlay_has_data`, the refresh cron's `section_count`, and
+# the retriever — for its *entire* lifetime, with no test catching it,
+# because the old version of `test_state_overlay_to_dict_has_all_sections`
+# (above) was itself a seventh hand-typed copy, kept in sync with `to_dict()`
+# only.
+#
+# Every site now derives from `OVERLAY_SECTION_FIELDS`
+# (state_overlay_schema.py). The tests below fail if that stops being true.
+
+
+class TestOverlaySectionRegistrySingleSourceOfTruth:
+    def test_renderer_labels_cover_every_derived_section(self):
+        """Site 2 (state_overlay_renderer._SECTION_LABELS) must have a label
+        for every section — not more, not fewer."""
+        from plugins.memory.memory_os.state_overlay_renderer import _SECTION_LABELS
+        assert set(_SECTION_LABELS) == set(OVERLAY_SECTION_FIELDS)
+
+    def test_renderer_short_sections_is_valid_subset(self):
+        """Site 3 (_SHORT_SECTIONS) is a deliberate subset — must not
+        reference a section name that doesn't exist (typo/removed-section
+        guard)."""
+        from plugins.memory.memory_os.state_overlay_renderer import _SHORT_SECTIONS
+        assert _SHORT_SECTIONS <= set(OVERLAY_SECTION_FIELDS)
+        assert _SHORT_SECTIONS  # non-trivial subset
+
+    def test_renderer_placeholder_sections_is_valid_subset(self):
+        """The renderer's "skip insufficient_data marker" subset must not
+        reference a section name that doesn't exist."""
+        from plugins.memory.memory_os.state_overlay_renderer import _PLACEHOLDER_SECTIONS
+        assert _PLACEHOLDER_SECTIONS <= set(OVERLAY_SECTION_FIELDS)
+
+    def test_renderer_raises_loudly_on_unlabeled_section(self):
+        """Counterfactual: if a section were added to the dataclass and left
+        unlabeled, the renderer must fail loudly at (re-)validation time
+        instead of silently rendering it blank. Simulates the addition via a
+        synthetic extended tuple rather than mutating StateOverlay itself.
+        """
+        from plugins.memory.memory_os.state_overlay_renderer import (
+            _assert_labels_cover_all_sections,
+        )
+        with pytest.raises(RuntimeError, match="community_snapshot"):
+            _assert_labels_cover_all_sections(("community_snapshot", *OVERLAY_SECTION_FIELDS))
+        # And the real, current section set must still validate cleanly.
+        _assert_labels_cover_all_sections(OVERLAY_SECTION_FIELDS)
+
+    def test_retriever_sections_partition_the_full_derived_set(self):
+        """Site 6 (retrievers/state_overlay.py) must classify every section
+        as either retrievable or explicitly not-retrievable — the union must
+        equal the full derived set with no overlap."""
+        from plugins.memory.memory_os.retrievers.state_overlay import (
+            _RETRIEVABLE_SECTIONS,
+            _NOT_RETRIEVABLE_SECTIONS,
+        )
+        retrievable = set(_RETRIEVABLE_SECTIONS)
+        assert retrievable | _NOT_RETRIEVABLE_SECTIONS == set(OVERLAY_SECTION_FIELDS)
+        assert retrievable & _NOT_RETRIEVABLE_SECTIONS == set()
+        # No duplicate entries within the retrievable tuple itself.
+        assert len(_RETRIEVABLE_SECTIONS) == len(retrievable)
+
+    def test_retriever_raises_loudly_on_unclassified_section(self):
+        """Counterfactual: if a section were added to the dataclass and left
+        unclassified here, the retriever must fail loudly instead of
+        silently omitting it from recall (exactly what happened to
+        community_snapshot)."""
+        from plugins.memory.memory_os.retrievers.state_overlay import (
+            _assert_sections_classified,
+        )
+        with pytest.raises(RuntimeError, match="community_snapshot"):
+            _assert_sections_classified(("community_snapshot", *OVERLAY_SECTION_FIELDS))
+        _assert_sections_classified(OVERLAY_SECTION_FIELDS)
+
+    def test_overlay_has_data_honors_whatever_section_keys_it_is_given(self):
+        """Site 4 (prefetch._overlay_has_data) must have no private hardcoded
+        section list of its own — its result must depend entirely on the
+        section_keys argument the caller (prefetch._state_overlay_lines)
+        passes in, which is OVERLAY_SECTION_FIELDS. Simulates a newly added
+        section ('future_section') to prove detection isn't tied to a fixed
+        list baked into this function.
+        """
+        from plugins.memory.memory_os.prefetch import _overlay_has_data
+
+        overlay = {
+            "identity_snapshot": {"status": "insufficient_data"},
+            "future_section": {"status": "ok"},
+        }
+        # Without the new section wired into the passed-in key list, it's
+        # invisible — this is the historical bug, reproduced deliberately.
+        assert _overlay_has_data(overlay, OVERLAY_SECTION_FIELDS) is False
+        # Once the (derived) key list includes it, it's detected.
+        assert _overlay_has_data(overlay, (*OVERLAY_SECTION_FIELDS, "future_section")) is True
+
+    def test_refresh_script_section_counter_uses_derived_fields(self):
+        """Site 5 (scripts/memory_os_state_overlay_refresh.py) must import
+        OVERLAY_SECTION_FIELDS rather than hand-maintaining its own tuple.
+        Direct behavioral coverage (via subprocess + monkeypatched module)
+        lives in tests/scripts/test_memory_os_state_overlay_refresh.py; this
+        is a lightweight static check that the import exists and matches.
+        """
+        script_path = (
+            Path(__file__).resolve().parents[3]
+            / "scripts" / "memory_os_state_overlay_refresh.py"
+        )
+        source = script_path.read_text(encoding="utf-8")
+        assert "OVERLAY_SECTION_FIELDS" in source
+        assert (
+            "from plugins.memory.memory_os.state_overlay_schema import "
+            "OVERLAY_SECTION_FIELDS" in source
+        )
+        # And the old hand-typed tuple must be gone.
+        assert '"identity_snapshot", "relationship_snapshot", "active_projects",' not in source

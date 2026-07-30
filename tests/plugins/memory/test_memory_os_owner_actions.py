@@ -2505,6 +2505,157 @@ def test_owner_review_reply_can_demote_crystallized_record_by_token(tmp_path):
     assert projection["projection_stale_count"] == 0
 
 
+def _crystallized_record_id_for_forgery(store) -> str:
+    append_candidate_queue(store, _candidate())
+    apply_owner_action(
+        store,
+        action_type="approve_candidate",
+        target="candidate:cand_owner_001",
+        owner_id="owner",
+        channel="cli",
+        apply=True,
+    )
+    record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    return str(record.frontmatter["id"])
+
+
+def _legacy_scheme_action_token(action_type: str, target_type: str, target_id: str) -> str:
+    """Reproduce the pre-fix keyless oa_ token an attacker can compute offline."""
+
+    return "oa_" + hashlib.sha256(
+        f"{action_type}|{target_type}|{target_id}".encode("utf-8")
+    ).hexdigest()[:14]
+
+
+def test_repro_offline_forged_revoke_token_is_refused_without_recorded_digest(tmp_path):
+    store = _store(tmp_path)
+    record_id = _crystallized_record_id_for_forgery(store)
+    forged = _legacy_scheme_action_token("revoke_crystallized", "crystallized_record", record_id)
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory revoke {forged}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+        require_recorded_digest=True,
+    )
+
+    after = CrystallizedMemoryService(store).find_record(record_id)
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "digest_not_found_or_expired"
+    assert result["active_digest"]["binding"] == "digest_not_found"
+    assert after is not None
+    assert after.frontmatter.get("canonical_state") != "owner_revoked"
+
+
+def test_repro_offline_forged_demote_token_is_refused_when_recorded_digest_lacks_it(tmp_path):
+    store = _store(tmp_path)
+    record_id = _crystallized_record_id_for_forgery(store)
+    rendered = render_owner_review_digest(store, owner_id="owner", channel="telegram")
+    owner_actions_module._append_owner_review_rendered_digest(store, rendered, channel="telegram")
+    forged = _legacy_scheme_action_token("demote_crystallized", "crystallized_record", record_id)
+    recorded = _jsonl(owner_review_rendered_digests_path(store.roots))[-1]
+    assert forged not in json.dumps(recorded, ensure_ascii=False)
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory demote {forged}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+        require_recorded_digest=True,
+    )
+
+    after = CrystallizedMemoryService(store).find_record(record_id)
+    assert result["active_digest"]["binding"] == "latest_recorded_digest"
+    assert result["status"] == "needs_clarification"
+    assert result["reason"] == "action_token_not_found_in_recorded_digest"
+    assert after is not None
+    assert after.frontmatter.get("canonical_state") != "demoted"
+
+
+def test_surface_token_digest_optional_allowlist_refuses_ownergate_action_types():
+    allowed = owner_actions_module._surface_token_allowed_without_recorded_digest
+    for action_type, target_type in (
+        ("mark_feedback", "memory_source"),
+        ("too_mechanical", "expression"),
+        ("apply_proposal", "proposal"),
+    ):
+        assert allowed({"action_type": action_type, "target_type": target_type}) is True
+    for action_type, target_type in (
+        ("revoke_crystallized", "crystallized_record"),
+        ("demote_crystallized", "crystallized_record"),
+        ("approve_candidate", "candidate"),
+        ("allow_speak_once", "speak"),
+        ("approve_session_mirror_apply", "session_mirror_apply"),
+        ("confirm_provisional_crystallized_record", "provisional_crystallized_record"),
+        # A future surface map must not widen the hole by reusing a low-risk
+        # action type against a governed target, or vice versa.
+        ("mark_feedback", "crystallized_record"),
+        ("revoke_crystallized", "memory_source"),
+    ):
+        assert allowed({"action_type": action_type, "target_type": target_type}) is False
+    assert allowed({}) is False
+    assert allowed(None) is False
+
+
+def test_proposal_followup_apply_token_still_applies_with_require_recorded_digest(tmp_path):
+    store = _store(tmp_path)
+    proposal_queue = ProposalQueueModule(tmp_path, profile="main")
+    candidate = proposal_queue.create_candidate(
+        store=store,
+        title="调整右脑表达策略：too_frequent 反馈",
+        body=(
+            "具体改动：降低右脑表达触发频次。\n"
+            "证据：owner 标记 too_frequent。\n"
+            "验收标准：policy.json 写入并保留 rollback。\n"
+            "后续状态：approved_for_proposal -> OpsGate report-only -> owner manual apply decision。\n"
+            "边界：不创建 generic executor。"
+        ),
+        kind="expression_policy",
+        proposal_class="expression_policy:too_frequent",
+        dedupe_key="expression_policy:too_frequent",
+        source_refs=["expression_feedback:too_frequent"],
+    )
+    apply_owner_action(
+        store,
+        action_type="approve_proposal",
+        target=f"proposal:{candidate['candidate_id']}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    route_approved_proposal_followup_to_ops_gate(
+        store,
+        proposal_id=candidate["candidate_id"],
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+    )
+    surface = owner_review_surface_report(
+        store,
+        operation="proposal_followups",
+        owner_id="owner",
+        channel="telegram",
+    )
+    apply_token = surface["proposal_followups"]["items"][0]["action_tokens"]["apply_proposal"]
+
+    result = parse_owner_review_reply(
+        store,
+        f"memory apply {apply_token}",
+        owner_id="owner",
+        channel="telegram",
+        apply=True,
+        require_recorded_digest=True,
+    )
+
+    assert result["active_digest"]["binding"] == "digest_not_found"
+    assert result["status"] == "ok"
+    assert result["parsed"]["action_type"] == "apply_proposal"
+    assert result["owner_action_result"]["result_ref"]["status"] == "applied"
+
+
 def test_render_digest_turns_schema_items_into_owner_readable_review_items(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
@@ -4713,3 +4864,62 @@ def test_repeat_decision_item_count_integration_across_two_digest_renders(tmp_pa
     report = owner_review_queue_report(store)
     burden = report["burden"]
     assert burden["repeat_decision_item_count"] >= 1
+
+
+def _raise_candidate_aggregation_status(monkeypatch):
+    from plugins.memory.memory_os import crystallized as crystallized_module
+
+    def _boom(_store):
+        raise RuntimeError("aggregation status unavailable")
+
+    monkeypatch.setattr(crystallized_module, "latest_candidate_aggregation_status", _boom)
+
+
+def test_candidate_aggregation_status_error_record_uses_warning_severity(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    _raise_candidate_aggregation_status(monkeypatch)
+
+    report = owner_review_status_report(store)
+
+    records = _jsonl(store.roots.memory_os_root / "system" / "error_records.jsonl")
+    matching = [
+        record
+        for record in records
+        if record.get("error_code") == "candidate_aggregation_status_read_failed"
+    ]
+    assert report["candidate_aggregation"]["available"] is False
+    assert matching
+    # Downstream consumers filter on exact severity == "warning"; "warn" is
+    # silently dropped.
+    assert matching[-1]["severity"] == "warning"
+
+
+def test_candidate_aggregation_error_record_write_failure_falls_back_to_audit(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+    _raise_candidate_aggregation_status(monkeypatch)
+    original_append = owner_actions_module._append_jsonl
+
+    def _refuse_error_record_writes(path, record):
+        if str(path).endswith("error_records.jsonl"):
+            raise OSError("error record surface unavailable")
+        return original_append(path, record)
+
+    monkeypatch.setattr(owner_actions_module, "_append_jsonl", _refuse_error_record_writes)
+
+    report = owner_review_status_report(store)
+
+    entries = [
+        entry
+        for entry in read_audit_entries(store.roots.audit_path)
+        if entry.get("action") == "owner_digest_error_record_failed"
+        and (entry.get("details") or {}).get("operation") == "candidate_aggregation_status_read"
+    ]
+    assert report["candidate_aggregation"]["available"] is False
+    # Without the fallback both the original failure and the recording failure
+    # vanish into `except Exception: pass`.
+    assert entries
+    details = entries[-1]["details"]
+    assert entries[-1]["status"] == "warning"
+    assert details["component"] == "owner_actions._candidate_aggregation_status_block"
+    assert details["original_error_type"] == "RuntimeError"
+    assert details["error_record_write_error_type"] == "OSError"

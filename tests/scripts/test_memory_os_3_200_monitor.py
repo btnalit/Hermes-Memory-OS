@@ -6961,3 +6961,57 @@ def test_remote_probe_bounds_missing_system_commands():
     script = _remote_probe_script("/tmp/nonexistent-hermes-home")
     assert "except OSError as exc:" in script
     assert '"code": 127' in script
+
+
+def test_error_record_emitting_components_constant_matches_source():
+    """A new `build_error_record(component=...)` emitter must be classified.
+
+    The monitor's headline `suppressed_error_count` can only aggregate a
+    component whose status payload actually reaches the snapshot — today
+    only four do. Components that emit error records but are not aggregated
+    undercount that headline silently, so the full emitter list is recorded
+    in ERROR_RECORD_EMITTING_COMPONENTS. This test derives the real list
+    from source, so adding an emitter without classifying it fails loudly
+    instead of quietly widening the blind spot.
+    """
+    import re
+
+    repo_root = Path(__file__).resolve().parents[2]
+    pattern = re.compile(r'component=\s*"([^"]+)"')
+    found: set[str] = set()
+    for base in ("plugins", "scripts"):
+        for path in (repo_root / base).rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            found.update(pattern.findall(path.read_text(encoding="utf-8", errors="ignore")))
+
+    missing = found - set(monitor.ERROR_RECORD_EMITTING_COMPONENTS)
+    stale = set(monitor.ERROR_RECORD_EMITTING_COMPONENTS) - found
+    assert not missing, (
+        "new error_record emitter(s) not classified in "
+        f"ERROR_RECORD_EMITTING_COMPONENTS: {sorted(missing)}"
+    )
+    assert not stale, (
+        "ERROR_RECORD_EMITTING_COMPONENTS lists component(s) that no longer "
+        f"emit error records: {sorted(stale)}"
+    )
+
+
+def test_monitor_error_observability_reports_component_coverage_gap():
+    """The undercount must be visible in the monitor output, not silent."""
+    report = monitor.monitor_error_observability({})
+    coverage = report["component_coverage"]
+
+    assert set(coverage["aggregated_components"]) == {
+        "runtime",
+        "memory_projection",
+        "session_mirror",
+        "prefetch",
+    }
+    # Dotted sub-components roll up to an aggregated parent...
+    assert "prefetch._indexed_lines" not in coverage["unaggregated_components"]
+    # ...but genuinely uncollected components are reported as such.
+    assert "state_source_mirror" in coverage["unaggregated_components"]
+    assert "memory_os.permanent_promotion" in coverage["unaggregated_components"]
+    assert coverage["unaggregated_component_count"] == len(coverage["unaggregated_components"])
+    assert coverage["unaggregated_component_count"] > 0

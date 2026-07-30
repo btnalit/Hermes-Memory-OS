@@ -57,6 +57,59 @@ AUTHORITY_FRESHNESS_MATRIX_DIGEST = authority_freshness_matrix_digest(AUTHORITY_
 OBSERVATION_WINDOW_ID = f"{AUTHORITY_FRESHNESS_MATRIX_VERSION}:{AUTHORITY_FRESHNESS_MATRIX_DIGEST}"
 
 
+# --- Bridge for the substrates-layer authority vocabulary ------------------
+#
+# Two independent vocabularies encode the same "how authoritative is this
+# fact" invariant in this codebase:
+#
+#   * this module's arbitration vocabulary, keyed directly in
+#     ``AUTHORITY_FRESHNESS_MATRIX["authority_rank"]`` above
+#     (direct_current_task .. external_unverified, plus "").
+#   * the substrates vocabulary produced by GroundingFact-based providers
+#     (plugins/memory/memory_os/substrates/base.py): "local_canonical",
+#     "owner_approved", "derived_projection".
+#
+# A RecallObject-based retriever built on top of a substrate (e.g.
+# retrievers/hindsight.py) can end up copying a raw substrates-vocabulary
+# string into ``authority_class``. Looking that string up directly against
+# ``authority_rank`` used to silently default to rank 0 via
+# ``.get(authority, 0)`` for ANY unrecognized value -- including a
+# genuinely authoritative "local_canonical"/"owner_approved" claim, which
+# would then rank BELOW "external_unverified" (rank 1), inverting the
+# local-first authority guarantee with no visible signal. This table maps
+# every known substrates-vocabulary value onto its arbitration-vocabulary
+# equivalent so the lookup is correct instead of a silent zero-default.
+SUBSTRATE_AUTHORITY_ALIASES: dict[str, str] = {
+    "local_canonical": "approved_canonical",
+    "owner_approved": "owner_confirmed",
+    "derived_projection": "external_unverified",
+}
+
+
+def resolve_authority_rank(authority_class: str) -> tuple[int, bool]:
+    """Resolve an ``authority_class`` string to its arbitration rank.
+
+    Checks the native arbitration vocabulary first (``authority_rank``,
+    which also covers the intentionally-empty ``""`` default), then falls
+    back to ``SUBSTRATE_AUTHORITY_ALIASES`` for substrates-vocabulary
+    strings. Returns ``(rank, recognized)``. ``recognized`` is False only
+    when ``authority_class`` matches NEITHER vocabulary -- callers MUST
+    treat that case as a flagged anomaly, not as an ordinary rank-0 fact:
+    an unrecognized string reaching this function is either a bug (typo,
+    stale constant) or drift between the two vocabularies, and silently
+    collapsing it into the same rank as an intentionally-unset value would
+    hide exactly the authority-inversion failure this bridge exists to
+    prevent.
+    """
+    authority_rank_table = AUTHORITY_FRESHNESS_MATRIX["authority_rank"]
+    if authority_class in authority_rank_table:
+        return authority_rank_table[authority_class], True
+    aliased = SUBSTRATE_AUTHORITY_ALIASES.get(authority_class)
+    if aliased is not None and aliased in authority_rank_table:
+        return authority_rank_table[aliased], True
+    return 0, False
+
+
 def evaluate_observation_window(observations: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     """Keep only the latest contiguous suffix produced by the current matrix.
 

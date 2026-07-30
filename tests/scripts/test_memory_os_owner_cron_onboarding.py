@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+
 
 def _load_module():
     path = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_owner_cron_onboarding.py"
@@ -241,28 +243,19 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert report["selected_right_brain_deliver"] == "origin"
     assert report["apply_requested"] is False
     assert report["cron_profile"] == "active-closure"
-    assert len(report["operational_cron_jobs"]) == 19
-    assert {job["name"] for job in report["operational_cron_jobs"]} == {
-        "memory-os-owner-review-digest",
-        "memory-os-proposal-followups-opsgate",
-        "memory-os-index-sync",
-        "memory-os-working-cleanup",
-        "memory-os-l3-probe-verification",
-        "memory-os-candidate-aggregation",
-        "memory-os-fact-judge",
-        "memory-os-event-stats-refresh",
-        "memory-os-exposure-rollup",
-        "memory-os-full-monitor-refresh",
-        "memory-os-v3-seed-evidence",
-        "memory-os-v3-wandering",
-        "memory-os-v3-journal-sweep",
-        "memory-os-state-overlay-refresh",
-        "memory-os-entity-index-refresh",
-        "memory-os-hindsight-advisory-digest",
-        "memory-os-hindsight-health-probe",
-        "memory-os-expression-feedback-request",
-        "memory-os-memory-sources-feedback-request",
+    # Derive the expected active-closure job set from the registry itself
+    # (via the module's own ACTIVE_CLOSURE_CRON_KEYS), not a hand-typed
+    # literal -- a hardcoded list here would silently re-hide the same
+    # registry-drift bug (a real registered spec, e.g. clearance_cycle,
+    # missing from the active-closure install) that this test exists to
+    # catch. See test_active_closure_cron_keys_are_derived_from_the_registry_not_hand_typed
+    # for the direct counterfactual on the derivation itself.
+    expected_names = {
+        spec.name for spec in memory_os_cron_specs()
+        if spec.key in module.ACTIVE_CLOSURE_CRON_KEYS
     }
+    assert len(report["operational_cron_jobs"]) == len(expected_names)
+    assert {job["name"] for job in report["operational_cron_jobs"]} == expected_names
     index_sync = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-index-sync"][0]
     assert index_sync["script"] == "memory_os_cron_index_sync_gate.py"
     assert index_sync["raw_script"] == "memory_os_index_sync.py"
@@ -288,6 +281,19 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert hindsight_health["schedule"] == "33 * * * *"
     assert hindsight_health["script"] == "memory_os_hindsight_health_probe.py"
     assert hindsight_health["raw_script"] == "memory_os_hindsight_health_probe.py"
+    # Counterfactual: clearance_cycle is a real registered spec whose helper
+    # and gate scripts the installer already deploys (see
+    # install_memory_os_plugin.py). Its absence from the old hand-typed
+    # ACTIVE_CLOSURE_CRON_KEYS frozenset was an oversight (every sibling key
+    # was added to that set in the same commit that registered it -- this
+    # one was not); this asserts it is now actually onboarded on
+    # active-closure hosts.
+    clearance_cycle = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-clearance-cycle"][0]
+    assert clearance_cycle["schedule"] == "*/10 * * * *"
+    assert clearance_cycle["script"] == "memory_os_cron_clearance_cycle_gate.py"
+    assert clearance_cycle["raw_script"] == "memory_os_clearance_cycle_helper.py"
+    assert clearance_cycle["deliver"] == "local"
+    assert clearance_cycle["no_agent"] is True
     for job in report["operational_cron_jobs"]:
         assert home.joinpath("scripts", job["script"]).is_file(), job["script"]
     assert not home.joinpath("cron", "jobs.json").exists()
@@ -635,3 +641,36 @@ def test_updates_existing_memory_sources_feedback_cron_prompt(tmp_path, monkeypa
     assert "旧提示" not in updated_job["prompt"]
     assert "不要写 Cron Run Report" in updated_job["prompt"]
     assert "只输出 OWNER_MESSAGE_BEGIN 和 OWNER_MESSAGE_END 之间的内容" in updated_job["prompt"]
+
+
+def test_active_closure_cron_keys_are_derived_from_the_registry_not_hand_typed():
+    """Counterfactual for the registry-drift bug this module fixes.
+
+    ACTIVE_CLOSURE_CRON_KEYS must be computed from memory_os_cron_specs()
+    minus an explicit, documented exclusion set -- not a hand-typed
+    frozenset literal. Every prior addition to MEMORY_OS_CRON_SPECS updated
+    the (then hand-typed) active-closure key set in the same commit,
+    except clearance_cycle: its commit registered the spec, wired the
+    onboarding CLI schedule arg, and updated the installer, but never added
+    the key to ACTIVE_CLOSURE_CRON_KEYS. A fresh active-closure install
+    therefore silently never created the clearance_cycle cron job even
+    though its helper/gate scripts were deployed by the installer.
+
+    Without the derivation fix this test fails two ways: the hand-typed
+    frozenset has no ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS companion (this
+    module previously defined none), and "clearance_cycle" is absent from
+    ACTIVE_CLOSURE_CRON_KEYS.
+    """
+    module = _load_module()
+    all_keys = {spec.key for spec in memory_os_cron_specs()}
+
+    assert module.ACTIVE_CLOSURE_CRON_KEYS == all_keys - module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
+    # module_cadence_report is the one documented, deliberate exclusion --
+    # its report is already generated on-demand elsewhere. Everything else
+    # registered defaults to being onboarded and visible.
+    assert module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS == {"module_cadence_report"}
+    assert "clearance_cycle" in module.ACTIVE_CLOSURE_CRON_KEYS
+    assert "module_cadence_report" not in module.ACTIVE_CLOSURE_CRON_KEYS
+    # Every registered key must be classified one way or the other -- no
+    # key silently falls through unclassified.
+    assert module.ACTIVE_CLOSURE_CRON_KEYS | module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS == all_keys

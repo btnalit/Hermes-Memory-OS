@@ -199,6 +199,48 @@ def test_runtime_heartbeat_errors_are_audited_and_record_attempt(tmp_path, monke
     assert entries[-1]["details"]["error_record"]["error_code"] == "runtime_heartbeat_error"
 
 
+def test_runtime_heartbeat_completes_execution_gate_envelope_on_mid_run_error(tmp_path, monkeypatch):
+    # Counterfactual for the runtime_heartbeat_core permit-lifecycle leak: the
+    # ExecutionGate permit is opened at the top of _heartbeat_checked, but the
+    # ~140 lines of work that follow (session mirror auto-apply, per-event
+    # processing, working-memory decay, state write, index sync) previously ran
+    # unguarded. Any mid-run exception left the permit permanently orphaned —
+    # a "permit" record with zero matching "completion" records in
+    # execution_gate_envelopes.jsonl. Without the fix, this test fails because
+    # lane_records has length 1 (permit only) instead of 2 (permit+completion).
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
+    store.initialize()
+
+    def fail_read_events():
+        raise RuntimeError("synthetic event read failure")
+
+    monkeypatch.setattr(store, "read_events", fail_read_events)
+
+    try:
+        MemoryOSRuntime(store).heartbeat(now=datetime(2026, 5, 23, 1, tzinfo=timezone.utc))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("heartbeat should re-raise the original failure")
+
+    envelope_path = tmp_path / "memory-os" / "system" / "execution_gate_envelopes.jsonl"
+    records = [
+        json.loads(line)
+        for line in envelope_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    lane_records = [r for r in records if r.get("lane_id") == "runtime_heartbeat_core"]
+    assert [record["stage"] for record in lane_records] == ["permit", "completion"]
+    assert lane_records[0]["execution_gate_envelope_id"] == lane_records[1]["execution_gate_envelope_id"]
+    assert lane_records[-1]["execution_status"] == "error"
+    assert lane_records[-1]["result_summary"]["error_type"] == "RuntimeError"
+    assert lane_records[-1]["result_summary"]["message"] == "synthetic event read failure"
+    # Error postcheck must reflect real (zero) progress, not a fabricated success shape.
+    assert lane_records[-1]["postcheck"]["processed_event_count"] == 0
+    assert lane_records[-1]["postcheck"]["working_created_count"] == 0
+    assert lane_records[-1]["postcheck"]["candidate_created_count"] == 0
+
+
 def test_runtime_heartbeat_attempt_state_errors_are_audited(tmp_path, monkeypatch):
     store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path))
     store.initialize()

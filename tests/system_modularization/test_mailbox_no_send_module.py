@@ -70,3 +70,56 @@ def test_mailbox_refuses_real_send_mode(tmp_path):
 
     assert report["status"] == "error"
     assert report["findings"][0]["code"] == "delivery_send_enabled"
+
+
+def test_mailbox_root_honors_configured_platform_root(tmp_path):
+    """Counterfactual: without config-aware resolution, mailbox_root always
+    returns hermes_home/mailbox, ignoring a host-configured mailbox location
+    entirely -- inbox_root/outbox_root would then point at the wrong place."""
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "platforms:",
+                "  mailbox:",
+                "    extra:",
+                "      root: community_mailbox",
+                "      agent_id: agent-42",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    module = MailboxNoSendModule(tmp_path, profile="main")
+
+    assert module.mailbox_root == tmp_path / "community_mailbox" / "agents" / "agent-42"
+    assert module.inbox_root == tmp_path / "community_mailbox" / "agents" / "agent-42" / "inbox"
+    assert module.outbox_root == tmp_path / "community_mailbox" / "agents" / "agent-42" / "outbox"
+
+
+def test_mailbox_root_falls_back_to_hardcoded_default_without_config(tmp_path):
+    """No-config hosts must resolve identically to before this fix."""
+    module = MailboxNoSendModule(tmp_path, profile="main")
+
+    assert module.mailbox_root == tmp_path / "mailbox"
+
+
+def test_mailbox_root_ignores_invalid_agent_id(tmp_path):
+    """An agent_id failing [A-Za-z0-9_-]{1,64} must never be used to build a
+    path -- fall back to the hardcoded default instead of crashing or using
+    an unsafe/untrusted path segment."""
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "platforms:",
+                "  mailbox:",
+                "    extra:",
+                "      root: community_mailbox",
+                "      agent_id: '../escape'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    module = MailboxNoSendModule(tmp_path, profile="main")
+
+    assert module.mailbox_root == tmp_path / "mailbox"
