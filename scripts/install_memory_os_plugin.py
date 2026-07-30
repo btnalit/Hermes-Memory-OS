@@ -54,6 +54,7 @@ SOURCE_FULL_MONITOR_REFRESH = REPO_ROOT / "scripts" / "memory_os_full_monitor_re
 SOURCE_FULL_MONITOR = REPO_ROOT / "scripts" / "memory_os_3_200_monitor.py"
 SOURCE_CLOSURE_RUNTIME_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_closure_runtime_evidence.py"
 SOURCE_LEGACY_RIGHT_BRAIN_RETIREMENT = REPO_ROOT / "scripts" / "memory_os_retire_legacy_right_brain.py"
+SOURCE_COMMUNITY_RETIREMENT = REPO_ROOT / "scripts" / "memory_os_community_retirement.py"
 SOURCE_V3_SEED_EVIDENCE = REPO_ROOT / "scripts" / "memory_os_v3_seed_evidence.py"
 SOURCE_V3_SEED_EVIDENCE_GATE = REPO_ROOT / "scripts" / "memory_os_cron_v3_seed_evidence_gate.py"
 SOURCE_V3_WANDERING = REPO_ROOT / "scripts" / "memory_os_v3_wandering.py"
@@ -1134,7 +1135,6 @@ def _write_module_cadence_report_script(hermes_home: Path, *, dry_run: bool) -> 
     return target
 
 
-
 def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> dict[str, Path]:
     sources = {
         "module_cadence_report_cron": SOURCE_MODULE_CADENCE_REPORT_CRON,
@@ -1157,6 +1157,7 @@ def _write_operational_helper_scripts(hermes_home: Path, *, dry_run: bool) -> di
         "full_monitor": SOURCE_FULL_MONITOR,
         "closure_runtime_evidence": SOURCE_CLOSURE_RUNTIME_EVIDENCE,
         "legacy_right_brain_retirement": SOURCE_LEGACY_RIGHT_BRAIN_RETIREMENT,
+        "community_retirement": SOURCE_COMMUNITY_RETIREMENT,
         "v3_seed_evidence": SOURCE_V3_SEED_EVIDENCE,
         "v3_seed_evidence_gate": SOURCE_V3_SEED_EVIDENCE_GATE,
         "v3_wandering": SOURCE_V3_WANDERING,

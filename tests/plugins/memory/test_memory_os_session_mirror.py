@@ -859,3 +859,50 @@ def test_runtime_heartbeat_auto_applies_one_session_after_session_mirror_lane_gr
     assert apply_records[0]["apply_governance"]["execution_gate_permit_resolution"]["unused_before_apply"] is True
     assert apply_records[0]["apply_governance"]["execution_gate_permit_resolution"]["scope_match"] is True
     assert apply_records[1]["apply_governance"]["approval_ref"] == owner_record["owner_action_id"]
+
+
+def test_unreadable_session_json_is_surfaced_not_silently_skipped(tmp_path):
+    """A dropped session file must be distinguishable from one that never existed.
+
+    `_read_session_json_files` used to skip malformed files with a bare
+    `except Exception: continue` — no error record, no counter, no finding.
+    A truncated or non-UTF8 session simply vanished from the SessionMirror
+    auto-apply candidate list with zero operator-visible signal.
+    """
+    store = _store(tmp_path)
+    sessions_root = store.roots.hermes_home / "sessions"
+    sessions_root.mkdir(parents=True, exist_ok=True)
+
+    # One good session, one truncated, one valid JSON that is not an object.
+    (sessions_root / "session_good.json").write_text(
+        json.dumps({"id": "s-good", "platform": "telegram", "messages": []}),
+        encoding="utf-8",
+    )
+    (sessions_root / "session_truncated.json").write_text('{"id": "s-bad",', encoding="utf-8")
+    (sessions_root / "session_notdict.json").write_text("[1, 2, 3]", encoding="utf-8")
+
+    mirror = SessionMirror(store)
+    sessions = mirror._read_session_json_files()
+
+    # The good session is still returned; the two bad ones are excluded...
+    assert [item["session_id"] for item in sessions] == ["s-good"]
+
+    # ...but their exclusion is now recorded, with the full error_record schema.
+    error_codes = {
+        record["error_code"] for record in mirror._session_read_error_records
+    }
+    assert error_codes == {"session_json_unreadable", "session_json_not_an_object"}
+    for record in mirror._session_read_error_records:
+        assert record["component"] == "session_mirror"
+        assert record["operation"] == "read_session_json_files"
+        assert record["severity"] == "warning"
+        assert record["recoverable"] is True
+
+    # And doctor() surfaces them to an operator as findings.
+    findings = mirror.doctor()["findings"]
+    surfaced = {
+        finding["id"]
+        for finding in findings
+        if finding["id"] in {"session_json_unreadable", "session_json_not_an_object"}
+    }
+    assert surfaced == {"session_json_unreadable", "session_json_not_an_object"}

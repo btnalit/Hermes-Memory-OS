@@ -42,18 +42,21 @@ def test_installer_copies_monitor_dashboard_snapshot_operational_helper(tmp_path
     full_monitor_source = scripts_root / "memory_os_3_200_monitor.py"
     closure_evidence_source = scripts_root / "memory_os_closure_runtime_evidence.py"
     retirement_source = scripts_root / "memory_os_retire_legacy_right_brain.py"
+    community_retirement_source = scripts_root / "memory_os_community_retirement.py"
     _write_operational_helper_scripts(target_home, dry_run=False)
     installed = target_home / "scripts" / source.name
     refresh_installed = target_home / "scripts" / refresh_source.name
     full_monitor_installed = target_home / "scripts" / full_monitor_source.name
     closure_evidence_installed = target_home / "scripts" / closure_evidence_source.name
     retirement_installed = target_home / "scripts" / retirement_source.name
+    community_retirement_installed = target_home / "scripts" / community_retirement_source.name
 
     assert installed.read_bytes() == source.read_bytes()
     assert refresh_installed.read_bytes() == refresh_source.read_bytes()
     assert full_monitor_installed.read_bytes() == full_monitor_source.read_bytes()
     assert closure_evidence_installed.read_bytes() == closure_evidence_source.read_bytes()
     assert retirement_installed.read_bytes() == retirement_source.read_bytes()
+    assert community_retirement_installed.read_bytes() == community_retirement_source.read_bytes()
 
 
 def test_installer_copies_agent_os_shell_by_default_without_cache_files(tmp_path):
@@ -452,30 +455,27 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     assert report["owner_cron_onboarding_report"]["selected_right_brain_deliver"] == "origin"
     assert report["owner_cron_profile"] == "active-closure"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "active-closure"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 19
+    # Derive the expected active-closure job set from the cron registry
+    # rather than hand-listing it. Two hand-maintained copies used to live
+    # here (a literal count and a literal name set); both silently went
+    # stale whenever a spec was added, which is exactly the drift that hid
+    # `clearance_cycle` from active-closure installs. Deriving means a new
+    # spec is picked up automatically and a misclassified one fails loudly.
+    from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+    from scripts.memory_os_owner_cron_onboarding import ACTIVE_CLOSURE_CRON_KEYS
+
+    expected_cron_names = {
+        spec.name
+        for spec in memory_os_cron_specs()
+        if spec.key in ACTIVE_CLOSURE_CRON_KEYS
+    }
+    assert (
+        len(report["owner_cron_onboarding_report"]["operational_cron_jobs"])
+        == len(expected_cron_names)
+    )
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
-    assert set(by_name) == {
-        "memory-os-owner-review-digest",
-        "memory-os-proposal-followups-opsgate",
-        "memory-os-index-sync",
-        "memory-os-working-cleanup",
-        "memory-os-l3-probe-verification",
-        "memory-os-candidate-aggregation",
-        "memory-os-fact-judge",
-        "memory-os-event-stats-refresh",
-        "memory-os-exposure-rollup",
-        "memory-os-full-monitor-refresh",
-        "memory-os-v3-seed-evidence",
-        "memory-os-v3-wandering",
-        "memory-os-v3-journal-sweep",
-        "memory-os-state-overlay-refresh",
-        "memory-os-entity-index-refresh",
-        "memory-os-hindsight-advisory-digest",
-        "memory-os-hindsight-health-probe",
-        "memory-os-expression-feedback-request",
-        "memory-os-memory-sources-feedback-request",
-    }
+    assert set(by_name) == expected_cron_names
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
     assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
     assert by_name["memory-os-index-sync"]["deliver"] == "local"

@@ -19,6 +19,7 @@ from .clearance_receipts import (
     read_clearance_receipts,
     write_clearance_receipt,
 )
+from .jsonl_io import build_error_record
 
 
 # ── E4: Rejudge queue ──────────────────────────────────────────────────────
@@ -260,11 +261,25 @@ def run_clearance_cycle(
             report["judged"] += 1
             report["verdict_distribution"][verdict] += 1
         except Exception as exc:
-            report["error_records"].append({
-                "record_id": record_id,
-                "error_code": type(exc).__name__,
-                "error_summary": str(exc)[:200],
-            })
+            report["error_records"].append(
+                build_error_record(
+                    component="clearance_cycle",
+                    operation="run_clearance_cycle_judge_item",
+                    error_code=type(exc).__name__,
+                    severity="error",
+                    recoverable=True,
+                    details={"record_id": record_id, "error_summary": str(exc)[:200]},
+                )
+            )
+
+    # Total-failure gate: a single bad record is expected/recoverable noise
+    # (it stays unjudged and is retried next cycle), so it must not flip the
+    # cron exit code (memory_os_clearance_cycle_helper.py maps status=="ok"
+    # to exit 0). But if EVERY attempted item in the batch errored, nothing
+    # useful was accomplished this cycle and that must be visible as a
+    # real failure, not silently reported "ok".
+    if batch and len(report["error_records"]) == len(batch):
+        report["status"] = "error"
 
     return report
 
@@ -723,31 +738,45 @@ def sweep_unavailable_open_proposals_on_flag_flip(store: Any) -> dict[str, Any]:
     swept_count = 0
     swept_ids: list[str] = []
     error_records: list[dict[str, Any]] = []
+    eligible_count = 0
 
     for state in service.proposals._states().values():
         if state.get("status") not in {"open", "deciding"}:
             continue
         clearance = state.get("clearance")
         if isinstance(clearance, dict) and clearance.get("status") == "unavailable":
+            eligible_count += 1
             proposal_id = str(state.get("proposal_id") or "")
             try:
                 service.proposals.append_terminal(
                     proposal_id,
                     status="revoked",
                     reason="v2e_flag_flip",
-                    detail="swept on v2e flag flip — no clearance receipt available",
                 )
                 swept_count += 1
                 if proposal_id:
                     swept_ids.append(proposal_id)
             except Exception as exc:
-                error_records.append({
-                    "proposal_id": proposal_id,
-                    "error_code": type(exc).__name__,
-                })
+                error_records.append(
+                    build_error_record(
+                        component="clearance_cycle",
+                        operation="sweep_unavailable_open_proposals_on_flag_flip",
+                        error_code=type(exc).__name__,
+                        severity="error",
+                        recoverable=True,
+                        details={"proposal_id": proposal_id},
+                    )
+                )
+
+    # Same total-vs-partial-failure discrimination as run_clearance_cycle:
+    # one proposal failing to sweep is recoverable (it stays open, unswept,
+    # and can be retried on the next flag-flip pass), but if every eligible
+    # proposal failed, the sweep accomplished nothing and that must not be
+    # reported as "ok".
+    status = "error" if eligible_count and len(error_records) == eligible_count else "ok"
 
     return {
-        "status": "ok",
+        "status": status,
         "swept_count": swept_count,
         "swept_proposal_ids": swept_ids,
         "error_records": error_records,

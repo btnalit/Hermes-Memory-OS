@@ -1017,13 +1017,24 @@ def _entity_index_enabled(store: MemoryOSStore) -> bool:
         return bool(resolve_knob("entity_index_enabled", default=False, roots=store.roots))
     except Exception as _exc:
         from .jsonl_io import build_error_record as _build_error_record
-        _build_error_record(
+        _error_record = _build_error_record(
             component="entity_index",
             operation="knob_resolution",
             error_code="ENTITY_INDEX_KNOB_FAILED",
             severity="warning",
             recoverable=True,
             details={"error": str(_exc)},
+        )
+        # Persisted the same way neighboring index.py operations (index_rebuild,
+        # index_rebuild_failed, index_sync) surface their outcomes — via the
+        # shared audit log — so a corrupt knob-override read is never silently
+        # dropped with zero diagnostic trace.
+        append_audit(
+            store.roots.audit_path,
+            action="entity_index_knob_resolution_failed",
+            status="warning",
+            target=str(store.roots.memory_os_root),
+            details={"error_record": _error_record},
         )
         return False
 

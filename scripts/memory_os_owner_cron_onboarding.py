@@ -38,27 +38,26 @@ from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
 
 
 SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
-ACTIVE_CLOSURE_CRON_KEYS = frozenset({
-    "owner_review_digest",
-    "proposal_followups_opsgate",
-    "index_sync",
-    "working_cleanup",
-    "l3_probe_verification",
-    "candidate_aggregation",
-    "fact_judge",
-    "event_stats_refresh",
-    "exposure_rollup",
-    "full_monitor_refresh",
-    "v3_seed_evidence",
-    "v3_wandering",
-    "v3_journal_sweep",
-    "state_overlay_refresh",
-    "entity_index_refresh",
-    "hindsight_advisory_digest",
-    "hindsight_health_probe",
-    "expression_feedback_request",
-    "memory_sources_feedback_request",
+
+# Registry keys deliberately withheld from the active-closure cron profile.
+# A key belongs here ONLY for a documented, deliberate reason -- never
+# merely because the spec happens to be new. Every OTHER key returned by
+# memory_os_cron_specs() is onboarded on active-closure hosts by default, so
+# a future registry addition defaults to being installed and visible rather
+# than silently skipped (a hand-typed inclusion allowlist is exactly the
+# "unknown spec silently dropped" trap this derivation avoids).
+#
+#   - module_cadence_report: the cadence report artifact itself is already
+#     produced on-demand by build_cadence_report() from both the monitor
+#     dashboard snapshot and the 3.200 full monitor on every run, so a
+#     dedicated periodic cron job is redundant. It remains available under
+#     the "full" cron profile for hosts that want a standalone report cron.
+ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS = frozenset({
+    "module_cadence_report",
 })
+ACTIVE_CLOSURE_CRON_KEYS = frozenset(
+    spec.key for spec in memory_os_cron_specs()
+) - ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
 DEFAULT_OWNER_REVIEW_SCHEDULE = "0 9 * * *"
 DEFAULT_RIGHT_BRAIN_SCHEDULE = "30 4 * * 0"
 DEFAULT_FACT_JUDGE_SCHEDULE = "0 */4 * * *"

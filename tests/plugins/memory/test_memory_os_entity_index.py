@@ -392,6 +392,58 @@ class TestEntityIndexCognitiveLoop:
         assert result["status"] == "ok"
         assert result["entities_indexed"] > 0
 
+    def test_entity_index_enabled_persists_error_record_on_knob_resolution_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_entity_index_enabled must not silently swallow resolve_knob() failures.
+
+        Counterfactual: before the fix, the except-Exception handler in
+        _entity_index_enabled built an error_record via build_error_record()
+        but discarded the return value as a bare expression statement —
+        never appending, never writing it anywhere. A corrupt knob-override
+        read therefore produced zero diagnostic trace. This test forces
+        resolve_knob() to raise and asserts a fully-shaped error_record
+        (component/operation/error_code/severity/recoverable/schema_version)
+        lands durably in the audit log.
+        """
+        from plugins.memory.memory_os.audit import read_audit_records
+        from plugins.memory.memory_os.index import _entity_index_enabled
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="entity-index-error-test")
+        store = MemoryOSStore(roots)
+        store.initialize()
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("corrupt knob-override store")
+
+        monkeypatch.setattr(
+            "plugins.memory.memory_os.knob_overrides.resolve_knob", _boom
+        )
+
+        result = _entity_index_enabled(store)
+        assert result is False  # fail-closed default is preserved
+
+        audit_records = read_audit_records(roots.audit_path)
+        matching = [
+            r for r in audit_records
+            if r.get("action") == "entity_index_knob_resolution_failed"
+        ]
+        assert len(matching) == 1, (
+            "expected exactly one durable audit record for the knob "
+            f"resolution failure, got: {audit_records}"
+        )
+        error_record = matching[0].get("details", {}).get("error_record")
+        assert isinstance(error_record, dict), "error_record must be persisted in details"
+        assert error_record["schema_version"] == "memory-os.error_record.v0"
+        assert error_record["component"] == "entity_index"
+        assert error_record["operation"] == "knob_resolution"
+        assert error_record["error_code"] == "ENTITY_INDEX_KNOB_FAILED"
+        assert error_record["severity"] == "warning"
+        assert error_record["recoverable"] is True
+        assert "corrupt knob-override store" in error_record["details"]["error"]
+
 
 # ── Whitespace collapse ─────────────────────────────────────────────
 

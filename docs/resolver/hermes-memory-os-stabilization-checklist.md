@@ -1059,6 +1059,91 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
   sannai-community README 一并携带）；`deploy_community.py` 未移植到新仓库（其模块清单混合
   核心文件，按旧仓库安装布局硬编码路径，移植等于重写一个未经验证的部署脚本，超出本次范围）。
 
+## BR — 全项目审查（6 轮不变量切片）与整体修复（2026-07-30）
+
+- **触发**：对 `47bbc13` 之后的整个项目做代码审查。首轮只覆盖了最后一次提交的 diff，遂按
+  **不变量**（而非目录）重新切片，补做 5 轮横切审查：ExecutionGate 覆盖、无声失败/
+  error_record、OwnerGate/ResolverGate 授权、治理 import 拓扑 + substrate 权威、
+  手工维护的并行注册表。共 28 项发现，按文件所有权分 8 个互不重叠的包修复。
+- **共同根因**：绝大多数发现是同一形状——**检查通过 ≠ 不变量成立**。`write_surface_check`
+  在仓库内保证 `unclassified_count=0`，但写入面可以留在主机上；`import_cycle_check` 查环
+  不查方向；多个测试断言的是自己手工维护的列表而非从单一真相源推导，列表漂移时照样绿。
+- **已修（按严重度）**：
+  1. **所有者授权绕过（安全，已实测复现）**：`owner_actions.py` 的 `_surface_action_token_map`
+     从当前实时状态重算令牌，使 `require_recorded_digest=True` 对 `revoke_crystallized`/
+     `demote_crystallized` 失效——仅凭一条 crystallized 记录的 `id` 即可离线算出
+     `oa_<sha256(...)[:14]>` 并撤销该记录，全程无摘要投递。修复期间另发现**更严重的变体**：
+     即使存在已记录摘要（生产常态，`binding == "latest_recorded_digest"`），伪造仍然成功——
+     只按 `digest_not_found` 收口会在真实生产状态下留洞。改为按风险类**默认拒绝**（动作类型
+     与目标类型都必须低风险），并删除 `token_match` 回退中重复的 `_surface_action_token_map`
+     二次查找（否则刚被拒绝的令牌会被重新放行）。`apply_proposal`/`proposal` 经评估保留为
+     digest-optional（已需 owner 批准 + OpsGate would_allow + 3 种受限 kind + 40 bit 提案 id
+     后缀，且不在 CLAUDE.md 的 OwnerGate 永久边界清单内）。
+  2. **ExecutionGate 许可证泄漏 ×2**：`runtime.py` heartbeat 中途抛异常则 envelope 永久悬空
+     （已复现：1 条 permit、0 条 completion）；`cognitive_loop.py` 三条 lane 委托模块零异常
+     保护。均按同文件既有正确范式（`spontaneous_expression_delivery`）在两个分支都收口。
+  3. **substrate 自称权威**：`substrates/router.py` 仅凭 fact 自报的 `authority_class` 授予
+     一级权威，不校验 `provider == "local_artifact"`。改为结构性校验并将伪造 fact 排除出
+     返回集（检测遥测仍从未过滤的 `raw_facts` 计算，避免"丢掉内容就丢掉告警"）。
+  4. **cron 注册表漂移（真实安装缺失）**：`ACTIVE_CLOSURE_CRON_KEYS` 与 dashboard 的
+     core/optional 名单是 `MEMORY_OS_CRON_SPECS` 的手抄副本，`clearance_cycle` 从未被加入，
+     全新 active-closure 安装**根本不会创建该 cron**。改为从注册表推导 + 显式声明有意排除。
+  5. **StateOverlay section 注册表六处重复**：改为从 `StateOverlay` dataclass 字段推导
+     （`OVERLAY_SECTION_FIELDS`），标签/子集在 import 时断言穷尽；另发现并消除了第 7 处
+     未被记录的内联副本。序列化输出键序逐字不变。
+  6. **错误可见性**：`index.py` 构造 error_record 后丢弃不写（唯一一处）→ 改为经
+     `append_audit` 落盘；`clearance_cycle.py` 追加缺字段记录且 `status` 恒为 `ok` → 改用
+     `build_error_record` 并区分"部分失败/整批失败"；`session_mirror.py` 两处静默
+     `except: continue` → 记录并经 `doctor()` 暴露。
+  7. **community 主机侧退役**：`47bbc13` 只移除了仓库、没有反向操作，`_copy_tree` 是纯增量，
+     已部署主机上的模块/数据目录/`deploy_community.py` 会永久残留。按
+     `legacy_right_brain_retirement.py` 范式新增 `scripts/memory_os_community_retirement.py`
+     （幂等、归档而非删除、dry-run 证明零写入、两阶段提交 + SHA256 完整性校验 + 写锁），
+     并把 `community_monitor.py`/`community_partner_reply.py` 加入
+     `RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES`（否则残留 cron 落入 `external_unmanaged` 而对
+     monitor 完全不可见）。**未在任何主机执行**，是否执行由 owner 决定。
+  8. **公开文档漂移**：路线图 §14「当前优先级」仍以现在时指示运维执行
+     `build_community_snapshot()` 与 `community_monitor.py`（均已删除），§13 仍把 R7 社区
+     列为在跑阶段——已改为迁出说明并保留原文，指向 sannai-community。
+  9. **pytest 版本漂移（红→绿）**：`test_memory_os_pytest_policy.py` 两处断言把随 pytest
+     版本变化的 `skip_count` 当作不变量（8.4.2/Windows 下单个 module-level skip 计为 2）。
+     改为断言真正的不变量（collect 阶段 skip 全部被判为 unknown、`status=fail`、returncode
+     非 0），而非附带计数。这两个失败是 BQ 记录的既有伪影，本节将其真正修复。
+- **交接期间自查发现的两个额外问题**（3 个 agent 因额度中断，由主会话接手完成）：
+  - `append_terminal(detail=...)` 根本不接受 `detail` 参数（`permanent_promotion.py:485-495`），
+    旧代码每次 sweep 都抛 `TypeError`，被宽 `except` 吞掉并写入畸形记录，函数还返回硬编码
+    `status: "ok"`——即 `sweep_unavailable_open_proposals_on_flag_flip` **从未成功清扫过任何
+    提案**。这是"无声失败"不变量的教科书式印证。
+  - 包切分本身引入一处跨包回归：`test_memory_os_plugin_install.py` 里硬编码 `== 19` 与 19 个
+    job 名字面量（cron 注册表的第 4、5 份副本）属于 F 包白名单，而改变数量的是 E1 包，E1
+    无权修它。**教训：按文件所有权切包时，行为变更与其测试可能不在同一个包里。**
+- **反事实覆盖**：每项修复均有"撤销修复即失败"的测试并经实际验证（本轮统一改用仓库外文件
+  复制回退，不用 `git stash`——8 个 agent 共享同一 worktree 时 stash 栈跨 worktree 共享，
+  裸 `pop` 可能恢复他人暂存内容）。关键新增：envelope 账本在错误路径上必须有 completion
+  记录（旧测试只断言 audit 与 heartbeat_state，从不读 `execution_gate_envelopes.jsonl`）；
+  伪造 fact 必须被排除出 `facts`（旧测试只断言违规标志位翻转）；新增 cron spec 未分类必须
+  测试失败；error_record 发射组件必须全部登记（从源码推导 30 个发射者）。
+- **测试与静态门**：全量本地（Windows）2968 passed / **2 failed** → **3023 passed / 0 failed**
+  / 13 skipped（+55，563s），**本仓库首次全绿**。静态门全过：import cycle 0 环、write surface
+  `unclassified_count=0`、static hygiene、public checkout probe `--strict`（exit 0）、
+  `git diff --check`。
+- **未做的事（明确记录，非遗漏）**：
+  - `oa_` 令牌密钥化（纵深防御）未实施：需向 `_action_token` 贯穿 `roots`（约 45 处，单点
+    遗漏会导致 digest cron 与 gateway **静默**产生不一致令牌）、令牌格式被 4 个白名单外文件的
+    正则锁定、且失败策略需要 `error_registry` 错误码与 monitor 字段。已实测的攻击面已由第 1
+    项完全关闭；未做半迁移。
+  - monitor 11 个组件的 snapshot 采集未接线（这些组件根本没有 snapshot payload，接线属于对
+    大型生产 monitor 的采集改造且无法离线验证）。改为把缺口**显式化且可测**：新增
+    `component_coverage.unaggregated_components`，并用从源码推导发射者清单的测试防止新增
+    发射者继续静默扩大盲区。
+  - `_configured_mailbox_root` 在 `signal_collectors.py` 与 `plugins/modules/messaging/mailbox.py`
+    逐字重复：合并需要从 portable module 反向 import memory_os 核心，越过模块边界，故有意
+    接受重复并在此登记。
+  - `error_registry.py` 零注册错误码（所有 code 经 `unregistered_error_code(...)` 落到
+    `production_severity="unknown"`）；`candidate_aggregation.py` 三处
+    `start_resolver_auto_approve_envelope` 后的写入无异常保护（与第 2 项同类，白名单外未修）。
+  - 主机侧：未触碰 hermes-media / hermes-feiniu。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1187,3 +1272,15 @@ sannai-community 仓库 README。）
   （有意减少 71，对应 6 个整体迁出的测试文件 + 2 个混合文件定向裁剪，非回归）/ 2 failed（同
   BK/BM/BO/BP 既有 skip-count 环境伪影）/ 13 skipped，静态门全过（import cycle 165/0、write
   surface 151/151、static hygiene、public checkout probe --strict、git diff --check）。
+- `47bbc13..（BR，本节）`：全项目审查改按**不变量**切片（ExecutionGate / 无声失败 /
+  OwnerGate 授权 / import 拓扑 + substrate 权威 / 并行注册表），28 项发现分 8 个文件互斥包
+  修复。最重一项为**已实测复现的所有者授权绕过**——`oa_` 是无密钥确定性哈希，仅凭记录 id
+  即可离线伪造 revoke/demote 并绕过 `require_recorded_digest`（且在"已存在摘要"的生产常态下
+  同样成立），改为按风险类默认拒绝；另修 ExecutionGate 许可证泄漏 ×2、substrate 自称权威、
+  cron 注册表漂移（`clearance_cycle` 从未被安装）、StateOverlay 六处 section 副本、4 处错误
+  可见性缺口、community 主机退役机制 + 公开文档漂移。顺带查实
+  `sweep_unavailable_open_proposals_on_flag_flip` 因 `append_terminal(detail=...)` 参数不存在
+  而**从未成功清扫过**。全量本地（Windows）2968 passed / 2 failed → **3023 passed / 0 failed**
+  / 13 skipped（+55），**首次全绿**；静态门全过（import cycle 0 环、write surface
+  unclassified 0、static hygiene、public checkout probe --strict exit 0、git diff --check）。
+  `oa_` 密钥化、monitor 11 组件采集接线、主机侧退役执行均**有意未做**并在 BR 节登记原因。

@@ -43,6 +43,7 @@ for _candidate in reversed(_PATH_CANDIDATES):
 
 from scripts.memory_os_module_cadence_report import build_cadence_report
 from plugins.memory.memory_os.audit import read_audit_records
+from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
 from plugins.memory.memory_os.clearance_receipts import clearance_snapshot_freshness
 from plugins.memory.memory_os.exposure_rollup import exposure_monitor_stats
 from plugins.memory.memory_os.owner_actions import owner_review_queue_report
@@ -62,28 +63,33 @@ DEFAULT_PROFILE = "default"
 # artifact stale; a one-hour threshold makes the dashboard stale for most of
 # every healthy day and recreates a second, misleading status truth.
 FULL_MONITOR_STALE_SECONDS = 30 * 3600
-CORE_MEMORY_OS_CRON = frozenset({
-    "memory-os-owner-review-digest",
-    "memory-os-proposal-followups-opsgate",
-    "memory-os-index-sync",
-    "memory-os-working-cleanup",
-    "memory-os-candidate-aggregation",
-    "memory-os-fact-judge",
-    "memory-os-event-stats-refresh",
-    "memory-os-exposure-rollup",
-    "memory-os-v3-seed-evidence",
-    "memory-os-v3-wandering",
-    "memory-os-v3-journal-sweep",
-    "memory-os-state-overlay-refresh",
-    "memory-os-entity-index-refresh",
-    "memory-os-full-monitor-refresh",
-    "memory-os-memory-sources-feedback-request",
+# Registry keys the dashboard tolerates seeing paused/disabled without
+# treating it as drift -- pausing one of these is a legitimate owner or
+# host-profile choice, not a signal something is broken. A registry key
+# that is NOT listed here defaults into CORE (must stay enabled or the
+# dashboard WARNs), so a newly registered cron spec is visible and health
+# is derived by default instead of silently falling into the unclassified
+# "other" bucket (see cron_registry.py MEMORY_OS_CRON_SPECS / the
+# active-closure onboarding profile in memory_os_owner_cron_onboarding.py
+# for the install-time counterpart of this distinction).
+#
+#   - module_cadence_report: not installed by active-closure at all (the
+#     report is generated on-demand elsewhere); tolerate absence/pause.
+#   - l3_probe_verification / expression_feedback_request: owner- and
+#     host-profile-tolerant jobs that are expected to be paused on some
+#     hosts without indicating an unhealthy install.
+OPTIONAL_MEMORY_OS_CRON_KEYS = frozenset({
+    "module_cadence_report",
+    "l3_probe_verification",
+    "expression_feedback_request",
 })
-OPTIONAL_MEMORY_OS_CRON = frozenset({
-    "memory-os-module-cadence-report",
-    "memory-os-l3-probe-verification",
-    "memory-os-expression-feedback-request",
-})
+_ALL_MEMORY_OS_CRON_SPECS = memory_os_cron_specs()
+CORE_MEMORY_OS_CRON = frozenset(
+    spec.name for spec in _ALL_MEMORY_OS_CRON_SPECS if spec.key not in OPTIONAL_MEMORY_OS_CRON_KEYS
+)
+OPTIONAL_MEMORY_OS_CRON = frozenset(
+    spec.name for spec in _ALL_MEMORY_OS_CRON_SPECS if spec.key in OPTIONAL_MEMORY_OS_CRON_KEYS
+)
 # Keep legacy tuple for backward-compatible reference; health now uses the
 # frozensets above so paused optional jobs don't contribute to WARN.
 EXPECTED_CRON_NAMES = tuple(sorted(CORE_MEMORY_OS_CRON))

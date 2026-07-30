@@ -2,7 +2,23 @@ import json
 
 from plugins.memory.memory_os.host_capability_probe import probe_host_capabilities
 from plugins.memory.memory_os.roots import MemoryOSRoots
-from plugins.memory.memory_os.signal_collectors import collect_signal_sources
+from plugins.memory.memory_os.signal_collectors import (
+    _mailbox_payload,
+    collect_signal_sources,
+)
+
+
+def _mailbox_base() -> dict:
+    return {
+        "status": "missing",
+        "capability_status": "missing",
+        "available": False,
+        "freshness_seconds": None,
+        "record_count": 0,
+        "latest_status": "",
+        "boundary_true_count": 0,
+        "raw_body_included": False,
+    }
 
 
 def test_collect_signal_sources_outputs_typed_metadata_only_payloads(tmp_path):
@@ -409,3 +425,80 @@ def test_collect_signal_sources_projects_external_hermes_cron_failures_metadata_
     assert payload["latest_failure_deliver"] is True
     assert "SHOULD_NOT_LEAK" not in encoded
     assert "secret token" not in encoded
+
+
+def test_mailbox_status_honors_configured_platform_root(tmp_path):
+    """Counterfactual for the deleted config-aware mailbox resolver.
+
+    Without _configured_mailbox_root, _mailbox_payload only ever probes
+    hermes_home/mailbox and hermes_home/system/mailbox, so it would report
+    mailbox_exists=False here even though a real, populated mailbox exists
+    at the host-configured platforms.mailbox.extra.root location.
+    """
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    community_root = tmp_path / "community_mailbox"
+    inbox = community_root / "agents" / "agent-42" / "inbox"
+    outbox = community_root / "agents" / "agent-42" / "outbox"
+    inbox.mkdir(parents=True)
+    outbox.mkdir(parents=True)
+    (inbox / "letter.json").write_text(json.dumps({"body": "hi"}), encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "platforms:",
+                "  mailbox:",
+                "    extra:",
+                "      root: community_mailbox",
+                "      agent_id: agent-42",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = _mailbox_payload(roots, _mailbox_base())
+
+    assert payload["mailbox_exists"] is True
+    assert payload["inbox_exists"] is True
+    assert payload["outbox_exists"] is True
+    assert payload["inbox_count"] == 1
+
+
+def test_mailbox_status_falls_back_to_hardcoded_root_without_config(tmp_path):
+    """No-config hosts must resolve identically to before this fix."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    (tmp_path / "mailbox" / "inbox").mkdir(parents=True)
+    (tmp_path / "mailbox" / "inbox" / "letter.json").write_text("{}", encoding="utf-8")
+
+    payload = _mailbox_payload(roots, _mailbox_base())
+
+    assert payload["mailbox_exists"] is True
+    assert payload["inbox_count"] == 1
+
+
+def test_mailbox_status_ignores_malformed_config(tmp_path):
+    """A malformed/incomplete config.yaml must never crash signal collection
+    and must fall back to the hardcoded probe unchanged."""
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    (tmp_path / "mailbox" / "inbox").mkdir(parents=True)
+    (tmp_path / "mailbox" / "inbox" / "letter.json").write_text("{}", encoding="utf-8")
+    # agent_id fails the [A-Za-z0-9_-]{1,64} validation -- must be rejected,
+    # not used to build an unsafe path.
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "platforms:",
+                "  mailbox:",
+                "    extra:",
+                "      root: community_mailbox",
+                "      agent_id: '../escape'",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = _mailbox_payload(roots, _mailbox_base())
+
+    assert payload["mailbox_exists"] is True
+    assert payload["inbox_count"] == 1

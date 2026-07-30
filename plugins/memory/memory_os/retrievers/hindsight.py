@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+from plugins.memory.memory_os.recall_policy import SUBSTRATE_AUTHORITY_ALIASES
 from plugins.memory.memory_os.recall_types import RecallObject, RecallType
 
 if TYPE_CHECKING:
@@ -67,7 +68,20 @@ class HindsightRetriever:
             summary = str(fact.get("body_summary") or fact.get("summary") or "")
             if not summary.strip():
                 continue
-            authority = str(fact.get("authority_class") or "derived_projection")
+            # Defect-2 bridge: `raw_authority` is in the SUBSTRATES
+            # vocabulary ("local_canonical" / "owner_approved" /
+            # "derived_projection" -- see substrates/base.py), while
+            # RecallObject.authority_class and recall_arbitration's ranking
+            # are keyed on the DISJOINT arbitration vocabulary
+            # (recall_policy.AUTHORITY_FRESHNESS_MATRIX["authority_rank"]).
+            # Copying `raw_authority` straight into the object's authority
+            # field would let an unrecognized substrates string silently
+            # rank at 0 in build_recall_plan (`.get(authority, 0)`).
+            # SUBSTRATE_AUTHORITY_ALIASES maps every known substrates value
+            # onto its arbitration-vocabulary equivalent; the raw value is
+            # still preserved in metadata for audit/debugging.
+            raw_authority = str(fact.get("authority_class") or "derived_projection")
+            authority = SUBSTRATE_AUTHORITY_ALIASES.get(raw_authority, raw_authority)
             try:
                 score = float(fact.get("relevance_score") or fact.get("confidence") or 0.5)
             except (TypeError, ValueError):
@@ -78,9 +92,10 @@ class HindsightRetriever:
                 content=summary[:300],
                 score=score,
                 source_ref=f"hindsight:{str(fact.get('substrate_snapshot_id', ''))}",
+                authority_class=authority,
                 metadata={
                     "advisory_only": True,
-                    "authority_class": authority,
+                    "authority_class": raw_authority,
                     "provider": provider,
                     "recall_llm_triggered": bool(fact.get("recall_llm_triggered")),
                 },

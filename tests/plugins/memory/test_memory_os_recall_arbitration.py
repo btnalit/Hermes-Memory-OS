@@ -586,6 +586,59 @@ def test_l4_ambiguous_pair_neither_suppressed_and_cross_linked_by_fingerprint():
     assert selected_by_ref["amb-right"]["ambiguity_related"] == [left_fp]
 
 
+# --- Defect 2: substrates-vocabulary authority_class must not silently rank 0 ---
+
+
+def test_substrate_vocabulary_authority_class_resolves_to_correct_rank_not_zero():
+    """Counterfactual for Defect 2: a RecallObject carrying a SUBSTRATES-
+    vocabulary authority_class ("local_canonical") -- as would be produced
+    by a retriever built on LocalArtifactProvider/GroundingFact -- must be
+    ranked using the alias bridge (recall_policy.SUBSTRATE_AUTHORITY_ALIASES),
+    not looked up directly against the arbitration vocabulary's
+    `authority_rank` table. Before the fix, `_AUTHORITY_RANK.get(authority, 0)`
+    had no entry for "local_canonical" and silently fell back to rank 0 --
+    the SAME rank as an intentionally-empty authority_class, and BELOW
+    "external_unverified" (rank 1). This is a genuinely-authoritative claim
+    that must never rank below an unverified external fact.
+    """
+    from plugins.memory.memory_os.recall_policy import AUTHORITY_FRESHNESS_MATRIX
+
+    local_canonical_via_substrate = _obj(
+        "genuinely local canonical fact",
+        authority="local_canonical",
+        ref="substrate-local",
+    )
+    external_unverified = _obj(
+        "ordinary external unverified fact",
+        authority="external_unverified",
+        ref="substrate-external",
+    )
+
+    plan = build_recall_plan([local_canonical_via_substrate, external_unverified], budget_chars=10_000)
+
+    by_ref = {entry["object"]["source_ref"]: entry for entry in plan["selected"]}
+    assert by_ref["substrate-local"]["authority_rank"] > by_ref["substrate-external"]["authority_rank"]
+    assert by_ref["substrate-local"]["authority_rank"] == AUTHORITY_FRESHNESS_MATRIX["authority_rank"]["approved_canonical"]
+    assert plan["unknown_authority_classes"] == []
+
+
+def test_unrecognized_authority_class_is_flagged_not_silently_zeroed():
+    """Counterfactual for Defect 2: a value that matches NEITHER the
+    arbitration vocabulary NOR the substrates-alias bridge must still be
+    visible as an anomaly via `unknown_authority_classes`, instead of
+    disappearing into an ordinary-looking rank 0. Reverting the
+    `resolve_authority_rank` wiring (i.e. going back to a plain
+    `_AUTHORITY_RANK.get(authority, 0)`) makes `unknown_authority_classes`
+    disappear entirely (KeyError on the plan dict) while the bad value
+    still silently ranks at 0."""
+    mystery = _obj("value from an unrecognized authority vocabulary", authority="totally_unknown_authority", ref="mystery")
+
+    plan = build_recall_plan([mystery], budget_chars=10_000)
+
+    assert plan["selected"][0]["authority_rank"] == 0
+    assert plan["unknown_authority_classes"] == ["totally_unknown_authority"]
+
+
 def test_apply_recall_plan_ignores_ambiguity_related_and_still_returns_both_objects():
     """`apply_recall_plan` reads only the "object" key of each selected
     entry -- confirm it stays unbroken when entries also carry the new

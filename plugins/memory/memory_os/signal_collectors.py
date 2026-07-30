@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -775,8 +776,58 @@ def _owner_review_pressure_payload(roots: MemoryOSRoots, base: dict[str, Any]) -
     }
 
 
+_MAILBOX_AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _configured_mailbox_root(hermes_home: Path) -> Path | None:
+    """Resolve a per-agent mailbox root from config.yaml.
+
+    Reads ``platforms.mailbox.extra.root`` and ``platforms.mailbox.extra.agent_id``
+    from ``<hermes_home>/config.yaml``. Both fields must be present and valid
+    (``agent_id`` must match ``[A-Za-z0-9_-]{1,64}``) for a configured root to
+    be returned; a relative ``root`` is resolved against ``hermes_home``. The
+    returned path is the bare per-agent directory (``<root>/agents/<agent_id>``)
+    -- callers append their own ``inbox``/``outbox`` suffixes, mirroring how the
+    hardcoded fallback roots are also bare directories.
+
+    Returns ``None`` -- never raises -- when config.yaml is absent, unreadable,
+    malformed, or the mailbox/extra fields are missing or invalid, so callers
+    can fall back to their existing hardcoded probe unchanged.
+    """
+    config_path = hermes_home / "config.yaml"
+    if not config_path.is_file():
+        return None
+    try:
+        import yaml
+
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    platforms = loaded.get("platforms")
+    mailbox_cfg = platforms.get("mailbox") if isinstance(platforms, dict) else None
+    extra = mailbox_cfg.get("extra") if isinstance(mailbox_cfg, dict) else None
+    if not isinstance(extra, dict):
+        return None
+    raw_root = extra.get("root")
+    agent_id = extra.get("agent_id")
+    if not isinstance(raw_root, str) or not raw_root.strip():
+        return None
+    if not isinstance(agent_id, str) or not _MAILBOX_AGENT_ID_PATTERN.fullmatch(agent_id):
+        return None
+    root_path = Path(raw_root.strip())
+    if not root_path.is_absolute():
+        root_path = hermes_home / root_path
+    return root_path / "agents" / agent_id
+
+
 def _mailbox_payload(roots: MemoryOSRoots, base: dict[str, Any]) -> dict[str, Any]:
-    root = _first_existing_path(roots.hermes_home, ("mailbox", "system/mailbox"))
+    configured_root = _configured_mailbox_root(roots.hermes_home)
+    if configured_root is not None and configured_root.exists():
+        root = configured_root
+    else:
+        root = _first_existing_path(roots.hermes_home, ("mailbox", "system/mailbox"))
     inbox = root / "inbox" if root else roots.hermes_home / "mailbox" / "inbox"
     outbox = root / "outbox" if root else roots.hermes_home / "mailbox" / "outbox"
     would_send_records = _read_jsonl(roots.hermes_home / "system-modules" / "mailbox" / "would_send.jsonl")

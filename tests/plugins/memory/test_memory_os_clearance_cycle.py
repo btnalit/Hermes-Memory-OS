@@ -7,6 +7,7 @@ and monitor stats.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -579,3 +580,315 @@ class TestClearanceCycleMonitorStats:
         assert stats["clearance_receipts_conflict"] == 1
         assert stats["clearance_receipts_unknown"] == 1
         assert stats["receipts_invalidated_count"] == 0
+
+
+# ── Error observability (silent-failure fix) ────────────────────────────
+
+
+class TestRunClearanceCycleErrorObservability:
+    """run_clearance_cycle must never report status='ok' after a total
+    per-item judge failure, and per-item error_records must be full
+    schema-conformant error_record dicts (not raw ad-hoc dicts).
+    """
+
+    def test_run_clearance_cycle_empty_batch_stays_ok(self, tmp_path: Path) -> None:
+        """No queue items at all — status must remain 'ok' (nothing to fail)."""
+        from plugins.memory.memory_os.clearance_cycle import run_clearance_cycle
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+
+        report = run_clearance_cycle(store, v2e_enabled=True)
+        assert report["status"] == "ok"
+        assert report["budget_used"] == 0
+        assert report["error_records"] == []
+
+    def test_run_clearance_cycle_total_batch_failure_flips_status_to_error(
+        self, tmp_path: Path,
+    ) -> None:
+        """Counterfactual for Defect 2.
+
+        Before the fix, run_clearance_cycle initialized report["status"] to
+        "ok" and never re-evaluated it after the per-item try/except loop,
+        so a cycle where EVERY item in the rejudge batch raised still
+        reported "ok" — and memory_os_clearance_cycle_helper.py maps
+        status=="ok" straight to cron exit code 0. The per-item except
+        handler also appended a raw dict (record_id/error_code/
+        error_summary) instead of a schema-conformant error_record. This
+        test asserts both are fixed: status flips to "error" on total
+        failure, and the error_record carries the full canonical schema.
+        """
+        from unittest.mock import patch
+
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.clearance_cycle import run_clearance_cycle
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+
+        # One never-judged provisional -> exactly one item in the batch.
+        candidate = CrystallizedCandidate(
+            "cand_total_fail", "fact", "A provisional fact.", ["evt_total_fail"],
+        )
+        decision = ApprovalDecision(
+            "cand_total_fail", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-07-01T00:00:00Z", provisional=True,
+            expires_at="2026-08-01T00:00:00Z",
+        )
+        service.write_approved_record(candidate, decision, file_name="prov_total_fail.md")
+
+        # A permanent record is required so the real judge branch
+        # (_judge_against_permanents) is invoked instead of the
+        # empty-corpus "always clear" shortcut.
+        perm_candidate = CrystallizedCandidate(
+            "cand_total_fail_perm", "fact", "An unrelated permanent fact.", ["evt_perm"],
+        )
+        perm_decision = ApprovalDecision(
+            "cand_total_fail_perm", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-06-01T00:00:00Z", provisional=False,
+        )
+        service.write_approved_record(perm_candidate, perm_decision, file_name="perm_total_fail.md")
+
+        # Crystallized records get their own auto-generated frontmatter
+        # "id" (not the candidate_id) — that generated id is what
+        # run_clearance_cycle uses as record_id.
+        prov_records = service.list_provisional_records()
+        assert len(prov_records) == 1
+        real_record_id = str(prov_records[0]["id"])
+
+        with patch(
+            "plugins.memory.memory_os.clearance_cycle._judge_against_permanents",
+            side_effect=RuntimeError("judge unavailable"),
+        ):
+            report = run_clearance_cycle(store, v2e_enabled=True)
+
+        assert report["judged"] == 0
+        assert report["budget_used"] == 1
+        assert len(report["error_records"]) == 1
+        assert report["status"] == "error", (
+            "every item in the batch errored — status must not report 'ok'"
+        )
+        error_record = report["error_records"][0]
+        assert error_record["schema_version"] == "memory-os.error_record.v0"
+        assert error_record["component"] == "clearance_cycle"
+        assert error_record["operation"] == "run_clearance_cycle_judge_item"
+        assert error_record["error_code"] == "RuntimeError"
+        assert error_record["severity"] == "error"
+        assert error_record["recoverable"] is True
+        assert error_record["details"]["record_id"] == real_record_id
+
+    def test_run_clearance_cycle_partial_batch_failure_keeps_status_ok(
+        self, tmp_path: Path,
+    ) -> None:
+        """One bad record among several must not flip the cron exit code.
+
+        memory_os_clearance_cycle_helper.py maps status=="ok" to exit 0 —
+        a single flaky judge call is expected/recoverable noise (the record
+        stays unjudged and is retried next cycle), so it must not fail the
+        whole cron run. Only a *total* batch failure should.
+        """
+        from unittest.mock import patch
+
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.clearance_cycle import run_clearance_cycle
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedCandidate,
+            CrystallizedMemoryService,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        service = CrystallizedMemoryService(store)
+
+        fail_id = "cand_partial_fail"
+        ok_id = "cand_partial_ok"
+        for cid, entered_at in ((fail_id, "2026-07-01T00:00:00Z"), (ok_id, "2026-07-02T00:00:00Z")):
+            candidate = CrystallizedCandidate(cid, "fact", f"Provisional {cid}.", [f"evt_{cid}"])
+            decision = ApprovalDecision(
+                cid, ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+                entered_at, provisional=True, expires_at="2026-08-01T00:00:00Z",
+            )
+            service.write_approved_record(candidate, decision, file_name=f"{cid}.md")
+
+        perm_candidate = CrystallizedCandidate(
+            "cand_partial_perm", "fact", "An unrelated permanent fact.", ["evt_perm2"],
+        )
+        perm_decision = ApprovalDecision(
+            "cand_partial_perm", ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED, "owner",
+            "2026-06-01T00:00:00Z", provisional=False,
+        )
+        service.write_approved_record(perm_candidate, perm_decision, file_name="perm_partial.md")
+
+        # Fail one item by patching the receipt write, NOT the judge.
+        # run_clearance_cycle only calls _judge_against_permanents in its
+        # `else` branch; when the permanent corpus is empty it takes the
+        # "empty corpus clause" branch and never calls the judge at all.
+        # A judge-level patch therefore silently never fires, every item
+        # succeeds, and the test asserts nothing. write_clearance_receipt
+        # is reached on BOTH branches, inside the same try, immediately
+        # before `report["judged"] += 1` — so it fails exactly one item.
+        from plugins.memory.memory_os.clearance_receipts import (
+            write_clearance_receipt as _real_write_clearance_receipt,
+        )
+
+        # The batch item's record_id is the GENERATED crystallized record id
+        # (`cry_<timestamp>_<hash>`) assigned by write_approved_record — NOT
+        # the candidate id. Matching on the candidate id would never fire, so
+        # fail the first receipt write and remember which record it was.
+        failed_record_ids: list[str] = []
+
+        def _flaky_receipt_write(roots, receipt):
+            if not failed_record_ids:
+                failed_record_ids.append(receipt.record_id)
+                raise RuntimeError("receipt store unavailable")
+            return _real_write_clearance_receipt(roots, receipt)
+
+        with patch(
+            "plugins.memory.memory_os.clearance_cycle.write_clearance_receipt",
+            side_effect=_flaky_receipt_write,
+        ):
+            report = run_clearance_cycle(store, v2e_enabled=True)
+
+        # Two provisional records enter the batch; exactly one was induced
+        # to fail, so the other must still have been judged successfully.
+        assert len(failed_record_ids) == 1, "expected exactly one induced failure"
+        assert report["judged"] == 1
+        assert len(report["error_records"]) == 1
+        assert report["error_records"][0]["details"]["record_id"] == failed_record_ids[0]
+        assert report["status"] == "ok", (
+            "a single per-item failure among a larger batch must not flip status"
+        )
+
+
+class TestSweepUnavailableOpenProposalsOnFlagFlip:
+    """Defect 2 coverage for sweep_unavailable_open_proposals_on_flag_flip.
+
+    Also covers a functional bug found in the same call while fixing the
+    error-record schema: the call passed append_terminal(detail=...), but
+    ProposalLedger.append_terminal() has no `detail` parameter (confirmed —
+    no other call site in the repo passes it), so the sweep TypeError'd on
+    every single eligible proposal, unconditionally. That is fixed alongside
+    the error-record/status fix since it lives in the same function.
+    """
+
+    def _make_eligible_proposal(self, store: Any, seed: str) -> str:
+        from plugins.memory.memory_os.permanent_promotion import PermanentPromotionService
+
+        service = PermanentPromotionService(store, v2e_enabled=False)
+        proposal, created = service.proposals.create_or_get(
+            target_id=f"target_{seed}",
+            candidate_id=f"cand_{seed}",
+            body=f"body for {seed}",
+            channel="cli",
+            origin="owner_initiated",
+            clearance={"status": "unavailable", "reason_code": "test"},
+        )
+        assert created is True
+        assert proposal["status"] == "open"
+        return str(proposal["proposal_id"])
+
+    def test_sweep_revokes_eligible_open_proposals_real_path(self, tmp_path: Path) -> None:
+        """End-to-end, no mocking: proves the append_terminal(detail=...)
+        TypeError bug is fixed and the sweep now actually revokes proposals.
+        """
+        from plugins.memory.memory_os.clearance_cycle import (
+            sweep_unavailable_open_proposals_on_flag_flip,
+        )
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        proposal_id = self._make_eligible_proposal(store, "sweep_real")
+
+        result = sweep_unavailable_open_proposals_on_flag_flip(store)
+
+        assert result["status"] == "ok"
+        assert result["error_records"] == []
+        assert result["swept_count"] == 1
+        assert proposal_id in result["swept_proposal_ids"]
+
+    def test_sweep_total_failure_flips_status_to_error(self, tmp_path: Path) -> None:
+        """Counterfactual for Defect 2 (second call site).
+
+        Before the fix this always returned status="ok" (initialized once,
+        never re-evaluated) with raw (proposal_id, error_code)-only dicts
+        instead of schema-conformant error_records — even when every
+        eligible proposal failed to sweep.
+        """
+        from unittest.mock import patch
+
+        from plugins.memory.memory_os.clearance_cycle import (
+            sweep_unavailable_open_proposals_on_flag_flip,
+        )
+        from plugins.memory.memory_os.permanent_promotion import ProposalLedger
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        self._make_eligible_proposal(store, "sweep_total_fail")
+
+        with patch.object(
+            ProposalLedger, "append_terminal",
+            side_effect=RuntimeError("ledger unavailable"),
+        ):
+            result = sweep_unavailable_open_proposals_on_flag_flip(store)
+
+        assert result["swept_count"] == 0
+        assert len(result["error_records"]) == 1
+        assert result["status"] == "error"
+        error_record = result["error_records"][0]
+        assert error_record["schema_version"] == "memory-os.error_record.v0"
+        assert error_record["component"] == "clearance_cycle"
+        assert error_record["operation"] == "sweep_unavailable_open_proposals_on_flag_flip"
+        assert error_record["severity"] == "error"
+        assert error_record["recoverable"] is True
+        assert "proposal_id" in error_record["details"]
+
+    def test_sweep_partial_failure_keeps_status_ok(self, tmp_path: Path) -> None:
+        """One proposal failing to sweep is recoverable noise (retried on
+        the next flag-flip pass) and must not fail the whole sweep result.
+        """
+        from unittest.mock import patch
+
+        from plugins.memory.memory_os.clearance_cycle import (
+            sweep_unavailable_open_proposals_on_flag_flip,
+        )
+        from plugins.memory.memory_os.permanent_promotion import ProposalLedger
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+        from plugins.memory.memory_os.store import MemoryOSStore
+
+        store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="test"))
+        store.initialize()
+        fail_id = self._make_eligible_proposal(store, "sweep_partial_fail")
+        ok_id = self._make_eligible_proposal(store, "sweep_partial_ok")
+
+        real_append_terminal = ProposalLedger.append_terminal
+
+        def _flaky_append_terminal(self, proposal_id, status, **kwargs):
+            if proposal_id == fail_id:
+                raise RuntimeError("ledger unavailable")
+            return real_append_terminal(self, proposal_id, status, **kwargs)
+
+        with patch.object(ProposalLedger, "append_terminal", _flaky_append_terminal):
+            result = sweep_unavailable_open_proposals_on_flag_flip(store)
+
+        assert result["swept_count"] == 1
+        assert ok_id in result["swept_proposal_ids"]
+        assert len(result["error_records"]) == 1
+        assert result["error_records"][0]["details"]["proposal_id"] == fail_id
+        assert result["status"] == "ok", (
+            "a single per-proposal failure must not flip status when others swept fine"
+        )

@@ -4112,6 +4112,75 @@ def _int_at(payload: dict[str, Any], path: tuple[str, ...]) -> int:
     return _to_int(current)
 
 
+# Every component string passed to `build_error_record(component=...)` anywhere
+# in this repository.
+#
+# `monitor_error_observability` can only roll a component into the headline
+# `suppressed_error_count` / `degraded_component_count` when the snapshot
+# actually carries that component's status payload — and today only four do.
+# The rest still write error records to disk, but those records never reach the
+# monitor, so the headline number silently undercounts.
+#
+# Listing them here does not fix the collection gap; it makes the gap explicit
+# and measurable (`component_coverage.unaggregated_components`) instead of
+# invisible, and `tests/scripts/test_memory_os_3_200_monitor.py` derives the
+# real emitter list from source so a NEW emitter cannot be added without either
+# being aggregated or being consciously recorded here.
+ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
+    "abstraction_distillation",
+    "candidate_aggregation_lane",
+    "candidate_review",
+    "cascade_routing_policy",
+    "clearance_cycle",
+    "entity_index",
+    "feature_score",
+    "imagination_loop",
+    "judge_calibration",
+    "knob_ab_eval",
+    "llm_contradiction_lane",
+    "memory_os.permanent_promotion",
+    "memory_projection",
+    "migration_controller",
+    "override_sweep",
+    "owner_actions._candidate_aggregation_status_block",
+    "owner_actions._rendered_digest_text",
+    "prefetch",
+    "prefetch._crystallized_lines",
+    "prefetch._floor_match_score",
+    "prefetch._indexed_lines",
+    "prefetch_facade",
+    "provenance",
+    "provisional",
+    "provisional_sweep",
+    "runtime",
+    "session_mirror",
+    "shadow_recall",
+    "state_source_mirror",
+    "symbolic_offloader",
+})
+
+
+def _error_record_component_coverage(aggregated: set[str]) -> dict[str, Any]:
+    """Report which error-record emitters the headline aggregate actually covers.
+
+    A component counts as covered when it is aggregated directly or is a dotted
+    sub-component of an aggregated parent (e.g. ``prefetch._indexed_lines`` is
+    covered by ``prefetch``).
+    """
+
+    def _is_covered(name: str) -> bool:
+        return any(name == parent or name.startswith(f"{parent}.") for parent in aggregated)
+
+    unaggregated = sorted(
+        name for name in ERROR_RECORD_EMITTING_COMPONENTS if not _is_covered(name)
+    )
+    return {
+        "aggregated_components": sorted(aggregated),
+        "unaggregated_components": unaggregated,
+        "unaggregated_component_count": len(unaggregated),
+    }
+
+
 def monitor_error_observability(snapshot: dict[str, Any]) -> dict[str, Any]:
     module_artifacts = snapshot.get("module_artifacts") if isinstance(snapshot.get("module_artifacts"), dict) else {}
     component_sources = {
@@ -4174,6 +4243,7 @@ def monitor_error_observability(snapshot: dict[str, Any]) -> dict[str, Any]:
         },
         "recent_error_codes": _bounded_error_codes(recent_codes, limit=10),
         "raw_body_included": raw_body_included,
+        "component_coverage": _error_record_component_coverage(set(component_sources)),
     }
 
 

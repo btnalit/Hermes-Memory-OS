@@ -607,11 +607,23 @@ class CognitiveLoopRunner:
             scope=scope,
             boundary=dict(BOUNDARIES),
         )
-        result = GroundTruthMinerModule(self.hermes_home, profile=self.profile).run_once(
-            store=self.store,
-            execution_envelope_id=str(permit.get("execution_gate_envelope_id") or ""),
-            expected_scope=scope,
-        )
+        envelope_id = str(permit.get("execution_gate_envelope_id") or "")
+        try:
+            result = GroundTruthMinerModule(self.hermes_home, profile=self.profile).run_once(
+                store=self.store,
+                execution_envelope_id=envelope_id,
+                expected_scope=scope,
+            )
+        except Exception as exc:
+            complete_execution_gate_envelope(
+                self.store,
+                envelope_id=envelope_id,
+                lane_id=REVERSIBLE_LABELS_LANE_ID,
+                execution_status="error",
+                postcheck=dict(BOUNDARIES),
+                result_summary={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+            )
+            raise
         context["ground_truth_miner_result"] = result
         return result
 
@@ -1214,13 +1226,25 @@ class CognitiveLoopRunner:
             scope=scope,
             boundary=dict(BOUNDARIES),
         )
-        result = collect_and_project_signals(
-            self.store,
-            host_capabilities=capabilities,
-            trigger_type="cognitive_loop",
-            execution_envelope_id=str(permit.get("execution_gate_envelope_id") or ""),
-            expected_scope=scope,
-        )
+        envelope_id = str(permit.get("execution_gate_envelope_id") or "")
+        try:
+            result = collect_and_project_signals(
+                self.store,
+                host_capabilities=capabilities,
+                trigger_type="cognitive_loop",
+                execution_envelope_id=envelope_id,
+                expected_scope=scope,
+            )
+        except Exception as exc:
+            complete_execution_gate_envelope(
+                self.store,
+                envelope_id=envelope_id,
+                lane_id="memory_projection_collect",
+                execution_status="error",
+                postcheck=dict(BOUNDARIES),
+                result_summary={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+            )
+            raise
         context["memory_projection_result"] = result
         return result
 
@@ -1238,13 +1262,25 @@ class CognitiveLoopRunner:
             scope=scope,
             boundary=dict(BOUNDARIES),
         )
-        result = run_left_brain_advisor(
-            self.store,
-            write=True,
-            trigger_type="cognitive_loop",
-            execution_envelope_id=str(permit.get("execution_gate_envelope_id") or ""),
-            expected_scope=scope,
-        )
+        envelope_id = str(permit.get("execution_gate_envelope_id") or "")
+        try:
+            result = run_left_brain_advisor(
+                self.store,
+                write=True,
+                trigger_type="cognitive_loop",
+                execution_envelope_id=envelope_id,
+                expected_scope=scope,
+            )
+        except Exception as exc:
+            complete_execution_gate_envelope(
+                self.store,
+                envelope_id=envelope_id,
+                lane_id="left_brain_advisor_report",
+                execution_status="error",
+                postcheck=dict(BOUNDARIES),
+                result_summary={"error_type": type(exc).__name__, "message": str(exc)[:200]},
+            )
+            raise
         context["left_brain_advisor_result"] = result
         return result
 

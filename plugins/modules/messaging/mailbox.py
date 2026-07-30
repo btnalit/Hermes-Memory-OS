@@ -3,10 +3,57 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+
+_MAILBOX_AGENT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _configured_mailbox_root(hermes_home: Path) -> Path | None:
+    """Resolve a per-agent mailbox root from config.yaml.
+
+    Reads ``platforms.mailbox.extra.root`` and ``platforms.mailbox.extra.agent_id``
+    from ``<hermes_home>/config.yaml``. Both fields must be present and valid
+    (``agent_id`` must match ``[A-Za-z0-9_-]{1,64}``) for a configured root to
+    be returned; a relative ``root`` is resolved against ``hermes_home``. The
+    returned path is the bare per-agent directory (``<root>/agents/<agent_id>``);
+    ``inbox_root``/``outbox_root`` append their own suffixes on top of it, the
+    same way they do for the hardcoded ``hermes_home / "mailbox"`` default.
+
+    Returns ``None`` -- never raises -- when config.yaml is absent, unreadable,
+    malformed, or the mailbox/extra fields are missing or invalid, so callers
+    fall back to the hardcoded default unchanged.
+    """
+    config_path = hermes_home / "config.yaml"
+    if not config_path.is_file():
+        return None
+    try:
+        import yaml
+
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    platforms = loaded.get("platforms")
+    mailbox_cfg = platforms.get("mailbox") if isinstance(platforms, dict) else None
+    extra = mailbox_cfg.get("extra") if isinstance(mailbox_cfg, dict) else None
+    if not isinstance(extra, dict):
+        return None
+    raw_root = extra.get("root")
+    agent_id = extra.get("agent_id")
+    if not isinstance(raw_root, str) or not raw_root.strip():
+        return None
+    if not isinstance(agent_id, str) or not _MAILBOX_AGENT_ID_PATTERN.fullmatch(agent_id):
+        return None
+    root_path = Path(raw_root.strip())
+    if not root_path.is_absolute():
+        root_path = hermes_home / root_path
+    return root_path / "agents" / agent_id
 
 
 def mailbox_manifest() -> dict[str, Any]:
@@ -54,6 +101,9 @@ class MailboxNoSendModule:
 
     @property
     def mailbox_root(self) -> Path:
+        configured = _configured_mailbox_root(self.hermes_home)
+        if configured is not None:
+            return configured
         return self.hermes_home / "mailbox"
 
     @property
