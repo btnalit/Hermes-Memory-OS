@@ -984,6 +984,81 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
 
 ---
 
+## BQ — 将 community 模块整体迁出为独立仓库 sannai-community（2026-07-29）
+
+- **触发**：用户要求把 Sannai 的社区功能（community）从 Hermes-Memory-OS 完整剥离，独立为新建的
+  GitHub 仓库 `btnalit/sannai-community`，使 Hermes-Memory-OS 不再包含该模块；文档与自动化部署
+  一并剥离。
+- **调查结论**：community 模块对核心代码的耦合极浅——8 个模块文件（`community.py`、
+  `community_shared.py`、`community_table.py`、`community_interest_garden.py`、
+  `community_triggers.py`、`community_snapshot.py`、`community_partner_runtime.py`、
+  `partner_create.py`）只依赖 `jsonl_io.py` 的少数工具函数（该文件本身零内部依赖，纯 stdlib，
+  可整体 vendor）；`community_monitor.py`/`community_partner_reply.py`/`deploy_community.py`
+  三个脚本零仓库内部 import，完全自包含。真正的集成点只有 4 处：`cognitive_loop.py` 的
+  `_community_cycle` 步骤、`memory-os-agent-os` CLI 的 `community status` 子命令、
+  `install_memory_os_plugin.py` 的 community 数据布局初始化、以及此前未被列入初始范围、经复核
+  新发现的第 4 处——`state_overlay.py`/`state_overlay_schema.py`/`state_overlay_renderer.py`
+  的 `community_snapshot` overlay 分区（`_community_inbox_dir` 辅助函数一并确认零其他调用方）。
+  另确认 `partner_create.py` 未被任何 CLI 命令直接调用（只被测试和 `deploy_community.py` 引用），
+  不构成额外集成点。
+- **新仓库**：`sannai-community`（用户已建好的空仓库）首次提交把 8 个模块 + 2 个脚本（自包含，
+  未改动）+ 一份整体 vendor 的 `jsonl_io.py` 组织为独立可安装包（`sannai_community/` 扁平包，
+  相对导入不变，故模块本身零改动；仅脚本/测试的绝对 import 路径需要改写）；5 个 community 专属
+  测试文件随迁（导入路径改写为 `sannai_community.*`），本地 59 passed。第二次提交把路线图
+  `docs/resolver/hermes-memory-os-optimization-roadmap.md` §11（11.1–11.12.7，含 Sannai 本人
+  撰写的 11.10《小院子》与 11.12《窗台/一起看/兴趣花园》）原文不改、编号不重排地迁为该仓库
+  `docs/design.md`，README 记录已知实现落差（零调用方模块、cron 脚本内联分叉、
+  `unread_partner_replies` 语义缺口——原样携带，未在迁移中"顺手修复"）。
+- **Hermes-Memory-OS 侧移除**（本仓库，无残留钩子——不保留可选 import 接口，符合仓库既有的
+  反 facade 抽象原则）：
+  1. 删除 8 个模块文件、3 个脚本（含 `scripts/deploy_community.py`——其
+     `COMMUNITY_MODULES` 清单混合了核心文件如 `cognitive_loop.py`/`state_overlay*.py`/
+     `jsonl_io.py`/`cron_registry.py`/`legacy_right_brain_retirement.py`，未原样移植到新仓库，
+     只删除；部署自动化随本次剥离退役，生产主机 hermes-media 上已部署的数据/cron 不受影响，
+     未做处理）。
+  2. `cognitive_loop.py`：移除 `_community_cycle` 方法与其步骤注册；连带清理仅供其使用的
+     `hashlib` import。
+  3. `plugins/memory-os-agent-os/__init__.py`：移除 `_ALLOWED_ALIASES` 的 `"community"`、
+     `community` 子命令解析器与分发分支、`_community_command` 函数体。
+  4. `scripts/install_memory_os_plugin.py`：移除 `SOURCE_COMMUNITY_DEPLOY`、
+     `_initialize_community_layout` 函数与调用点、安装报告字典的 `community_layout`/
+     `community_deploy` 键。
+  5. `scripts/memory_os_write_surface_check.py`：移除 8 条 `community_*` 分类登记（保留
+     其间穿插的 `execution_gate.py`/`runtime.py` 两条，未误删）。
+  6. `state_overlay.py`/`state_overlay_schema.py`/`state_overlay_renderer.py`：移除
+     `community_snapshot` overlay 分区的构建代码、schema 字段与 `to_dict()` 键、渲染器标签与
+     `_SHORT_SECTIONS` 归属；连带清理仅供 `_community_inbox_dir` 使用的 `yaml` import。
+  7. 删除 6 个 community 专属测试文件（`test_memory_os_community.py`、
+     `test_memory_os_community_features.py`、`test_memory_os_community_hardening.py`、
+     `test_memory_os_community_table_and_interest_garden.py`、`test_memory_os_partner_create.py`、
+     `tests/scripts/test_deploy_community.py`）；修剪 2 个混合测试文件——
+     `test_memory_os_cognitive_loop.py`（移除 community 相关 import、
+     `test_community_cycle_deduplicates_persisted_candidate_reports` 整个测试函数、步骤名列表
+     里的 `"community_cycle"` 一项、以及两条 `steps["community_cycle"]` 断言）与
+     `test_memory_os_agent_os_shell.py`（移除 `community` 子命令解析断言片段）。
+     `test_memory_os_community_hardening.py` 中的 `test_state_overlay_includes_community_projection`
+     未随文件整体迁移——它验证的正是本次移除的 overlay 集成点，在新旧两个仓库都无处安放，直接
+     删除，不迁移。
+  8. 路线图文档：§11 标题与编号保留（供 §13/§14/§15 与本清单已有的 "11.x" 交叉引用继续解析），
+     正文替换为迁移说明；仅删除 §15 中已过期的 community 相关一条结论（"社区给 Sannai 带来..."）；
+     §13 的 R7 验收矩阵行、§14 当前优先级均保持不变，不臆造新内容替换（这两节涉及的是历史验收
+     记录与优先级快照，删除或改写超出本次剥离范围）。本清单"待办"原第 4、5 两项（Track A
+     模块落差、`unread_partner_replies` 语义缺口）随代码迁出，标注已随 BQ 迁移。
+- **反事实覆盖**：`git grep -ril "community"`（大小写不敏感）在改动后的 Python 源文件中返回
+  零命中，确认无残留引用会在 import 时报错；write surface check 的
+  `allowed_count == surface_count`（151/151）确认没有留下指向已删除文件的失效分类条目
+  （若漏删会在此处 FAIL，而非 `unclassified_count`，因为该项由 AST 扫描现存文件生成）。
+- **测试数量变化（有意减少，非回归）**：全量本地（Windows）**3039 → 2968 passed** / 2 failed
+  / 13 skipped——净减少 71，对应 6 个整体迁出的测试文件 + 2 个混合文件的定向裁剪；2 项 FAIL
+  与 BK/BM/BO/BP 记录的同一 `test_memory_os_pytest_policy.py` skip-count 本机 `%TEMP%` 环境
+  伪影一致，非本次改动引入。import cycle（165 modules / 0 cycle，此前 173）、write surface
+  （151/151，`unclassified_count=0`，此前 163/163）、static hygiene、public checkout probe
+  （`--strict`，`fail: []`）、`git diff --check` 全过。
+- **未做的事**：未处理 hermes-media 生产主机上已部署的 community 数据/cron（按用户明确要求，
+  本次只做仓库层面剥离）；未尝试修复 BP/11.12.7 记录的既有实现落差（原样迁移，随
+  sannai-community README 一并携带）；`deploy_community.py` 未移植到新仓库（其模块清单混合
+  核心文件，按旧仓库安装布局硬编码路径，移植等于重写一个未经验证的部署脚本，超出本次范围）。
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1000,14 +1075,10 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
    残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
-4. BP 记录的 Track A 实现落差——`community_partner_runtime.py`/`community_table.py`/
-   `community_interest_garden.py` 与实际线上路径（`scripts/community_partner_reply.py`）
-   脱节，导致限流约束缺失、shared 写入门控被绕开、`_extract_topics` 关键词分叉；收口需二选一
-   （改脚本 import 模块并验证部署契约 / 明确废弃模块并删除），本次未做判断，留给下次接触
-   Track A 代码时处理（路线图 11.12.7 记录）。
-5. BP 记录的 `community_snapshot.py::unread_partner_replies`/`partner_reply_breakdown`
-   语义缺口——用两个无关计数器相减，当前无消费者读取，未修；若未来有 UI/digest 要消费这两个
-   字段，须先补"回复已读游标"再接入，不能直接信任现有数值。
+
+（原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
+BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
+sannai-community 仓库 README。）
 
 ---
 
@@ -1108,3 +1179,11 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
   既有 skip-count 环境伪影 + 1 个全量套件下资源争用偶发 FAIL、隔离重跑 100% PASS，均经
   stash 对照验证与本次改动无关）/ 13 skipped，静态门全过（import cycle 173/0、write
   surface 163/163、static hygiene、public checkout probe、git diff --check）。
+- `b89e9c4..（BQ，本节）`：Sannai 社区功能整体迁出为独立仓库
+  [sannai-community](https://github.com/btnalit/sannai-community)——8 个模块文件、3 个脚本、
+  路线图 §11 设计文档随迁；Hermes-Memory-OS 侧移除 4 处集成点（cognitive_loop 步骤、CLI 子
+  命令、installer 数据布局初始化、state_overlay 三文件的 community_snapshot 分区），零残留
+  钩子。生产主机数据/cron 未处理（按范围要求）。全量本地（Windows）3039→**2968 passed**
+  （有意减少 71，对应 6 个整体迁出的测试文件 + 2 个混合文件定向裁剪，非回归）/ 2 failed（同
+  BK/BM/BO/BP 既有 skip-count 环境伪影）/ 13 skipped，静态门全过（import cycle 165/0、write
+  surface 151/151、static hygiene、public checkout probe --strict、git diff --check）。
