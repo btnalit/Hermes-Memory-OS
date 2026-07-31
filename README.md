@@ -257,9 +257,9 @@ small without merging any governance boundary.
 
 | Job | Schedule | Lanes |
 | --- | --- | --- |
-| `memory-os-tick-derived` | `*/15 * * * *` | index sync, event stats refresh, state overlay refresh, entity index refresh |
-| `memory-os-tick-governance` | `*/30 * * * *` | proposal follow-up OpsGate |
-| `memory-os-tick-evidence` | `0 * * * *` | fact judge, candidate aggregation, L3 probe verification, Hindsight health probe, V3 wandering |
+| `memory-os-tick-derived` | `2,17,32,47 * * * *` | index sync, event stats refresh, state overlay refresh, entity index refresh |
+| `memory-os-tick-governance` | `7,37 * * * *` | proposal follow-up OpsGate |
+| `memory-os-tick-evidence` | `12 * * * *` | fact judge, candidate aggregation, L3 probe verification, Hindsight health probe, V3 wandering |
 | `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working-memory cleanup, Hindsight advisory digest |
 | `memory-os-owner-review-digest` | `0 9 * * *` | owner review digest |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory-source feedback |

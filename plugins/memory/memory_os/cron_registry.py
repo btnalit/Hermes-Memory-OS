@@ -187,6 +187,14 @@ class MemoryOSCronSpec:
 
 # ── Group table: what actually becomes a Hermes cron job ──────────────
 #
+# Tick minutes are deliberately STAGGERED (:02/:17/:32/:47, :07/:37, :12,
+# 00:05) rather than sharing :00. Aligned expressions (*/15, */30, 0 * * * *)
+# all fire at the top of the hour, which put three group runners in the same
+# minute contending on execution_gate_index.json -- the very concurrency this
+# consolidation set out to remove. Staggering changes no lane's cadence:
+# a lane's rate comes from due_interval_minutes, not from which minute its
+# tick lands on.
+#
 # Four multi-member tick groups collapse 16 local lanes into 4 jobs.  The
 # owner-facing lanes keep a dedicated single-member group each: they render a
 # distinct owner message through their own agent prompt and deliver channel,
@@ -199,7 +207,7 @@ MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
         name="memory-os-tick-derived",
         wrapper_script="memory_os_cron_tick_derived.py",
         schedule_arg="tick_derived_schedule",
-        default_schedule="*/15 * * * *",
+        default_schedule="2,17,32,47 * * * *",
         deliver_role="local",
         prompt_ref="empty",
         no_agent=True,
@@ -210,7 +218,7 @@ MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
         name="memory-os-tick-governance",
         wrapper_script="memory_os_cron_tick_governance.py",
         schedule_arg="tick_governance_schedule",
-        default_schedule="*/30 * * * *",
+        default_schedule="7,37 * * * *",
         deliver_role="local",
         prompt_ref="empty",
         no_agent=True,
@@ -221,7 +229,7 @@ MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
         name="memory-os-tick-evidence",
         wrapper_script="memory_os_cron_tick_evidence.py",
         schedule_arg="tick_evidence_schedule",
-        default_schedule="0 * * * *",
+        default_schedule="12 * * * *",
         deliver_role="local",
         prompt_ref="empty",
         no_agent=True,

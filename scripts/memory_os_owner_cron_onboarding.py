@@ -157,9 +157,9 @@ def build_parser() -> argparse.ArgumentParser:
     # lane they no longer control scheduling.  Passing one that differs from
     # its default raises a deprecation finding rather than being silently
     # ignored -- see _deprecated_schedule_findings().
-    parser.add_argument("--tick-derived-schedule", default="*/15 * * * *")
-    parser.add_argument("--tick-governance-schedule", default="*/30 * * * *")
-    parser.add_argument("--tick-evidence-schedule", default="0 * * * *")
+    parser.add_argument("--tick-derived-schedule", default="2,17,32,47 * * * *")
+    parser.add_argument("--tick-governance-schedule", default="7,37 * * * *")
+    parser.add_argument("--tick-evidence-schedule", default="12 * * * *")
     parser.add_argument("--tick-daily-schedule", default="5 0 * * *")
     parser.add_argument(
         "--cron-profile",

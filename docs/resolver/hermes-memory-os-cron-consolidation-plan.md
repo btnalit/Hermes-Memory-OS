@@ -173,9 +173,9 @@ class MemoryOSCronGroupSpec:         # Hermes 调度面，8 条
 
 | Group | Hermes job | schedule | 成员（due 策略） |
 |---|---|---|---|
-| **G1 派生视图** | `memory-os-tick-derived` | `*/15 * * * *` | `event_stats_refresh`(15m)、`index_sync`(30m)、`state_overlay_refresh`(30m)、`entity_index_refresh`(30m) |
-| **G2 治理队列** | `memory-os-tick-governance` | `*/30 * * * *` | `proposal_followups_opsgate`(30m)、`clearance_cycle`(10m，**仍延后**) |
-| **G3 判断与探针** | `memory-os-tick-evidence` | `0 * * * *` | `hindsight_health_probe`(1h)、`fact_judge`(4h)、`candidate_aggregation`(6h)、`l3_probe_verification`(6h)、`v3_wandering`(6h) |
+| **G1 派生视图** | `memory-os-tick-derived` | `2,17,32,47 * * * *` | `event_stats_refresh`(15m)、`index_sync`(30m)、`state_overlay_refresh`(30m)、`entity_index_refresh`(30m) |
+| **G2 治理队列** | `memory-os-tick-governance` | `7,37 * * * *` | `proposal_followups_opsgate`(30m)、`clearance_cycle`(10m，**仍延后**) |
+| **G3 判断与探针** | `memory-os-tick-evidence` | `12 * * * *` | `hindsight_health_probe`(1h)、`fact_judge`(4h)、`candidate_aggregation`(6h)、`l3_probe_verification`(6h)、`v3_wandering`(6h) |
 | **G4 日界与维护** | `memory-os-tick-daily` | `5 0 * * *` | `exposure_rollup`(**calendar** 00:05)、`v3_seed_evidence`(**calendar** 00:05)、`v3_journal_sweep`(24h)、`working_cleanup`(7d)、`hindsight_advisory_digest`(7d) |
 
 分组依据是**语义类别**（可解释、失败影响面同质），
@@ -370,16 +370,28 @@ helper 脚本与 lane 注册表全程未动，回滚后行为与今天完全一�
   单次重写成本从「随 envelope 无上限增长」变成有界 O(2000)，
   这才是 §2.1 那条 15 秒锁超时路径真正被拆掉的原因——不是靠并发降为 1。
 
-### 建议的后续修复（未实施）
+### 后续修复（**已实施**，2026-07-31）
 
-把三个 tick 的分钟错开即可彻底消除整点碰撞，且不改变任何 lane 的有效节奏
+把三个 tick 的分钟错开，彻底消除整点碰撞，且不改变任何 lane 的有效节奏
 （各 lane 节奏由 `due_interval_minutes` 决定，与 tick 落在哪一分钟无关）：
 
-| Group | 现 | 建议 |
+| Group | 原 | 现 |
 |---|---|---|
 | `tick-derived` | `*/15 * * * *` | `2,17,32,47 * * * *` |
 | `tick-governance` | `*/30 * * * *` | `7,37 * * * *` |
 | `tick-evidence` | `0 * * * *` | `12 * * * *` |
 
-改动面：`MEMORY_OS_CRON_GROUPS` 的 `default_schedule` + onboarding 默认值 + 相应测试断言。
-`tick-daily`(`5 0 * * *`) 与四个 owner 作业无需变动。
+`tick-daily`(`5 0 * * *`) 与四个 owner 作业未动。
+
+**实测结果：同分钟最大并发 3 → 1，触发次数保持 172/天不变。**
+至此 §4.4 表格里最初写的「并发 1」才真正成立。
+
+改动面：`MEMORY_OS_CRON_GROUPS.default_schedule`、onboarding 参数默认值、
+`install_memory_os_plugin.py` 传参、公开文档四张表。测试断言已改为**从注册表派生**
+（不再写字面 schedule），并新增两条不变量：
+
+- `test_no_two_group_jobs_start_in_the_same_minute` —— 任意两个 group job 不得同分钟启动。
+- `test_every_tick_fires_at_least_as_often_as_its_fastest_installed_lane` ——
+  错开只许动分钟、不许动频率；比较对象是 active-closure **实际安装**的 lane，
+  因此 `clearance_cycle`(10min，延后中) 不会误伤 `tick-governance`(30min)，
+  但一旦有人激活它却没加快该 tick，这条会立刻失败。

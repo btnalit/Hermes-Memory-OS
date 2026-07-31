@@ -1349,11 +1349,11 @@ def _run_owner_cron_onboarding(
         # in the cron registry), so the tick cadence is the only schedule the
         # installer needs to supply.
         "--tick-derived-schedule",
-        "*/15 * * * *",
+        "2,17,32,47 * * * *",
         "--tick-governance-schedule",
-        "*/30 * * * *",
+        "7,37 * * * *",
         "--tick-evidence-schedule",
-        "0 * * * *",
+        "12 * * * *",
         "--tick-daily-schedule",
         "5 0 * * *",
         "--apply",

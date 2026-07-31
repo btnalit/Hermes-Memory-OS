@@ -188,14 +188,18 @@ cron surface without collapsing any governance boundary.
 
 | Job | Schedule | Lanes it runs |
 | --- | --- | --- |
-| `memory-os-tick-derived` | `*/15 * * * *` | event stats refresh, index sync, state overlay refresh, entity index refresh |
-| `memory-os-tick-governance` | `*/30 * * * *` | proposal follow-up OpsGate |
-| `memory-os-tick-evidence` | `0 * * * *` | hindsight health probe, fact judge, candidate aggregation, L3 probe verification, V3 wandering |
+| `memory-os-tick-derived` | `2,17,32,47 * * * *` | event stats refresh, index sync, state overlay refresh, entity index refresh |
+| `memory-os-tick-governance` | `7,37 * * * *` | proposal follow-up OpsGate |
+| `memory-os-tick-evidence` | `12 * * * *` | hindsight health probe, fact judge, candidate aggregation, L3 probe verification, V3 wandering |
 | `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working cleanup, hindsight advisory digest |
 | `memory-os-owner-review-digest` | `0 9 * * *` | sends approval items and real alerts through the owner channel |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | requests owner feedback on memory source recall quality |
 | `memory-os-expression-feedback-request` | `0 5 * * 0` | requests owner feedback on right-brain expressions |
 | `memory-os-full-monitor-refresh` | `30 2 * * *` | full production monitor snapshot |
+
+Tick minutes are staggered so no two group jobs start in the same minute --
+aligned expressions would all fire at the top of the hour and reintroduce the
+contention consolidation removes. Staggering changes no lane's cadence.
 
 A tick job fires at its *fastest* member's cadence; every other member is
 gated by its own `due_interval_minutes` and simply skipped on ticks where it

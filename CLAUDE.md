@@ -132,9 +132,9 @@ Default profile `active-closure` installs **8 Hermes cron jobs** covering 19 lan
 
 | Group job | Schedule | Members |
 |---|---|---|
-| `memory-os-tick-derived` | `*/15 * * * *` | event_stats_refresh, index_sync, state_overlay_refresh, entity_index_refresh |
-| `memory-os-tick-governance` | `*/30 * * * *` | proposal_followups_opsgate (+ clearance_cycle when enabled) |
-| `memory-os-tick-evidence` | `0 * * * *` | hindsight_health_probe, fact_judge, candidate_aggregation, l3_probe_verification, v3_wandering |
+| `memory-os-tick-derived` | `2,17,32,47 * * * *` | event_stats_refresh, index_sync, state_overlay_refresh, entity_index_refresh |
+| `memory-os-tick-governance` | `7,37 * * * *` | proposal_followups_opsgate (+ clearance_cycle when enabled) |
+| `memory-os-tick-evidence` | `12 * * * *` | hindsight_health_probe, fact_judge, candidate_aggregation, l3_probe_verification, v3_wandering |
 | `memory-os-tick-daily` | `5 0 * * *` | exposure_rollup, v3_seed_evidence, v3_journal_sweep, working_cleanup, hindsight_advisory_digest |
 | `memory-os-owner-review-digest` | `0 9 * * *` | owner_review_digest |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory_sources_feedback_request |
@@ -143,6 +143,7 @@ Default profile `active-closure` installs **8 Hermes cron jobs** covering 19 lan
 
 Rules that follow from this:
 
+- Tick minutes are **staggered** (`:02/:17/:32/:47`, `:07/:37`, `:12`, `00:05`) so no two group jobs start in the same minute. Aligned expressions (`*/15`, `*/30`, `0 * * * *`) all fire at `:00`, which reintroduces exactly the same-minute contention on `execution_gate_index.json` that consolidation exists to remove. Staggering changes no lane's cadence.
 - A group's cron cadence is its **finest** member's. Each lane keeps its own effective rate via `due_interval_minutes`; `scripts/memory_os_cron_group_runner.py` skips members that aren't due. Adding a lane means adding it to a group, **not** creating a cron job.
 - `due_policy="calendar"` exists for date-partitioned lanes (`v3_seed_evidence`), which must run at most once per UTC day rather than on elapsed time.
 - **The monitor's completion-freshness window must come from the lane's `due_interval_minutes`, never from the group job's cron expression** — deriving it from the schedule collapses a weekly lane sharing a daily tick to a 54h window and reports it permanently stale.

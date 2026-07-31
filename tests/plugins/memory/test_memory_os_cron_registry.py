@@ -223,3 +223,69 @@ def test_owner_facing_lanes_keep_dedicated_jobs():
         spec = memory_os_cron_spec_by_key(key)
         assert spec is not None, key
         assert groups[spec.group_key].member_keys == (key,), key
+
+
+def _cron_minutes(field, lo, hi):
+    if field == "*":
+        return set(range(lo, hi + 1))
+    out = set()
+    for part in field.split(","):
+        if part.startswith("*/"):
+            out |= set(range(lo, hi + 1, int(part[2:])))
+        else:
+            out.add(int(part))
+    return out
+
+
+def test_no_two_group_jobs_start_in_the_same_minute():
+    """The consolidation exists to remove same-minute contention on
+    execution_gate_index.json. Aligned cron expressions (*/15, */30,
+    0 * * * *) all fire at :00 and put three group runners in the same
+    minute again -- which is exactly what happened on the first production
+    deployment, where three ticks fired at 20:00:56. Minutes are staggered;
+    this pins that.
+    """
+    from collections import Counter
+
+    fires = Counter()
+    for group in memory_os_cron_groups():
+        minute, hour, day_of_month, month, day_of_week = group.default_schedule.split()
+        if day_of_week != "*" or day_of_month != "*" or month != "*":
+            continue  # weekly/monthly jobs are counted separately below
+        for h in _cron_minutes(hour, 0, 23):
+            for m in _cron_minutes(minute, 0, 59):
+                fires[(h, m)] += 1
+
+    collisions = {slot: count for slot, count in fires.items() if count > 1}
+    assert not collisions, f"group jobs share a start minute: {sorted(collisions)}"
+
+
+def test_every_tick_fires_at_least_as_often_as_its_fastest_installed_lane():
+    """Staggering moves minutes, never rates.
+
+    Compared against the lanes active-closure actually INSTALLS, not every
+    registered lane: clearance_cycle wants 10min but its activation is
+    deferred, so tick-governance running every 30min is correct today. If
+    clearance_cycle is ever switched on without speeding that tick up, this
+    fails -- which is the intended tripwire.
+    """
+    excluded = {"module_cadence_report", "clearance_cycle"}
+    for group in memory_os_cron_groups():
+        minute, hour, _, _, day_of_week = group.default_schedule.split()
+        if day_of_week != "*" or hour != "*":
+            continue  # daily/weekly ticks are gated per lane, not per minute
+        members = [
+            spec
+            for spec in memory_os_cron_specs()
+            if spec.group_key == group.key and spec.key not in excluded
+        ]
+        if not members:
+            continue
+        slots = sorted(_cron_minutes(minute, 0, 59))
+        assert slots, group.name
+        tick_interval = 60 // len(slots)
+        fastest = min(spec.due_interval_minutes for spec in members)
+        assert tick_interval <= fastest, (
+            f"{group.name} fires every {tick_interval}min but its fastest "
+            f"installed member needs every {fastest}min"
+        )

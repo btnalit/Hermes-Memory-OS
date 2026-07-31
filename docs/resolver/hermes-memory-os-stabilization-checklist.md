@@ -1340,6 +1340,69 @@ runtime 插入，但两者都是「快照优先 + try/except 软失败」，不�
 
 ---
 
+## BU — BT 两项发现的修复（2026-07-31）
+
+BT 登记的两项部署后发现全部修完。
+
+### 1. tick 分钟错开：同分钟并发 3 → 1
+
+BS 最初宣称的「并发 5 → 1」实际只做到 5 → 3（BT 已更正）。根因是三个 tick 的
+cron 表达式在整点重叠（`*/15`、`*/30`、`0 * * * *` 全部命中 `:00`）。
+
+现错开为 `2,17,32,47` / `7,37` / `12`（`tick-daily` 与四个 owner 作业未动）。
+**实测同分钟最大并发 3 → 1，触发次数保持 172/天不变**——错开只动分钟不动频率，
+各 lane 的有效节奏本就由 `due_interval_minutes` 决定，与 tick 落在哪一分钟无关。
+
+测试断言全部改为**从注册表派生**（不再写字面 schedule），并新增两条不变量：
+
+- `test_no_two_group_jobs_start_in_the_same_minute`
+- `test_every_tick_fires_at_least_as_often_as_its_fastest_installed_lane`
+  —— 比较对象是 active-closure **实际安装**的 lane。写这条时它先失败了一次：
+  `clearance_cycle` 声明 10min 而 `tick-governance` 是 30min。但该 lane 处于延后状态、
+  并不安装，所以正确口径是「已安装成员」。这条同时成为激活 `clearance_cycle` 时的绊线——
+  届时若不把该 tick 提速会立即失败。
+
+### 2. installed-layout import shadow：4 个脚本
+
+`deploy_l3_probe.py`、`memory_os_blank_host_smoke.py`、`memory_os_export_shadow.py`、
+`memory_os_queue_consolidated_candidate.py` 全部改为与 29 个兄弟脚本一致的条件式
+bootstrap：仓库布局下用 repo root，否则回退 `$HERMES_HOME/memory-os/runtime/python`。
+
+**BT 里「共 4 个」的说法要修正**：那是用宽松启发式扫出来的。改用严格正则复扫后，
+无条件插入 `parents[1]` 的其实是 7 个，另外 3 个是
+`deploy_memory_os.py`、`install_memory_os_plugin.py`、`memory_os_boundary_runtime_probe.py`。
+这 3 个**只从仓库检出运行、不随安装分发到主机**，`parents[1]` 就是 repo root，
+因此现状是正确的，未改动。
+
+同时发现最初判为「缺回退」的 `memory_os_candidate_aggregation_lane.py`、
+`memory_os_fact_judge_lane.py`、`memory_os_ragflow_readonly_probe.py` 其实都没问题——
+前两个直接指向 runtime root（安装布局专用），第三个用的是条件式但检查的是
+`plugins/seam/external_evidence`。**是我的检测式过严产生了假阳性，不是它们有缺陷。**
+
+新增 `tests/scripts/test_memory_os_installed_layout_imports.py`（5 项）：
+
+- 两条静态不变量：已分发脚本不得无条件插入 `parents[1]`；
+  且**豁免是被验证的而非被断言的**——从 `install_memory_os_plugin.py` 自己的
+  `SOURCE_* = REPO_ROOT / "scripts" / "x.py"` 声明里读出「已分发集合」，
+  那 3 个仓库侧工具一旦开始被分发，测试立刻失败。
+- 端到端：在真实遮蔽布局（`$HERMES_HOME/plugins/` 无 `memory/` 子包 +
+  `memory-os/runtime/python/plugins/` 放真包）下从中立 cwd 执行脚本，
+  断言不再出现 `No module named 'plugins.memory'`。
+- **反事实**：把旧 bootstrap 塞回脚本副本，断言同一夹具**确实**能复现该报错——
+  否则前一条可能只是因为夹具根本没遮蔽而空过。
+
+端到端断言刻意只判「遮蔽错误消失」，不判 returncode 0：这些脚本会继续导入更深的
+memory-os 包，需要 Hermes agent runtime（`agent` / `memory_os_agent`），CI 无此依赖，
+属既有环境限制。能走到那一步本身就证明 `plugins.memory` 已解析成功。
+
+修复后生产可撤掉 `deploy_l3_probe.py` 的本地覆盖，漂移归零。
+
+### 测试与门禁
+
+3058 → **3065 passed / 13 skipped / 0 failed**（净 +7：installed-layout 5 项 + cron 不变量 2 项）。四项静态门全过。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1349,10 +1412,6 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 已修复；2/9（pytest_policy skip-count）诊断为本机环境伪影，非项目代码缺陷，不修复。
 
 当前遗留：
-0. **`scripts/` 下 4 个脚本存在 installed-layout import shadow**（BT 记录）：
-   `deploy_l3_probe.py`、`memory_os_blank_host_smoke.py`、`memory_os_export_shadow.py`、
-   `memory_os_queue_consolidated_candidate.py`。已在 3.200 生产上实际触发一次，
-   目前靠主机侧本地覆盖绕过——仓库缺陷未修，生产存在一处已记录漂移。
 1. 四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否
    接入 cron onboarding 决定是否需要，BJ 记录）。
 2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
@@ -1507,3 +1566,15 @@ sannai-community 仓库 README。）
   已核对代码确认由生产观测数据成熟度驱动、与 cron 调度面无耦合。新登记待办：
   `scripts/` 下 4 个脚本的 installed-layout import shadow（已在生产触发一次，
   目前靠主机本地覆盖绕过，仓库缺陷未修）。纯文档，无代码改动。
+- `fe53dd3..HEAD`：BT 两项发现全部修复（BU）。① tick 分钟错开为
+  `2,17,32,47` / `7,37` / `12`，**实测同分钟最大并发 3 → 1、触发次数保持 172/天不变**，
+  至此 BS 最初宣称的「并发 1」才真正成立；测试断言改为从注册表派生并新增两条不变量
+  （不得同分钟启动、错开不得降低频率，后者以 active-closure 实际安装的 lane 为口径，
+  同时作为激活 `clearance_cycle` 的绊线）。② 4 个脚本的 installed-layout import shadow
+  改为条件式 bootstrap（仓库布局用 repo root，否则回退 runtime root），新增
+  `test_memory_os_installed_layout_imports.py`：静态不变量 + 端到端遮蔽复现 +
+  **反事实**（塞回旧 bootstrap 必须复现 `No module named 'plugins.memory'`），
+  且豁免名单从安装器自身的 `SOURCE_*` 声明读出、被验证而非被断言。
+  同时更正 BT 里「共 4 个」的说法——严格复扫是 7 个无条件插入，其余 3 个是
+  仅从仓库运行、不随安装分发的工具，现状正确未动；另有 3 个此前误判为缺陷的其实是
+  检测式假阳性。3058 → **3065 passed / 13 skipped / 0 failed**，静态门全过。

@@ -6,7 +6,11 @@ import os
 import sys
 from pathlib import Path
 
-from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, memory_os_cron_specs
+from plugins.memory.memory_os.cron_registry import (
+    memory_os_cron_groups,
+    memory_os_cron_spec_by_key,
+    memory_os_cron_specs,
+)
 
 
 def _load_module():
@@ -242,17 +246,20 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     # Each lane is now scheduled by its GROUP job. Assert the mapping via the
     # registry so this cannot drift back into per-lane job assumptions.
     jobs_by_name = {job["name"]: job for job in report["operational_cron_jobs"]}
-    for lane_key, expected_group_job, expected_schedule in (
-        ("index_sync", "memory-os-tick-derived", "*/15 * * * *"),
-        ("exposure_rollup", "memory-os-tick-daily", "5 0 * * *"),
-        ("hindsight_advisory_digest", "memory-os-tick-daily", "5 0 * * *"),
-        ("hindsight_health_probe", "memory-os-tick-evidence", "0 * * * *"),
+    groups_by_name = {group.name: group for group in memory_os_cron_groups()}
+    for lane_key, expected_group_job in (
+        ("index_sync", "memory-os-tick-derived"),
+        ("exposure_rollup", "memory-os-tick-daily"),
+        ("hindsight_advisory_digest", "memory-os-tick-daily"),
+        ("hindsight_health_probe", "memory-os-tick-evidence"),
     ):
         spec = memory_os_cron_spec_by_key(lane_key)
         assert spec is not None, lane_key
         assert spec.name == expected_group_job, lane_key
         job = jobs_by_name[expected_group_job]
-        assert job["schedule"] == expected_schedule, lane_key
+        # Schedule comes from the registry, not a literal, so staggering the
+        # tick minutes cannot silently drift this assertion.
+        assert job["schedule"] == groups_by_name[expected_group_job].default_schedule, lane_key
         assert job["deliver"] == "local", lane_key
         assert job["no_agent"] is True, lane_key
         # The lane's own helper must be listed among the tick's members.
@@ -388,7 +395,10 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-tick-evidence"]["deliver"] == "local"
     assert by_name["memory-os-tick-evidence"]["script"] == "memory_os_cron_tick_evidence.py"
     assert by_name["memory-os-tick-evidence"]["no_agent"] is True
-    assert by_name["memory-os-tick-evidence"]["schedule_display"] == "0 * * * *"
+    assert (
+        by_name["memory-os-tick-evidence"]["schedule_display"]
+        == {g.name: g for g in memory_os_cron_groups()}["memory-os-tick-evidence"].default_schedule
+    )
     assert memory_os_cron_spec_by_key("hindsight_health_probe").name == "memory-os-tick-evidence"
     assert home.joinpath("scripts", "memory_os_hindsight_health_probe.py").read_text(encoding="utf-8") == "#!/usr/bin/env python3\n"
 

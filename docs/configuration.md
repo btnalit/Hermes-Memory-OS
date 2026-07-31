@@ -96,14 +96,16 @@ merging any governance boundary.
 
 | Job | Schedule | Member lanes |
 | --- | --- | --- |
-| `memory-os-tick-derived` | `*/15 * * * *` | `event_stats_refresh`, `index_sync`, `state_overlay_refresh`, `entity_index_refresh` |
-| `memory-os-tick-governance` | `*/30 * * * *` | `proposal_followups_opsgate` |
-| `memory-os-tick-evidence` | `0 * * * *` | `hindsight_health_probe`, `fact_judge`, `candidate_aggregation`, `l3_probe_verification`, `v3_wandering` |
+| `memory-os-tick-derived` | `2,17,32,47 * * * *` | `event_stats_refresh`, `index_sync`, `state_overlay_refresh`, `entity_index_refresh` |
+| `memory-os-tick-governance` | `7,37 * * * *` | `proposal_followups_opsgate` |
+| `memory-os-tick-evidence` | `12 * * * *` | `hindsight_health_probe`, `fact_judge`, `candidate_aggregation`, `l3_probe_verification`, `v3_wandering` |
 | `memory-os-tick-daily` | `5 0 * * *` | `exposure_rollup`, `v3_seed_evidence`, `v3_journal_sweep`, `working_cleanup`, `hindsight_advisory_digest` |
 | `memory-os-owner-review-digest` | `0 9 * * *` | `owner_review_digest` |
 | `memory-os-memory-sources-feedback-request` | `30 10 * * *` | `memory_sources_feedback_request` |
 | `memory-os-expression-feedback-request` | `0 5 * * 0` | `expression_feedback_request` |
 | `memory-os-full-monitor-refresh` | `30 2 * * *` | `full_monitor_refresh` |
+
+Tick minutes are staggered so no two group jobs start in the same minute.
 
 Per-lane cadence is preserved by `due_interval_minutes` rather than by cron: a
 tick fires at its fastest member's rate and skips members that are not yet due.
