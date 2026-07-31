@@ -163,6 +163,27 @@ def _registry_script_names() -> list[str]:
     return sorted(dict.fromkeys(names))
 
 
+def test_execution_gate_asset_install_is_idempotent_in_installed_layout(tmp_path, monkeypatch):
+    """Running the deployed onboarding script must not copy a file onto itself."""
+    module = _load_module()
+    hermes_home = tmp_path / "home"
+    scripts_dir = hermes_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    execution_runner = scripts_dir / "memory_os_execution_gate_runner.py"
+    group_runner = scripts_dir / "memory_os_cron_group_runner.py"
+    execution_runner.write_text("# execution\n", encoding="utf-8")
+    group_runner.write_text("# group\n", encoding="utf-8")
+    monkeypatch.setattr(module, "SOURCE_EXECUTION_GATE_RUNNER", execution_runner)
+    monkeypatch.setattr(module, "SOURCE_CRON_GROUP_RUNNER", group_runner)
+
+    module._write_execution_gate_assets(hermes_home=hermes_home, specs=[])
+
+    assert execution_runner.read_text(encoding="utf-8") == "# execution\n"
+    assert group_runner.read_text(encoding="utf-8") == "# group\n"
+    assert execution_runner.stat().st_mode & 0o100
+    assert group_runner.stat().st_mode & 0o100
+
+
 def _home_with_helpers(
     tmp_path: Path,
     *,

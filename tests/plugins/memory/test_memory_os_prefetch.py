@@ -2239,7 +2239,7 @@ def test_qx_counterfactual_remove_append_loses_last_session(monkeypatch, tmp_pat
 
 
 class TestPrefetchFacadeIntegration:
-    """Phase 3: Retriever Facade → prefetch integration (knob-gated)."""
+    """Phase 3: Retriever Facade → prefetch integration (mode + kill-switch gated)."""
 
     def test_facade_initialized_once_and_cached(self, tmp_path, monkeypatch):
         """Facade is initialized only once per provider (constraint 1: no repeated init)."""
@@ -2264,6 +2264,274 @@ class TestPrefetchFacadeIntegration:
         provider = MemoryOSProvider()
         facade = provider._ensure_recall_facade()
         assert facade is None, f"Facade should be None when knob disabled, got {facade}"
+
+    def test_shadow_arbitration_config_keeps_observation_lane_live_after_enable_override_expires(self, tmp_path):
+        """A durable shadow mode must not depend on a provisional enable override.
+
+        Production had ``recall_arbitration.mode=shadow`` but stopped writing
+        Recall Plan observations after the temporary ``prefetch_facade_enabled``
+        override expired and the gateway restarted.  The durable mode is the
+        authoritative lane state; the knob remains an explicit kill switch.
+        """
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        provider = MemoryOSProvider()
+        provider._roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        provider._config = {
+            "recall_arbitration": {
+                "mode": "shadow",
+                "freshness_guard_mode": "shadow",
+                "conflict_resolution_mode": "shadow",
+            }
+        }
+
+        facade = provider._ensure_recall_facade()
+
+        assert facade is not None
+        assert facade._arbitration_mode == "shadow"
+
+    def test_explicit_facade_kill_switch_overrides_durable_shadow_mode(self, tmp_path):
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        register_override(
+            "prefetch_facade_enabled",
+            False,
+            prior=True,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        assert provider._ensure_recall_facade() is None
+
+    def test_mode_off_cannot_be_resurrected_by_stale_true_override(self, tmp_path):
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        register_override(
+            "prefetch_facade_enabled",
+            True,
+            prior=False,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "off"}}
+
+        assert provider._ensure_recall_facade() is None
+
+    def test_kill_switch_takes_effect_after_facade_was_initialized(self, tmp_path):
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+        assert provider._ensure_recall_facade() is not None
+
+        register_override(
+            "prefetch_facade_enabled",
+            False,
+            prior=True,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+
+        assert provider._ensure_recall_facade() is None
+
+    def test_malformed_non_boolean_kill_switch_value_fails_closed(self, tmp_path):
+        import json
+
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        override_path = roots.memory_os_root / "system" / "knob_overrides.jsonl"
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        override_path.write_text(
+            json.dumps({
+                "knob": "prefetch_facade_enabled",
+                "override_value": "false",
+                "state": "active",
+                "provisional": True,
+                "expires_at": "2099-01-01T00:00:00+00:00",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        assert provider._ensure_recall_facade() is None
+
+    def test_corrupt_kill_switch_store_fails_closed_without_breaking_prefetch(self, tmp_path):
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        override_path = roots.memory_os_root / "system" / "knob_overrides.jsonl"
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        override_path.write_bytes(bytes([0xFF, 0xFE, 0x00]))
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        assert provider._ensure_recall_facade() is None
+        assert provider._recall_facade_knob_errors == 1
+
+    def test_malformed_json_kill_switch_store_fails_closed(self, tmp_path):
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        override_path = roots.memory_os_root / "system" / "knob_overrides.jsonl"
+        override_path.parent.mkdir(parents=True, exist_ok=True)
+        override_path.write_text("{not-json}\n", encoding="utf-8")
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        assert provider._ensure_recall_facade() is None
+        assert provider._recall_facade_knob_errors == 1
+
+    def test_expired_false_kill_switch_reenables_without_file_change(self, tmp_path):
+        import time
+        from datetime import datetime, timedelta, timezone
+
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        register_override(
+            "prefetch_facade_enabled",
+            False,
+            prior=True,
+            proposed_by="test",
+            approved_via="test",
+            expires_at=(datetime.now(timezone.utc) + timedelta(seconds=0.15)).isoformat(),
+            roots=roots,
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+        assert provider._ensure_recall_facade() is None
+
+        time.sleep(0.2)
+
+        assert provider._ensure_recall_facade() is not None
+
+    def test_facade_is_constructed_once_under_concurrent_prefetch(self, tmp_path, monkeypatch):
+        import importlib
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        memory_os_module = importlib.import_module("plugins.memory.memory_os")
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        constructed = 0
+
+        class FakeFacade:
+            def __init__(self, **kwargs):
+                nonlocal constructed
+                constructed += 1
+                time.sleep(0.03)
+
+            def register(self, retriever):
+                return None
+
+        monkeypatch.setattr(memory_os_module, "RetrieverFacade", FakeFacade)
+        provider = MemoryOSProvider()
+        provider._roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: provider._ensure_recall_facade(), range(8)))
+
+        assert constructed == 1
+        assert len({id(item) for item in results}) == 1
+
+    def test_status_refreshes_kill_switch_before_reporting(self, tmp_path):
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+
+        provider = MemoryOSProvider()
+        provider.initialize(
+            "session-1",
+            hermes_home=str(tmp_path),
+            platform="telegram",
+            agent_identity="memoryos-test",
+        )
+        provider._config["recall_arbitration"] = {"mode": "shadow"}
+        assert provider._ensure_recall_facade() is not None
+        register_override(
+            "prefetch_facade_enabled",
+            False,
+            prior=True,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=provider._roots,
+        )
+
+        report = provider._tool_status_report()
+        provider.shutdown()
+
+        assert report["recall_facade"]["arbitration_mode"] == "shadow"
+        assert report["recall_facade"]["kill_switch_enabled"] is False
+        assert report["recall_facade"]["effective_enabled"] is False
+
+    def test_unchanged_kill_switch_store_is_not_rescanned_on_every_prefetch(self, tmp_path, monkeypatch):
+        from plugins.memory.memory_os import MemoryOSProvider, knob_overrides
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        register_override(
+            "prefetch_facade_enabled",
+            True,
+            prior=False,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+        calls = 0
+        original = knob_overrides.resolve_knob
+
+        def counted(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(knob_overrides, "resolve_knob", counted)
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        first = provider._ensure_recall_facade()
+        second = provider._ensure_recall_facade()
+
+        assert first is second
+        assert calls == 1
 
     def test_facade_is_none_does_not_block_build_prefetch_sections(self, tmp_path):
         """_build_prefetch_sections with recall_facade=None must not raise."""

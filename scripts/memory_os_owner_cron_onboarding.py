@@ -477,7 +477,7 @@ def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any
         if not source.is_file():
             raise RuntimeError(f"cron runner source missing: {source}")
         target = scripts_dir / source.name
-        shutil.copy2(source, target)
+        _copy_asset_if_distinct(source, target)
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
     for spec in specs:
         script_name = str(spec["script"])
@@ -489,7 +489,7 @@ def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any
         if source_wrapper.is_file():
             # Group tick shims ship in the repo; copy rather than regenerate so
             # the deployed wrapper always matches the reviewed source.
-            shutil.copy2(source_wrapper, wrapper)
+            _copy_asset_if_distinct(source_wrapper, wrapper)
         else:
             # Single-lane gate shims are generated per registry key.
             wrapper.write_text(
@@ -502,6 +502,18 @@ def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any
                 encoding="utf-8",
             )
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+
+
+def _copy_asset_if_distinct(source: Path, target: Path) -> None:
+    """Copy an onboarding asset unless installed-layout paths are identical."""
+    if target.exists():
+        try:
+            if source.samefile(target):
+                return
+        except OSError:
+            # Let copy2 surface the actionable filesystem failure below.
+            pass
+    shutil.copy2(source, target)
 
 
 def _spec_by_key(specs: list[dict[str, Any]], key: str) -> dict[str, Any]:

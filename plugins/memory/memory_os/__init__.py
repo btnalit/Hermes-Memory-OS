@@ -81,6 +81,11 @@ class MemoryOSProvider(MemoryProvider):
         # ── Phase 3: Retriever Facade (provider-level cache, constraint 1) ─
         self._recall_facade: RetrieverFacade | None = None
         self._recall_facade_initialized = False
+        self._recall_facade_knob_fingerprint: tuple[bool, int, int, int] | None = None
+        self._recall_facade_enabled_cache = False
+        self._recall_facade_knob_expiry_epoch: float | None = None
+        self._recall_facade_knob_errors = 0
+        self._recall_facade_lock = threading.RLock()
 
     @property
     def name(self) -> str:
@@ -173,14 +178,14 @@ class MemoryOSProvider(MemoryProvider):
         )
 
     def _ensure_recall_facade(self) -> RetrieverFacade | None:
-        """Lazy-init the RetrieverFacade with registered retrievers.
+        """Return the governed facade, lazily constructing it at most once.
 
-        Returns None when the facade knob is disabled.  Only initializes
-        once (provider-level cache, constraint 1).  Retriever __init__
+        ``recall_arbitration.mode`` is the durable authority: only ``shadow``
+        and ``apply_canary`` may run. ``prefetch_facade_enabled`` is a
+        call-time kill switch for those modes, so disabling it takes effect
+        without rebuilding or restarting the provider. Retriever construction
         must not trigger model loading or network calls (constraint 3).
         """
-        if self._recall_facade_initialized:
-            return self._recall_facade
         if self._roots is None:
             # A provider that has not been opened has no injected store context.
             # Keep the optional facade disabled instead of reading ambient ~/.hermes.
@@ -188,45 +193,160 @@ class MemoryOSProvider(MemoryProvider):
             self._recall_facade = None
             return None
 
-        from .knob_overrides import resolve_knob as _resolve_knob
-
-        enabled = _resolve_knob(
-            "prefetch_facade_enabled", default=False, roots=self._roots,
-        )
-        if not enabled:
-            # Flag set so subsequent calls skip re-resolution (knob stays off)
-            self._recall_facade_initialized = True
-            return None
-
-        from .retrievers.crystallized import CrystallizedRetriever
-        from .retrievers.entity_graph import EntityGraphRetriever
-        from .retrievers.indexed_fts import IndexedFTSRetriever
-        from .retrievers.state_overlay import StateOverlayRetriever
-        from .retrievers.temporal import TemporalRetriever
-
         arbitration_cfg = self._config.get("recall_arbitration") if isinstance(self._config, dict) else {}
         arbitration_cfg = arbitration_cfg if isinstance(arbitration_cfg, dict) else {}
-        self._recall_facade = RetrieverFacade(
-            arbitration_mode=str(arbitration_cfg.get("mode") or "off"),
-            freshness_guard_mode=str(arbitration_cfg.get("freshness_guard_mode") or "shadow"),
-            conflict_resolution_mode=str(arbitration_cfg.get("conflict_resolution_mode") or "shadow"),
-        )
-        retrievers = (
-            StateOverlayRetriever,
-            IndexedFTSRetriever,
-            CrystallizedRetriever,
-            EntityGraphRetriever,
-            TemporalRetriever,
-        )
-        for retriever_class in retrievers:
+        arbitration_mode = str(arbitration_cfg.get("mode") or "off")
+        if arbitration_mode not in {"shadow", "apply_canary"}:
+            # A stale enable override must never resurrect a durably disabled or
+            # invalid mode.
+            return None
+
+        # The durable mode keeps the lane live when a provisional enable
+        # override expires; an explicit active false override remains a
+        # call-time kill switch.
+        if not self._recall_facade_kill_switch_enabled():
+            return None
+        if self._recall_facade_initialized:
+            return self._recall_facade
+
+        with self._recall_facade_lock:
+            # A switch write may race the first check while this thread waits
+            # for another initializer. Re-evaluate under the same lock before
+            # constructing or returning the cached object.
+            if not self._recall_facade_kill_switch_enabled():
+                return None
+            if self._recall_facade_initialized:
+                return self._recall_facade
+
+            from .retrievers.crystallized import CrystallizedRetriever
+            from .retrievers.entity_graph import EntityGraphRetriever
+            from .retrievers.indexed_fts import IndexedFTSRetriever
+            from .retrievers.state_overlay import StateOverlayRetriever
+            from .retrievers.temporal import TemporalRetriever
+
+            self._recall_facade = RetrieverFacade(
+                arbitration_mode=arbitration_mode,
+                freshness_guard_mode=str(arbitration_cfg.get("freshness_guard_mode") or "shadow"),
+                conflict_resolution_mode=str(arbitration_cfg.get("conflict_resolution_mode") or "shadow"),
+            )
+            retrievers = (
+                StateOverlayRetriever,
+                IndexedFTSRetriever,
+                CrystallizedRetriever,
+                EntityGraphRetriever,
+                TemporalRetriever,
+            )
+            for retriever_class in retrievers:
+                try:
+                    self._recall_facade.register(retriever_class())
+                except Exception:
+                    # fail-open: registration failure must not block startup;
+                    # recorded as suppressed count for monitor visibility
+                    self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
+            self._recall_facade_initialized = True  # set after successful init
+            return self._recall_facade
+
+    def _recall_facade_kill_switch_enabled(self) -> bool:
+        """Resolve the call-time facade switch once per store revision.
+
+        The override ledger can grow large, so rescanning it on every prefetch
+        would put governed file I/O on the hot path. A stat fingerprint plus
+        the nearest relevant expiry preserves live writes and time-based expiry
+        while unchanged stores use the cached strict-boolean result. Unreadable
+        or malformed stores fail closed and increment the visible error count.
+        """
+        if self._roots is None:
+            return False
+        with self._recall_facade_lock:
+            path = self._roots.memory_os_root / "system" / "knob_overrides.jsonl"
             try:
-                self._recall_facade.register(retriever_class())
-            except Exception:
-                # fail-open: registration failure must not block startup;
-                # recorded as suppressed count for monitor visibility
-                self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
-        self._recall_facade_initialized = True  # set after successful init
-        return self._recall_facade
+                stat_result = path.stat()
+            except FileNotFoundError:
+                fingerprint = (False, 0, 0, 0)
+            except OSError:
+                self._recall_facade_knob_errors += 1
+                return False
+            else:
+                fingerprint = (
+                    True,
+                    int(stat_result.st_ino),
+                    int(stat_result.st_size),
+                    int(stat_result.st_mtime_ns),
+                )
+
+            now_epoch = datetime.now(timezone.utc).timestamp()
+            cached_not_expired = (
+                self._recall_facade_knob_expiry_epoch is None
+                or now_epoch < self._recall_facade_knob_expiry_epoch
+            )
+            if (
+                fingerprint == self._recall_facade_knob_fingerprint
+                and cached_not_expired
+            ):
+                return self._recall_facade_enabled_cache
+
+            expiry_epoch: float | None = None
+            if not fingerprint[0]:
+                resolved: object = True
+            else:
+                from .knob_overrides import resolve_knob
+
+                try:
+                    expiry_epoch = self._validate_recall_facade_override_store(
+                        path,
+                        now_epoch=now_epoch,
+                    )
+                    resolved = resolve_knob(
+                        "prefetch_facade_enabled",
+                        default=True,
+                        roots=self._roots,
+                    )
+                except Exception:
+                    # This is a governance boundary on the live prefetch path:
+                    # unexpected reader/parser failures disable the optional
+                    # facade instead of breaking prefetch or enabling canary.
+                    resolved = False
+                    expiry_epoch = None
+                    self._recall_facade_knob_errors += 1
+
+            enabled = type(resolved) is bool and resolved is True
+            if type(resolved) is not bool:
+                self._recall_facade_knob_errors += 1
+            self._recall_facade_knob_fingerprint = fingerprint
+            self._recall_facade_enabled_cache = enabled
+            self._recall_facade_knob_expiry_epoch = expiry_epoch
+            return enabled
+
+    @staticmethod
+    def _validate_recall_facade_override_store(
+        path: Path,
+        *,
+        now_epoch: float,
+    ) -> float | None:
+        """Strictly validate the ledger and return its nearest facade expiry."""
+        nearest_expiry: float | None = None
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            if not raw_line.strip():
+                continue
+            record = json.loads(raw_line)
+            if not isinstance(record, dict):
+                raise ValueError("knob override record is not an object")
+            if str(record.get("knob") or "") != "prefetch_facade_enabled":
+                continue
+            expires_at = str(record.get("expires_at") or "").strip()
+            if not expires_at:
+                continue
+            if expires_at.endswith("Z"):
+                expires_at = expires_at[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(expires_at)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            expiry_epoch = parsed.astimezone(timezone.utc).timestamp()
+            if expiry_epoch > now_epoch and (
+                nearest_expiry is None or expiry_epoch < nearest_expiry
+            ):
+                nearest_expiry = expiry_epoch
+        return nearest_expiry
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._store is None:
@@ -969,6 +1089,20 @@ class MemoryOSProvider(MemoryProvider):
             operational_truth,
         )
         public_index_counts = project_public_counts(index_counts, operational_truth)
+        recall_arbitration_raw = (
+            self._config.get("recall_arbitration")
+            if isinstance(self._config, dict)
+            else {}
+        )
+        recall_arbitration_cfg = (
+            recall_arbitration_raw if isinstance(recall_arbitration_raw, dict) else {}
+        )
+        recall_arbitration_mode = str(recall_arbitration_cfg.get("mode") or "off")
+        recall_facade_switch_enabled = (
+            self._recall_facade_kill_switch_enabled()
+            if recall_arbitration_mode in {"shadow", "apply_canary"}
+            else False
+        )
         return {
             "schema_version": "memory-os.tool_status.v0",
             "provider": "memory_os",
@@ -999,6 +1133,13 @@ class MemoryOSProvider(MemoryProvider):
             "suppressed_terminal_candidate_count": sum(1 for view in candidate_views if view.terminal),
             "recall_plan": recall_plan_status,
             "recall_observation_window": recall_observation_window,
+            "recall_facade": {
+                "arbitration_mode": recall_arbitration_mode,
+                "initialized": self._recall_facade_initialized,
+                "kill_switch_enabled": recall_facade_switch_enabled,
+                "effective_enabled": bool(recall_facade_switch_enabled),
+                "knob_error_count": self._recall_facade_knob_errors,
+            },
             "crystallized_candidates_label": "review candidates only; not approved crystallized memory",
             "crystallized_records": public_counts["crystallized_records"],
             "crystallized_records_label": "approved crystallized memory records",
