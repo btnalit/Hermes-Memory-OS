@@ -6,7 +6,7 @@ import os
 import sys
 from pathlib import Path
 
-from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, memory_os_cron_specs
 
 
 def _load_module():
@@ -136,6 +136,29 @@ raise SystemExit(2)
     return launcher
 
 
+def _registry_script_names() -> list[str]:
+    """Every script onboarding expects on the host, derived from the registry.
+
+    Covers each lane's helper (raw_script) plus each group's cron entrypoint
+    (wrapper_script), so adding a lane or a group tick never silently leaves
+    this fixture short.
+    """
+    names: list[str] = []
+    for spec in memory_os_cron_specs():
+        names.extend([spec.raw_script, spec.wrapper_script])
+    # Retired right-brain scripts: not in the registry any more, but several
+    # tests place them on the host to assert they get paused/retired.
+    names.extend(
+        [
+            "memory_os_right_brain_expression.py",
+            "memory_os_cron_right_brain_expression_gate.py",
+            "memory_os_right_brain_expression_outcome_cron.py",
+            "memory_os_cron_right_brain_expression_outcome_gate.py",
+        ]
+    )
+    return sorted(dict.fromkeys(names))
+
+
 def _home_with_helpers(
     tmp_path: Path,
     *,
@@ -146,52 +169,12 @@ def _home_with_helpers(
     scripts = home / "scripts"
     scripts.mkdir(parents=True)
     omitted = omit_helpers or set()
-    for helper in (
-        "memory_os_owner_review_digest.py",
-        "memory_os_cron_owner_review_digest_gate.py",
-        "memory_os_right_brain_expression.py",
-        "memory_os_cron_right_brain_expression_gate.py",
-        "memory_os_module_cadence_report_cron.py",
-        "memory_os_cron_module_cadence_report_gate.py",
-        "memory_os_right_brain_expression_outcome_cron.py",
-        "memory_os_cron_right_brain_expression_outcome_gate.py",
-        "memory_os_proposal_followups_ops_gate.py",
-        "memory_os_cron_proposal_followups_opsgate_gate.py",
-        "memory_os_expression_feedback_prompt.py",
-        "memory_os_cron_expression_feedback_request_gate.py",
-        "memory_os_memory_sources_feedback_prompt.py",
-        "memory_os_cron_memory_sources_feedback_request_gate.py",
-        "memory_os_candidate_aggregation_lane.py",
-        "memory_os_cron_candidate_aggregation_gate.py",
-        "memory_os_fact_judge_lane.py",
-        "memory_os_cron_fact_judge_gate.py",
-        "memory_os_index_sync.py",
-        "memory_os_cron_index_sync_gate.py",
-        "cleanup_expired_working.py",
-        "memory_os_cron_working_cleanup_gate.py",
-        "memory_os_l3_probe_helper.py",
-        "memory_os_cron_l3_probe_verification_gate.py",
-        "memory_os_event_stats_refresh.py",
-        "memory_os_cron_event_stats_refresh_gate.py",
-        "memory_os_exposure_rollup.py",
-        "memory_os_cron_exposure_rollup_gate.py",
-        "memory_os_full_monitor_refresh.py",
-        "memory_os_v3_seed_evidence.py",
-        "memory_os_cron_v3_seed_evidence_gate.py",
-        "memory_os_v3_journal_sweep.py",
-        "memory_os_cron_v3_journal_sweep_gate.py",
-        "memory_os_v3_wandering.py",
-        "memory_os_cron_v3_wandering_gate.py",
-        "memory_os_state_overlay_refresh.py",
-        "memory_os_cron_state_overlay_refresh_gate.py",
-        "memory_os_entity_index_refresh.py",
-        "memory_os_cron_entity_index_refresh_gate.py",
-        "memory_os_hindsight_advisory_digest.py",
-        "memory_os_cron_hindsight_advisory_digest_gate.py",
-        "memory_os_hindsight_health_probe.py",
-        "memory_os_clearance_cycle_helper.py",
-        "memory_os_cron_clearance_cycle_gate.py",
-    ):
+    # Derived from the registry rather than hand-listed: a hand-typed script
+    # list silently rots whenever the cron surface changes (it did when
+    # per-lane jobs were consolidated into group ticks), and the resulting
+    # "script_missing" finding blocks onboarding for a reason unrelated to
+    # what the test is actually asserting.
+    for helper in _registry_script_names():
         if helper in omitted:
             continue
         scripts.joinpath(helper).write_text("#!/usr/bin/env python3\n", encoding="utf-8")
@@ -256,31 +239,32 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     }
     assert len(report["operational_cron_jobs"]) == len(expected_names)
     assert {job["name"] for job in report["operational_cron_jobs"]} == expected_names
-    index_sync = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-index-sync"][0]
-    assert index_sync["script"] == "memory_os_cron_index_sync_gate.py"
-    assert index_sync["raw_script"] == "memory_os_index_sync.py"
-    assert index_sync["deliver"] == "local"
-    assert index_sync["no_agent"] is True
-    exposure_rollup = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-exposure-rollup"][0]
-    assert exposure_rollup["schedule"] == "5 0 * * *"
-    assert exposure_rollup["script"] == "memory_os_cron_exposure_rollup_gate.py"
-    assert exposure_rollup["raw_script"] == "memory_os_exposure_rollup.py"
-    assert exposure_rollup["deliver"] == "local"
-    assert exposure_rollup["no_agent"] is True
-    full_monitor = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-full-monitor-refresh"][0]
+    # Each lane is now scheduled by its GROUP job. Assert the mapping via the
+    # registry so this cannot drift back into per-lane job assumptions.
+    jobs_by_name = {job["name"]: job for job in report["operational_cron_jobs"]}
+    for lane_key, expected_group_job, expected_schedule in (
+        ("index_sync", "memory-os-tick-derived", "*/15 * * * *"),
+        ("exposure_rollup", "memory-os-tick-daily", "5 0 * * *"),
+        ("hindsight_advisory_digest", "memory-os-tick-daily", "5 0 * * *"),
+        ("hindsight_health_probe", "memory-os-tick-evidence", "0 * * * *"),
+    ):
+        spec = memory_os_cron_spec_by_key(lane_key)
+        assert spec is not None, lane_key
+        assert spec.name == expected_group_job, lane_key
+        job = jobs_by_name[expected_group_job]
+        assert job["schedule"] == expected_schedule, lane_key
+        assert job["deliver"] == "local", lane_key
+        assert job["no_agent"] is True, lane_key
+        # The lane's own helper must be listed among the tick's members.
+        assert spec.raw_script in job["raw_scripts"], lane_key
+
+    # full_monitor_refresh keeps a dedicated job (heavyweight, owner-delivered).
+    full_monitor = jobs_by_name["memory-os-full-monitor-refresh"]
     assert full_monitor["schedule"] == "30 2 * * *"
     assert full_monitor["script"] == "memory_os_full_monitor_refresh.py"
     assert full_monitor["raw_script"] == "memory_os_full_monitor_refresh.py"
     assert full_monitor["deliver"] == "discord"
     assert full_monitor["no_agent"] is True
-    hindsight = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-hindsight-advisory-digest"][0]
-    assert hindsight["schedule"] == "20 2 * * 0"
-    assert hindsight["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
-    assert hindsight["raw_script"] == "memory_os_hindsight_advisory_digest.py"
-    hindsight_health = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-hindsight-health-probe"][0]
-    assert hindsight_health["schedule"] == "33 * * * *"
-    assert hindsight_health["script"] == "memory_os_hindsight_health_probe.py"
-    assert hindsight_health["raw_script"] == "memory_os_hindsight_health_probe.py"
     # clearance_cycle is a real registered spec whose helper and gate scripts
     # the installer already deploys, but its activation is DEFERRED (see the
     # comment on ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS): enabling it in the same
@@ -302,7 +286,8 @@ def test_onboarding_fail_closed_when_active_closure_wrapper_script_missing(tmp_p
     home = _home_with_helpers(
         tmp_path,
         platforms={"telegram": [{"id": "owner", "type": "dm", "name": "owner"}]},
-        omit_helpers={"memory_os_cron_index_sync_gate.py"},
+        # The cron entrypoint for index_sync is now its group tick wrapper.
+        omit_helpers={"memory_os_cron_tick_derived.py"},
     )
     args = module.build_parser().parse_args(
         [
@@ -320,7 +305,7 @@ def test_onboarding_fail_closed_when_active_closure_wrapper_script_missing(tmp_p
     report = module.run_onboarding(args)
 
     assert report["status"] == "blocked"
-    assert any(item["code"] == "memory-os-index-sync_script_missing" for item in report["findings"])
+    assert any(item["code"] == "memory-os-tick-derived_script_missing" for item in report["findings"])
     assert not report["operational_cron_jobs"]
 
 
@@ -380,32 +365,13 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert report["selected_owner_review_deliver"] == "telegram"
     assert report["selected_owner_review_channel"] == "telegram"
     assert report["cron_profile"] == "full"
-    assert len(report["operational_cron_jobs"]) == 21
+    # Full profile installs one job per GROUP, not per lane.
+    assert len(report["operational_cron_jobs"]) == len({spec.name for spec in memory_os_cron_specs()})
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
-    assert set(by_name) == {
-        "memory-os-owner-review-digest",
-        "memory-os-module-cadence-report",
-        "memory-os-proposal-followups-opsgate",
-        "memory-os-expression-feedback-request",
-        "memory-os-memory-sources-feedback-request",
-        "memory-os-candidate-aggregation",
-        "memory-os-fact-judge",
-        "memory-os-index-sync",
-        "memory-os-event-stats-refresh",
-        "memory-os-exposure-rollup",
-        "memory-os-full-monitor-refresh",
-        "memory-os-v3-seed-evidence",
-        "memory-os-v3-wandering",
-        "memory-os-v3-journal-sweep",
-        "memory-os-state-overlay-refresh",
-        "memory-os-entity-index-refresh",
-        "memory-os-hindsight-advisory-digest",
-        "memory-os-hindsight-health-probe",
-        "memory-os-working-cleanup",
-        "memory-os-l3-probe-verification",
-        "memory-os-clearance-cycle",
-    }
+    # One Hermes job per group, derived from the registry so the expected set
+    # cannot drift from what onboarding actually installs.
+    assert set(by_name) == {spec.name for spec in memory_os_cron_specs()}
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "telegram"
     assert by_name["memory-os-owner-review-digest"]["script"] == "memory_os_cron_owner_review_digest_gate.py"
     assert by_name["memory-os-owner-review-digest"]["no_agent"] is False
@@ -413,19 +379,23 @@ def test_onboarding_apply_creates_owner_review_and_right_brain_cron_jobs(tmp_pat
     assert by_name["memory-os-module-cadence-report"]["deliver"] == "local"
     assert by_name["memory-os-module-cadence-report"]["script"] == "memory_os_cron_module_cadence_report_gate.py"
     assert by_name["memory-os-module-cadence-report"]["no_agent"] is True
-    assert by_name["memory-os-hindsight-advisory-digest"]["deliver"] == "local"
-    assert by_name["memory-os-hindsight-advisory-digest"]["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
-    assert by_name["memory-os-hindsight-advisory-digest"]["no_agent"] is True
-    assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
-    assert by_name["memory-os-hindsight-health-probe"]["deliver"] == "local"
-    assert by_name["memory-os-hindsight-health-probe"]["script"] == "memory_os_hindsight_health_probe.py"
-    assert by_name["memory-os-hindsight-health-probe"]["no_agent"] is True
-    assert by_name["memory-os-hindsight-health-probe"]["schedule_display"] == "33 * * * *"
+    # Grouped lanes are scheduled by their tick, not by a per-lane job.
+    assert by_name["memory-os-tick-daily"]["deliver"] == "local"
+    assert by_name["memory-os-tick-daily"]["script"] == "memory_os_cron_tick_daily.py"
+    assert by_name["memory-os-tick-daily"]["no_agent"] is True
+    assert by_name["memory-os-tick-daily"]["schedule_display"] == "5 0 * * *"
+    assert memory_os_cron_spec_by_key("hindsight_advisory_digest").name == "memory-os-tick-daily"
+    assert by_name["memory-os-tick-evidence"]["deliver"] == "local"
+    assert by_name["memory-os-tick-evidence"]["script"] == "memory_os_cron_tick_evidence.py"
+    assert by_name["memory-os-tick-evidence"]["no_agent"] is True
+    assert by_name["memory-os-tick-evidence"]["schedule_display"] == "0 * * * *"
+    assert memory_os_cron_spec_by_key("hindsight_health_probe").name == "memory-os-tick-evidence"
     assert home.joinpath("scripts", "memory_os_hindsight_health_probe.py").read_text(encoding="utf-8") == "#!/usr/bin/env python3\n"
 
-    assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
-    assert by_name["memory-os-proposal-followups-opsgate"]["script"] == "memory_os_cron_proposal_followups_opsgate_gate.py"
-    assert by_name["memory-os-proposal-followups-opsgate"]["no_agent"] is True
+    assert by_name["memory-os-tick-governance"]["deliver"] == "local"
+    assert by_name["memory-os-tick-governance"]["script"] == "memory_os_cron_tick_governance.py"
+    assert by_name["memory-os-tick-governance"]["no_agent"] is True
+    assert memory_os_cron_spec_by_key("proposal_followups_opsgate").name == "memory-os-tick-governance"
     assert by_name["memory-os-expression-feedback-request"]["deliver"] == "telegram"
     assert by_name["memory-os-expression-feedback-request"]["script"] == "memory_os_cron_expression_feedback_request_gate.py"
     assert by_name["memory-os-expression-feedback-request"]["no_agent"] is False
@@ -572,10 +542,10 @@ def test_active_closure_onboarding_pauses_known_optional_memory_os_jobs(tmp_path
     jobs = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"]
     by_name = {job["name"]: job for job in jobs}
     assert by_name["memory-os-owner-review-digest"]["enabled"] is True
-    assert by_name["memory-os-proposal-followups-opsgate"]["enabled"] is True
-    assert by_name["memory-os-index-sync"]["enabled"] is True
-    assert by_name["memory-os-index-sync"]["script"] == "memory_os_cron_index_sync_gate.py"
-    assert by_name["memory-os-index-sync"]["no_agent"] is True
+    assert by_name["memory-os-tick-governance"]["enabled"] is True
+    assert by_name["memory-os-tick-derived"]["enabled"] is True
+    assert by_name["memory-os-tick-derived"]["script"] == "memory_os_cron_tick_derived.py"
+    assert by_name["memory-os-tick-derived"]["no_agent"] is True
     # Right-brain expression stays optional (not in active-closure) and gets paused
     assert by_name["memory-os-right-brain-expression"]["enabled"] is False
     assert by_name["renamed-right-brain-outcome"]["enabled"] is False

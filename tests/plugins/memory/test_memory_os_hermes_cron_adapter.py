@@ -9,12 +9,16 @@ from plugins.seam.hermes_memory_os.cron_adapter import probe_hermes_cron_capabil
 
 def test_hermes_cron_adapter_classifies_wrapped_naked_and_unregistered_jobs():
     cadence = memory_os_cron_spec_by_key("module_cadence_report")
+    governance = memory_os_cron_spec_by_key("proposal_followups_opsgate")
     assert cadence is not None
+    assert governance is not None
 
     summary = classify_hermes_cron_jobs(
         [
             {"name": cadence.name, "script": cadence.wrapper_script, "enabled": True},
-            {"name": "memory-os-proposal-followups-opsgate", "script": "memory_os_proposal_followups_ops_gate.py"},
+            # "Naked": a live job name running the lane helper DIRECTLY instead
+            # of through its ExecutionGate wrapper, so it produces no permit.
+            {"name": governance.name, "script": governance.raw_script},
             {"name": "memory-os-extra", "script": "memory_os_extra.py"},
             {"name": "hermes-heartbeat", "script": "hermes_heartbeat.py"},
         ],
@@ -25,7 +29,8 @@ def test_hermes_cron_adapter_classifies_wrapped_naked_and_unregistered_jobs():
     assert summary["memory_os_owned_naked_count"] == 1
     assert summary["memory_os_like_unregistered_count"] == 1
     assert summary["hermes_host_owned_count"] == 1
-    assert summary["active_registry_job_count"] == len(memory_os_cron_specs())
+    # One entry per Hermes JOB, not per lane -- several lanes share a group tick.
+    assert summary["active_registry_job_count"] == len({spec.name for spec in memory_os_cron_specs()})
     assert summary["enabled_memory_os_job_count"] == 1
 
 
@@ -68,6 +73,74 @@ def test_hermes_cron_adapter_separates_retired_legacy_from_known_optional_jobs()
             "known_optional_reason": "not_in_active_installed_snapshot",
         }
     ]
+
+
+def test_hermes_cron_adapter_classifies_legacy_per_lane_jobs_as_superseded_known_optional():
+    # Post-consolidation registry: the passed-in "active/installed" specs are
+    # the full (already-onboarded) registry, so every spec.name is now a
+    # group tick name (e.g. "memory-os-tick-evidence"), not a per-lane name.
+    # A leftover pre-consolidation per-lane job -- name "memory-os-<lane>"
+    # running "memory_os_cron_<lane>_gate.py" -- must NOT fall through to
+    # unregistered_like (which the 3.200 monitor treats as a FAIL).
+    specs = memory_os_cron_specs()
+    jobs = [
+        {"name": "memory-os-index-sync", "script": "memory_os_cron_index_sync_gate.py", "enabled": True},
+        {"name": "memory-os-working-cleanup", "script": "memory_os_cron_working_cleanup_gate.py", "enabled": False},
+    ]
+
+    summary = legacy_cron_adapter.classify_hermes_cron_jobs(jobs, specs)
+
+    assert summary["memory_os_like_unregistered_count"] == 0
+    assert summary["memory_os_known_optional_count"] == 2
+    assert summary["enabled_known_optional_outside_active_registry_count"] == 1
+    # Total enabled Memory-OS-owned job count is unaffected by which bucket
+    # an enabled job lands in -- both known_optional and unregistered_like
+    # feed enabled_memory_os_job_count, so reclassifying must not drop it.
+    assert summary["enabled_memory_os_job_count"] == 1
+    reasons = {job["known_registry_key"]: job["known_optional_reason"] for job in summary["known_optional_jobs"]}
+    assert reasons == {
+        "memory-os-index-sync": "superseded_by_group_tick",
+        "memory-os-working-cleanup": "superseded_by_group_tick",
+    }
+
+
+def test_hermes_cron_adapter_legacy_hindsight_probe_job_gets_superseded_reason_not_generic_one():
+    # memory_os_hindsight_health_probe.py is BOTH the legacy per-lane wrapper
+    # script for "memory-os-hindsight-health-probe" AND the current
+    # hindsight_health_probe lane's raw_script (a tick_evidence member). The
+    # known_specs_by_raw lookup would match this script too and tag it
+    # "not_in_active_installed_snapshot" -- the legacy check must win first
+    # so the more precise "superseded_by_group_tick" reason is reported.
+    specs = memory_os_cron_specs()
+    jobs = [
+        {"name": "memory-os-hindsight-health-probe", "script": "memory_os_hindsight_health_probe.py", "enabled": True},
+    ]
+
+    summary = legacy_cron_adapter.classify_hermes_cron_jobs(jobs, specs)
+
+    assert summary["memory_os_like_unregistered_count"] == 0
+    assert summary["memory_os_known_optional_count"] == 1
+    job = summary["known_optional_jobs"][0]
+    assert job["known_optional_reason"] == "superseded_by_group_tick"
+    assert job["known_registry_key"] == "memory-os-hindsight-health-probe"
+
+
+def test_hermes_cron_adapter_active_tick_evidence_job_stays_wrapped_despite_hindsight_raw_script_collision():
+    # The ACTIVE group job for the tick_evidence group (whose members include
+    # the hindsight_health_probe lane) must still resolve via the by-name
+    # branch and land in "wrapped", never in the legacy known_optional bucket.
+    hindsight_lane = memory_os_cron_spec_by_key("hindsight_health_probe")
+    assert hindsight_lane is not None
+    specs = memory_os_cron_specs()
+    jobs = [
+        {"name": hindsight_lane.name, "script": hindsight_lane.wrapper_script, "enabled": True},
+    ]
+
+    summary = legacy_cron_adapter.classify_hermes_cron_jobs(jobs, specs)
+
+    assert summary["memory_os_owned_wrapped_count"] == 1
+    assert summary["memory_os_known_optional_count"] == 0
+    assert summary["memory_os_like_unregistered_count"] == 0
 
 
 def test_hermes_cron_adapters_classify_raw_script_aliases_as_enabled_retired_legacy():
@@ -208,3 +281,46 @@ def test_hermes_cron_adapter_probe_reports_timeout_as_incompatible(monkeypatch):
     assert capabilities.status == "incompatible"
     assert any(item["code"] == "hermes_cron_create_help_unavailable" for item in capabilities.findings)
     assert any(item["code"] == "hermes_cron_edit_help_unavailable" for item in capabilities.findings)
+
+
+def test_seam_adapter_classifies_legacy_per_lane_jobs_as_superseded_not_drift():
+    """Counterfactual for the PRODUCTION classification path.
+
+    memory_os_cron_adapter_probe.py imports classify_hermes_cron_jobs from the
+    seam module, and the 3.200 monitor prefers that probe's report. A leftover
+    pre-consolidation per-lane job must land in known_optional; falling through
+    to unregistered_like makes the monitor FAIL
+    (execution_gate_memory_os_cron_unregistered_like_job) on every upgraded
+    host, since group consolidation means no active spec carries those names.
+    """
+    summary = classify_hermes_cron_jobs(
+        [
+            {"name": "memory-os-index-sync", "script": "memory_os_cron_index_sync_gate.py", "enabled": False},
+            {"name": "memory-os-working-cleanup", "script": "memory_os_cron_working_cleanup_gate.py", "enabled": False},
+        ],
+        memory_os_cron_specs(),
+    )
+
+    assert summary["memory_os_like_unregistered_count"] == 0
+    assert summary["memory_os_known_optional_count"] == 2
+    assert all(
+        job["known_optional_reason"] == "superseded_by_group_tick"
+        for job in summary["known_optional_jobs"]
+    )
+
+
+def test_seam_and_memory_adapters_agree_on_legacy_per_lane_classification():
+    """The two copies of this logic must not diverge -- the seam one is what
+    production reads, the memory one is what most tests exercise."""
+    jobs = [{"name": "memory-os-fact-judge", "script": "memory_os_cron_fact_judge_gate.py", "enabled": False}]
+
+    seam = classify_hermes_cron_jobs(jobs, memory_os_cron_specs())
+    memory = legacy_cron_adapter.classify_hermes_cron_jobs(jobs, memory_os_cron_specs())
+
+    assert seam["memory_os_known_optional_count"] == memory["memory_os_known_optional_count"] == 1
+    assert seam["memory_os_like_unregistered_count"] == memory["memory_os_like_unregistered_count"] == 0
+    assert (
+        seam["known_optional_jobs"][0]["known_optional_reason"]
+        == memory["known_optional_jobs"][0]["known_optional_reason"]
+        == "superseded_by_group_tick"
+    )

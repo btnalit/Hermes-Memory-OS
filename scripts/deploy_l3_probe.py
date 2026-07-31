@@ -25,8 +25,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -44,7 +42,6 @@ except ImportError:
     _MEMORY_OS_IDENTITY_MARKERS = ["pyproject.toml", "plugins/memory/memory_os/__init__.py"]
 
 from plugins.seam.hermes_memory_os.cron_adapter import HermesCronAdapter
-from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key, write_cron_registry_snapshot
 
 SCHEMA_VERSION = "memory-os.l3_probe_deploy.v0"
 
@@ -52,7 +49,6 @@ SCHEMA_VERSION = "memory-os.l3_probe_deploy.v0"
 HERMES_SCRIPTS = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "scripts"
 SOURCE_HELPER = REPO_ROOT / "scripts" / "memory_os_l3_probe_helper.py"
 DEPLOY_HELPER = HERMES_SCRIPTS / "memory_os_l3_probe_helper.py"
-REGISTRY_PATH = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / "memory-os" / "system" / "memory_os_cron_registry.json"
 
 # ── cron job parameters ────────────────────────────────────────────
 JOB_NAME = "memory-os-l3-probe-verification"
@@ -156,56 +152,21 @@ def run_apply(hermes_home: Path) -> dict[str, Any]:
         "phase": "apply",
         "hermes_home": str(hermes_home),
     }
-    actions: list[dict[str, Any]] = []
-
-    # Step 1: ensure scripts dir exists
-    HERMES_SCRIPTS.mkdir(parents=True, exist_ok=True)
-
-    # Step 2: deploy helper script
-    if SOURCE_HELPER.is_file():
-        shutil.copy2(SOURCE_HELPER, DEPLOY_HELPER)
-        DEPLOY_HELPER.chmod(DEPLOY_HELPER.stat().st_mode | stat.S_IXUSR)
-        actions.append({
-            "action": "deploy_helper",
-            "source": str(SOURCE_HELPER),
-            "target": str(DEPLOY_HELPER),
-            "status": "copied",
-        })
-    else:
-        # Fallback: write helper inline
-        DEPLOY_HELPER.write_text(_FALLBACK_HELPER, encoding="utf-8")
-        DEPLOY_HELPER.chmod(DEPLOY_HELPER.stat().st_mode | stat.S_IXUSR)
-        actions.append({
-            "action": "deploy_helper",
-            "source": "inline",
-            "target": str(DEPLOY_HELPER),
-            "status": "written",
-        })
-    # Write repo root config so the deployed helper can find probe_l3_prefetch_behavior.py
-    repo_root_file = DEPLOY_HELPER.with_name("l3_probe_repo_root.txt")
-    repo_root_file.write_text(str(REPO_ROOT), encoding="utf-8")
-    # Post-write verify: the path must actually be a Memory-OS repo
-    _verify_written_repo_root(repo_root_file, REPO_ROOT)
-    actions.append({
-        "action": "write_repo_root_config",
-        "path": str(repo_root_file),
-        "repo_root": str(REPO_ROOT),
-    })
-    result["helper_deployed"] = True
-
-    # Step 3: create cron job via Hermes CLI
-    if SOURCE_HELPER.is_file():
-        # Use the onboarder's cron registry snapshot update pattern
-        _ensure_registry_snapshot_exists(hermes_home)
-    else:
-        _ensure_registry_snapshot_exists(hermes_home)
-
-    cron_result = _ensure_cron_job(hermes_home)
-    actions.append(cron_result)
-    result["cron_job"] = cron_result
-
-    result["actions"] = actions
-    result["status"] = "applied" if cron_result.get("status") in ("applied", "already_configured", "updated") else "error"
+    # The l3_probe_verification lane is now a member of the
+    # "memory-os-tick-evidence" group tick, created by
+    # memory_os_owner_cron_onboarding.py. Creating the old standalone
+    # "memory-os-l3-probe-verification" job here as well would run the lane
+    # twice -- once from this job and once from the tick -- with two
+    # independent ExecutionGate envelopes per cycle. Refuse loudly instead.
+    result["status"] = "blocked"
+    result["error_code"] = "superseded_by_group_tick"
+    result["superseded_by"] = "memory-os-tick-evidence"
+    result["detail"] = (
+        "l3_probe_verification is scheduled by the memory-os-tick-evidence group tick. "
+        "Run memory_os_owner_cron_onboarding.py --apply instead. "
+        "Use --cleanup here to remove a leftover standalone job."
+    )
+    result["actions"] = []
     return result
 
 
@@ -313,87 +274,6 @@ def _find_job_by_name(jobs: list[dict[str, Any]], name: str) -> dict[str, Any] |
         if str(job.get("name") or "") == name:
             return job
     return None
-
-
-def _ensure_registry_snapshot_exists(hermes_home: Path) -> dict[str, Any]:
-    """Ensure the cron registry snapshot exists (writes from central MEMORY_OS_CRON_SPECS)."""
-    registry_path = hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json"
-    central_spec = memory_os_cron_spec_by_key("l3_probe_verification")
-    if central_spec is None:
-        return {"status": "error", "reason": "l3_probe_verification not found in central MEMORY_OS_CRON_SPECS"}
-    spec_dict = central_spec.to_json()
-    if registry_path.exists():
-        loaded = json.loads(registry_path.read_text(encoding="utf-8"))
-        specs = loaded.get("specs", [])
-        for spec in specs:
-            if spec.get("key") == "l3_probe_verification":
-                return {"status": "already_registered"}
-        specs.append(spec_dict)
-        registry_path.write_text(
-            json.dumps({**loaded, "specs": specs}, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        return {"status": "registered"}
-    else:
-        write_cron_registry_snapshot(registry_path)
-        return {"status": "created"}
-
-
-def _ensure_cron_job(hermes_home: Path) -> dict[str, Any]:
-    """Create or update the cron job via hermes CLI."""
-    adapter = HermesCronAdapter(hermes_home=hermes_home, hermes_bin=HERMES_BIN)
-    existing = _find_job_by_name(adapter.read_jobs(), JOB_NAME)
-    env = dict(os.environ)
-    env["HERMES_HOME"] = str(hermes_home)
-
-    if existing:
-        job_id = str(existing.get("job_id") or existing.get("id") or "")
-        # Update via hermes cron edit
-        completed = subprocess.run(
-            [HERMES_BIN, "cron", "edit", job_id,
-             "--schedule", SCHEDULE,
-             "--script", DEPLOY_HELPER.name,
-             "--deliver", DELIVER],
-            check=False, text=True, capture_output=True, env=env,
-        )
-        if completed.returncode != 0:
-            return {
-                "action": "update_cron_job",
-                "job_id": job_id,
-                "status": "error",
-                "stderr": (completed.stderr or completed.stdout or "").strip()[:500],
-            }
-        return {
-            "action": "update_cron_job",
-            "job_id": job_id,
-            "status": "updated",
-        }
-
-    # Create new job via hermes cron create
-    completed = subprocess.run(
-        [HERMES_BIN, "cron", "create",
-         "--name", JOB_NAME,
-         "--schedule", SCHEDULE,
-         "--script", DEPLOY_HELPER.name,
-         "--no-agent",
-         "--deliver", DELIVER],
-        check=False, text=True, capture_output=True, env=env,
-    )
-    if completed.returncode != 0:
-        return {
-            "action": "create_cron_job",
-            "status": "error",
-            "stderr": (completed.stderr or completed.stdout or "").strip()[:500],
-        }
-    created = _find_job_by_name(adapter.read_jobs(), JOB_NAME)
-    return {
-        "action": "create_cron_job",
-        "job_id": str((created or {}).get("job_id") or (created or {}).get("id") or ""),
-        "status": "applied",
-    }
-
-
-# ── repo root verification ─────────────────────────────────────────
 
 
 def _verify_written_repo_root(config_file: Path, repo_root: Path) -> None:

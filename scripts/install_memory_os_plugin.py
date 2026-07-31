@@ -1344,16 +1344,18 @@ def _run_owner_cron_onboarding(
         expression_feedback_schedule,
         "--memory-sources-feedback-schedule",
         memory_sources_feedback_schedule,
-        "--candidate-aggregation-schedule",
-        "0 */6 * * *",
-        "--fact-judge-schedule",
-        "0 */4 * * *",
-        "--index-sync-schedule",
+        # These lanes are scheduled by their group ticks now. Each lane keeps
+        # its own effective cadence through due gating (due_interval_minutes
+        # in the cron registry), so the tick cadence is the only schedule the
+        # installer needs to supply.
+        "--tick-derived-schedule",
+        "*/15 * * * *",
+        "--tick-governance-schedule",
         "*/30 * * * *",
-        "--working-cleanup-schedule",
-        "0 3 * * 0",
-        "--l3-probe-schedule",
-        "0 */6 * * *",
+        "--tick-evidence-schedule",
+        "0 * * * *",
+        "--tick-daily-schedule",
+        "5 0 * * *",
         "--apply",
     ]
     if owner_approved:

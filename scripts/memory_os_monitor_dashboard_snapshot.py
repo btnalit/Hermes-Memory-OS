@@ -90,12 +90,17 @@ OPTIONAL_MEMORY_OS_CRON_KEYS = frozenset({
     "clearance_cycle",
 })
 _ALL_MEMORY_OS_CRON_SPECS = memory_os_cron_specs()
+# Several lanes now share one Hermes cron job (a group tick), so a job name is
+# CORE when ANY member lane is core, and OPTIONAL only when EVERY member is
+# optional.  Classifying per lane instead would put e.g.
+# "memory-os-tick-evidence" in both sets (core fact_judge alongside optional
+# l3_probe_verification) and double-count it as both missing and paused.
 CORE_MEMORY_OS_CRON = frozenset(
     spec.name for spec in _ALL_MEMORY_OS_CRON_SPECS if spec.key not in OPTIONAL_MEMORY_OS_CRON_KEYS
 )
 OPTIONAL_MEMORY_OS_CRON = frozenset(
     spec.name for spec in _ALL_MEMORY_OS_CRON_SPECS if spec.key in OPTIONAL_MEMORY_OS_CRON_KEYS
-)
+) - CORE_MEMORY_OS_CRON
 # Keep legacy tuple for backward-compatible reference; health now uses the
 # frozensets above so paused optional jobs don't contribute to WARN.
 EXPECTED_CRON_NAMES = tuple(sorted(CORE_MEMORY_OS_CRON))

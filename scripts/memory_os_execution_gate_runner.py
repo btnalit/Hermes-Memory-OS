@@ -31,6 +31,14 @@ from typing import Any
 SCHEMA_VERSION = "memory-os.execution_gate_envelope.v0"
 HELPER_REPORT_SCHEMA_VERSION = "memory-os.helper_execution_report.v0"
 SIDECAR_LOCK_TIMEOUT_SECONDS = 15.0
+# Backstop for lanes whose registry entry carries no explicit timeout.
+DEFAULT_HELPER_TIMEOUT_SECONDS = 300
+# Retention for the O(1) sidecar index.  Entries are only consulted while an
+# envelope is live (permit -> completion), so a few days of history is ample;
+# a missed lookup falls back to the full-scan rebuild in execution_gate.py.
+# Without a cap this file grew one entry per envelope forever while being
+# fully rewritten on every permit and completion.
+SIDECAR_INDEX_MAX_ENTRIES = 2000
 
 
 class ExecutionGateInfrastructureError(RuntimeError):
@@ -57,10 +65,37 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = "normal") -> int:
+    """Run one lane behind an ExecutionGate permit. Returns its exit code."""
+    return int(
+        run_registry_key_detailed(
+            registry_key,
+            hermes_home=hermes_home,
+            smoke_mode=smoke_mode,
+        ).get("returncode")
+        or 0
+    )
+
+
+def run_registry_key_detailed(
+    registry_key: str,
+    *,
+    hermes_home: Path,
+    smoke_mode: str = "normal",
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Run one lane and report the outcome structurally.
+
+    ``timeout_seconds`` bounds the helper subprocess.  Under the old 1:1
+    job-per-lane layout a hung helper cost only its own lane; under group
+    ticks it would block every later member of the tick, so a bound is
+    required rather than optional.  ``None``/0 falls back to the lane's
+    registered ``timeout_seconds``.
+    """
     spec = _load_spec(hermes_home, registry_key)
     if not spec:
         sys.stderr.write(f"unknown Memory-OS cron registry key: {registry_key}\n")
-        return 2
+        return {"status": "unknown_registry_key", "error_code": "unknown_registry_key", "returncode": 2}
+    effective_timeout = int(timeout_seconds or 0) or int(spec.get("timeout_seconds") or 0) or DEFAULT_HELPER_TIMEOUT_SECONDS
     scripts_dir = Path(__file__).resolve().parent
     helper = scripts_dir / spec["raw_script"]
     boundary = {
@@ -82,14 +117,20 @@ def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = 
         )
     except ExecutionGateInfrastructureError as exc:
         sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
-        return 3
+        return {"status": "infrastructure_error", "error_code": exc.code, "returncode": 3}
+    envelope_id = str(permit["execution_gate_envelope_id"])
     if permit["permit_decision"] != "allowed":
-        return 2
+        return {
+            "status": "permit_blocked",
+            "error_code": str(permit.get("permit_reason") or "permit_blocked"),
+            "execution_gate_envelope_id": envelope_id,
+            "returncode": 2,
+        }
     if not helper.is_file():
         try:
             _append_completion(
                 hermes_home=hermes_home,
-                envelope_id=permit["execution_gate_envelope_id"],
+                envelope_id=envelope_id,
                 lane_id=spec["lane_id"],
                 execution_status="helper_missing",
                 returncode=2,
@@ -100,50 +141,92 @@ def run_registry_key(registry_key: str, *, hermes_home: Path, smoke_mode: str = 
             )
         except ExecutionGateInfrastructureError as exc:
             sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
-            return 3
+            return {
+                "status": "infrastructure_error",
+                "error_code": exc.code,
+                "execution_gate_envelope_id": envelope_id,
+                "returncode": 3,
+            }
         sys.stderr.write(f"Memory-OS cron helper missing: {helper.name}\n")
-        return 2
-    report_path = _helper_report_path(hermes_home, str(permit["execution_gate_envelope_id"]))
+        return {
+            "status": "helper_missing",
+            "error_code": "helper_missing",
+            "execution_gate_envelope_id": envelope_id,
+            "returncode": 2,
+        }
+    report_path = _helper_report_path(hermes_home, envelope_id)
     env = {
         **os.environ,
         "HERMES_HOME": str(hermes_home),
-        "MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID": str(permit["execution_gate_envelope_id"]),
+        "MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID": envelope_id,
         "MEMORY_OS_EXECUTION_REPORT_PATH": str(report_path),
         "MEMORY_OS_EXECUTION_SMOKE_MODE": smoke_mode,
     }
-    completed = subprocess.run(
-        [sys.executable, str(helper)],
-        check=False,
-        text=True,
-        capture_output=True,
-        env=env,
-    )
-    helper_report = _read_helper_report(report_path, completed.stdout)
+    timed_out = False
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(helper)],
+            check=False,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=effective_timeout,
+        )
+        stdout, stderr, returncode = completed.stdout, completed.stderr, completed.returncode
+    except subprocess.TimeoutExpired as exc:
+        # The helper is killed by subprocess.run before this is raised.  Code
+        # 124 matches the timeout convention already used by the monitor's
+        # bounded collection.
+        timed_out = True
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        returncode = 124
+        sys.stderr.write(
+            f"Memory-OS cron helper timeout after {effective_timeout}s: {helper.name}\n"
+        )
+    helper_report = {} if timed_out else _read_helper_report(report_path, stdout)
     observed_boundary = helper_report.get("boundary") if isinstance(helper_report.get("boundary"), dict) else boundary
+    execution_status = "timeout" if timed_out else ("ok" if returncode == 0 else "error")
     try:
         _append_completion(
             hermes_home=hermes_home,
-            envelope_id=permit["execution_gate_envelope_id"],
+            envelope_id=envelope_id,
             lane_id=spec["lane_id"],
-            execution_status="ok" if completed.returncode == 0 else "error",
-            returncode=completed.returncode,
+            execution_status=execution_status,
+            returncode=returncode,
             smoke_mode=smoke_mode,
             boundary=observed_boundary,
             helper_report=helper_report,
-            requires_boundary_report=spec.get("requires_boundary_report", True),
+            # A timed-out helper never got to write its boundary report, so
+            # requiring one would mislabel the timeout as a boundary gap.
+            requires_boundary_report=False if timed_out else spec.get("requires_boundary_report", True),
         )
     except ExecutionGateInfrastructureError as exc:
-        if completed.stdout:
-            sys.stdout.write(completed.stdout)
-        if completed.stderr:
-            sys.stderr.write(completed.stderr)
+        if stdout:
+            sys.stdout.write(stdout)
+        if stderr:
+            sys.stderr.write(stderr)
         sys.stderr.write(f"Memory-OS execution gate infrastructure error: {exc.code}\n")
-        return 3
-    if completed.stdout:
-        sys.stdout.write(completed.stdout)
-    if completed.stderr:
-        sys.stderr.write(completed.stderr)
-    return completed.returncode
+        return {
+            "status": "infrastructure_error",
+            "error_code": exc.code,
+            "execution_gate_envelope_id": envelope_id,
+            "returncode": 3,
+        }
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    result = {
+        "status": execution_status,
+        "execution_gate_envelope_id": envelope_id,
+        "lane_id": spec["lane_id"],
+        "returncode": returncode,
+    }
+    if timed_out:
+        result["error_code"] = "helper_timeout"
+        result["error_detail"] = f"timeout_after_{effective_timeout}s"
+    return result
 
 
 def _load_spec(hermes_home: Path, registry_key: str) -> dict[str, Any] | None:
@@ -166,11 +249,18 @@ def _load_spec(hermes_home: Path, registry_key: str) -> dict[str, Any] | None:
 
 
 def _runner_spec_from_registry_item(item: dict[str, Any]) -> dict[str, Any]:
+    try:
+        timeout_seconds = int(item.get("timeout_seconds") or 0)
+    except (TypeError, ValueError):
+        timeout_seconds = 0
     return {
         "raw_script": str(item.get("raw_script") or ""),
         "lane_id": str(item.get("lane_id") or ""),
         "risk_class": str(item.get("helper_kind") or "local_helper"),
         "requires_boundary_report": bool(item.get("requires_boundary_report")),
+        # 0 means "not declared" -- the caller falls back to
+        # DEFAULT_HELPER_TIMEOUT_SECONDS rather than running unbounded.
+        "timeout_seconds": max(timeout_seconds, 0),
     }
 
 
@@ -361,11 +451,48 @@ def _update_sidecar_index(hermes_home: Path, envelope_id: str, stage: str, recor
                 entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
                 entry["completed_at"] = record.get("created_at")
             loaded[envelope_id] = entry
-            _atomic_write_json(index_path, loaded)
+            _atomic_write_json(index_path, prune_sidecar_index(loaded, envelope_id))
     except ExecutionGateInfrastructureError:
         raise
     except OSError as exc:
         raise ExecutionGateInfrastructureError("sidecar_update_failed") from exc
+
+
+def prune_sidecar_index(
+    index: dict[str, Any],
+    keep_envelope_id: str = "",
+    *,
+    max_entries: int = SIDECAR_INDEX_MAX_ENTRIES,
+) -> dict[str, Any]:
+    """Bound the sidecar index to the newest ``max_entries`` envelopes.
+
+    The index is rewritten in full on every permit and completion, so
+    unbounded growth turns each cron firing into an O(N) read+write+fsync.
+    Dropping an old entry is safe: ``execution_gate.py`` rebuilds missing
+    entries from the JSONL journal on lookup miss, and entries are only
+    consulted while an envelope is live.
+
+    ``keep_envelope_id`` is never evicted -- the envelope being written must
+    survive its own prune regardless of clock skew in the sort key.
+    """
+    if max_entries <= 0 or len(index) <= max_entries:
+        return index
+
+    def sort_key(item: tuple[str, Any]) -> tuple[str, str]:
+        envelope_id, entry = item
+        if not isinstance(entry, dict):
+            return ("", envelope_id)
+        stamp = str(entry.get("permit_created_at") or entry.get("completed_at") or "")
+        # envelope_id is prefixed with a UTC timestamp, so it is a sound
+        # tiebreaker when an entry carries no usable timestamp.
+        return (stamp, envelope_id)
+
+    ordered = sorted(index.items(), key=sort_key)
+    keep_count = max_entries
+    kept = dict(ordered[-keep_count:])
+    if keep_envelope_id and keep_envelope_id not in kept and keep_envelope_id in index:
+        kept[keep_envelope_id] = index[keep_envelope_id]
+    return kept
 
 
 @contextlib.contextmanager

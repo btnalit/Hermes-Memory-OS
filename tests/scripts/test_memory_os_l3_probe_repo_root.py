@@ -262,3 +262,27 @@ def test_deploy_l3_probe_imports_shared_markers():
         assert "_MEMORY_OS_IDENTITY_MARKERS" in source or "markers" not in source, (
             f"{func_name} should use _MEMORY_OS_IDENTITY_MARKERS, not hardcoded list"
         )
+
+
+def test_deploy_l3_probe_apply_refuses_now_that_lane_is_in_a_group_tick(tmp_path):
+    """l3_probe_verification is scheduled by memory-os-tick-evidence.
+
+    Without this guard, running deploy_l3_probe.py --apply would create the
+    old standalone "memory-os-l3-probe-verification" job alongside the tick,
+    running the same lane twice per cycle with two ExecutionGate envelopes.
+    """
+    import importlib.util
+
+    deploy_path = Path(__file__).resolve().parents[2] / "scripts" / "deploy_l3_probe.py"
+    spec = importlib.util.spec_from_file_location("deploy_l3_probe_under_test", deploy_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    result = module.run_apply(tmp_path / "home")
+
+    assert result["status"] == "blocked"
+    assert result["error_code"] == "superseded_by_group_tick"
+    assert result["superseded_by"] == "memory-os-tick-evidence"
+    assert result["actions"] == []
+    # No cron job may be created as a side effect.
+    assert not (tmp_path / "home" / "cron" / "jobs.json").exists()

@@ -122,7 +122,36 @@ Broad `except Exception` must record bounded error records (`error_record` schem
 Fast probe PASS is not a substitute for full live monitor PASS.
 
 ### Cron Profile
-Default is `active-closure` (10 jobs: `owner_review_digest`, `proposal_followups_opsgate`, `index_sync`, `working_cleanup`, `l3_probe_verification`, `candidate_aggregation`, `fact_judge`, `event_stats_refresh`, `expression_feedback_request`, `memory_sources_feedback_request`). The `full` profile adds optional expression/cadence/feedback jobs. On upgraded hosts, active-closure onboarding pauses (does not delete) known optional jobs. The monitor classifies paused optional jobs as known optional rather than unregistered drift.
+
+`cron_registry.py` holds **two tables**, and the distinction is load-bearing:
+
+- **Lanes** (`MEMORY_OS_CRON_LANES`, 21) — the governance identity: `lane_id`, `raw_script`, `helper_kind` (risk class), boundary contract. One ExecutionGate envelope per lane per run. This never collapses.
+- **Groups** (`MEMORY_OS_CRON_GROUPS`, 9) — the Hermes scheduling surface: what `hermes cron create` actually creates.
+
+Default profile `active-closure` installs **8 Hermes cron jobs** covering 19 lanes (`module_cadence_report` is full-profile only; `clearance_cycle` activation is deferred):
+
+| Group job | Schedule | Members |
+|---|---|---|
+| `memory-os-tick-derived` | `*/15 * * * *` | event_stats_refresh, index_sync, state_overlay_refresh, entity_index_refresh |
+| `memory-os-tick-governance` | `*/30 * * * *` | proposal_followups_opsgate (+ clearance_cycle when enabled) |
+| `memory-os-tick-evidence` | `0 * * * *` | hindsight_health_probe, fact_judge, candidate_aggregation, l3_probe_verification, v3_wandering |
+| `memory-os-tick-daily` | `5 0 * * *` | exposure_rollup, v3_seed_evidence, v3_journal_sweep, working_cleanup, hindsight_advisory_digest |
+| `memory-os-owner-review-digest` | `0 9 * * *` | owner_review_digest |
+| `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory_sources_feedback_request |
+| `memory-os-expression-feedback-request` | `0 5 * * 0` | expression_feedback_request |
+| `memory-os-full-monitor-refresh` | `30 2 * * *` | full_monitor_refresh |
+
+Rules that follow from this:
+
+- A group's cron cadence is its **finest** member's. Each lane keeps its own effective rate via `due_interval_minutes`; `scripts/memory_os_cron_group_runner.py` skips members that aren't due. Adding a lane means adding it to a group, **not** creating a cron job.
+- `due_policy="calendar"` exists for date-partitioned lanes (`v3_seed_evidence`), which must run at most once per UTC day rather than on elapsed time.
+- **The monitor's completion-freshness window must come from the lane's `due_interval_minutes`, never from the group job's cron expression** — deriving it from the schedule collapses a weekly lane sharing a daily tick to a 54h window and reports it permanently stale.
+- Owner-facing lanes keep dedicated single-member jobs: each renders a distinct owner message with its own agent prompt and deliver channel. `full_monitor_refresh` stays alone because it is the heavyweight (≤180s) monitor and would block co-tenants.
+- Per-lane disable lives in `<hermes_home>/memory-os/system/cron_lane_disabled.json` (owners lost per-job disable granularity to grouping). Honoured by both the tick runner and the monitor.
+- Legacy pre-consolidation per-lane jobs are listed in `LEGACY_PER_LANE_CRON_JOBS` and classified `known_optional` / `superseded_by_group_tick`. Onboarding **pauses, never deletes** them — that is the rollback path. `classify_hermes_cron_jobs` exists in three places (`hermes_cron_adapter.py`, `plugins/seam/.../cron_adapter.py`, and an embedded fallback in `memory_os_3_200_monitor.py`); the seam copy is what production reads, so any change must be applied to all three.
+- Nothing except `memory_os_owner_cron_onboarding.py` may create Memory-OS cron jobs. `install_memory_os.sh` and `deploy_l3_probe.py --apply` used to create per-lane jobs directly and would double-run a lane that a tick now owns.
+
+The `full` profile adds `module_cadence_report`. On upgraded hosts, active-closure onboarding pauses (does not delete) known optional jobs. The monitor classifies paused optional jobs as known optional rather than unregistered drift.
 
 ### Owner Actions
 Display anchors (`A1`, `R1`, `F1`) in digests are UI labels only. The durable identity is the `oa_` action token. Owner approval moves a proposal into human-controlled follow-up — it does not execute work. Only proposal kinds with a bounded runtime target, rollback, monitor fields, and an explicit apply token can be applied.
