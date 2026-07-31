@@ -52,8 +52,8 @@ DEPLOY_HELPER = HERMES_SCRIPTS / "memory_os_l3_probe_helper.py"
 
 # ── cron job parameters ────────────────────────────────────────────
 JOB_NAME = "memory-os-l3-probe-verification"
-SCHEDULE = "every 360m"
-DELIVER = "origin"
+# The lane moved into this group tick; the standalone job above is legacy.
+SUPERSEDED_BY_GROUP_JOB = "memory-os-tick-evidence"
 HERMES_BIN = os.environ.get("HERMES_BIN", "hermes")
 
 
@@ -104,11 +104,21 @@ def run_plan(hermes_home: Path) -> dict[str, Any]:
         needs.append("install_helper")
     elif not helper_current:
         needs.append("update_helper")
-    if not existing_job:
-        needs.append("create_cron_job")
+    # NOT a needed action any more: the lane is scheduled by the
+    # memory-os-tick-evidence group tick, so the ABSENCE of the standalone
+    # job is the correct post-consolidation state. Reporting it as
+    # "create_cron_job" would tell an operator to do something --apply now
+    # refuses, and doing it by hand would double-run the lane.
+    if existing_job:
+        report["superseded_job_present"] = True
+        report["superseded_by"] = SUPERSEDED_BY_GROUP_JOB
+        needs.append("cleanup_superseded_cron_job")
     if not needs:
         report["status"] = "no_action_needed"
-        report["message"] = "L3 probe is already deployed and current."
+        report["message"] = (
+            "L3 probe helper is current; the lane is scheduled by "
+            f"{SUPERSEDED_BY_GROUP_JOB}."
+        )
     else:
         report["status"] = "action_needed"
         report["needs"] = needs
@@ -132,14 +142,12 @@ def run_dry_run(hermes_home: Path) -> dict[str, Any]:
             "source": str(SOURCE_HELPER) if SOURCE_HELPER.is_file() else "inline",
             "target": str(DEPLOY_HELPER),
         })
-    if "create_cron_job" in needs:
+    if "cleanup_superseded_cron_job" in needs:
         commands.append({
-            "operation": "hermes cron create",
+            "operation": "hermes cron remove",
             "name": JOB_NAME,
-            "schedule": SCHEDULE,
-            "script": DEPLOY_HELPER.name,
-            "no_agent": "true",
-            "deliver": DELIVER,
+            "reason": "superseded_by_group_tick",
+            "superseded_by": SUPERSEDED_BY_GROUP_JOB,
         })
 
     return {**plan, "phase": "dry_run", "commands": commands}
