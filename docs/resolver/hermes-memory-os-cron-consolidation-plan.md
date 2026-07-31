@@ -223,7 +223,7 @@ prompt 互相污染——这是 owner 体验边界，不能为了减 job 数牺�
 | shim 脚本数 | 19 | 8 |
 | cron 触发次数/天 | 336 | **172** |
 | helper 实际执行次数/天 | 336 | 336（**不减**，工作量不变） |
-| 同分钟最大并发进程 | **5** | **1** |
+| 同分钟最大并发进程 | **5** | **3**（每小时 :00，09:00 为 4） |
 | index.json 重写次数/天 | 672 | **672（不减）** —— 合并不改变每 lane 两次落盘；真正的收益是并发争锁消失。无界增长是另一个缺陷，见 §7 |
 | 新增一条 lane 的代价 | 新建 job + shim + schedule 参数 | 往 group 里加一行 |
 
@@ -345,6 +345,41 @@ helper 脚本与 lane 注册表全程未动，回滚后行为与今天完全一�
 
 把 `MemoryOSCronSpec` 拆成「lane 治理身份（21 条不变）」与「group 调度面（8 条）」两张表，
 用一个复用 `run_registry_key()` 的 tick runner 按组遍历、按 lane 开 envelope，
-**Hermes job 19 → 8、同分钟并发 5 → 1**；
+**Hermes job 19 → 8、同分钟并发 5 → 3**（见下方「实测修正」）；
 前提是先做掉 R1（monitor 新鲜度改按 lane 取）与 R2（旧 job 名显式分类），
 否则合并当天生产 monitor 就会 WARN 常亮 + FAIL。
+
+
+---
+
+## 10. 实测修正（2026-07-31，3.200 部署后）
+
+**本文与实施提交里「同分钟并发 5 → 1」的说法是错的，实际是 5 → 3。**
+
+四个 tick 的 cron 表达式在整点重叠：`tick-derived`(`*/15`)、`tick-governance`(`*/30`)、
+`tick-evidence`(`0 * * * *`) 都命中 `:00`，因此**每小时整点仍有 3 个 group runner 同时启动**
+（09:00 加上 owner-review-digest 是 4 个）。3.200 部署日志独立佐证了这一点：
+三个 tick 均在 `2026-07-31 20:00:56 CST` 由真实 scheduler 同秒触发。
+
+### 影响评估
+
+比合并前有改善但**未消除**：
+
+- 并发进程 5 → 3（09:00 为 4）
+- 更关键的是 `execution_gate_index.json` 现在有 `prune_sidecar_index()` 上限 2000 条，
+  单次重写成本从「随 envelope 无上限增长」变成有界 O(2000)，
+  这才是 §2.1 那条 15 秒锁超时路径真正被拆掉的原因——不是靠并发降为 1。
+
+### 建议的后续修复（未实施）
+
+把三个 tick 的分钟错开即可彻底消除整点碰撞，且不改变任何 lane 的有效节奏
+（各 lane 节奏由 `due_interval_minutes` 决定，与 tick 落在哪一分钟无关）：
+
+| Group | 现 | 建议 |
+|---|---|---|
+| `tick-derived` | `*/15 * * * *` | `2,17,32,47 * * * *` |
+| `tick-governance` | `*/30 * * * *` | `7,37 * * * *` |
+| `tick-evidence` | `0 * * * *` | `12 * * * *` |
+
+改动面：`MEMORY_OS_CRON_GROUPS` 的 `default_schedule` + onboarding 默认值 + 相应测试断言。
+`tick-daily`(`5 0 * * *`) 与四个 owner 作业无需变动。

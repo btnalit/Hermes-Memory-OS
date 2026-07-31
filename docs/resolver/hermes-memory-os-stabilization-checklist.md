@@ -1175,7 +1175,13 @@ active-closure：**19 个 Hermes cron job → 8 个**（19 条 lane 不变）。
 5 个进程同时对 `execution_gate_index.json` 做「独占加锁 → 全量读 → 全量重写 → fsync」，
 锁超时 15s。超时即 `ExecutionGateInfrastructureError("sidecar_lock_timeout")` → runner 返回 3
 → 该 lane 当次无 completion 记录 → monitor 记 `helper_completion_missing`。
-合并后同分钟并发 5 → 1，触发次数 336/天 → 172/天。
+合并后触发次数 336/天 → 172/天。
+**并发数更正（2026-07-31 部署后实测）：是 5 → 3，不是最初写的 5 → 1。**
+三个 tick 的 cron 表达式在整点重叠（`*/15`、`*/30`、`0 * * * *` 都命中 `:00`），
+每小时整点仍有 3 个 group runner 同时启动（09:00 为 4 个）；3.200 日志显示三者
+在 `2026-07-31 20:00:56 CST` 同秒触发。真正拆掉 15 秒锁超时风险的是
+`prune_sidecar_index()` 把单次重写成本从无上限增长压成有界 O(2000)，而非并发降为 1。
+错开三个 tick 的分钟即可彻底消除碰撞且不影响任何 lane 节奏——见方案文档 §10，未实施。
 
 ### 阻断性前置条件（两条，先做才安全）
 
@@ -1270,6 +1276,70 @@ lane 注册表与 helper 脚本全程未动，回滚后行为与合并前一致�
 
 ---
 
+## BT — 3.200 定向部署结果与部署后发现（2026-07-31）
+
+BS 的 cron 合并已由 3.200 主机执行定向部署（非 full deploy）并验证。**BS 遗留的
+「未部署、live_monitor_pass 未取得」一项就此关闭**，但闭环仍未全绿，原因与本次改动无关。
+
+### 已取得的生产证据
+
+- 生产 cron registry 升级为 `memory-os.cron_registry.v1`，19 active lane specs / 8 groups。
+- 三个 tick（derived / governance / evidence）由**真实 Hermes scheduler** 于
+  `2026-07-31 20:00:56 CST` 自然触发并返回 ok；组内未到期 lane 正确返回 `skipped_not_due`——
+  **due gating 在生产上得到验证，不是重复执行**。`tick-daily` 已启用，首个自然窗口为每日 00:05。
+- 旧 per-lane job 按设计**暂停而非删除**，回滚路径保留。
+- Unregistered Memory-OS jobs = 0、naked jobs = 0、active cron helper completion missing = 0
+  —— R2（旧 job 名分类）与 R1（新鲜度按 lane）在生产数据上均未触发误报。
+- 63 个目标文件与 GitHub HEAD 字节级一致，配置文件未被改动，备份可校验。
+
+### Monitor 仍 FAIL，但与本次改动无关
+
+唯一 FAIL 是 `v2_exposure_schema_era_unhealthy`。已核对 `memory_os_3_200_monitor.py`：
+该码由 `snapshot["v2_exposure_monitor"]["schema_era_health"] == "FAIL"` 驱动，
+判定的是自然生产记录里的 schema-era 归因缺口 / 守恒断裂 / 遥测退化，
+与 cron 调度面无耦合。生产数据：观测 17.4/30 天、schema-era 分类率 0.6506、
+归因缺口 66、exposure rollup 滞后 67.9h、**守恒失败 0**、下游 clearance 正确冻结。
+滞后 67.9h ≈ 2.8 天，早于本次部署时点，属既有数据成熟度问题。
+
+### 部署后发现（未修复，登记为待办）
+
+**installed-layout import shadow 又出现一例，且是一类而非孤例。**
+
+`deploy_l3_probe.py` 在生产副本上从中立工作目录执行时报
+`ModuleNotFoundError: No module named 'plugins.memory'`：它无条件把
+`Path(__file__).resolve().parents[1]` 插入 `sys.path`，在安装布局下该路径是
+`$HERMES_HOME`，其 `plugins/` 目录会遮蔽 memory-os runtime 命名空间。
+主机侧已只在生产副本加 runtime bootstrap（未推开源仓库），因此**仓库缺陷仍在**，
+且生产上多出一处有记录的本地覆盖。
+
+按 Section W 第 5 条全项目 grep 同一模式，`scripts/` 下**共 4 个脚本**有硬顶层
+`from plugins.*` 导入 + 无条件 REPO_ROOT 插入、且缺少 29 个兄弟脚本都有的
+runtime 回退分支：
+
+- `deploy_l3_probe.py`（已在生产暴露）
+- `memory_os_blank_host_smoke.py`
+- `memory_os_export_shadow.py`
+- `memory_os_queue_consolidated_candidate.py`
+
+（`memory_os_cron_group_runner.py` 与 `memory_os_execution_gate_runner.py` 虽也无显式
+runtime 插入，但两者都是「快照优先 + try/except 软失败」，不受影响，无需改动。）
+
+修复方式与 `memory_os_exposure_rollup.py` 等既有脚本一致：条件判断 repo 布局，
+否则回退 `$HERMES_HOME/memory-os/runtime/python`。修完后生产可撤掉本地覆盖。
+
+这与路线图早先记录的「cron adapter installed-layout import shadow」是同一类缺陷。
+
+### 两处刻意未扩大的边界（主机侧决定，非本次改动遗漏）
+
+1. **未重启 Gateway**：当前 Gateway 仍是 7/29 启动的进程。cron 与 timer 都是新进程，
+   fresh-process provider 导入也已验证，因此 cron 合并确实生效；但不能宣称旧 Gateway
+   PID 内的模块缓存已重新加载。
+2. **未执行 Community 数据归档迁移**：代码层已退休，`/root/.hermes/memory-os/community/`
+   数据仍原地保留，无 `community_retirement.json` manifest。归档会移动用户数据，
+   不在本次部署授权范围内。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1279,6 +1349,10 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 已修复；2/9（pytest_policy skip-count）诊断为本机环境伪影，非项目代码缺陷，不修复。
 
 当前遗留：
+0. **`scripts/` 下 4 个脚本存在 installed-layout import shadow**（BT 记录）：
+   `deploy_l3_probe.py`、`memory_os_blank_host_smoke.py`、`memory_os_export_shadow.py`、
+   `memory_os_queue_consolidated_candidate.py`。已在 3.200 生产上实际触发一次，
+   目前靠主机侧本地覆盖绕过——仓库缺陷未修，生产存在一处已记录漂移。
 1. 四个 helper-completion 兄弟 WARN 码的 clean-host 分类表注册（视 `deploy_memory_os.py` 是否
    接入 cron onboarding 决定是否需要，BJ 记录）。
 2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
@@ -1414,7 +1488,7 @@ sannai-community 仓库 README。）
   与 group 调度面（9 条），active-closure **19 个 cron job → 8 个**，新增
   `memory_os_cron_group_runner.py` 按 due 门控逐 member 开自己的 ExecutionGate envelope。
   实测动因：00:00/12:00 各有 5 个 job 同时争 `execution_gate_index.json` 的 15 秒锁
-  （合并后同分钟并发 5→1、触发 336/天→172/天）。两条阻断前置先行：monitor 新鲜度改按 lane
+  （合并后触发 336/天→172/天；并发 5→**3** 而非最初所写的 5→1，见方案文档 §10 实测修正）。两条阻断前置先行：monitor 新鲜度改按 lane
   `due_interval_minutes` 取（否则 4 条 lane 窗口塌缩、2 条永久 stale）、旧 19 个 per-lane job
   名显式归入 `superseded_by_group_tick`（否则每台升级主机 monitor FAIL）。顺链修掉
   `classify_hermes_cron_jobs` 的**三份**拷贝、dashboard CORE/OPTIONAL 集合重叠、
@@ -1423,3 +1497,13 @@ sannai-community 仓库 README。）
   以及独立缺陷 `execution_gate_index.json` 无裁剪（新增 `prune_sidecar_index`，保留 2000 条）。
   3023 → **3058 passed / 13 skipped / 0 failed**（+35），静态门全过。
   未部署 3.200，`live_monitor_pass` 未取得。
+- `4d4ea17..HEAD`：3.200 定向部署结果登记（BT）+ 自我更正。BS 的「未部署、
+  live_monitor_pass 未取得」关闭：三个 tick 由真实 scheduler 于 20:00:56 CST 自然触发返回 ok、
+  组内未到期 lane 正确 `skipped_not_due`（due gating 生产验证通过），unregistered/naked/
+  helper-completion-missing 均为 0。**更正 BS 与实施提交里「同分钟并发 5→1」的错误说法——
+  实际是 5→3**（三个 tick 的 cron 表达式在整点重叠），真正拆掉 15 秒锁超时风险的是
+  `prune_sidecar_index()` 把重写成本压成有界 O(2000)；错开 tick 分钟可彻底消除碰撞，
+  方案文档 §10 给出建议但未实施。Monitor 唯一 FAIL `v2_exposure_schema_era_unhealthy`
+  已核对代码确认由生产观测数据成熟度驱动、与 cron 调度面无耦合。新登记待办：
+  `scripts/` 下 4 个脚本的 installed-layout import shadow（已在生产触发一次，
+  目前靠主机本地覆盖绕过，仓库缺陷未修）。纯文档，无代码改动。
