@@ -1088,6 +1088,13 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
   4. **cron 注册表漂移（真实安装缺失）**：`ACTIVE_CLOSURE_CRON_KEYS` 与 dashboard 的
      core/optional 名单是 `MEMORY_OS_CRON_SPECS` 的手抄副本，`clearance_cycle` 从未被加入，
      全新 active-closure 安装**根本不会创建该 cron**。改为从注册表推导 + 显式声明有意排除。
+     **`clearance_cycle` 本次仍不安装，但改为按名字显式排除并写明理由（延后启用）**：本次同
+     一批改动修好了 `append_terminal(detail=...)`，使 `sweep_unavailable_open_proposals_on_flag_flip`
+     （会**撤销**未决提案，就在 `clearance_cycle.py` 内）从"每次必抛 TypeError"变为真正可执行；
+     若同时创建该 cron，等于让两条从未真正跑过的路径在 3.200 上同时上线，出问题无法归因。
+     dashboard 侧同步标为 OPTIONAL（否则会对"我们故意不装的任务"永久报 missing_core WARN），
+     并加了一条测试锁死两者一致性。**启用方式：删掉排除集里那一行即可**；漂移防护不受影响，
+     新注册的 spec 仍不可能被静默漏掉。本次的关键区别是——遗漏必须是一个**决定**，而不是意外。
   5. **StateOverlay section 注册表六处重复**：改为从 `StateOverlay` dataclass 字段推导
      （`OVERLAY_SECTION_FIELDS`），标签/子集在 import 时断言穷尽；另发现并消除了第 7 处
      未被记录的内联副本。序列化输出键序逐字不变。

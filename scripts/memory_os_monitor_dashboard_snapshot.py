@@ -82,6 +82,12 @@ OPTIONAL_MEMORY_OS_CRON_KEYS = frozenset({
     "module_cadence_report",
     "l3_probe_verification",
     "expression_feedback_request",
+    # Kept OPTIONAL for as long as active-closure onboarding defers it (see
+    # ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS in memory_os_owner_cron_onboarding.py).
+    # Classifying a job we deliberately do not install as CORE would raise a
+    # permanent missing_core WARN for its expected absence. Promote it to CORE
+    # in the same change that enables the cron.
+    "clearance_cycle",
 })
 _ALL_MEMORY_OS_CRON_SPECS = memory_os_cron_specs()
 CORE_MEMORY_OS_CRON = frozenset(

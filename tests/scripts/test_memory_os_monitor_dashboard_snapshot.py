@@ -20,6 +20,15 @@ def _load_module():
     return module
 
 
+def _load_onboarding_module():
+    path = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_owner_cron_onboarding.py"
+    spec = importlib.util.spec_from_file_location("memory_os_owner_cron_onboarding", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
 def _write_jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -818,18 +827,39 @@ def test_core_and_optional_cron_sets_exhaustively_cover_the_registry():
 
 def test_hindsight_and_clearance_cron_are_not_left_unclassified():
     """Direct counterfactual for the three specific jobs identified as
-    missing from the dashboard's hand-typed CORE/OPTIONAL sets. All three
-    are unconditionally onboarded on active-closure hosts (none has a
-    documented reason to tolerate being paused), so all three belong in
-    CORE, not OPTIONAL and not unclassified."""
+    missing from the dashboard's hand-typed CORE/OPTIONAL sets.
+
+    The two hindsight jobs are unconditionally onboarded on active-closure
+    hosts, so their absence must WARN -- they belong in CORE.
+
+    clearance-cycle is classified OPTIONAL for exactly as long as
+    active-closure onboarding defers it (see ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
+    in memory_os_owner_cron_onboarding.py). Calling a job we deliberately do
+    not install CORE would raise a permanent missing_core WARN for its
+    expected absence. What matters either way is that it is CLASSIFIED --
+    the original bug was that all three fell through to the untracked
+    "other" bucket, so their disappearance could never be noticed.
+    """
     module = _load_module()
     for name in (
         "memory-os-hindsight-advisory-digest",
         "memory-os-hindsight-health-probe",
-        "memory-os-clearance-cycle",
     ):
         assert name in module.CORE_MEMORY_OS_CRON, name
         assert name not in module.OPTIONAL_MEMORY_OS_CRON, name
+
+    assert "memory-os-clearance-cycle" in module.OPTIONAL_MEMORY_OS_CRON
+    assert "memory-os-clearance-cycle" not in module.CORE_MEMORY_OS_CRON
+
+    # The two classifications must stay in lockstep: a job excluded from the
+    # active-closure install must not be CORE, or the monitor WARNs forever.
+    onboarding = _load_onboarding_module()
+    for spec_key, job_name in (("clearance_cycle", "memory-os-clearance-cycle"),):
+        if spec_key in onboarding.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS:
+            assert job_name not in module.CORE_MEMORY_OS_CRON, (
+                f"{job_name} is excluded from active-closure onboarding but "
+                "classified CORE, which would WARN on its expected absence"
+            )
 
 
 def test_retired_right_brain_is_removed_from_active_cron_surface(tmp_path):
