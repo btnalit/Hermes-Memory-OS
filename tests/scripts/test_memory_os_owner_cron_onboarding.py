@@ -281,19 +281,17 @@ def test_onboarding_dry_run_selects_detected_channel_and_does_not_create_jobs(tm
     assert hindsight_health["schedule"] == "33 * * * *"
     assert hindsight_health["script"] == "memory_os_hindsight_health_probe.py"
     assert hindsight_health["raw_script"] == "memory_os_hindsight_health_probe.py"
-    # Counterfactual: clearance_cycle is a real registered spec whose helper
-    # and gate scripts the installer already deploys (see
-    # install_memory_os_plugin.py). Its absence from the old hand-typed
-    # ACTIVE_CLOSURE_CRON_KEYS frozenset was an oversight (every sibling key
-    # was added to that set in the same commit that registered it -- this
-    # one was not); this asserts it is now actually onboarded on
-    # active-closure hosts.
-    clearance_cycle = [job for job in report["operational_cron_jobs"] if job["name"] == "memory-os-clearance-cycle"][0]
-    assert clearance_cycle["schedule"] == "*/10 * * * *"
-    assert clearance_cycle["script"] == "memory_os_cron_clearance_cycle_gate.py"
-    assert clearance_cycle["raw_script"] == "memory_os_clearance_cycle_helper.py"
-    assert clearance_cycle["deliver"] == "local"
-    assert clearance_cycle["no_agent"] is True
+    # clearance_cycle is a real registered spec whose helper and gate scripts
+    # the installer already deploys, but its activation is DEFERRED (see the
+    # comment on ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS): enabling it in the same
+    # change that repaired append_terminal would make two never-exercised
+    # paths live at once on production. Assert the deferral is real and
+    # deliberate -- not the old silent drift.
+    assert not [
+        job for job in report["operational_cron_jobs"]
+        if job["name"] == "memory-os-clearance-cycle"
+    ]
+    assert "clearance_cycle" in module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
     for job in report["operational_cron_jobs"]:
         assert home.joinpath("scripts", job["script"]).is_file(), job["script"]
     assert not home.joinpath("cron", "jobs.json").exists()
@@ -656,20 +654,29 @@ def test_active_closure_cron_keys_are_derived_from_the_registry_not_hand_typed()
     therefore silently never created the clearance_cycle cron job even
     though its helper/gate scripts were deployed by the installer.
 
-    Without the derivation fix this test fails two ways: the hand-typed
-    frozenset has no ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS companion (this
-    module previously defined none), and "clearance_cycle" is absent from
-    ACTIVE_CLOSURE_CRON_KEYS.
+    Without the derivation fix this test fails: the hand-typed frozenset has
+    no ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS companion (this module previously
+    defined none), so an unlisted spec was silently dropped rather than
+    deliberately classified.
+
+    Note the distinction this test enforces: clearance_cycle is still not
+    onboarded today, but it is now EXCLUDED BY NAME with a documented reason
+    (deferred activation) instead of merely being absent from a hand-typed
+    list. That is the whole point -- omission must be a decision, not an
+    accident.
     """
     module = _load_module()
     all_keys = {spec.key for spec in memory_os_cron_specs()}
 
     assert module.ACTIVE_CLOSURE_CRON_KEYS == all_keys - module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
-    # module_cadence_report is the one documented, deliberate exclusion --
-    # its report is already generated on-demand elsewhere. Everything else
-    # registered defaults to being onboarded and visible.
-    assert module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS == {"module_cadence_report"}
-    assert "clearance_cycle" in module.ACTIVE_CLOSURE_CRON_KEYS
+    # Both exclusions are documented and deliberate: module_cadence_report is
+    # permanent (generated on demand elsewhere); clearance_cycle is deferred
+    # pending a separate, observed enablement.
+    assert module.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS == {
+        "module_cadence_report",
+        "clearance_cycle",
+    }
+    assert "clearance_cycle" not in module.ACTIVE_CLOSURE_CRON_KEYS
     assert "module_cadence_report" not in module.ACTIVE_CLOSURE_CRON_KEYS
     # Every registered key must be classified one way or the other -- no
     # key silently falls through unclassified.

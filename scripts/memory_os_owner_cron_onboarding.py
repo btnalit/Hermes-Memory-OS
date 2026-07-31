@@ -53,7 +53,29 @@ SCHEMA_VERSION = "memory-os.owner_cron_onboarding.v0"
 #     dedicated periodic cron job is redundant. It remains available under
 #     the "full" cron profile for hosts that want a standalone report cron.
 ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS = frozenset({
+    # Permanent exclusion: its report is already generated on demand elsewhere.
     "module_cadence_report",
+    # DEFERRED ACTIVATION, not a permanent exclusion.
+    #
+    # clearance_cycle is a real registered spec whose helper/gate scripts the
+    # installer already deploys, but it was never added to the (previously
+    # hand-typed) active-closure key set -- an oversight, since every sibling
+    # spec was classified in the same commit that registered it. So the job has
+    # never actually been created on a production host, and the lane has never
+    # run there.
+    #
+    # It is held back here on purpose rather than switched on as a side effect
+    # of the registry-drift fix: the same change set also repaired
+    # `append_terminal(detail=...)`, which means
+    # `sweep_unavailable_open_proposals_on_flag_flip` -- which REVOKES open
+    # proposals and lives in clearance_cycle.py -- went from raising TypeError
+    # on every call to actually working. Enabling the cron in the same step
+    # would make two never-exercised paths live at once on 3.200, so a failure
+    # could not be attributed to either.
+    #
+    # To enable: delete this one line. The drift guard below still guarantees a
+    # newly registered spec can never be silently omitted again.
+    "clearance_cycle",
 })
 ACTIVE_CLOSURE_CRON_KEYS = frozenset(
     spec.key for spec in memory_os_cron_specs()
