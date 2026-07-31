@@ -286,3 +286,34 @@ def test_deploy_l3_probe_apply_refuses_now_that_lane_is_in_a_group_tick(tmp_path
     assert result["actions"] == []
     # No cron job may be created as a side effect.
     assert not (tmp_path / "home" / "cron" / "jobs.json").exists()
+
+
+def _load_deploy_module():
+    import importlib.util
+
+    deploy_path = Path(__file__).resolve().parents[2] / "scripts" / "deploy_l3_probe.py"
+    spec = importlib.util.spec_from_file_location("deploy_l3_probe_plan_test", deploy_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_deploy_l3_probe_plan_does_not_ask_to_create_the_superseded_job(tmp_path, monkeypatch):
+    """Absence of the standalone job is the CORRECT post-consolidation state.
+
+    Reporting "create_cron_job" would tell an operator to do by hand exactly
+    the thing --apply now refuses, double-running the lane against the
+    memory-os-tick-evidence tick.
+    """
+    import json as _json
+
+    module = _load_deploy_module()
+    home = tmp_path / "home"
+    (home / "cron").mkdir(parents=True)
+    (home / "cron" / "jobs.json").write_text(_json.dumps({"jobs": []}), encoding="utf-8")
+
+    plan = module.run_plan(home)
+    dry_run = module.run_dry_run(home)
+
+    assert "create_cron_job" not in plan.get("needs", [])
+    assert all(cmd.get("operation") != "hermes cron create" for cmd in dry_run.get("commands", []))

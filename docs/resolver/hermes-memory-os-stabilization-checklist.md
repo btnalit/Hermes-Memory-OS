@@ -1244,14 +1244,23 @@ R1/R2 的 revert→FAIL→restore→PASS 已实际验证。
 
 ### 测试与门禁
 
-3023（BR 基线）→ **3056 passed / 13 skipped / 0 failed**，净 +33。
-新增 `tests/scripts/test_memory_os_cron_group_runner.py`（14 项）。
+3023（BR 基线）→ **3058 passed / 13 skipped / 0 failed**，净 +35。
+新增 `tests/scripts/test_memory_os_cron_group_runner.py`（14 项），
+另在 `test_memory_os_l3_probe_repo_root.py` 补 2 项双跑守卫。
 四项静态门全过：import_cycle / write_surface（unclassified=0）/ static_hygiene / public_checkout_probe。
 
 ### 回滚
 
 onboarding 只**暂停**旧 19 个 per-lane job，不删除。回滚 = 重新启用旧 job + 停用 8 个 group job；
 lane 注册表与 helper 脚本全程未动，回滚后行为与合并前一致。
+
+**旧 per-lane gate shim 是回滚基础设施，故意保留、不删除。** 被暂停的旧 job 其 `script` 字段
+指向 `memory_os_cron_<lane>_gate.py`，删掉这些 shim 会让回滚（重新启用旧 job）直接失败。
+因此 `_write_execution_gate_assets()` 只写当前 group 的 wrapper、不清理旧 shim，
+`install_memory_os.sh` 也继续安装 `memory_os_cron_working_cleanup_gate.py`——
+这一条是有意为之，不是清理遗漏。只有旧 job **创建逻辑**被移除
+（`install_memory_os.sh` 的自建 cron 块、`deploy_l3_probe.py --apply`），
+因为那才是导致 lane 双跑的部分。
 
 ### 未做 / 残留
 
@@ -1412,5 +1421,5 @@ sannai-community 仓库 README。）
   `install_memory_os.sh` 与 `deploy_l3_probe.py` 两处会导致 lane 双跑的自建 job，
   并补上 helper subprocess timeout、group 非阻塞锁、成员失败隔离、lane 级停用，
   以及独立缺陷 `execution_gate_index.json` 无裁剪（新增 `prune_sidecar_index`，保留 2000 条）。
-  3023 → **3056 passed / 13 skipped / 0 failed**（+33），静态门全过。
+  3023 → **3058 passed / 13 skipped / 0 failed**（+35），静态门全过。
   未部署 3.200，`live_monitor_pass` 未取得。
