@@ -177,7 +177,7 @@ HERMES_HOME=/root/.hermes \
 - the `memory-os-agent-os` shell plugin;
 - heartbeat and cognitive-loop runtime integration;
 - portable cognition, governance, and expression modules;
-- the 14-job `active-closure` Hermes cron profile;
+- the 8-job `active-closure` Hermes cron profile (19 governed lanes grouped into 4 tick jobs plus 4 owner-facing jobs);
 - owner-channel discovery from `channel_directory.json`;
 - post-install verification that fails loudly when core components are missing.
 
@@ -246,23 +246,36 @@ observation only, or `--llm-judge-preset none` to disable it.
 
 ## Automation Profiles
 
-The default `active-closure` profile contains 14 jobs:
+The default `active-closure` profile contains **8 Hermes cron jobs** scheduling
+**19 governed lanes**.
 
-| Area | Jobs |
-| --- | --- |
-| Owner loop | owner review digest, expression feedback, memory-source feedback |
-| Governance | proposal follow-up OpsGate, candidate aggregation, fact judge |
-| Memory maintenance | index sync, event stats refresh, state overlay refresh, entity index refresh, working-memory cleanup |
-| Integrity and substrates | L3 probe verification, Hindsight advisory digest, Hindsight health probe |
+Scheduling and governance are separate concerns. A *lane* is the unit of
+governance: it opens its own ExecutionGate permit, carries its own risk class,
+and writes its own completion evidence. A *job* is only the Hermes scheduling
+surface. Lanes are grouped into shared "tick" jobs so the cron surface stays
+small without merging any governance boundary.
 
-Most maintenance and governance jobs run with `deliver=local` and no agent.
-Owner-facing jobs resolve the configured owner channel through Hermes.
+| Job | Schedule | Lanes |
+| --- | --- | --- |
+| `memory-os-tick-derived` | `*/15 * * * *` | index sync, event stats refresh, state overlay refresh, entity index refresh |
+| `memory-os-tick-governance` | `*/30 * * * *` | proposal follow-up OpsGate |
+| `memory-os-tick-evidence` | `0 * * * *` | fact judge, candidate aggregation, L3 probe verification, Hindsight health probe, V3 wandering |
+| `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working-memory cleanup, Hindsight advisory digest |
+| `memory-os-owner-review-digest` | `0 9 * * *` | owner review digest |
+| `memory-os-memory-sources-feedback-request` | `30 10 * * *` | memory-source feedback |
+| `memory-os-expression-feedback-request` | `0 5 * * 0` | expression feedback |
+| `memory-os-full-monitor-refresh` | `30 2 * * *` | full monitor snapshot |
 
-The `full` profile adds three optional jobs:
+A tick fires at its fastest member's cadence; every other member is gated by
+its own `due_interval_minutes` and skipped until due, so a weekly lane sharing
+a daily tick still runs weekly. Interval-gated lanes also catch up after
+downtime, which fixed-time per-lane cron could not do.
 
-- right-brain expression through `deliver=origin`;
-- module cadence reporting;
-- right-brain expression outcome capture.
+Tick jobs run with `deliver=local` and no agent. Owner-facing jobs stay
+one-per-job — each renders a distinct owner message through its own agent
+prompt and channel — and resolve the configured owner channel through Hermes.
+
+The `full` profile adds one optional job: module cadence reporting.
 
 Enable it explicitly:
 

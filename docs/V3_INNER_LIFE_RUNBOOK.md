@@ -23,7 +23,27 @@ V3 private thoughts are not canonical memory, are not retrieval documents, and a
 | R4 | Synthesis admission | `synthesis_admission_enabled=false` |
 | R5 | Would-share/actual expression | `outlet_shadow_enabled=false`, `expression_enabled=false` |
 
-The installed R3 cron is safe while disabled: it exits before model input. There is no catch-up behavior.
+The installed R3 lane is safe while disabled: it exits before model input. There is no catch-up behavior.
+
+### Where the V3 lanes are scheduled
+
+The V3 lanes no longer own individual Hermes cron jobs. They run as member
+lanes of grouped tick jobs, each still behind its own ExecutionGate permit:
+
+| Lane | Tick job | Effective cadence |
+|---|---|---|
+| `v3_seed_evidence` (R1) | `memory-os-tick-daily` | once per UTC calendar day |
+| `v3_wandering` (R3) | `memory-os-tick-evidence` | every 6h |
+| `v3_journal_sweep` (R2 TTL sweep) | `memory-os-tick-daily` | daily |
+
+`v3_seed_evidence` uses `due_policy="calendar"` rather than an elapsed
+interval, because it emits one record per `natural_date` and reports
+`consecutive_valid_day_count` — elapsed gating could drift it across a UTC day
+boundary and skip or double-count a day.
+
+To hold a single V3 lane without disabling the whole tick, add its registry key
+to `$HERMES_HOME/memory-os/system/cron_lane_disabled.json`. Disabling the tick
+job itself would also stop its unrelated co-tenant lanes.
 
 ## No-session Hermes adapter
 

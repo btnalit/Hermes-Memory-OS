@@ -81,18 +81,36 @@ Operational Hermes cron onboarding:
 ```
 
 The operational preset defaults to `--owner-cron-profile active-closure`, which
-creates the core maintenance and oversight jobs (10 total):
+creates **8 Hermes cron jobs** scheduling **19 governed lanes**.
 
-- `memory-os-owner-review-digest` — owner-facing approval digest
-- `memory-os-proposal-followups-opsgate` — proposal follow-up OpsGate review
-- `memory-os-index-sync` — SQLite FTS5 index incremental sync
-- `memory-os-working-cleanup` — expired working memory cleanup
-- `memory-os-l3-probe-verification` — L3 boundary probe verification
-- `memory-os-candidate-aggregation` — candidate cluster aggregation
-- `memory-os-fact-judge` — fact-judge lane for reversible labels
-- `memory-os-event-stats-refresh` — O(1) event stats cache refresh
-- `memory-os-expression-feedback-request` — right-brain expression feedback
-- `memory-os-memory-sources-feedback-request` — MemorySources recall feedback
+`cron_registry.py` keeps two tables, and the split is load-bearing:
+
+- **Lanes** (`MEMORY_OS_CRON_LANES`) — the governance identity: `lane_id`,
+  helper script, `risk_class`, boundary contract. Every lane opens its own
+  ExecutionGate permit and writes its own completion evidence on every run.
+- **Groups** (`MEMORY_OS_CRON_GROUPS`) — the Hermes scheduling surface, i.e.
+  what `hermes cron create` actually creates.
+
+Consolidating lanes into shared tick jobs reduces the cron surface without
+merging any governance boundary.
+
+| Job | Schedule | Member lanes |
+| --- | --- | --- |
+| `memory-os-tick-derived` | `*/15 * * * *` | `event_stats_refresh`, `index_sync`, `state_overlay_refresh`, `entity_index_refresh` |
+| `memory-os-tick-governance` | `*/30 * * * *` | `proposal_followups_opsgate` |
+| `memory-os-tick-evidence` | `0 * * * *` | `hindsight_health_probe`, `fact_judge`, `candidate_aggregation`, `l3_probe_verification`, `v3_wandering` |
+| `memory-os-tick-daily` | `5 0 * * *` | `exposure_rollup`, `v3_seed_evidence`, `v3_journal_sweep`, `working_cleanup`, `hindsight_advisory_digest` |
+| `memory-os-owner-review-digest` | `0 9 * * *` | `owner_review_digest` |
+| `memory-os-memory-sources-feedback-request` | `30 10 * * *` | `memory_sources_feedback_request` |
+| `memory-os-expression-feedback-request` | `0 5 * * 0` | `expression_feedback_request` |
+| `memory-os-full-monitor-refresh` | `30 2 * * *` | `full_monitor_refresh` |
+
+Per-lane cadence is preserved by `due_interval_minutes` rather than by cron: a
+tick fires at its fastest member's rate and skips members that are not yet due.
+Date-partitioned lanes use `due_policy="calendar"` instead, so they run at most
+once per UTC day and cannot drift across a day boundary.
+
+Adding a new lane means adding it to a group — **not** creating a cron job.
 
 See `cron_registry.py` for the authoritative list.
 
@@ -101,14 +119,23 @@ the normal Hermes owner channel, while safe proposal follow-up routing is
 report-only/OpsGate process motion. Runtime heartbeat and the cognitive-loop
 timer handle sensing, projection, advisor reports, and low-risk lane evidence.
 
-`--owner-cron-profile full` additionally creates optional jobs for
-right-brain expression, module cadence reporting, expression outcome capture,
-expression feedback, and MemorySources feedback. Those jobs are product
-surfaces, not prerequisites for the active-closure logic chain. On upgraded
-hosts, active-closure onboarding pauses known optional Memory-OS cron jobs
-instead of deleting them. Running the `full` profile restores the optional cron
-surface when it is intentionally needed. Paused optional jobs are classified as
-known optional rather than unregistered drift.
+`--owner-cron-profile full` additionally creates the optional module cadence
+report job. That job is a product surface, not a prerequisite for the
+active-closure logic chain. On upgraded hosts, active-closure onboarding pauses
+known optional Memory-OS cron jobs instead of deleting them. Running the `full`
+profile restores the optional cron surface when it is intentionally needed.
+Paused optional jobs are classified as known optional rather than unregistered
+drift.
+
+Upgrading from a pre-consolidation host is non-destructive: the old per-lane
+jobs (`memory-os-index-sync`, `memory-os-working-cleanup`, …) are **paused, not
+deleted**, and are classified `superseded_by_group_tick`. Re-enabling them and
+disabling the group ticks is the rollback path, so their gate wrapper scripts
+stay installed on purpose.
+
+To stop one lane without stopping its whole tick, list its registry key in
+`$HERMES_HOME/memory-os/system/cron_lane_disabled.json`. The tick runner skips
+it and the monitor reports it as disabled rather than as missing evidence.
 
 Memory-OS provides bounded helper scripts; Hermes owns cron, agent turns,
 platform transport, origin/local delivery, retry, and cooldown.

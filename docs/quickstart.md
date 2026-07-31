@@ -27,12 +27,11 @@ This installs and enables the Memory-OS provider, the Hermes Agent OS shell,
 the portable runtime, heartbeat, the current cognitive loop harness, and the
 active-closure Hermes cron operational set. Owner-facing cron jobs use Hermes
 `channel_directory.json` autodiscovery, so Telegram is selected only when it is
-the configured owner channel. The default active-closure cron set contains
-the owner review digest, proposal follow-up OpsGate, index sync, working
-cleanup, L3 probe verification, candidate aggregation, fact judge, event
-stats refresh, expression feedback, and memory sources feedback jobs.
-Runtime heartbeat and the cognitive-loop timer own the main
-sensing/projection/advisor loop.
+the configured owner channel. The default active-closure cron set is **8 Hermes
+cron jobs** covering 19 governed lanes: four grouped "tick" jobs that run their
+member lanes on each lane's own cadence, plus four owner-facing jobs that each
+render a distinct owner message. Runtime heartbeat and the cognitive-loop timer
+own the main sensing/projection/advisor loop.
 
 Interactive install:
 
@@ -178,25 +177,48 @@ Backups belong under `$HERMES_HOME/plugin-backups/`, not under
 
 ### Cron Profile
 
-The default cron profile is `active-closure` (10 jobs):
+The default cron profile is `active-closure`: **8 Hermes cron jobs** scheduling
+**19 governed lanes**.
 
-| Job | Purpose |
-| --- | --- |
-| `memory-os-owner-review-digest` | sends approval items and real alerts through the owner channel |
-| `memory-os-proposal-followups-opsgate` | moves safe proposal follow-ups through OpsGate/report-only review |
-| `memory-os-index-sync` | keeps SQLite FTS5 index in sync with canonical files |
-| `memory-os-working-cleanup` | prunes expired working memory items |
-| `memory-os-l3-probe-verification` | verifies L3 boundary probe integrity |
-| `memory-os-candidate-aggregation` | aggregates candidate clusters |
-| `memory-os-fact-judge` | reversible fact-judge lane for crystallized records |
-| `memory-os-event-stats-refresh` | rebuilds O(1) event stats cache every 15 min |
-| `memory-os-expression-feedback-request` | requests owner feedback on right-brain expressions |
-| `memory-os-memory-sources-feedback-request` | requests owner feedback on memory source recall quality |
+Scheduling and governance are deliberately separate. A *lane* is the unit of
+governance — it opens its own ExecutionGate permit, carries its own
+`risk_class`, and produces its own completion evidence. A *job* is only the
+Hermes scheduling surface. Grouping lanes into shared tick jobs shrinks the
+cron surface without collapsing any governance boundary.
 
-The full registry also contains optional jobs for right-brain expression,
-module cadence reports, expression outcome capture, and owner feedback prompts.
-They are intentionally not part of the default install. Enable them only when
-that user-facing product surface is desired:
+| Job | Schedule | Lanes it runs |
+| --- | --- | --- |
+| `memory-os-tick-derived` | `*/15 * * * *` | event stats refresh, index sync, state overlay refresh, entity index refresh |
+| `memory-os-tick-governance` | `*/30 * * * *` | proposal follow-up OpsGate |
+| `memory-os-tick-evidence` | `0 * * * *` | hindsight health probe, fact judge, candidate aggregation, L3 probe verification, V3 wandering |
+| `memory-os-tick-daily` | `5 0 * * *` | exposure rollup, V3 seed evidence, V3 journal sweep, working cleanup, hindsight advisory digest |
+| `memory-os-owner-review-digest` | `0 9 * * *` | sends approval items and real alerts through the owner channel |
+| `memory-os-memory-sources-feedback-request` | `30 10 * * *` | requests owner feedback on memory source recall quality |
+| `memory-os-expression-feedback-request` | `0 5 * * 0` | requests owner feedback on right-brain expressions |
+| `memory-os-full-monitor-refresh` | `30 2 * * *` | full production monitor snapshot |
+
+A tick job fires at its *fastest* member's cadence; every other member is
+gated by its own `due_interval_minutes` and simply skipped on ticks where it
+is not yet due. So a weekly lane sharing a daily tick still runs weekly. An
+interval-gated lane also self-heals after downtime — the next tick sees it
+overdue and runs it, which fixed-time per-lane cron could not do.
+
+Owner-facing jobs are deliberately **not** merged: each renders a distinct
+owner message through its own agent prompt and delivery channel, so a shared
+tick would fuse separate owner messages. `memory-os-full-monitor-refresh`
+stays separate because it is the heavyweight (≤180s) monitor and would block
+co-tenants of any tick.
+
+To stop a single lane without stopping its whole tick, list its registry key
+in `$HERMES_HOME/memory-os/system/cron_lane_disabled.json`; the tick runner
+skips it and the monitor classifies it as disabled rather than missing.
+
+`scripts/memory_os_cron_group_runner.py` is the tick entrypoint and
+`plugins/memory/memory_os/cron_registry.py` is the authoritative registry.
+
+The full registry also contains optional jobs for module cadence reports and
+owner feedback prompts. They are intentionally not part of the default
+install. Enable them only when that user-facing product surface is desired:
 
 ```bash
 HERMES_HOME=/root/.hermes python scripts/install_memory_os_plugin.py \
