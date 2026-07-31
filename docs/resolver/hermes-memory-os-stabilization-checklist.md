@@ -1399,7 +1399,43 @@ memory-os 包，需要 Hermes agent runtime（`agent` / `memory_os_agent`），C
 
 ### 测试与门禁
 
-3058 → **3065 passed / 13 skipped / 0 failed**（净 +7：installed-layout 5 项 + cron 不变量 2 项）。四项静态门全过。
+3058 → **3066 passed / 13 skipped / 0 failed**（净 +8：installed-layout 6 项 + cron 不变量 2 项）。五项静态门全过。
+
+### BU.1 — CI 红：该测试在 CI 上是**空过**的（同日修复）
+
+BU 的 installed-layout 测试本机全绿，CI 却红在反事实那条：
+`assert "No module named 'plugins.memory'" in ''` —— stderr 是**空的**，
+即塞回旧 bootstrap 也没报错。
+
+根因：**CI 跑 `pip install -e '.[dev]'`**（`.github/workflows/ci.yml:28`），
+仓库以 editable 方式装进 site-packages，于是 `plugins` **无论脚本怎么摆弄 sys.path
+都能导入**。本机没装 editable，所以复现不出来。
+
+这意味着不只是反事实那条会挂——**正向那条在 CI 上同样是空过的**：
+它"通过"是因为 editable install 提供了 `plugins`，而不是因为 bootstrap 修对了。
+一条恒绿却什么都不证明的测试，比一条红的更危险。
+
+修复：子解释器加 `-S -E` 隔离。`-S` 跳过 site-packages（editable install 就在那儿），
+`-E` 忽略 `PYTHON*` 环境变量；`HERMES_HOME` 不是 `PYTHON*` 前缀所以照常传入，
+再配合中立 cwd 让仓库检出也不可见。
+
+三点加固，防止再次空过：
+
+1. **新增前置条件测试** `test_installed_layout_fixture_is_isolated_from_ambient_packages`：
+   断言在该隔离下 `import plugins.memory` **必须失败**。若哪天隔离失效，
+   这条会带着明确信息先挂，而不是让整个文件静默空过。
+2. **正向断言改为positive**：不再只判"遮蔽报错不存在"（这也可能是脚本更早就死了），
+   改判 traceback 里出现 `$HERMES_HOME/memory-os/runtime/python/plugins/` 路径——
+   能走进 runtime 树里的模块，才证明确实从那里解析。
+3. **本机用一次性 venv 复刻 CI 条件验证**（`pip install -e .` + pytest）：
+   确认 editable install 下 `plugins.memory` 确实可被环境直接导入、`-S -E` 能切断它；
+   并把**上一版测试文件**放进该 venv 跑，复现出与 CI 完全一致的失败，
+   新版 6 项全过。验证完删除 venv。
+
+教训：**跨环境的测试必须验证自己的前置条件**。本机能复现 ≠ CI 能复现；
+当测试依赖"某模块不可导入"时，那个"不可导入"本身就是必须断言的前提。
+
+---
 
 ---
 
@@ -1578,3 +1614,11 @@ sannai-community 仓库 README。）
   同时更正 BT 里「共 4 个」的说法——严格复扫是 7 个无条件插入，其余 3 个是
   仅从仓库运行、不随安装分发的工具，现状正确未动；另有 3 个此前误判为缺陷的其实是
   检测式假阳性。3058 → **3065 passed / 13 skipped / 0 failed**，静态门全过。
+- `3dbbb9b..HEAD`：修 BU 的 CI 红（BU.1）。installed-layout 测试在 CI 上**空过**——
+  CI 的 `pip install -e '.[dev]'` 让 `plugins` 无视 sys.path 即可导入，
+  于是反事实无法失败、正向断言也不成立（本机未装 editable 故复现不出）。
+  子解释器改用 `-S -E` 隔离（`-S` 切 site-packages 即 editable install，
+  `-E` 切 `PYTHON*` 变量而保留 `HERMES_HOME`），新增前置条件测试断言隔离本身有效，
+  正向断言由"无遮蔽报错"改为"traceback 出现 runtime 树路径"。
+  已用一次性 venv 复刻 CI 条件验证：旧版在其中复现出与 CI 一致的失败、新版 6 项全过。
+  3065 → **3066 passed / 13 skipped / 0 failed**，五项静态门全过。

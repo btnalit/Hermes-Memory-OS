@@ -44,6 +44,32 @@ UNCONDITIONAL_REPO_ROOT_INSERT = re.compile(
     r"\s*sys\.path\.insert\(0, str\(REPO_ROOT\)\)"
 )
 
+SHADOW_ERROR = "No module named 'plugins.memory'"
+
+# Isolate the child interpreter from anything that could supply ``plugins``
+# other than the bootstrap under test:
+#   -S  skip site-packages, which on CI holds an EDITABLE install of this repo
+#       (`pip install -e '.[dev]'`, see .github/workflows/ci.yml). Without it
+#       these tests are VACUOUS: the package imports fine no matter what
+#       sys.path the script builds, so the counterfactual cannot fail and the
+#       positive test proves nothing. That is exactly how the first version of
+#       this file passed locally and failed on CI.
+#   -E  ignore PYTHON* env vars (PYTHONPATH / PYTHONHOME). HERMES_HOME is not
+#       PYTHON*-prefixed, so the bootstrap still receives it.
+# A neutral cwd keeps the repo checkout off sys.path as well.
+ISOLATED_FLAGS = ["-S", "-E"]
+
+# The old, broken bootstrap, injected into a copy of a script to prove these
+# tests actually detect the defect they claim to guard against.
+LEGACY_BOOTSTRAP = "\n".join(
+    [
+        "REPO_ROOT = Path(__file__).resolve().parents[1]",
+        "if str(REPO_ROOT) not in sys.path:",
+        "    sys.path.insert(0, str(REPO_ROOT))",
+        "",
+    ]
+)
+
 
 def _deployed_script_names() -> set[str]:
     """Scripts the installer copies into ``$HERMES_HOME/scripts/``.
@@ -109,17 +135,6 @@ def test_repo_only_tools_with_unconditional_insert_are_not_deployed():
     )
 
 
-SHADOW_ERROR = "No module named 'plugins.memory'"
-
-# The old, broken bootstrap. Injected into a copy of the script to prove this
-# test actually detects the defect it claims to guard against.
-LEGACY_BOOTSTRAP = (
-    "REPO_ROOT = Path(__file__).resolve().parents[1]\n"
-    "if str(REPO_ROOT) not in sys.path:\n"
-    "    sys.path.insert(0, str(REPO_ROOT))\n"
-)
-
-
 def _installed_layout_home(tmp_path: Path) -> Path:
     """Reproduce the production shape that caused the failure.
 
@@ -138,13 +153,17 @@ def _installed_layout_home(tmp_path: Path) -> Path:
     return home
 
 
-def _run_from_installed_layout(home: Path, cwd: Path, script_name: str) -> str:
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+def _isolated_env(home: Path) -> dict:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
     env["HERMES_HOME"] = str(home)
+    return env
+
+
+def _run_from_installed_layout(home: Path, cwd: Path, script_name: str) -> str:
     completed = subprocess.run(
-        [sys.executable, str(home / "scripts" / script_name), "--help"],
+        [sys.executable, *ISOLATED_FLAGS, str(home / "scripts" / script_name), "--help"],
         cwd=str(cwd),  # neutral cwd: the repo must not be discoverable
-        env=env,
+        env=_isolated_env(home),
         capture_output=True,
         text=True,
         errors="replace",
@@ -153,47 +172,81 @@ def _run_from_installed_layout(home: Path, cwd: Path, script_name: str) -> str:
     return completed.stderr or ""
 
 
+def test_installed_layout_fixture_is_isolated_from_ambient_packages(tmp_path):
+    """Precondition for the two tests below.
+
+    If ``plugins`` is importable with no bootstrap at all -- which is exactly
+    what an editable install on CI provides -- the shadowing can never be
+    observed and the other tests silently prove nothing. Asserting the
+    isolation here surfaces that failure with a clear message instead of as a
+    mysteriously-passing suite.
+    """
+    home = _installed_layout_home(tmp_path)
+
+    completed = subprocess.run(
+        [sys.executable, *ISOLATED_FLAGS, "-c", "import plugins.memory"],
+        cwd=str(tmp_path),
+        env=_isolated_env(home),
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=120,
+    )
+
+    assert completed.returncode != 0, (
+        "plugins.memory imports with no bootstrap at all, so these tests cannot "
+        "observe the shadowing defect. Check ISOLATED_FLAGS."
+    )
+    assert "No module named" in (completed.stderr or "")
+
+
 @pytest.mark.parametrize(
     "script_name",
     ["memory_os_export_shadow.py", "deploy_l3_probe.py"],
 )
-def test_script_resolves_plugins_package_under_a_shadowing_installed_layout(tmp_path, script_name):
-    """The fixed script must reach the runtime package, not the shadowing dir.
+def test_script_resolves_plugins_from_the_runtime_tree(tmp_path, script_name):
+    """Positive assertion: resolution comes from the runtime tree.
 
-    Only the shadowing failure is asserted. These scripts pull in the wider
-    memory-os package, which needs the Hermes agent runtime (``agent`` /
-    ``memory_os_agent``); that is absent in CI and is a separate, expected
-    environment limitation. Getting far enough to fail on *that* import proves
-    ``plugins.memory`` resolved.
+    Asserted via the traceback path rather than merely the absence of the
+    shadowing error -- "no error" could also mean the script died earlier for
+    an unrelated reason. Reaching a module *inside*
+    ``$HERMES_HOME/memory-os/runtime/python/plugins/`` proves the bootstrap
+    resolved there.
+
+    These scripts go on to import the wider memory-os package, which needs the
+    Hermes agent runtime (``agent`` / ``memory_os_agent``). That is absent
+    under -S and in CI, so a non-zero exit is expected and not asserted on.
     """
     home = _installed_layout_home(tmp_path)
     shutil.copy2(SCRIPTS_DIR / script_name, home / "scripts" / script_name)
 
     stderr = _run_from_installed_layout(home, tmp_path, script_name)
 
+    runtime_marker = str(home / "memory-os" / "runtime" / "python" / "plugins").replace("\\", "/")
     assert SHADOW_ERROR not in stderr, stderr
-    assert "No module named 'plugins'" not in stderr, stderr
+    assert runtime_marker in stderr.replace("\\", "/"), (
+        f"expected imports to resolve under {runtime_marker}\n{stderr}"
+    )
 
 
 def test_the_shadowing_failure_is_actually_reproducible(tmp_path):
     """Counterfactual for the test above.
 
     Restores the legacy bootstrap in a copy of the script and asserts the
-    installed layout really does produce the production error. Without this,
-    the test above could pass simply because the layout never shadowed.
+    installed layout really does produce the production error.
     """
     script_name = "memory_os_export_shadow.py"
     home = _installed_layout_home(tmp_path)
     source = (SCRIPTS_DIR / script_name).read_text(encoding="utf-8")
 
     start = source.index("# Location-agnostic import resolution.")
-    end = source.index("from plugins.", start)
-    legacy = source[:start] + LEGACY_BOOTSTRAP + "\n" + source[end:]
+    end = source.index("\nfrom plugins.", start)
+    legacy = source[:start] + LEGACY_BOOTSTRAP + source[end:]
     (home / "scripts" / script_name).write_text(legacy, encoding="utf-8")
 
     stderr = _run_from_installed_layout(home, tmp_path, script_name)
 
     assert SHADOW_ERROR in stderr, (
         "the installed-layout fixture no longer reproduces the shadowing "
-        f"failure, so the guard above proves nothing:\n{stderr}"
+        f"failure, so the guards above prove nothing:\n{stderr}"
     )
