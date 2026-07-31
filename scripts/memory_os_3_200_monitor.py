@@ -7223,6 +7223,14 @@ def execution_gate_cron_summary():
             else:
                 naked.append(safe)
             continue
+        # Pre-consolidation per-lane jobs, superseded by a group tick. Without
+        # this they fall through to the "memory-os-" prefix branch into
+        # unregistered_like, which this same monitor reports as a FAIL.
+        if name in _legacy_per_lane_job_names() or script in _legacy_per_lane_script_names():
+            safe["known_registry_key"] = name
+            safe["known_optional_reason"] = "superseded_by_group_tick"
+            known_optional.append(safe)
+            continue
         known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
         if known_spec:
             safe["known_registry_key"] = str(known_spec.get("key") or "")
@@ -7346,6 +7354,47 @@ def _memory_os_cron_specs_from_snapshot():
         return [dict(item) for item in specs if isinstance(item, dict)]
     return []
 
+def _legacy_per_lane_cron_jobs():
+    """Pre-consolidation per-lane job name -> its legacy wrapper script.
+
+    Mirrors LEGACY_PER_LANE_CRON_JOBS in cron_registry.py.  This monitor also
+    runs as a standalone remote script where the plugin package may not be
+    importable, so it falls back to an inline copy rather than losing the
+    classification and reporting every leftover job as a FAIL.
+    """
+    try:
+        from plugins.memory.memory_os.cron_registry import LEGACY_PER_LANE_CRON_JOBS
+
+        return dict(LEGACY_PER_LANE_CRON_JOBS)
+    except Exception:
+        return {
+            "memory-os-index-sync": "memory_os_cron_index_sync_gate.py",
+            "memory-os-event-stats-refresh": "memory_os_cron_event_stats_refresh_gate.py",
+            "memory-os-state-overlay-refresh": "memory_os_cron_state_overlay_refresh_gate.py",
+            "memory-os-entity-index-refresh": "memory_os_cron_entity_index_refresh_gate.py",
+            "memory-os-proposal-followups-opsgate": "memory_os_cron_proposal_followups_opsgate_gate.py",
+            "memory-os-clearance-cycle": "memory_os_cron_clearance_cycle_gate.py",
+            "memory-os-hindsight-health-probe": "memory_os_hindsight_health_probe.py",
+            "memory-os-fact-judge": "memory_os_cron_fact_judge_gate.py",
+            "memory-os-candidate-aggregation": "memory_os_cron_candidate_aggregation_gate.py",
+            "memory-os-l3-probe-verification": "memory_os_cron_l3_probe_verification_gate.py",
+            "memory-os-v3-wandering": "memory_os_cron_v3_wandering_gate.py",
+            "memory-os-exposure-rollup": "memory_os_cron_exposure_rollup_gate.py",
+            "memory-os-v3-seed-evidence": "memory_os_cron_v3_seed_evidence_gate.py",
+            "memory-os-v3-journal-sweep": "memory_os_cron_v3_journal_sweep_gate.py",
+            "memory-os-working-cleanup": "memory_os_cron_working_cleanup_gate.py",
+            "memory-os-hindsight-advisory-digest": "memory_os_cron_hindsight_advisory_digest_gate.py",
+        }
+
+
+def _legacy_per_lane_job_names():
+    return set(_legacy_per_lane_cron_jobs())
+
+
+def _legacy_per_lane_script_names():
+    return set(_legacy_per_lane_cron_jobs().values())
+
+
 def _memory_os_known_cron_specs():
     try:
         from plugins.memory.memory_os.cron_registry import (
@@ -7438,12 +7487,24 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
     boundary_not_required = 0
     now = datetime.now(timezone.utc)
     jobs_by_name = jobs_by_name or {}
+    # Owner-controlled per-lane disable list. Group ticks make the Hermes job
+    # granularity coarser than the lane (disabling the job now disables every
+    # member of its group), so per-lane control is restored via this list --
+    # see plugins/memory/memory_os/cron_registry.read_disabled_lane_keys.
+    try:
+        from plugins.memory.memory_os.cron_registry import read_disabled_lane_keys
+
+        disabled_lane_keys = read_disabled_lane_keys(_hermes_home)
+    except Exception:
+        disabled_lane_keys = frozenset()
     for lane in sorted(expected_lanes):
         spec = specs_by_lane.get(lane) if isinstance(specs_by_lane.get(lane), dict) else {}
         job_name = str(spec.get("name") or "")
         cron_job = jobs_by_name.get(job_name) if isinstance(jobs_by_name, dict) else {}
         record = completions.get(lane)
-        if isinstance(cron_job, dict) and cron_job.get("enabled") is False:
+        lane_key = str(spec.get("key") or "")
+        owner_disabled_lane = bool(lane_key) and lane_key in disabled_lane_keys
+        if (isinstance(cron_job, dict) and cron_job.get("enabled") is False) or owner_disabled_lane:
             disabled.append(lane)
             if record:
                 # A disabled job isn't expected to produce FRESH evidence,
@@ -7466,7 +7527,7 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
             if isinstance(cron_job, dict) and str(cron_job.get("last_status") or "") == "ok":
                 schedule = _cron_schedule_display(cron_job)
                 last_run = _parse_monitor_timestamp(str(cron_job.get("last_run_at") or ""))
-                freshness = _helper_completion_freshness_window(schedule)
+                freshness = _helper_completion_freshness_window(schedule, spec.get("due_interval_minutes"))
                 if last_run is not None and now - last_run <= freshness:
                     # Fresh cron success is useful degraded evidence, but it is
                     # not a completion envelope and carries no boundary proof.
@@ -7478,7 +7539,7 @@ def _execution_gate_helper_completion_summary(specs_by_lane, jobs_by_name=None):
         completed.append(lane)
         schedule = _cron_schedule_display(cron_job) if isinstance(cron_job, dict) else ""
         record_time = _parse_monitor_timestamp(str(record.get("created_at") or ""))
-        freshness = _helper_completion_freshness_window(schedule)
+        freshness = _helper_completion_freshness_window(schedule, spec.get("due_interval_minutes"))
         if record_time and now - record_time > freshness:
             stale.append(lane)
         else:
@@ -7543,8 +7604,27 @@ def _cron_schedule_display(job):
         return str(schedule.get("expr") or schedule.get("display") or "")
     return str(schedule or "")
 
-def _helper_completion_freshness_window(schedule):
-    interval = _cron_schedule_interval(str(schedule or ""))
+def _lane_due_interval_timedelta(due_interval_minutes):
+    try:
+        minutes = int(due_interval_minutes)
+    except (TypeError, ValueError):
+        return None
+    if minutes <= 0:
+        return None
+    return timedelta(minutes=minutes)
+
+def _helper_completion_freshness_window(schedule, due_interval_minutes=None):
+    # Primary source: the LANE's own due_interval_minutes. After group-tick
+    # consolidation the cron job's schedule is the GROUP's cadence, which can
+    # be much faster than a slow lane sharing that tick (e.g. a 7-day lane in
+    # a daily group) -- deriving the window from the job schedule alone
+    # collapses that lane's window and reports it permanently stale. Only
+    # fall back to the group schedule when the lane interval is missing,
+    # zero, or otherwise unusable -- never fall back to a 0-length window,
+    # which would mark every lane permanently stale.
+    interval = _lane_due_interval_timedelta(due_interval_minutes)
+    if interval is None:
+        interval = _cron_schedule_interval(str(schedule or ""))
     minimum = timedelta(hours=12)
     grace = timedelta(hours=6)
     return max(interval * 2 + grace, minimum)

@@ -258,7 +258,10 @@ class TestStateOverlayCronRegistration:
         )
         spec = memory_os_cron_spec_by_key("state_overlay_refresh")
         assert spec is not None, "state_overlay_refresh must be in MEMORY_OS_CRON_SPECS"
-        assert spec.name == "memory-os-state-overlay-refresh"
+        # Scheduled by the derived-views group tick after cron consolidation.
+        assert spec.name == "memory-os-tick-derived"
+        assert spec.group_key == "tick_derived"
+        assert spec.due_interval_minutes == 30
         assert spec.raw_script == "memory_os_state_overlay_refresh.py"
         assert spec.no_agent is True
         assert spec.helper_kind == "local_helper"

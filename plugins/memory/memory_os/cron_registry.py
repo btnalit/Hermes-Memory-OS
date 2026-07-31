@@ -1,4 +1,27 @@
-"""Memory-OS-owned Hermes cron registry."""
+"""Memory-OS-owned Hermes cron registry.
+
+Two tables, deliberately kept separate (see
+``docs/resolver/hermes-memory-os-cron-consolidation-plan.md``):
+
+``MemoryOSCronLaneDef`` / ``MemoryOSCronSpec``
+    The *governance identity* of a lane: ``lane_id``, ``raw_script``,
+    ``helper_kind`` (risk class) and boundary-report requirement.  One entry
+    per ExecutionGate lane.  This granularity is what the monitor, the
+    envelope journal and StructuralWriteGate scope checks all key off, so it
+    never collapses.
+
+``MemoryOSCronGroupSpec``
+    The *Hermes scheduling surface*: the job that actually gets created via
+    ``hermes cron create``.  Several lanes share one group job, which is fired
+    by a tick wrapper that runs each due member behind its own ExecutionGate
+    permit.
+
+``MEMORY_OS_CRON_SPECS`` is the join of the two: every lane still exposes a
+``name``/``wrapper_script``/``schedule_arg``, but those values are *derived
+from its group* rather than owned per lane.  Existing consumers therefore keep
+working unchanged; the only visible difference is that several specs now share
+one ``name``.
+"""
 
 from __future__ import annotations
 
@@ -31,9 +54,99 @@ RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES = frozenset(
     }
 )
 
+# ── Legacy per-lane cron jobs (superseded by group ticks) ─────────────
+#
+# Before the group consolidation every lane owned its own Hermes cron job
+# named ``memory-os-<lane>`` running a 5-line shim
+# ``memory_os_cron_<lane>_gate.py``.  Those jobs still exist (paused) on
+# already-onboarded hosts.
+#
+# They MUST be listed here.  ``classify_hermes_cron_jobs`` resolves a job by
+# spec name / wrapper script / raw script; after consolidation none of those
+# lookups match a legacy per-lane job any more, so without this table the job
+# falls through to the ``name.startswith("memory-os-")`` branch and lands in
+# ``unregistered_like`` -- which the 3.200 monitor reports as a FAIL
+# (``execution_gate_memory_os_cron_unregistered_like_job``) on every upgraded
+# host.  This is the identical trap the retired sannai community scripts hit
+# above; the fix is the same: name them explicitly.
+LEGACY_PER_LANE_CRON_JOBS = {
+    "memory-os-index-sync": "memory_os_cron_index_sync_gate.py",
+    "memory-os-event-stats-refresh": "memory_os_cron_event_stats_refresh_gate.py",
+    "memory-os-state-overlay-refresh": "memory_os_cron_state_overlay_refresh_gate.py",
+    "memory-os-entity-index-refresh": "memory_os_cron_entity_index_refresh_gate.py",
+    "memory-os-proposal-followups-opsgate": "memory_os_cron_proposal_followups_opsgate_gate.py",
+    "memory-os-clearance-cycle": "memory_os_cron_clearance_cycle_gate.py",
+    "memory-os-hindsight-health-probe": "memory_os_hindsight_health_probe.py",
+    "memory-os-fact-judge": "memory_os_cron_fact_judge_gate.py",
+    "memory-os-candidate-aggregation": "memory_os_cron_candidate_aggregation_gate.py",
+    "memory-os-l3-probe-verification": "memory_os_cron_l3_probe_verification_gate.py",
+    "memory-os-v3-wandering": "memory_os_cron_v3_wandering_gate.py",
+    "memory-os-exposure-rollup": "memory_os_cron_exposure_rollup_gate.py",
+    "memory-os-v3-seed-evidence": "memory_os_cron_v3_seed_evidence_gate.py",
+    "memory-os-v3-journal-sweep": "memory_os_cron_v3_journal_sweep_gate.py",
+    "memory-os-working-cleanup": "memory_os_cron_working_cleanup_gate.py",
+    "memory-os-hindsight-advisory-digest": "memory_os_cron_hindsight_advisory_digest_gate.py",
+}
+LEGACY_PER_LANE_CRON_JOB_NAMES = frozenset(LEGACY_PER_LANE_CRON_JOBS)
+LEGACY_PER_LANE_CRON_SCRIPT_NAMES = frozenset(LEGACY_PER_LANE_CRON_JOBS.values())
+
+DUE_POLICY_INTERVAL = "interval"
+DUE_POLICY_CALENDAR = "calendar"
+
+
+@dataclass(frozen=True)
+class MemoryOSCronGroupSpec:
+    """One Hermes cron job. Fires a tick that runs its due members."""
+
+    key: str
+    name: str
+    wrapper_script: str
+    schedule_arg: str
+    default_schedule: str
+    deliver_role: str
+    prompt_ref: str
+    no_agent: bool
+    member_keys: tuple[str, ...]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "name": self.name,
+            "wrapper_script": self.wrapper_script,
+            "schedule_arg": self.schedule_arg,
+            "default_schedule": self.default_schedule,
+            "deliver_role": self.deliver_role,
+            "prompt_ref": self.prompt_ref,
+            "no_agent": self.no_agent,
+            "member_keys": list(self.member_keys),
+        }
+
+
+@dataclass(frozen=True)
+class MemoryOSCronLaneDef:
+    """Governance identity of a lane, independent of how it is scheduled."""
+
+    key: str
+    raw_script: str
+    lane_id: str
+    helper_kind: str
+    group_key: str
+    due_interval_minutes: int
+    due_policy: str = DUE_POLICY_INTERVAL
+    calendar_anchor: str = ""
+    timeout_seconds: int = 300
+    requires_boundary_report: bool = False
+
 
 @dataclass(frozen=True)
 class MemoryOSCronSpec:
+    """Lane joined with its group.
+
+    ``name``/``wrapper_script``/``schedule_arg``/``deliver_role``/
+    ``prompt_ref``/``no_agent`` are the *group's* values -- several specs
+    legitimately share them.
+    """
+
     key: str
     name: str
     raw_script: str
@@ -45,6 +158,11 @@ class MemoryOSCronSpec:
     prompt_ref: str
     no_agent: bool
     requires_boundary_report: bool = False
+    group_key: str = ""
+    due_policy: str = DUE_POLICY_INTERVAL
+    due_interval_minutes: int = 1440
+    calendar_anchor: str = ""
+    timeout_seconds: int = 300
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -59,285 +177,403 @@ class MemoryOSCronSpec:
             "prompt_ref": self.prompt_ref,
             "no_agent": self.no_agent,
             "requires_boundary_report": self.requires_boundary_report,
+            "group_key": self.group_key,
+            "due_policy": self.due_policy,
+            "due_interval_minutes": self.due_interval_minutes,
+            "calendar_anchor": self.calendar_anchor,
+            "timeout_seconds": self.timeout_seconds,
         }
 
 
-MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = (
-    MemoryOSCronSpec(
+# ── Group table: what actually becomes a Hermes cron job ──────────────
+#
+# Four multi-member tick groups collapse 16 local lanes into 4 jobs.  The
+# owner-facing lanes keep a dedicated single-member group each: they render a
+# distinct owner message through their own agent prompt and deliver channel,
+# so merging them would fuse separate owner messages and cross-contaminate
+# prompts.  full_monitor_refresh stays alone because it is the heavyweight
+# (<=180s) full monitor and would block co-tenants of any tick.
+MEMORY_OS_CRON_GROUPS: tuple[MemoryOSCronGroupSpec, ...] = (
+    MemoryOSCronGroupSpec(
+        key="tick_derived",
+        name="memory-os-tick-derived",
+        wrapper_script="memory_os_cron_tick_derived.py",
+        schedule_arg="tick_derived_schedule",
+        default_schedule="*/15 * * * *",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        member_keys=("event_stats_refresh", "index_sync", "state_overlay_refresh", "entity_index_refresh"),
+    ),
+    MemoryOSCronGroupSpec(
+        key="tick_governance",
+        name="memory-os-tick-governance",
+        wrapper_script="memory_os_cron_tick_governance.py",
+        schedule_arg="tick_governance_schedule",
+        default_schedule="*/30 * * * *",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        member_keys=("proposal_followups_opsgate", "clearance_cycle"),
+    ),
+    MemoryOSCronGroupSpec(
+        key="tick_evidence",
+        name="memory-os-tick-evidence",
+        wrapper_script="memory_os_cron_tick_evidence.py",
+        schedule_arg="tick_evidence_schedule",
+        default_schedule="0 * * * *",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        member_keys=(
+            "hindsight_health_probe",
+            "fact_judge",
+            "candidate_aggregation",
+            "l3_probe_verification",
+            "v3_wandering",
+        ),
+    ),
+    MemoryOSCronGroupSpec(
+        key="tick_daily",
+        name="memory-os-tick-daily",
+        wrapper_script="memory_os_cron_tick_daily.py",
+        schedule_arg="tick_daily_schedule",
+        default_schedule="5 0 * * *",
+        deliver_role="local",
+        prompt_ref="empty",
+        no_agent=True,
+        member_keys=(
+            "exposure_rollup",
+            "v3_seed_evidence",
+            "v3_journal_sweep",
+            "working_cleanup",
+            "hindsight_advisory_digest",
+        ),
+    ),
+    # ── Single-member groups: unchanged Hermes jobs ───────────────────
+    MemoryOSCronGroupSpec(
         key="owner_review_digest",
         name="memory-os-owner-review-digest",
-        raw_script="memory_os_owner_review_digest.py",
         wrapper_script="memory_os_cron_owner_review_digest_gate.py",
-        lane_id="owner_review_digest_render",
-        helper_kind="owner_channel_render",
         schedule_arg="owner_review_schedule",
+        default_schedule="0 9 * * *",
         deliver_role="owner",
         prompt_ref="owner_review_agent_prompt",
         no_agent=False,
+        member_keys=("owner_review_digest",),
     ),
-
-    MemoryOSCronSpec(
-        key="module_cadence_report",
-        name="memory-os-module-cadence-report",
-        raw_script="memory_os_module_cadence_report_cron.py",
-        wrapper_script="memory_os_cron_module_cadence_report_gate.py",
-        lane_id="module_cadence_report",
-        helper_kind="local_helper",
-        schedule_arg="module_cadence_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-    ),
-
-    MemoryOSCronSpec(
-        key="proposal_followups_opsgate",
-        name="memory-os-proposal-followups-opsgate",
-        raw_script="memory_os_proposal_followups_ops_gate.py",
-        wrapper_script="memory_os_cron_proposal_followups_opsgate_gate.py",
-        lane_id="proposal_followups_opsgate",
-        helper_kind="local_helper",
-        schedule_arg="proposal_followups_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-    ),
-    MemoryOSCronSpec(
-        key="expression_feedback_request",
-        name="memory-os-expression-feedback-request",
-        raw_script="memory_os_expression_feedback_prompt.py",
-        wrapper_script="memory_os_cron_expression_feedback_request_gate.py",
-        lane_id="expression_feedback_request",
-        helper_kind="owner_channel_render",
-        schedule_arg="expression_feedback_schedule",
-        deliver_role="owner",
-        prompt_ref="expression_feedback_agent_prompt",
-        no_agent=False,
-    ),
-    MemoryOSCronSpec(
+    MemoryOSCronGroupSpec(
         key="memory_sources_feedback_request",
         name="memory-os-memory-sources-feedback-request",
-        raw_script="memory_os_memory_sources_feedback_prompt.py",
         wrapper_script="memory_os_cron_memory_sources_feedback_request_gate.py",
-        lane_id="memory_sources_feedback_request",
-        helper_kind="owner_channel_render",
         schedule_arg="memory_sources_feedback_schedule",
+        default_schedule="30 10 * * *",
         deliver_role="owner",
         prompt_ref="memory_sources_feedback_agent_prompt",
         no_agent=False,
+        member_keys=("memory_sources_feedback_request",),
     ),
-    MemoryOSCronSpec(
-        key="candidate_aggregation",
-        name="memory-os-candidate-aggregation",
-        raw_script="memory_os_candidate_aggregation_lane.py",
-        wrapper_script="memory_os_cron_candidate_aggregation_gate.py",
-        lane_id="candidate_aggregation",
-        helper_kind="bounded_reversible_queue",
-        schedule_arg="candidate_aggregation_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=True,
+    MemoryOSCronGroupSpec(
+        key="expression_feedback_request",
+        name="memory-os-expression-feedback-request",
+        wrapper_script="memory_os_cron_expression_feedback_request_gate.py",
+        schedule_arg="expression_feedback_schedule",
+        default_schedule="0 5 * * 0",
+        deliver_role="owner",
+        prompt_ref="expression_feedback_agent_prompt",
+        no_agent=False,
+        member_keys=("expression_feedback_request",),
     ),
-    MemoryOSCronSpec(
-        key="fact_judge",
-        name="memory-os-fact-judge",
-        raw_script="memory_os_fact_judge_lane.py",
-        wrapper_script="memory_os_cron_fact_judge_gate.py",
-        lane_id="fact_judge",
-        helper_kind="local_helper",
-        schedule_arg="fact_judge_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="index_sync",
-        name="memory-os-index-sync",
-        raw_script="memory_os_index_sync.py",
-        wrapper_script="memory_os_cron_index_sync_gate.py",
-        lane_id="index_sync",
-        helper_kind="local_helper",
-        schedule_arg="index_sync_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="event_stats_refresh",
-        name="memory-os-event-stats-refresh",
-        raw_script="memory_os_event_stats_refresh.py",
-        wrapper_script="memory_os_cron_event_stats_refresh_gate.py",
-        lane_id="event_stats_refresh",
-        helper_kind="local_helper",
-        schedule_arg="event_stats_refresh_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="exposure_rollup",
-        name="memory-os-exposure-rollup",
-        raw_script="memory_os_exposure_rollup.py",
-        wrapper_script="memory_os_cron_exposure_rollup_gate.py",
-        lane_id="exposure_rollup",
-        helper_kind="local_helper",
-        schedule_arg="exposure_rollup_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
+    MemoryOSCronGroupSpec(
         key="full_monitor_refresh",
         name="memory-os-full-monitor-refresh",
-        raw_script="memory_os_full_monitor_refresh.py",
         wrapper_script="memory_os_full_monitor_refresh.py",
-        lane_id="full_monitor_refresh",
-        helper_kind="read_only_probe",
         schedule_arg="full_monitor_refresh_schedule",
+        default_schedule="30 2 * * *",
         deliver_role="owner",
         prompt_ref="empty",
         no_agent=True,
-        requires_boundary_report=False,
+        member_keys=("full_monitor_refresh",),
     ),
-    MemoryOSCronSpec(
-        key="v3_seed_evidence",
-        name="memory-os-v3-seed-evidence",
-        raw_script="memory_os_v3_seed_evidence.py",
-        wrapper_script="memory_os_cron_v3_seed_evidence_gate.py",
-        lane_id="v3_seed_evidence",
-        helper_kind="local_helper",
-        schedule_arg="v3_seed_evidence_schedule",
+    MemoryOSCronGroupSpec(
+        key="module_cadence_report",
+        name="memory-os-module-cadence-report",
+        wrapper_script="memory_os_cron_module_cadence_report_gate.py",
+        schedule_arg="module_cadence_schedule",
+        default_schedule="15 */6 * * *",
         deliver_role="local",
         prompt_ref="empty",
         no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="v3_wandering",
-        name="memory-os-v3-wandering",
-        raw_script="memory_os_v3_wandering.py",
-        wrapper_script="memory_os_cron_v3_wandering_gate.py",
-        lane_id="v3_wandering",
-        helper_kind="local_helper",
-        schedule_arg="v3_wandering_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="v3_journal_sweep",
-        name="memory-os-v3-journal-sweep",
-        raw_script="memory_os_v3_journal_sweep.py",
-        wrapper_script="memory_os_cron_v3_journal_sweep_gate.py",
-        lane_id="v3_journal_sweep",
-        helper_kind="local_helper",
-        schedule_arg="v3_journal_sweep_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="working_cleanup",
-        name="memory-os-working-cleanup",
-        raw_script="cleanup_expired_working.py",
-        wrapper_script="memory_os_cron_working_cleanup_gate.py",
-        lane_id="working_cleanup",
-        helper_kind="local_helper",
-        schedule_arg="working_cleanup_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="l3_probe_verification",
-        name="memory-os-l3-probe-verification",
-        raw_script="memory_os_l3_probe_helper.py",
-        wrapper_script="memory_os_cron_l3_probe_verification_gate.py",
-        lane_id="l3_probe_verification",
-        helper_kind="local_helper",
-        schedule_arg="l3_probe_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="state_overlay_refresh",
-        name="memory-os-state-overlay-refresh",
-        raw_script="memory_os_state_overlay_refresh.py",
-        wrapper_script="memory_os_cron_state_overlay_refresh_gate.py",
-        lane_id="state_overlay_refresh",
-        helper_kind="local_helper",
-        schedule_arg="state_overlay_refresh_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="entity_index_refresh",
-        name="memory-os-entity-index-refresh",
-        raw_script="memory_os_entity_index_refresh.py",
-        wrapper_script="memory_os_cron_entity_index_refresh_gate.py",
-        lane_id="entity_index_refresh",
-        helper_kind="local_helper",
-        schedule_arg="entity_index_refresh_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="hindsight_advisory_digest",
-        name="memory-os-hindsight-advisory-digest",
-        raw_script="memory_os_hindsight_advisory_digest.py",
-        wrapper_script="memory_os_cron_hindsight_advisory_digest_gate.py",
-        lane_id="hindsight_advisory_digest",
-        helper_kind="local_helper",
-        schedule_arg="hindsight_advisory_digest_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="hindsight_health_probe",
-        name="memory-os-hindsight-health-probe",
-        raw_script="memory_os_hindsight_health_probe.py",
-        wrapper_script="memory_os_hindsight_health_probe.py",
-        lane_id="hindsight_health_probe",
-        helper_kind="read_only_probe",
-        schedule_arg="hindsight_health_probe_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
-    ),
-    MemoryOSCronSpec(
-        key="clearance_cycle",
-        name="memory-os-clearance-cycle",
-        raw_script="memory_os_clearance_cycle_helper.py",
-        wrapper_script="memory_os_cron_clearance_cycle_gate.py",
-        lane_id="clearance_cycle",
-        helper_kind="local_helper",
-        schedule_arg="clearance_cycle_schedule",
-        deliver_role="local",
-        prompt_ref="empty",
-        no_agent=True,
-        requires_boundary_report=False,
+        member_keys=("module_cadence_report",),
     ),
 )
 
 
+# ── Lane table: governance identity, one entry per ExecutionGate lane ──
+#
+# ``due_interval_minutes`` is the lane's effective cadence.  It is the ONLY
+# source the monitor may use for completion-freshness windows -- deriving the
+# window from the group's cron expression instead would collapse a weekly
+# lane sharing a daily tick down to a 54h window and report it permanently
+# stale.
+MEMORY_OS_CRON_LANES: tuple[MemoryOSCronLaneDef, ...] = (
+    # G1 derived views -- rebuildable projections, no governance risk
+    MemoryOSCronLaneDef(
+        key="event_stats_refresh",
+        raw_script="memory_os_event_stats_refresh.py",
+        lane_id="event_stats_refresh",
+        helper_kind="local_helper",
+        group_key="tick_derived",
+        due_interval_minutes=15,
+    ),
+    MemoryOSCronLaneDef(
+        key="index_sync",
+        raw_script="memory_os_index_sync.py",
+        lane_id="index_sync",
+        helper_kind="local_helper",
+        group_key="tick_derived",
+        due_interval_minutes=30,
+        timeout_seconds=600,
+    ),
+    MemoryOSCronLaneDef(
+        key="state_overlay_refresh",
+        raw_script="memory_os_state_overlay_refresh.py",
+        lane_id="state_overlay_refresh",
+        helper_kind="local_helper",
+        group_key="tick_derived",
+        due_interval_minutes=30,
+    ),
+    MemoryOSCronLaneDef(
+        key="entity_index_refresh",
+        raw_script="memory_os_entity_index_refresh.py",
+        lane_id="entity_index_refresh",
+        helper_kind="local_helper",
+        group_key="tick_derived",
+        due_interval_minutes=30,
+    ),
+    # G2 governance queues
+    MemoryOSCronLaneDef(
+        key="proposal_followups_opsgate",
+        raw_script="memory_os_proposal_followups_ops_gate.py",
+        lane_id="proposal_followups_opsgate",
+        helper_kind="local_helper",
+        group_key="tick_governance",
+        due_interval_minutes=30,
+    ),
+    MemoryOSCronLaneDef(
+        key="clearance_cycle",
+        raw_script="memory_os_clearance_cycle_helper.py",
+        lane_id="clearance_cycle",
+        helper_kind="local_helper",
+        group_key="tick_governance",
+        due_interval_minutes=10,
+    ),
+    # G3 judgement + probe lanes
+    MemoryOSCronLaneDef(
+        key="hindsight_health_probe",
+        raw_script="memory_os_hindsight_health_probe.py",
+        lane_id="hindsight_health_probe",
+        helper_kind="read_only_probe",
+        group_key="tick_evidence",
+        due_interval_minutes=60,
+    ),
+    MemoryOSCronLaneDef(
+        key="fact_judge",
+        raw_script="memory_os_fact_judge_lane.py",
+        lane_id="fact_judge",
+        helper_kind="local_helper",
+        group_key="tick_evidence",
+        due_interval_minutes=240,
+        timeout_seconds=600,
+    ),
+    MemoryOSCronLaneDef(
+        key="candidate_aggregation",
+        raw_script="memory_os_candidate_aggregation_lane.py",
+        lane_id="candidate_aggregation",
+        helper_kind="bounded_reversible_queue",
+        group_key="tick_evidence",
+        due_interval_minutes=360,
+        timeout_seconds=600,
+        requires_boundary_report=True,
+    ),
+    MemoryOSCronLaneDef(
+        key="l3_probe_verification",
+        raw_script="memory_os_l3_probe_helper.py",
+        lane_id="l3_probe_verification",
+        helper_kind="local_helper",
+        group_key="tick_evidence",
+        due_interval_minutes=360,
+    ),
+    MemoryOSCronLaneDef(
+        key="v3_wandering",
+        raw_script="memory_os_v3_wandering.py",
+        lane_id="v3_wandering",
+        helper_kind="local_helper",
+        group_key="tick_evidence",
+        due_interval_minutes=360,
+    ),
+    # G4 day-boundary + maintenance
+    MemoryOSCronLaneDef(
+        key="exposure_rollup",
+        raw_script="memory_os_exposure_rollup.py",
+        lane_id="exposure_rollup",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=1440,
+    ),
+    # Date-partitioned: emits a per-``natural_date`` daily record and exposes
+    # consecutive_valid_day_count.  Elapsed-interval gating could drift it
+    # across a UTC day boundary and double-count or skip a day, so it is
+    # anchored to the calendar day instead.
+    MemoryOSCronLaneDef(
+        key="v3_seed_evidence",
+        raw_script="memory_os_v3_seed_evidence.py",
+        lane_id="v3_seed_evidence",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=1440,
+        due_policy=DUE_POLICY_CALENDAR,
+        calendar_anchor="00:00",
+    ),
+    MemoryOSCronLaneDef(
+        key="v3_journal_sweep",
+        raw_script="memory_os_v3_journal_sweep.py",
+        lane_id="v3_journal_sweep",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=1440,
+    ),
+    MemoryOSCronLaneDef(
+        key="working_cleanup",
+        raw_script="cleanup_expired_working.py",
+        lane_id="working_cleanup",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=10080,
+    ),
+    MemoryOSCronLaneDef(
+        key="hindsight_advisory_digest",
+        raw_script="memory_os_hindsight_advisory_digest.py",
+        lane_id="hindsight_advisory_digest",
+        helper_kind="local_helper",
+        group_key="tick_daily",
+        due_interval_minutes=10080,
+    ),
+    # Single-member groups
+    MemoryOSCronLaneDef(
+        key="owner_review_digest",
+        raw_script="memory_os_owner_review_digest.py",
+        lane_id="owner_review_digest_render",
+        helper_kind="owner_channel_render",
+        group_key="owner_review_digest",
+        due_interval_minutes=1440,
+        timeout_seconds=600,
+    ),
+    MemoryOSCronLaneDef(
+        key="memory_sources_feedback_request",
+        raw_script="memory_os_memory_sources_feedback_prompt.py",
+        lane_id="memory_sources_feedback_request",
+        helper_kind="owner_channel_render",
+        group_key="memory_sources_feedback_request",
+        due_interval_minutes=1440,
+        timeout_seconds=600,
+    ),
+    MemoryOSCronLaneDef(
+        key="expression_feedback_request",
+        raw_script="memory_os_expression_feedback_prompt.py",
+        lane_id="expression_feedback_request",
+        helper_kind="owner_channel_render",
+        group_key="expression_feedback_request",
+        due_interval_minutes=10080,
+        timeout_seconds=600,
+    ),
+    MemoryOSCronLaneDef(
+        key="full_monitor_refresh",
+        raw_script="memory_os_full_monitor_refresh.py",
+        lane_id="full_monitor_refresh",
+        helper_kind="read_only_probe",
+        group_key="full_monitor_refresh",
+        due_interval_minutes=1440,
+        timeout_seconds=900,
+    ),
+    MemoryOSCronLaneDef(
+        key="module_cadence_report",
+        raw_script="memory_os_module_cadence_report_cron.py",
+        lane_id="module_cadence_report",
+        helper_kind="local_helper",
+        group_key="module_cadence_report",
+        due_interval_minutes=360,
+    ),
+)
+
+
+def _build_specs() -> tuple[MemoryOSCronSpec, ...]:
+    groups = {group.key: group for group in MEMORY_OS_CRON_GROUPS}
+    missing = sorted({lane.group_key for lane in MEMORY_OS_CRON_LANES} - set(groups))
+    if missing:
+        raise ValueError(f"cron lanes reference unknown group keys: {missing}")
+    lanes_by_key = {lane.key: lane for lane in MEMORY_OS_CRON_LANES}
+    for group in MEMORY_OS_CRON_GROUPS:
+        unknown = sorted(set(group.member_keys) - set(lanes_by_key))
+        if unknown:
+            raise ValueError(f"cron group {group.key} lists unknown member keys: {unknown}")
+        for member in group.member_keys:
+            if lanes_by_key[member].group_key != group.key:
+                raise ValueError(
+                    f"cron lane {member} claims group {lanes_by_key[member].group_key} "
+                    f"but is listed under {group.key}"
+                )
+    specs: list[MemoryOSCronSpec] = []
+    for lane in MEMORY_OS_CRON_LANES:
+        group = groups[lane.group_key]
+        if lane.key not in group.member_keys:
+            raise ValueError(f"cron lane {lane.key} is not listed in group {group.key} member_keys")
+        specs.append(
+            MemoryOSCronSpec(
+                key=lane.key,
+                name=group.name,
+                raw_script=lane.raw_script,
+                wrapper_script=group.wrapper_script,
+                lane_id=lane.lane_id,
+                helper_kind=lane.helper_kind,
+                schedule_arg=group.schedule_arg,
+                deliver_role=group.deliver_role,
+                prompt_ref=group.prompt_ref,
+                no_agent=group.no_agent,
+                requires_boundary_report=lane.requires_boundary_report,
+                group_key=group.key,
+                due_policy=lane.due_policy,
+                due_interval_minutes=lane.due_interval_minutes,
+                calendar_anchor=lane.calendar_anchor,
+                timeout_seconds=lane.timeout_seconds,
+            )
+        )
+    return tuple(specs)
+
+
+MEMORY_OS_CRON_SPECS: tuple[MemoryOSCronSpec, ...] = _build_specs()
+
+
 def memory_os_cron_specs() -> tuple[MemoryOSCronSpec, ...]:
     return MEMORY_OS_CRON_SPECS
+
+
+def memory_os_cron_groups() -> tuple[MemoryOSCronGroupSpec, ...]:
+    return MEMORY_OS_CRON_GROUPS
+
+
+def memory_os_cron_group_by_key(key: str) -> MemoryOSCronGroupSpec | None:
+    for group in MEMORY_OS_CRON_GROUPS:
+        if group.key == key:
+            return group
+    return None
+
+
+def memory_os_cron_group_by_name(name: str) -> MemoryOSCronGroupSpec | None:
+    for group in MEMORY_OS_CRON_GROUPS:
+        if group.name == name:
+            return group
+    return None
 
 
 def memory_os_cron_spec_by_key(key: str) -> MemoryOSCronSpec | None:
@@ -347,19 +583,39 @@ def memory_os_cron_spec_by_key(key: str) -> MemoryOSCronSpec | None:
     return None
 
 
+def memory_os_cron_specs_by_name(name: str) -> tuple[MemoryOSCronSpec, ...]:
+    """All lanes scheduled by the Hermes job called ``name``."""
+    return tuple(spec for spec in MEMORY_OS_CRON_SPECS if spec.name == name)
+
+
 def memory_os_cron_spec_by_name(name: str) -> MemoryOSCronSpec | None:
-    for spec in MEMORY_OS_CRON_SPECS:
-        if spec.name == name:
-            return spec
-    return None
+    """First lane scheduled by ``name``.
+
+    Kept for callers that only need a representative spec (wrapper script,
+    deliver role, schedule arg -- all group-level values shared by every
+    member).  Use :func:`memory_os_cron_specs_by_name` when the full member
+    list matters.
+    """
+    matches = memory_os_cron_specs_by_name(name)
+    return matches[0] if matches else None
 
 
-def cron_registry_snapshot(*, source_commit: str = "", specs: tuple[MemoryOSCronSpec, ...] | None = None) -> dict[str, Any]:
+def cron_registry_snapshot(
+    *,
+    source_commit: str = "",
+    specs: tuple[MemoryOSCronSpec, ...] | None = None,
+    groups: tuple[MemoryOSCronGroupSpec, ...] | None = None,
+) -> dict[str, Any]:
     selected_specs = specs if specs is not None else MEMORY_OS_CRON_SPECS
+    if groups is not None:
+        selected_groups = groups
+    else:
+        selected_groups = groups_for_specs(selected_specs)
     return {
-        "schema_version": "memory-os.cron_registry.v0",
+        "schema_version": "memory-os.cron_registry.v1",
         "source_commit": str(source_commit or ""),
         "specs": [spec.to_json() for spec in selected_specs],
+        "groups": [group.to_json() for group in selected_groups],
     }
 
 
@@ -368,8 +624,9 @@ def write_cron_registry_snapshot(
     *,
     source_commit: str = "",
     specs: tuple[MemoryOSCronSpec, ...] | None = None,
+    groups: tuple[MemoryOSCronGroupSpec, ...] | None = None,
 ) -> dict[str, Any]:
-    snapshot = cron_registry_snapshot(source_commit=source_commit, specs=specs)
+    snapshot = cron_registry_snapshot(source_commit=source_commit, specs=specs, groups=groups)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     return snapshot
@@ -380,9 +637,30 @@ def specs_from_snapshot(value: dict[str, Any]) -> tuple[MemoryOSCronSpec, ...]:
     for item in value.get("specs", []) if isinstance(value.get("specs"), list) else []:
         if not isinstance(item, dict):
             continue
+        key = str(item.get("key") or "")
+        # v0 snapshots predate the lane/group split and carry no due metadata.
+        # Fall back to the compiled-in lane definition so an old snapshot can
+        # never silently yield a 0-minute interval -- which would make every
+        # lane permanently "due" in the tick runner and permanently stale in
+        # the monitor.
+        fallback = memory_os_cron_spec_by_key(key)
+        try:
+            due_interval = int(item.get("due_interval_minutes") or 0)
+        except (TypeError, ValueError):
+            due_interval = 0
+        if due_interval <= 0:
+            due_interval = fallback.due_interval_minutes if fallback else 1440
+        try:
+            timeout_seconds = int(item.get("timeout_seconds") or 0)
+        except (TypeError, ValueError):
+            timeout_seconds = 0
+        if timeout_seconds <= 0:
+            timeout_seconds = fallback.timeout_seconds if fallback else 300
+        due_policy = str(item.get("due_policy") or "") or (fallback.due_policy if fallback else DUE_POLICY_INTERVAL)
+        calendar_anchor = str(item.get("calendar_anchor") or "") or (fallback.calendar_anchor if fallback else "")
         specs.append(
             MemoryOSCronSpec(
-                key=str(item.get("key") or ""),
+                key=key,
                 name=str(item.get("name") or ""),
                 raw_script=str(item.get("raw_script") or ""),
                 wrapper_script=str(item.get("wrapper_script") or ""),
@@ -393,6 +671,102 @@ def specs_from_snapshot(value: dict[str, Any]) -> tuple[MemoryOSCronSpec, ...]:
                 prompt_ref=str(item.get("prompt_ref") or "empty"),
                 no_agent=bool(item.get("no_agent")),
                 requires_boundary_report=bool(item.get("requires_boundary_report")),
+                group_key=str(item.get("group_key") or "") or (fallback.group_key if fallback else ""),
+                due_policy=due_policy,
+                due_interval_minutes=due_interval,
+                calendar_anchor=calendar_anchor,
+                timeout_seconds=timeout_seconds,
             )
         )
     return tuple(spec for spec in specs if spec.key and spec.name and spec.raw_script and spec.wrapper_script)
+
+
+def groups_from_snapshot(value: dict[str, Any]) -> tuple[MemoryOSCronGroupSpec, ...]:
+    """Group specs recorded in an installed snapshot.
+
+    A v0 snapshot has no ``groups`` array; callers fall back to
+    :func:`groups_for_specs` over its ``specs``.
+    """
+    groups = []
+    for item in value.get("groups", []) if isinstance(value.get("groups"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        members = item.get("member_keys")
+        groups.append(
+            MemoryOSCronGroupSpec(
+                key=str(item.get("key") or ""),
+                name=str(item.get("name") or ""),
+                wrapper_script=str(item.get("wrapper_script") or ""),
+                schedule_arg=str(item.get("schedule_arg") or ""),
+                default_schedule=str(item.get("default_schedule") or ""),
+                deliver_role=str(item.get("deliver_role") or "local"),
+                prompt_ref=str(item.get("prompt_ref") or "empty"),
+                no_agent=bool(item.get("no_agent")),
+                member_keys=tuple(str(member) for member in members if str(member)) if isinstance(members, list) else (),
+            )
+        )
+    return tuple(group for group in groups if group.key and group.name and group.wrapper_script)
+
+
+def lane_disable_state_path(hermes_home: Path | str) -> Path:
+    """Owner-controlled per-lane disable list.
+
+    Before consolidation an owner stopped a single lane by disabling its
+    dedicated Hermes cron job, and the monitor read ``enabled is False`` off
+    that job.  Group ticks make the Hermes job granularity coarser than the
+    lane, so that control is restored here instead: the tick runner skips a
+    listed lane, and the monitor classifies it ``disabled`` rather than
+    reporting missing completion evidence.
+    """
+    return Path(hermes_home) / "memory-os" / "system" / "cron_lane_disabled.json"
+
+
+def read_disabled_lane_keys(hermes_home: Path | str) -> frozenset[str]:
+    """Lane keys the owner has disabled. Unreadable/malformed state disables
+    nothing -- a corrupt file must never silently stop governed lanes."""
+    path = lane_disable_state_path(hermes_home)
+    if not path.exists():
+        return frozenset()
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return frozenset()
+    if isinstance(loaded, dict):
+        entries = loaded.get("disabled_lane_keys")
+    else:
+        entries = loaded
+    if not isinstance(entries, list):
+        return frozenset()
+    return frozenset(str(entry) for entry in entries if str(entry))
+
+
+def groups_for_specs(specs: tuple[MemoryOSCronSpec, ...]) -> tuple[MemoryOSCronGroupSpec, ...]:
+    """Group specs covering ``specs``, with member lists narrowed to them.
+
+    Used by onboarding so a profile that installs a subset of lanes creates a
+    group job whose member list matches what is actually installed (the
+    excluded members must not be run by the tick).
+    """
+    members_by_name: dict[str, set[str]] = {}
+    for spec in specs:
+        members_by_name.setdefault(spec.name, set()).add(spec.key)
+    built: list[MemoryOSCronGroupSpec] = []
+    for group in MEMORY_OS_CRON_GROUPS:
+        members = members_by_name.get(group.name)
+        if not members:
+            continue
+        ordered = tuple(key for key in group.member_keys if key in members)
+        built.append(
+            MemoryOSCronGroupSpec(
+                key=group.key,
+                name=group.name,
+                wrapper_script=group.wrapper_script,
+                schedule_arg=group.schedule_arg,
+                default_schedule=group.default_schedule,
+                deliver_role=group.deliver_role,
+                prompt_ref=group.prompt_ref,
+                no_agent=group.no_agent,
+                member_keys=ordered,
+            )
+        )
+    return tuple(built)

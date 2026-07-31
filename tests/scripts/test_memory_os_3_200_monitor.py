@@ -4217,6 +4217,129 @@ def test_memory_os_cron_specs_missing_snapshot_does_not_use_private_fallback(tmp
         sys.path[:] = original_sys_path
 
 
+def test_helper_completion_freshness_window_uses_lane_interval_not_group_schedule():
+    """After group-tick consolidation the Hermes cron job's schedule is the
+    GROUP's cadence. A lane whose real cadence is slower than its group's
+    tick (e.g. working_cleanup: 7-day cadence sharing the daily tick_daily
+    group, schedule "5 0 * * *") must derive its freshness window from its
+    own due_interval_minutes, not the group schedule -- deriving it from the
+    group schedule alone collapses a ~342h window down to ~54h and reports
+    the lane permanently stale even though it ran on time."""
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    freshness_window = namespace["_helper_completion_freshness_window"]
+
+    lane_window = freshness_window("5 0 * * *", 10080)
+    group_only_window = freshness_window("5 0 * * *", None)
+
+    assert lane_window == timedelta(days=7) * 2 + timedelta(hours=6)
+    assert group_only_window == timedelta(hours=24) * 2 + timedelta(hours=6)
+    assert lane_window > group_only_window
+
+    # Missing/zero/garbage due_interval_minutes must fall back to the
+    # schedule-derived window, never collapse to a 0-length window (which
+    # would mark every lane permanently stale).
+    assert freshness_window("5 0 * * *", 0) == group_only_window
+    assert freshness_window("5 0 * * *", -5) == group_only_window
+    assert freshness_window("5 0 * * *", "garbage") == group_only_window
+
+
+def test_execution_gate_helper_completion_summary_weekly_lane_in_daily_group_not_falsely_stale(tmp_path):
+    """Integration-level reproduction of the working_cleanup/
+    hindsight_advisory_digest bug: a completion record 100 hours old is well
+    within the lane's real 7-day (10080-minute) cadence, but would be
+    reported stale under the group's daily schedule alone (~54h window)."""
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    now = datetime.now(timezone.utc)
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    completion_record = {
+        "stage": "completion",
+        "lane_id": "working_cleanup",
+        "created_at": (now - timedelta(hours=100)).isoformat(),
+        "execution_status": "ok",
+        "postcheck": {"returncode": 0},
+    }
+    (system / "execution_gate_envelopes.jsonl").write_text(json.dumps(completion_record) + "\n", encoding="utf-8")
+    namespace["_hermes_home"] = str(tmp_path)
+
+    specs_by_lane = {
+        "working_cleanup": {
+            "key": "working_cleanup",
+            "name": "memory-os-tick-daily",
+            "lane_id": "working_cleanup",
+            "due_interval_minutes": 10080,
+        }
+    }
+    jobs_by_name = {
+        "memory-os-tick-daily": {
+            "name": "memory-os-tick-daily",
+            "enabled": True,
+            "schedule": "5 0 * * *",
+        }
+    }
+
+    summary = namespace["_execution_gate_helper_completion_summary"](specs_by_lane, jobs_by_name)
+
+    assert summary["helper_completion_stale_count"] == 0
+    assert summary["helper_completion_not_due_count"] == 1
+    assert "working_cleanup" not in summary["helper_completion_stale_lanes"]
+
+
+def test_execution_gate_helper_completion_summary_respects_per_lane_disable_list(tmp_path):
+    """Group ticks make disabling the Hermes job disable every member lane.
+    Per-lane control is restored via cron_lane_disabled.json
+    (read_disabled_lane_keys) -- a lane listed there must be classified
+    disabled even though its group's cron job is still enabled (other lanes
+    in the group keep running). An existing completion record's recorded
+    boundary evidence must still be counted -- disabling must never erase
+    already-captured evidence."""
+    namespace: dict[str, object] = {}
+    _exec_remote_probe_prefix(namespace)
+    now = datetime.now(timezone.utc)
+    system = tmp_path / "memory-os" / "system"
+    system.mkdir(parents=True)
+    (system / "cron_lane_disabled.json").write_text(
+        json.dumps({"disabled_lane_keys": ["working_cleanup"]}),
+        encoding="utf-8",
+    )
+    completion_record = {
+        "stage": "completion",
+        "lane_id": "working_cleanup",
+        "created_at": (now - timedelta(hours=1)).isoformat(),
+        "execution_status": "ok",
+        "postcheck": {"returncode": 0},
+        "postcheck_boundary_true": True,
+    }
+    (system / "execution_gate_envelopes.jsonl").write_text(json.dumps(completion_record) + "\n", encoding="utf-8")
+    namespace["_hermes_home"] = str(tmp_path)
+
+    specs_by_lane = {
+        "working_cleanup": {
+            "key": "working_cleanup",
+            "name": "memory-os-tick-daily",
+            "lane_id": "working_cleanup",
+            "due_interval_minutes": 10080,
+        }
+    }
+    jobs_by_name = {
+        "memory-os-tick-daily": {
+            "name": "memory-os-tick-daily",
+            "enabled": True,
+            "schedule": "5 0 * * *",
+        }
+    }
+
+    summary = namespace["_execution_gate_helper_completion_summary"](specs_by_lane, jobs_by_name)
+
+    assert summary["helper_completion_disabled_count"] == 1
+    assert summary["helper_completion_disabled_lanes"] == ["working_cleanup"]
+    assert summary["helper_completion_missing_count"] == 0
+    # Evidence already captured before disabling must still be counted.
+    assert summary["helper_boundary_true_count"] == 1
+
+
 def test_classify_snapshot_fails_session_mirror_owner_approved_without_owner_channel_binding():
     snapshot = _healthy_snapshot()
     snapshot["session_mirror"] = {

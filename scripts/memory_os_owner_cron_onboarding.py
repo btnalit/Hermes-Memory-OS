@@ -30,7 +30,9 @@ if str(IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(IMPORT_ROOT))
 
 from plugins.memory.memory_os.cron_registry import (
+    LEGACY_PER_LANE_CRON_JOBS,
     RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
+    groups_for_specs,
     memory_os_cron_specs,
     write_cron_registry_snapshot,
 )
@@ -109,7 +111,9 @@ CHANNEL_PRIORITY = (
     "sms",
 )
 
-SOURCE_EXECUTION_GATE_RUNNER = Path(__file__).resolve().parent / "memory_os_execution_gate_runner.py"
+SOURCE_SCRIPTS_DIR = Path(__file__).resolve().parent
+SOURCE_EXECUTION_GATE_RUNNER = SOURCE_SCRIPTS_DIR / "memory_os_execution_gate_runner.py"
+SOURCE_CRON_GROUP_RUNNER = SOURCE_SCRIPTS_DIR / "memory_os_cron_group_runner.py"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -143,6 +147,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hindsight-advisory-digest-schedule", default="20 2 * * 0")
     parser.add_argument("--hindsight-health-probe-schedule", default="33 * * * *")
     parser.add_argument("--clearance-cycle-schedule", default="*/10 * * * *")
+    # ── Group tick schedules ──────────────────────────────────────────
+    # These are the schedules that are actually installed.  A group's cadence
+    # is its finest member's; each member is additionally gated by its own
+    # due_interval_minutes, so a slower lane still runs at its own rate.
+    #
+    # The per-lane --*-schedule flags above are retained so existing callers
+    # (notably install_memory_os_plugin.py) keep parsing, but for a grouped
+    # lane they no longer control scheduling.  Passing one that differs from
+    # its default raises a deprecation finding rather than being silently
+    # ignored -- see _deprecated_schedule_findings().
+    parser.add_argument("--tick-derived-schedule", default="*/15 * * * *")
+    parser.add_argument("--tick-governance-schedule", default="*/30 * * * *")
+    parser.add_argument("--tick-evidence-schedule", default="0 * * * *")
+    parser.add_argument("--tick-daily-schedule", default="5 0 * * *")
     parser.add_argument(
         "--cron-profile",
         choices=("active-closure", "full"),
@@ -165,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
 def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
     hermes_home = Path(args.hermes_home).expanduser().resolve()
     channels = discover_owner_channels(hermes_home)
-    findings: list[dict[str, str]] = []
+    findings: list[dict[str, str]] = _deprecated_schedule_findings(args)
 
     owner_review_deliver = _resolve_deliver(
         requested=str(args.owner_review_deliver),
@@ -200,8 +218,12 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
     for spec in operational_specs:
         if not (hermes_home / "scripts" / spec["script"]).is_file():
             findings.append(_finding(f"{spec['name']}_script_missing", "error"))
-        if not (hermes_home / "scripts" / spec["raw_script"]).is_file():
-            findings.append(_finding(f"{spec['name']}_raw_script_missing", "error"))
+        # Every MEMBER helper must exist, not just the representative's --
+        # a group tick whose helper is absent would fail that lane on every
+        # tick with no install-time signal.
+        for raw_script in spec.get("raw_scripts") or [spec["raw_script"]]:
+            if not (hermes_home / "scripts" / raw_script).is_file():
+                findings.append(_finding(f"{raw_script}_raw_script_missing", "error"))
     status = "blocked" if _has_error(findings) else status
     if not _has_error(findings):
         if args.apply:
@@ -289,7 +311,10 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
                     "deliver": spec["deliver"],
                     "script": spec["script"],
                     "raw_script": spec["raw_script"],
+                    "raw_scripts": list(spec.get("raw_scripts") or [spec["raw_script"]]),
                     "registry_key": spec["registry_key"],
+                    "group_key": spec.get("group_key", ""),
+                    "member_keys": list(spec.get("member_keys") or []),
                     "no_agent": spec["no_agent"],
                     "status": "dry_run",
                 }
@@ -323,22 +348,49 @@ def run_onboarding(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _selected_lane_specs(args: argparse.Namespace) -> tuple[Any, ...]:
+    """Lane specs this profile installs (one per ExecutionGate lane)."""
+    return tuple(
+        spec
+        for spec in memory_os_cron_specs()
+        if str(args.cron_profile) != "active-closure" or spec.key in ACTIVE_CLOSURE_CRON_KEYS
+    )
+
+
 def _operational_specs(args: argparse.Namespace, owner_deliver: str, right_brain_deliver: str) -> list[dict[str, Any]]:
+    """One entry per Hermes cron JOB (i.e. per group), not per lane.
+
+    Several lanes now share one group job, so iterating lanes here would try
+    to upsert the same job once per member.
+    """
+    selected = _selected_lane_specs(args)
+    by_name: dict[str, list[Any]] = {}
+    for spec in selected:
+        by_name.setdefault(spec.name, []).append(spec)
     specs: list[dict[str, Any]] = []
-    for cron_spec in memory_os_cron_specs():
-        if str(args.cron_profile) == "active-closure" and cron_spec.key not in ACTIVE_CLOSURE_CRON_KEYS:
+    for group in groups_for_specs(selected):
+        members = by_name.get(group.name) or []
+        if not members:
             continue
+        representative = members[0]
         specs.append(
             {
-                "_cron_spec": cron_spec,
-                "registry_key": cron_spec.key,
-                "name": cron_spec.name,
-                "schedule": _schedule_for_spec(args, cron_spec.schedule_arg),
-                "deliver": _deliver_for_spec(cron_spec.deliver_role, owner_deliver, right_brain_deliver),
-                "script": cron_spec.wrapper_script,
-                "raw_script": cron_spec.raw_script,
-                "no_agent": cron_spec.no_agent,
-                "prompt": _prompt_for_spec(cron_spec.prompt_ref),
+                "_cron_spec": representative,
+                "_group": group,
+                "_members": list(members),
+                # The representative lane key; kept because reports and
+                # _spec_by_key() address entries by registry_key.
+                "registry_key": representative.key,
+                "group_key": group.key,
+                "member_keys": list(group.member_keys),
+                "name": group.name,
+                "schedule": _schedule_for_spec(args, group.schedule_arg),
+                "deliver": _deliver_for_spec(group.deliver_role, owner_deliver, right_brain_deliver),
+                "script": group.wrapper_script,
+                "raw_script": representative.raw_script,
+                "raw_scripts": [member.raw_script for member in members],
+                "no_agent": group.no_agent,
+                "prompt": _prompt_for_spec(group.prompt_ref),
             }
         )
     return specs
@@ -346,6 +398,45 @@ def _operational_specs(args: argparse.Namespace, owner_deliver: str, right_brain
 
 def _schedule_for_spec(args: argparse.Namespace, schedule_arg: str) -> str:
     return str(getattr(args, schedule_arg))
+
+
+# Per-lane schedule flag -> (its historical default, the group flag that now
+# controls it).  Kept parseable for existing callers, but a caller that sets
+# one to a NON-default value would otherwise have its intent silently
+# discarded, so that case is reported.
+SUPERSEDED_SCHEDULE_ARGS: dict[str, tuple[str, str]] = {
+    "index_sync_schedule": ("*/30 * * * *", "--tick-derived-schedule"),
+    "event_stats_refresh_schedule": ("7,22,37,52 * * * *", "--tick-derived-schedule"),
+    "state_overlay_refresh_schedule": ("17,47 * * * *", "--tick-derived-schedule"),
+    "entity_index_refresh_schedule": ("25,55 * * * *", "--tick-derived-schedule"),
+    "proposal_followups_schedule": ("*/30 * * * *", "--tick-governance-schedule"),
+    "clearance_cycle_schedule": ("*/10 * * * *", "--tick-governance-schedule"),
+    "hindsight_health_probe_schedule": ("33 * * * *", "--tick-evidence-schedule"),
+    "fact_judge_schedule": (DEFAULT_FACT_JUDGE_SCHEDULE, "--tick-evidence-schedule"),
+    "candidate_aggregation_schedule": ("0 */6 * * *", "--tick-evidence-schedule"),
+    "l3_probe_schedule": ("0 */6 * * *", "--tick-evidence-schedule"),
+    "v3_wandering_schedule": ("17 */6 * * *", "--tick-evidence-schedule"),
+    "exposure_rollup_schedule": ("5 0 * * *", "--tick-daily-schedule"),
+    "v3_seed_evidence_schedule": ("15 0 * * *", "--tick-daily-schedule"),
+    "v3_journal_sweep_schedule": ("30 3 * * *", "--tick-daily-schedule"),
+    "working_cleanup_schedule": ("0 3 * * 0", "--tick-daily-schedule"),
+    "hindsight_advisory_digest_schedule": ("20 2 * * 0", "--tick-daily-schedule"),
+}
+
+
+def _deprecated_schedule_findings(args: argparse.Namespace) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    for arg_name, (historical_default, group_flag) in sorted(SUPERSEDED_SCHEDULE_ARGS.items()):
+        value = str(getattr(args, arg_name, "") or "")
+        if value and value != historical_default:
+            findings.append(
+                {
+                    "code": f"{arg_name}_superseded_by_group_tick",
+                    "severity": "warn",
+                    "detail": f"lane schedule is now set by {group_flag}; supplied value {value!r} is not applied",
+                }
+            )
+    return findings
 
 
 def _deliver_for_spec(role: str, owner_deliver: str, right_brain_deliver: str) -> str:
@@ -371,30 +462,45 @@ def _prompt_for_spec(prompt_ref: str) -> str:
 def _write_execution_gate_assets(*, hermes_home: Path, specs: list[dict[str, Any]]) -> None:
     scripts_dir = hermes_home / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
-    selected_specs = tuple(spec["_cron_spec"] for spec in specs)
+    # The snapshot records every installed LANE plus the GROUP jobs that
+    # schedule them.  The tick runner reads the group member lists from here,
+    # so a profile-excluded lane (e.g. clearance_cycle) must not appear.
+    selected_specs: tuple[Any, ...] = ()
+    for spec in specs:
+        selected_specs += tuple(spec.get("_members") or (spec["_cron_spec"],))
     write_cron_registry_snapshot(
         hermes_home / "memory-os" / "system" / "memory_os_cron_registry.json",
         specs=selected_specs,
+        groups=tuple(spec["_group"] for spec in specs if spec.get("_group")),
     )
-    runner_target = scripts_dir / "memory_os_execution_gate_runner.py"
-    if SOURCE_EXECUTION_GATE_RUNNER.is_file():
-        shutil.copy2(SOURCE_EXECUTION_GATE_RUNNER, runner_target)
-        runner_target.chmod(runner_target.stat().st_mode | stat.S_IXUSR)
-    else:
-        raise RuntimeError(f"execution gate runner source missing: {SOURCE_EXECUTION_GATE_RUNNER}")
+    for source in (SOURCE_EXECUTION_GATE_RUNNER, SOURCE_CRON_GROUP_RUNNER):
+        if not source.is_file():
+            raise RuntimeError(f"cron runner source missing: {source}")
+        target = scripts_dir / source.name
+        shutil.copy2(source, target)
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
     for spec in specs:
-        if str(spec["script"]) == str(spec["raw_script"]):
+        script_name = str(spec["script"])
+        if script_name == str(spec["raw_script"]):
+            # The lane's helper IS the cron entrypoint (e.g. full_monitor_refresh).
             continue
-        wrapper = scripts_dir / str(spec["script"])
-        wrapper.write_text(
-            (
-                "#!/usr/bin/env python3\n"
-                "from memory_os_execution_gate_runner import main\n\n"
-                "if __name__ == \"__main__\":\n"
-                f"    raise SystemExit(main([\"--registry-key\", \"{spec['registry_key']}\"]))\n"
-            ),
-            encoding="utf-8",
-        )
+        wrapper = scripts_dir / script_name
+        source_wrapper = SOURCE_SCRIPTS_DIR / script_name
+        if source_wrapper.is_file():
+            # Group tick shims ship in the repo; copy rather than regenerate so
+            # the deployed wrapper always matches the reviewed source.
+            shutil.copy2(source_wrapper, wrapper)
+        else:
+            # Single-lane gate shims are generated per registry key.
+            wrapper.write_text(
+                (
+                    "#!/usr/bin/env python3\n"
+                    "from memory_os_execution_gate_runner import main\n\n"
+                    "if __name__ == \"__main__\":\n"
+                    f"    raise SystemExit(main([\"--registry-key\", \"{spec['registry_key']}\"]))\n"
+                ),
+                encoding="utf-8",
+            )
         wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
 
 
@@ -507,6 +613,14 @@ def _pause_known_optional_cron_jobs(
             "memory-os-right-brain-expression": "right_brain_expression",
             "memory-os-right-brain-expression-outcome": "right_brain_expression_outcome",
         }
+    )
+    # Legacy per-lane jobs from before the group consolidation.  Their names
+    # are no longer any spec's name, so without this they would be left
+    # running alongside the group tick that replaced them -- double-running
+    # every consolidated lane.  Paused, never deleted: re-enabling them is
+    # the rollback path.
+    known_keys_by_name.update(
+        {name: "superseded_by_group_tick" for name in LEGACY_PER_LANE_CRON_JOBS}
     )
     adapter = HermesCronAdapter(hermes_home=hermes_home, hermes_bin=hermes_bin)
     results: list[dict[str, Any]] = []

@@ -155,23 +155,21 @@ def test_execution_gate_snapshot_uses_canonical_stage_and_boundary_fields(tmp_pa
     assert snapshot["permanent_approvals"] == 0
 
 
+def _core_cron_names() -> list[str]:
+    """Core job names, derived from the registry rather than hand-typed.
+
+    A hand-typed list silently rots whenever the cron surface changes (it did
+    when per-lane jobs were consolidated into group ticks), which makes the
+    fixture assert against a job set no host actually has.
+    """
+    return sorted(_load_module().CORE_MEMORY_OS_CRON)
+
+
 def _write_jobs(home: Path) -> None:
     jobs = []
-    core_names = [
-        "memory-os-owner-review-digest",
-        "memory-os-proposal-followups-opsgate",
-        "memory-os-index-sync",
-        "memory-os-candidate-aggregation",
-        "memory-os-fact-judge",
-        "memory-os-state-overlay-refresh",
-        "memory-os-entity-index-refresh",
-        "memory-os-full-monitor-refresh",
-        "memory-os-memory-sources-feedback-request",
-    ]
-    optional_names = [
-        "memory-os-expression-feedback-request",
+    core_names = _core_cron_names()
+    optional_names = sorted(_load_module().OPTIONAL_MEMORY_OS_CRON) + [
         "memory-os-right-brain-expression",
-        "memory-os-module-cadence-report",
         "memory-os-right-brain-expression-outcome",
     ]
     for index, name in enumerate(core_names + optional_names, start=1):
@@ -296,8 +294,8 @@ def test_dashboard_snapshot_maps_read_only_evidence_without_writing_reports(tmp_
     serialized = json.dumps(snapshot, ensure_ascii=False)
 
     assert snapshot["schema_version"] == "memory-os.monitor_dashboard_snapshot.v0"
-    assert snapshot["cron"]["enabled"] == 9  # 9 core cron jobs enabled
-    assert snapshot["cron"]["core_total"] == 9
+    assert snapshot["cron"]["enabled"] == len(_core_cron_names())  # all core cron jobs enabled
+    assert snapshot["cron"]["core_total"] == len(_core_cron_names())
     assert snapshot["cron"]["optional_total"] == 2
     assert {item["key"]: item["unit"] for item in snapshot["kpis"]}["cron_ok"] == "enabled jobs"
     assert snapshot["ownerReview"]["counts"]["action_required_shown"] == 1
@@ -765,13 +763,22 @@ def test_dashboard_exposes_shared_artifact_identity_and_count_conflict(tmp_path)
     assert "source conflict · raw trend hidden" in dashboard_js
 
 
+def _job_name_for_lane(key):
+    """The Hermes job that schedules a lane (its group tick after consolidation)."""
+    from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key
+
+    spec = memory_os_cron_spec_by_key(key)
+    assert spec is not None, key
+    return spec.name
+
+
 def test_v3_crons_are_part_of_core_monitor_contract():
     module = _load_module()
-    assert {
-        "memory-os-v3-seed-evidence",
-        "memory-os-v3-wandering",
-        "memory-os-v3-journal-sweep",
-    }.issubset(module.CORE_MEMORY_OS_CRON)
+    names = {
+        _job_name_for_lane(key)
+        for key in ("v3_seed_evidence", "v3_wandering", "v3_journal_sweep")
+    }
+    assert names.issubset(module.CORE_MEMORY_OS_CRON)
 
 
 def test_no_agent_origin_job_is_not_misclassified_as_agent_work():
@@ -789,11 +796,11 @@ def test_no_agent_origin_job_is_not_misclassified_as_agent_work():
 
 def test_state_overlay_and_entity_index_are_part_of_core_monitor_contract():
     module = _load_module()
-    assert {
-        "memory-os-state-overlay-refresh",
-        "memory-os-entity-index-refresh",
-        "memory-os-full-monitor-refresh",
-    }.issubset(module.CORE_MEMORY_OS_CRON)
+    names = {
+        _job_name_for_lane(key)
+        for key in ("state_overlay_refresh", "entity_index_refresh", "full_monitor_refresh")
+    }
+    assert names.issubset(module.CORE_MEMORY_OS_CRON)
 
 
 def test_expression_feedback_is_optional_when_expression_is_disabled():
@@ -832,34 +839,43 @@ def test_hindsight_and_clearance_cron_are_not_left_unclassified():
     The two hindsight jobs are unconditionally onboarded on active-closure
     hosts, so their absence must WARN -- they belong in CORE.
 
-    clearance-cycle is classified OPTIONAL for exactly as long as
-    active-closure onboarding defers it (see ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
-    in memory_os_owner_cron_onboarding.py). Calling a job we deliberately do
-    not install CORE would raise a permanent missing_core WARN for its
-    expected absence. What matters either way is that it is CLASSIFIED --
-    the original bug was that all three fell through to the untracked
-    "other" bucket, so their disappearance could never be noticed.
+    Deferral of a lane (clearance_cycle) is now enforced at LANE level -- the
+    lane is left out of its group's member_keys in the installed snapshot --
+    rather than by withholding a whole cron job. Its group tick
+    (memory-os-tick-governance) is still installed for its core co-member
+    proposal_followups_opsgate, so classifying that job CORE raises no
+    spurious missing_core WARN.
+
+    The invariant that must hold either way: every CORE job name is actually
+    installed by active-closure onboarding, or the monitor WARNs forever.
     """
     module = _load_module()
     for name in (
-        "memory-os-hindsight-advisory-digest",
-        "memory-os-hindsight-health-probe",
+        _job_name_for_lane("hindsight_advisory_digest"),
+        _job_name_for_lane("hindsight_health_probe"),
     ):
         assert name in module.CORE_MEMORY_OS_CRON, name
         assert name not in module.OPTIONAL_MEMORY_OS_CRON, name
 
-    assert "memory-os-clearance-cycle" in module.OPTIONAL_MEMORY_OS_CRON
-    assert "memory-os-clearance-cycle" not in module.CORE_MEMORY_OS_CRON
+    # Nothing may be classified both CORE and OPTIONAL -- a group tick mixing
+    # core and optional members would otherwise be counted as both missing
+    # and paused.
+    assert not (module.CORE_MEMORY_OS_CRON & module.OPTIONAL_MEMORY_OS_CRON)
 
-    # The two classifications must stay in lockstep: a job excluded from the
-    # active-closure install must not be CORE, or the monitor WARNs forever.
+    # Every CORE job must be one active-closure onboarding actually installs.
+    from plugins.memory.memory_os.cron_registry import memory_os_cron_specs
+
     onboarding = _load_onboarding_module()
-    for spec_key, job_name in (("clearance_cycle", "memory-os-clearance-cycle"),):
-        if spec_key in onboarding.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS:
-            assert job_name not in module.CORE_MEMORY_OS_CRON, (
-                f"{job_name} is excluded from active-closure onboarding but "
-                "classified CORE, which would WARN on its expected absence"
-            )
+    installed_names = {
+        spec.name
+        for spec in memory_os_cron_specs()
+        if spec.key not in onboarding.ACTIVE_CLOSURE_EXCLUDED_CRON_KEYS
+    }
+    missing = module.CORE_MEMORY_OS_CRON - installed_names
+    assert not missing, (
+        f"{sorted(missing)} classified CORE but not installed by active-closure "
+        "onboarding, which would WARN on their expected absence"
+    )
 
 
 def test_retired_right_brain_is_removed_from_active_cron_surface(tmp_path):

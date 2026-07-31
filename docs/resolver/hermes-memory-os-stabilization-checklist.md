@@ -1151,6 +1151,116 @@ BC 评审 15 项至此全部完成（P0×3 → BD，P1×4 → BE，P2×3 → BF�
     `start_resolver_auto_approve_envelope` 后的写入无异常保护（与第 2 项同类，白名单外未修）。
   - 主机侧：未触碰 hermes-media / hermes-feiniu。
 
+## BS — Hermes cron 归类合并：19 job → 8 group tick（2026-07-31）
+
+### 做了什么
+
+把 `MemoryOSCronSpec` 拆成两张表，只合并调度面、不动治理粒度：
+
+- **lane 表**（`MEMORY_OS_CRON_LANES`，21 条）＝ 治理身份：`lane_id` / `raw_script` /
+  `helper_kind` / boundary 契约。每 lane 每次运行仍开自己的 ExecutionGate envelope。
+- **group 表**（`MEMORY_OS_CRON_GROUPS`，9 条）＝ Hermes 调度面，真正被
+  `hermes cron create` 创建的东西。
+
+`MEMORY_OS_CRON_SPECS` 是两表的 join，`name`/`wrapper_script`/`schedule_arg` 从 group 派生，
+因此既有消费者全部无改动继续工作，唯一可见差异是多条 spec 共享同一个 `name`。
+
+active-closure：**19 个 Hermes cron job → 8 个**（19 条 lane 不变）。
+新增 `scripts/memory_os_cron_group_runner.py` + 4 个 tick shim。
+
+### 根因（为什么必须合并，不是审美问题）
+
+按 schedule 实算一天的触发时刻：**00:00 与 12:00 各有 5 个 job 同时触发**
+（proposal_followups / candidate_aggregation / fact_judge / index_sync / l3_probe），
+5 个进程同时对 `execution_gate_index.json` 做「独占加锁 → 全量读 → 全量重写 → fsync」，
+锁超时 15s。超时即 `ExecutionGateInfrastructureError("sidecar_lock_timeout")` → runner 返回 3
+→ 该 lane 当次无 completion 记录 → monitor 记 `helper_completion_missing`。
+合并后同分钟并发 5 → 1，触发次数 336/天 → 172/天。
+
+### 阻断性前置条件（两条，先做才安全）
+
+**R1 — monitor 新鲜度窗口必须按 lane 取。**
+`_helper_completion_freshness_window()` 原本取 cron **job** 的 schedule。分组后用公式实算，
+**4 条 lane 的窗口会塌缩**：working_cleanup 342h→54h、hindsight_advisory_digest 342h→54h
+（两条必然永久 stale）、candidate_aggregation 18h→12h、fact_judge 14h→12h（略晚即误报）。
+改为取 lane 自己的 `due_interval_minutes`，缺失/0/非法值回退到原 schedule 行为（绝不产生 0 窗口）。
+
+**R2 — 19 个旧 per-lane job 名必须显式分类。**
+分组后 spec.name 变成 group 名，`known_specs_by_name` 不再认识 `memory-os-index-sync` 这类
+旧名字 → 落入 `unregistered_like` → monitor FAIL
+`execution_gate_memory_os_cron_unregistered_like_job`，每台已升级主机都会红。
+新增 `LEGACY_PER_LANE_CRON_JOBS`，归入 `known_optional` + `superseded_by_group_tick`。
+
+### 顺调用链发现的同类缺陷（Section W 第 5 条的产出）
+
+1. **`classify_hermes_cron_jobs` 有三份拷贝。** 只修 `hermes_cron_adapter.py` 不解决生产问题——
+   `memory_os_cron_adapter_probe.py` 导入的是 `plugins/seam/hermes_memory_os/cron_adapter.py`，
+   而 monitor 优先读该 probe；monitor 自身还有一份内嵌 fallback。三份全部同步修复。
+2. **`memory_os_monitor_dashboard_snapshot.py` 的 CORE/OPTIONAL 集合会重叠。**
+   `tick_evidence` 同时含 core 成员（fact_judge）与 optional 成员（l3_probe_verification），
+   同一 job 名会既算 missing_core 又算 optional_paused。改为「任一成员 core ⇒ 整个 job core」。
+3. **两处仍在直接创建 per-lane job，会导致 lane 双跑：**
+   `install_memory_os.sh` 自建 `memory-os-working-cleanup`（已删除，onboarding 是唯一创建者）；
+   `deploy_l3_probe.py --apply` 自建 `memory-os-l3-probe-verification`（改为 fail-closed
+   `superseded_by_group_tick`，并删掉随之失效的 apply 主体与两个孤儿函数）。
+4. **`execution_gate_index.json` 无任何裁剪**（独立缺陷，本次一并修）：每次 permit/completion
+   全量重写，entry 按 envelope 无上限增长（约 336/天 ≈ 12 万/年）。新增
+   `prune_sidecar_index()` 保留最新 2000 条；安全性依据是 `execution_gate.py` 已有
+   lookup-miss 时从 JSONL 全量重建的恢复路径。正在写入的 envelope 永不被淘汰。
+
+### 一并加固
+
+- `subprocess.run` 原本**没有 timeout**。1:1 时一个 hang 只拖垮一条 lane，合并后拖垮整组。
+  新增每 member `timeout_seconds`，超时记 `execution_status="timeout"` / returncode 124 后继续下一个成员。
+- group 级**非阻塞**锁：抢不到锁以显式 `skipped_overlap` 退出 0，不静默 pass。
+- 成员失败隔离：逐 member try/except + 独立 completion，单成员非零不终止后续成员。
+- lane 级停用 `cron_lane_disabled.json`（补回分组后 owner 丢失的单 lane 停用能力），
+  tick runner 与 monitor 同时读取；文件损坏时 fail-open，绝不静默停掉受治理的 lane。
+- `due_policy="calendar"`：`v3_seed_evidence` 按 `natural_date` 分区并暴露
+  `consecutive_valid_day_count`，elapsed 门控可能跨 UTC 日界漂移导致漏算/重算，故按日锚定。
+  逐个核对过其余 lane：`exposure_rollup` 是水位线驱动且幂等、`working_cleanup` 纯年龄判定，
+  均可用 elapsed。
+- `trigger_surface` 保持字面量 `"hermes_cron"`：已核实 `resolve_trigger_class()` 只读环境变量
+  `MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID`，tick runner 逐 member 设置该变量，natural_cron 溯源不受影响。
+
+### 反事实覆盖
+
+- R1：weekly lane 落在日频 group 时不得判 stale（无修复时窗口 54h → FAIL）。
+- R2：遗留 per-lane job 必须 `unregistered_like == 0`（无修复时为 2 → monitor FAIL）。
+- 超时：member `timeout_seconds=1` + sleep 30 的 stub，必须得到 status=timeout/returncode=124
+  且后续成员仍执行（无 timeout 支持时该 member 会正常返回 0）。
+- 重叠：预先持有 group 锁，必须得到 `skipped_overlap` 且**不产生任何 envelope**。
+- 隔离：前一个成员 exit 9，后一个成员仍须 ok 且两条 completion 都在。
+- due 门控：30 分钟 lane 在 15 分钟 tick 上必须隔次运行；`due_interval_minutes=0`
+  不得退化为「每 tick 都跑」（回退为日频）。
+- calendar：同一 UTC 日内第二次 tick 必须 `already_ran_today`；未到 anchor 必须
+  `before_calendar_anchor`。
+- v0 快照回填：旧快照无 due 元数据时必须回填 lane 表的值，不得得到 0（否则 tick 永远 due、
+  monitor 永远 stale）。
+- 裁剪：正在写入的 envelope 即使时间戳最旧也不得被淘汰。
+- 双跑：`deploy_l3_probe.run_apply()` 必须 blocked 且不产生 jobs.json。
+
+R1/R2 的 revert→FAIL→restore→PASS 已实际验证。
+
+### 测试与门禁
+
+3023（BR 基线）→ **3056 passed / 13 skipped / 0 failed**，净 +33。
+新增 `tests/scripts/test_memory_os_cron_group_runner.py`（14 项）。
+四项静态门全过：import_cycle / write_surface（unclassified=0）/ static_hygiene / public_checkout_probe。
+
+### 回滚
+
+onboarding 只**暂停**旧 19 个 per-lane job，不删除。回滚 = 重新启用旧 job + 停用 8 个 group job；
+lane 注册表与 helper 脚本全程未动，回滚后行为与合并前一致。
+
+### 未做 / 残留
+
+- 尚未部署到 3.200，`live_monitor_pass` 未取得——本次仅 `local_pass` + 静态门。
+- `v3_journal_sweep` 的底层模块未逐行核实是否按日分区，暂按 elapsed（1440 min）处理；
+  若后续确认按日分区，改成 `due_policy="calendar"` 即可，无需动结构。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1291,3 +1401,16 @@ sannai-community 仓库 README。）
   / 13 skipped（+55），**首次全绿**；静态门全过（import cycle 0 环、write surface
   unclassified 0、static hygiene、public checkout probe --strict exit 0、git diff --check）。
   `oa_` 密钥化、monitor 11 组件采集接线、主机侧退役执行均**有意未做**并在 BR 节登记原因。
+- `38fa4e0..HEAD`：Hermes cron 归类合并——`MemoryOSCronSpec` 拆为 lane 治理身份（21 条不变）
+  与 group 调度面（9 条），active-closure **19 个 cron job → 8 个**，新增
+  `memory_os_cron_group_runner.py` 按 due 门控逐 member 开自己的 ExecutionGate envelope。
+  实测动因：00:00/12:00 各有 5 个 job 同时争 `execution_gate_index.json` 的 15 秒锁
+  （合并后同分钟并发 5→1、触发 336/天→172/天）。两条阻断前置先行：monitor 新鲜度改按 lane
+  `due_interval_minutes` 取（否则 4 条 lane 窗口塌缩、2 条永久 stale）、旧 19 个 per-lane job
+  名显式归入 `superseded_by_group_tick`（否则每台升级主机 monitor FAIL）。顺链修掉
+  `classify_hermes_cron_jobs` 的**三份**拷贝、dashboard CORE/OPTIONAL 集合重叠、
+  `install_memory_os.sh` 与 `deploy_l3_probe.py` 两处会导致 lane 双跑的自建 job，
+  并补上 helper subprocess timeout、group 非阻塞锁、成员失败隔离、lane 级停用，
+  以及独立缺陷 `execution_gate_index.json` 无裁剪（新增 `prune_sidecar_index`，保留 2000 条）。
+  3023 → **3056 passed / 13 skipped / 0 failed**（+33），静态门全过。
+  未部署 3.200，`live_monitor_pass` 未取得。

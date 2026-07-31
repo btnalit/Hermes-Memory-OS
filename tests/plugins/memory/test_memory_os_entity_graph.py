@@ -250,7 +250,12 @@ class TestEntityIndexCronRegistration:
         from plugins.memory.memory_os.cron_registry import memory_os_cron_spec_by_key
         spec = memory_os_cron_spec_by_key("entity_index_refresh")
         assert spec is not None
-        assert spec.name == "memory-os-entity-index-refresh"
+        # Scheduled by the derived-views group tick after cron consolidation;
+        # its lane identity (helper, cadence) is what matters here.
+        assert spec.name == "memory-os-tick-derived"
+        assert spec.group_key == "tick_derived"
+        assert spec.raw_script == "memory_os_entity_index_refresh.py"
+        assert spec.due_interval_minutes == 30
         assert spec.no_agent is True
 
     def test_entity_graph_in_recall_probe(self):

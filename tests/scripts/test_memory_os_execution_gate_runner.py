@@ -433,3 +433,55 @@ def test_execution_gate_sidecar_replace_failure_preserves_previous_index(tmp_pat
 
     assert json.loads(index_path.read_text(encoding="utf-8")) == {"existing": {"completion_count": 1}}
     assert list(index_path.parent.glob(f".{index_path.name}.*.tmp")) == []
+
+
+def _load_runner_module():
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    spec = importlib.util.spec_from_file_location(
+        "memory_os_execution_gate_runner_under_test", scripts_dir / "memory_os_execution_gate_runner.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_sidecar_index_is_bounded_and_keeps_newest_entries():
+    """The sidecar index is fully rewritten on every permit AND completion.
+
+    Unbounded growth turned each cron firing into an O(N) read+write+fsync of
+    a file that gained one entry per envelope forever.
+    """
+    module = _load_runner_module()
+    index = {
+        f"xgate_{i:05d}": {"envelope_id": f"xgate_{i:05d}", "permit_created_at": f"2026-07-{(i % 28) + 1:02d}T00:00:00Z"}
+        for i in range(50)
+    }
+
+    pruned = module.prune_sidecar_index(index, max_entries=10)
+
+    assert len(pruned) == 10
+    newest = sorted(index, key=lambda k: (index[k]["permit_created_at"], k))[-10:]
+    assert set(pruned) == set(newest)
+
+
+def test_sidecar_index_prune_never_evicts_the_envelope_being_written():
+    """The live envelope must survive its own prune regardless of clock skew,
+    or its completion record would lose the permit it belongs to."""
+    module = _load_runner_module()
+    index = {
+        f"xgate_{i:05d}": {"envelope_id": f"xgate_{i:05d}", "permit_created_at": "2026-07-30T00:00:00Z"}
+        for i in range(30)
+    }
+    # An entry whose timestamp sorts oldest, i.e. first to be evicted.
+    index["xgate_live"] = {"envelope_id": "xgate_live", "permit_created_at": "1970-01-01T00:00:00Z"}
+
+    pruned = module.prune_sidecar_index(index, "xgate_live", max_entries=5)
+
+    assert "xgate_live" in pruned
+
+
+def test_sidecar_index_prune_is_a_noop_below_the_cap():
+    module = _load_runner_module()
+    index = {"xgate_a": {"envelope_id": "xgate_a"}, "xgate_b": {"envelope_id": "xgate_b"}}
+
+    assert module.prune_sidecar_index(index, max_entries=10) == index

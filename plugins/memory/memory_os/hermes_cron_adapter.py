@@ -9,11 +9,19 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from .cron_registry import (
+    LEGACY_PER_LANE_CRON_JOBS,
+    LEGACY_PER_LANE_CRON_JOB_NAMES,
+    LEGACY_PER_LANE_CRON_SCRIPT_NAMES,
     MemoryOSCronSpec,
     RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
     RETIRED_MEMORY_OS_CRON_SCRIPTS,
     memory_os_cron_specs,
 )
+
+# Reverse of LEGACY_PER_LANE_CRON_JOBS (script -> canonical legacy job name),
+# used when a legacy per-lane job is identified by its script but its "name"
+# field was not the canonical one (e.g. renamed on the host).
+_LEGACY_PER_LANE_SCRIPT_TO_NAME = {script: name for name, script in LEGACY_PER_LANE_CRON_JOBS.items()}
 
 
 @dataclass(frozen=True)
@@ -121,6 +129,26 @@ def classify_hermes_cron_jobs(jobs: Iterable[dict[str, Any]], specs: Iterable[Me
         if retired_name or retired_script:
             safe["retirement_reason"] = "legacy_right_brain_retired"
             retired_legacy.append(safe)
+            continue
+        # Pre-consolidation per-lane jobs (memory-os-<lane> running
+        # memory_os_cron_<lane>_gate.py) are superseded, not unregistered --
+        # see the LEGACY_PER_LANE_CRON_JOBS comment block in cron_registry.py.
+        # This MUST be checked before the known_spec lookup below: one legacy
+        # wrapper script name, memory_os_hindsight_health_probe.py, happens to
+        # also be the tick_evidence group's hindsight_health_probe *raw_script*,
+        # so known_specs_by_raw would otherwise match it first and tag it with
+        # the generic "not_in_active_installed_snapshot" reason instead of the
+        # more precise "superseded_by_group_tick" one. This can never swallow
+        # an active group job: the specs_by_name-by-name branch above already
+        # resolves any job whose Hermes job name is a live group name, and no
+        # active group's name or wrapper_script collides with the legacy
+        # per-lane tables (the coincidence above is confined to a raw_script,
+        # which is never a Hermes job's own "script" field for an active job).
+        if name in LEGACY_PER_LANE_CRON_JOB_NAMES or script in LEGACY_PER_LANE_CRON_SCRIPT_NAMES:
+            registry_key = name if name in LEGACY_PER_LANE_CRON_JOB_NAMES else _LEGACY_PER_LANE_SCRIPT_TO_NAME.get(script, "")
+            safe["known_registry_key"] = registry_key
+            safe["known_optional_reason"] = "superseded_by_group_tick"
+            known_optional.append(safe)
             continue
         known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
         if known_spec:

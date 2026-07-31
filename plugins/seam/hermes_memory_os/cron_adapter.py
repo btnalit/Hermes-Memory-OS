@@ -13,11 +13,16 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 from plugins.memory.memory_os.cron_registry import (
+    LEGACY_PER_LANE_CRON_JOB_NAMES,
+    LEGACY_PER_LANE_CRON_JOBS,
+    LEGACY_PER_LANE_CRON_SCRIPT_NAMES,
     MemoryOSCronSpec,
     RETIRED_MEMORY_OS_CRON_SCRIPT_NAMES,
     RETIRED_MEMORY_OS_CRON_SCRIPTS,
     memory_os_cron_specs,
 )
+
+_LEGACY_PER_LANE_SCRIPT_TO_NAME = {script: name for name, script in LEGACY_PER_LANE_CRON_JOBS.items()}
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,17 @@ def classify_hermes_cron_jobs(
         if retired_name or retired_script:
             safe["retirement_reason"] = "legacy_right_brain_retired"
             retired_legacy.append(safe)
+            continue
+        # Pre-consolidation per-lane jobs, superseded by a group tick.  They
+        # are recognised, not drift: without this they fall through to the
+        # "memory-os-" prefix branch below into unregistered_like, which the
+        # 3.200 monitor reports as a FAIL on every upgraded host.  Checked
+        # before the known_spec lookup so the reason is the precise
+        # "superseded" one rather than the generic not-installed reason.
+        if name in LEGACY_PER_LANE_CRON_JOB_NAMES or script in LEGACY_PER_LANE_CRON_SCRIPT_NAMES:
+            safe["known_registry_key"] = name or _LEGACY_PER_LANE_SCRIPT_TO_NAME.get(script, "")
+            safe["known_optional_reason"] = "superseded_by_group_tick"
+            known_optional.append(safe)
             continue
         known_spec = known_specs_by_name.get(name) or known_specs_by_wrapper.get(script) or known_specs_by_raw.get(script)
         if known_spec:

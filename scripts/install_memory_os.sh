@@ -728,24 +728,13 @@ run_installer() {
 	    fi
 	  done
 
-  # Create working memory cleanup cron (no_agent, watchdog pattern)
-  if command_exists hermes && [[ "${DRY_RUN}" != "1" ]]; then
-    local cron_name="memory-os-working-cleanup"
-    local cron_present=0
-    cron_present=$(hermes cron list 2>/dev/null | grep -c "${cron_name}" || true)
-    if [[ "${cron_present}" -eq 0 ]]; then
-      hermes cron create \
-        --name "${cron_name}" \
-        --schedule "0 3 * * 0" \
-        --script cleanup_expired_working.py \
-        --no-agent \
-        --deliver local 2>/dev/null && \
-        echo "  ✅ Cron '${cron_name}' created (Sun 03:00 CST, 7d retention)" || \
-        echo "  ⚠️  Could not create cron '${cron_name}' (hermes not fully configured?)"
-    else
-      echo "  ✅ Cron '${cron_name}' already exists"
-    fi
-  fi
+  # NOTE: the working-cleanup cron is NOT created here any more.
+  #
+  # working_cleanup is now a member lane of the "memory-os-tick-daily" group
+  # tick, created by memory_os_owner_cron_onboarding.py (run above when
+  # ENABLE_OWNER_CRON_ONBOARDING=1), which is the single owner of Memory-OS
+  # cron creation. Creating a standalone "memory-os-working-cleanup" job here
+  # as well would run the same lane twice on every host that has both.
 }
 
 verify_install() {

@@ -477,15 +477,18 @@ def test_installer_can_run_owner_cron_onboarding_with_auto_channel(tmp_path):
     by_name = {job["name"]: job for job in jobs}
     assert set(by_name) == expected_cron_names
     assert by_name["memory-os-owner-review-digest"]["deliver"] == "discord"
-    assert by_name["memory-os-proposal-followups-opsgate"]["deliver"] == "local"
-    assert by_name["memory-os-index-sync"]["deliver"] == "local"
-    assert by_name["memory-os-index-sync"]["script"] == "memory_os_cron_index_sync_gate.py"
-    assert by_name["memory-os-index-sync"]["no_agent"] is True
-    assert by_name["memory-os-hindsight-advisory-digest"]["deliver"] == "local"
-    assert by_name["memory-os-hindsight-advisory-digest"]["script"] == "memory_os_cron_hindsight_advisory_digest_gate.py"
-    assert by_name["memory-os-hindsight-advisory-digest"]["no_agent"] is True
-    assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
-    assert home.joinpath("scripts", "memory_os_cron_hindsight_advisory_digest_gate.py").is_file()
+    # Grouped lanes are scheduled by their tick job; the installer must deploy
+    # the tick wrapper AND every member helper.
+    assert by_name["memory-os-tick-governance"]["deliver"] == "local"
+    assert by_name["memory-os-tick-derived"]["deliver"] == "local"
+    assert by_name["memory-os-tick-derived"]["script"] == "memory_os_cron_tick_derived.py"
+    assert by_name["memory-os-tick-derived"]["no_agent"] is True
+    assert by_name["memory-os-tick-daily"]["deliver"] == "local"
+    assert by_name["memory-os-tick-daily"]["script"] == "memory_os_cron_tick_daily.py"
+    assert by_name["memory-os-tick-daily"]["no_agent"] is True
+    assert by_name["memory-os-tick-daily"]["schedule_display"] == "5 0 * * *"
+    assert home.joinpath("scripts", "memory_os_cron_tick_daily.py").is_file()
+    assert home.joinpath("scripts", "memory_os_cron_group_runner.py").is_file()
     assert home.joinpath("scripts", "memory_os_hindsight_advisory_digest.py").is_file()
     hindsight_health_probe = home.joinpath("scripts", "memory_os_hindsight_health_probe.py")
     source_hindsight_health_probe = Path(__file__).resolve().parents[2].joinpath(
@@ -522,35 +525,21 @@ def test_installer_can_run_full_owner_cron_profile_when_requested(tmp_path):
 
     assert report["owner_cron_profile"] == "full"
     assert report["owner_cron_onboarding_report"]["cron_profile"] == "full"
-    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == 21
+    # One job per group, derived from the registry.
+    from plugins.memory.memory_os.cron_registry import memory_os_cron_specs as _specs
+
+    assert len(report["owner_cron_onboarding_report"]["operational_cron_jobs"]) == len(
+        {spec.name for spec in _specs()}
+    )
 
     jobs = json.loads(home.joinpath("cron", "jobs.json").read_text(encoding="utf-8"))["jobs"]
-    assert {job["name"] for job in jobs} == {
-        "memory-os-owner-review-digest",
-        "memory-os-module-cadence-report",
-        "memory-os-proposal-followups-opsgate",
-        "memory-os-expression-feedback-request",
-        "memory-os-memory-sources-feedback-request",
-        "memory-os-candidate-aggregation",
-        "memory-os-fact-judge",
-        "memory-os-index-sync",
-        "memory-os-working-cleanup",
-        "memory-os-l3-probe-verification",
-        "memory-os-event-stats-refresh",
-        "memory-os-exposure-rollup",
-        "memory-os-full-monitor-refresh",
-        "memory-os-v3-seed-evidence",
-        "memory-os-v3-wandering",
-        "memory-os-v3-journal-sweep",
-        "memory-os-state-overlay-refresh",
-        "memory-os-entity-index-refresh",
-        "memory-os-hindsight-advisory-digest",
-        "memory-os-hindsight-health-probe",
-        "memory-os-clearance-cycle",
-    }
+    assert {job["name"] for job in jobs} == {spec.name for spec in _specs()}
     by_name = {job["name"]: job for job in jobs}
-    assert by_name["memory-os-hindsight-advisory-digest"]["schedule_display"] == "20 2 * * 0"
-    assert home.joinpath("scripts", "memory_os_cron_hindsight_advisory_digest_gate.py").is_file()
+    assert by_name["memory-os-tick-daily"]["schedule_display"] == "5 0 * * *"
+    # The lane's cron entrypoint is now its group tick, backed by the shared
+    # group runner; the per-lane gate shim is no longer generated.
+    assert home.joinpath("scripts", "memory_os_cron_tick_daily.py").is_file()
+    assert home.joinpath("scripts", "memory_os_cron_group_runner.py").is_file()
 
 
 def test_installer_runs_owner_cron_onboarding_after_shell_enable(tmp_path, monkeypatch):
