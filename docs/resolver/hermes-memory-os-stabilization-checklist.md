@@ -1524,6 +1524,15 @@ roots 事后注入之后 facade **永久返回 None**——一个哨兵表达两
 
 新增 `_recall_facade_mode` 记录构造时的模式，两处 `initialized` 短路都加上模式一致判断。
 
+**5.1 的修复自身引入了一个新暴露，在合并前自审中发现并修掉**：原实现里
+`self._recall_facade` 一生只赋值一次（`initialized` 置真后永不重建），所以"半注册状态"
+不可能被观察到；加了模式变更重建之后，`self._recall_facade` 会被**就地替换**，而另一线程
+可能正持着上一次构造留下的 `initialized=True` 在锁外读它——于是读到一个尚未 register 完
+的 facade。改为先构建到局部变量、注册完成后再按 `facade → mode → initialized` 的顺序发布
+（模式先于哨兵，保证看到 `initialized=True` 的读者不会读到过期模式）。
+教训：**给一个"只写一次"的字段加上重建路径，等于把它变成共享可变状态**，
+原本成立的免锁读假设会随之失效。
+
 ### 6. onboarding 的 wrapper 分支无覆盖
 
 `_write_execution_gate_assets` 有**两处** `_copy_asset_if_distinct` 调用（runner 循环 +

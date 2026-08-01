@@ -240,7 +240,11 @@ class MemoryOSProvider(MemoryProvider):
             from .retrievers.state_overlay import StateOverlayRetriever
             from .retrievers.temporal import TemporalRetriever
 
-            self._recall_facade = RetrieverFacade(
+            # Build into a local and publish only once fully registered. A
+            # mode change rebuilds, so assigning self._recall_facade first
+            # would expose a half-registered object to a reader still holding
+            # the previous (true) _recall_facade_initialized outside the lock.
+            facade = RetrieverFacade(
                 arbitration_mode=arbitration_mode,
                 freshness_guard_mode=str(arbitration_cfg.get("freshness_guard_mode") or "shadow"),
                 conflict_resolution_mode=str(arbitration_cfg.get("conflict_resolution_mode") or "shadow"),
@@ -254,16 +258,19 @@ class MemoryOSProvider(MemoryProvider):
             )
             for retriever_class in retrievers:
                 try:
-                    self._recall_facade.register(retriever_class())
+                    facade.register(retriever_class())
                 except Exception:
                     # fail-open: registration failure must not block startup.
                     # Surfaced as recall_facade.init_error_count in
                     # _tool_status_report(); no monitor component aggregates
                     # that block yet (see BV note in the stabilization checklist).
                     self._recall_facade_init_errors += 1
+            # Publication order matters: mode before the sentinel, so a reader
+            # that sees initialized=True never reads a stale mode.
+            self._recall_facade = facade
             self._recall_facade_mode = arbitration_mode
             self._recall_facade_initialized = True  # set after successful init
-            return self._recall_facade
+            return facade
 
     @staticmethod
     def _recall_facade_switch_default(arbitration_mode: str) -> bool:
