@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from plugins.memory.memory_os.audit import read_audit_entries
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.candidate_clusters import (
@@ -191,6 +192,20 @@ def test_direct_candidate_cluster_apply_without_recorded_owner_token_fails_close
     assert result["code"] == "owner_write_recorded_digest_required"
     assert list(store.roots.crystallized_root.glob("*.md")) == []
     assert read_owner_action_records(store.roots) == []
+
+    # Keeping the owner-action ledger empty is deliberate — an unauthorized
+    # caller must not be able to append to it.  But a rejected permanent-write
+    # attempt still has to leave evidence somewhere, or forged-token probing is
+    # invisible; the audit channel carries it.
+    rejections = [
+        entry
+        for entry in read_audit_entries(store.roots.audit_path)
+        if entry.get("action") == "owner_canonical_write_authorization_rejected"
+    ]
+    assert len(rejections) == 1, rejections
+    assert rejections[0]["status"] == "error"
+    assert rejections[0]["details"]["owner_id"] == "attacker-process"
+    assert rejections[0]["details"]["code"] == "owner_write_recorded_digest_required"
 
 
 def test_candidate_cluster_action_scope_change_fails_closed_without_canonical_write(tmp_path):

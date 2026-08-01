@@ -15,6 +15,11 @@ dev = [
   "pytest>=8",
   "PyYAML>=6",
   "numpy>=1.24",
+  # Windows ships no system tz database, so zoneinfo.ZoneInfo("UTC") raises
+  # ZoneInfoNotFoundError there.  digest_consolidation.py imports ZoneInfo, so a
+  # fresh `pip install -e ".[dev]"` venv on Windows fails 15 tests without this.
+  # Linux/macOS use the OS database and ignore it.
+  'tzdata; sys_platform == "win32"',
 ]
 llm = [
   "openai>=1.0",

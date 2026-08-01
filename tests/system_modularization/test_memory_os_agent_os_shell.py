@@ -12,9 +12,47 @@ import pytest
 
 from plugins.memory.memory_os.audit import read_audit_entries
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHELL_DIR = REPO_ROOT / "plugins" / "memory-os-agent-os"
+
+_PRESERVED_MODULE_PREFIXES = ("plugins", "memory_os")
+
+
+def _is_preserved_module(name: str) -> bool:
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in _PRESERVED_MODULE_PREFIXES)
+
+
+@pytest.fixture(autouse=True)
+def restore_memory_os_import_state():
+    """Restore ``sys.modules``/``sys.path`` after every test in this file.
+
+    Several tests below import a *fake* provider tree out of ``tmp_path``, and to
+    do that they have to displace the real ``plugins`` packages.  Removing only
+    the parent packages is not the same as "not imported" — it leaves their
+    already-imported children behind, which is a hole rather than a clean slate:
+    ``import plugins.memory.memory_os.crystallized as x`` then re-imports a bare
+    ``plugins`` and dies on ``getattr(plugins, "memory")``, taking down every
+    later test in the session.
+
+    Restoring the original module *objects* (rather than clearing the names) is
+    the load-bearing part.  A purge would hand later tests a second, distinct
+    copy of classes that other test modules already bound at collection time, so
+    ``monkeypatch.setattr`` on a class would patch an object under no one's test.
+    That failure is silent; this one at least was loud.
+    """
+    saved_modules = {name: module for name, module in sys.modules.items() if _is_preserved_module(name)}
+    saved_path = list(sys.path)
+    try:
+        yield
+    finally:
+        for name in [name for name in sys.modules if _is_preserved_module(name)]:
+            if name not in saved_modules:
+                del sys.modules[name]
+        sys.modules.update(saved_modules)
+        sys.path[:] = saved_path
 
 
 class FakePluginContext:
@@ -1141,7 +1179,6 @@ def test_shell_runtime_path_adds_flat_provider_parent(monkeypatch, tmp_path):
 
 
 def test_shell_runtime_path_infers_hermes_home_from_installed_plugin_without_env(monkeypatch, tmp_path):
-    original_sys_path = list(sys.path)
     hermes_home = tmp_path / "home"
     installed_shell = hermes_home / "plugins" / "memory-os-agent-os"
     installed_shell.mkdir(parents=True)
@@ -1153,19 +1190,14 @@ def test_shell_runtime_path_infers_hermes_home_from_installed_plugin_without_env
     flat_provider.mkdir(parents=True)
     monkeypatch.delenv("HERMES_HOME", raising=False)
 
-    try:
-        module = load_shell_module_from(shell_init)
-        module._ensure_memory_os_runtime_path()
+    module = load_shell_module_from(shell_init)
+    module._ensure_memory_os_runtime_path()
 
-        assert str(runtime_root) in sys.path
-        assert str(hermes_home / "plugins") in sys.path
-    finally:
-        sys.path[:] = original_sys_path
-        _clear_imported_memory_os_modules()
+    assert str(runtime_root) in sys.path
+    assert str(hermes_home / "plugins") in sys.path
 
 
 def test_shell_alias_imports_provider_from_inferred_runtime_without_env(monkeypatch, tmp_path, capsys):
-    original_sys_path = list(sys.path)
     hermes_home = tmp_path / "home"
     installed_shell = hermes_home / "plugins" / "memory-os-agent-os"
     installed_shell.mkdir(parents=True)
@@ -1195,16 +1227,29 @@ def test_shell_alias_imports_provider_from_inferred_runtime_without_env(monkeypa
     ]:
         sys.modules.pop(name, None)
 
-    try:
-        module = load_shell_module_from(shell_init, name="memory_os_agent_os_shell_installed_runtime")
+    module = load_shell_module_from(shell_init, name="memory_os_agent_os_shell_installed_runtime")
 
-        result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="status"))
+    result = module._memory_os_agent_os_exit_code(argparse.Namespace(agent_os_command="status"))
 
-        assert result == 0
-        assert json.loads(capsys.readouterr().out) == {"delegated": "status", "status": "ok"}
-    finally:
-        sys.path[:] = original_sys_path
-        _clear_imported_memory_os_modules()
+    assert result == 0
+    assert json.loads(capsys.readouterr().out) == {"delegated": "status", "status": "ok"}
+
+
+def test_installed_runtime_import_leaves_no_hole_in_the_real_plugins_package():
+    """Counterfactual guard for ``restore_memory_os_import_state``.
+
+    Runs immediately after the two tests that displace the real ``plugins``
+    packages with a fake ``tmp_path`` tree.  Without the restoring fixture the
+    session is left holding ``plugins.memory.memory_os.crystallized`` while
+    ``plugins.memory`` is gone, and this import raises
+    ``ImportError: cannot import name 'memory' from 'plugins'`` — the failure
+    that took out every test sorting after this file.
+    """
+    import plugins.memory.memory_os.crystallized as crystallized_module
+
+    assert Path(sys.modules["plugins"].__file__).resolve() == REPO_ROOT / "plugins" / "__init__.py"
+    assert sys.modules["plugins.memory.memory_os.crystallized"] is crystallized_module
+    assert Path(crystallized_module.__file__).resolve().is_relative_to(REPO_ROOT)
 
 
 def test_shell_session_start_hook_writes_bounded_audit_marker(monkeypatch, tmp_path):
@@ -1253,15 +1298,3 @@ def test_shell_session_hooks_skip_without_hermes_home(monkeypatch, tmp_path):
 def _audit_entries(hermes_home: Path) -> list[dict[str, Any]]:
     audit_path = hermes_home / "memory-os" / "audit" / "write_audit.jsonl"
     return read_audit_entries(audit_path)
-
-
-def _clear_imported_memory_os_modules() -> None:
-    for name in [
-        "plugins",
-        "plugins.memory",
-        "plugins.memory.memory_os",
-        "plugins.memory.memory_os.cli",
-        "memory_os",
-        "memory_os.cli",
-    ]:
-        sys.modules.pop(name, None)

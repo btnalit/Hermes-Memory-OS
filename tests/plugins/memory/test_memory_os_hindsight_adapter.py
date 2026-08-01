@@ -20,6 +20,8 @@ from plugins.memory.memory_os.adapters.hindsight import (
     HindsightExportRefused,
 )
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 class FakeHindsightClient:
     def __init__(self, *, fail=False):

@@ -36,6 +36,13 @@ from .memory_sources import (
     read_memory_source_feedback_records,
     read_memory_source_records,
 )
+from .owner_write_authority import (
+    OWNER_CANONICAL_WRITE_ACTION_TYPES,
+    owner_action_context_consumptions_path,
+    owner_review_rendered_digests_path,
+    safe_channel as _safe_channel,
+    verify_owner_write_binding as _verified_owner_write_binding,
+)
 from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
 from .jsonl_io import (
@@ -211,10 +218,6 @@ ACTION_TYPES = {
     *PERMANENT_PROMOTION_ACTION_TYPES,
 }
 
-OWNER_CANONICAL_WRITE_ACTION_TYPES = frozenset(
-    {"approve_candidate", "approve_candidate_cluster", "approve_external_evidence"}
-)
-
 # V2-0 registry: scope the permanent-promotion delivery contract narrowly so
 # unrelated owner-review systems never contribute to its hard-zero invariants.
 LIVING_MEMORY_TARGET_TYPES = frozenset(
@@ -290,14 +293,6 @@ def right_brain_expression_outcomes_path(roots: MemoryOSRoots) -> Path:
 
 def owner_review_deliveries_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "owner_review_deliveries.jsonl"
-
-
-def owner_review_rendered_digests_path(roots: MemoryOSRoots) -> Path:
-    return roots.memory_os_root / "system" / "owner_review_rendered_digests.jsonl"
-
-
-def owner_action_context_consumptions_path(roots: MemoryOSRoots) -> Path:
-    return roots.memory_os_root / "system" / "owner_action_context_consumptions.jsonl"
 
 
 def owner_review_cron_helper_path(roots: MemoryOSRoots) -> Path:
@@ -2908,83 +2903,6 @@ def _assemble_living_memory_delivery_items(
     }
 
 
-def _verified_owner_write_binding(
-    store: MemoryOSStore,
-    record: dict[str, Any],
-) -> tuple[dict[str, Any], str]:
-    context = record.get("owner_write_context") if isinstance(record.get("owner_write_context"), dict) else {}
-    token_binding = record.get("token_binding") if isinstance(record.get("token_binding"), dict) else {}
-    action_type = str(record.get("action_type") or "")
-    target_type = str(record.get("target_type") or "")
-    target_id = str(record.get("target_id") or "")
-    owner_id = str(record.get("owner_id") or "")
-    channel = _safe_channel(str(record.get("channel") or ""))
-    digest_id = str(context.get("digest_id") or "")
-    reply_ingress_id = str(context.get("reply_ingress_id") or "")
-    token_hash = str(token_binding.get("action_token_hash") or "")
-    source = str(context.get("source") or "")
-    if action_type not in OWNER_CANONICAL_WRITE_ACTION_TYPES:
-        return {}, "owner_write_action_not_authorized"
-    if source not in {"recorded_digest", "latest_recorded_digest", "latest_owner_home_digest"}:
-        return {}, "owner_write_recorded_digest_required"
-    if not digest_id or not reply_ingress_id or len(token_hash) != 64:
-        return {}, "owner_write_context_incomplete"
-    if any(
-        str(context.get(key) or "") != expected
-        for key, expected in (
-            ("owner_id", owner_id),
-            ("channel", channel),
-            ("action_type", action_type),
-            ("target_type", target_type),
-            ("target_id", target_id),
-        )
-    ):
-        return {}, "owner_write_context_mismatch"
-    digest_record = _find_rendered_digest_record(
-        store.roots,
-        digest_id=digest_id,
-        owner_id=owner_id,
-        channel=channel,
-    )
-    if not digest_record:
-        return {}, "owner_write_recorded_digest_not_found"
-    rendered = _rendered_digest_from_record(digest_record)
-    matched: dict[str, Any] | None = None
-    for token, token_match in _rendered_action_token_map(rendered).items():
-        if hashlib.sha256(token.encode("utf-8")).hexdigest() != token_hash:
-            continue
-        matched = token_match
-        break
-    if not matched:
-        return {}, "owner_write_token_not_in_recorded_digest"
-    if any(
-        str(matched.get(key) or "") != expected
-        for key, expected in (
-            ("action_type", action_type),
-            ("target_type", target_type),
-            ("target_id", target_id),
-        )
-    ):
-        return {}, "owner_write_token_target_mismatch"
-    item = matched.get("item") if isinstance(matched.get("item"), dict) else {}
-    expected_review_item_id = str(item.get("review_item_id") or f"{target_type}:{target_id}")
-    if str(token_binding.get("review_item_id") or "") != expected_review_item_id:
-        return {}, "owner_write_review_item_mismatch"
-    return {
-        "schema_version": "memory-os.owner_write_context_consumption.v0",
-        "context_id": reply_ingress_id,
-        "digest_id": digest_id,
-        "reply_sha256": str(context.get("reply_sha256") or ""),
-        "action_token_hash": token_hash,
-        "review_item_id": expected_review_item_id,
-        "action_type": action_type,
-        "target_type": target_type,
-        "target_id": target_id,
-        "owner_id": owner_id,
-        "channel": channel,
-    }, ""
-
-
 def _consume_owner_write_context(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
     consumption, error = _verified_owner_write_binding(store, record)
     if error:
@@ -3002,63 +2920,6 @@ def _consume_owner_write_context(store: MemoryOSStore, record: dict[str, Any]) -
             json.dumps(consumption, ensure_ascii=False, sort_keys=True) + "\n",
         )
     return dict(consumption)
-
-
-def _validate_consumed_owner_write_context(
-    store: MemoryOSStore,
-    owner_action_context: dict[str, Any] | None,
-    *,
-    candidate: CrystallizedCandidate,
-    decision: ApprovalDecision,
-) -> bool:
-    if not isinstance(owner_action_context, dict):
-        return False
-    consumption, error = _verified_owner_write_binding(store, owner_action_context)
-    if error:
-        return False
-    if decision.reviewer != str(consumption.get("owner_id") or ""):
-        return False
-    action_type = str(consumption.get("action_type") or "")
-    target_type = str(consumption.get("target_type") or "")
-    target_id = str(consumption.get("target_id") or "")
-    if action_type in {"approve_candidate", "approve_external_evidence"}:
-        if target_type != "candidate" or target_id != candidate.candidate_id:
-            return False
-    elif action_type == "approve_candidate_cluster":
-        action_context = (
-            owner_action_context.get("action_context")
-            if isinstance(owner_action_context.get("action_context"), dict)
-            else {}
-        )
-        scope = (
-            action_context.get("candidate_cluster_scope")
-            if isinstance(action_context.get("candidate_cluster_scope"), dict)
-            else {}
-        )
-        scoped_target_id = f"{str(scope.get('cluster_id') or '')}:{str(scope.get('scope_hash') or '')}"
-        if scoped_target_id != target_id:
-            return False
-        if candidate.candidate_id not in {str(value) for value in scope.get("member_candidate_ids") or []}:
-            return False
-    else:
-        return False
-    context_id = str(consumption.get("context_id") or "")
-    for existing in reversed(_read_jsonl(owner_action_context_consumptions_path(store.roots))):
-        if str(existing.get("context_id") or "") != context_id:
-            continue
-        return all(
-            str(existing.get(key) or "") == str(consumption.get(key) or "")
-            for key in (
-                "digest_id",
-                "action_token_hash",
-                "action_type",
-                "target_type",
-                "target_id",
-                "owner_id",
-                "channel",
-            )
-        ) and str(existing.get("status") or "") == "consumed"
-    return False
 
 
 def apply_owner_action(
@@ -3162,6 +3023,24 @@ def apply_owner_action(
         if action_type in OWNER_CANONICAL_WRITE_ACTION_TYPES:
             context_result = _consume_owner_write_context(store, record)
             if context_result.get("status") != "consumed":
+                # persist_error=False below keeps an unauthorized caller from
+                # appending to the owner-action ledger at all.  That is the
+                # right call, but it would otherwise leave a rejected
+                # canonical-write attempt with no durable trace anywhere, so
+                # record the rejection on the audit channel instead — bounded
+                # fields only, never the offered token.
+                append_audit(
+                    store.roots.audit_path,
+                    action="owner_canonical_write_authorization_rejected",
+                    status="error",
+                    target=f"{target_type}:{target_id}",
+                    details={
+                        "action_type": action_type,
+                        "owner_id": owner_id,
+                        "channel": _safe_channel(channel),
+                        "code": str(context_result.get("code") or "owner_write_authorization_required"),
+                    },
+                )
                 return _action_error(
                     store,
                     action_type,
@@ -5599,6 +5478,11 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         "requires_maturation": bool(item.get("requires_maturation")),
         "expression_preview": _bounded_text(str(item.get("expression_preview") or ""), 360),
         "expression_preview_suppressed": bool(item.get("expression_preview_suppressed")),
+        # Carried through the bounded copy because _render_review_item() decides
+        # from it whether a candidate is offered approve_external_evidence or
+        # approve_candidate.  Dropping it here silently downgraded every tainted
+        # candidate to the ordinary-candidate branch on this render path.
+        "external_review_eligible": bool(item.get("external_review_eligible")),
         "payload_ref": _bounded_text(str(item.get("payload_ref") or ""), 220),
         "session_mirror_approval": _bounded_session_mirror_approval(
             item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
@@ -6019,9 +5903,16 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
     if not target_id:
         return []
     if target_type == "candidate":
+        # No approve_external_evidence here.  This branch only renders ordinary
+        # candidates: a candidate whose provenance is actually tainted is caught
+        # earlier in _render_review_item() by the external_review_eligible test
+        # and offered approve_external_evidence instead of approve_candidate.
+        # Offering it to every candidate put a permanently invalid action in the
+        # Owner's digest — production validation still fails it closed, but a
+        # governance surface that lists actions the Owner cannot take teaches the
+        # Owner to ignore it.
         return [
             _review_action("approve", "approve_candidate", target_type, target_id),
-            _review_action("approve", "approve_external_evidence", target_type, target_id),
             _review_action("reject", "reject_candidate", target_type, target_id),
         ]
     if target_type == "candidate_cluster":
@@ -7070,26 +6961,6 @@ def _digest_mode(value: str | None) -> str:
 def _digest_id() -> str:
     created_at = datetime.now(timezone.utc)
     return f"odig_{created_at.strftime('%Y%m%dT%H%M%S%fZ')}_{uuid4().hex[:8]}"
-
-
-def _safe_channel(value: str) -> str:
-    channel = str(value or "").strip().lower().replace("-", "_")
-    allowed = {
-        "telegram",
-        "cli",
-        "web",
-        "slack",
-        "whatsapp",
-        "wecom",
-        "wechat",
-        "weixin",
-        "matrix",
-        "discord",
-        "signal",
-        "origin",
-        "unknown",
-    }
-    return channel if channel in allowed else "unknown"
 
 
 def _safe_target_ref(value: str) -> str:

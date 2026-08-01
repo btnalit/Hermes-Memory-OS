@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import importlib.util
 import threading
 
 import pytest
@@ -25,6 +26,8 @@ from plugins.memory.memory_os.fixtures import build_event
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import CRYSTALLIZED_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
 
 
 def _service(tmp_path):
@@ -118,6 +121,31 @@ def test_caller_minted_resolver_provisional_requires_automation_capability(tmp_p
     assert list(service.store.roots.crystallized_root.glob("*.md")) == []
 
 
+def test_canonical_write_authority_fixture_is_opt_in_rather_than_autouse():
+    """The suite-wide grant must stay something a test has to ask for.
+
+    While ``crystallized_test_write_authority`` was autouse, every test in the
+    repository silently held permanent-write authority, so a production caller
+    that stopped proving its Owner binding still went green.  The two tests above
+    only demonstrate fail-closed behaviour because the default is *no* grant;
+    if this fixture were ever made autouse again they would start passing for
+    the wrong reason, and nothing else would notice.
+    """
+    conftest_path = Path(__file__).resolve().parents[2] / "conftest.py"
+    spec = importlib.util.spec_from_file_location("_suite_conftest_probe", conftest_path)
+    suite_conftest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(suite_conftest)
+
+    fixture = suite_conftest.crystallized_test_write_authority
+    # pytest >= 8.4 exposes the marker as ``_fixture_function_marker``; older
+    # releases attach ``_pytestfixturefunction`` to the function itself.
+    marker = getattr(fixture, "_fixture_function_marker", None) or getattr(
+        fixture, "_pytestfixturefunction", None
+    )
+    assert marker is not None, "could not locate the fixture marker on this pytest version"
+    assert marker.autouse is False
+
+
 def test_write_capability_imports_are_restricted_to_governed_production_callers():
     repo_root = Path(__file__).resolve().parents[3]
     expected = {
@@ -133,7 +161,7 @@ def test_write_capability_imports_are_restricted_to_governed_production_callers(
     }
     for capability, allowed in expected.items():
         found = {
-            str(path.relative_to(repo_root))
+            path.relative_to(repo_root).as_posix()
             for base in (repo_root / "plugins", repo_root / "scripts")
             for path in base.rglob("*.py")
             if capability in path.read_text(encoding="utf-8", errors="ignore")
@@ -213,6 +241,17 @@ def test_candidate_queue_skips_malformed_and_invalid_rows(tmp_path):
         "jsonl_malformed_line",
         "jsonl_non_object_line",
     }
+    # A row that parses as JSON but is not a usable candidate must be reported
+    # too, not dropped in silence.  The aggregation lane skips its all-or-nothing
+    # queue compaction whenever the reader reports errors, so an unreported drop
+    # here becomes a permanent deletion at the next compaction.
+    schema_rejects = [
+        record for record in errors
+        if record["error_code"] == "candidate_required_field_invalid"
+    ]
+    assert len(schema_rejects) == 1, errors
+    assert schema_rejects[0]["candidate_id"] == "missing-body"
+    assert schema_rejects[0]["component"] == "crystallized_candidate_queue"
 
 
 def test_approved_record_frontmatter_contains_approval_metadata_and_source_events(tmp_path):

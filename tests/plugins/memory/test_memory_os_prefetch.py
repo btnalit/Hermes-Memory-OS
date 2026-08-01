@@ -14,6 +14,10 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, WORKING_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def _store(tmp_path):
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")

@@ -33,6 +33,8 @@ from plugins.modules.governance.candidate_aggregation import (
     _MIN_SUBSTANTIVE_CHARS,
 )
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 _VALID_ENVELOPE_ID = "xgate_test_candidate_aggregation_envelope"
 
 

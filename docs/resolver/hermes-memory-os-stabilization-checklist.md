@@ -1612,6 +1612,203 @@ write surface 154/154 unclassified 0、static hygiene、public checkout probe --
 
 ---
 
+## BW — 接手 WIP checkpoint `192e056`：套件隔离修复 + Owner 写入权威收口（2026-08-01）
+
+`5bf0022`/`192e056` 两个提交以 WIP 身份推上 main，自述「完整套件 3015 passed / 102 errors，
+错误集中在 `tests/system_modularization/`，代表性测试单独跑过，建议先查共享根因」。
+本节接手该 checkpoint。
+
+### 0. 102 个 error 是**一个**根因，不是 102 个缺陷（P0）
+
+`tests/system_modularization/test_memory_os_agent_os_shell.py` 的
+`_clear_imported_memory_os_modules()` 从 `sys.modules` 弹掉 `plugins`、`plugins.memory`、
+`plugins.memory.memory_os`，**却把它们已导入的子模块留在原地**。这不是「没导入」而是一个洞：
+
+- `from plugins.memory.memory_os.crystallized import X` 仍然成功（叶子模块在缓存里）；
+- `import plugins.memory.memory_os.crystallized as x` 却失败——该字节码走
+  `IMPORT_NAME`（fromlist 为空）拿到重新导入的**裸** `plugins`，再 `IMPORT_FROM memory`
+  做 `getattr(plugins, "memory")`，而新父包上没有这个属性，`sys.modules['plugins.memory']`
+  的兜底也已被弹掉 → `ImportError: cannot import name 'memory' from 'plugins'`。
+
+本提交新增的 `tests/conftest.py` 恰好在**每条测试的 setup**里跑这两行（第 24 行 `from`
+成功、第 28 行 `import ... as` 失败），于是**排在该文件之后的每条测试**全部 error。
+这也解释了为什么代表性测试单独跑是绿的——它从来不是那些测试的缺陷。
+
+三个环境独立复现同一条结论：
+
+| 环境 | 结果 |
+|---|---|
+| GitHub Actions（Linux，`192e056`） | 3011 passed / 13 skipped / **102 errors** |
+| 交接方 Linux 隔离全量 | 3015 passed / 9 skipped / **102 errors** |
+| 本机 Windows 全量（修复前基线） | 3010 passed / **1 failed** / 13 skipped / **102 errors** |
+
+**并纠正交接说明的两点**：① 该 checkpoint 的 GitHub CI 是**红的**（run 30697011570，
+`verify: failure`）——交接方本机 `gh` 未登录故未能核验，不是「未知」而是「已失败」；
+② 交接清单未提到的**第 4 条本机失败**：
+`test_write_capability_imports_are_restricted_to_governed_production_callers`
+用正斜杠字面量比对 Windows 原生分隔符，与 BK 记录的同一类缺陷（改 `.as_posix()`）。
+又一条本机必红的测试被推上 main，DoD 第 4 步再次未执行——与 BV 第 0 节同族的流程发现。
+
+修法不是「把弹出的名字补全」：**全量清除会把类身份也换掉**——其他测试文件在 collection 期
+已绑定 `CrystallizedMemoryService` 等类对象，重新导入会产生第二份副本，
+`monkeypatch.setattr(类, ...)` 就会打在没人使用的对象上，**失败方式从响亮变成静默**。
+改为 autouse fixture 在每条测试前后**快照并还原模块对象本身**（而非清名字），
+`sys.path` 一并还原；删除 `_clear_imported_memory_os_modules()` 本体，避免再被调用。
+
+### 1. Owner 写入权威两份实现，跑在生产上的是弱的那份（P1）
+
+`owner_actions.py` 与 `crystallized.py` 各有一份 `_validate_consumed_owner_write_context`。
+查实：**`owner_actions` 那份没有任何 caller（死代码）**，真正守生产永久写的是
+`crystallized` 那份，而它是两份里**弱的**——相对 `owner_actions` 版本缺了四项：
+
+1. 不校验 context 的 `source` 属于 recorded digest（`recorded_digest` /
+   `latest_recorded_digest` / `latest_owner_home_digest`）；
+2. 不校验 `action_type` 属于 canonical-write 白名单；
+3. 不校验 token hash 是完整 SHA-256（长度 64）；
+4. 消费账本比对时**不比 `action_token_hash`**，且用的是另一个字段
+   （`owner_write_context_id` 而非 `reply_ingress_id`）。
+
+新增 `plugins/memory/memory_os/owner_write_authority.py`：只依赖 roots/store/JSONL 原语，
+不 import `owner_actions`/`crystallized`（两者反过来 import 它），
+**不导出任何永久写 capability 单例**。两份重复实现全部删除，
+`owner_actions` 与 `crystallized` 同走这一份。顺带把
+`OWNER_CANONICAL_WRITE_ACTION_TYPES`、两个 ledger path helper、`_safe_channel`
+也收敛为单一定义（`owner_actions` 以 import 别名保留原有模块内名字，调用点零改动）。
+import cycle 门：166 模块 / 0 环。
+
+### 2. 测试授权由「全局默认给」改为「显式申请」（P1）
+
+原 `tests/conftest.py` 用 autouse fixture 给**全仓库每条测试**发永久写权威——
+一个丢了 Owner 绑定的生产 caller 照样能全绿，因为 fixture 悄悄补上了它没能自证的授权。
+改为具名 fixture `crystallized_test_write_authority`，默认 fail-closed；
+实测确定需要它的 **21 个文件**各加一行 module 级 `pytestmark` 声明。
+
+值得记录的是**哪些文件不需要**：`test_memory_os_external_evidence_owner_action.py`、
+`test_memory_os_candidate_clusters.py` 等 Owner ingress/安全用例在去掉全局授权后**依然全绿**，
+证明它们本来就走真实 recorded-digest 路径，不靠 fixture 补授权。
+另加 `test_canonical_write_authority_fixture_is_opt_in_rather_than_autouse()` 钉住
+「这条 fixture 不得再变回 autouse」——否则文件里那两条 fail-closed 用例会开始因错误的原因通过。
+
+### 3. `approve_external_evidence` 出现在每条候选上（P1）
+
+两处缺陷叠加，交接说明只猜到后一半：
+
+- `_review_actions()` 的 candidate 分支**无条件**塞进 `approve_external_evidence`；
+- `_digest_item()` 按**白名单**重建 bounded item，名单里没有 `external_review_eligible`
+  → 走该渲染路径时标记丢失，于是**真·tainted 候选反而掉进普通候选分支**。
+
+两处都修。关键证据：修掉前一处之后，既有的
+`test_approve_external_evidence_crystallizes_tainted_candidate` **立刻失败**——
+说明它此前一直**因为那个无条件 token 才通过**，从未真正走到
+`external_review_eligible` 分支。这是一条真实的生产缺陷：在 `_digest_item` 渲染路径上，
+tainted 候选拿到的是 `approve_candidate`，而普通 approve 对 tainted 候选是被拒的
+（`test_ordinary_approve_cannot_approve_tainted_candidate`），即 Owner 在该路径上
+**根本无法批准 tainted 候选**（fail-closed，非越权，但治理面是坏的）。
+新增两条**精确集合**断言（而非 `in`/`not in`），双向覆盖：普通候选
+`== {approve_candidate, reject_candidate}`、tainted 候选
+`== {approve_external_evidence, reject_candidate}`。
+
+### 4. `candidate_cluster` 移出 `LIVING_MEMORY_TARGET_TYPES` 是对的，但漏了一份拷贝（P1）
+
+结论：**移除正确**。该集合现在只剩 `crystallized_record` /
+`provisional_crystallized_record` / `permanent_memory_promotion`——全是**已写入的记录级**目标；
+而 candidate_cluster 是「提议写入」，与 `candidate` 同类，
+**`candidate` 从来就不在这个集合里**。旧的 membership 才是不一致的那个。
+
+但 `scripts/memory_os_3_200_monitor.py` 里那份**内嵌 fallback 拷贝**仍列着
+`candidate_cluster`。该 fallback 只在 provider 不可导入时生效（clean host、远程探针），
+所以它**不会报错**，只会让同一条 item 在不同主机上被分到不同类——比报错更坏。
+已同步并新增 `test_monitor_living_memory_fallback_matches_owner_actions()` 用 AST 取出
+字面量与真集合逐一比对，钉死漂移。（同 CLAUDE.md 记载的
+`classify_hermes_cron_jobs` 三份拷贝同族风险。）
+
+### 5. 对 `192e056` 全部 27 个文件的 caller/adoption/security 复审（另 5 项发现）
+
+不只看最后改动的 owner_actions/crystallized，逐个生产文件复审得：
+
+1. **`scripts/memory_os_candidate_backfill_409.py` 已被打断**——本提交把
+   `append_candidate_triage()` 改为空 envelope 即 `PermissionError`，docstring 写着
+   「operator backfill 必须开显式 governed envelope」，但仓库里唯一的 operator backfill
+   脚本没同步改：`--apply` 现在必崩。补 `--execution-gate-envelope-id`
+   （env 默认 `MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID`，与仓库既有 6 个脚本同一惯例）
+   并在 apply 前显式 fail-closed 返回 2，实测无 envelope → exit 2、有 envelope → exit 0。
+2. **`crystallization_gate._gate_error_result()` 与同函数其余路径 error_record 形状打架**——
+   前者 `{"code": ...}`、后者 `{"error_code": ...}`，同一个 `error_records` 字段两种形状；
+   当前消费者只读 `status` 故未崩，但下一个迭代记录的消费者会在**恰好是失败的那些路径**上
+   读不到 `error_code`。统一为 `{candidate_id, error_code, component}`，新增双路径精确集合断言。
+3. **`read_candidate_queue()` 静默丢弃 schema 非法行**——能解析成 JSON 但不是可用候选的行
+   被 `continue` 掉且不记 error record。而聚合车道只在「读到错误」时跳过队列压缩，
+   压缩是全量重写：这类行会先被静默丢弃、再被下一次压缩**永久抹掉**，全程无痕。
+   四个校验分支各补 `error_record`（含 component/operation/severity/recoverable）。
+4. **被拒的 canonical write 授权不留任何痕迹**——该路径用 `persist_error=False`，
+   这本身是对的（不能让未授权调用方往 owner-action 账本里追加），但它同时意味着
+   伪造 token 的探测**在任何地方都不可见**。改为在 audit 通道记一条
+   `owner_canonical_write_authorization_rejected`（有界字段，绝不记 token 本体），
+   既保住 `read_owner_action_records(...) == []` 这条既有不变量，又留下证据。
+5. **`_resolver_candidate_gate_result()` 对每条候选都跑**——含被判 reject 的，
+   每次开两个 sqlite 连接 + 一次 FTS 查询，而其结果只在 approve 分支被读。
+   三处改为按 `verdict.get("approve")` 惰性求值，行为不变。
+
+### 有意未做（登记）
+
+- `scripts/memory_os_blank_host_smoke.py` 被本提交从「永久写」改为「provisional 写 +
+  probe capability」（因为永久写现在需要 recorded digest）。这是**必要的**，但
+  blank-host smoke 因此**不再覆盖永久 canonical write 路径**——登记为覆盖缺口，
+  补齐需要 smoke 自建完整 recorded digest，属独立一轮。
+- `execution_gate._rebuild_gate_index_from_records()` 现在 `del records` 忽略入参、
+  改为持锁重读账本，函数名与签名已名不副实；且它在**每次 permit resolve 成功后**都被调用，
+  即每次 resolve 多一次全账本读 + 索引全量重写。BS/BT 记录过
+  `execution_gate_index.json` 的 15 秒锁争用，虽已由 `prune_sidecar_index()`（保留 2000 条）
+  与 BU 的 tick 错峰把同分钟并发压到 1，仍登记为需要观察的热路径成本。
+
+### 反事实覆盖
+
+- 关掉 `restore_memory_os_import_state` 的 autouse →
+  `test_installed_runtime_import_leaves_no_hole_in_the_real_plugins_package` FAIL，
+  且暴露出比「洞」更坏的一种状态：`sys.modules["plugins"]` 指向 `tmp_path` 里的**假树**。
+- 去掉 `_review_actions` 的无条件 external token → 既有
+  `test_approve_external_evidence_crystallizes_tainted_candidate` FAIL（见第 3 节）。
+- 未声明 `crystallized_test_write_authority` 的永久写 →
+  `CrystallizedApprovalError`，由带 `require_explicit_crystallized_capability` 的两条既有
+  用例 + 新增的 opt-in 钉子用例共同守住。
+- `_gate_error_result` 形状统一后，两条既有断言旧形状的用例立刻 FAIL 并已同步
+  （Section W 规则 2 的现场：改了什么就 grep 什么）。
+
+### 测试与门禁
+
+修复前（`192e056`，本机 Windows）3010 passed / 1 failed / 102 errors / 13 skipped
+→ 修复后 **3119 passed / 13 skipped / 0 failed / 0 errors**。
+五项静态门全过：import cycle 166 模块 / 0 环、write surface 153/153 unclassified 0、
+static hygiene、public checkout probe --strict exit 0、`git diff --check` 干净；
+closure matrix `status=ok`。GitHub CI 对最终提交全绿（full suite + 五门 + 空白门）。
+
+### clean clone + 全新 venv 门：查出两条既有环境缺口
+
+按交接要求做了 exact-commit clean clone + `pip install -e ".[dev]"` 全新 venv 全量，
+**首次跑出 15 failed**——两条都与本轮改动无关，是这道门本身该抓的东西：
+
+1. **`pyproject.toml` 的 dev 依赖在 Windows 上不完整（已修）**。
+   Windows 没有系统 tz 数据库，`zoneinfo.ZoneInfo("UTC")` 直接抛
+   `ZoneInfoNotFoundError`；`plugins/modules/context/digest_consolidation.py` 顶层
+   `from zoneinfo import ZoneInfo`，于是全新 venv 里 15 条测试中的 14 条挂掉
+   （digest_consolidation 10 条 + modules doctor 连带 3 条 + deep_reflection 1 条）。
+   本机之前一直绿是因为系统 Python 恰好装了 `tzdata 2025.3`，CI 绿是因为 Linux 有系统库——
+   **两个环境都在替这条缺失依赖兜底**，只有全新 venv 会暴露它。
+   已加 `tzdata; sys_platform == "win32"` 到 dev extras，实测 14 条全部转绿。
+   （未动运行时 `dependencies = []`：生产两台主机都是 Linux；但需记住
+   digest_consolidation 在 Windows 运行时同样会炸。）
+2. **`test_isolated_worker_executes_without_session_or_delivery_files` 在全新 venv 下必红（未修，登记）**。
+   该测试 `os.symlink(sys.executable, host/"venv"/"bin"/"python")`，
+   在 venv 里 `sys.executable` 是 `.venv/Scripts/python.exe`，符号链接到 venv 布局之外后
+   丢掉 `pyvenv.cfg` 上下文，子进程于是导不到 editable 装的 `plugins` → `returncode != 0`
+   → `ephemeral_worker_failed`。系统 Python 与 Linux CI 均无此问题。
+   文件不在本轮 diff 内，属既有跨环境假设缺口（与 BU.1「CI 空过、本机绿」、
+   BV 第 0 节「本机红、CI 绿」同族：**测试不验证自己的运行前提**）。
+
+修掉第 1 条后 clean-clone 全新 venv 的剩余失败为 **1 条**，即上述第 2 条。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1813,3 +2010,25 @@ sannai-community 仓库 README。）
   显式记录不做 2 项（monitor 对 `recall_facade` 的采集接线；`prefetch()` 三个旋钮合并为一次
   `resolve_knobs()` 以真正消除热路径重复读）。3077 passed + 1 failed →
   **3085 passed / 13 skipped / 0 failed**（净 +7），五项静态门全过。
+- `192e056..（BW，本节）`：接手 WIP checkpoint。**102 个 error 是一个根因**——
+  shell 测试从 `sys.modules` 弹掉 `plugins`/`plugins.memory` 却留下已导入的子模块，
+  于是 `from ... import` 成功而 `import ... as` 在 `getattr(plugins, "memory")` 上炸，
+  新增的 autouse conftest 恰好每条测试 setup 都跑这行，排在其后的测试全灭；
+  改为快照/还原**模块对象本身**（清名字会换掉类身份，把响亮失败变成静默错patch）。
+  GitHub CI 对该 commit 已是红的（run 30697011570），交接方 `gh` 未登录故未核验；
+  另修交接未提到的第 4 条本机失败（正斜杠字面量比 Windows 分隔符，同 BK）。
+  Owner 写入权威两份实现中**跑在生产上的是弱的那份**（不验 recorded-digest source /
+  不验 action 白名单 / 不验 token hash 长度 / 消费比对不含 `action_token_hash`），
+  统一抽到 `owner_write_authority.py`（只依赖 roots/store/JSONL，无 capability 单例）。
+  测试授权由全局 autouse 改为 21 个文件显式声明，Owner ingress/安全用例去掉授权后依然全绿。
+  `approve_external_evidence` 两处缺陷：`_review_actions` 无条件发放 +
+  `_digest_item` 白名单丢掉 `external_review_eligible`，导致**真 tainted 候选反而走普通分支**
+  （既有测试此前一直因无条件 token 而假通过）。`candidate_cluster` 移出
+  `LIVING_MEMORY_TARGET_TYPES` 判定为正确（集合只应含已写入的记录级目标，
+  `candidate` 从来不在其中），但 monitor 内嵌 fallback 拷贝未同步、已修并以 AST 比对钉死。
+  27 文件复审另得 5 项：backfill 脚本被新 fail-closed 契约打断（已补 envelope 参数）、
+  gate error_record 两种形状、`read_candidate_queue` 静默丢弃 schema 非法行（会被压缩永久抹掉）、
+  被拒授权无任何痕迹（补 audit）、gate 对 reject 候选也跑（改惰性）。
+  3010 passed + 1 failed + 102 errors → **3119 passed / 13 skipped / 0 failed / 0 errors**，
+  五项静态门 + closure matrix 全过。有意未做 2 项（blank-host smoke 不再覆盖永久写路径；
+  `_rebuild_gate_index_from_records` 每次 resolve 全账本重读的热路径成本）。

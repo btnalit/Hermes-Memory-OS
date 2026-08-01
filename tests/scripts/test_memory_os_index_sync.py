@@ -24,6 +24,8 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def _load_sync_module():
     """Load memory_os_index_sync.py via importlib (same pattern as other script tests)."""

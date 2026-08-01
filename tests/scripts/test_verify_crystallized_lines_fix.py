@@ -29,6 +29,10 @@ from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.memory.memory_os.ids import new_crystallized_id, new_event_id
 from datetime import datetime, timezone
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def _ts():
     return datetime.now(timezone.utc).isoformat()

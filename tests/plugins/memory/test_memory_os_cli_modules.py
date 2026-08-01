@@ -22,6 +22,10 @@ from plugins.memory.memory_os.__main__ import main as memory_os_module_main
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def test_modules_status_reports_commandized_and_uncommandized_modules(tmp_path, monkeypatch, capsys):
     _init_store(tmp_path)

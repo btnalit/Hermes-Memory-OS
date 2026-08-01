@@ -29,6 +29,8 @@ from plugins.memory.memory_os.clearance_receipts import (
     write_clearance_receipt,
 )
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 class FakeRoots:
     def __init__(self, tmp_path: Path) -> None:

@@ -116,7 +116,98 @@ def _approve_external_via_recorded_digest(
     return dict(parsed["owner_action_result"])
 
 
+def _rendered_candidate_action_types(
+    store: MemoryOSStore,
+    candidate_id: str,
+    *,
+    owner_id: str = "test-owner",
+) -> set[str]:
+    """Return the exact set of action types the Owner digest offers a candidate."""
+    channel = "telegram"
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "actions_enabled": True,
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": channel,
+                "recurring_delivery_target_class": "owner_home",
+            }
+        },
+        store.roots.hermes_home,
+    )
+    rendered = render_owner_review_digest(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        max_action_required=20,
+        max_review_suggested=20,
+        max_fyi=20,
+        record_active=True,
+    )
+    item = next(
+        item
+        for items in rendered["sections"].values()
+        for item in items
+        if item.get("target_type") == "candidate" and item.get("target_id") == candidate_id
+    )
+    tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
+    return set(tokens)
+
+
 # ── Tests ────────────────────────────────────────────────────────────────
+
+
+class TestExternalEvidenceActionIsOfferedOnlyWhereItIsValid:
+    """The digest must not offer an action the Owner is not allowed to take.
+
+    ``_review_actions()`` used to hand ``approve_external_evidence`` to *every*
+    candidate.  Production validation still rejected it for untainted candidates
+    (see ``test_approve_external_evidence_untainted_candidate_rejected``), so
+    this was never an authority bypass — but it put a permanently invalid action
+    in front of the Owner on every ordinary candidate, which trains the Owner to
+    ignore the surface that governance depends on them reading.
+
+    Both assertions are exact-set rather than ``in``/``not in``, so the inverse
+    regression — a tainted candidate silently losing its external action — fails
+    here too.
+    """
+
+    def test_ordinary_candidate_is_not_offered_external_evidence_approval(self, tmp_path):
+        store = _store(tmp_path)
+        append_candidate_queue(
+            store,
+            CrystallizedCandidate(
+                candidate_id="cand-ordinary-001",
+                kind="moment",
+                body="An ordinary candidate with no external provenance.",
+                source_event_ids=["evt-ordinary-001"],
+                sensitivity="private",
+                tags=["test"],
+                bridge_state="owner_eligible",
+                created_at=datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+        assert _rendered_candidate_action_types(store, "cand-ordinary-001") == {
+            "approve_candidate",
+            "reject_candidate",
+        }
+
+    def test_tainted_candidate_is_offered_external_evidence_instead_of_plain_approve(self, tmp_path):
+        store = _store(tmp_path)
+        _create_tainted_candidate(
+            store,
+            candidate_id="cand-tainted-001",
+            content="Externally sourced claim needing evidence review.",
+            external_ref="ext://provider/doc-1",
+        )
+
+        assert _rendered_candidate_action_types(store, "cand-tainted-001") == {
+            "approve_external_evidence",
+            "reject_candidate",
+        }
 
 
 class TestApproveExternalEvidenceOwnerAction:

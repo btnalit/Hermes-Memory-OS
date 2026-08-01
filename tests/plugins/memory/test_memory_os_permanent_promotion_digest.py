@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def test_real_production_migration_fixture_is_desensitised_and_non_mutating():
     import json

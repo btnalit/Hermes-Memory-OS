@@ -107,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         "--hermes-home", default=os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes"),
     )
     parser.add_argument("--profile", default=os.environ.get("HERMES_PROFILE") or "default")
+    parser.add_argument(
+        "--execution-gate-envelope-id",
+        default=os.environ.get("MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID", ""),
+        help="ExecutionGate envelope this backfill runs under (required with --apply)",
+    )
     args = parser.parse_args(argv)
 
     if args.apply and not args.confirm_backfill:
@@ -185,6 +190,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Apply ────────────────────────────────────────────────────────
     if args.apply:
+        # append_candidate_triage() is fail-closed on an empty envelope id, so
+        # check it here rather than letting the first write raise PermissionError
+        # after the summary has already been printed.
+        envelope_id = str(args.execution_gate_envelope_id or "").strip()
+        if not envelope_id:
+            print(
+                "ERROR: --apply requires --execution-gate-envelope-id "
+                "(or MEMORY_OS_EXECUTION_GATE_ENVELOPE_ID); candidate triage is a "
+                "governed write and no longer accepts an operator backfill without one.",
+                file=sys.stderr,
+            )
+            return 2
         written = 0
 
         # Tag fleeting
@@ -196,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
                 target_state="fleeting",
                 reason="backfill: no decision content (chat/acknowledgment only)",
                 now=now,
+                execution_gate_envelope_id=envelope_id,
             )
             written += 1
 
@@ -215,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
                     reason=reason,
                     cluster_key=key,
                     now=now,
+                    execution_gate_envelope_id=envelope_id,
                 )
                 written += 1
 

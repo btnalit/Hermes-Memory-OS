@@ -16,6 +16,7 @@ from .approval import ApprovalDecision, ApprovalPurpose
 from .audit import append_audit
 from .jsonl_io import append_jsonl_locked, append_jsonl_lines_locked, locked_jsonl_file, _append_line_under_lock
 from .ids import new_crystallized_id
+from .owner_write_authority import validate_consumed_owner_write_context
 from .schema import CRYSTALLIZED_SCHEMA_VERSION
 from .store import MemoryOSStore, _format_frontmatter
 from .review_content_safety import permanent_promotion_forbidden_reason_codes
@@ -43,145 +44,6 @@ class CrystallizedApprovalError(ValueError):
 _PERMANENT_PROMOTION_WRITE_CAPABILITY = object()
 _RESOLVER_PROVISIONAL_WRITE_CAPABILITY = object()
 _PROBE_PROVISIONAL_WRITE_CAPABILITY = object()
-
-
-def _read_jsonl_dict_records(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            records.append(value)
-    return records
-
-
-def _validate_consumed_owner_write_context(
-    store: MemoryOSStore,
-    owner_action_context: dict[str, Any] | None,
-    *,
-    candidate: CrystallizedCandidate,
-    decision: ApprovalDecision,
-) -> bool:
-    """Revalidate a consumed Owner action without importing owner_actions.
-
-    Keeping this verification on canonical ledgers avoids a crystallized ↔
-    owner_actions import cycle and, more importantly, avoids trusting a Python
-    object as permanent-write authority.
-    """
-
-    if not isinstance(owner_action_context, dict):
-        return False
-    context = owner_action_context.get("owner_write_context")
-    if not isinstance(context, dict):
-        return False
-    required = {
-        "digest_id",
-        "reply_ingress_id",
-        "owner_id",
-        "channel",
-        "action_type",
-        "target_type",
-        "target_id",
-    }
-    if any(not context.get(key) for key in required):
-        return False
-    if decision.reviewer != str(context.get("owner_id") or ""):
-        return False
-
-    action_type = str(context.get("action_type") or "")
-    target_type = str(context.get("target_type") or "")
-    target_id = str(context.get("target_id") or "")
-    if action_type in {"approve_candidate", "approve_external_evidence"}:
-        if target_type != "candidate" or target_id != candidate.candidate_id:
-            return False
-    elif action_type == "approve_candidate_cluster":
-        action_context = owner_action_context.get("action_context")
-        if not isinstance(action_context, dict):
-            return False
-        scope = action_context.get("candidate_cluster_scope")
-        if not isinstance(scope, dict):
-            return False
-        if f"{scope.get('cluster_id', '')}:{scope.get('scope_hash', '')}" != target_id:
-            return False
-        members = scope.get("member_candidate_ids")
-        if not isinstance(members, list) or candidate.candidate_id not in {str(value) for value in members}:
-            return False
-    else:
-        return False
-
-    token_binding = owner_action_context.get("token_binding")
-    if not isinstance(token_binding, dict):
-        return False
-    digest_id = str(context.get("digest_id") or "")
-    owner_id = str(context.get("owner_id") or "")
-    channel = str(context.get("channel") or "")
-    token_hash = str(token_binding.get("action_token_hash") or "")
-    review_item_id = str(token_binding.get("review_item_id") or "")
-    digest_path = store.roots.memory_os_root / "system" / "owner_review_rendered_digests.jsonl"
-    digest_record = next(
-        (
-            record
-            for record in reversed(_read_jsonl_dict_records(digest_path))
-            if str(record.get("digest_id") or "") == digest_id
-            and str(record.get("owner_id") or "") == owner_id
-            and str(record.get("channel") or "") == channel
-        ),
-        None,
-    )
-    if digest_record is None:
-        return False
-    rendered = digest_record.get("rendered_digest")
-    if not isinstance(rendered, dict):
-        return False
-    sections = rendered.get("sections")
-    if not isinstance(sections, dict):
-        return False
-    token_match = False
-    for section_items in sections.values():
-        if not isinstance(section_items, list):
-            continue
-        for item in section_items:
-            if not isinstance(item, dict) or str(item.get("review_item_id") or "") != review_item_id:
-                continue
-            actions = item.get("action_tokens")
-            targets = item.get("action_targets")
-            if not isinstance(actions, dict) or not isinstance(targets, dict):
-                continue
-            token = str(actions.get(action_type) or "")
-            target = targets.get(action_type)
-            if not token or not isinstance(target, dict):
-                continue
-            token_match = (
-                hashlib.sha256(token.encode("utf-8")).hexdigest() == token_hash
-                and str(target.get("target_type") or "") == target_type
-                and str(target.get("target_id") or "") == target_id
-            )
-            if token_match:
-                break
-        if token_match:
-            break
-    if not token_match:
-        return False
-
-    consumption_path = store.roots.memory_os_root / "system" / "owner_action_context_consumptions.jsonl"
-    return any(
-        str(record.get("status") or "") == "consumed"
-        and str(record.get("context_id") or "") == str(owner_action_context.get("owner_write_context_id") or "")
-        and all(str(record.get(key) or "") == str(context.get(key) or "") for key in (
-            "digest_id", "owner_id", "channel", "action_type", "target_type", "target_id"
-        ))
-        for record in _read_jsonl_dict_records(consumption_path)
-    )
 
 
 def _canonical_transition_locked(method):
@@ -296,11 +158,11 @@ class CrystallizedMemoryService:
             # Owner-action ingress must first bind and consume one recorded
             # digest action context; the validator re-checks that durable
             # context against this exact candidate and decision.
-            if not _validate_consumed_owner_write_context(
+            if not validate_consumed_owner_write_context(
                 self.store,
                 owner_action_context,
-                candidate=candidate,
-                decision=decision,
+                candidate_id=candidate.candidate_id,
+                reviewer=decision.reviewer,
             ):
                 raise CrystallizedApprovalError("invalid or unconsumed owner action context")
         created_at = _timestamp(now)
@@ -1322,6 +1184,28 @@ def read_candidate_queue(
     if error_records is not None:
         error_records.extend(io_result.error_records[-5:])
     candidates: list[CrystallizedCandidate] = []
+
+    def _reject(row: dict[str, Any], error_code: str) -> None:
+        """Record a schema-invalid row instead of dropping it silently.
+
+        These rows have to be visible for the same reason malformed JSON does:
+        the aggregation lane skips queue compaction whenever the reader reports
+        errors, and compaction is an all-or-nothing rewrite.  A row that parses
+        as JSON but is not a usable candidate would otherwise be dropped here
+        and then permanently erased by the next compaction, with nothing
+        anywhere saying so.
+        """
+        if error_records is None:
+            return
+        error_records.append({
+            "component": "crystallized_candidate_queue",
+            "operation": "read_candidate_queue",
+            "error_code": error_code,
+            "severity": "warning",
+            "recoverable": True,
+            "candidate_id": str(row.get("candidate_id") or "")[:120],
+        })
+
     for raw in io_result.records:
         candidate_id = raw.get("candidate_id")
         kind = raw.get("kind")
@@ -1330,14 +1214,18 @@ def read_candidate_queue(
         tags = raw.get("tags") or []
         provenance = raw.get("provenance")
         if not all(isinstance(value, str) and value.strip() for value in (candidate_id, kind, body)):
+            _reject(raw, "candidate_required_field_invalid")
             continue
         if not isinstance(source_event_ids, list) or not isinstance(tags, list):
+            _reject(raw, "candidate_list_field_invalid")
             continue
         if provenance is not None and not isinstance(provenance, dict):
+            _reject(raw, "candidate_provenance_invalid")
             continue
         try:
             rejection_count = int(raw.get("rejection_count", 0))
         except (TypeError, ValueError):
+            _reject(raw, "candidate_rejection_count_invalid")
             continue
         candidates.append(
             CrystallizedCandidate(

@@ -283,6 +283,8 @@ def test_thundering_herd_top_n(tmp_path):
 
 from plugins.modules.governance.candidate_aggregation import _match_existing_provisional
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def test_bump_recurrence_on_match(tmp_path):
     """D.6: durable 撞已有 provisional → bump recurrence+1 + expires_at 续期，不新建."""

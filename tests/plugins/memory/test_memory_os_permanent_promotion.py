@@ -5,6 +5,8 @@ import re
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def test_proposal_id_and_content_hash_are_stable_for_same_input():
     from plugins.memory.memory_os.permanent_promotion import content_hash, make_proposal_id
