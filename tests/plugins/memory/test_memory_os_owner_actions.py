@@ -90,6 +90,56 @@ def _jsonl(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _apply_candidate_via_recorded_digest(
+    store: MemoryOSStore,
+    candidate_id: str,
+    *,
+    owner_id: str = "owner",
+    channel: str = "telegram",
+) -> dict:
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "actions_enabled": True,
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": channel,
+                "recurring_delivery_target_class": "owner_home",
+            }
+        },
+        store.roots.hermes_home,
+    )
+    rendered = render_owner_review_digest(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        max_action_required=20,
+        max_review_suggested=20,
+        max_fyi=20,
+        record_active=True,
+    )
+    item = next(
+        item
+        for section in rendered["sections"].values()
+        for item in section
+        if item.get("target_type") == "candidate"
+        and item.get("target_id") == candidate_id
+    )
+    token = str(item["action_tokens"]["approve_candidate"])
+    result = parse_owner_review_reply(
+        store,
+        f"memory approve {token}",
+        owner_id=owner_id,
+        channel=channel,
+        apply=True,
+        digest_id=str(rendered["digest_id"]),
+        require_recorded_digest=True,
+    )
+    assert result["status"] == "ok", result
+    return dict(result["owner_action_result"])
+
+
 def test_retired_right_brain_outcomes_do_not_reenter_active_owner_surface(tmp_path):
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="main")
     live = tmp_path / "system-modules" / "right_brain_expression_adapter" / "outcomes.jsonl"
@@ -458,14 +508,9 @@ def test_approve_candidate_requires_apply_and_is_idempotent(tmp_path):
     assert not owner_actions_path(store.roots).exists()
     assert not (store.roots.crystallized_root / "owner_approved.md").exists()
 
-    applied = apply_owner_action(
+    applied = _apply_candidate_via_recorded_digest(
         store,
-        action_type="approve_candidate",
-        target="candidate:cand_owner_001",
-        owner_id="owner",
-        channel="cli",
-        note="Approved.",
-        apply=True,
+        "cand_owner_001",
     )
 
     assert applied["status"] == "ok"
@@ -496,14 +541,7 @@ def test_approve_candidate_requires_apply_and_is_idempotent(tmp_path):
 def test_owner_actions_status_counts_queue_and_owner_effects(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
-    apply_owner_action(
-        store,
-        action_type="approve_candidate",
-        target="cand_owner_001",
-        owner_id="owner",
-        channel="cli",
-        apply=True,
-    )
+    _apply_candidate_via_recorded_digest(store, "cand_owner_001")
 
     status = owner_review_status_report(store)
 
@@ -580,13 +618,9 @@ def test_revoke_crystallized_owner_action_marks_canonical_and_invalidates_projec
             tags=["owner-review"],
         ),
     )
-    approve = apply_owner_action(
+    approve = _apply_candidate_via_recorded_digest(
         store,
-        action_type="approve_candidate",
-        target="candidate:cand_public_revoke_001",
-        owner_id="owner",
-        channel="cli",
-        apply=True,
+        "cand_public_revoke_001",
     )
     assert approve["status"] == "ok"
     record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
@@ -640,13 +674,9 @@ def test_demote_crystallized_owner_action_marks_canonical_and_invalidates_projec
             tags=["owner-review"],
         ),
     )
-    approve = apply_owner_action(
+    approve = _apply_candidate_via_recorded_digest(
         store,
-        action_type="approve_candidate",
-        target="candidate:cand_public_demote_001",
-        owner_id="owner",
-        channel="cli",
-        apply=True,
+        "cand_public_demote_001",
     )
     assert approve["status"] == "ok"
     record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
@@ -2442,14 +2472,7 @@ def test_digest_actions_enabled_is_config_derived_without_auto_execute(tmp_path)
 def test_owner_review_reply_can_revoke_crystallized_record_by_token(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
-    apply_owner_action(
-        store,
-        action_type="approve_candidate",
-        target="candidate:cand_owner_001",
-        owner_id="owner",
-        channel="cli",
-        apply=True,
-    )
+    _apply_candidate_via_recorded_digest(store, "cand_owner_001")
     record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
     record_id = str(record.frontmatter["id"])
     token = "oa_" + hashlib.sha256(
@@ -2474,14 +2497,7 @@ def test_owner_review_reply_can_revoke_crystallized_record_by_token(tmp_path):
 def test_owner_review_reply_can_demote_crystallized_record_by_token(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate())
-    apply_owner_action(
-        store,
-        action_type="approve_candidate",
-        target="candidate:cand_owner_001",
-        owner_id="owner",
-        channel="cli",
-        apply=True,
-    )
+    _apply_candidate_via_recorded_digest(store, "cand_owner_001")
     record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
     record_id = str(record.frontmatter["id"])
     token = "oa_" + hashlib.sha256(
@@ -2507,15 +2523,9 @@ def test_owner_review_reply_can_demote_crystallized_record_by_token(tmp_path):
 
 def _crystallized_record_id_for_forgery(store) -> str:
     append_candidate_queue(store, _candidate())
-    apply_owner_action(
-        store,
-        action_type="approve_candidate",
-        target="candidate:cand_owner_001",
-        owner_id="owner",
-        channel="cli",
-        apply=True,
-    )
+    _apply_candidate_via_recorded_digest(store, "cand_owner_001")
     record = CrystallizedMemoryService(store).read_records("owner_approved.md")[0]
+    owner_review_rendered_digests_path(store.roots).unlink(missing_ok=True)
     return str(record.frontmatter["id"])
 
 

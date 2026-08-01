@@ -1,6 +1,8 @@
 import argparse
 import json
 
+import pytest
+
 from plugins.memory.memory_os.cli import memory_os_command, register_cli
 from plugins.memory.memory_os.crystallized import CrystallizedCandidate, append_candidate_queue
 from plugins.memory.memory_os.candidate_clusters import (
@@ -8,7 +10,14 @@ from plugins.memory.memory_os.candidate_clusters import (
     candidate_cluster_action_target,
     candidate_cluster_report,
 )
-from plugins.memory.memory_os.owner_actions import apply_owner_action, owner_review_queue_report, read_owner_action_records
+from plugins.memory.memory_os.config import save_config
+from plugins.memory.memory_os.owner_actions import (
+    apply_owner_action,
+    owner_review_queue_report,
+    parse_owner_review_reply,
+    read_owner_action_records,
+    render_owner_review_digest,
+)
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -139,21 +148,12 @@ def test_owner_review_queue_exposes_candidate_cluster_actions_with_scoped_tokens
     assert item_after["action_tokens"]["approve_candidate_cluster"] != token_before
 
 
+@pytest.mark.require_explicit_crystallized_capability
 def test_approve_candidate_cluster_writes_canonical_records_for_each_member_before_action_ledger(tmp_path):
     store = _store(tmp_path)
     append_candidate_queue(store, _candidate("cand-a", "批准候选簇必须走 canonical crystallized write path", ["evt-a"]))
     append_candidate_queue(store, _candidate("cand-b", "批准候选 cluster 必须走 canonical crystallized write path", ["evt-b"]))
-    target_id = _first_cluster_review_item(store)["target_id"]
-
-    result = apply_owner_action(
-        store,
-        action_type="approve_candidate_cluster",
-        target=f"candidate_cluster:{target_id}",
-        owner_id="owner-test",
-        channel="test",
-        note="cluster approval smoke",
-        apply=True,
-    )
+    result, target_id = _apply_cluster_owner_token(store, owner_id="owner-test")
 
     assert result["status"] == "ok"
     assert result["result_ref"]["approved_candidate_ids"] == ["cand-a", "cand-b"]
@@ -169,6 +169,28 @@ def test_approve_candidate_cluster_writes_canonical_records_for_each_member_befo
     assert records[-1]["target_id"] == target_id
     approval_ledger = store.roots.memory_os_root / "system" / "crystallization_approvals.jsonl"
     assert "approve_candidate_cluster" in approval_ledger.read_text(encoding="utf-8")
+
+
+@pytest.mark.require_explicit_crystallized_capability
+def test_direct_candidate_cluster_apply_without_recorded_owner_token_fails_closed(tmp_path):
+    store = _store(tmp_path)
+    append_candidate_queue(store, _candidate("cand-a", "direct cluster apply must not mint owner authority", ["evt-a"]))
+    append_candidate_queue(store, _candidate("cand-b", "direct cluster approval must not mint owner authority", ["evt-b"]))
+    target_id = _first_cluster_review_item(store)["target_id"]
+
+    result = apply_owner_action(
+        store,
+        action_type="approve_candidate_cluster",
+        target=f"candidate_cluster:{target_id}",
+        owner_id="attacker-process",
+        channel="cli",
+        apply=True,
+    )
+
+    assert result["status"] == "error"
+    assert result["code"] == "owner_write_recorded_digest_required"
+    assert list(store.roots.crystallized_root.glob("*.md")) == []
+    assert read_owner_action_records(store.roots) == []
 
 
 def test_candidate_cluster_action_scope_change_fails_closed_without_canonical_write(tmp_path):
@@ -245,6 +267,51 @@ def _first_cluster_review_item(store: MemoryOSStore) -> dict:
         if item.get("target_type") == "candidate_cluster":
             return item
     raise AssertionError(f"candidate_cluster review item not found: {rendered_items!r}")
+
+
+def _apply_cluster_owner_token(store: MemoryOSStore, *, owner_id: str) -> tuple[dict, str]:
+    channel = "telegram"
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "actions_enabled": True,
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": channel,
+                "recurring_delivery_target_class": "owner_home",
+            }
+        },
+        store.roots.hermes_home,
+    )
+    rendered = render_owner_review_digest(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        max_action_required=20,
+        max_review_suggested=0,
+        max_fyi=0,
+        record_active=True,
+    )
+    cluster_item = next(
+        item
+        for items in rendered["sections"].values()
+        for item in items
+        if item.get("target_type") == "candidate_cluster"
+    )
+    target_id = str(cluster_item["target_id"])
+    token = str(cluster_item["action_tokens"]["approve_candidate_cluster"])
+    result = parse_owner_review_reply(
+        store,
+        f"memory approve {token}",
+        owner_id=owner_id,
+        channel=channel,
+        apply=True,
+        digest_id=str(rendered["digest_id"]),
+        require_recorded_digest=True,
+    )
+    assert result["status"] == "ok", result.get("reason")
+    return result["owner_action_result"], target_id
 
 
 def _store(tmp_path):

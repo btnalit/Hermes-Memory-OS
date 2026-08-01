@@ -58,7 +58,10 @@ from plugins.memory.memory_os.adapters.hindsight import (  # noqa: E402
     HindsightAdapterConfig,
 )
 from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose  # noqa: E402
-from plugins.memory.memory_os.crystallized import CrystallizedMemoryService  # noqa: E402
+from plugins.memory.memory_os.crystallized import (  # noqa: E402
+    CrystallizedMemoryService,
+    _RESOLVER_PROVISIONAL_WRITE_CAPABILITY,
+)
 from plugins.memory.memory_os.fixtures import build_sannai_multi_root_fixture  # noqa: E402
 from plugins.memory.memory_os.index import MemoryOSIndex  # noqa: E402
 from plugins.memory.memory_os.inner_drive import InnerDriveEngine  # noqa: E402
@@ -139,9 +142,12 @@ def _run_e2e(base_dir: Path) -> dict[str, Any]:
     decision = ApprovalDecision(
         candidate_id=process_result.candidate.candidate_id,
         purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
-        reviewer="owner",
+        reviewer="blank_host_resolver",
         reviewed_at="2026-05-20T08:00:00+00:00",
         note="Blank-host smoke approval.",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-05-21T08:00:00+00:00",
     )
     crystallized = CrystallizedMemoryService(store)
     crystallized.write_approved_record(
@@ -149,6 +155,7 @@ def _run_e2e(base_dir: Path) -> dict[str, Any]:
         decision,
         file_name="moments.md",
         now=datetime(2026, 5, 20, 8, 1, tzinfo=timezone.utc),
+        capability=_RESOLVER_PROVISIONAL_WRITE_CAPABILITY,
     )
     disabled_report = HindsightAdapter(store, client=FakeHindsightClient()).export_all()
     enabled_client = FakeHindsightClient()

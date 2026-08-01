@@ -9,7 +9,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .jsonl_io import append_jsonl_locked, read_json_state_result, write_json_atomic
+from .jsonl_io import (
+    _append_line_under_lock,
+    append_jsonl_locked,
+    locked_jsonl_file,
+    read_json_state_result,
+    write_json_atomic,
+)
 from .roots import MemoryOSRoots
 from .store import MemoryOSStore
 
@@ -76,6 +82,16 @@ def _update_gate_index(
     If this update crashes, the next resolve will detect the index miss and
     fall back to a full scan, which rebuilds the missing index entries.
     """
+    with locked_jsonl_file(_gate_index_path(roots)):
+        _update_gate_index_locked(roots, envelope_id, stage, record)
+
+
+def _update_gate_index_locked(
+    roots: MemoryOSRoots,
+    envelope_id: str,
+    stage: str,
+    record: dict[str, Any],
+) -> None:
     index = _read_gate_index(roots)
     entry = index.get(envelope_id, {})
     entry["envelope_id"] = envelope_id
@@ -107,32 +123,34 @@ def _rebuild_gate_index_from_records(
     Used as crash-recovery: if index miss detected during resolve,
     do a full scan and rebuild all index entries.
     """
-    index: dict[str, dict[str, Any]] = {}
-    for record in records:
-        eid = str(record.get("execution_gate_envelope_id") or "")
-        if not eid:
-            continue
-        stage = str(record.get("stage") or "")
-        entry = index.get(eid, {})
-        entry["envelope_id"] = eid
-        if stage == "permit":
-            entry.update({
-                "permit_decision": record.get("permit_decision"),
-                "lane_id": record.get("lane_id"),
-                "risk_class": record.get("risk_class"),
-                "scope_hash": record.get("scope_hash"),
-                "permit_created_at": record.get("created_at"),
-                "permit_expires_at": record.get("expires_at"),
-                "boundary_true": record.get("boundary_true", False),
-            })
-        elif stage == "completion":
-            # Track completion count as integer (C2 fix: was boolean)
-            entry["completion_count"] = entry.get("completion_count", 0) + 1
-            entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
-            entry["completed_at"] = record.get("created_at")
-        index[eid] = entry
-    _write_gate_index(roots, index)
-    return index
+    del records  # The caller snapshot may be stale by the time the lock is acquired.
+    with locked_jsonl_file(_gate_index_path(roots)):
+        current_records = _read_jsonl(execution_gate_records_path(roots))
+        index: dict[str, dict[str, Any]] = {}
+        for record in current_records:
+            eid = str(record.get("execution_gate_envelope_id") or "")
+            if not eid:
+                continue
+            stage = str(record.get("stage") or "")
+            entry = index.get(eid, {})
+            entry["envelope_id"] = eid
+            if stage == "permit":
+                entry.update({
+                    "permit_decision": record.get("permit_decision"),
+                    "lane_id": record.get("lane_id"),
+                    "risk_class": record.get("risk_class"),
+                    "scope_hash": record.get("scope_hash"),
+                    "permit_created_at": record.get("created_at"),
+                    "permit_expires_at": record.get("expires_at"),
+                    "boundary_true": record.get("boundary_true", False),
+                })
+            elif stage == "completion":
+                entry["completion_count"] = entry.get("completion_count", 0) + 1
+                entry["completion_status"] = record.get("execution_status") or record.get("completion_status")
+                entry["completed_at"] = record.get("created_at")
+            index[eid] = entry
+        _write_gate_index(roots, index)
+        return index
 
 
 def read_execution_gate_records(roots: MemoryOSRoots, *, limit: int = 0) -> list[dict[str, Any]]:
@@ -300,7 +318,11 @@ def resolve_execution_gate_permit(
     # Fast path: O(1) index lookup
     idx = _read_gate_index(roots)
     index_entry = idx.get(target)
-    if index_entry is not None and index_entry.get("permit_decision") is not None:
+    if (
+        index_entry is not None
+        and index_entry.get("permit_decision") is not None
+        and not require_unused
+    ):
         failed = _validate_index_entry(
             index_entry, target, lane_id, risk_class,
             require_fresh, require_unused, expected_scope, expected_scope_hash, now,
@@ -373,6 +395,9 @@ def resolve_execution_gate_permit(
         # NOT on semantic rejections (C5 fix)
         return failure
 
+    expected_hash = str(expected_scope_hash or "").strip()
+    if expected_scope is not None:
+        expected_hash = execution_gate_scope_hash(expected_scope)
     result = _permit_resolution(
         status="valid",
         reason="",
@@ -381,7 +406,7 @@ def resolve_execution_gate_permit(
         risk_class=str(permit.get("risk_class") or ""),
         permit=permit,
         completion_count=len(completions),
-        scope_match=True if expected_scope_hash else None,
+        scope_match=True if expected_hash else None,
         require_fresh=require_fresh,
     )
     _rebuild_gate_index_from_records(roots, records)
@@ -481,11 +506,14 @@ def complete_execution_gate_envelope(
     postcheck: dict[str, Any] | None = None,
     result_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    target_envelope_id = str(envelope_id or "").strip()
+    if not target_envelope_id:
+        raise ValueError("execution gate completion requires a non-empty envelope id")
     now = datetime.now(timezone.utc)
     record = {
         "schema_version": EXECUTION_GATE_SCHEMA_VERSION,
         "stage": "completion",
-        "execution_gate_envelope_id": str(envelope_id or ""),
+        "execution_gate_envelope_id": target_envelope_id,
         "created_at": now.isoformat().replace("+00:00", "Z"),
         "profile": store.roots.profile or "default",
         "lane_id": str(lane_id or ""),
@@ -494,9 +522,31 @@ def complete_execution_gate_envelope(
         "postcheck_boundary_true": any_boundary_true(postcheck or {}),
         "result_summary": _bounded_json(result_summary or {}),
     }
-    _append_jsonl(execution_gate_records_path(store.roots), record)
-    _update_gate_index(store.roots, envelope_id, "completion", record)
-    return record
+    path = execution_gate_records_path(store.roots)
+    appended = False
+    existing_completion: dict[str, Any] | None = None
+    with locked_jsonl_file(path) as target:
+        for existing in _read_jsonl(path):
+            if (
+                existing.get("stage") == "completion"
+                and str(existing.get("execution_gate_envelope_id") or "") == target_envelope_id
+            ):
+                existing_completion = existing
+                break
+        if existing_completion is None:
+            _append_line_under_lock(
+                target,
+                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n",
+            )
+            appended = True
+    if appended:
+        _update_gate_index(store.roots, target_envelope_id, "completion", record)
+        return record
+
+    # A concurrent/retried completion is a canonical no-op. Rebuild the sidecar
+    # from the journal so the derived completion_count converges to exactly one.
+    _rebuild_gate_index_from_records(store.roots, [])
+    return dict(existing_completion or record)
 
 
 def execution_gate_summary(roots: MemoryOSRoots) -> dict[str, Any]:

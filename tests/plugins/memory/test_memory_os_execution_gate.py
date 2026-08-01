@@ -1,8 +1,10 @@
 import json
+import threading
 from datetime import datetime, timezone
 
 from plugins.memory.memory_os.execution_gate import (
     boundary_true_paths,
+    complete_execution_gate_envelope,
     execution_gate_records_path,
     execution_gate_scope_hash,
     resolve_execution_gate_permit,
@@ -107,6 +109,129 @@ def test_rotate_execution_gate_records_reports_lock_cleanup_failure(tmp_path, mo
 
     assert report["status"] == "warning"
     assert report["lock_cleanup_error"] == "synthetic lock cleanup failure"
+
+
+def test_completion_append_and_sidecar_are_idempotent_under_concurrency(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="idempotent-completion",
+        trigger_surface="test",
+        risk_class="bounded_reversible_queue",
+        human_approval_required=False,
+        why_no_human_approval="test",
+        scope={"candidate_id": "cand-idempotent-completion"},
+        boundary={},
+    )
+    errors: list[BaseException] = []
+
+    def complete() -> None:
+        try:
+            complete_execution_gate_envelope(
+                store,
+                envelope_id=str(permit["execution_gate_envelope_id"]),
+                lane_id="idempotent-completion",
+                execution_status="completed",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=complete) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert errors == []
+    records = [
+        json.loads(line)
+        for line in execution_gate_records_path(store.roots).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    completions = [
+        row
+        for row in records
+        if row.get("stage") == "completion"
+        and row.get("execution_gate_envelope_id") == permit["execution_gate_envelope_id"]
+    ]
+    assert len(completions) == 1
+    resolution = resolve_execution_gate_permit(
+        store.roots,
+        envelope_id=str(permit["execution_gate_envelope_id"]),
+        lane_id="idempotent-completion",
+        risk_class="bounded_reversible_queue",
+        require_unused=True,
+    )
+    assert resolution["completion_count"] == 1
+
+
+def test_update_gate_index_uses_shared_sidecar_lock(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    import plugins.memory.memory_os.execution_gate as execution_gate
+
+    roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+    observed = []
+
+    @contextmanager
+    def observe_lock(path):
+        observed.append(path)
+        yield path
+
+    monkeypatch.setattr(execution_gate, "locked_jsonl_file", observe_lock, raising=False)
+    execution_gate._update_gate_index(
+        roots,
+        "xgate-lock-test",
+        "permit",
+        {
+            "permit_decision": "allowed",
+            "lane_id": "test",
+            "risk_class": "test",
+            "scope_hash": "hash",
+            "created_at": "2026-08-01T00:00:00Z",
+            "expires_at": "2026-08-01T01:00:00Z",
+        },
+    )
+
+    assert observed == [execution_gate._gate_index_path(roots)]
+
+
+def test_resolve_require_unused_rejects_canonical_completion_missing_from_sidecar(tmp_path):
+    store = MemoryOSStore(MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test"))
+    store.initialize()
+    permit = start_execution_gate_envelope(
+        store,
+        lane_id="test-lane",
+        trigger_surface="test",
+        risk_class="bounded_reversible_queue",
+        human_approval_required=False,
+        why_no_human_approval="test",
+        scope={"candidate_id": "cand-stale-index"},
+        boundary={},
+    )
+    completion = {
+        "schema_version": "memory-os.execution_gate_envelope.v0",
+        "stage": "completion",
+        "execution_gate_envelope_id": permit["execution_gate_envelope_id"],
+        "created_at": "2026-08-01T00:00:00Z",
+        "lane_id": "test-lane",
+        "execution_status": "completed",
+    }
+    with execution_gate_records_path(store.roots).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(completion) + "\n")
+
+    result = resolve_execution_gate_permit(
+        store.roots,
+        envelope_id=permit["execution_gate_envelope_id"],
+        lane_id="test-lane",
+        risk_class="bounded_reversible_queue",
+        require_unused=True,
+    )
+
+    assert result["status"] == "invalid"
+    assert result["reason"] == "execution_gate_permit_already_completed"
+    assert result["completion_count"] == 1
 
 
 def test_resolve_execution_gate_permit_validates_lane_risk_and_boundary(tmp_path):

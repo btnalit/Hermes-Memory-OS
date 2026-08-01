@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .audit import append_audit
 from .ids import new_audit_id
+from .jsonl_io import locked_jsonl_file
 from .store import MemoryOSStore
 
 
@@ -338,9 +339,13 @@ def _apply_action(
 
 
 def _prune_working_item(store: MemoryOSStore, target: Path, item_id: str) -> None:
-    document = json.loads(target.read_text(encoding="utf-8"))
-    document["items"] = [item for item in document.get("items", []) if str(item.get("id", "")) != item_id]
-    store.write_working_document(target.stem, document)
+    with locked_jsonl_file(target):
+        document = json.loads(target.read_text(encoding="utf-8"))
+        document["items"] = [
+            item for item in document.get("items", [])
+            if str(item.get("id", "")) != item_id
+        ]
+        store.write_working_document(target.stem, document)
 
 
 def _prune_event_line(

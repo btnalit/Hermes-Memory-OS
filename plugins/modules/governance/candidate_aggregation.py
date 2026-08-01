@@ -50,6 +50,7 @@ from plugins.memory.memory_os.crystallized import (
     CANDIDATE_DEMOTE_TTL_SECONDS,
     CrystallizedCandidate,
     CrystallizedMemoryService,
+    _RESOLVER_PROVISIONAL_WRITE_CAPABILITY,
     append_candidate_triage,
     read_candidate_queue,
     read_candidate_triage,
@@ -185,6 +186,124 @@ def provisional_write_postcheck() -> dict[str, Any]:
     }
 
 
+def _resolver_candidate_gate_result(
+    store: MemoryOSStore,
+    candidate: CrystallizedCandidate,
+) -> dict[str, Any]:
+    import json
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    from plugins.memory.memory_os.index import MemoryOSIndex
+
+    return run_crystallization_gate(
+        str(store.roots.index_path),
+        index=MemoryOSIndex(store.roots),
+        audit_path=str(store.roots.audit_path),
+        candidates=[
+            {
+                "candidate_id": candidate.candidate_id,
+                "body": candidate.body,
+                "tags_json": json.dumps(candidate.tags or [], ensure_ascii=False),
+            }
+        ],
+    )
+
+
+def _resolver_candidate_gate_allows(
+    result: dict[str, Any],
+    candidate_id: str,
+) -> bool:
+    if str(result.get("status") or "") != "ok":
+        return False
+    flagged_ids = {
+        str(item.get("candidate_id") or "")
+        for item in result.get("flagged_candidates", [])
+        if isinstance(item, dict)
+    }
+    return candidate_id not in flagged_ids
+
+
+def _write_resolver_provisional(
+    store: MemoryOSStore,
+    candidate: CrystallizedCandidate,
+    decision: Any,
+) -> Path:
+    from plugins.memory.memory_os.execution_gate import (
+        RESOLVER_AUTO_APPROVE_LANE,
+        RESOLVER_AUTO_APPROVE_RISK_CLASS,
+        complete_execution_gate_envelope,
+        resolve_execution_gate_permit,
+        start_resolver_auto_approve_envelope,
+    )
+
+    envelope = start_resolver_auto_approve_envelope(
+        store,
+        candidate_id=candidate.candidate_id,
+        sensitivity=candidate.sensitivity,
+        has_identity_signal=False,
+        bridge_state=candidate.bridge_state,
+    )
+    envelope_id = str(envelope["execution_gate_envelope_id"])
+    permit = resolve_execution_gate_permit(
+        store.roots,
+        envelope_id=envelope_id,
+        lane_id=RESOLVER_AUTO_APPROVE_LANE,
+        risk_class=RESOLVER_AUTO_APPROVE_RISK_CLASS,
+        require_fresh=True,
+        require_unused=True,
+        expected_scope=(envelope.get("scope") if isinstance(envelope.get("scope"), dict) else {}),
+    )
+    if str(permit.get("status") or "") != "valid":
+        complete_execution_gate_envelope(
+            store,
+            envelope_id=envelope_id,
+            lane_id=RESOLVER_AUTO_APPROVE_LANE,
+            execution_status="failed_closed",
+            postcheck={
+                "crystallized_write": "none",
+                "actual_permanent_crystallized_approval": False,
+                "actual_unapproved_permanent_crystallized_write": False,
+            },
+            result_summary={
+                "candidate_id": candidate.candidate_id,
+                "error_code": str(permit.get("reason") or "execution_gate_permit_invalid"),
+            },
+        )
+        raise PermissionError(str(permit.get("reason") or "execution_gate_permit_invalid"))
+    try:
+        path = CrystallizedMemoryService(store).write_approved_record(
+            candidate,
+            decision,
+            file_name="owner_approved.md",
+            capability=_RESOLVER_PROVISIONAL_WRITE_CAPABILITY,
+        )
+    except Exception as exc:
+        complete_execution_gate_envelope(
+            store,
+            envelope_id=envelope_id,
+            lane_id=RESOLVER_AUTO_APPROVE_LANE,
+            execution_status="failed",
+            postcheck={
+                "crystallized_write": "provisional_failed",
+                "actual_permanent_crystallized_approval": False,
+                "actual_unapproved_permanent_crystallized_write": False,
+            },
+            result_summary={
+                "candidate_id": candidate.candidate_id,
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+    complete_execution_gate_envelope(
+        store,
+        envelope_id=envelope_id,
+        lane_id=RESOLVER_AUTO_APPROVE_LANE,
+        execution_status="completed",
+        postcheck=provisional_write_postcheck(),
+    )
+    return path
+
+
 # Auto-demote candidates that have been rejected N+ times by owner
 _REJECTION_THRESHOLD = 3
 
@@ -237,7 +356,8 @@ def run_candidate_aggregation_lane(
     remains Owner-only.
     """
     _now = now or datetime.now(timezone.utc)
-    candidates = read_candidate_queue(store)
+    candidate_error_records: list[dict[str, Any]] = []
+    candidates = read_candidate_queue(store, error_records=candidate_error_records)
     triage_records = read_candidate_triage(store)
 
     # Build a set of terminally-triaged candidate_ids.
@@ -279,7 +399,14 @@ def run_candidate_aggregation_lane(
 
     from plugins.memory.memory_os.crystallized import compact_candidate_queue
     archive = store.roots.memory_os_root / "system" / "candidate_archive.jsonl"
-    compact_count = compact_candidate_queue(store, archive_path=archive, retention_days=7)
+    # Compaction is an all-or-nothing rewrite. If the tolerant reader observed
+    # corruption, preserve the queue byte-for-byte and surface the bounded
+    # errors instead of allowing a partial archive/replace transaction.
+    compact_count = 0 if candidate_error_records else compact_candidate_queue(
+        store,
+        archive_path=archive,
+        retention_days=7,
+    )
 
     result = {
         "candidates_read": len(candidates),
@@ -292,6 +419,14 @@ def run_candidate_aggregation_lane(
         "fleeting_count": fleeting_results["fleeting_count"],
         "compacted_count": compact_count,
         "action": "candidate_aggregation_tick",
+        "status": "warning" if candidate_error_records else "ok",
+        "suppressed_error_count": len(candidate_error_records),
+        "recent_error_codes": [
+            str(record.get("error_code") or "")
+            for record in candidate_error_records[-5:]
+            if record.get("error_code")
+        ],
+        "error_records": candidate_error_records[-5:],
         "promotion_result": promote_results,
         "actual_send": False,
         "actual_execute": False,
@@ -573,24 +708,12 @@ def _cluster_and_promote(
                 provisional_promotion=provisional_promotion,
                 cascade_policy=cascade_policy,
             )
-            if verdict.get("approve"):
+            gate_result = _resolver_candidate_gate_result(store, member)
+            if verdict.get("approve") and _resolver_candidate_gate_allows(
+                gate_result, member.candidate_id,
+            ):
                 target_state = "resolver_approved"
-                from plugins.memory.memory_os.execution_gate import (
-                    start_resolver_auto_approve_envelope,
-                    complete_execution_gate_envelope,
-                    RESOLVER_AUTO_APPROVE_LANE,
-                )
                 from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
-                from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
-
-                crystallized_service = CrystallizedMemoryService(store)
-                envelope = start_resolver_auto_approve_envelope(
-                    store,
-                    candidate_id=member.candidate_id,
-                    sensitivity=member.sensitivity,
-                    has_identity_signal=False,
-                    bridge_state=member.bridge_state,
-                )
                 decision = ApprovalDecision(
                     candidate_id=member.candidate_id,
                     purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
@@ -602,19 +725,15 @@ def _cluster_and_promote(
                     expires_at=_default_provisional_expires_at(member, _now),
                     recurrence=0,
                 )
-                crystallized_service.write_approved_record(
-                    member, decision, file_name="owner_approved.md",
-                )
+                _write_resolver_provisional(store, member, decision)
                 provisional_write_count += 1
-                complete_execution_gate_envelope(
-                    store,
-                    envelope_id=envelope["execution_gate_envelope_id"],
-                    lane_id=RESOLVER_AUTO_APPROVE_LANE,
-                    execution_status="completed",
-                    postcheck=provisional_write_postcheck(),
-                )
             else:
                 target_state = "owner_eligible"
+                if verdict.get("approve"):
+                    reason = (
+                        f"{reason}; crystallization_gate:"
+                        f"{gate_result.get('error_code') or 'flagged'}"
+                    )
 
             append_candidate_triage(
                 store,
@@ -743,24 +862,12 @@ def _cluster_and_promote(
                 provisional_promotion=provisional_promotion,
                 cascade_policy=cascade_policy,
             )
-            if verdict.get("approve"):
+            gate_result = _resolver_candidate_gate_result(store, c)
+            if verdict.get("approve") and _resolver_candidate_gate_allows(
+                gate_result, c.candidate_id,
+            ):
                 target_state = "resolver_approved"
-                from plugins.memory.memory_os.execution_gate import (
-                    start_resolver_auto_approve_envelope,
-                    complete_execution_gate_envelope,
-                    RESOLVER_AUTO_APPROVE_LANE,
-                )
                 from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
-                from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
-
-                crystallized_service = CrystallizedMemoryService(store)
-                envelope = start_resolver_auto_approve_envelope(
-                    store,
-                    candidate_id=c.candidate_id,
-                    sensitivity=c.sensitivity,
-                    has_identity_signal=False,
-                    bridge_state=c.bridge_state,
-                )
                 decision = ApprovalDecision(
                     candidate_id=c.candidate_id,
                     purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
@@ -772,19 +879,15 @@ def _cluster_and_promote(
                     expires_at=_default_provisional_expires_at(c, _now),
                     recurrence=0,
                 )
-                crystallized_service.write_approved_record(
-                    c, decision, file_name="owner_approved.md",
-                )
+                _write_resolver_provisional(store, c, decision)
                 provisional_write_count += 1
-                complete_execution_gate_envelope(
-                    store,
-                    envelope_id=envelope["execution_gate_envelope_id"],
-                    lane_id=RESOLVER_AUTO_APPROVE_LANE,
-                    execution_status="completed",
-                    postcheck=provisional_write_postcheck(),
-                )
             else:
                 target_state = "owner_eligible"
+                if verdict.get("approve"):
+                    reason = (
+                        f"{reason}; crystallization_gate:"
+                        f"{gate_result.get('error_code') or 'flagged'}"
+                    )
 
             append_candidate_triage(
                 store,
@@ -891,22 +994,12 @@ def _cluster_and_promote(
             provisional_promotion=provisional_promotion,
             cascade_policy=cascade_policy,
         )
-        if verdict.get("approve"):
+        gate_result = _resolver_candidate_gate_result(store, c)
+        if verdict.get("approve") and _resolver_candidate_gate_allows(
+            gate_result, c.candidate_id,
+        ):
             target_state = "resolver_approved"
-            from plugins.memory.memory_os.execution_gate import (
-                start_resolver_auto_approve_envelope as _srae2,
-                complete_execution_gate_envelope as _cege2,
-                RESOLVER_AUTO_APPROVE_LANE as _RAL2,
-            )
             from plugins.memory.memory_os.approval import ApprovalDecision as _AD2, ApprovalPurpose as _AP2
-            from plugins.memory.memory_os.crystallized import CrystallizedMemoryService as _CMS2
-
-            _crystallized_service2 = _CMS2(store)
-            _envelope2 = _srae2(
-                store, candidate_id=c.candidate_id,
-                sensitivity=c.sensitivity, has_identity_signal=False,
-                bridge_state=c.bridge_state,
-            )
             _decision2 = _AD2(
                 candidate_id=c.candidate_id,
                 purpose=_AP2.APPROVE_FOR_CRYSTALLIZED,
@@ -916,15 +1009,15 @@ def _cluster_and_promote(
                 expires_at=_default_provisional_expires_at(c, _now),
                 recurrence=0,
             )
-            _crystallized_service2.write_approved_record(c, _decision2, file_name="owner_approved.md")
+            _write_resolver_provisional(store, c, _decision2)
             provisional_write_count += 1
-            _cege2(
-                store, envelope_id=_envelope2["execution_gate_envelope_id"],
-                lane_id=_RAL2, execution_status="completed",
-                postcheck=provisional_write_postcheck(),
-            )
         else:
             target_state = "owner_eligible"
+            if verdict.get("approve"):
+                reason = (
+                    f"{reason}; crystallization_gate:"
+                    f"{gate_result.get('error_code') or 'flagged'}"
+                )
 
         append_candidate_triage(
             store, candidate_id=c.candidate_id, action="promote",

@@ -2649,6 +2649,10 @@ def test_classify_snapshot_aggregates_error_observability_counters():
 
     assert summary["schema_version"] == "memory-os.monitor_error_observability.v0"
     assert summary["suppressed_error_count"] == 10
+    assert summary["observed_suppressed_error_count"] == 10
+    assert summary["aggregate_complete"] is False
+    assert summary["count_semantics"] == "lower_bound"
+    assert summary["unobserved_error_count"] is None
     assert summary["degraded_component_count"] == 4
     assert summary["live_write_error_count"] == 1
     assert summary["component_counts"] == {

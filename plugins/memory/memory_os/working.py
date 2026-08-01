@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import wraps
 from math import pow
 from typing import Any
 
 from .audit import append_audit, read_audit_records
 from .ids import new_working_id
+from .jsonl_io import locked_jsonl_file
 from .schema import WORKING_SCHEMA_VERSION, WORKING_SCHEMA_VERSION_V0, WorkingItem
 from .store import MemoryOSStore
 
@@ -48,12 +50,24 @@ class WorkingMemoryError(ValueError):
     """Raised when a working-memory operation is invalid."""
 
 
+def _working_transition_locked(method):
+    @wraps(method)
+    def wrapper(self, kind: str, *args, **kwargs):
+        self._validate_kind(kind)
+        path = self.store.roots.working_root / f"{kind}.json"
+        with locked_jsonl_file(path):
+            return method(self, kind, *args, **kwargs)
+
+    return wrapper
+
+
 class WorkingMemoryService:
     """Manage profile-local working-memory documents."""
 
     def __init__(self, store: MemoryOSStore) -> None:
         self.store = store
 
+    @_working_transition_locked
     def add_item(
         self,
         kind: str,
@@ -137,6 +151,23 @@ class WorkingMemoryService:
             document["schema_version"] = WORKING_SCHEMA_VERSION
         return document
 
+    @_working_transition_locked
+    def initialize_empty_document(
+        self,
+        kind: str,
+        *,
+        now: datetime | None = None,
+        audit_write: bool = True,
+    ) -> dict[str, Any]:
+        document = {
+            "schema_version": WORKING_SCHEMA_VERSION,
+            "updated_at": (now or datetime.now(timezone.utc)).isoformat(),
+            "items": [],
+        }
+        self.store.write_working_document(kind, document, audit=audit_write)
+        return document
+
+    @_working_transition_locked
     def decay_items(
         self,
         kind: str,
@@ -196,6 +227,7 @@ class WorkingMemoryService:
             self.store.write_working_document(kind, document, audit=audit_write)
         return updated_items
 
+    @_working_transition_locked
     def prune_expired_items(
         self,
         kind: str,

@@ -54,9 +54,9 @@ def test_living_memory_choke_point_filters_nonpromotion_but_keeps_other_systems(
     delivery_items, diagnostics = owner_actions_module._assemble_living_memory_delivery_items(items)
 
     assert [item["target_type"] for item in delivery_items] == [
-        "permanent_memory_promotion", "speak_permission", "knob_override"
+        "candidate_cluster", "permanent_memory_promotion", "speak_permission", "knob_override"
     ]
-    assert diagnostics["living_memory_nonpromotion_filtered_count"] == 3
+    assert diagnostics["living_memory_nonpromotion_filtered_count"] == 2
     assert diagnostics["permanent_promotion_review_item_count"] == 1
 
 
@@ -89,8 +89,8 @@ def test_digest_delivery_filters_every_nonpromotion_living_memory_target(tmp_pat
     preview = owner_actions_module.owner_review_digest_preview(store, max_action_required=10)
     target_types = [item["target_type"] for item in preview["sections"]["action_required"]]
 
-    assert target_types == ["permanent_memory_promotion", "speak_permission"]
-    assert preview["delivery_diagnostics"]["living_memory_nonpromotion_filtered_count"] == 2
+    assert target_types == ["candidate_cluster", "permanent_memory_promotion", "speak_permission"]
+    assert preview["delivery_diagnostics"]["living_memory_nonpromotion_filtered_count"] == 1
 
 
 def test_digest_has_no_expiring_provisional_delivery_or_legacy_expiry_tokens(tmp_path):

@@ -1206,15 +1206,32 @@ def test_t2_2_4_gate_skipped_when_no_candidates(tmp_path):
     assert result["flagged_count"] == 0
 
 
-def test_t2_2_5_gate_fail_open_broken_index(tmp_path):
-    """T2.2.5: Gate returns gracefully on broken index."""
+def test_t2_2_5_gate_returns_structured_error_when_index_cannot_open(tmp_path):
     from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
-    result = run_crystallization_gate(
-        "/nonexistent/path/to/index.db",
-        index=None,
-    )
+
+    result = run_crystallization_gate(str(tmp_path), index=None)
+
     assert result["status"] == "error"
-    assert "error" in result
+    assert result["error_code"] == "cannot_open_index"
+    assert result["error_count"] == 1
+    assert result["error_records"] == [
+        {"code": "cannot_open_index", "candidate_id": "", "component": "sqlite"}
+    ]
+
+
+def test_t2_2_5_gate_returns_structured_error_when_candidates_cannot_be_read(tmp_path):
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+
+    index_path = tmp_path / "empty.sqlite"
+    sqlite3.connect(index_path).close()
+    result = run_crystallization_gate(str(index_path), index=None)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "cannot_read_candidates"
+    assert result["error_count"] == 1
+    assert result["error_records"] == [
+        {"code": "cannot_read_candidates", "candidate_id": "", "component": "sqlite"}
+    ]
 
 
 def test_t2_2_5_gate_fails_closed_when_edge_query_errors(tmp_path):
@@ -1552,6 +1569,60 @@ def test_resolve_edge_target_preview_found(tmp_path):
     preview = _resolve_edge_target_preview(store, record_id)
     assert preview is not None
     assert "深色主题" in preview
+
+
+def test_resolve_edge_target_preview_excludes_revoked_record(tmp_path):
+    from plugins.memory.memory_os.prefetch import _resolve_edge_target_preview
+    from plugins.memory.memory_os.roots import MemoryOSRoots
+    from plugins.memory.memory_os.store import MemoryOSStore
+    from plugins.memory.memory_os.crystallized import (
+        CrystallizedCandidate,
+        CrystallizedMemoryService,
+    )
+    from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+
+    roots = MemoryOSRoots.from_hermes_home(str(tmp_path), profile="test")
+    store = MemoryOSStore(roots)
+    store.initialize()
+    service = CrystallizedMemoryService(store)
+    candidate = CrystallizedCandidate(
+        candidate_id="cand-revoked-preview",
+        kind="preference",
+        body="SECRET-NONCE-REVOKED-PREVIEW",
+        source_event_ids=["evt-revoked-preview"],
+    )
+    decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-06-22T10:00:00Z",
+    )
+    service.write_approved_record(
+        candidate,
+        decision,
+        file_name="owner_approved.md",
+    )
+    record_id = str(service.read_records("owner_approved.md")[0].frontmatter["id"])
+    service.revoke_record(record_id, revoked_by="owner", reason="test")
+
+    assert _resolve_edge_target_preview(store, record_id) is None
+
+    from plugins.memory.memory_os.prefetch import _graph_layer_injection_lines
+
+    lines = _graph_layer_injection_lines(
+        store,
+        [
+            {
+                "edge_id": "edge-revoked-preview",
+                "to_record_type": "crystallized_record",
+                "to_record_id": record_id,
+                "relation_type": "similar_to",
+                "weight": 0.8,
+                "state": "active",
+            }
+        ],
+    )
+    assert lines == []
 
 
 def test_graph_layer_injection_lines_formats_edges(tmp_path):

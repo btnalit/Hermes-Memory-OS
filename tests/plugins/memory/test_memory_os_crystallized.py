@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import threading
 
 import pytest
@@ -14,7 +15,9 @@ from plugins.memory.memory_os.crystallized import (
     CrystallizedApprovalError,
     CrystallizedCandidate,
     CrystallizedMemoryService,
+    _RESOLVER_PROVISIONAL_WRITE_CAPABILITY,
     append_candidate_queue,
+    append_candidate_triage,
     is_active_crystallized_frontmatter,
     read_candidate_queue,
 )
@@ -44,6 +47,16 @@ def _candidate() -> CrystallizedCandidate:
     )
 
 
+def _write_approved_record(service, candidate, decision, **kwargs):
+    capability = _RESOLVER_PROVISIONAL_WRITE_CAPABILITY if decision.provisional else None
+    return service.write_approved_record(
+        candidate,
+        decision,
+        capability=capability,
+        **kwargs,
+    )
+
+
 def test_unapproved_candidate_cannot_write_crystallized_record(tmp_path):
     service = _service(tmp_path)
     candidate = _candidate()
@@ -55,9 +68,94 @@ def test_unapproved_candidate_cannot_write_crystallized_record(tmp_path):
     )
 
     with pytest.raises(CrystallizedApprovalError, match="approve_for_crystallized"):
-        service.write_approved_record(candidate, decision, file_name="moments.md")
+        _write_approved_record(service, candidate, decision, file_name="moments.md")
 
     assert list(service.store.roots.crystallized_root.glob("*.md")) == []
+
+
+@pytest.mark.require_explicit_crystallized_capability
+def test_caller_minted_permanent_approval_requires_owner_write_capability(tmp_path):
+    """A reviewer string is not proof that an Owner action authorized a write."""
+    service = _service(tmp_path)
+    candidate = _candidate()
+    fabricated = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="attacker_process",
+        reviewed_at="2026-05-20T08:30:00+00:00",
+    )
+
+    with pytest.raises(CrystallizedApprovalError, match="owner action context"):
+        service.write_approved_record(candidate, fabricated, file_name="moments.md")
+
+    assert list(service.store.roots.crystallized_root.glob("*.md")) == []
+
+
+@pytest.mark.require_explicit_crystallized_capability
+def test_caller_minted_resolver_provisional_requires_automation_capability(tmp_path):
+    service = _service(tmp_path)
+    candidate = _candidate()
+    fabricated = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="resolver",
+        reviewed_at="2026-05-20T08:30:00+00:00",
+        source_state="resolver_approved",
+        provisional=True,
+        expires_at="2026-05-21T08:30:00+00:00",
+    )
+
+    with pytest.raises(CrystallizedApprovalError, match="provisional write capability"):
+        service.write_approved_record(candidate, fabricated, file_name="moments.md")
+    with pytest.raises(CrystallizedApprovalError, match="provisional write capability"):
+        service.write_approved_record(
+            candidate,
+            fabricated,
+            file_name="moments.md",
+            capability={},
+        )
+
+    assert list(service.store.roots.crystallized_root.glob("*.md")) == []
+
+
+def test_write_capability_imports_are_restricted_to_governed_production_callers():
+    repo_root = Path(__file__).resolve().parents[3]
+    expected = {
+        "_RESOLVER_PROVISIONAL_WRITE_CAPABILITY": {
+            "plugins/memory/memory_os/crystallized.py",
+            "plugins/modules/governance/candidate_aggregation.py",
+            "scripts/memory_os_blank_host_smoke.py",
+        },
+        "_PROBE_PROVISIONAL_WRITE_CAPABILITY": {
+            "plugins/memory/memory_os/crystallized.py",
+            "scripts/probe_l3_prefetch_behavior.py",
+        },
+    }
+    for capability, allowed in expected.items():
+        found = {
+            str(path.relative_to(repo_root))
+            for base in (repo_root / "plugins", repo_root / "scripts")
+            for path in base.rglob("*.py")
+            if capability in path.read_text(encoding="utf-8", errors="ignore")
+        }
+        assert found == allowed
+
+
+def test_candidate_triage_empty_execution_gate_token_fails_closed(tmp_path):
+    service = _service(tmp_path)
+
+    for token in ("", "   "):
+        with pytest.raises(PermissionError, match="non-empty execution gate"):
+            append_candidate_triage(
+                service.store,
+                candidate_id="cand-empty-gate",
+                action="promote",
+                target_state="owner_eligible",
+                reason="test",
+                execution_gate_envelope_id=token,
+            )
+
+    assert not (service.store.roots.crystallized_root / "candidate_triage.jsonl").exists()
 
 
 def test_candidate_queue_round_trips_default_none_tags(tmp_path):
@@ -77,6 +175,46 @@ def test_candidate_queue_round_trips_default_none_tags(tmp_path):
     assert records[0].tags == []
 
 
+def test_candidate_append_tolerates_existing_non_object_jsonl_row(tmp_path):
+    service = _service(tmp_path)
+    queue = service.store.roots.crystallized_root / "candidates.jsonl"
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_text("[]\n", encoding="utf-8")
+
+    candidate = _candidate()
+    append_candidate_queue(service.store, candidate)
+
+    assert [record.candidate_id for record in read_candidate_queue(service.store)] == [
+        candidate.candidate_id
+    ]
+
+
+def test_candidate_queue_skips_malformed_and_invalid_rows(tmp_path):
+    service = _service(tmp_path)
+    queue = service.store.roots.crystallized_root / "candidates.jsonl"
+    queue.write_text(
+        "\n".join(
+            [
+                '{"candidate_id":"valid","kind":"fact","body":"valid body","source_event_ids":["evt-1"]}',
+                "{BROKEN",
+                "[]",
+                '{"candidate_id":"missing-body","kind":"fact"}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    errors = []
+    records = read_candidate_queue(service.store, error_records=errors)
+
+    assert [record.candidate_id for record in records] == ["valid"]
+    assert {record["error_code"] for record in errors} >= {
+        "jsonl_malformed_line",
+        "jsonl_non_object_line",
+    }
+
+
 def test_approved_record_frontmatter_contains_approval_metadata_and_source_events(tmp_path):
     service = _service(tmp_path)
     candidate = _candidate()
@@ -88,7 +226,7 @@ def test_approved_record_frontmatter_contains_approval_metadata_and_source_event
         note="Approved for long-term memory.",
     )
 
-    path = service.write_approved_record(
+    path = _write_approved_record(service,
         candidate,
         decision,
         file_name="moments.md",
@@ -120,7 +258,7 @@ def test_approved_write_waits_for_canonical_transition_lock(tmp_path, monkeypatc
         reviewer="owner",
         reviewed_at="2026-05-20T08:00:00+00:00",
     )
-    service.write_approved_record(first, first_decision, file_name="moments.md")
+    _write_approved_record(service, first, first_decision, file_name="moments.md")
     first_id = service.read_records("moments.md")[0].frontmatter["id"]
 
     second = CrystallizedCandidate(
@@ -169,7 +307,7 @@ def test_approved_write_waits_for_canonical_transition_lock(tmp_path, monkeypatc
     def append_second() -> None:
         try:
             append_attempted.set()
-            service.write_approved_record(
+            _write_approved_record(service,
                 second, second_decision, file_name="moments.md"
             )
         except BaseException as exc:  # surfaced after both threads join
@@ -207,7 +345,7 @@ def test_revoke_holds_edge_lock_across_read_modify_write(tmp_path, monkeypatch):
         reviewer="owner",
         reviewed_at="2026-05-20T08:00:00+00:00",
     )
-    service.write_approved_record(candidate, decision, file_name="moments.md")
+    _write_approved_record(service, candidate, decision, file_name="moments.md")
     record_id = str(service.read_records("moments.md")[0].frontmatter["id"])
 
     from plugins.memory.memory_os import jsonl_io
@@ -302,7 +440,7 @@ def test_cw019_owner_eligible_is_preserved_but_not_upgraded_to_crystallized_appr
 
     assert decision.purpose == ApprovalPurpose.APPROVE_FOR_VISIBILITY
     with pytest.raises(CrystallizedApprovalError, match="owner_eligible"):
-        service.write_approved_record(candidate, decision, file_name="moments.md")
+        _write_approved_record(service, candidate, decision, file_name="moments.md")
 
 
 def test_approved_record_is_auditable_back_to_source_events(tmp_path):
@@ -315,7 +453,7 @@ def test_approved_record_is_auditable_back_to_source_events(tmp_path):
         reviewed_at="2026-05-20T08:00:00+00:00",
     )
 
-    service.write_approved_record(candidate, decision, file_name="moments.md")
+    _write_approved_record(service, candidate, decision, file_name="moments.md")
 
     audit_entries = read_audit_entries(service.store.roots.audit_path)
     assert any(entry["action"] == "crystallized_record_written" for entry in audit_entries)
@@ -385,7 +523,7 @@ def test_write_approved_record_with_provisional_true_adds_provisional_frontmatte
         recurrence=0,
     )
     service = CrystallizedMemoryService(store)
-    path = service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    path = _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
     records = service.read_records("owner_approved.md")
     assert len(records) == 1
@@ -424,7 +562,7 @@ def test_write_approved_record_with_provisional_false_does_not_add_provisional_k
         provisional=False,
     )
     service = CrystallizedMemoryService(store)
-    path = service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    path = _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
     records = service.read_records("owner_approved.md")
     assert len(records) == 1
@@ -468,7 +606,7 @@ def test_invalidate_provisional_record_sets_canonical_state_and_preserves_record
         expires_at="2026-06-24T00:00:00Z",
     )
     service = CrystallizedMemoryService(store)
-    path = service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    path = _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
     records = service.read_records("owner_approved.md")
     record_id = records[0].frontmatter["id"]
 
@@ -542,7 +680,7 @@ def test_confirm_provisional_record_removes_provisional_and_expires_at(tmp_path)
         expires_at="2026-06-24T00:00:00Z",
     )
     service = CrystallizedMemoryService(store)
-    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
     records = service.read_records("owner_approved.md")
     record_id = records[0].frontmatter["id"]
 
@@ -590,7 +728,7 @@ def test_list_provisional_records_filters_active_provisional_only(tmp_path):
         provisional=True,
         expires_at="2026-06-24T00:00:00Z",
     )
-    service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+    _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
     # Write a non-provisional record
     candidate2 = CrystallizedCandidate(
@@ -607,7 +745,7 @@ def test_list_provisional_records_filters_active_provisional_only(tmp_path):
         reviewed_at="2026-06-17T00:00:00Z",
         provisional=False,
     )
-    service.write_approved_record(candidate2, decision2, file_name="owner_approved.md")
+    _write_approved_record(service, candidate2, decision2, file_name="owner_approved.md")
 
     results = service.list_provisional_records()
     assert len(results) == 1
@@ -654,7 +792,7 @@ class TestAutoPromoteProvisionalRecords:
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
         service = CrystallizedMemoryService(store)
-        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
         # Verify it's provisional before promotion
         assert len(service.list_provisional_records()) == 1
@@ -701,7 +839,7 @@ class TestAutoPromoteProvisionalRecords:
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
         service = CrystallizedMemoryService(store)
-        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
         result = service.auto_promote_provisional_records(now=now)
         assert result["eligible_count"] == 0
@@ -749,7 +887,7 @@ class TestAutoPromoteProvisionalRecords:
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
         service = CrystallizedMemoryService(store)
-        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
         # Mark as rejected by owner
         records = service.read_records("owner_approved.md")
@@ -811,7 +949,7 @@ class TestAutoPromoteProvisionalRecords:
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
         service = CrystallizedMemoryService(store)
-        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
         with pytest.warns(DeprecationWarning, match="auto_promote_enabled"):
             result = service.auto_promote_provisional_records(now=now, _store_root=tmp_path)
@@ -854,7 +992,7 @@ class TestAutoPromoteProvisionalRecords:
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
         service = CrystallizedMemoryService(store)
-        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
         result = service.auto_promote_provisional_records(now=now, dry_run=True)
         assert result["eligible_count"] == 1
@@ -894,7 +1032,7 @@ class TestAutoPromoteProvisionalRecords:
             source_state="resolver_approved", provisional=True,
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
-        service.write_approved_record(c1, d1, file_name="owner_approved.md")
+        _write_approved_record(service, c1, d1, file_name="owner_approved.md")
 
         # Young record (<7 days)
         c2 = CrystallizedCandidate(
@@ -911,7 +1049,7 @@ class TestAutoPromoteProvisionalRecords:
             source_state="resolver_approved", provisional=True,
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
-        service.write_approved_record(c2, d2, file_name="owner_approved.md")
+        _write_approved_record(service, c2, d2, file_name="owner_approved.md")
 
         result = service.auto_promote_provisional_records(now=now)
         assert result["eligible_count"] == 1
@@ -964,7 +1102,7 @@ class TestAutoPromoteAdversarial:
             expires_at=(now + timedelta(days=30)).isoformat(),
         )
         service = CrystallizedMemoryService(store)
-        service.write_approved_record(candidate, decision, file_name="owner_approved.md")
+        _write_approved_record(service, candidate, decision, file_name="owner_approved.md")
 
         # Without calling auto_promote, record stays provisional
         assert len(service.list_provisional_records()) == 1
@@ -1150,7 +1288,7 @@ def _build_aged_provisional(service, *, candidate_id, days_old, now,
         provisional=True,
         expires_at=(now + timedelta(days=30)).isoformat(),
     )
-    service.write_approved_record(candidate, decision, file_name=file_name)
+    _write_approved_record(service, candidate, decision, file_name=file_name)
 
 
 def _eligibility_service(tmp_path):

@@ -1972,11 +1972,16 @@ def classify_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         if isinstance(snapshot.get("error_observability"), dict)
         else monitor_error_observability(snapshot)
     )
+    if not isinstance(error_observability, dict):
+        error_observability = {}
     if error_observability.get("schema_version") == "memory-os.monitor_error_observability.v0":
         passed.append(
             {
                 "code": "monitor_error_observability_visible",
                 "suppressed_error_count": error_observability.get("suppressed_error_count"),
+                "observed_suppressed_error_count": error_observability.get("observed_suppressed_error_count"),
+                "aggregate_complete": error_observability.get("aggregate_complete"),
+                "count_semantics": error_observability.get("count_semantics"),
                 "degraded_component_count": error_observability.get("degraded_component_count"),
                 "live_write_error_count": error_observability.get("live_write_error_count"),
             }
@@ -4132,6 +4137,7 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "candidate_review",
     "cascade_routing_policy",
     "clearance_cycle",
+    "crystallized_candidate_queue",
     "entity_index",
     "feature_score",
     "imagination_loop",
@@ -4155,6 +4161,7 @@ ERROR_RECORD_EMITTING_COMPONENTS = frozenset({
     "runtime",
     "session_mirror",
     "shadow_recall",
+    "sqlite",
     "state_source_mirror",
     "symbolic_offloader",
 })
@@ -4230,9 +4237,17 @@ def monitor_error_observability(snapshot: dict[str, Any]) -> dict[str, Any]:
             if not _is_monitor_probe_error_record(record) and _is_live_write_error_record(component, record)
         )
     total_suppressed = sum(component_counts.values())
+    component_coverage = _error_record_component_coverage(set(component_sources))
+    aggregate_complete = component_coverage["unaggregated_component_count"] == 0
     return {
         "schema_version": "memory-os.monitor_error_observability.v0",
+        # Backward-compatible field; count_semantics makes clear that it is not
+        # a repository-wide total until every emitter is aggregated.
         "suppressed_error_count": total_suppressed,
+        "observed_suppressed_error_count": total_suppressed,
+        "aggregate_complete": aggregate_complete,
+        "count_semantics": "complete" if aggregate_complete else "lower_bound",
+        "unobserved_error_count": 0 if aggregate_complete else None,
         "degraded_component_count": sum(1 for value in component_counts.values() if value > 0),
         "live_write_error_count": live_write_error_count,
         "monitor_probe_error_count": monitor_probe_error_count,
@@ -4243,7 +4258,7 @@ def monitor_error_observability(snapshot: dict[str, Any]) -> dict[str, Any]:
         },
         "recent_error_codes": _bounded_error_codes(recent_codes, limit=10),
         "raw_body_included": raw_body_included,
-        "component_coverage": _error_record_component_coverage(set(component_sources)),
+        "component_coverage": component_coverage,
     }
 
 

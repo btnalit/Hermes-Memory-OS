@@ -9,7 +9,9 @@ from typing import Any, TYPE_CHECKING
 from plugins.memory.memory_os.crystallized import (
     _parse_markdown_records,
     is_active_crystallized_frontmatter,
+    read_effective_candidates,
 )
+from plugins.memory.memory_os.index import _event_fts_text
 from plugins.memory.memory_os.recall_types import RecallObject, RecallType
 
 if TYPE_CHECKING:
@@ -42,6 +44,15 @@ class IndexedFTSRetriever:
             return []
 
         active_crystallized_bodies = _active_crystallized_record_bodies(store.roots.crystallized_root)
+        canonical_event_bodies = {
+            str(event.id): _event_fts_text(event)
+            for event in store.read_events()
+        }
+        canonical_candidate_bodies = {
+            item.candidate.candidate_id: item.candidate.body
+            for item in read_effective_candidates(store)
+            if not item.terminal
+        }
         objects: list[RecallObject] = []
         batch_size = max(50, limit * 4)
         offset = 0
@@ -67,11 +78,15 @@ class IndexedFTSRetriever:
                     break
                 offset += len(rows)
                 for row in rows:
-                    if row["record_type"] == "crystallized_record":
-                        record_id = str(row["record_id"] or "")
-                        source_body = active_crystallized_bodies.get(record_id)
-                        if source_body is None or source_body.strip() != str(row["text"] or "").strip():
-                            continue
+                    record_type = str(row["record_type"] or "")
+                    record_id = str(row["record_id"] or "")
+                    source_body = {
+                        "crystallized_record": active_crystallized_bodies,
+                        "event": canonical_event_bodies,
+                        "crystallized_candidate": canonical_candidate_bodies,
+                    }.get(record_type, {}).get(record_id)
+                    if source_body is None or source_body.strip() != str(row["text"] or "").strip():
+                        continue
                     content = (row["text"] or "")[:500]
                     if not content.strip():
                         continue

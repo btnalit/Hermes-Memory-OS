@@ -14,7 +14,7 @@ from .approval import approval_from_cw019_state
 from .audit import append_audit
 from .ids import new_event_id
 from .roots import MemoryOSRoots
-from .schema import EVENT_SCHEMA_VERSION, EventEnvelope, WORKING_SCHEMA_VERSION
+from .schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from .store import MemoryOSStore
 from .working import WorkingMemoryService
 
@@ -405,10 +405,7 @@ def _import_lingering_if_present(bundle: Path, store: MemoryOSStore) -> None:
             weight = 0.5
         imported_items.append(asdict(service.add_item("lingering", text, tags=["shadow-import"], weight=weight)))
     if not imported_items and parsed == []:
-        store.write_working_document(
-            "lingering",
-            {"schema_version": WORKING_SCHEMA_VERSION, "updated_at": datetime.now(timezone.utc).isoformat(), "items": []},
-        )
+        service.initialize_empty_document("lingering")
 
 
 def _bundle_relative_path(source: dict[str, Any]) -> Path:

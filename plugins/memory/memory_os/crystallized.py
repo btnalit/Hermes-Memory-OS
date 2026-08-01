@@ -41,6 +41,147 @@ class CrystallizedApprovalError(ValueError):
 
 
 _PERMANENT_PROMOTION_WRITE_CAPABILITY = object()
+_RESOLVER_PROVISIONAL_WRITE_CAPABILITY = object()
+_PROBE_PROVISIONAL_WRITE_CAPABILITY = object()
+
+
+def _read_jsonl_dict_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    return records
+
+
+def _validate_consumed_owner_write_context(
+    store: MemoryOSStore,
+    owner_action_context: dict[str, Any] | None,
+    *,
+    candidate: CrystallizedCandidate,
+    decision: ApprovalDecision,
+) -> bool:
+    """Revalidate a consumed Owner action without importing owner_actions.
+
+    Keeping this verification on canonical ledgers avoids a crystallized ↔
+    owner_actions import cycle and, more importantly, avoids trusting a Python
+    object as permanent-write authority.
+    """
+
+    if not isinstance(owner_action_context, dict):
+        return False
+    context = owner_action_context.get("owner_write_context")
+    if not isinstance(context, dict):
+        return False
+    required = {
+        "digest_id",
+        "reply_ingress_id",
+        "owner_id",
+        "channel",
+        "action_type",
+        "target_type",
+        "target_id",
+    }
+    if any(not context.get(key) for key in required):
+        return False
+    if decision.reviewer != str(context.get("owner_id") or ""):
+        return False
+
+    action_type = str(context.get("action_type") or "")
+    target_type = str(context.get("target_type") or "")
+    target_id = str(context.get("target_id") or "")
+    if action_type in {"approve_candidate", "approve_external_evidence"}:
+        if target_type != "candidate" or target_id != candidate.candidate_id:
+            return False
+    elif action_type == "approve_candidate_cluster":
+        action_context = owner_action_context.get("action_context")
+        if not isinstance(action_context, dict):
+            return False
+        scope = action_context.get("candidate_cluster_scope")
+        if not isinstance(scope, dict):
+            return False
+        if f"{scope.get('cluster_id', '')}:{scope.get('scope_hash', '')}" != target_id:
+            return False
+        members = scope.get("member_candidate_ids")
+        if not isinstance(members, list) or candidate.candidate_id not in {str(value) for value in members}:
+            return False
+    else:
+        return False
+
+    token_binding = owner_action_context.get("token_binding")
+    if not isinstance(token_binding, dict):
+        return False
+    digest_id = str(context.get("digest_id") or "")
+    owner_id = str(context.get("owner_id") or "")
+    channel = str(context.get("channel") or "")
+    token_hash = str(token_binding.get("action_token_hash") or "")
+    review_item_id = str(token_binding.get("review_item_id") or "")
+    digest_path = store.roots.memory_os_root / "system" / "owner_review_rendered_digests.jsonl"
+    digest_record = next(
+        (
+            record
+            for record in reversed(_read_jsonl_dict_records(digest_path))
+            if str(record.get("digest_id") or "") == digest_id
+            and str(record.get("owner_id") or "") == owner_id
+            and str(record.get("channel") or "") == channel
+        ),
+        None,
+    )
+    if digest_record is None:
+        return False
+    rendered = digest_record.get("rendered_digest")
+    if not isinstance(rendered, dict):
+        return False
+    sections = rendered.get("sections")
+    if not isinstance(sections, dict):
+        return False
+    token_match = False
+    for section_items in sections.values():
+        if not isinstance(section_items, list):
+            continue
+        for item in section_items:
+            if not isinstance(item, dict) or str(item.get("review_item_id") or "") != review_item_id:
+                continue
+            actions = item.get("action_tokens")
+            targets = item.get("action_targets")
+            if not isinstance(actions, dict) or not isinstance(targets, dict):
+                continue
+            token = str(actions.get(action_type) or "")
+            target = targets.get(action_type)
+            if not token or not isinstance(target, dict):
+                continue
+            token_match = (
+                hashlib.sha256(token.encode("utf-8")).hexdigest() == token_hash
+                and str(target.get("target_type") or "") == target_type
+                and str(target.get("target_id") or "") == target_id
+            )
+            if token_match:
+                break
+        if token_match:
+            break
+    if not token_match:
+        return False
+
+    consumption_path = store.roots.memory_os_root / "system" / "owner_action_context_consumptions.jsonl"
+    return any(
+        str(record.get("status") or "") == "consumed"
+        and str(record.get("context_id") or "") == str(owner_action_context.get("owner_write_context_id") or "")
+        and all(str(record.get(key) or "") == str(context.get(key) or "") for key in (
+            "digest_id", "owner_id", "channel", "action_type", "target_type", "target_id"
+        ))
+        for record in _read_jsonl_dict_records(consumption_path)
+    )
 
 
 def _canonical_transition_locked(method):
@@ -118,6 +259,12 @@ class CrystallizedRecord:
     body: str
 
 
+@dataclass(frozen=True)
+class CrystallizedWriteReceipt:
+    path: Path
+    record_id: str
+
+
 class CrystallizedMemoryService:
     """Write and read owner-approved long-term memory records."""
 
@@ -132,8 +279,30 @@ class CrystallizedMemoryService:
         *,
         file_name: str,
         now: datetime | None = None,
-    ) -> Path:
+        capability: object | None = None,
+        owner_action_context: dict[str, Any] | None = None,
+        return_receipt: bool = False,
+    ) -> Path | CrystallizedWriteReceipt:
         self._ensure_crystallized_approval(candidate, decision)
+        if decision.provisional:
+            allowed = (
+                capability is _RESOLVER_PROVISIONAL_WRITE_CAPABILITY
+                or capability is _PROBE_PROVISIONAL_WRITE_CAPABILITY
+            )
+            if not allowed:
+                raise CrystallizedApprovalError("invalid provisional write capability")
+        else:
+            # Permanent canonical authority is not a module singleton.  The
+            # Owner-action ingress must first bind and consume one recorded
+            # digest action context; the validator re-checks that durable
+            # context against this exact candidate and decision.
+            if not _validate_consumed_owner_write_context(
+                self.store,
+                owner_action_context,
+                candidate=candidate,
+                decision=decision,
+            ):
+                raise CrystallizedApprovalError("invalid or unconsumed owner action context")
         created_at = _timestamp(now)
         provenance = dict(candidate.provenance or {})
         from .provenance import candidate_external_ref, is_tainted
@@ -198,6 +367,8 @@ class CrystallizedMemoryService:
             "supersede" if decision.provisional else "add",
             frontmatter["id"],
         )
+        if return_receipt:
+            return CrystallizedWriteReceipt(path=path, record_id=str(frontmatter["id"]))
         return path
 
     def read_records(self, file_name: str) -> list[CrystallizedRecord]:
@@ -1070,6 +1241,8 @@ def _candidate_id_present_locked(target: Path, candidate_id: str) -> bool:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(obj, dict):
+                continue
             if obj.get("candidate_id") == candidate_id:
                 return True
         return False
@@ -1130,28 +1303,54 @@ def append_candidate_queue(store: MemoryOSStore, candidate: CrystallizedCandidat
     return path
 
 
-def read_candidate_queue(roots_or_store: Any) -> list[CrystallizedCandidate]:
+def read_candidate_queue(
+    roots_or_store: Any,
+    *,
+    error_records: list[dict[str, Any]] | None = None,
+) -> list[CrystallizedCandidate]:
     roots = getattr(roots_or_store, "roots", roots_or_store)
     path = roots.crystallized_root / "candidates.jsonl"
     if not path.exists():
         return []
+    from .jsonl_io import read_jsonl_result
+
+    io_result = read_jsonl_result(
+        path,
+        component="crystallized_candidate_queue",
+        operation="read_candidate_queue",
+    )
+    if error_records is not None:
+        error_records.extend(io_result.error_records[-5:])
     candidates: list[CrystallizedCandidate] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
+    for raw in io_result.records:
+        candidate_id = raw.get("candidate_id")
+        kind = raw.get("kind")
+        body = raw.get("body")
+        source_event_ids = raw.get("source_event_ids", [])
+        tags = raw.get("tags") or []
+        provenance = raw.get("provenance")
+        if not all(isinstance(value, str) and value.strip() for value in (candidate_id, kind, body)):
             continue
-        raw = json.loads(line)
+        if not isinstance(source_event_ids, list) or not isinstance(tags, list):
+            continue
+        if provenance is not None and not isinstance(provenance, dict):
+            continue
+        try:
+            rejection_count = int(raw.get("rejection_count", 0))
+        except (TypeError, ValueError):
+            continue
         candidates.append(
             CrystallizedCandidate(
-                candidate_id=str(raw["candidate_id"]),
-                kind=str(raw["kind"]),
-                body=str(raw["body"]),
-                source_event_ids=[str(item) for item in raw.get("source_event_ids", [])],
+                candidate_id=str(candidate_id),
+                kind=str(kind),
+                body=str(body),
+                source_event_ids=[str(item) for item in source_event_ids],
                 sensitivity=str(raw.get("sensitivity", "private")),
-                tags=[str(item) for item in (raw.get("tags") or [])],
+                tags=[str(item) for item in tags],
                 bridge_state=str(raw.get("bridge_state", "")),
                 created_at=str(raw.get("created_at") or ""),
-                rejection_count=int(raw.get("rejection_count", 0)),
-                provenance=dict(raw.get("provenance") or {}) or None,
+                rejection_count=rejection_count,
+                provenance=(dict(provenance) or None) if provenance is not None else None,
             )
         )
     return candidates
@@ -1249,14 +1448,15 @@ def append_candidate_triage(
     The lane reads both files at query time and resolves effective state.
 
     Governance path:
-      - Lane ticks (envelope_id non-empty): goes through append_governed_jsonl
-        with the ExecutionGate envelope → A6 satisfied.
-      - Backfill/operator (envelope_id empty): uses
-        allow_owner_action_without_envelope=True → classified exemption in
-        write_surface_check.
+      - Every append requires a non-empty ExecutionGate envelope id and is
+        validated by append_governed_jsonl. Empty/whitespace tokens fail closed;
+        operator backfills must open an explicit governed envelope.
     """
     if action not in CANDIDATE_TRIAGE_ACTIONS:
         raise ValueError(f"invalid triage action: {action!r}; expected one of {CANDIDATE_TRIAGE_ACTIONS}")
+    envelope_id = str(execution_gate_envelope_id or "").strip()
+    if not envelope_id:
+        raise PermissionError("candidate triage requires a non-empty execution gate envelope id")
     path = store.roots.crystallized_root / CANDIDATE_TRIAGE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
@@ -1266,38 +1466,22 @@ def append_candidate_triage(
         "reason": str(reason),
         "cluster_key": str(cluster_key or ""),
         "cluster_size": int(cluster_size),
-        "execution_gate_envelope_id": str(execution_gate_envelope_id or ""),
+        "execution_gate_envelope_id": envelope_id,
         "created_at": _timestamp(now),
     }
-    # Use governed write — bare path.open('a') would fail write_surface_check
+    # Use governed write — bare path.open('a') would fail write_surface_check.
     from .structural_write_gate import append_governed_jsonl
-    from .execution_gate import execution_gate_scope_hash
 
-    has_envelope = bool(execution_gate_envelope_id and str(execution_gate_envelope_id).strip())
-    # When an execution-gate envelope is present, the permit's lane_id /
-    # risk_class / expiry are already validated by the structural write gate.
-    # The envelope-level scope (cron metadata) differs from the triage-action
-    # scope (lane/action/target_state), so omit scope_hash for envelope-backed
-    # writes — lane_id + envelope_id + expiry provide sufficient constraint.
-    scope_hash = (
-        ""
-        if has_envelope
-        else execution_gate_scope_hash({
-            "lane": "candidate_aggregation",
-            "action": action,
-            "target_state": target_state,
-        })
-    )
     append_governed_jsonl(
         store,
         path,
         record,
-        write_owner="cognitive_loop" if has_envelope else "operator",
+        write_owner="cognitive_loop",
         lane_id="candidate_aggregation",
         risk_class="bounded_reversible_queue",
-        execution_gate_envelope_id=str(execution_gate_envelope_id or ""),
-        scope_hash=scope_hash,
-        allow_owner_action_without_envelope=not has_envelope,
+        execution_gate_envelope_id=envelope_id,
+        scope_hash="",
+        allow_owner_action_without_envelope=False,
     )
     append_audit(
         store.roots.audit_path,

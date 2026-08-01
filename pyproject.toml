@@ -32,3 +32,7 @@ include = ["plugins*", "memory_os_agent*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+  "require_explicit_crystallized_capability: run without the test-only canonical write capability fixture",
+  "use_real_crystallization_gate: run candidate aggregation against the real strict graph gate",
+]

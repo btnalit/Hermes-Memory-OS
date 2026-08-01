@@ -12,7 +12,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,8 +20,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from plugins.memory.memory_os.crystallized import (
     CrystallizedCandidate,
     CrystallizedMemoryService,
+    CrystallizedWriteReceipt,
     ApprovalDecision,
     ApprovalPurpose,
+    _PROBE_PROVISIONAL_WRITE_CAPABILITY,
     is_active_crystallized_frontmatter,
 )
 from plugins.memory.memory_os.config import load_config
@@ -122,6 +124,94 @@ def _compact_probe_file(service: CrystallizedMemoryService) -> str:
         return f"compact: failed ({exc})"
 
 
+def _exercise_prefetch(
+    *,
+    store: MemoryOSStore,
+    nonce_pos: str,
+    nonce_neg: str,
+    budget_chars: int,
+    results: dict[str, str],
+) -> tuple[bool, bool, list[str], dict[str, str]]:
+    probe_queries = [
+        "What is the current system deployment codename?",
+        "Can you tell me the deployment codename for this system?",
+        "I need to check the deployment identifier for this host.",
+    ]
+    dry_run_config = {"enabled": False, "mode": "dry_run"}
+    l2_positive = False
+    for query in probe_queries:
+        context = build_prefetch(
+            query, budget_chars=budget_chars, store=store, index=None,
+            context_router_config=dry_run_config,
+        )
+        if nonce_pos in context:
+            l2_positive = True
+            results[f"l2_recall_positive [{query[:30]}...]"] = "✅ NONCE FOUND in prefetch context"
+            break
+    if not l2_positive:
+        context = build_prefetch(
+            probe_queries[0], budget_chars=budget_chars, store=store, index=None,
+            context_router_config=dry_run_config,
+        )
+        results["l2_recall_positive"] = "❌ NONCE NOT FOUND in prefetch context"
+        in_section = False
+        for line in context.splitlines():
+            if "### Crystallized Memory" in line:
+                in_section = True
+            elif line.startswith("### ") and in_section:
+                break
+            if in_section:
+                results["l2_recall_debug"] = results.get("l2_recall_debug", "") + line + "\n"
+        results["l2_recall_file_check"] = "nonce in _system_probe.md"
+
+    l2_negative = False
+    for query in probe_queries:
+        context = build_prefetch(
+            query, budget_chars=budget_chars, store=store, index=None,
+            context_router_config=dry_run_config,
+        )
+        if nonce_neg in context:
+            l2_negative = True
+            results[f"l2_recall_negative [{query[:30]}...]"] = "❌ NEGATIVE NONCE FOUND (should not happen!)"
+            break
+    if not l2_negative:
+        results["l2_recall_negative"] = "✅ negative nonce NOT recalled (expected)"
+    return l2_positive, l2_negative, probe_queries, dry_run_config
+
+
+def _cleanup_probe_record(
+    service: CrystallizedMemoryService,
+    record_id: str,
+    results: dict[str, str],
+) -> bool:
+    try:
+        revoke_result = service.revoke_record(
+            record_id,
+            revoked_by="probe",
+            reason="L3 probe cleanup — positive nonce",
+            now=datetime.now(timezone.utc),
+        )
+        if revoke_result.get("canonical_state_changed"):
+            results["cleanup"] = "revoked: canonical_state changed"
+        else:
+            results["cleanup"] = f"revoke status: {revoke_result}"
+        results["cleanup_compact"] = _compact_probe_file(service)
+        remaining_ids = {
+            str(record.frontmatter.get("id") or "")
+            for record in service.read_records("_system_probe.md")
+        }
+        removed = record_id not in remaining_ids
+        results["cleanup_record_verification"] = (
+            "✅ stable record id absent after cleanup"
+            if removed
+            else "❌ stable record id remains after cleanup"
+        )
+        return removed
+    except Exception as exc:
+        results["cleanup"] = f"cleanup failed: {type(exc).__name__}"
+        return False
+
+
 # ── harness core ───────────────────────────────────────────────────
 def run(cleanup: bool = True) -> dict[str, str]:
     results: dict[str, str] = {}
@@ -156,103 +246,65 @@ def run(cleanup: bool = True) -> dict[str, str]:
         reviewer="probe",
         reviewed_at=_now(),
         note=f"L3 probe nonce (positive case); cleanup=revoke",
+        source_state="l3_probe",
+        provisional=True,
+        expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
     )
-    path = service.write_approved_record(cand_pos, dec_pos, file_name="_system_probe.md")
-    record_id = service.read_records("_system_probe.md")[-1].frontmatter["id"]
-    log["positive_record_id"] = record_id
-    log["write_path"] = str(path)
-    log_path.write_text(json.dumps(log, indent=2), encoding="utf-8")
-    results["write"] = f"written to {path.name}: record_id={record_id}"
-
-    # ── step 2: L2 recall verification — positive nonce ────────
-    probe_queries = [
-        "What is the current system deployment codename?",
-        "Can you tell me the deployment codename for this system?",
-        "I need to check the deployment identifier for this host.",
-    ]
-
-    # Dry-run mode: generate ALL sections without LLM routing (user protocol: "dry-run --query")
-    # This tests L2 recall: does _crystallized_lines actually contain the nonce?
-    dry_run_config = {"enabled": False, "mode": "dry_run"}
-
+    cleanup_ok = not cleanup
+    cleanup_recall_ok = not cleanup
     l2_positive = False
-    for q in probe_queries:
-        context = build_prefetch(
-            q, budget_chars=budget_chars, store=store, index=None,
-            context_router_config=dry_run_config,
+    l2_negative = True
+    probe_queries = ["What is the current system deployment codename?"]
+    dry_run_config = {"enabled": False, "mode": "dry_run"}
+    receipt = service.write_approved_record(
+        cand_pos,
+        dec_pos,
+        file_name="_system_probe.md",
+        capability=_PROBE_PROVISIONAL_WRITE_CAPABILITY,
+        return_receipt=True,
+    )
+    if not isinstance(receipt, CrystallizedWriteReceipt):
+        raise TypeError("probe write did not return a stable write receipt")
+    path = receipt.path
+    record_id = receipt.record_id
+    try:
+        log["positive_record_id"] = record_id
+        log["write_path"] = str(path)
+        log_path.write_text(json.dumps(log, indent=2), encoding="utf-8")
+        results["write"] = f"written to {path.name}: record_id={record_id}"
+        l2_positive, l2_negative, probe_queries, dry_run_config = _exercise_prefetch(
+            store=store,
+            nonce_pos=nonce_pos,
+            nonce_neg=nonce_neg,
+            budget_chars=budget_chars,
+            results=results,
         )
-        if nonce_pos in context:
-            l2_positive = True
-            results[f"l2_recall_positive [{q[:30]}...]"] = "✅ NONCE FOUND in prefetch context"
-            break
-
-    if not l2_positive:
-        # Full context dump for debugging — show Crystallized Memory section specifically
-        context = build_prefetch(
-            probe_queries[0], budget_chars=budget_chars, store=store, index=None,
-            context_router_config=dry_run_config,
-        )
-        results["l2_recall_positive"] = "❌ NONCE NOT FOUND in prefetch context"
-        # Extract Crystallized Memory section
-        in_section = False
-        for line in context.splitlines():
-            if "### Crystallized Memory" in line:
-                in_section = True
-            elif line.startswith("### ") and in_section:
-                break
-            if in_section:
-                results["l2_recall_debug"] = results.get("l2_recall_debug", "") + line + "\n"
-        # Also dump nonce_file
-        results["l2_recall_file_check"] = f"nonce in _system_probe.md"
-
-    # ── step 3: L2 recall verification — negative nonce ────────
-    l2_negative = False
-    for q in probe_queries:
-        context = build_prefetch(
-            q, budget_chars=budget_chars, store=store, index=None,
-            context_router_config=dry_run_config,
-        )
-        if nonce_neg in context:
-            l2_negative = True
-            results[f"l2_recall_negative [{q[:30]}...]"] = "❌ NEGATIVE NONCE FOUND (should not happen!)"
-            break
-
-    if not l2_negative:
-        results["l2_recall_negative"] = "✅ negative nonce NOT recalled (expected)"
-
-    # ── step 4: cleanup — revoke + compact via governance path ─
-    if cleanup:
-        revoke_result = service.revoke_record(
-            record_id,
-            revoked_by="probe",
-            reason="L3 probe cleanup — positive nonce",
-            now=datetime.now(timezone.utc),
-        )
-        if revoke_result.get("canonical_state_changed"):
-            results["cleanup"] = f"revoked: canonical_state changed"
-        else:
-            results["cleanup"] = f"revoke status: {revoke_result}"
-
-        # Compact the probe file: rewrite with only active records,
-        # delete if empty.  This prevents unbounded accumulation of
-        # inactive probe nonces in the production crystallized directory.
-        compacted = _compact_probe_file(service)
-        results["cleanup_compact"] = compacted
-
-        # Verify revocation: post-revoke prefetch should NOT contain nonce
-        context_post = build_prefetch(
-            probe_queries[0], budget_chars=budget_chars, store=store, index=None,
-            context_router_config=dry_run_config,
-        )
-        if nonce_pos in context_post:
-            results["cleanup_verify"] = "❌ NONCE STILL VISIBLE after revoke — revocation leak!"
-        else:
-            results["cleanup_verify"] = "✅ nonce filtered after revoke (is_active works)"
+    finally:
+        if cleanup:
+            cleanup_ok = _cleanup_probe_record(service, str(record_id), results)
+            try:
+                context_post = build_prefetch(
+                    probe_queries[0], budget_chars=budget_chars, store=store, index=None,
+                    context_router_config=dry_run_config,
+                )
+                cleanup_recall_ok = nonce_pos not in context_post
+                results["cleanup_recall_verification"] = (
+                    "✅ revoked nonce no longer recalled"
+                    if cleanup_recall_ok
+                    else "❌ revoked nonce STILL recalled"
+                )
+            except Exception as exc:
+                cleanup_recall_ok = False
+                results["cleanup_recall_verification"] = (
+                    f"❌ cleanup recall verification failed: {type(exc).__name__}"
+                )
 
     # ── final report ──────────────────────────────────────────
     all_ok = (
         l2_positive      # condition 1: positive nonce recalled
         and not l2_negative  # condition 2: negative nonce NOT recalled
+        and cleanup_ok
+        and cleanup_recall_ok
     )
     results["verdict"] = "✅ L2: GOVERNANCE PATH + PREFETCH RECALL VERIFIED" if all_ok else "❌ PARTIAL FAILURE"
 

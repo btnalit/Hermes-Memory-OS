@@ -38,7 +38,12 @@ from .memory_sources import (
 )
 from .read_model_paths import owner_actions_path as _owner_actions_path
 from .roots import MemoryOSRoots
-from .jsonl_io import append_jsonl_locked, build_error_record
+from .jsonl_io import (
+    _append_line_under_lock,
+    append_jsonl_locked,
+    build_error_record,
+    locked_jsonl_file,
+)
 from .store import MemoryOSStore
 from .review_content_safety import (
     contains_transcript_marker as _shared_contains_transcript_marker,
@@ -206,11 +211,14 @@ ACTION_TYPES = {
     *PERMANENT_PROMOTION_ACTION_TYPES,
 }
 
+OWNER_CANONICAL_WRITE_ACTION_TYPES = frozenset(
+    {"approve_candidate", "approve_candidate_cluster", "approve_external_evidence"}
+)
+
 # V2-0 registry: scope the permanent-promotion delivery contract narrowly so
 # unrelated owner-review systems never contribute to its hard-zero invariants.
 LIVING_MEMORY_TARGET_TYPES = frozenset(
     {
-        "candidate_cluster",
         "crystallized_record",
         "provisional_crystallized_record",
         "permanent_memory_promotion",
@@ -286,6 +294,10 @@ def owner_review_deliveries_path(roots: MemoryOSRoots) -> Path:
 
 def owner_review_rendered_digests_path(roots: MemoryOSRoots) -> Path:
     return roots.memory_os_root / "system" / "owner_review_rendered_digests.jsonl"
+
+
+def owner_action_context_consumptions_path(roots: MemoryOSRoots) -> Path:
+    return roots.memory_os_root / "system" / "owner_action_context_consumptions.jsonl"
 
 
 def owner_review_cron_helper_path(roots: MemoryOSRoots) -> Path:
@@ -2275,6 +2287,11 @@ def parse_owner_review_reply(
             item=item,
             action_token=action_token,
             reply_text=reply_text,
+            action_type=action_type,
+            target_type=target_type,
+            target_id=target_id,
+            owner_id=owner_id,
+            channel=channel,
         ),
     )
     return _reply_result(
@@ -2891,6 +2908,159 @@ def _assemble_living_memory_delivery_items(
     }
 
 
+def _verified_owner_write_binding(
+    store: MemoryOSStore,
+    record: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    context = record.get("owner_write_context") if isinstance(record.get("owner_write_context"), dict) else {}
+    token_binding = record.get("token_binding") if isinstance(record.get("token_binding"), dict) else {}
+    action_type = str(record.get("action_type") or "")
+    target_type = str(record.get("target_type") or "")
+    target_id = str(record.get("target_id") or "")
+    owner_id = str(record.get("owner_id") or "")
+    channel = _safe_channel(str(record.get("channel") or ""))
+    digest_id = str(context.get("digest_id") or "")
+    reply_ingress_id = str(context.get("reply_ingress_id") or "")
+    token_hash = str(token_binding.get("action_token_hash") or "")
+    source = str(context.get("source") or "")
+    if action_type not in OWNER_CANONICAL_WRITE_ACTION_TYPES:
+        return {}, "owner_write_action_not_authorized"
+    if source not in {"recorded_digest", "latest_recorded_digest", "latest_owner_home_digest"}:
+        return {}, "owner_write_recorded_digest_required"
+    if not digest_id or not reply_ingress_id or len(token_hash) != 64:
+        return {}, "owner_write_context_incomplete"
+    if any(
+        str(context.get(key) or "") != expected
+        for key, expected in (
+            ("owner_id", owner_id),
+            ("channel", channel),
+            ("action_type", action_type),
+            ("target_type", target_type),
+            ("target_id", target_id),
+        )
+    ):
+        return {}, "owner_write_context_mismatch"
+    digest_record = _find_rendered_digest_record(
+        store.roots,
+        digest_id=digest_id,
+        owner_id=owner_id,
+        channel=channel,
+    )
+    if not digest_record:
+        return {}, "owner_write_recorded_digest_not_found"
+    rendered = _rendered_digest_from_record(digest_record)
+    matched: dict[str, Any] | None = None
+    for token, token_match in _rendered_action_token_map(rendered).items():
+        if hashlib.sha256(token.encode("utf-8")).hexdigest() != token_hash:
+            continue
+        matched = token_match
+        break
+    if not matched:
+        return {}, "owner_write_token_not_in_recorded_digest"
+    if any(
+        str(matched.get(key) or "") != expected
+        for key, expected in (
+            ("action_type", action_type),
+            ("target_type", target_type),
+            ("target_id", target_id),
+        )
+    ):
+        return {}, "owner_write_token_target_mismatch"
+    item = matched.get("item") if isinstance(matched.get("item"), dict) else {}
+    expected_review_item_id = str(item.get("review_item_id") or f"{target_type}:{target_id}")
+    if str(token_binding.get("review_item_id") or "") != expected_review_item_id:
+        return {}, "owner_write_review_item_mismatch"
+    return {
+        "schema_version": "memory-os.owner_write_context_consumption.v0",
+        "context_id": reply_ingress_id,
+        "digest_id": digest_id,
+        "reply_sha256": str(context.get("reply_sha256") or ""),
+        "action_token_hash": token_hash,
+        "review_item_id": expected_review_item_id,
+        "action_type": action_type,
+        "target_type": target_type,
+        "target_id": target_id,
+        "owner_id": owner_id,
+        "channel": channel,
+    }, ""
+
+
+def _consume_owner_write_context(store: MemoryOSStore, record: dict[str, Any]) -> dict[str, Any]:
+    consumption, error = _verified_owner_write_binding(store, record)
+    if error:
+        return {"status": "error", "code": error}
+    path = owner_action_context_consumptions_path(store.roots)
+    context_id = str(consumption["context_id"])
+    with locked_jsonl_file(path):
+        for existing in _read_jsonl(path):
+            if str(existing.get("context_id") or "") == context_id:
+                return {"status": "error", "code": "owner_write_context_already_consumed"}
+        consumption["status"] = "consumed"
+        consumption["consumed_at"] = datetime.now(timezone.utc).isoformat()
+        _append_line_under_lock(
+            path,
+            json.dumps(consumption, ensure_ascii=False, sort_keys=True) + "\n",
+        )
+    return dict(consumption)
+
+
+def _validate_consumed_owner_write_context(
+    store: MemoryOSStore,
+    owner_action_context: dict[str, Any] | None,
+    *,
+    candidate: CrystallizedCandidate,
+    decision: ApprovalDecision,
+) -> bool:
+    if not isinstance(owner_action_context, dict):
+        return False
+    consumption, error = _verified_owner_write_binding(store, owner_action_context)
+    if error:
+        return False
+    if decision.reviewer != str(consumption.get("owner_id") or ""):
+        return False
+    action_type = str(consumption.get("action_type") or "")
+    target_type = str(consumption.get("target_type") or "")
+    target_id = str(consumption.get("target_id") or "")
+    if action_type in {"approve_candidate", "approve_external_evidence"}:
+        if target_type != "candidate" or target_id != candidate.candidate_id:
+            return False
+    elif action_type == "approve_candidate_cluster":
+        action_context = (
+            owner_action_context.get("action_context")
+            if isinstance(owner_action_context.get("action_context"), dict)
+            else {}
+        )
+        scope = (
+            action_context.get("candidate_cluster_scope")
+            if isinstance(action_context.get("candidate_cluster_scope"), dict)
+            else {}
+        )
+        scoped_target_id = f"{str(scope.get('cluster_id') or '')}:{str(scope.get('scope_hash') or '')}"
+        if scoped_target_id != target_id:
+            return False
+        if candidate.candidate_id not in {str(value) for value in scope.get("member_candidate_ids") or []}:
+            return False
+    else:
+        return False
+    context_id = str(consumption.get("context_id") or "")
+    for existing in reversed(_read_jsonl(owner_action_context_consumptions_path(store.roots))):
+        if str(existing.get("context_id") or "") != context_id:
+            continue
+        return all(
+            str(existing.get(key) or "") == str(consumption.get(key) or "")
+            for key in (
+                "digest_id",
+                "action_token_hash",
+                "action_type",
+                "target_type",
+                "target_id",
+                "owner_id",
+                "channel",
+            )
+        ) and str(existing.get("status") or "") == "consumed"
+    return False
+
+
 def apply_owner_action(
     store: MemoryOSStore,
     *,
@@ -2989,6 +3159,23 @@ def apply_owner_action(
             }
     result_ref: dict[str, Any] = {}
     if apply:
+        if action_type in OWNER_CANONICAL_WRITE_ACTION_TYPES:
+            context_result = _consume_owner_write_context(store, record)
+            if context_result.get("status") != "consumed":
+                return _action_error(
+                    store,
+                    action_type,
+                    target,
+                    owner_id,
+                    channel,
+                    str(context_result.get("code") or "owner_write_authorization_required"),
+                    target_type=target_type,
+                    target_id=target_id,
+                    idempotency_key=idempotency_key,
+                    apply=apply,
+                    persist_error=False,
+                )
+            record["owner_write_context_id"] = str(context_result["context_id"])
         result_ref = _apply_state_transition(store, record, note=note, rating=rating)
         record["result_ref"] = result_ref
         _append_owner_action(store, record)
@@ -3499,6 +3686,7 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             candidate,
             decision,
             file_name="owner_approved.md",
+            owner_action_context=record,
         )
         record["owner_effect"]["owner_approved_external_evidence"] = True
         record["owner_effect"]["owner_approved_crystallized_write"] = True
@@ -3521,6 +3709,7 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
             candidate,
             decision,
             file_name="owner_approved.md",
+            owner_action_context=record,
         )
         record["owner_effect"]["owner_approved_crystallized_write"] = True
         return {"crystallized_path": str(path), "candidate_id": target_id}
@@ -3551,6 +3740,7 @@ def _apply_state_transition(store: MemoryOSStore, record: dict[str, Any], *, not
                     candidate,
                     decision,
                     file_name="owner_approved.md",
+                    owner_action_context=record,
                 )
                 paths.append(str(path))
                 approved_ids.append(candidate.candidate_id)
@@ -4258,6 +4448,7 @@ def _action_error(
     target_id: str = "",
     idempotency_key: str = "",
     apply: bool,
+    persist_error: bool = True,
 ) -> dict[str, Any]:
     if not target_type or not target_id:
         target_type, target_id = _normalize_target(action_type, target)
@@ -4280,7 +4471,7 @@ def _action_error(
         rating="",
     )
     record["code"] = code
-    if apply:
+    if apply and persist_error:
         _append_owner_action(store, record)
     return {
         "schema_version": OWNER_ACTION_RESULT_SCHEMA_VERSION,
@@ -4518,6 +4709,18 @@ def _attach_owner_reply_context(record: dict[str, Any], context: dict[str, Any])
     record["source"] = str(context.get("source") or "")
     record["digest_id"] = str(context.get("digest_id") or "")
     record["reply_ingress_id"] = str(context.get("reply_ingress_id") or "")
+    record["owner_write_context"] = {
+        "schema_version": "memory-os.owner_write_action_context.v0",
+        "source": str(context.get("source") or ""),
+        "digest_id": str(context.get("digest_id") or ""),
+        "reply_ingress_id": str(context.get("reply_ingress_id") or ""),
+        "reply_sha256": str(context.get("reply_sha256") or ""),
+        "owner_id": str(context.get("owner_id") or ""),
+        "channel": str(context.get("channel") or ""),
+        "action_type": str(context.get("action_type") or ""),
+        "target_type": str(context.get("target_type") or ""),
+        "target_id": str(context.get("target_id") or ""),
+    }
     token_binding = context.get("token_binding") if isinstance(context.get("token_binding"), dict) else {}
     record["token_binding"] = {
         "scope": str(token_binding.get("scope") or ""),
@@ -4588,11 +4791,15 @@ def _candidate_cluster_review_items(store: MemoryOSStore, closed: set[str]) -> l
 
 
 def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict[str, Any]]:
+    from .provenance import candidate_external_ref, is_tainted
+
     items: list[dict[str, Any]] = []
     for effective in read_effective_candidates(store):
-        if not effective.owner_review_eligible:
-            continue
         candidate = effective.candidate
+        external_ref = candidate_external_ref(candidate, store=store) if is_tainted(candidate, store=store) else None
+        external_review_eligible = bool(external_ref)
+        if not effective.owner_review_eligible and not external_review_eligible:
+            continue
         target_ref = f"candidate:{candidate.candidate_id}"
         if target_ref in closed:
             continue
@@ -4612,6 +4819,8 @@ def _candidate_review_items(store: MemoryOSStore, closed: set[str]) -> list[dict
                 "created_at_source": created_at_source,
                 "status": "pending",
                 "effective_state": effective.effective_state,
+                "external_review_eligible": external_review_eligible,
+                "external_evidence_ref": str(external_ref or ""),
                 "summary": (
                     "Memory candidate is a transcript/event excerpt and needs consolidation before approval"
                     if needs_consolidation
@@ -5514,6 +5723,11 @@ def _render_review_item(item: dict[str, Any], *, section: str) -> dict[str, Any]
             for verb in ("approve", "reject", "defer")
             if token.startswith("ppmt_")
         ]
+    elif target_type == "candidate" and bool(item.get("external_review_eligible")):
+        actions = [
+            _review_action("approve", "approve_external_evidence", target_type, target_id),
+            _review_action("reject", "reject_candidate", target_type, target_id),
+        ]
     else:
         actions = [] if _review_item_suppresses_actions(item) else _review_actions(target_type, target_id)
     if target_type == "speak" and bool(item.get("expression_preview_suppressed")):
@@ -5807,6 +6021,7 @@ def _review_actions(target_type: str, target_id: str) -> list[dict[str, str]]:
     if target_type == "candidate":
         return [
             _review_action("approve", "approve_candidate", target_type, target_id),
+            _review_action("approve", "approve_external_evidence", target_type, target_id),
             _review_action("reject", "reject_candidate", target_type, target_id),
         ]
     if target_type == "candidate_cluster":
@@ -6658,6 +6873,12 @@ def _owner_action_type_from_reply(verb: str, item: dict[str, Any]) -> str:
         return "approve_candidate"
     if verb == "reject" and target_type == "candidate":
         return "reject_candidate"
+    if verb == "approve" and target_type == "candidate_cluster":
+        return "approve_candidate_cluster"
+    if verb == "reject" and target_type == "candidate_cluster":
+        return "reject_candidate_cluster"
+    if verb == "defer" and target_type == "candidate_cluster":
+        return "defer_candidate_cluster"
     if verb == "approve" and target_type == "proposal":
         return "approve_proposal"
     if verb == "reject" and target_type == "proposal":
@@ -6695,13 +6916,17 @@ def _reply_verb_matches_action_type(verb: str, action_type: str) -> bool:
     if verb == "approve":
         return action_type in {
             "approve_candidate",
+            "approve_candidate_cluster",
+            "approve_external_evidence",
             "approve_proposal",
             "approve_session_mirror_apply",
             "retain_hindsight_curation",
             "approve_edge",
         }
     if verb == "reject":
-        return action_type in {"reject_candidate", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override", "reject_edge"}
+        return action_type in {"reject_candidate", "reject_candidate_cluster", "reject_proposal", "reject_hindsight_curation", "reject_provisional_crystallized_record", "reject_provisional_knob_override", "reject_edge"}
+    if verb == "defer":
+        return action_type == "defer_candidate_cluster"
     if verb == "feedback":
         return action_type == "mark_feedback" or action_type in EXPRESSION_FEEDBACK_ACTION_TYPES
     if verb == "allow":
@@ -6734,6 +6959,11 @@ def _owner_reply_action_context(
     item: dict[str, Any],
     action_token: str,
     reply_text: str,
+    action_type: str,
+    target_type: str,
+    target_id: str,
+    owner_id: str,
+    channel: str,
 ) -> dict[str, Any]:
     delivery_binding = rendered.get("delivery_binding") if isinstance(rendered.get("delivery_binding"), dict) else {}
     digest_id = str(rendered.get("digest_id") or "")
@@ -6747,6 +6977,12 @@ def _owner_reply_action_context(
         "source": "latest_owner_home_digest" if owner_home_bound else binding,
         "digest_id": digest_id,
         "reply_ingress_id": reply_ingress_id,
+        "owner_id": str(owner_id),
+        "channel": _safe_channel(channel),
+        "action_type": str(action_type),
+        "target_type": str(target_type),
+        "target_id": str(target_id),
+        "reply_sha256": hashlib.sha256(str(reply_text or "").encode("utf-8")).hexdigest(),
         "token_binding": {
             "scope": str(delivery_binding.get("scope") or ""),
             "digest_id": digest_id,

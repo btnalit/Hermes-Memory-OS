@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import threading
 
 import pytest
 
@@ -35,6 +36,39 @@ def test_add_item_persists_active_working_document(tmp_path):
     assert document["items"][0]["kind"] == "lingering"
     assert document["items"][0]["status"] == "active"
     assert document["items"][0]["weight"] == 0.8
+
+
+def test_concurrent_add_items_share_one_read_modify_write_lock(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    original_read = service.read_document
+    barrier = threading.Barrier(2)
+
+    def synchronized_read(kind):
+        document = original_read(kind)
+        try:
+            barrier.wait(timeout=0.3)
+        except threading.BrokenBarrierError:
+            pass
+        return document
+
+    monkeypatch.setattr(service, "read_document", synchronized_read)
+    errors = []
+
+    def add(text):
+        try:
+            service.add_item("lingering", text)
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=add, args=(f"item-{index}",)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    assert sorted(item["text"] for item in original_read("lingering")["items"]) == ["item-0", "item-1"]
 
 
 def test_decay_is_deterministic_and_marks_expired_items_with_audit(tmp_path):

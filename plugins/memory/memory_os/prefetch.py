@@ -1714,7 +1714,7 @@ def _resolve_edge_target_preview(
     try:
         svc = CrystallizedMemoryService(store)
         record = svc.find_record(normalized)
-        if record is None:
+        if record is None or not is_active_crystallized_frontmatter(record.frontmatter):
             return None
         text = _redact(_clip(record.body, 180))
         if not text or _is_diagnostic_style_seed(text):
@@ -1722,6 +1722,17 @@ def _resolve_edge_target_preview(
         return text
     except Exception:
         return None
+
+
+def _edge_target_is_inactive(store: MemoryOSStore, record_id: str) -> bool:
+    normalized = str(record_id or "").strip()
+    if not normalized:
+        return False
+    try:
+        record = CrystallizedMemoryService(store).find_record(normalized)
+    except Exception:
+        return False
+    return record is not None and not is_active_crystallized_frontmatter(record.frontmatter)
 
 
 def _graph_layer_injection_lines(
@@ -1773,8 +1784,12 @@ def _graph_layer_injection_lines(
         body = _resolve_edge_target_preview(store, to_id)
         if body:
             display_text = body
+        elif _edge_target_is_inactive(store, to_id):
+            # Never turn a revoked/demoted canonical target into an unresolved
+            # identifier-only recall line; inactive targets are fully suppressed.
+            continue
         else:
-            # Fallback: show record_id so agent can at least reference it
+            # Missing targets remain diagnosable without exposing inactive content.
             display_text = f"[unresolved:{to_id}]"
 
         weight_str = f"{weight:.2f}".rstrip("0").rstrip(".")

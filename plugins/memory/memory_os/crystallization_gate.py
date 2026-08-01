@@ -28,6 +28,22 @@ _MAX_CANDIDATES = 100
 _FTS_LIMIT = 5  # most similar records to check per candidate
 
 
+def _gate_error_result(code: str, *, component: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "error": code,
+        "error_code": code,
+        "error_count": 1,
+        "error_records": [
+            {"code": code, "candidate_id": "", "component": component}
+        ],
+        "candidate_count": 0,
+        "flagged_count": 0,
+        "flagged_candidates": [],
+        "duration_ms": 0,
+    }
+
+
 def _tokenize(text: str) -> set[str]:
     """Lowercase alpha-numeric token set for FTS5 query building."""
     return set(re.findall(r"[a-z\u4e00-\u9fff][a-z0-9\u4e00-\u9fff]*", text.lower()))
@@ -41,6 +57,7 @@ def run_crystallization_gate(
     *,
     index: object | None = None,
     audit_path: str | None = None,
+    candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the crystallization contradiction gate.
 
@@ -57,20 +74,24 @@ def run_crystallization_gate(
     try:
         conn = sqlite3.connect(index_path)
     except (sqlite3.Error, Exception):
-        return {"status": "error", "error": f"cannot_open_index: {index_path}"}
+        return _gate_error_result("cannot_open_index", component="sqlite")
     conn.row_factory = sqlite3.Row
-    try:
-        candidates_raw = conn.execute(
-            "select * from crystallized_candidates limit ?",
-            (_MAX_CANDIDATES,),
-        ).fetchall()
-    except sqlite3.Error:
-        return {"status": "error", "error": "cannot_read_candidates"}
-    finally:
+    if candidates is None:
+        try:
+            candidates_raw = conn.execute(
+                "select * from crystallized_candidates limit ?",
+                (_MAX_CANDIDATES,),
+            ).fetchall()
+        except sqlite3.Error:
+            return _gate_error_result("cannot_read_candidates", component="sqlite")
+        finally:
+            conn.close()
+        candidate_rows: list[dict[str, Any]] = [dict(row) for row in candidates_raw]
+    else:
         conn.close()
+        candidate_rows = [dict(row) for row in candidates[:_MAX_CANDIDATES]]
 
-    candidates: list[dict[str, Any]] = [dict(r) for r in candidates_raw]
-    if not candidates:
+    if not candidate_rows:
         return {
             "status": "ok",
             "candidate_count": 0,
@@ -86,7 +107,7 @@ def run_crystallization_gate(
     conn2 = sqlite3.connect(index_path)
     conn2.row_factory = sqlite3.Row
     try:
-        for cand in candidates:
+        for cand in candidate_rows:
             cid = str(cand.get("candidate_id", ""))
             body = str(cand.get("body", ""))
             cand_tags = cand.get("tags_json", []) or []
@@ -195,7 +216,7 @@ def run_crystallization_gate(
         already_flagged = {
             str(item.get("candidate_id") or "") for item in flagged
         }
-        for cand in candidates:
+        for cand in candidate_rows:
             cid = str(cand.get("candidate_id", ""))
             if cid in already_flagged:
                 continue
@@ -214,7 +235,7 @@ def run_crystallization_gate(
     status = "error" if error_records else "ok"
     result = {
         "status": status,
-        "candidate_count": len(candidates),
+        "candidate_count": len(candidate_rows),
         "flagged_count": len(flagged),
         "flagged_candidates": flagged,
         "error_count": len(error_records),
@@ -231,7 +252,7 @@ def run_crystallization_gate(
             status=status,
             target=str(index_path),
             details={
-                "candidate_count": len(candidates),
+                "candidate_count": len(candidate_rows),
                 "flagged_count": len(flagged),
                 "flagged_ids": [f["candidate_id"] for f in flagged],
                 "error_count": len(error_records),

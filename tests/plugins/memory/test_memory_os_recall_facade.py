@@ -277,6 +277,25 @@ class TestRetrieverFacade:
         assert objects[0].content == "active release boundary"
         assert objects[0].authority_class == "indexed_derived"
 
+    @pytest.mark.parametrize("record_type", ["event", "crystallized_candidate"])
+    def test_indexed_fts_retriever_excludes_derived_rows_missing_from_canonical_store(
+        self, tmp_path, record_type,
+    ):
+        import sqlite3
+
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever
+
+        store = _make_store(_make_roots(tmp_path))
+        MemoryOSIndex(store.roots).rebuild_from_store(store)
+        with sqlite3.connect(store.roots.index_path) as conn:
+            conn.execute(
+                "insert into memory_fts (record_type, record_id, title, text) values (?, ?, ?, ?)",
+                (record_type, "stale-derived", "stale", "stale authority nonce"),
+            )
+
+        assert IndexedFTSRetriever().retrieve(store, "stale authority nonce") == []
+
     def test_indexed_fts_retriever_fails_closed_when_active_canonical_body_changed_after_index(self, tmp_path):
         from plugins.memory.memory_os.index import MemoryOSIndex
         from plugins.memory.memory_os.retrievers.indexed_fts import IndexedFTSRetriever

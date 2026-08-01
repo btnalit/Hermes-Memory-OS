@@ -8,7 +8,9 @@ integration tests (which live in test_candidate_aggregation_pipeline.py).
 """
 
 import json
-from datetime import datetime, timezone
+import sqlite3
+import pytest
+from datetime import datetime, timedelta, timezone
 
 from plugins.memory.memory_os.crystallized import (
     CrystallizedCandidate,
@@ -42,6 +44,8 @@ def _store_with_gate(tmp_path) -> MemoryOSStore:
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
     store = MemoryOSStore(roots)
     store.initialize()
+    from plugins.memory.memory_os.index import MemoryOSIndex
+    MemoryOSIndex(roots).rebuild_from_store(store)
 
     now = datetime.now(timezone.utc)
     expires_at = now.replace(year=now.year + 1).isoformat().replace("+00:00", "Z")
@@ -563,6 +567,28 @@ class TestTagFleeting:
 class TestA1Boundary:
     """A1: lane reports reversible provisional writes without implying permanence."""
 
+    def test_lane_surfaces_candidate_queue_parse_errors_without_dropping_valid_rows(self, tmp_path):
+        from plugins.memory.memory_os.crystallized import append_candidate_queue
+        from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
+
+        store = _store_with_gate(tmp_path)
+        append_candidate_queue(store, _cand("cand-valid-with-broken-tail"))
+        queue = store.roots.crystallized_root / "candidates.jsonl"
+        with queue.open("a", encoding="utf-8") as handle:
+            handle.write("{BROKEN\n")
+
+        result = run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+
+        assert result["candidates_read"] == 1
+        assert result["status"] == "warning"
+        assert result["suppressed_error_count"] == 1
+        assert result["recent_error_codes"] == ["jsonl_malformed_line"]
+        assert "raw_body" not in result["error_records"][0]
+        assert "line" not in result["error_records"][0]
+
     def test_lane_tick_without_crystallized_write_reports_none(self, tmp_path):
         """An empty triage-only tick truthfully reports no crystallized write."""
         from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
@@ -638,6 +664,168 @@ class TestA1Boundary:
         # via any_boundary_true(postcheck). Before the P1-1 fix this was True
         # for every legitimate provisional write.
         assert completion["postcheck_boundary_true"] is False
+
+    def test_resolver_gate_error_routes_candidate_to_owner_without_write(self, tmp_path, monkeypatch):
+        import plugins.modules.governance.candidate_aggregation as aggregation
+        from plugins.memory.memory_os.crystallized import append_candidate_queue, read_candidate_triage
+
+        store = _store_with_gate(tmp_path)
+        candidate = _cand("cand-gate-error", body="记住：每次启动必须检查治理图")
+        append_candidate_queue(store, candidate)
+        monkeypatch.setattr(
+            aggregation,
+            "_resolver_candidate_gate_result",
+            lambda store, candidate: {
+                "status": "error",
+                "error_code": "edge_query_failed",
+                "flagged_candidates": [
+                    {"candidate_id": candidate.candidate_id, "reason": "edge_query_failed"}
+                ],
+            },
+            raising=False,
+        )
+
+        result = aggregation.run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+
+        assert result["provisional_crystallized_write_count"] == 0
+        assert not (store.roots.crystallized_root / "owner_approved.md").exists()
+        triage = read_candidate_triage(store)
+        assert triage[0]["candidate_id"] == candidate.candidate_id
+        assert triage[0]["target_state"] == "owner_eligible"
+
+    @pytest.mark.use_real_crystallization_gate
+    def test_real_graph_failure_blocks_resolver_provisional_write(self, tmp_path):
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedMemoryService,
+            append_candidate_queue,
+            read_candidate_triage,
+        )
+        from plugins.memory.memory_os.index import MemoryOSIndex
+        import plugins.modules.governance.candidate_aggregation as aggregation
+
+        store = _store_with_gate(tmp_path)
+        baseline = _cand(
+            "cand-baseline",
+            body="记住：每次启动必须检查日志",
+        )
+        CrystallizedMemoryService(store).write_approved_record(
+            baseline,
+            ApprovalDecision(
+                candidate_id=baseline.candidate_id,
+                purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+                reviewer="owner",
+                reviewed_at=datetime.now(timezone.utc).isoformat(),
+            ),
+            file_name="baseline.md",
+        )
+        candidate = _cand(
+            "cand-real-gate-error",
+            body="记住：每次启动必须检查日志",
+        )
+        append_candidate_queue(store, candidate)
+        MemoryOSIndex(store.roots).rebuild_from_store(store)
+        with sqlite3.connect(store.roots.index_path) as conn:
+            conn.execute("alter table memory_edges rename to memory_edges_valid")
+            conn.execute("create table memory_edges (broken_column text)")
+
+        result = aggregation.run_candidate_aggregation_lane(
+            store,
+            execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+        )
+
+        assert result["provisional_crystallized_write_count"] == 0
+        assert CrystallizedMemoryService(store).find_records_by_candidate_id(
+            candidate.candidate_id
+        ) == []
+        triage = read_candidate_triage(store)
+        assert any(
+            row["candidate_id"] == candidate.candidate_id
+            and row["target_state"] == "owner_eligible"
+            for row in triage
+        ), {"result": result, "triage": triage}
+
+    def test_resolver_execution_gate_is_validated_before_canonical_write(self, tmp_path, monkeypatch):
+        from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+        from plugins.memory.memory_os.crystallized import CrystallizedMemoryService
+        import plugins.memory.memory_os.execution_gate as execution_gate
+        from plugins.modules.governance.candidate_aggregation import _write_resolver_provisional
+
+        store = _store_with_gate(tmp_path)
+        candidate = _cand("cand-outer-gate-blocked", body="记住：外层 gate 必须先验证")
+        decision = ApprovalDecision(
+            candidate_id=candidate.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="resolver",
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+            source_state="resolver_approved",
+            provisional=True,
+            expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        )
+        writes: list[str] = []
+        monkeypatch.setattr(
+            execution_gate,
+            "resolve_execution_gate_permit",
+            lambda *args, **kwargs: {
+                "status": "invalid",
+                "reason": "synthetic_outer_gate_denial",
+            },
+        )
+        monkeypatch.setattr(
+            CrystallizedMemoryService,
+            "write_approved_record",
+            lambda *args, **kwargs: writes.append("called"),
+        )
+
+        with pytest.raises(PermissionError, match="synthetic_outer_gate_denial"):
+            _write_resolver_provisional(store, candidate, decision)
+
+        assert writes == []
+        assert not (store.roots.crystallized_root / "owner_approved.md").exists()
+
+    def test_resolver_write_exception_records_failure_completion(self, tmp_path, monkeypatch):
+        from plugins.memory.memory_os.crystallized import (
+            CrystallizedMemoryService,
+            append_candidate_queue,
+        )
+        from plugins.modules.governance.candidate_aggregation import run_candidate_aggregation_lane
+
+        store = _store_with_gate(tmp_path)
+        append_candidate_queue(
+            store,
+            _cand("cand-failed-receipt", body="记住：每次启动必须检查失败回执"),
+        )
+
+        def fail_write(*args, **kwargs):
+            raise OSError("synthetic canonical write failure")
+
+        monkeypatch.setattr(CrystallizedMemoryService, "write_approved_record", fail_write)
+        with pytest.raises(OSError, match="synthetic canonical write failure"):
+            run_candidate_aggregation_lane(
+                store,
+                execution_gate_envelope_id=_VALID_ENVELOPE_ID,
+            )
+
+        gate_path = store.roots.memory_os_root / "system" / "execution_gate_envelopes.jsonl"
+        records = [json.loads(line) for line in gate_path.read_text().splitlines() if line.strip()]
+        permits = [
+            row for row in records
+            if row.get("stage") == "permit" and row.get("lane_id") == "resolver_auto_approve"
+        ]
+        completions = [
+            row for row in records
+            if row.get("stage") == "completion" and row.get("lane_id") == "resolver_auto_approve"
+        ]
+        assert len(permits) == 1
+        assert len(completions) == 1
+        assert completions[0]["execution_status"] == "failed"
+        assert completions[0]["result_summary"] == {
+            "candidate_id": "cand-failed-receipt",
+            "error_type": "OSError",
+        }
 
     def test_promote_writes_triage_not_crystallized(self, tmp_path):
         """Non-resolver-eligible candidates still write triage not crystallized.

@@ -9,11 +9,18 @@ import pytest
 from plugins.memory.memory_os.crystallized import (
     CrystallizedApprovalError,
     CrystallizedCandidate,
+    CrystallizedMemoryService,
     append_candidate_queue,
     read_candidate_queue,
 )
+from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
+from plugins.memory.memory_os.config import save_config
 from plugins.memory.memory_os.external_intake import external_intake
-from plugins.memory.memory_os.owner_actions import apply_owner_action
+from plugins.memory.memory_os.owner_actions import (
+    apply_owner_action,
+    parse_owner_review_reply,
+    render_owner_review_digest,
+)
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
@@ -58,6 +65,57 @@ def _create_tainted_candidate(
     return event_id, candidate
 
 
+def _approve_external_via_recorded_digest(
+    store: MemoryOSStore,
+    candidate_id: str,
+    *,
+    owner_id: str = "test-owner",
+) -> dict:
+    channel = "telegram"
+    save_config(
+        {
+            "owner_review": {
+                "enabled": True,
+                "actions_enabled": True,
+                "recurring_delivery_enabled": True,
+                "recurring_delivery_mode": "hermes_cron",
+                "recurring_delivery_channel": channel,
+                "recurring_delivery_target_class": "owner_home",
+            }
+        },
+        store.roots.hermes_home,
+    )
+    rendered = render_owner_review_digest(
+        store,
+        owner_id=owner_id,
+        channel=channel,
+        max_action_required=20,
+        max_review_suggested=20,
+        max_fyi=20,
+        record_active=True,
+    )
+    item = next(
+        item
+        for items in rendered["sections"].values()
+        for item in items
+        if item.get("target_type") == "candidate" and item.get("target_id") == candidate_id
+    )
+    action_tokens = item.get("action_tokens") if isinstance(item.get("action_tokens"), dict) else {}
+    assert "approve_external_evidence" in action_tokens, item
+    token = str(action_tokens["approve_external_evidence"])
+    parsed = parse_owner_review_reply(
+        store,
+        f"memory approve {token}",
+        owner_id=owner_id,
+        channel=channel,
+        apply=True,
+        digest_id=str(rendered["digest_id"]),
+        require_recorded_digest=True,
+    )
+    assert parsed["status"] == "ok", parsed
+    return dict(parsed["owner_action_result"])
+
+
 # ── Tests ────────────────────────────────────────────────────────────────
 
 
@@ -75,14 +133,7 @@ class TestApproveExternalEvidenceOwnerAction:
             external_ref=ref,
         )
 
-        result = apply_owner_action(
-            store,
-            action_type="approve_external_evidence",
-            target=f"candidate:{candidate.candidate_id}",
-            owner_id="test-owner",
-            channel="test",
-            apply=True,
-        )
+        result = _approve_external_via_recorded_digest(store, candidate.candidate_id)
 
         assert result["status"] == "ok", f"Expected ok, got {result}"
         rr = result["result_ref"]
@@ -110,15 +161,19 @@ class TestApproveExternalEvidenceOwnerAction:
             external_ref="ragflow:dataset:doc:chunk-006",
         )
 
+        decision = ApprovalDecision(
+            candidate_id=candidate.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="test-owner",
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+            external_evidence_ack=True,
+            acked_external_ref="wrong-ref-value",
+        )
         with pytest.raises(CrystallizedApprovalError, match="external_evidence_ack_ref_mismatch"):
-            apply_owner_action(
-                store,
-                action_type="approve_external_evidence",
-                target=f"candidate:{candidate.candidate_id}",
-                owner_id="test-owner",
-                channel="test",
-                reply_context={"acked_external_ref": "wrong-ref-value"},
-                apply=True,
+            CrystallizedMemoryService(store).write_approved_record(
+                candidate,
+                decision,
+                file_name="owner_approved.md",
             )
 
     def test_ordinary_approve_cannot_approve_tainted_candidate(self, tmp_path):
@@ -131,14 +186,17 @@ class TestApproveExternalEvidenceOwnerAction:
             external_ref="ragflow:dataset:doc:chunk-007",
         )
 
+        decision = ApprovalDecision(
+            candidate_id=candidate.candidate_id,
+            purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+            reviewer="test-owner",
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+        )
         with pytest.raises(CrystallizedApprovalError, match="external_evidence_requires_explicit_ack"):
-            apply_owner_action(
-                store,
-                action_type="approve_candidate",
-                target=f"candidate:{candidate.candidate_id}",
-                owner_id="test-owner",
-                channel="test",
-                apply=True,
+            CrystallizedMemoryService(store).write_approved_record(
+                candidate,
+                decision,
+                file_name="owner_approved.md",
             )
 
     def test_approve_external_evidence_untainted_candidate_rejected(self, tmp_path):
