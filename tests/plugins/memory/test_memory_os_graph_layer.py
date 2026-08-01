@@ -25,6 +25,10 @@ from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.schema import EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 

@@ -4,6 +4,10 @@ import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def _setup_store_with_provisional_records(tmp_path, *, count=5, expires_days=7):
     """Create a store with provisional crystallized records for sweep testing."""

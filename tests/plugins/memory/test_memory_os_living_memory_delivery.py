@@ -7,6 +7,10 @@ from plugins.memory.memory_os.approval import ApprovalDecision, ApprovalPurpose
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def _store(tmp_path: object) -> MemoryOSStore:
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="test")

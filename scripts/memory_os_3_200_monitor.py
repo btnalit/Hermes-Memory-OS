@@ -1198,8 +1198,14 @@ def summarize_living_memory_promotion(
     try:
         from plugins.memory.memory_os.owner_actions import LIVING_MEMORY_TARGET_TYPES
     except Exception:
+        # Must stay identical to owner_actions.LIVING_MEMORY_TARGET_TYPES.  This
+        # fallback only fires where the provider is not importable (clean host,
+        # remote probe), so a stale copy here does not fail loudly — it silently
+        # classifies the same item differently depending on the host, which is
+        # worse.  test_monitor_living_memory_fallback_matches_owner_actions pins
+        # the two together.
         LIVING_MEMORY_TARGET_TYPES = frozenset({
-            "candidate_cluster", "crystallized_record",
+            "crystallized_record",
             "provisional_crystallized_record", "permanent_memory_promotion",
         })
     promo = "permanent_memory_promotion"

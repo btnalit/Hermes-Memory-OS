@@ -15,6 +15,8 @@ from plugins.memory.memory_os.inner_drive import InnerDriveEngine
 from plugins.memory.memory_os.roots import MemoryOSRoots
 from plugins.memory.memory_os.store import MemoryOSStore
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 class FakeHindsightClient:
     def __init__(self):

@@ -67,6 +67,8 @@ from plugins.memory.memory_os.substrates.ledger import SubstrateOperationLedger
 from plugins.memory.memory_os.substrates.projection import ProjectionLedger, derive_projection_coherence
 from plugins.modules.governance.proposal_queue import ProposalQueueModule
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 def _store(tmp_path, *, profile: str = "main") -> MemoryOSStore:
     roots = MemoryOSRoots.from_hermes_home(tmp_path, profile=profile)

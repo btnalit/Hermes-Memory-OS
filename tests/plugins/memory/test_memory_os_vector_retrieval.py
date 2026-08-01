@@ -5,6 +5,8 @@ import numpy as np
 import pytest
 from pathlib import Path
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 
 # ── Mock embedder for tests (no model download needed) ──────────────
 class MockEmbedder:

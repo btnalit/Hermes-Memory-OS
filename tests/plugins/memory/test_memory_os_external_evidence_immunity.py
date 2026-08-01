@@ -19,6 +19,8 @@ from plugins.memory.memory_os.schema import EVENT_SCHEMA_VERSION, EventEnvelope
 from plugins.memory.memory_os.store import MemoryOSStore
 from plugins.modules.governance.candidate_aggregation import _cluster_and_promote
 
+pytestmark = pytest.mark.usefixtures("crystallized_test_write_authority")
+
 _VALID_ENVELOPE_ID = "xgate_test_external_evidence_immunity"
 
 

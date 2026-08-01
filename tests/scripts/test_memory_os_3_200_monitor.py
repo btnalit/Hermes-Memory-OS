@@ -17,6 +17,39 @@ from scripts.memory_os_3_200_monitor import (
 )
 
 
+def test_monitor_living_memory_fallback_matches_owner_actions():
+    """The monitor's embedded fallback set must not drift from the real one.
+
+    ``summarize_living_memory_promotion`` imports ``LIVING_MEMORY_TARGET_TYPES``
+    and falls back to a literal copy when the provider is not importable — which
+    is the normal case on a clean host or through the remote probe.  A stale copy
+    therefore never raises; it just makes the same item count as living memory on
+    one host and not on another.  ``candidate_cluster`` was removed from the real
+    set and left behind here, which is exactly that failure.
+    """
+    import ast
+
+    from plugins.memory.memory_os.owner_actions import LIVING_MEMORY_TARGET_TYPES
+
+    source = Path(monitor.__file__).read_text(encoding="utf-8")
+    literals = [
+        frozenset(ast.literal_eval(node.value.args[0]))
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "LIVING_MEMORY_TARGET_TYPES"
+            for target in node.targets
+        )
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", "") == "frozenset"
+        and node.value.args
+    ]
+
+    assert literals, "monitor no longer carries a LIVING_MEMORY_TARGET_TYPES fallback literal"
+    for literal in literals:
+        assert literal == LIVING_MEMORY_TARGET_TYPES
+
+
 def test_monitor_script_help_bootstraps_repo_import_path():
     script = Path(__file__).resolve().parents[2] / "scripts" / "memory_os_3_200_monitor.py"
 
