@@ -369,6 +369,13 @@ OVERRIDABLE_KNOBS: dict[str, dict[str, Any]] = {
         "ab_metric": None,
     },
     # ── Phase 3: Retriever Facade integration knobs ─────────────────────
+    # NOTE: ``default`` here is the registry/owner-digest metadata default (the
+    # off state, also used by owner_actions for `prior` rendering when a record
+    # carries no prior_value). It is NOT the value the provider resolves with:
+    # MemoryOSProvider._recall_facade_switch_default() derives the resolution
+    # default from recall_arbitration.mode — True under output-neutral
+    # ``shadow`` so the observation lane survives an expired enable override,
+    # False under output-mutating ``apply_canary``.
     "prefetch_facade_enabled": {
         "module": "prefetch",
         "default": False,
@@ -434,6 +441,17 @@ def _override_store_path(roots: MemoryOSRoots | None = None, *,
             _ambient_fallback_warned = True
         roots = MemoryOSRoots.from_profile()
     return roots.memory_os_root / "system" / "knob_overrides.jsonl"
+
+
+def override_store_path(roots: MemoryOSRoots | None = None) -> Path:
+    """Public accessor for the knob-override store path.
+
+    Callers that watch the store (e.g. the provider's facade kill-switch
+    cache) must resolve it through this module rather than rebuilding the
+    path, so a watcher can never end up stat-ing a different file than the
+    resolver reads.
+    """
+    return _override_store_path(roots)
 
 
 # ── Read ────────────────────────────────────────────────────────────────

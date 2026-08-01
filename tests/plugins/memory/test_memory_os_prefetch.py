@@ -2242,28 +2242,66 @@ class TestPrefetchFacadeIntegration:
     """Phase 3: Retriever Facade → prefetch integration (mode + kill-switch gated)."""
 
     def test_facade_initialized_once_and_cached(self, tmp_path, monkeypatch):
-        """Facade is initialized only once per provider (constraint 1: no repeated init)."""
+        """Facade is initialized only once per provider (constraint 1: no repeated init).
+
+        Roots and a live durable mode are both required for this to assert
+        anything: a bare provider has ``_roots is None`` and returns before any
+        construction, which made ``f1 is f2`` a ``None is None`` tautology.
+        """
         import warnings
 
         from plugins.memory.memory_os import MemoryOSProvider
         from plugins.memory.memory_os import knob_overrides
+        from plugins.memory.memory_os.roots import MemoryOSRoots
 
         monkeypatch.setattr(knob_overrides, "_ambient_fallback_warned", False)
         provider = MemoryOSProvider()
+        provider._roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
         with warnings.catch_warnings():
+            # Resolution must pass roots through; an ambient ~/.hermes fallback
+            # would raise here instead of silently reading the wrong store.
             warnings.simplefilter("error", RuntimeWarning)
             f1 = provider._ensure_recall_facade()
             f2 = provider._ensure_recall_facade()
+        assert f1 is not None, "a live shadow mode must construct the facade"
         # Same object reference — cached at provider level
         assert f1 is f2, "Facade must be cached (provider-level), not rebuilt"
 
-    def test_facade_returns_none_when_knob_disabled(self, tmp_path):
-        """Default: prefetch_facade_enabled=False → facade is None."""
+    def test_facade_returns_none_when_no_durable_mode_configured(self, tmp_path):
+        """No ``recall_arbitration`` key at all → facade is None.
+
+        Distinct from an explicit ``mode: off``: this covers config that never
+        mentions the lane. Roots are injected so the assertion exercises the
+        mode gate rather than returning early on a missing store context.
+        """
         from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
 
         provider = MemoryOSProvider()
+        provider._roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        provider._config = {}
+
         facade = provider._ensure_recall_facade()
-        assert facade is None, f"Facade should be None when knob disabled, got {facade}"
+        assert facade is None, f"Facade should be None with no durable mode, got {facade}"
+
+    def test_roots_injected_after_a_rootless_call_still_builds_the_facade(self, tmp_path):
+        """A rootless call must not latch the "already constructed" sentinel.
+
+        ``_recall_facade_initialized`` means "construction already ran". The
+        rootless early-return used to set it, which pinned the facade to None
+        for the remaining life of the provider even once roots arrived.
+        """
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        provider = MemoryOSProvider()
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+        assert provider._ensure_recall_facade() is None
+
+        provider._roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+
+        assert provider._ensure_recall_facade() is not None
 
     def test_shadow_arbitration_config_keeps_observation_lane_live_after_enable_override_expires(self, tmp_path):
         """A durable shadow mode must not depend on a provisional enable override.
@@ -2412,6 +2450,14 @@ class TestPrefetchFacadeIntegration:
         assert provider._recall_facade_knob_errors == 1
 
     def test_expired_false_kill_switch_reenables_without_file_change(self, tmp_path):
+        """Shadow mode returns on expiry — the durable mode is the authority.
+
+        The expiry window has to cover a governed JSONL write, provider
+        construction, a stat, a full ledger read and a reversed rescan before
+        the *first* assert. A sub-second window makes the first assert fail on
+        a loaded CI runner (see BO); the window is wall-clock generous and the
+        sleep is derived from it.
+        """
         import time
         from datetime import datetime, timedelta, timezone
 
@@ -2419,14 +2465,16 @@ class TestPrefetchFacadeIntegration:
         from plugins.memory.memory_os.knob_overrides import register_override
         from plugins.memory.memory_os.roots import MemoryOSRoots
 
+        expires_in_seconds = 3.0
         roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        registered_at = datetime.now(timezone.utc)
         register_override(
             "prefetch_facade_enabled",
             False,
             prior=True,
             proposed_by="test",
             approved_via="test",
-            expires_at=(datetime.now(timezone.utc) + timedelta(seconds=0.15)).isoformat(),
+            expires_at=(registered_at + timedelta(seconds=expires_in_seconds)).isoformat(),
             roots=roots,
         )
         provider = MemoryOSProvider()
@@ -2434,9 +2482,156 @@ class TestPrefetchFacadeIntegration:
         provider._config = {"recall_arbitration": {"mode": "shadow"}}
         assert provider._ensure_recall_facade() is None
 
-        time.sleep(0.2)
+        elapsed = (datetime.now(timezone.utc) - registered_at).total_seconds()
+        time.sleep(max(0.1, expires_in_seconds - elapsed + 0.2))
 
         assert provider._ensure_recall_facade() is not None
+
+    def test_expired_false_kill_switch_does_not_reenable_output_mutating_canary(self, tmp_path):
+        """apply_canary must not resume output mutation when a disable expires.
+
+        ``shadow`` is output-neutral, so the durable mode may keep it live once
+        a provisional override expires. ``apply_canary`` appends a live
+        ``Recall Facade (unified)`` section to prefetch output, so the same
+        default would mean output mutation silently resumes on expiry — no file
+        write, no restart, no owner action. It requires explicit, unexpired
+        positive authority instead.
+        """
+        import time
+        from datetime import datetime, timedelta, timezone
+
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        expires_in_seconds = 3.0
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        registered_at = datetime.now(timezone.utc)
+        register_override(
+            "prefetch_facade_enabled",
+            False,
+            prior=True,
+            proposed_by="test",
+            approved_via="test",
+            expires_at=(registered_at + timedelta(seconds=expires_in_seconds)).isoformat(),
+            roots=roots,
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "apply_canary"}}
+        assert provider._ensure_recall_facade() is None
+
+        elapsed = (datetime.now(timezone.utc) - registered_at).total_seconds()
+        time.sleep(max(0.1, expires_in_seconds - elapsed + 0.2))
+
+        assert provider._ensure_recall_facade() is None, (
+            "an expired disable must not silently re-enable output mutation"
+        )
+
+    def test_apply_canary_runs_on_explicit_unexpired_enable_override(self, tmp_path):
+        """The canary is not disabled outright — explicit positive authority runs it."""
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        register_override(
+            "prefetch_facade_enabled",
+            True,
+            prior=False,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "apply_canary"}}
+
+        facade = provider._ensure_recall_facade()
+
+        assert facade is not None
+        assert facade._arbitration_mode == "apply_canary"
+
+    def test_cached_facade_is_not_served_under_a_different_arbitration_mode(self, tmp_path):
+        """The facade freezes its mode at construction — the cache must track it.
+
+        ``_recall_facade_initialized`` alone would hand back a shadow-built
+        facade to an apply_canary caller (and vice versa), silently running the
+        wrong lane against a config that says otherwise.
+        """
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        register_override(
+            "prefetch_facade_enabled",
+            True,
+            prior=False,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+        shadow_facade = provider._ensure_recall_facade()
+        assert shadow_facade is not None
+        assert shadow_facade._arbitration_mode == "shadow"
+
+        provider._config = {"recall_arbitration": {"mode": "apply_canary"}}
+        canary_facade = provider._ensure_recall_facade()
+
+        assert canary_facade is not None
+        assert canary_facade._arbitration_mode == "apply_canary", (
+            "a cached facade must not be served under a mode it was not built for"
+        )
+
+    def test_kill_switch_is_read_from_the_resolver_owned_store_path(self, tmp_path, monkeypatch):
+        """The switch watcher resolves the store path through knob_overrides.
+
+        A watcher that rebuilds the path itself can drift from the resolver,
+        and a path that stats as "missing" used to short-circuit straight to
+        enabled — so drift would silently ignore the owner's kill switch rather
+        than fail closed. This pins the weaker, directly observable property:
+        the switch is read from whatever store the resolver owns, not from a
+        path derived independently from ``roots``.
+        """
+        from plugins.memory.memory_os import MemoryOSProvider
+        from plugins.memory.memory_os import knob_overrides
+        from plugins.memory.memory_os.knob_overrides import register_override
+        from plugins.memory.memory_os.roots import MemoryOSRoots
+
+        roots = MemoryOSRoots.from_hermes_home(tmp_path, profile="memoryos-test")
+        relocated_root = tmp_path / "relocated-system"
+        relocated_root.mkdir(parents=True, exist_ok=True)
+        relocated_store = relocated_root / "knob_overrides.jsonl"
+        monkeypatch.setattr(
+            knob_overrides,
+            "_override_store_path",
+            lambda roots=None, *, _store_root=None: relocated_store,
+        )
+        register_override(
+            "prefetch_facade_enabled",
+            False,
+            prior=True,
+            proposed_by="test",
+            approved_via="test",
+            expires_at="2099-01-01T00:00:00+00:00",
+            roots=roots,
+        )
+        assert relocated_store.is_file()
+        assert not (roots.memory_os_root / "system" / "knob_overrides.jsonl").exists()
+
+        provider = MemoryOSProvider()
+        provider._roots = roots
+        provider._config = {"recall_arbitration": {"mode": "shadow"}}
+
+        assert provider._ensure_recall_facade() is None, (
+            "the owner's disable lives in the resolver-owned store and must be honoured"
+        )
 
     def test_facade_is_constructed_once_under_concurrent_prefetch(self, tmp_path, monkeypatch):
         import importlib
@@ -2496,8 +2691,39 @@ class TestPrefetchFacadeIntegration:
         provider.shutdown()
 
         assert report["recall_facade"]["arbitration_mode"] == "shadow"
+        assert report["recall_facade"]["mode_live"] is True
         assert report["recall_facade"]["kill_switch_enabled"] is False
         assert report["recall_facade"]["effective_enabled"] is False
+
+    def test_status_distinguishes_mode_off_from_an_owner_disabled_switch(self, tmp_path):
+        """``kill_switch_enabled: false`` alone is ambiguous — ``mode_live`` resolves it.
+
+        With no durable mode the switch renders false even though the owner
+        never touched it, which reads as "someone killed the lane". Reporting
+        ``mode_live`` alongside it lets a reader tell the two states apart.
+        """
+        from plugins.memory.memory_os import MemoryOSProvider
+
+        provider = MemoryOSProvider()
+        provider.initialize(
+            "session-1",
+            hermes_home=str(tmp_path),
+            platform="telegram",
+            agent_identity="memoryos-test",
+        )
+        provider._config["recall_arbitration"] = {"mode": "off"}
+
+        report = provider._tool_status_report()
+        provider.shutdown()
+
+        assert report["recall_facade"]["arbitration_mode"] == "off"
+        assert report["recall_facade"]["mode_live"] is False
+        assert report["recall_facade"]["kill_switch_enabled"] is False
+        assert report["recall_facade"]["effective_enabled"] is False
+        # Suppressed-failure counters are owner-visible even though no monitor
+        # component aggregates this block yet.
+        assert report["recall_facade"]["knob_error_count"] == 0
+        assert report["recall_facade"]["init_error_count"] == 0
 
     def test_unchanged_kill_switch_store_is_not_rescanned_on_every_prefetch(self, tmp_path, monkeypatch):
         from plugins.memory.memory_os import MemoryOSProvider, knob_overrides

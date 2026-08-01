@@ -1437,6 +1437,170 @@ BU 的 installed-layout 测试本机全绿，CI 却红在反事实那条：
 
 ---
 
+## BV — 对 `6273e8b` 的代码评审与修复（2026-07-31）
+
+本机对齐 GitHub 后发现 `6273e8b`（keep recall and onboarding lanes live）尚未被任何评审节
+覆盖——清单最后一条记录停在 `3dbbb9b..HEAD`（BU.1）。逐项复审得 13 项发现：修 10 项、
+有意保留 1 项、显式记录不做 2 项。
+
+### 0. 该提交打破了 Windows 本机全绿基线，且推送前未被发现
+
+评审前实测基线：3077 passed / **1 failed** / 13 skipped，唯一失败的就是它自己新增的
+`test_execution_gate_asset_install_is_idempotent_in_installed_layout`——
+`assert stat().st_mode & 0o100` 在 Windows 上恒为 0（`chmod` 的执行位在 Windows 无效，
+`st_mode` 实测 `0o100666`）。CI 是 Linux 故绿、本机红，与 BU.1 的「CI 空过、本机绿」
+**互为镜像**，同属"跨环境测试不验证自己的前提"。BR 刚拿到的「首次全绿」被这一条打掉。
+改为 `_assert_executable_bit()`，`os.name == "nt"` 时跳过（沿用本文件已有的 nt 分支惯例）。
+
+**这首先是一条流程发现，不只是可移植性疏忽**：一条本机必红的测试被推送上了 main，
+说明 Definition of Done 第 4 步（"绝不允许只跑自己新增/修改的测试就推送"）在本次没有执行，
+或只在 Linux 一侧执行。本清单存在的意义正是记录这类流程缺口——`st_mode` 的技术解释是次要的。
+
+### 1. `apply_canary` 上「关闭开关过期 = 静默恢复输出改写」（最重一项）
+
+本提交把 `prefetch_facade_enabled` 的解析默认值从 `False` 翻成 `True`，理由是「durable mode
+才是权威，不该被临时 override 的过期拖死」。这对 `shadow` 成立——它是 output-neutral 的，
+只落 metadata-only 的 Recall Plan。
+
+但 `apply_canary` **会往 live prefetch 追加 `Recall Facade (unified)` 段**
+（`prefetch.py:636`）。而 `resolve_knobs` 对 active + provisional + **已过期** 的记录是
+`continue` 跳过、回落到调用方默认值（`knob_overrides.py:491`）。于是在 `mode=apply_canary`
+的主机上，Owner 挂的一条 provisional `false` 关闭开关一旦到期——无文件写入、无重启、
+无任何 Owner 动作——输出改写就静默恢复。**这正是本提交所修 bug 的镜像**；它自己的
+`test_expired_false_kill_switch_reenables_without_file_change` 断言的就是这个"到期即恢复"，
+只是仅覆盖了 `shadow`。
+
+新增 `_recall_facade_switch_default(mode)`：`shadow → True`（保住观测车道，即本提交本意），
+`apply_canary → False`（输出改写必须有显式且未过期的正向授权）。该默认值一并纳入缓存指纹，
+防止跨模式串用缓存。生产 3.200 当前为 `shadow`，本项无生产行为影响。
+
+### 2. kill switch 的存储路径自行拼装 = fail-open
+
+`__init__.py` 手工拼 `roots.memory_os_root/"system"/"knob_overrides.jsonl"`，绕开
+`_override_store_path()`。两者一旦分叉，`stat()` 抛 `FileNotFoundError` → 旧代码直接
+`resolved = True` 返回，**根本不调用解析器**，即 Owner 的 kill switch 被无视。
+一个未被强制的耦合，失败方向却是 fail-open——治理开关最不能容忍的方向。
+
+改为走新增的公开访问器 `knob_overrides.override_store_path()`，并**删掉「文件不存在 →
+直接 True」的短路**：文件不存在只是「没有 override」，答案仍须由解析器套用默认值给出
+（`_validate_recall_facade_override_store` 相应改为容忍不存在的 store，否则会把
+"无 override" 误判成校验失败而 fail-closed，反向踩坑）。
+
+### 3. 两个抑制错误计数器不走项目的 `error_record` 契约
+
+`_recall_facade_init_errors` 全仓库**只写不读**，注释却写着 "recorded as suppressed count
+for monitor visibility"——不实。`_recall_facade_knob_errors` 只出现在 status，
+而 monitor 对 `recall_facade` 零命中。同一特性里相邻的 `prefetch.py:640` 反而是对的
+（`build_error_record(component="prefetch_facade", ...)` 汇入 `suppressed_error_count`）。
+
+本次：两个计数器都在 status 暴露（新增 `init_error_count`）、修正不实注释。
+**monitor 接线有意未做**并登记为遗留——新增一个 WARN 码需要分类表注册 +
+`fail_if_production` 判定 + clean-host 分档，属独立一轮；与 BR 记录的
+「monitor 11 组件采集接线」同族缺口。
+
+### 4. status 无法区分「被 Owner 关掉」与「mode 本来就 off」
+
+`kill_switch_enabled` 在 `mode=off` 时同样渲染 `false`，读起来像「有人把车道杀了」；
+`effective_enabled` 则是它的纯重复字段。新增 `mode_live` 让两种状态可分辨，
+`effective_enabled` 改为显式合取。（`effective_enabled` 在构造上仍与 `kill_switch_enabled`
+数值相等，真正消歧的是 `mode_live`；该字段属已落地 schema，未删。）
+
+### 5. `_roots is None` 分支污染 init 哨兵
+
+该分支把 `_recall_facade_initialized` 置 True。哨兵语义是「构造已跑过」，在这里置真会让
+roots 事后注入之后 facade **永久返回 None**——一个哨兵表达两件事（Section W 规则 4）。
+已去掉置真。
+
+### 5.1 缓存的 facade 会被以另一个 arbitration mode 交付出去
+
+顺着第 5 项的调用链继续查出来的：`RetrieverFacade` 在**构造时**固化
+`_arbitration_mode`，而 `_recall_facade_initialized` 会在重新应用模式之前短路返回缓存对象。
+于是 `shadow` 下构造好的 facade 会被交给 `apply_canary` 的调用方（反之亦然），
+**跑的车道与 config 声明的不一致**。实测复现：翻转 mode 后拿到的对象
+`_arbitration_mode` 仍是 `shadow`。
+
+（本次为 `apply_canary` 引入的按模式取默认值已让 *开关缓存* 在模式翻转时失效——
+`default_enabled` 是指纹的一部分——但 *facade 对象* 本身不受该指纹保护，是独立的一条。）
+
+新增 `_recall_facade_mode` 记录构造时的模式，两处 `initialized` 短路都加上模式一致判断。
+
+### 6. onboarding 的 wrapper 分支无覆盖
+
+`_write_execution_gate_assets` 有**两处** `_copy_asset_if_distinct` 调用（runner 循环 +
+group tick wrapper 分支），而新测试传 `specs=[]`，只跑到第一处。反事实实测：把 wrapper
+那处改回 `shutil.copy2`，全套仍绿。新增
+`test_group_tick_wrapper_install_is_idempotent_in_installed_layout` 覆盖第二处——
+反事实下 Windows 报 `PermissionError [WinError 32]`、Linux 报 `SameFileError`，
+同一个自我复制缺陷。
+
+### 7. 150ms 到期测试是墙钟 flaky
+
+`test_expired_false_kill_switch_reenables_without_file_change` 的 150ms 窗口要覆盖一次
+治理 JSONL 写入 + provider 构造 + `stat` + 全量 `read_text` + 反向重扫，才轮到**第一条**
+断言。在产生过 BO 抖动的 mount-isolated GHA runner 上过窄；一旦超时，解析回落到新默认值
+`True`，`assert ... is None` 直接失败。窗口放宽到 3s，sleep 由实测已耗时反推。
+
+### 8. 有意保留：严格校验取全账本口径
+
+`_validate_recall_facade_override_store` 对**任意**坏行/非 dict 记录抛错，包括与本旋钮
+无关的记录；而解析器自己的 `_read_jsonl` 是**静默跳过**的。这条不对称真实存在，
+但**保留 fail-closed**：坏行无法归属到具体旋钮，把它当治理存储损坏比静默跳过更安全；
+且改它等于推翻本提交刚落地的 `test_malformed_json_kill_switch_store_fails_closed`。
+已在 docstring 写明这是有意与解析器不同，可见性由第 3 项兜底。
+
+### 9. 记录不做：缓存的热路径前提弱于其自述
+
+`prefetch()` 在 `_ensure_recall_facade()` 之前**已经**有两次未缓存的全账本 `resolve_knob()`
+（`lane_low_clue_recall_enabled`、`session_scoped_recent_events`）。为省下第三次读而引入
+~90 行缓存机制（stat 指纹 + RLock + 到期追踪 + 严格校验 + 路径重复 + fail-open 分支），
+其热路径理由因此**明显弱于自述**——缓存确实省掉了每次 prefetch 的一次读，
+但"governed file I/O 不能上热路径"这个前提在同一函数里已经被违反两次。
+`resolve_knobs()` 本就是为「一次读、N 个旋钮」而存在，
+把三者合并会把热路径 I/O 从 2 次降到 1 次，并顺带删掉缓存、锁与第 2 项的路径重复。
+**本次未做**：这是对热路径的设计改动、牵涉另外两个旋钮各自的既有测试，应单独一轮。
+
+### 反事实覆盖
+
+第 1、2、5、5.1、6 项各用 revert→fail→restore→pass 实测：
+
+- 去掉 `_recall_facade_switch_default` 的模式判别（恒 True）→
+  `test_expired_false_kill_switch_does_not_reenable_output_mutating_canary` FAIL。
+- 恢复手工拼路径 + 「文件缺失→True」短路 →
+  `test_kill_switch_is_read_from_the_resolver_owned_store_path` FAIL。
+- 恢复 `_roots is None` 的哨兵置真 →
+  `test_roots_injected_after_a_rootless_call_still_builds_the_facade` FAIL。
+- 去掉两处模式一致判断 →
+  `test_cached_facade_is_not_served_under_a_different_arbitration_mode` FAIL
+  （报出交付的是 `shadow` facade）。
+- wrapper 分支改回 `shutil.copy2` → 新增的 wrapper 测试 FAIL。
+
+（过程教训：第 5.1 项的第一次反事实是**假通过**——patch 脚本因缩进前缀互为子串而
+`assert count == 1` 中断、根本没改文件，测试自然仍绿。反事实必须确认补丁真的落了盘，
+否则"通过"证明的是补丁没生效，不是修复没必要。）
+
+另修掉该测试类原有**两条空过测试**：裸 `MemoryOSProvider()` 的 `_roots is None` 会在任何
+mode/knob 逻辑之前返回，`test_facade_initialized_once_and_cached` 断言的是 `None is None`，
+`test_facade_returns_none_when_knob_disabled` 从未走到旋钮、其 docstring
+（"Default: prefetch_facade_enabled=False"）在本提交后已是错的。两条均补注 roots 与 mode
+后才真正成立，后者改名为 `test_facade_returns_none_when_no_durable_mode_configured`
+（覆盖"config 完全不提这条车道"，与已有的显式 `mode: off` 用例区分）。
+
+### 同类模式全项目扫描（Section W 规则 5）
+
+- 手工拼 `knob_overrides.jsonl` 路径：仅 `knob_overrides.py` 自身（属主）与
+  `memory_os_vector_retrieval_benchmark.py:489`（写自建 fixture store，非 watcher），无同类缺陷。
+- 测试里断言执行位：仅本次修正的一处。
+- 亚秒级 sleep/到期：另两处（`test_memory_os_legacy_right_brain_retirement.py:347`、
+  `test_memory_os_monitor_perf.py:23`）失败方向安全——前者断言 writer **仍被阻塞**，
+  机器越慢越成立。
+
+### 测试与门禁
+
+3077 passed + 1 failed → **3085 passed / 13 skipped / 0 failed**（净 +7 测试：prefetch 6 + onboarding 1，
+另修好 1 条 Windows 红）。五项静态门全过：import cycle 165 模块 / 0 环、
+write surface 154/154 unclassified 0、static hygiene、public checkout probe --strict exit 0、
+`git diff --check` 干净。
+
 ---
 
 ## 待办
@@ -1622,3 +1786,21 @@ sannai-community 仓库 README。）
   正向断言由"无遮蔽报错"改为"traceback 出现 runtime 树路径"。
   已用一次性 venv 复刻 CI 条件验证：旧版在其中复现出与 CI 一致的失败、新版 6 项全过。
   3065 → **3066 passed / 13 skipped / 0 failed**，五项静态门全过。
+- `6273e8b..（BV，本节）`：对 `6273e8b` 的代码评审与修复，12 项发现修 9 项。最重一项是
+  **`apply_canary` 上「关闭开关过期即静默恢复输出改写」**——该提交把解析默认值翻成 `True`
+  以救活 `shadow` 观测车道，但 `apply_canary` 会往 live prefetch 追加
+  `Recall Facade (unified)` 段，于是 provisional `false` 一到期就无声恢复输出改写，
+  正是它所修 bug 的镜像；改为按模式取默认值（`shadow → True`、`apply_canary → False`）。
+  另修：kill switch 路径自行拼装 + 「文件缺失→直接 True」的 **fail-open**（改走
+  `override_store_path()` 且不再短路）；`_recall_facade_init_errors` 只写不读且注释不实；
+  status 无法区分「被 Owner 关掉」与「mode 本来 off」（新增 `mode_live`）；
+  `_roots is None` 污染 init 哨兵致 roots 后注入后永久返回 None；缓存的 facade 会被以
+  另一个 arbitration mode 交付（对象构造时固化模式，`initialized` 短路先于模式判断）；
+  onboarding wrapper 分支零覆盖（反事实实测可回退）；150ms 到期测试墙钟 flaky。
+  **并查实该提交把 Windows 本机全绿基线打破了**——它自己新增的 onboarding 测试断言
+  `st_mode & 0o100`，在 Windows 恒为 0，CI（Linux）绿而本机红，与 BU.1 互为镜像；
+  这首先是一条流程发现（本机必红的测试被推上 main，DoD 第 4 步未执行）。
+  有意保留 1 项（严格校验的全账本 fail-closed 口径），
+  显式记录不做 2 项（monitor 对 `recall_facade` 的采集接线；`prefetch()` 三个旋钮合并为一次
+  `resolve_knobs()` 以真正消除热路径重复读）。3077 passed + 1 failed →
+  **3085 passed / 13 skipped / 0 failed**（净 +7），五项静态门全过。

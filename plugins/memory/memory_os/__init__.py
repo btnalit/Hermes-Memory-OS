@@ -81,10 +81,18 @@ class MemoryOSProvider(MemoryProvider):
         # ── Phase 3: Retriever Facade (provider-level cache, constraint 1) ─
         self._recall_facade: RetrieverFacade | None = None
         self._recall_facade_initialized = False
-        self._recall_facade_knob_fingerprint: tuple[bool, int, int, int] | None = None
+        # Mode the cached facade was constructed with. The facade freezes its
+        # arbitration mode at construction, so serving it under a different
+        # mode would silently run the wrong lane.
+        self._recall_facade_mode = ""
+        # Fingerprint carries the resolution default too: the default is
+        # mode-derived, so a cache entry resolved under one mode must never be
+        # served to another.
+        self._recall_facade_knob_fingerprint: tuple[bool, int, int, int, bool] | None = None
         self._recall_facade_enabled_cache = False
         self._recall_facade_knob_expiry_epoch: float | None = None
         self._recall_facade_knob_errors = 0
+        self._recall_facade_init_errors = 0
         self._recall_facade_lock = threading.RLock()
 
     @property
@@ -188,8 +196,11 @@ class MemoryOSProvider(MemoryProvider):
         """
         if self._roots is None:
             # A provider that has not been opened has no injected store context.
-            # Keep the optional facade disabled instead of reading ambient ~/.hermes.
-            self._recall_facade_initialized = True
+            # Keep the optional facade disabled instead of reading ambient
+            # ~/.hermes -- but do NOT latch ``_recall_facade_initialized``: that
+            # sentinel means "construction already ran", and latching it here
+            # would pin the facade to None for the rest of the process even
+            # after roots are injected.
             self._recall_facade = None
             return None
 
@@ -201,21 +212,26 @@ class MemoryOSProvider(MemoryProvider):
             # invalid mode.
             return None
 
-        # The durable mode keeps the lane live when a provisional enable
-        # override expires; an explicit active false override remains a
-        # call-time kill switch.
-        if not self._recall_facade_kill_switch_enabled():
+        # The durable mode keeps the OBSERVATION lane live when a provisional
+        # enable override expires; an explicit active false override remains a
+        # call-time kill switch. ``apply_canary`` is deliberately excluded from
+        # that durable default -- see _recall_facade_switch_default().
+        if not self._recall_facade_kill_switch_enabled(
+            default_enabled=self._recall_facade_switch_default(arbitration_mode),
+        ):
             return None
-        if self._recall_facade_initialized:
+        if self._recall_facade_initialized and self._recall_facade_mode == arbitration_mode:
             return self._recall_facade
 
         with self._recall_facade_lock:
             # A switch write may race the first check while this thread waits
             # for another initializer. Re-evaluate under the same lock before
             # constructing or returning the cached object.
-            if not self._recall_facade_kill_switch_enabled():
+            if not self._recall_facade_kill_switch_enabled(
+                default_enabled=self._recall_facade_switch_default(arbitration_mode),
+            ):
                 return None
-            if self._recall_facade_initialized:
+            if self._recall_facade_initialized and self._recall_facade_mode == arbitration_mode:
                 return self._recall_facade
 
             from .retrievers.crystallized import CrystallizedRetriever
@@ -240,13 +256,35 @@ class MemoryOSProvider(MemoryProvider):
                 try:
                     self._recall_facade.register(retriever_class())
                 except Exception:
-                    # fail-open: registration failure must not block startup;
-                    # recorded as suppressed count for monitor visibility
-                    self._recall_facade_init_errors = getattr(self, "_recall_facade_init_errors", 0) + 1
+                    # fail-open: registration failure must not block startup.
+                    # Surfaced as recall_facade.init_error_count in
+                    # _tool_status_report(); no monitor component aggregates
+                    # that block yet (see BV note in the stabilization checklist).
+                    self._recall_facade_init_errors += 1
+            self._recall_facade_mode = arbitration_mode
             self._recall_facade_initialized = True  # set after successful init
             return self._recall_facade
 
-    def _recall_facade_kill_switch_enabled(self) -> bool:
+    @staticmethod
+    def _recall_facade_switch_default(arbitration_mode: str) -> bool:
+        """Default for ``prefetch_facade_enabled`` under a given durable mode.
+
+        ``shadow`` is output-neutral: it only builds and persists the
+        metadata-only Recall Plan, so the durable mode is allowed to keep the
+        observation lane live once a provisional enable override expires --
+        that is the regression this lane's fix exists to prevent.
+
+        ``apply_canary`` is NOT output-neutral: it appends a live
+        ``Recall Facade (unified)`` section to prefetch output. Defaulting it
+        to enabled would mean a provisional *disable* override silently
+        resumes output mutation the moment it expires, with no file write, no
+        restart and no owner action -- the same silent-flip failure mirrored
+        onto the mutating mode. Output mutation therefore requires explicit,
+        unexpired positive authority.
+        """
+        return arbitration_mode == "shadow"
+
+    def _recall_facade_kill_switch_enabled(self, *, default_enabled: bool) -> bool:
         """Resolve the call-time facade switch once per store revision.
 
         The override ledger can grow large, so rescanning it on every prefetch
@@ -254,15 +292,23 @@ class MemoryOSProvider(MemoryProvider):
         the nearest relevant expiry preserves live writes and time-based expiry
         while unchanged stores use the cached strict-boolean result. Unreadable
         or malformed stores fail closed and increment the visible error count.
+
+        *default_enabled* is the mode-derived resolution default and is part of
+        the cache key -- see :meth:`_recall_facade_switch_default`.
         """
         if self._roots is None:
             return False
         with self._recall_facade_lock:
-            path = self._roots.memory_os_root / "system" / "knob_overrides.jsonl"
+            # Path ownership stays with knob_overrides: rebuilding it here
+            # would let the two drift, and a wrong path stats as "missing",
+            # which must never be a shortcut around reading the real switch.
+            from .knob_overrides import override_store_path, resolve_knob
+
+            path = override_store_path(self._roots)
             try:
                 stat_result = path.stat()
             except FileNotFoundError:
-                fingerprint = (False, 0, 0, 0)
+                fingerprint = (False, 0, 0, 0, default_enabled)
             except OSError:
                 self._recall_facade_knob_errors += 1
                 return False
@@ -272,6 +318,7 @@ class MemoryOSProvider(MemoryProvider):
                     int(stat_result.st_ino),
                     int(stat_result.st_size),
                     int(stat_result.st_mtime_ns),
+                    default_enabled,
                 )
 
             now_epoch = datetime.now(timezone.utc).timestamp()
@@ -286,28 +333,25 @@ class MemoryOSProvider(MemoryProvider):
                 return self._recall_facade_enabled_cache
 
             expiry_epoch: float | None = None
-            if not fingerprint[0]:
-                resolved: object = True
-            else:
-                from .knob_overrides import resolve_knob
-
-                try:
-                    expiry_epoch = self._validate_recall_facade_override_store(
-                        path,
-                        now_epoch=now_epoch,
-                    )
-                    resolved = resolve_knob(
-                        "prefetch_facade_enabled",
-                        default=True,
-                        roots=self._roots,
-                    )
-                except Exception:
-                    # This is a governance boundary on the live prefetch path:
-                    # unexpected reader/parser failures disable the optional
-                    # facade instead of breaking prefetch or enabling canary.
-                    resolved = False
-                    expiry_epoch = None
-                    self._recall_facade_knob_errors += 1
+            try:
+                # A missing store is "no overrides", not "enabled": the answer
+                # still comes from the resolver applying *default_enabled*.
+                expiry_epoch = self._validate_recall_facade_override_store(
+                    path,
+                    now_epoch=now_epoch,
+                )
+                resolved: object = resolve_knob(
+                    "prefetch_facade_enabled",
+                    default=default_enabled,
+                    roots=self._roots,
+                )
+            except Exception:
+                # This is a governance boundary on the live prefetch path:
+                # unexpected reader/parser failures disable the optional
+                # facade instead of breaking prefetch or enabling canary.
+                resolved = False
+                expiry_epoch = None
+                self._recall_facade_knob_errors += 1
 
             enabled = type(resolved) is bool and resolved is True
             if type(resolved) is not bool:
@@ -323,8 +367,18 @@ class MemoryOSProvider(MemoryProvider):
         *,
         now_epoch: float,
     ) -> float | None:
-        """Strictly validate the ledger and return its nearest facade expiry."""
+        """Strictly validate the ledger and return its nearest facade expiry.
+
+        A store that does not exist yet is "no overrides recorded", not a
+        validation failure -- the resolver applies the caller's default.
+        Strictness is deliberately whole-ledger: a line that will not parse
+        cannot be attributed to a knob, so it is treated as corruption of the
+        governance store rather than silently skipped the way the resolver's
+        own tolerant reader does.
+        """
         nearest_expiry: float | None = None
+        if not path.exists():
+            return None
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             if not raw_line.strip():
                 continue
@@ -1098,9 +1152,17 @@ class MemoryOSProvider(MemoryProvider):
             recall_arbitration_raw if isinstance(recall_arbitration_raw, dict) else {}
         )
         recall_arbitration_mode = str(recall_arbitration_cfg.get("mode") or "off")
+        recall_facade_mode_live = recall_arbitration_mode in {"shadow", "apply_canary"}
+        # ``kill_switch_enabled`` alone cannot distinguish "the owner disabled
+        # the lane" from "the durable mode is off, nobody touched the switch" --
+        # both render false. ``mode_live`` is reported alongside it so a reader
+        # can tell those apart. The resolution stays gated on a live mode so an
+        # off lane keeps costing zero governed reads on the prefetch hot path.
         recall_facade_switch_enabled = (
-            self._recall_facade_kill_switch_enabled()
-            if recall_arbitration_mode in {"shadow", "apply_canary"}
+            self._recall_facade_kill_switch_enabled(
+                default_enabled=self._recall_facade_switch_default(recall_arbitration_mode),
+            )
+            if recall_facade_mode_live
             else False
         )
         return {
@@ -1135,10 +1197,12 @@ class MemoryOSProvider(MemoryProvider):
             "recall_observation_window": recall_observation_window,
             "recall_facade": {
                 "arbitration_mode": recall_arbitration_mode,
+                "mode_live": recall_facade_mode_live,
                 "initialized": self._recall_facade_initialized,
                 "kill_switch_enabled": recall_facade_switch_enabled,
-                "effective_enabled": bool(recall_facade_switch_enabled),
+                "effective_enabled": recall_facade_mode_live and recall_facade_switch_enabled,
                 "knob_error_count": self._recall_facade_knob_errors,
+                "init_error_count": self._recall_facade_init_errors,
             },
             "crystallized_candidates_label": "review candidates only; not approved crystallized memory",
             "crystallized_records": public_counts["crystallized_records"],
