@@ -1780,7 +1780,32 @@ tainted 候选拿到的是 `approve_candidate`，而普通 approve 对 tainted �
 → 修复后 **3119 passed / 13 skipped / 0 failed / 0 errors**。
 五项静态门全过：import cycle 166 模块 / 0 环、write surface 153/153 unclassified 0、
 static hygiene、public checkout probe --strict exit 0、`git diff --check` 干净；
-closure matrix `status=ok`。
+closure matrix `status=ok`。GitHub CI 对最终提交全绿（full suite + 五门 + 空白门）。
+
+### clean clone + 全新 venv 门：查出两条既有环境缺口
+
+按交接要求做了 exact-commit clean clone + `pip install -e ".[dev]"` 全新 venv 全量，
+**首次跑出 15 failed**——两条都与本轮改动无关，是这道门本身该抓的东西：
+
+1. **`pyproject.toml` 的 dev 依赖在 Windows 上不完整（已修）**。
+   Windows 没有系统 tz 数据库，`zoneinfo.ZoneInfo("UTC")` 直接抛
+   `ZoneInfoNotFoundError`；`plugins/modules/context/digest_consolidation.py` 顶层
+   `from zoneinfo import ZoneInfo`，于是全新 venv 里 15 条测试中的 14 条挂掉
+   （digest_consolidation 10 条 + modules doctor 连带 3 条 + deep_reflection 1 条）。
+   本机之前一直绿是因为系统 Python 恰好装了 `tzdata 2025.3`，CI 绿是因为 Linux 有系统库——
+   **两个环境都在替这条缺失依赖兜底**，只有全新 venv 会暴露它。
+   已加 `tzdata; sys_platform == "win32"` 到 dev extras，实测 14 条全部转绿。
+   （未动运行时 `dependencies = []`：生产两台主机都是 Linux；但需记住
+   digest_consolidation 在 Windows 运行时同样会炸。）
+2. **`test_isolated_worker_executes_without_session_or_delivery_files` 在全新 venv 下必红（未修，登记）**。
+   该测试 `os.symlink(sys.executable, host/"venv"/"bin"/"python")`，
+   在 venv 里 `sys.executable` 是 `.venv/Scripts/python.exe`，符号链接到 venv 布局之外后
+   丢掉 `pyvenv.cfg` 上下文，子进程于是导不到 editable 装的 `plugins` → `returncode != 0`
+   → `ephemeral_worker_failed`。系统 Python 与 Linux CI 均无此问题。
+   文件不在本轮 diff 内，属既有跨环境假设缺口（与 BU.1「CI 空过、本机绿」、
+   BV 第 0 节「本机红、CI 绿」同族：**测试不验证自己的运行前提**）。
+
+修掉第 1 条后 clean-clone 全新 venv 的剩余失败为 **1 条**，即上述第 2 条。
 
 ---
 
