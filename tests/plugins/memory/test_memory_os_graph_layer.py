@@ -1217,6 +1217,160 @@ def test_t2_2_5_gate_fail_open_broken_index(tmp_path):
     assert "error" in result
 
 
+def test_t2_2_5_gate_fails_closed_when_edge_query_errors(tmp_path):
+    """An unreadable graph must not look like a clean contradiction check."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_gate_error", "kind": "preference",
+         "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": ["evt_gate_error"], "tags": [],
+         "body": "The deployment strategy favors gradual rollout over canary."},
+    ])
+    index.rebuild_from_store(store)
+
+    conn = _conn(index)
+    conn.execute(
+        """insert into crystallized_candidates
+           (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
+           values (?, ?, ?, ?, ?, ?, ?)""",
+        ("cand_gate_error", "preference",
+         "The deployment strategy favors gradual rollout over canary.",
+         "[]", "[]", "private", "proposed"),
+    )
+    conn.commit()
+    conn.close()
+
+    class BrokenEdgeIndex:
+        def query_edges(self, *args, **kwargs):
+            raise RuntimeError("deterministic edge query failure")
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    result = run_crystallization_gate(
+        str(index.roots.index_path),
+        index=BrokenEdgeIndex(),
+        audit_path=str(store.roots.audit_path),
+    )
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "edge_query_failed"
+    assert result["error_count"] == 1
+    assert result["flagged_count"] == 1
+    assert result["flagged_candidates"][0]["candidate_id"] == "cand_gate_error"
+    assert result["flagged_candidates"][0]["reason_code"] == "edge_query_failed"
+
+    from plugins.memory.memory_os.audit import read_audit_records
+
+    audit_record = read_audit_records(store.roots.audit_path)[-1]
+    assert audit_record["action"] == "crystallization_gate_run"
+    assert audit_record["status"] == "error"
+    assert audit_record["details"]["error_count"] == 1
+    assert audit_record["details"]["error_codes"] == ["edge_query_failed"]
+
+
+def test_t2_2_5_gate_fails_closed_when_fts_query_errors(tmp_path):
+    """A broken similarity index must route every candidate to owner review."""
+    store, index = _store(tmp_path)
+    conn = _conn(index)
+    conn.execute(
+        """insert into crystallized_candidates
+           (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
+           values (?, ?, ?, ?, ?, ?, ?)""",
+        ("cand_fts_error", "preference", "A substantive candidate body for the gate.",
+         "[]", "[]", "private", "proposed"),
+    )
+    conn.execute("drop table memory_fts")
+    conn.commit()
+    conn.close()
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    result = run_crystallization_gate(str(index.roots.index_path), index=index)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "fts_query_failed"
+    assert result["error_count"] == 1
+    assert result["flagged_count"] == 1
+    assert result["flagged_candidates"][0]["candidate_id"] == "cand_fts_error"
+    assert result["flagged_candidates"][0]["reason_code"] == "fts_query_failed"
+
+
+def test_t2_2_5_gate_uses_strict_real_edge_query(tmp_path):
+    """The production index must not translate graph corruption into no edges."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_real_edge_error", "kind": "preference",
+         "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": ["evt_real_edge_error"], "tags": [],
+         "body": "The deployment strategy favors gradual rollout over canary."},
+    ])
+    index.rebuild_from_store(store)
+
+    conn = _conn(index)
+    conn.execute(
+        """insert into crystallized_candidates
+           (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
+           values (?, ?, ?, ?, ?, ?, ?)""",
+        ("cand_real_edge_error", "preference",
+         "The deployment strategy favors gradual rollout over canary.",
+         "[]", "[]", "private", "proposed"),
+    )
+    conn.execute("drop table memory_edges")
+    conn.execute("create table memory_edges (broken_column text)")
+    conn.commit()
+    conn.close()
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    result = run_crystallization_gate(str(index.roots.index_path), index=index)
+
+    check_conn = sqlite3.connect(index.roots.index_path)
+    edge_columns_after = [
+        str(row[1])
+        for row in check_conn.execute("pragma table_info(memory_edges)").fetchall()
+    ]
+    check_conn.close()
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "edge_query_failed"
+    assert result["error_count"] == 1
+    assert result["flagged_count"] == 1
+    assert result["flagged_candidates"][0]["candidate_id"] == "cand_real_edge_error"
+    assert result["flagged_candidates"][0]["reason_code"] == "edge_query_failed"
+    assert edge_columns_after == ["broken_column"]
+
+
+def test_t2_2_5_gate_fails_closed_without_edge_index_dependency(tmp_path):
+    """A candidate with FTS peers cannot be cleared without the edge reader."""
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_missing_edge_index", "kind": "preference",
+         "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": ["evt_missing_edge_index"], "tags": [],
+         "body": "The deployment strategy favors gradual rollout over canary."},
+    ])
+    index.rebuild_from_store(store)
+
+    conn = _conn(index)
+    conn.execute(
+        """insert into crystallized_candidates
+           (candidate_id, kind, body, source_event_ids_json, tags_json, sensitivity, bridge_state)
+           values (?, ?, ?, ?, ?, ?, ?)""",
+        ("cand_missing_edge_index", "preference",
+         "The deployment strategy favors gradual rollout over canary.",
+         "[]", "[]", "private", "proposed"),
+    )
+    conn.commit()
+    conn.close()
+
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+    result = run_crystallization_gate(str(index.roots.index_path), index=None)
+
+    assert result["status"] == "error"
+    assert result["error_code"] == "edge_index_unavailable"
+    assert result["error_count"] == 1
+    assert result["flagged_count"] == 1
+    assert result["flagged_candidates"][0]["candidate_id"] == "cand_missing_edge_index"
+    assert result["flagged_candidates"][0]["reason_code"] == "edge_index_unavailable"
+
+
 def test_t2_2_6_gate_does_not_alter_candidates(tmp_path):
     """T2.2.6: Gate is read-only — does not modify any data."""
     store, index = _store(tmp_path)

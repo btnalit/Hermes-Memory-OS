@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import threading
 
 import pytest
 
@@ -107,6 +108,186 @@ def test_approved_record_frontmatter_contains_approval_metadata_and_source_event
     assert frontmatter["source_event_ids"] == candidate.source_event_ids
     assert frontmatter["sensitivity"] == "private"
     assert frontmatter["hindsight_indexed"] is False
+
+
+def test_approved_write_waits_for_canonical_transition_lock(tmp_path, monkeypatch):
+    """A revoke read/replace must not race an append and discard that append."""
+    service = _service(tmp_path)
+    first = _candidate()
+    first_decision = ApprovalDecision(
+        candidate_id=first.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-05-20T08:00:00+00:00",
+    )
+    service.write_approved_record(first, first_decision, file_name="moments.md")
+    first_id = service.read_records("moments.md")[0].frontmatter["id"]
+
+    second = CrystallizedCandidate(
+        candidate_id="cand-concurrent-append-002",
+        kind="moment",
+        body="A second owner-approved record written during a revoke.",
+        source_event_ids=["evt-concurrent-append-002"],
+    )
+    second_decision = ApprovalDecision(
+        candidate_id=second.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-05-20T08:02:00+00:00",
+    )
+
+    revoke_reader_entered = threading.Event()
+    release_revoke = threading.Event()
+    append_attempted = threading.Event()
+    append_entered = threading.Event()
+    failures: list[BaseException] = []
+    original_read_records = service.read_records
+    original_append = service.store.append_crystallized_record
+
+    def paused_read_records(file_name: str):
+        records = original_read_records(file_name)
+        revoke_reader_entered.set()
+        if not release_revoke.wait(timeout=5):
+            raise AssertionError("timed out waiting to release revoke")
+        return records
+
+    def observed_append(*args, **kwargs):
+        append_entered.set()
+        return original_append(*args, **kwargs)
+
+    monkeypatch.setattr(service, "read_records", paused_read_records)
+    monkeypatch.setattr(service.store, "append_crystallized_record", observed_append)
+
+    def revoke_target() -> None:
+        try:
+            service.revoke_record(
+                str(first_id), revoked_by="owner", reason="concurrency regression"
+            )
+        except BaseException as exc:  # surfaced after both threads join
+            failures.append(exc)
+
+    def append_second() -> None:
+        try:
+            append_attempted.set()
+            service.write_approved_record(
+                second, second_decision, file_name="moments.md"
+            )
+        except BaseException as exc:  # surfaced after both threads join
+            failures.append(exc)
+
+    revoke_thread = threading.Thread(target=revoke_target)
+    append_thread = threading.Thread(target=append_second)
+    revoke_thread.start()
+    assert revoke_reader_entered.wait(timeout=5)
+    append_thread.start()
+    assert append_attempted.wait(timeout=5)
+    append_raced_transition = append_entered.wait(timeout=0.5)
+    release_revoke.set()
+    revoke_thread.join(timeout=5)
+    append_thread.join(timeout=5)
+
+    assert not revoke_thread.is_alive()
+    assert not append_thread.is_alive()
+    assert failures == []
+    assert append_raced_transition is False
+    assert append_entered.is_set()
+    assert {record.frontmatter["candidate_id"] for record in original_read_records("moments.md")} == {
+        first.candidate_id,
+        second.candidate_id,
+    }
+
+
+def test_revoke_holds_edge_lock_across_read_modify_write(tmp_path, monkeypatch):
+    """A concurrent governed edge append must survive revoke invalidation."""
+    service = _service(tmp_path)
+    candidate = _candidate()
+    decision = ApprovalDecision(
+        candidate_id=candidate.candidate_id,
+        purpose=ApprovalPurpose.APPROVE_FOR_CRYSTALLIZED,
+        reviewer="owner",
+        reviewed_at="2026-05-20T08:00:00+00:00",
+    )
+    service.write_approved_record(candidate, decision, file_name="moments.md")
+    record_id = str(service.read_records("moments.md")[0].frontmatter["id"])
+
+    from plugins.memory.memory_os import jsonl_io
+
+    edges_path = service.store.roots.memory_os_root / "graph" / "edges.jsonl"
+    initial_edge = {
+        "edge_id": "edge-revoke-initial",
+        "from_record_id": record_id,
+        "to_record_id": "other-record",
+        "state": "active",
+    }
+    late_edge = {
+        "edge_id": "edge-concurrent-late",
+        "from_record_id": "late-a",
+        "to_record_id": "late-b",
+        "state": "candidate",
+    }
+    jsonl_io.append_jsonl_locked(edges_path, initial_edge)
+
+    edge_read_entered = threading.Event()
+    release_revoke = threading.Event()
+    late_append_attempted = threading.Event()
+    late_append_entered = threading.Event()
+    failures: list[BaseException] = []
+    original_read_jsonl = jsonl_io.read_jsonl
+    original_append_under_lock = jsonl_io._append_line_under_lock
+
+    def paused_read_jsonl(path, *args, **kwargs):
+        records = original_read_jsonl(path, *args, **kwargs)
+        if str(path) == str(edges_path):
+            edge_read_entered.set()
+            if not release_revoke.wait(timeout=5):
+                raise AssertionError("timed out waiting to release edge rewrite")
+        return records
+
+    def observed_append_under_lock(target, line, **kwargs):
+        if target == edges_path and "edge-concurrent-late" in line:
+            late_append_entered.set()
+        return original_append_under_lock(target, line, **kwargs)
+
+    monkeypatch.setattr(jsonl_io, "read_jsonl", paused_read_jsonl)
+    monkeypatch.setattr(jsonl_io, "_append_line_under_lock", observed_append_under_lock)
+
+    def revoke_target() -> None:
+        try:
+            service.revoke_record(
+                record_id, revoked_by="owner", reason="edge-lock regression"
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    def append_late_edge() -> None:
+        try:
+            late_append_attempted.set()
+            jsonl_io.append_jsonl_locked(edges_path, late_edge)
+        except BaseException as exc:
+            failures.append(exc)
+
+    revoke_thread = threading.Thread(target=revoke_target)
+    append_thread = threading.Thread(target=append_late_edge)
+    revoke_thread.start()
+    assert edge_read_entered.wait(timeout=5)
+    append_thread.start()
+    assert late_append_attempted.wait(timeout=5)
+    append_raced_rewrite = late_append_entered.wait(timeout=0.5)
+    release_revoke.set()
+    revoke_thread.join(timeout=5)
+    append_thread.join(timeout=5)
+
+    assert not revoke_thread.is_alive()
+    assert not append_thread.is_alive()
+    assert failures == []
+    assert append_raced_rewrite is False
+    assert late_append_entered.is_set()
+    final_edges = original_read_jsonl(edges_path)
+    assert {edge["edge_id"] for edge in final_edges} == {
+        "edge-revoke-initial",
+        "edge-concurrent-late",
+    }
+    assert final_edges[0]["state"] == "invalidated"
 
 
 def test_cw019_owner_eligible_is_preserved_but_not_upgraded_to_crystallized_approval(tmp_path):

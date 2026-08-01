@@ -124,6 +124,7 @@ class CrystallizedMemoryService:
     def __init__(self, store: MemoryOSStore) -> None:
         self.store = store
 
+    @_canonical_transition_locked
     def write_approved_record(
         self,
         candidate: CrystallizedCandidate,
@@ -315,19 +316,25 @@ class CrystallizedMemoryService:
                 # Invalidate all active edges involving the revoked node (守 G3)
                 from .jsonl_io import read_jsonl
                 edges_path = self.store.roots.memory_os_root / "graph" / "edges.jsonl"
+                changed_edges = 0
                 if edges_path.exists():
-                    edges = read_jsonl(str(edges_path))
-                    now = datetime.now(timezone.utc).isoformat()
-                    changed_edges = 0
-                    for edge in edges:
-                        if (edge.get("from_record_id") == normalized or edge.get("to_record_id") == normalized) \
-                                and edge.get("state") == "active":
-                            edge["state"] = "invalidated"
-                            edge["invalidated_at"] = now
-                            changed_edges += 1
+                    # Hold the same sidecar lock used by governed edge appenders
+                    # across the entire read/modify/write transaction.  Locking
+                    # only the final rewrite can discard an append that lands
+                    # after the read but before replacement.
+                    with locked_jsonl_file(edges_path):
+                        edges = read_jsonl(str(edges_path))
+                        invalidated_at = datetime.now(timezone.utc).isoformat()
+                        for edge in edges:
+                            if (edge.get("from_record_id") == normalized or edge.get("to_record_id") == normalized) \
+                                    and edge.get("state") == "active":
+                                edge["state"] = "invalidated"
+                                edge["invalidated_at"] = invalidated_at
+                                changed_edges += 1
+                        if changed_edges:
+                            from .jsonl_io import write_jsonl
+                            write_jsonl(edges_path, edges, ensure_parent=False)
                     if changed_edges:
-                        from .jsonl_io import write_jsonl
-                        write_jsonl(edges_path, edges, ensure_parent=False)
                         append_audit(
                             self.store.roots.audit_path,
                             action="node_edges_invalidated",

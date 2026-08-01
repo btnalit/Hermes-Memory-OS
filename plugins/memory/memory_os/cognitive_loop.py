@@ -995,6 +995,9 @@ class CognitiveLoopRunner:
             "candidate_count": result.get("candidate_count", 0),
             "flagged_count": result.get("flagged_count", 0),
             "flagged_ids": [f.get("candidate_id", "") for f in result.get("flagged_candidates", [])],
+            "error_count": result.get("error_count", 0),
+            "error_code": result.get("error_code", ""),
+            "error_records": result.get("error_records", []),
             "duration_ms": result.get("duration_ms", 0),
             "error": result.get("error", ""),
         }

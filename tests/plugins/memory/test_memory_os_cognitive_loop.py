@@ -23,6 +23,40 @@ def test_cognitive_loop_rejects_apply_without_test_host(tmp_path):
     assert result["boundaries"]["actual_execute"] is False
 
 
+def test_cognitive_loop_crystallization_gate_preserves_bounded_error_metadata(
+    tmp_path, monkeypatch
+):
+    store = _init_store(tmp_path)
+
+    from plugins.memory.memory_os import crystallization_gate
+
+    monkeypatch.setattr(
+        crystallization_gate,
+        "run_crystallization_gate",
+        lambda *args, **kwargs: {
+            "status": "error",
+            "candidate_count": 1,
+            "flagged_count": 1,
+            "flagged_candidates": [{"candidate_id": "cand_error"}],
+            "error_count": 1,
+            "error_code": "edge_query_failed",
+            "error_records": [
+                {"candidate_id": "cand_error", "error_code": "edge_query_failed"}
+            ],
+            "duration_ms": 1,
+        },
+    )
+
+    result = CognitiveLoopRunner(store)._crystallization_gate({})
+
+    assert result["status"] == "error"
+    assert result["error_count"] == 1
+    assert result["error_code"] == "edge_query_failed"
+    assert result["error_records"] == [
+        {"candidate_id": "cand_error", "error_code": "edge_query_failed"}
+    ]
+
+
 def test_cognitive_loop_default_disables_legacy_right_brain_without_writes(tmp_path):
     store = _init_store(tmp_path)
     _append_event(store, "evt_legacy_gate", "User discussed a foreground task that must not become inner speech.")

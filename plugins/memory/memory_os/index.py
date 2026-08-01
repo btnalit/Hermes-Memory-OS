@@ -237,27 +237,45 @@ class MemoryOSIndex:
         relation_types: list[str] | None = None,
         state: str = "active",
         limit: int = 10,
+        strict: bool = False,
     ) -> list[dict[str, Any]]:
         """根据一组 anchor node id 查询关联边(第二跳遍历)。
 
         契约:
         - anchor_ids 为空 → 立即返回 [] (不做全表扫描,守 G2 性能边界)
         - depth=1: 直接 IN (anchors) 查询,不做递归
-        - 异常 → 返回 [] (fail-open,守 G1)
+        - 默认异常 → 返回 [] (召回增强 fail-open,守 G1)
+        - strict=True 时异常向 caller 传播，供治理 gate fail-closed
         - limit 上限避免 budget 爆炸
         """
         if not anchor_ids:
             return []
         if not self.roots.index_path.exists():
+            if strict:
+                raise sqlite3.OperationalError("memory index is unavailable")
             return []
         if depth < 1:
             depth = 1
         conn = sqlite3.connect(self.roots.index_path)
         conn.row_factory = sqlite3.Row
         try:
-            _initialize_schema(conn)
-            return _query_edges_sqlite(conn, anchor_ids, depth=depth, relation_types=relation_types, state=state, limit=limit)
+            # Strict governance reads must not repair or mutate a malformed
+            # schema as a side effect of checking it.  Default recall callers
+            # retain the legacy initialize-and-fail-open behavior.
+            if not strict:
+                _initialize_schema(conn)
+            return _query_edges_sqlite(
+                conn,
+                anchor_ids,
+                depth=depth,
+                relation_types=relation_types,
+                state=state,
+                limit=limit,
+                strict=strict,
+            )
         except Exception:
+            if strict:
+                raise
             return []
         finally:
             conn.close()
@@ -1194,6 +1212,7 @@ def _query_edges_sqlite(
     relation_types: list[str] | None = None,
     state: str = "active",
     limit: int = 10,
+    strict: bool = False,
 ) -> list[dict[str, Any]]:
     """SQLite query helper for MemoryOSIndex.query_edges()."""
     if not anchor_ids or depth < 1:
@@ -1224,6 +1243,8 @@ def _query_edges_sqlite(
     try:
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.Error:
+        if strict:
+            raise
         return []
     results = [dict(row) for row in rows]
     if depth <= 1:
@@ -1254,6 +1275,8 @@ def _query_edges_sqlite(
     try:
         s2_rows = conn.execute(s2_sql, s2_params).fetchall()
     except sqlite3.Error:
+        if strict:
+            raise
         return results[:limit]
     seen = {r["edge_id"] for r in results}
     combined = results + [dict(row) for row in s2_rows if row["edge_id"] not in seen]
