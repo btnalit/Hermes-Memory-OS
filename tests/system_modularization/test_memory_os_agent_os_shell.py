@@ -1298,5 +1298,3 @@ def test_shell_session_hooks_skip_without_hermes_home(monkeypatch, tmp_path):
 def _audit_entries(hermes_home: Path) -> list[dict[str, Any]]:
     audit_path = hermes_home / "memory-os" / "audit" / "write_audit.jsonl"
     return read_audit_entries(audit_path)
-
-
