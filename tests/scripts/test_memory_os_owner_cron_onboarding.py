@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -163,6 +164,18 @@ def _registry_script_names() -> list[str]:
     return sorted(dict.fromkeys(names))
 
 
+def _assert_executable_bit(path: Path) -> None:
+    """Assert the user execute bit, where the platform actually has one.
+
+    Windows has no POSIX execute bit: ``chmod(mode | S_IXUSR)`` is a no-op
+    there and ``st_mode`` comes back ``0o100666``. Asserting it unconditionally
+    makes the test pass on Linux CI and fail on every Windows checkout.
+    """
+    if os.name == "nt":
+        return
+    assert path.stat().st_mode & stat.S_IXUSR
+
+
 def test_execution_gate_asset_install_is_idempotent_in_installed_layout(tmp_path, monkeypatch):
     """Running the deployed onboarding script must not copy a file onto itself."""
     module = _load_module()
@@ -180,8 +193,50 @@ def test_execution_gate_asset_install_is_idempotent_in_installed_layout(tmp_path
 
     assert execution_runner.read_text(encoding="utf-8") == "# execution\n"
     assert group_runner.read_text(encoding="utf-8") == "# group\n"
-    assert execution_runner.stat().st_mode & 0o100
-    assert group_runner.stat().st_mode & 0o100
+    _assert_executable_bit(execution_runner)
+    _assert_executable_bit(group_runner)
+
+
+def test_group_tick_wrapper_install_is_idempotent_in_installed_layout(tmp_path, monkeypatch):
+    """The wrapper branch copies from SOURCE_SCRIPTS_DIR — same self-copy hazard.
+
+    ``_write_execution_gate_assets`` has two copy sites: the runner loop and
+    the group-tick wrapper branch. Covering only the first leaves the second
+    free to regress back to a bare ``shutil.copy2``, which raises
+    ``SameFileError`` in the installed layout where source and target are the
+    same path.
+    """
+    module = _load_module()
+    hermes_home = tmp_path / "home"
+    scripts_dir = hermes_home / "scripts"
+    scripts_dir.mkdir(parents=True)
+    execution_runner = scripts_dir / "memory_os_execution_gate_runner.py"
+    group_runner = scripts_dir / "memory_os_cron_group_runner.py"
+    execution_runner.write_text("# execution\n", encoding="utf-8")
+    group_runner.write_text("# group\n", encoding="utf-8")
+    wrapper = scripts_dir / "memory_os_tick_derived.py"
+    wrapper.write_text("# tick wrapper\n", encoding="utf-8")
+
+    monkeypatch.setattr(module, "SOURCE_EXECUTION_GATE_RUNNER", execution_runner)
+    monkeypatch.setattr(module, "SOURCE_CRON_GROUP_RUNNER", group_runner)
+    # Installed layout: the onboarding script lives in the same scripts/ dir
+    # it installs into, so the wrapper source resolves to the wrapper target.
+    monkeypatch.setattr(module, "SOURCE_SCRIPTS_DIR", scripts_dir)
+    monkeypatch.setattr(module, "write_cron_registry_snapshot", lambda *a, **k: None)
+
+    module._write_execution_gate_assets(
+        hermes_home=hermes_home,
+        specs=[{
+            "script": "memory_os_tick_derived.py",
+            "raw_script": "memory_os_event_stats_refresh.py",
+            "registry_key": "tick_derived",
+            "_members": ("event_stats_refresh",),
+            "_group": None,
+        }],
+    )
+
+    assert wrapper.read_text(encoding="utf-8") == "# tick wrapper\n"
+    _assert_executable_bit(wrapper)
 
 
 def _home_with_helpers(
