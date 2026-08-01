@@ -3023,6 +3023,24 @@ def apply_owner_action(
         if action_type in OWNER_CANONICAL_WRITE_ACTION_TYPES:
             context_result = _consume_owner_write_context(store, record)
             if context_result.get("status") != "consumed":
+                # persist_error=False below keeps an unauthorized caller from
+                # appending to the owner-action ledger at all.  That is the
+                # right call, but it would otherwise leave a rejected
+                # canonical-write attempt with no durable trace anywhere, so
+                # record the rejection on the audit channel instead — bounded
+                # fields only, never the offered token.
+                append_audit(
+                    store.roots.audit_path,
+                    action="owner_canonical_write_authorization_rejected",
+                    status="error",
+                    target=f"{target_type}:{target_id}",
+                    details={
+                        "action_type": action_type,
+                        "owner_id": owner_id,
+                        "channel": _safe_channel(channel),
+                        "code": str(context_result.get("code") or "owner_write_authorization_required"),
+                    },
+                )
                 return _action_error(
                     store,
                     action_type,

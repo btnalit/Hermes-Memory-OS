@@ -1053,6 +1053,49 @@ def _seed_contradicts_edge(
     )
 
 
+def test_gate_error_records_use_one_shape_on_every_path(tmp_path):
+    """Every error record the gate emits must be readable the same way.
+
+    The early-return path built ``{"code": ...}`` while the per-candidate paths
+    built ``{"error_code": ...}``, both under the same ``error_records`` key.
+    Nothing crashed because the only consumer reads ``status``, but the next
+    consumer to iterate the records would have found ``error_code`` missing on
+    exactly the paths that matter — the failures.
+    """
+    from plugins.memory.memory_os.crystallization_gate import run_crystallization_gate
+
+    # Path 1: the index cannot be opened at all.
+    unopenable = run_crystallization_gate(str(tmp_path / "no_such_dir" / "index.db"))
+
+    # Path 2: candidates resolve, but no edge index is available to clear them.
+    store, index = _store(tmp_path)
+    _seed_canonical_crystallized(store, [
+        {"id": "cry_shape_a", "kind": "preference",
+         "created_at": "2026-06-01T10:00:00Z",
+         "source_event_ids": ["evt_a"], "tags": [],
+         "body": "The deployment strategy favors gradual rollout over canary."},
+    ])
+    index.rebuild_from_store(store)
+    no_edge_index = run_crystallization_gate(
+        str(index.roots.index_path),
+        candidates=[{
+            "candidate_id": "cand_shape_test",
+            "kind": "preference",
+            "body": "The deployment strategy favors gradual rollout over canary.",
+            "tags_json": "[]",
+        }],
+    )
+
+    assert unopenable["status"] == "error"
+    assert no_edge_index["status"] == "error"
+    for result in (unopenable, no_edge_index):
+        assert result["error_records"], result
+        for record in result["error_records"]:
+            assert set(record) == {"candidate_id", "error_code", "component"}, record
+            assert record["error_code"], record
+            assert record["component"], record
+
+
 def test_t2_2_1_gate_flags_contradicting_candidate(tmp_path):
     """T2.2.1: Gate flags a candidate whose body matches a crystallized
     record that has a contradicts edge."""
@@ -1219,7 +1262,7 @@ def test_t2_2_5_gate_returns_structured_error_when_index_cannot_open(tmp_path):
     assert result["error_code"] == "cannot_open_index"
     assert result["error_count"] == 1
     assert result["error_records"] == [
-        {"code": "cannot_open_index", "candidate_id": "", "component": "sqlite"}
+        {"candidate_id": "", "error_code": "cannot_open_index", "component": "sqlite"}
     ]
 
 
@@ -1234,7 +1277,7 @@ def test_t2_2_5_gate_returns_structured_error_when_candidates_cannot_be_read(tmp
     assert result["error_code"] == "cannot_read_candidates"
     assert result["error_count"] == 1
     assert result["error_records"] == [
-        {"code": "cannot_read_candidates", "candidate_id": "", "component": "sqlite"}
+        {"candidate_id": "", "error_code": "cannot_read_candidates", "component": "sqlite"}
     ]
 
 

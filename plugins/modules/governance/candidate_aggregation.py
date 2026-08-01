@@ -708,7 +708,12 @@ def _cluster_and_promote(
                 provisional_promotion=provisional_promotion,
                 cascade_policy=cascade_policy,
             )
-            gate_result = _resolver_candidate_gate_result(store, member)
+            # Gate only the verdicts that could actually write.  It opens two
+            # sqlite connections and runs an FTS query per call, and its result
+            # is read only on the approve path.
+            gate_result = (
+                _resolver_candidate_gate_result(store, member) if verdict.get("approve") else {}
+            )
             if verdict.get("approve") and _resolver_candidate_gate_allows(
                 gate_result, member.candidate_id,
             ):
@@ -862,7 +867,9 @@ def _cluster_and_promote(
                 provisional_promotion=provisional_promotion,
                 cascade_policy=cascade_policy,
             )
-            gate_result = _resolver_candidate_gate_result(store, c)
+            gate_result = (
+                _resolver_candidate_gate_result(store, c) if verdict.get("approve") else {}
+            )
             if verdict.get("approve") and _resolver_candidate_gate_allows(
                 gate_result, c.candidate_id,
             ):
@@ -994,7 +1001,9 @@ def _cluster_and_promote(
             provisional_promotion=provisional_promotion,
             cascade_policy=cascade_policy,
         )
-        gate_result = _resolver_candidate_gate_result(store, c)
+        gate_result = (
+            _resolver_candidate_gate_result(store, c) if verdict.get("approve") else {}
+        )
         if verdict.get("approve") and _resolver_candidate_gate_allows(
             gate_result, c.candidate_id,
         ):

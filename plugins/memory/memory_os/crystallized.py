@@ -1184,6 +1184,28 @@ def read_candidate_queue(
     if error_records is not None:
         error_records.extend(io_result.error_records[-5:])
     candidates: list[CrystallizedCandidate] = []
+
+    def _reject(row: dict[str, Any], error_code: str) -> None:
+        """Record a schema-invalid row instead of dropping it silently.
+
+        These rows have to be visible for the same reason malformed JSON does:
+        the aggregation lane skips queue compaction whenever the reader reports
+        errors, and compaction is an all-or-nothing rewrite.  A row that parses
+        as JSON but is not a usable candidate would otherwise be dropped here
+        and then permanently erased by the next compaction, with nothing
+        anywhere saying so.
+        """
+        if error_records is None:
+            return
+        error_records.append({
+            "component": "crystallized_candidate_queue",
+            "operation": "read_candidate_queue",
+            "error_code": error_code,
+            "severity": "warning",
+            "recoverable": True,
+            "candidate_id": str(row.get("candidate_id") or "")[:120],
+        })
+
     for raw in io_result.records:
         candidate_id = raw.get("candidate_id")
         kind = raw.get("kind")
@@ -1192,14 +1214,18 @@ def read_candidate_queue(
         tags = raw.get("tags") or []
         provenance = raw.get("provenance")
         if not all(isinstance(value, str) and value.strip() for value in (candidate_id, kind, body)):
+            _reject(raw, "candidate_required_field_invalid")
             continue
         if not isinstance(source_event_ids, list) or not isinstance(tags, list):
+            _reject(raw, "candidate_list_field_invalid")
             continue
         if provenance is not None and not isinstance(provenance, dict):
+            _reject(raw, "candidate_provenance_invalid")
             continue
         try:
             rejection_count = int(raw.get("rejection_count", 0))
         except (TypeError, ValueError):
+            _reject(raw, "candidate_rejection_count_invalid")
             continue
         candidates.append(
             CrystallizedCandidate(

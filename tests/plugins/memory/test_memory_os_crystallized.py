@@ -241,6 +241,17 @@ def test_candidate_queue_skips_malformed_and_invalid_rows(tmp_path):
         "jsonl_malformed_line",
         "jsonl_non_object_line",
     }
+    # A row that parses as JSON but is not a usable candidate must be reported
+    # too, not dropped in silence.  The aggregation lane skips its all-or-nothing
+    # queue compaction whenever the reader reports errors, so an unreported drop
+    # here becomes a permanent deletion at the next compaction.
+    schema_rejects = [
+        record for record in errors
+        if record["error_code"] == "candidate_required_field_invalid"
+    ]
+    assert len(schema_rejects) == 1, errors
+    assert schema_rejects[0]["candidate_id"] == "missing-body"
+    assert schema_rejects[0]["component"] == "crystallized_candidate_queue"
 
 
 def test_approved_record_frontmatter_contains_approval_metadata_and_source_events(tmp_path):

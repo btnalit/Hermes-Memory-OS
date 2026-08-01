@@ -34,8 +34,11 @@ def _gate_error_result(code: str, *, component: str) -> dict[str, Any]:
         "error": code,
         "error_code": code,
         "error_count": 1,
+        # Same record shape as the per-candidate errors below.  These two used to
+        # disagree ("code" here, "error_code" there) inside one return field, so
+        # any consumer that read error_code would have found None on this path.
         "error_records": [
-            {"code": code, "candidate_id": "", "component": component}
+            {"candidate_id": "", "error_code": code, "component": component}
         ],
         "candidate_count": 0,
         "flagged_count": 0,
@@ -147,6 +150,7 @@ def run_crystallization_gate(
                     {
                         "candidate_id": cid,
                         "error_code": "edge_index_unavailable",
+                        "component": "crystallization_gate",
                     }
                 )
                 flagged.append(
@@ -189,6 +193,7 @@ def run_crystallization_gate(
                     error_records.append({
                         "candidate_id": cid,
                         "error_code": "edge_query_failed",
+                        "component": "crystallization_gate",
                     })
                     flagged.append({
                         "candidate_id": cid,
@@ -212,6 +217,7 @@ def run_crystallization_gate(
         error_records.append({
             "candidate_id": "",
             "error_code": "fts_query_failed",
+            "component": "crystallization_gate",
         })
         already_flagged = {
             str(item.get("candidate_id") or "") for item in flagged
