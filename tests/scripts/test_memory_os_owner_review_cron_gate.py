@@ -242,3 +242,18 @@ def test_cron_gate_blocks_unresolved_auto_delivery_target(tmp_path):
 
     assert report["status"] == "blocked"
     assert any(item["code"] == "deliver_target_auto_unresolved" for item in report["findings"])
+
+
+def test_agent_prompt_forbids_inventing_unlisted_action_commands():
+    """The prompt used to show `memory approve oa_... / memory reject oa_...` as
+    its worked example, and the agent duly emitted both verbs for a
+    session_mirror_apply item that only ever exposes approve — handing the Owner
+    a reject command the token can never authorize.
+    """
+    module = _load_gate_module()
+    prompt = module.OWNER_REVIEW_AGENT_PROMPT
+
+    assert "只能照抄 Script Output 里 `会话回复示例:` 实际列出的命令" in prompt
+    assert "不要为了对称补出没有列出的 approve/reject/allow/defer 行" in prompt
+    # The old symmetric example must not survive as a template to imitate.
+    assert "memory approve oa_... / memory reject oa_...。" not in prompt
