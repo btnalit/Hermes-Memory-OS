@@ -1809,6 +1809,157 @@ closure matrix `status=ok`。GitHub CI 对最终提交全绿（full suite + 五�
 
 ---
 
+## BX — 每日 owner 审批议程：口径撒谎、翻页错位、审批项不可读（2026-08-01）
+
+owner 从生产 3.200 的 `memory-os-owner-review-digest` 收到的真实推送：
+
+> 今日需决定 1 项（共 25 项，另有 24 项未展示）
+> [A25] 是否批准 SessionMirror 的受限生产导入 lane 毕业，并执行一次真实 smoke？
+> …fingerprint 相关字段…
+> 批准命令：`memory approve oa_d40…` 拒绝命令：`memory reject oa_d40…`
+
+owner 的三条反馈：**看不懂在批什么**、**第一条永远是这条**、**真实的那些看不到**。
+本节把三条都追到源码，并确认它们是**同一条链**上的三个缺陷。
+
+### 0. 先复现，再动手（本轮唯一一次「先证据后设计」）
+
+用 24 条 `provisional_crystallized_record` + 1 条 `session_mirror_apply` 构造 fixture
+调 `owner_review_digest_preview(digest_mode="agenda")`，逐字复现了生产文案：
+
+| 量 | 值 |
+|---|---|
+| `counts.action_required_total` | 25（**未过滤**队列） |
+| `counts.action_required_shown` | 1 |
+| `counts.visible_action_required_total` | 1（**过滤后**，真正可投递的） |
+| `overflow.action_required` | 0（正确，可投递项没有溢出） |
+| 展示锚点 | **A25** ← 与生产一致 |
+| 表头 | 「需要你决定 25 项；本条展示 1 项，未展示 24 项」← 与生产一致 |
+
+结论：A1–A24 **全部是投递链路结构上永远送不出去的项**，不是「今天没排上」。
+
+### 1. 表头统计的是与 section 不同的人群（P0，「真实的看不到」的真身）
+
+`_assemble_living_memory_delivery_items()` 把 `LIVING_MEMORY_TARGET_TYPES` 里的
+非 promotion 项从**每一次投递渲染**中移除——这是 `39d1f2e`（Living Memory V2-0 rev-2）
+Task 7 有意引入的 delivery choke point，且被 monitor 硬约束
+（`living_memory_owner_delivery_nonpromotion_count>0` 直接 fail）。**所以正确修法不是放开过滤**，
+放开会当场打红生产 monitor。
+
+真正的缺陷是 `_rendered_overview_lines()` 用 `action_required_total`（未过滤）当分母，
+而 section 来自过滤后的列表：于是每天告诉 owner「有 25 项要你决定、24 项没展示」，
+而那 24 项 owner 在这个渠道里**永远等不到、也本来就不需要决定**
+（provisional 的 `confirm` 早已是 disabled no-op，到期自动失效，成熟的另走永久记忆提案）。
+
+改为按 section 实际来源的人群计数（`visible_action_required_total`，缺失时回落到原
+字段以兼容旧记录），并新增一行**如实披露**被过滤的 backlog 及其去向。
+按 Section W 第 5 条全项目扫同一模式，`review_suggested_total` 有**完全相同**的缺陷
+（同样未过滤、同样被 stale 抑制影响），一并修掉；`fyi_total` 本就基于 visible，无需改。
+
+### 2. 「下一页」按计数翻页，翻进另一份列表（P0，与第 1 条是同一 bug 的另一半）
+
+`_surface_offsets(operation="next_page")` 用 `counts.action_required_shown` 当偏移量，
+而 `owner_review_surface_report()` 的 `raw_items` 是**未过滤**队列：
+议程展示了 A25，偏移量却是 1 → 翻页返回 **A2**，一条 owner 从没见过的项，
+同时 **A1 被静默跳过**。表头还在教 owner 回复「下一页」——广告出来的逃生口是坏的。
+
+改为**按 `review_item_id` 身份续页**（与 `_repeat_decision_item_count` 同一把钥匙，
+抽出共享 helper `_rendered_digest_review_item_ids()`），并保留 `offsets` 字段的既有语义
+（回填「本页之前已处理掉多少条」），避免消费者读到裸 0 误以为没跳过。
+旧记录没有 `review_item_id` 时回落到计数路径。
+
+> Section W 第 2 条当场兑现：grep 到既有
+> `test_review_surface_next_page_uses_latest_owner_home_digest_offsets` 断言
+> `offsets["action_required"] == 2`。若不回填该字段，这条测试会红——而且它红得有道理。
+
+### 3. 审批项不可读 + 广告了一个不存在的动作（P1，「看不懂」的真身）
+
+`_session_mirror_apply_review_items()` 的 summary/reason 是
+`fingerprint=smfp_…; max_sessions=1`——**这不是任何人能做的决定**。
+而 `_safe_pending_session()` 早就产出了为展示而生的
+`metadata_or_redacted_summary` 面（已裁剪、已脱敏、`raw_private_body_printed=False`）：
+platform / message_count / tool_count / 脱敏摘要。改为渲染它，并按
+`external_review_eligible` 同款教训在 `_digest_item()` 里显式携带
+`pending_session_preview`——否则会在有界拷贝处被静默丢弃、退回 fingerprint 文案。
+
+另：`session_mirror_apply` 在 `_review_actions()` 里**只有 approve**，
+`TERMINAL_ACTIONS_BY_TARGET_TYPE` 也只认 `approve_session_mirror_apply`；
+生产推送里那条「拒绝命令 `memory reject oa_…`」是 **cron agent prompt 自己补出来的**
+（prompt 的示例写着 `memory approve oa_... / memory reject oa_...`，教会了模型凑对称）。
+该命令必被拒绝。这正是 `_review_actions()` 里那条注释警告过的反模式
+（「列出 owner 做不到的动作，只会教会 owner 忽略这个界面」）——只是这次发生在上一层。
+prompt 改为**只许照抄 Script Output 实际列出的命令**，并明说「只支持批准就直说」。
+
+### 4. 未修、留作 owner 决策的一项
+
+session_mirror 项的身份是 `production_bounded:{stable_scope_id}`，由**首个 pending 会话的
+fingerprint** 派生；且该 target_type **没有 reject 动作**。即：owner 目前没有任何方式说
+「别再问了」。给它加 `reject_/defer_session_mirror_apply` 需要新的 owner action 类型、
+终态注册、handler 与回滚契约（CLAUDE.md：新动作须自带有界 apply 契约），
+属于治理面扩张，不在本次「修好每日摘要」的范围内，**记为待办第 4 项**由 owner 定夺。
+
+### 5. 完成前复审抓到的第三次同类实例（出在自己身上）
+
+披露行初稿写的是「…；想看可回复：**查看临时记忆**」。但 `owner_review_surface_report()`
+的 operation 只有 `overview / page / next_page / detail / proposal_followups /
+expression_feedback_context / memory_sources_feedback_context`——**没有任何一个
+只返回被过滤掉的 provisional 记录**。这正是本节修的两个缺陷的同一形状
+（表头广告一条到不了的路 / prompt 广告一个不存在的动词），只是这次是自己写的第三次。
+改为**只披露、不邀请**：保留「到期自动失效，成熟的会另走永久记忆提案来问你」，
+删掉回复引导，并加一条测试把该契约钉住（`"查看临时记忆" not in text`）。
+
+### 6. 可投递项归零时议程静默——既有行为，未被本次改动影响
+
+`memory_os_owner_review_digest.py` 的 `_has_meaningful_content()` 在 agenda 模式下以
+`counts.action_required_shown > 0` 为门槛。owner 一旦批准/清掉那唯一一条可投递项，
+该值归零、脚本不输出、cron 保持静默——**即使 `nondeliverable_living_memory_total` 仍是 24**。
+这是 provisional 本就不需要 owner 决策的正确结果。需要说明的是：
+`action_required_shown` 一直取自**过滤后**的 section，本次只动了表头分母，
+**没有改动这条静默门槛**——静默行为在本次修复前后完全一致，不是新引入的变化。
+
+### 7. `counts` 同时保留两种口径的下游风险已扫
+
+`counts` 里 `action_required_total`（未过滤，25）与 `visible_action_required_total`
+（可投递，1）并存，`_bounded_delivery_digest` 也一并记账。风险是下游若用
+`action_required_total - action_required_shown` 当「隐藏项数」会重犯本节的错。
+全项目 grep `_total.*-.*_shown`：命中仅 `_rendered_overview_lines()` 内那三处，
+均已改用修正后的口径；`memory_os_3_200_monitor.py` 与
+`memory_os_monitor_dashboard_snapshot.py` **没有**该算式。风险关闭。
+
+### 8. 合并前自审又抓到一处「静默跳过一项」——同族缺陷，出在第 2 条的修复里
+
+第 2 条改成按身份续页后，`next_offsets` 仍写作 `start + len(selected)`。
+`next_offsets` 是**调用方回填给后续 `page` 的游标**（`__init__.py` 工具 schema 明示 offset），
+而该算式只在「已展示项恰好连续排在最前」时成立。本例恰恰相反：唯一被展示的
+session_mirror 项排在**最后**（idx 24），于是 start=1、selected=3 → 游标 4，
+后续 `page(offset=4)` 返回 `cry_04`，**把从未展示过的 `cry_03` 静默跳过**——
+与本节第 2 条修的缺陷是同一个（「广告出来的续页路径会漏项」），只是这次漏在修复自身里。
+改为「落在**实际返回的最后一项**之后」（`chosen[-1][0] + 1`）。
+反事实实测：还原该行 → `assert ['cry_04'] == ['cry_03']` FAIL，恢复 → PASS。
+既有 `offsets == 2` 断言不受影响（该场景已展示项本就在最前，两种算法同值）。
+
+### 反事实覆盖
+
+新增 11 条测试（10 条 `test_memory_os_owner_digest_agenda.py` + 1 条 cron gate prompt）。
+用 `git checkout main -- plugins scripts`（保留测试、只回滚代码）**实测**
+revert→fail→restore→pass：**8 条在无修复时 FAIL**——表头口径、backlog 披露、
+不再广告翻页、身份续页、续页游标不漏项、session 可读性、preview 有界拷贝存活、
+cron prompt 不编命令。另 3 条是回归护栏，设计上前后都应绿：计数回落路径、
+「不提供做不到的动作」、披露行不邀请无路由回复（该行本就是本次新增，故在 main 上恒真）。
+
+### 测试数量
+
+修复前 3119 passed / 13 skipped（BW 收尾基线）→ 修复后 **3130 passed / 13 skipped / 0 failed**
+（+11）。四道静态门全过：import cycle / write surface `unclassified_count=0` /
+static hygiene / public checkout probe（strict），`git diff --check` 干净。
+
+### 未验证项（如实声明）
+
+本轮**只有本机 pytest 与静态门证据**（`local_pass`）。未跑 3.200 `live_monitor_pass`、
+未跑 clean-host、未部署。文案改动的最终呈现还经过 Hermes cron agent 改写，
+真实推送效果需下一次 09:00 议程或一次 `deliver-once` 才能确认。
+
+---
+
 ## 待办
 
 BC 代码评审（对 `abcce26` 的 15 项发现）已全部完成：P0×3（BD）、P1×4（BE）、
@@ -1825,6 +1976,10 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
    `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
    残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
+4. **owner 无法拒绝 session_mirror 导入审批**：`session_mirror_apply` 只暴露 approve，
+   `TERMINAL_ACTIONS_BY_TARGET_TYPE` 也只认 approve，且 target_id 随首个 pending 会话
+   fingerprint 变化。owner 目前没有「别再问了」的表达方式。补 reject/defer 需新 owner
+   action 类型 + 终态注册 + handler + 回滚契约，属治理面扩张，待 owner 决策（BX 记录）。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
 BQ 的 community 模块整体迁出本仓库，不再是本仓库待办；债务记录随代码一并迁至
@@ -2032,3 +2187,25 @@ sannai-community 仓库 README。）
   3010 passed + 1 failed + 102 errors → **3119 passed / 13 skipped / 0 failed / 0 errors**，
   五项静态门 + closure matrix 全过。有意未做 2 项（blank-host smoke 不再覆盖永久写路径；
   `_rebuild_gate_index_from_records` 每次 resolve 全账本重读的热路径成本）。
+- `2d40c12..（BX，本节）`：每日 owner 审批议程三缺陷同源修复。owner 反馈「看不懂在批什么 /
+  第一条永远是这条 / 真实的看不到」——先用 24 provisional + 1 session_mirror 的 fixture
+  逐字复现生产文案（A25、「25 项 / 未展示 24 项」），确认 A1–A24 是被
+  `_assemble_living_memory_delivery_items()` 结构性挡在投递之外的项。**该过滤是
+  `39d1f2e` 有意引入且被 monitor 硬约束的 delivery choke point，放开会当场打红生产**，
+  故修口径而非修过滤：表头改按 section 实际来源人群计数（`visible_*`，缺失回落旧字段），
+  并新增一行如实披露被过滤 backlog 的去向；按 Section W 第 5 条扫出
+  `review_suggested_total` 同款缺陷一并修。「下一页」原用 `action_required_shown` 当偏移量
+  索引进**未过滤**列表（展示 A25 却返回 A2、静默跳过 A1），改为按 `review_item_id` 身份续页
+  并回填 `offsets` 既有语义（grep 到既有测试断言 `offsets==2`，Section W 第 2 条当场兑现）。
+  session_mirror 审批项文案由 `fingerprint=smfp_…` 改为渲染 `_safe_pending_session()`
+  早已备好的脱敏展示面，并在 `_digest_item()` 显式携带 `pending_session_preview`
+  （与 `external_review_eligible` 同款丢弃陷阱）。另修 cron agent prompt 的对称示例——
+  它教会模型给只有 approve 的项补出 `memory reject oa_…`，那条命令必被拒绝。
+  11 条新测试，实测 revert→fail→restore→pass 有 8 条反事实。自审两次抓到同族缺陷出在
+  修复自身：① 披露行广告了一条无 operation 可路由的回复（「查看临时记忆」），改为只披露不邀请；
+  ② 身份续页后 `next_offsets` 仍用 `start + len(selected)`，在「已展示项排在最后」这一
+  正是本例的形状下会让后续 `page` 静默跳过 `cry_03`，改为落在实际返回的最后一项之后。
+  两处都补了测试钉住。
+  3119 → **3130 passed / 13 skipped / 0 failed**，四道静态门全过。
+  仅 `local_pass`：未跑 3.200 live monitor、未部署。
+  留 1 项待 owner 决策：session_mirror 审批目前无 reject/defer（待办第 4 项）。

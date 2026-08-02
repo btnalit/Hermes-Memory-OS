@@ -759,24 +759,54 @@ def owner_review_surface_report(
     latest_record = _latest_owner_home_digest_record(store.roots, owner_id=resolved_owner)
     latest_rendered = _rendered_digest_from_record(latest_record) if latest_record else {}
     latest_counts = latest_rendered.get("counts") if isinstance(latest_rendered.get("counts"), dict) else {}
+    # "下一页" must resume from what the Owner was actually shown.  Offsetting by
+    # counts.action_required_shown indexes into *this* report's unfiltered queue,
+    # while the digest rendered a delivery-filtered list — so an agenda that
+    # displayed A25 (the first deliverable item) produced offset 1 and returned
+    # A2, an item the Owner had never seen.  Resume by stable review_item_id
+    # instead, and fall back to count offsets only when the latest digest
+    # carries no identities (legacy records predating review_item_id).
+    already_shown_review_item_ids = _rendered_digest_review_item_ids(latest_rendered)
+    resume_by_identity = safe_operation == "next_page" and bool(already_shown_review_item_ids)
     offsets = _surface_offsets(
-        operation=safe_operation,
+        operation="page" if resume_by_identity else safe_operation,
         section=safe_section,
-        explicit_offset=bounded_offset,
+        explicit_offset=0 if resume_by_identity else bounded_offset,
         latest_counts=latest_counts,
     )
     sections: dict[str, list[dict[str, Any]]] = {}
     next_offsets: dict[str, int] = {}
     for priority in _selected_review_sections(safe_section):
         raw_items = [item for item in queue.get("items", []) if item.get("priority") == priority]
-        start = offsets.get(priority, 0)
-        selected = raw_items[start : start + bounded_limit]
+        if resume_by_identity:
+            remaining = [
+                (index, item)
+                for index, item in enumerate(raw_items)
+                if str(item.get("review_item_id") or "") not in already_shown_review_item_ids
+            ]
+            # `offsets` keeps its published meaning — how many items ahead of this
+            # page were already handled — so consumers cannot read a bare 0 and
+            # conclude nothing was skipped.
+            start = len(raw_items) - len(remaining)
+            offsets[priority] = start
+            chosen = remaining[:bounded_limit]
+            selected = [item for _index, item in chosen]
+            # `next_offsets` is the cursor the caller feeds back as `offset` on a
+            # follow-up `page`, so it must land just past the last item actually
+            # returned.  `start + len(selected)` only holds when the already-shown
+            # items are contiguous at the front; in the shape that motivated this
+            # fix the single shown item was *last*, and that arithmetic skipped a
+            # never-displayed item — the very defect being repaired here.
+            next_offsets[priority] = (chosen[-1][0] + 1) if chosen else start
+        else:
+            start = offsets.get(priority, 0)
+            selected = raw_items[start : start + bounded_limit]
+            next_offsets[priority] = min(start + len(selected), len(raw_items))
         sections[priority] = [
             _render_review_item(_digest_item(item), section=priority)
             for item in selected
             if isinstance(item, dict)
         ]
-        next_offsets[priority] = min(start + len(selected), len(raw_items))
     return {
         "schema_version": OWNER_REVIEW_SURFACE_SCHEMA_VERSION,
         "profile": store.roots.profile or "default",
@@ -1835,6 +1865,14 @@ def owner_review_digest_preview(
             "visible_action_required_total": visible_action_total,
             "visible_review_suggested_total": visible_review_suggested_total,
             "visible_fyi_total": visible_fyi_total,
+            # Non-promotion Living Memory items are removed from every delivery
+            # render by _assemble_living_memory_delivery_items() (a deliberate,
+            # monitor-enforced choke point).  Carry the count so the rendered
+            # overview can disclose the backlog honestly instead of folding it
+            # into "需要你决定", which the Owner cannot act on from this channel.
+            "nondeliverable_living_memory_total": int(
+                delivery_diagnostics.get("living_memory_nonpromotion_filtered_count") or 0
+            ),
         },
         "review_aging": review_aging,
         "delivery_diagnostics": delivery_diagnostics,
@@ -2860,18 +2898,7 @@ def _repeat_decision_item_count(store: MemoryOSStore, items: list[dict[str, Any]
     records = read_owner_review_rendered_digest_records(store.roots)
     if not records:
         return 0
-    latest = _rendered_digest_from_record(records[-1])
-    sections = latest.get("sections") if isinstance(latest.get("sections"), dict) else {}
-    prior_review_item_ids: set[str] = set()
-    for section_items in sections.values():
-        if not isinstance(section_items, list):
-            continue
-        for prior_item in section_items:
-            if not isinstance(prior_item, dict):
-                continue
-            review_item_id = str(prior_item.get("review_item_id") or "")
-            if review_item_id:
-                prior_review_item_ids.add(review_item_id)
+    prior_review_item_ids = _rendered_digest_review_item_ids(_rendered_digest_from_record(records[-1]))
     if not prior_review_item_ids:
         return 0
     return sum(
@@ -2879,6 +2906,31 @@ def _repeat_decision_item_count(store: MemoryOSStore, items: list[dict[str, Any]
         for item in items
         if str(item.get("review_item_id") or "") in prior_review_item_ids
     )
+
+
+def _rendered_digest_review_item_ids(rendered: dict[str, Any]) -> set[str]:
+    """Stable identities of every item a rendered digest actually displayed.
+
+    ``review_item_id`` is the identity ``_bounded_rendered_item`` persists into
+    the rendered-digest ledger, so both the repeat-item projection and the
+    "next page" resume path read the same key the render side wrote.  Never key
+    this on display text (``summary``, ``question``, ...), which is re-derived
+    per render and would drift on wording changes alone.
+    """
+    if not isinstance(rendered, dict):
+        return set()
+    sections = rendered.get("sections") if isinstance(rendered.get("sections"), dict) else {}
+    review_item_ids: set[str] = set()
+    for section_items in sections.values():
+        if not isinstance(section_items, list):
+            continue
+        for item in section_items:
+            if not isinstance(item, dict):
+                continue
+            review_item_id = str(item.get("review_item_id") or "")
+            if review_item_id:
+                review_item_ids.add(review_item_id)
+    return review_item_ids
 
 
 def _assemble_living_memory_delivery_items(
@@ -4460,6 +4512,11 @@ def _bounded_delivery_digest(preview: dict[str, Any]) -> dict[str, Any]:
             "action_required_shown": counts.get("action_required_shown"),
             "review_suggested_shown": counts.get("review_suggested_shown"),
             "fyi_shown": counts.get("fyi_shown"),
+            # The *_total fields above count the unfiltered queue; carry the
+            # deliverable population too so the ledger records what this channel
+            # could actually present, not just what existed.
+            "visible_action_required_total": counts.get("visible_action_required_total"),
+            "nondeliverable_living_memory_total": counts.get("nondeliverable_living_memory_total"),
         },
         "overflow": {
             "action_required": overflow.get("action_required"),
@@ -4867,6 +4924,20 @@ def _session_mirror_apply_review_items(store: MemoryOSStore, closed: set[str]) -
         "actual_unapproved_crystallized_approval": False,
     }
     created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    # The Owner is being asked whether one specific pending session may be
+    # imported.  Describing it as "fingerprint=smfp_...; max_sessions=1" is not
+    # a decision anybody can make.  _safe_pending_session() already produced the
+    # redaction-applied, clipped `metadata_or_redacted_summary` surface intended
+    # for exactly this display, so render that instead of the internal handles.
+    message_count = max(int(first.get("message_count") or 0), 0)
+    tool_count = max(int(first.get("tool_count") or 0), 0)
+    session_summary = _bounded_text(str(first.get("summary") or ""), 120)
+    descriptor = f"待导入 {platform or 'unknown'} 平台的 1 个会话（{message_count} 条消息"
+    if tool_count:
+        descriptor += f"、{tool_count} 次工具调用"
+    descriptor += "）"
+    if session_summary:
+        descriptor += f"；内容摘要：{session_summary}"
     return [
         {
             "schema_version": "memory-os.review_item.v0",
@@ -4878,11 +4949,8 @@ def _session_mirror_apply_review_items(store: MemoryOSStore, closed: set[str]) -
             "created_at": created_at,
             "created_at_source": "scan_pending",
             "status": "pending_lane_graduation",
-            "summary": _bounded_text(
-                f"SessionMirror bounded production lane approval: platform={platform or 'unknown'}; "
-                f"fingerprint={fingerprint}; max_sessions=1",
-                180,
-            ),
+            "summary": _bounded_text(descriptor, 180),
+            "pending_session_preview": _bounded_text(descriptor, 260),
             "safe_source_ids": [f"session_mirror:{fingerprint}"],
             "session_mirror_approval": approval,
             "selected_sessions": [first],
@@ -5484,6 +5552,11 @@ def _digest_item(item: dict[str, Any]) -> dict[str, Any]:
         # candidate to the ordinary-candidate branch on this render path.
         "external_review_eligible": bool(item.get("external_review_eligible")),
         "payload_ref": _bounded_text(str(item.get("payload_ref") or ""), 220),
+        # Carried for the same reason as external_review_eligible above:
+        # _render_review_item() builds the Owner-visible 原因 line from it, and
+        # dropping it here would silently fall the session_mirror item back to
+        # the fingerprint-only wording this field exists to replace.
+        "pending_session_preview": _bounded_text(str(item.get("pending_session_preview") or ""), 260),
         "session_mirror_approval": _bounded_session_mirror_approval(
             item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
         ),
@@ -5704,6 +5777,9 @@ def _review_question(target_type: str, item: dict[str, Any]) -> str:
     if target_type == "speak":
         return "这条右脑表达草案要允许一次，还是给表达质量反馈？"
     if target_type == "session_mirror_apply":
+        preview = _bounded_text(str(item.get("pending_session_preview") or ""), 150)
+        if preview:
+            return _bounded_text(f"要把这个会话导入记忆吗？{preview}", 180)
         return "要批准 SessionMirror 这个 bounded 生产导入 lane 毕业并执行一次真实 smoke 吗？"
     if target_type == "left_brain_advisor_finding":
         summary = _safe_review_summary(item.get("summary"), fallback="左脑信号诊断")
@@ -5829,6 +5905,13 @@ def _review_reason(target_type: str, item: dict[str, Any]) -> str:
         return _bounded_text(f"{source_module} 产生了一条 would-send 主动发言草案，但当前只能看到安全引用。", 220)
     if target_type == "session_mirror_apply":
         approval = item.get("session_mirror_approval") if isinstance(item.get("session_mirror_approval"), dict) else {}
+        preview = _bounded_text(str(item.get("pending_session_preview") or ""), 260)
+        if preview:
+            return _bounded_text(
+                f"SessionMirror 检测到一个可安全导入的 pending 会话：{preview}。"
+                f"本次范围上限 {approval.get('max_sessions') or 1} 个会话。",
+                360,
+            )
         return _bounded_text(
             "SessionMirror 检测到一个可安全导入的 pending 会话。"
             f"fingerprint={approval.get('selected_pending_session_fingerprint') or 'unknown'}; "
@@ -6186,9 +6269,31 @@ def _rendered_overview_lines(
     if not counts:
         return ["全貌：本条摘要只展示当前优先项；未展示项会在后续摘要或你主动要求时继续展开。"]
     pending = int(counts.get("pending") or 0)
-    action_total = int(counts.get("action_required_total") or 0)
+    # Every rendered section is assembled from the delivery-filtered queue, but
+    # action_required_total counts the *unfiltered* queue.  Reporting the raw
+    # total here told the Owner "需要你决定 25 项 ... 未展示 24 项" on a digest
+    # whose only deliverable item was the 1 that was shown — the other 24 were
+    # non-promotion Living Memory records that this channel can never deliver
+    # and that the Owner does not need to decide (they expire on their own or
+    # graduate through the permanent-promotion proposal path).  Count the
+    # population the sections actually come from; fall back to the raw total
+    # only for legacy records that predate the visible_* counters.
+    visible_action_total = counts.get("visible_action_required_total")
+    action_total = int(
+        visible_action_total
+        if visible_action_total is not None
+        else counts.get("action_required_total") or 0
+    )
     action_shown = int(counts.get("action_required_shown") or 0)
-    suggested_total = int(counts.get("review_suggested_total") or 0)
+    # Same defect, same fix: review_suggested_total counts the unfiltered queue
+    # while the 建议你看 section is built from the delivery-filtered, stale-
+    # suppressed list, so provisional records inflated it too.
+    visible_suggested_total = counts.get("visible_review_suggested_total")
+    suggested_total = int(
+        visible_suggested_total
+        if visible_suggested_total is not None
+        else counts.get("review_suggested_total") or 0
+    )
     suggested_shown = int(counts.get("review_suggested_shown") or 0)
     fyi_total = int(counts.get("fyi_total") or 0)
     fyi_shown = int(counts.get("fyi_shown") or 0)
@@ -6212,25 +6317,41 @@ def _rendered_overview_lines(
         int(budget_omitted.get("fyi") or 0),
         max(fyi_total - fyi_shown, 0),
     )
+    nondeliverable_living_memory = int(counts.get("nondeliverable_living_memory_total") or 0)
     if _digest_mode(digest_mode) == "agenda":
         lines = [
             "今日议程：",
             f"- 需要你决定 {action_total} 项；本条展示 {action_shown} 项，未展示 {action_omitted} 项。",
             "- 本推送只包含审批项和真实告警；建议查看/FYI 不主动推送。",
         ]
+        if nondeliverable_living_memory:
+            # Disclosure only — deliberately no "reply X to see them" invitation.
+            # No owner_review_surface_report operation returns just the filtered
+            # provisional records, so naming one would repeat the exact defect
+            # this section fixes: advertising a path that does not reach.
+            lines.append(
+                f"- 另有 {nondeliverable_living_memory} 条临时记忆(provisional)不需要你在这里决定："
+                "它们到期会自动失效，成熟的会另走永久记忆提案来问你。"
+            )
         if action_omitted:
             lines.append("- 想继续处理可回复：下一页 / 还有哪些 / 展开 A4。")
         else:
             lines.append("- 其它观察项可主动问：还有哪些 / 查看建议项 / 查看 FYI。")
         return lines
-    return [
+    lines = [
         "全貌：",
         f"- 待处理 {pending} 项；本条展示 {action_shown + suggested_shown + fyi_shown} 项。",
         f"- 需要你决定 {action_total} 项：展示 {action_shown}，未展示 {action_omitted}。",
         f"- 建议你看 {suggested_total} 项：展示 {suggested_shown}，未展示 {suggested_omitted}。",
         f"- 仅供了解 {fyi_total} 项：展示 {fyi_shown}，未展示 {fyi_omitted}。",
-        "- 没展示的不是丢失；为避免刷屏，会在后续摘要或你要求展开时再列。",
     ]
+    if nondeliverable_living_memory:
+        lines.append(
+            f"- 另有 {nondeliverable_living_memory} 条临时记忆(provisional)不在本摘要范围："
+            "到期自动失效，成熟的另走永久记忆提案。"
+        )
+    lines.append("- 没展示的不是丢失；为避免刷屏，会在后续摘要或你要求展开时再列。")
+    return lines
 
 
 def _delivery_message_from_preview(preview: dict[str, Any]) -> str:
