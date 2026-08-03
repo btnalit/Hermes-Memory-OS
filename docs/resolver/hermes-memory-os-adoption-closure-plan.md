@@ -17,15 +17,30 @@
 
 13 个待处理项按**接线之后会发生什么**分类，而不是按 R 编号：
 
-| 类 | 含义 | 数量 | 合并即终结？ |
+| 类 | 含义 | 数量 | 状态 |
 |---|---|---|---|
-| **1** | 内部迁移，Owner 看不到任何变化 | 2 | ✅ |
-| **2** | 工具/CI，零运行时风险 | 4 | ✅ |
-| **3** | 改变 Owner 可见行为 → 必须走 shadow → canary → apply | 3 | ❌ 会转成观察项 |
-| **4** | 建议删除而不是接线 | 4 | ✅（删除即终结） |
+| **1** | 内部迁移（`timeutil`，已缩小范围） | 1 | 待做 |
+| **2** | 工具/CI（`recall_golden`） | 1 | 待做，优先级最低 |
+| **3** | 直接实现（Owner 决定不开观察窗口） | 3 | 待做，**这才是有产品价值的真活** |
+| **4** | 删除 | **8** | ✅ 全部已删 |
 
-**headline：6 项合并即终结、4 项删除即终结，只有 3 项会进入观察窗口——而那 3 项恰好都动
-recall 输出，那里的观察是正确纪律，不是拖延。**
+**headline（2026-08-03 实测修正）：13 项里 **8 项是删除**，真正要做的只剩
+`timeutil` 迁移 + 3 项功能实现 + 1 个低优先级工具。**
+
+> ⚠️ **本节初版的分类是错的，修正过程本身是这份文档最重要的教训。**
+> 初版说「6 项合并即终结」，是**看模块接口 + 查有没有人 import** 归的类，
+> **没有读实现**。逐项读实现后，原 Class 1/2 的 6 项里有 **4 项当场塌成删除**：
+>
+> | 模块 | 接口看起来 | 实现真相 |
+> |---|---|---|
+> | `error_registry` | 接到 `build_error_record` 即可 | 注册表运行时为空（`register_error_code` 从未被调用）；severity 已在每个调用点传；`clean_host_severity` 与 monitor 的 `CLEAN_HOST_WARN_CLASSIFICATIONS` 重复；两处 code 是 `type(exc).__name__` 动态生成，无法预注册 |
+> | `monitor_perf` | 迁移 monitor 的运行时测量 | **够不着要测的东西**：耗时全在远端探针里，那是自包含 raw 字符串脚本、按 BL 记录有意不 import 仓库模块。本地接上只等于把 `time.monotonic()` 换成 `perf_counter()` |
+> | `seed_evidence_incremental` | 增量读，避免全量扫描 | **它不是增量的**：先 `read_jsonl(path)` 读整个文件再切片，I/O 与全量读相同；且消费方 `v3_seed_evidence.py:158` 需要全部记录 |
+> | `evidence_gen` | 接进 CI | `build_test_delta` 接的是**已解析好的字典**，不解析 pytest 输出。缺的解析器才是真正的活 |
+>
+> **推论(已写入第 8 节)**：一个从来没被调用过的 helper，等于**没有任何人验证过它的前提**——
+> 它自己的测试只验证它的内部逻辑对不对，不验证它能不能用在这个架构上。
+> 因此默认预期应是"**大概率不适用**"，只有读实现才能推翻。
 
 这句话必须放在最前面而不是脚注：如果方案读起来是「接线 13 个」，一个月后其中 3 个进了
 30 天窗口，同样的挫败感会原样复发，而且是这份文档造成的。
@@ -79,26 +94,25 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
   `parse_utc`，断言结果一致；不一致的站点必须显式选择 `allow_naive=True` 或保留旧行为，
   并在代码注释里写明为什么。**不允许用一句"这是重构"覆盖全部 77 处。**
 - **回滚**：逐文件迁移、逐文件可回滚；不做一次性大改。
-- **建议**：**接线**。但**按文件分批**，每批独立 PR，不追求一次做完。
+- **范围已缩小（2026-08-03 抽样 8 处后）**：并非 77 处一视同仁。
+  - **严格改进、应迁移**：形如 `.replace("Z","+00:00")` 后 `fromisoformat`
+    （`clearance_cycle.py:178/818/854`）与 `.astimezone(timezone.utc)`
+    （`cleanup.py:602`）——`parse_utc` 内部做的正是这两件事，迁移后行为一致且更短。
+  - **必须单独处理**：用户输入的时间参数（`cli.py:930/931` 的 `--since`/`--until`），
+    用户合法地会输入无时区值，`parse_utc` 会返回 `None`。这些站点要么显式
+    `allow_naive=True`，要么保留原实现，并在注释写明原因。
+- **建议**：**先迁移"严格改进"子集**，按文件分批、每批独立 PR 带差分测试；
+  用户输入类站点单独一批并逐个判断。不追求 77 处全清。
 
-### 2.2 `error_registry` → `build_error_record`
+### 2.2 ~~`error_registry`~~ → 已删除（见 5.5）
 
-- **具名调用点**：`plugins/memory/memory_os/jsonl_io.py:build_error_record`
-  （全项目 error_record 的唯一构造点）。
-- **类别**：1
-- **Owner 可见变化**：无。
-- **退出条件**：`build_error_record` 产出的 error_record **字段形状逐字节不变**，
-  仅增加"该 code 是否已注册"的旁路校验；monitor 的 `error_observability` 聚合口径不变。
-- **反事实测试**：注册表缺失某 code 时，`build_error_record` 仍产出合法记录
-  （fail-open，不得因为未注册就吞掉错误）；已注册 code 的输出与迁移前逐字段相同。
-- **回滚**：单文件 revert。
-- **建议**：**接线**。前提是先确认注册表是现有 code 集合的**超集**——这一步没做之前不要动。
+见第 5.5 节的删除依据。
 
 ---
 
 ## 3. Class 2 — 工具 / CI，零运行时风险
 
-### 3.1 `seed_evidence_incremental`
+### ~~`seed_evidence_incremental`~~ → 已删除（见 5.6）  <!-- was 3.1 `seed_evidence_incremental` -->
 
 - **具名调用点**：`plugins/memory/memory_os/v3_seed_evidence.py` 的读取路径。
 - **类别**：2
@@ -111,7 +125,7 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 - **回滚**：读取路径保留全量分支，一个开关切回。
 - **建议**：**接线**。
 
-### 3.2 `monitor_perf`
+### ~~`monitor_perf`~~ → 已删除（见 5.7）  <!-- was 3.2 `monitor_perf` -->
 
 - **具名调用点**：`scripts/memory_os_3_200_monitor.py` 现有的运行时测量
   （已经在产出 `full_monitor_runtime_over_target` WARN，说明**存在真实消费者**）。
@@ -135,7 +149,7 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 - **建议**：**接线**，但**优先级最低**——它是 R1.2 的度量工具，
   在 Recall Plan 还是 shadow 的阶段价值有限。
 
-### 3.4 `evidence_gen`
+### ~~`evidence_gen`~~ → 已删除（见 5.8）  <!-- was 3.4 `evidence_gen` -->
 
 - **具名调用点**：`.github/workflows/ci.yml`（路线图已核实当前未调用）。
 - **类别**：2
@@ -149,6 +163,14 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 
 > 这三项接线后**不会立刻闭环**，会进入 shadow → canary → apply 阶梯。
 > 这是本方案里唯一会产生新观察窗口的部分，Owner 需要预期到这一点。
+
+> **实现层核实结论（2026-08-03，扫描后）**：三项**全部可行**，且比原估计更清楚：
+> `gap_note` 输入只是普通 dict（`plan["findings"][].code`），不需要 prefetch 重建结构；
+> `restraint` **比原估计便宜**——否定信号已存在（`low_clue_recall.py:593` 的
+> `_recent_correction_signal()` 已在 live recall 里驱动 `correction_active`），
+> 缺的只是把它接到 `DenialTracker` 并持久化；
+> `continuity` 中等成本——overlay 对象已带时间戳（`state_overlay.py:281` 的
+> `last_updated`/`ts`），缺的是到 `ContinuityObject` 的字段映射，不是从头产出数据。
 
 ### 4.1 `gap_note`
 
@@ -244,6 +266,38 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
   **同名模块使 caller 统计天然容易出错**，这本身就是删除它的理由之一。
 - **建议**：**删除**。已经有一个在用的同名同职责模块。
 
+### 5.5 `error_registry` — 删除（原 Class 1，实测重分类）
+
+四条独立理由，任何一条都足够：注册表运行时为空（`register_error_code` 从未被调用，
+方案原本写的前提「注册表须是现有 code 集合的超集」不是未满足而是**反过来了**）；
+`severity`/`recoverable` 已在每个调用点传递，注册表要么重复它们（两个真相来源 → 漂移，
+正是 BR 在 `classify_hermes_cron_jobs` 三份拷贝上踩的坑）要么取代它们（24 处重构，
+远超 Class 1「Owner 无可见变化」）；`clean_host_severity` 与
+`CLEAN_HOST_WARN_CLASSIFICATIONS` 重复且后者生产在用；两处 code 为
+`type(exc).__name__` 动态生成，集合开放、无法预注册。
+
+### 5.6 `seed_evidence_incremental` — 删除（原 Class 2）
+
+**它不是增量的**：`read_seed_evidence_incremental()` 先 `read_jsonl(path)` 读整个文件
+再切片，I/O 成本与全量读相同。且预期消费方 `v3_seed_evidence.py:158` 拿到 `existing`
+后要 `existing + [daily_record]` 建整体快照，**需要全部记录**，没有局部读的用武之地。
+模块自带的 `verify_incremental_equivalence()` 能自证等价——因为两边本来就是同一个全量读。
+
+### 5.7 `monitor_perf` — 删除（原 Class 2）
+
+**够不着它要测的东西。** 全部采集在 `_run_probe(host, _remote_probe_script(...))` 一次调用里，
+而 `_remote_probe_script()` 返回的是 **raw 字符串字面量**——一个自包含、只 import 标准库的
+生成式脚本，按 BL 记录**有意不 import 仓库模块**。因此 `monitor_perf` 无法进入真正耗时的地方；
+在本地包住整个调用，只等于把 `time.monotonic()` 换成 `perf_counter()`，零收益。
+分段计时若要做，应当在探针字符串内部用标准库实现，与本模块无关。
+
+### 5.8 `evidence_gen` — 删除（原 Class 2）
+
+`build_test_delta(before, after)` 接收的是**已解析好的字典**（含 `total`/`failed`/`passed`），
+本身只是 20 行集合运算；它**不解析 pytest 输出**。要进 CI 必须先写一个 pytest 输出解析器——
+那才是真正的工作量，而本模块是其中最容易的一小部分。现有做法（稳定化清单每轮手写测试增量）
+一直有效。属"新功能"而非"接线"，按删除默认处理。
+
 ---
 
 ## 6. Owner 决策（2026-08-03，已拍板）
@@ -296,22 +350,27 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 前提：**每一项都是独立 PR，都要过全量测试 + 四道静态门 + 反事实测试**
 （CLAUDE.md 的 definition of done 不因为"这是接线工作"而降级）。
 
-| 批次 | 内容 | 为什么这个顺序 |
+| 批次 | 内容 | 状态 |
 |---|---|---|
-| **A** | `error_registry`、`monitor_perf`、`seed_evidence_incremental`、`evidence_gen` | 零 Owner 可见风险，合并即终结，先把"能关的关掉" |
-| **B** | `timeutil` 分文件迁移（每批一个 PR，带差分测试） | 77 点最大但可切片；错误会被差分测试当场抓住 |
-| **C** | Class 4 四项执行删除（若 Owner 同意） | 减少语义面，越早越省后续维护；`natural_evidence`/`lifecycle` 各自已有生产替代实现 |
-| **D** | `gap_note` → shadow，`continuity` → shadow | 开始产生观察数据 |
-| **E** | `restraint`（持久化决策做完之后） | 依赖第 6 节第 2 项 |
-| **F** | `recall_golden` | Recall Plan 仍在 shadow 时价值有限 |
+| **A** | 删除 `error_registry`、`monitor_perf`、`seed_evidence_incremental`、`evidence_gen` | ✅ 本轮完成（原计划是"接线这四项"，实测后全部改为删除） |
+| **B** | `timeutil` 迁移——**已缩小范围**，见 2.1 | 待做 |
+| **C** | `gap_note` 直接实现（+ kill switch） | 待做 |
+| **D** | `restraint`：接 `_recent_correction_signal` → `DenialTracker` → 文件持久化 | 待做 |
+| **E** | `continuity`：overlay 字段映射 + staleness 过滤 + 「隐藏了什么」诊断记录 | 待做 |
+| **F** | `recall_golden` CLI | 待做，优先级最低 |
 
-做完 A+B+C：**10 项终结，路线图上"没接线"这一类清零**，剩下的只有 D/E 产生的
-3 个真观察项 + R1。那时"卡在观察"才是对整个系统的准确描述。
+批次 A 完成后，**8 项已终结（全部通过删除）**。剩余工作是 1 个迁移 + 3 项功能实现
++ 1 个低优先级工具——比初版方案设想的小得多，因为大部分"待接线"其实是不该接。
 
 ---
 
 ## 8. 复发防护
 
+0. **接线前必须先验证该 helper 自身的前提能否成立——这是每项的必做步骤，不是某一条的附注。**
+   本轮 6 个"该接线"的条目里有 4 个一碰实现就塌成删除。原因是分类只看了接口
+   和"有没有人 import 它"，没读实现。一个从未被调用的 helper，
+   **没有任何人验证过它的假设**；它自己的测试只证明内部逻辑自洽。
+   默认预期应为"大概率不适用"。
 1. **删除是默认，接线要论证。** 新 helper 进仓库时，PR 必须写明具名生产调用点，
    或者标注"仅工具/仅测试"并接受它随时可能被删。
 2. **"已实现待接线"不是一个允许长期存在的状态。** 任何 helper 在合并后
