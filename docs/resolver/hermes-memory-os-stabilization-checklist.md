@@ -2120,6 +2120,35 @@ owner 每天 09:00 收到的仍是 BX 之前的渲染（口径撒谎、翻页跳
 
 反事实：4 项 revert→FAIL→restore→PASS（超时/JSON 分档、默认值下限、崩溃码、探针同族修复）。
 
+### BY.3 — BY 部署到 3.200 并端到端验证（2026-08-03）
+
+PR #10 合并为 `01356df` 后部署。
+
+- `/opt/Hermes-Memory-OS` ff 到 `01356df`；备份
+  `/root/.hermes/backups/memory-os-pre-by-20260803T082748Z`（21M）。
+- **刻意不带 `--timeout` 跑 `--phase apply`**，用来在生产上验 BY.2：preflight 通过、
+  全程 `fail=[]`、`apply_applied` / `postcheck_pass` / manifest / 两个探针全 pass。
+  这在 BY.2 之前是不可能的（默认 60s < compat 门 63s，preflight 必失败）。未重启 Gateway。
+- 部署后 fresh-process import 核验：`session_mirror_apply` 终态动作为
+  `['approve…','defer…','reject…']` 三条；`DEFER_ACTION_TYPES` 两条齐全；
+  `LANE_DISABLE_STATE_SCHEMA_VERSION = memory-os.cron_lane_disabled.v1`；
+  主机侧 group runner 已能解析 `lanes`。manifest `deployed_head=01356df`。
+- **补写 lane 停用审计记录**（待办 5）：用主机上刚部署的 `build_lane_disable_state()` 生成，
+  保证 schema 与运行时一致；读回校验通过。
+- **端到端验证 item 5**：Full Monitor 的
+  `helper_completion_disabled_undocumented_count` 由 **1 → 0**，
+  `..._disabled_without_audit_record` WARN 消失，而
+  `helper_completion_disabled_count` 仍为 1、`helper_completion_disabled_records` 带出
+  source/reason/actor/disabled_at —— 即"lane 依然是停用的，但从此有据可查"，正是该项的目标。
+
+最终生产状态：**97 PASS / 6 WARN / 1 FAIL**，唯一 FAIL 仍是
+`v2_exposure_schema_era_unhealthy`（数据成熟度驱动，与本次无关）。
+本次 monitor 由主检出跑，**代码与主机已部署版本同为 `01356df`**。
+
+部署后紧接着的第一次 monitor 曾出现第二条 FAIL `shell_alias_no_env_failed`，
+原样重跑不复现、手工逐条复现探针条件全 rc=0，判定为主机负载下的瞬时争用，
+详见待办第 3 项（该项首次拿到实测复现）。
+
 ---
 
 ## 待办
@@ -2138,25 +2167,18 @@ BJ 待办的"9 项 Windows 本地 pre-existing 测试失败诊断"已由 BK 完�
 2. `install_memory_os_plugin.py` 五处 `str(path.relative_to(...))` 与本次修复的
    `plan_deployment()` 同一模式，当前无触发路径，暂不改动（BK 记录）。
 3. `shell_alias_no_env()` 的 22 条 CLI 探针命令并行执行（`ThreadPoolExecutor`）对同一
-   `HERMES_HOME` 文件/SQLite 状态的一般性并发风险——无实测复现、无并发单测覆盖，记录为已知
-   残留风险（BM 记录，`review_reply` 使用假 token 探针本身已确认安全）。
+   `HERMES_HOME` 文件/SQLite 状态的一般性并发风险（BM 记录，`review_reply` 使用假 token
+   探针本身已确认安全）。**BY.3 首次拿到实测复现**：BY 部署后紧接着跑的那次 Full Monitor
+   出现 `shell_alias_no_env_failed`（FAIL，08-02 快照里该项为 PASS 且无 false 键），
+   同一次运行还带 `full_monitor_runtime_over_target`；随即原样重跑**不复现**
+   （`shell_alias_no_env_ok` 回到 PASS、false 键为空），且逐条手工复现探针条件
+   （12 条 CLI 命令、不带 env 前缀）全部 rc=0。判定为**主机负载下的瞬时争用**，
+   非 BY 引入的回归——但这条待办从此不再是"无实测复现"。仍缺并发单测覆盖。
 4. ~~owner 无法拒绝 session_mirror 导入审批~~ —— **BY 已关闭**（owner 决策：reject + defer 都做）。
-5. **待 BY 合并并部署后，在 3.200 补写 `expression_feedback_request` 的停用审计记录**
-   （item 5 的数据侧，机制侧已在 BY 完成）。**现在不能写**：主机上运行的 group runner
-   仍是 `54296ea`，它只认裸 list 与 `disabled_lane_keys` 两种旧形状，此刻写 v1 的 `lanes`
-   形状会被读成"没有任何 lane 被停用"。BY 部署后再写，内容为：
-
-   ```json
-   {"schema_version": "memory-os.cron_lane_disabled.v1",
-    "lanes": {"expression_feedback_request": {
-      "reason": "<owner 填：与右脑表达 lane 一同退休>",
-      "actor": "owner",
-      "disabled_at": "<写入时 UTC>"}}}
-   ```
-
-   写完后 monitor 的 `..._disabled_without_audit_record` 应从 1 归 0，
-   `..._disabled` 仍保留（lane 确实是停用的，只是从此有据可查）。
-   注意该 lane 当前是在 Hermes **job** 层停用的；补记录不改变运行状态。
+5. ~~在 3.200 补写 `expression_feedback_request` 的停用审计记录~~ —— **BY.3 已写入并验证**
+   （见 BY.3 节）。`reason` 字段刻意**没有编造原始停用理由**：主机上从来没有记录过它，
+   现文案如实写明"owner 2026-08-02 决定保持停用 / 原始理由未知 / 本条为补记不改变运行状态"，
+   owner 可随时替换该文本。
 6. ~~`deploy_memory_os.py --timeout` 默认 60s < 自身 compat 门实测 63s~~ —— **BY.2 已修**。
 
 （原 4、5 两项——BP 记录的 Track A 模块/脚本落差与 `unread_partner_replies` 语义缺口——已随
@@ -2424,3 +2446,12 @@ sannai-community 仓库 README。）
   boundary_runtime）完全相同的缺陷，抽 `_probe_transport_fault()` 一并修；另三处本就先判
   exit_code，已正确未动。`exit_code` 缺省取 0 保证既有调用行为不变。
   4 项反事实 revert→FAIL→restore→PASS。3148 → **3159 passed / 13 skipped / 0 failed**（+11）。
+- `01356df`（BY.3，本节）：BY 合并后部署 3.200 并端到端验证。**刻意不带 `--timeout` 跑 apply**
+  以在生产上验证 BY.2——preflight 通过、全程 `fail=[]`，这在修复前不可能。部署后核验
+  session_mirror 三条终态动作、`DEFER_ACTION_TYPES`、lane disable v1 schema 均在线；
+  用主机上刚部署的 `build_lane_disable_state()` 补写 `expression_feedback_request` 停用审计记录
+  （**未编造原始理由**，如实写明未知 + 本条为补记）。item 5 端到端成立：
+  `..._disabled_undocumented_count` **1 → 0**、对应 WARN 消失，而 `..._disabled_count` 仍为 1
+  且 records 带出 reason/actor/disabled_at。最终 **97 PASS / 6 WARN / 1 FAIL**，
+  唯一 FAIL 仍是 `v2_exposure_schema_era_unhealthy`。另：部署后首次 monitor 的
+  `shell_alias_no_env_failed` 重跑不复现，为待办第 3 项并发争用风险的首个实测实例。
