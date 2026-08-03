@@ -79,6 +79,14 @@ def parse_utc(value: str | None, *, allow_naive: bool = False) -> datetime | Non
             tz = timezone(offset)
         elif not allow_naive:
             return None
+        else:
+            # allow_naive means "accept input that carries no offset", not
+            # "return something unusable". Without this the function contradicts
+            # its own contract ("a timezone-aware datetime in UTC") and hands
+            # back a naive value, which raises TypeError the moment a caller
+            # subtracts it from an aware datetime. The inlined copies this
+            # helper is meant to replace have always coerced to UTC here.
+            tz = timezone.utc
     try:
         dt = datetime(year, month, day, hour, minute, second, microsecond, tzinfo=tz)
     except (ValueError, OverflowError):

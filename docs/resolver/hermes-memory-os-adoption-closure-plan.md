@@ -101,6 +101,39 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
   - **必须单独处理**：用户输入的时间参数（`cli.py:930/931` 的 `--since`/`--until`），
     用户合法地会输入无时区值，`parse_utc` 会返回 `None`。这些站点要么显式
     `allow_naive=True`，要么保留原实现，并在注释写明原因。
+
+> **批次 B 执行结果（2026-08-03）——范围比预想更小，但查出一个真 bug。**
+>
+> 差分测试（先测、后改）发现 `parse_utc` 与它要替换的内联实现有 **4 处分歧**，其中一处是崩溃级：
+>
+> | 输入 | 内联实现（生产在跑） | 修复前的 `parse_utc(allow_naive=True)` |
+> |---|---|---|
+> | `2026-08-03T04:05:06`（无时区） | tz-aware UTC | **naive** ← 与 aware 相减即 `TypeError` |
+> | `2026-08-03`（仅日期） | 午夜 UTC | `None` |
+> | `2026-08-03T04:05`（无秒） | 正常 | `None` |
+> | `2026-08-03 04:05:06`（空格分隔） | tz-aware | naive |
+>
+> **裁定**：`allow_naive=True` 返回 naive 是 `timeutil` 的**契约违反**——docstring 明写
+> 「a timezone-aware datetime in UTC」，且所有内联副本都强制转 UTC。已修复：无偏移且
+> `allow_naive=True` 时附加 `timezone.utc`。**正则的严格性保留不放宽**（拒绝仅日期/无秒
+> 是治理时间戳解析器应有的严格）。
+>
+> 既有测试 `test_naive_allowed` 原本断言 `tzinfo is None`——**它钉住的正是这个 bug**。
+> 这是第 8.0 条的活标本：一个从未被调用的 helper，它的测试只验证它自己的假设。已刻意更新。
+>
+> **⚠️ 常设隐患（独立于本次迁移，供后续会话）**：`parse_utc` 拒绝仅日期与无秒时间戳。
+> 任何目前接受这两种格式的调用点，一旦迁移过来就会**静默开始丢记录**。
+> 已用 `test_parse_utc_is_deliberately_stricter_than_fromisoformat` 钉死为契约。
+>
+> **实际迁移范围：31 处里只迁了 1 处。** 按裁定「逐站点追溯输入是否机器生成，追不到就踢出」：
+> - ✅ `execution_gate.py:_record_created_at` —— `created_at` 由本模块自己在 478/517 行
+>   以 `now.isoformat().replace("+00:00","Z")` 写入，**完整追溯到机器写入者**，已迁移。
+> - ❌ `v3_retention.py:_parse_datetime`（`item["expires_at"]`）、
+>   `task_state.py:_parse_timestamp`（`record["updated_at"|"created_at"]`）——
+>   本轮**追不到确定的写入者**，按裁定踢出本批。不是"不能迁"，是"没验证过就不迁"。
+> - 其余 28 处出于以下原因不在范围内：`try` 包住的不止解析、或接受用户输入、或会撞上严格性分歧。
+>   **「迁完 31 处」不是目标。**
+
 - **建议**：**先迁移"严格改进"子集**，按文件分批、每批独立 PR 带差分测试；
   用户输入类站点单独一批并逐个判断。不追求 77 处全清。
 
