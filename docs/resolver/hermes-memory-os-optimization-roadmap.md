@@ -252,6 +252,8 @@ designed
 
 ### P2 — helper-only adoption debt
 
+> **闭环方案见 [`hermes-memory-os-adoption-closure-plan.md`](hermes-memory-os-adoption-closure-plan.md)（2026-08-03）**：该文档把本清单按"接线之后会发生什么"重新分类——6 项合并即终结、4 项建议删除、只有 3 项会进入观察窗口，并为每项指定了具名调用点、退出条件、反事实测试与回滚方式。另更正本节两处：`timeutil` 的实际调用点是 **77 处 / 46 文件**（本节记的 10 处是模块数），且 `parse_utc` 与裸 `fromisoformat` 实测**不等价**，迁移不得按机械重构推进。
+
 10. 以下能力仍不得标为 wired/live（2026-07-29 依据 `004a16b` 逐一以 import/caller 证据核实，
     除注明外全部仅被自身测试引用）：
    - `timeutil` 的剩余 ad-hoc parser 迁移——生产/脚本代码仍有 10 处独立时间解析实现：
