@@ -179,8 +179,11 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 - **退出条件**：CLI 可对 golden set 跑出 hit/miss/authority 报告。
 - **反事实测试**：故意劣化一条 recall 结果，断言评估分数下降。
 - **回滚**：删子命令。
-- **建议**：**接线**，但**优先级最低**——它是 R1.2 的度量工具，
-  在 Recall Plan 还是 shadow 的阶段价值有限。
+- **建议（2026-08-03 修订）**：**倾向删除，而不是无限期排队。**
+  一个没有 CI 消费者的 golden-set 评估器，正是本轮已经删掉四次的那个模式
+  （`evidence_gen` 同型：工具建好了、没有调用方、也没人打算建调用方）。
+  与其永远挂在"批次 F"，不如按删除默认处理；真需要时再连同 CI job 一起作为新功能建。
+  **待 Owner 一句话确认。**
 
 ### ~~`evidence_gen`~~ → 已删除（见 5.8）  <!-- was 3.4 `evidence_gen` -->
 
@@ -205,7 +208,23 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 > `continuity` 中等成本——overlay 对象已带时间戳（`state_overlay.py:281` 的
 > `last_updated`/`ts`），缺的是到 `ContinuityObject` 的字段映射，不是从头产出数据。
 
-### 4.1 `gap_note`
+### 4.1 `gap_note` — **被上游阻塞，须排在 `continuity` 之后（2026-08-03 实测）**
+
+> **前置检查结果：前提不成立，但不是删除——是顺序排反了。**
+> - `prefetch.py` **根本没有 `findings` 结构**。
+> - 全仓**没有任何生产代码**产出 `owner_conflict_requires_clarification`
+>   或 `stale_task_revision` —— 而 `ELIGIBLE_REASON_CODES` 只认这两个。
+>
+> 也就是说 `gap_note` 是个**渲染器**，它要渲染的信号还没人产出。
+> 照原计划先接它，等于接一个永远渲染不出东西的组件（与 `evidence_gen`
+> 「已建好的那 20% 最容易的部分」同型）。
+>
+> **解开方式**：`stale_task_revision` 正是 4.2 的 `continuity` 要产出的东西。
+> 因此顺序改为 **`continuity` → `gap_note`**。
+> `owner_conflict_requires_clarification` 需要冲突检测，本轮无生产者，
+> 可先只支持 stale 一路，冲突一路留待日后。
+
+### 4.1b `gap_note` 原始条目（存档）
 
 - **具名调用点**：`prefetch.py` 的 recall plan 组装处 + Recall Facade。
 - **类别**：3
@@ -218,7 +237,50 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 - **回滚**：kill switch，且**必须 fail-closed**（BV 教训：文件缺失不得默认 True）。
 - **建议**：**接线到 shadow**。
 
-### 4.2 `continuity`
+### 4.2 `continuity` — **设计已定案（2026-08-03）：只分级披露，不做过滤**
+
+> **裁定**：`continuity` **计算新鲜度等级并把它披露出去**；
+> **既有的 `cutoff`/`recency` 过滤器一律不动**
+> （`state_overlay.py:264,286` 的 7 天窗口、`prefetch.py:2002,2019` 的 48 小时窗口）。
+> `DEFAULT_STALE_AFTER` 从"闸门"降格为"**分级刻度**"。
+>
+> **⚠️ 更正本文档 4.2 初版的一处错误说法。** 初版写「`prefetch.py`/`state_overlay.py`
+> 没有任何 freshness/stale_after 逻辑，所以这是新增能力」——**这是错的**。
+> 生产**早有**时效过滤，只是写作 `cutoff`/`recency` 而非 `stale_after`，
+> 初版的 grep 因此漏掉了。`continuity` 因而是**替换/补充既有逻辑**，不是新增能力。
+>
+> **为什么不做过滤（三条，任何一条都足够）：**
+> 1. **两套阈值模型不兼容，而生产那套是经过实测的。** `DEFAULT_STALE_AFTER` 的
+>    1 小时 / 2 小时是按"会话内"模型写的，本系统不用这个模型。
+>    把 open_thread 的 7 天换成 2 小时是 **84 倍的上下文缩减**，没有人要求过；
+>    叠加在既有过滤之上也只会更少。两种做法都等于拿**未经验证的常量**改线上行为。
+> 2. **它把 `gap_note` 从死项变成可用。** `continuity` 产出 `stale_task_revision`，
+>    正是 `gap_note` 缺的那个上游生产者。分级而非过滤，把两个卡住的条目接成一条能跑的链。
+> 3. **它符合本项目一贯的治理立场**——让事情**可见**，而不是**静默丢弃**。
+>    过滤掉的上下文不留任何痕迹供 Owner 检查；一个等级 + 一行披露留得下。
+>
+> **这不是把"观察"偷偷放回来。** Owner 否决的是**等待窗口**（"等够 N 天才准上线"）。
+> 分级并经 `gap_note` 呈现给 Owner 的组件，**第一天就是 live 且起作用的**。
+> 与 `gap_note` 那条「kill switch ≠ 观察门」是同一个区分。
+>
+> **给后续会话的告诫**：不要"顺手把活干完"去接上过滤器。上面三条就是不接的理由。
+
+**实现时必须处理的四个静默失败陷阱：**
+
+1. **naive 时间戳会让整个功能空转。** `age_seconds()` 调 `parse_utc` 用默认
+   `allow_naive=False`，naive 输入 → `None` → 永远 UNKNOWN → 永远不 stale。
+   须逐调用点决定是否传 `allow_naive=True`（该参数的契约刚在批次 B 修好），
+   并**为 UNKNOWN 路径写测试**，否则静默空转就藏在这里。
+2. **`current_task_is_stale()` 在 `current_task is None` 时返回 `True`**——
+   **"不存在"不等于"过期"**。直接喂给披露层，Owner 每开一个新会话都会看到
+   "你的任务信息可能已过期"。None 必须按 UNKNOWN 处理。
+3. **诊断记录是一次自动 JSONL 写入**，必须走 StructuralWriteGate，
+   否则 `write_surface_check` 会以 `unclassified_count > 0` 失败。
+4. **目标反事实（一条测试钉死整个设计决策）**：
+   一个已过 `stale_after` 的对象**被判为 STALE**，
+   **且 live prefetch 输出逐字节不变**。
+
+### 4.2b `continuity` 原始条目（存档）
 
 - **具名调用点**：`prefetch.py` 上下文组装 + `state_overlay.py`。
 - **类别**：3
@@ -385,15 +447,23 @@ helper，而不是继续增加第三套语义」，而这批 helper 之所以累
 
 | 批次 | 内容 | 状态 |
 |---|---|---|
-| **A** | 删除 `error_registry`、`monitor_perf`、`seed_evidence_incremental`、`evidence_gen` | ✅ 本轮完成（原计划是"接线这四项"，实测后全部改为删除） |
-| **B** | `timeutil` 迁移——**已缩小范围**，见 2.1 | 待做 |
-| **C** | `gap_note` 直接实现（+ kill switch） | 待做 |
-| **D** | `restraint`：接 `_recent_correction_signal` → `DenialTracker` → 文件持久化 | 待做 |
-| **E** | `continuity`：overlay 字段映射 + staleness 过滤 + 「隐藏了什么」诊断记录 | 待做 |
-| **F** | `recall_golden` CLI | 待做，优先级最低 |
+| **A** | 删除 `error_registry`、`monitor_perf`、`seed_evidence_incremental`、`evidence_gen` | ✅ 已合并（PR #15，原计划是接线这四项，实测后全部改为删除） |
+| **B** | `timeutil`：修 `allow_naive` 契约违反 + 迁移 1 处已追溯站点 | ✅ 已合并（PR #16，`09c9629`；31 处里只迁 1 处，其余按裁定不迁） |
+| **C** | **`continuity`：只分级披露、不过滤**（见 4.2） | 待做，**下一项** |
+| **D** | `gap_note`：渲染 C 产出的 `stale_task_revision` | 待做，**依赖 C** |
+| **E** | `restraint`：接 `low_clue_recall.py:593` 的 `_recent_correction_signal` → `DenialTracker` → `restraint_denials.json` | 待做 |
+| **F** | ~~`recall_golden`~~ | **倾向删除**（见 3.3），待 Owner 一句话确认 |
 
-批次 A 完成后，**8 项已终结（全部通过删除）**。剩余工作是 1 个迁移 + 3 项功能实现
-+ 1 个低优先级工具——比初版方案设想的小得多，因为大部分"待接线"其实是不该接。
+**部署时机**：3.200 的 `/opt` 同步与部署验证**在整条 C→D→E 链落地后一次性做**，
+不逐批部署。删除类改动单独部署没有可验证的行为变化，反而多几轮风险窗口。
+
+A、B 完成后：**9 项已终结**（8 项删除 + 1 项 timeutil 修复与定向迁移）。
+剩余只有 **C→D→E 这一条链**（continuity 产出 → gap_note 披露 → restraint 克制），
+外加待确认删除的 `recall_golden`。
+
+这比初版方案设想的小得多——因为大部分"待接线"其实是不该接。
+**初版说「6 项合并即终结」，实测后其中 4 项是删除**；
+真正有产品价值的活自始至终只有这三项。
 
 ---
 
